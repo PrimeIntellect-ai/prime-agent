@@ -265,6 +265,39 @@ background_send = asyncio.create_task(send_later())`,
 		});
 	});
 
+	it("cancels a blocking mailbox wait when the cell is interrupted", async () => {
+		let started!: () => void;
+		const didStart = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let hostCancelled = false;
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledAgentMessageSkill()],
+			hostHandlers: {
+				"agent_message.wait": async (_payload, signal) => {
+					started();
+					await new Promise<void>((_resolve, reject) => {
+						const cancel = () => {
+							hostCancelled = true;
+							reject(new Error("wait cancelled"));
+						};
+						signal?.addEventListener("abort", cancel, { once: true });
+						if (signal?.aborted) cancel();
+					});
+					return {};
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const abort = new AbortController();
+		const execution = manager.execute("await agent_message.wait(timeout=30)", { signal: abort.signal });
+		await didStart;
+		abort.abort();
+		await expect(execution).resolves.toMatchObject({ status: "aborted" });
+		await expect.poll(() => hostCancelled).toBe(true);
+	});
+
 	it("bounds retained handlers for late sent messages", async () => {
 		const manager = new KernelManager({ cwd: tempDir });
 		const host = manager as unknown as LateHandlerRetentionHost;

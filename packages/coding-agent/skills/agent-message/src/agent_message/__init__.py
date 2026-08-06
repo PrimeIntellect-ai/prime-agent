@@ -7,6 +7,7 @@ only call the host bridge exposed inside the Prime Agent IPython kernel.
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import uuid4
 
 from IPython.display import display
 from rlm import host_request
@@ -26,9 +27,16 @@ async def send(
     *,
     receiver_role: ReceiverRole | str | None = None,
     receiver_name: str | None = None,
+    message_id: str | None = None,
+    reply_to: str | None = None,
 ) -> dict[str, Any]:
     """Send one direct role-addressed message or broadcast to ``"all"``."""
     roles = ("parent", "sibling", "child")
+    if message_id is not None and (not isinstance(message_id, str) or not message_id.strip()):
+        raise ValueError("message_id must be a non-empty string")
+    if reply_to is not None and (not isinstance(reply_to, str) or not reply_to.strip()):
+        raise ValueError("reply_to must be a non-empty string")
+    stable_id = message_id.strip() if message_id is not None else f"agentmsg_{uuid4()}"
     if broadcast_message is not None:
         if message != "all":
             raise TypeError(
@@ -40,6 +48,8 @@ async def send(
         payload: dict[str, Any] = {
             "target": "all",
             "message": broadcast_message,
+            "id": stable_id,
+            "reply_to": reply_to,
         }
     else:
         if receiver_role not in roles:
@@ -55,6 +65,8 @@ async def send(
             "message": message,
             "receiver_role": receiver_role,
             "receiver_name": receiver_name,
+            "id": stable_id,
+            "reply_to": reply_to,
         }
     receipt = await host_request("agent_message.send", payload)
     receipts = receipt.get("receipts") if isinstance(receipt, dict) else None
@@ -65,6 +77,56 @@ async def send(
     else:
         _emit_sent_message(receipt, receiver_role)
     return receipt
+
+
+def _optional_filter(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value.strip()
+
+
+async def inbox(
+    *,
+    limit: int = 20,
+    consume: bool = False,
+    sender: str | None = None,
+    reply_to: str | None = None,
+) -> dict[str, Any]:
+    """Peek at or consume the oldest matching retained family messages."""
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise ValueError("limit must be an integer between 1 and 100")
+    if not isinstance(consume, bool):
+        raise TypeError("consume must be bool")
+    return await host_request(
+        "agent_message.inbox",
+        {
+            "limit": limit,
+            "consume": consume,
+            "sender": _optional_filter(sender, "sender"),
+            "reply_to": _optional_filter(reply_to, "reply_to"),
+        },
+    )
+
+
+async def wait(
+    *,
+    timeout: float = 30.0,
+    sender: str | None = None,
+    reply_to: str | None = None,
+) -> dict[str, Any]:
+    """Consume the oldest matching message, waiting event-first up to ``timeout`` seconds."""
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0 or timeout > 300:
+        raise ValueError("timeout must be greater than 0 and at most 300 seconds")
+    return await host_request(
+        "agent_message.wait",
+        {
+            "timeout_ms": max(1, round(timeout * 1000)),
+            "sender": _optional_filter(sender, "sender"),
+            "reply_to": _optional_filter(reply_to, "reply_to"),
+        },
+    )
 
 
 def _emit_sent_message(receipt: dict[str, Any], receiver_role: str | None = None) -> None:

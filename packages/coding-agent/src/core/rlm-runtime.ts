@@ -44,6 +44,11 @@ export interface RlmModelMatch {
 	id: string;
 	name: string;
 	selector: string;
+	role?: string;
+	concreteSelector?: string;
+	runtime?: "native" | "claude-code";
+	available?: boolean;
+	effort?: ThinkingLevel;
 }
 
 export interface RlmFindModelsResult {
@@ -208,6 +213,33 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 		}
 		const { subagent, outcome } = await handler(payload.target.trim());
 		return outcome === undefined ? { subagent } : { subagent, outcome };
+	};
+}
+
+/** Minimal lifecycle boundary shared by native and external RLM children. */
+export interface RlmChildRuntime {
+	readonly runtimeKind: "native" | "claude-code";
+	readonly modelSelector: string;
+	readonly sessionName: string;
+	readonly sessionId?: string;
+	abort(reason: string): void;
+	dispose(): void | Promise<void>;
+	deliver?(message: string): "queued" | "woken" | Promise<"queued" | "woken">;
+}
+
+export function adaptNativeRlmChildRuntime(session: AgentSession): RlmChildRuntime {
+	const model = session.model;
+	return {
+		runtimeKind: "native",
+		modelSelector: model ? `${model.provider}/${model.id}` : "native/unknown",
+		get sessionName() {
+			return session.sessionName ?? session.sessionId;
+		},
+		get sessionId() {
+			return session.sessionId;
+		},
+		abort: () => void session.abort(),
+		dispose: () => session.disposeAsync(),
 	};
 }
 

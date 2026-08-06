@@ -89,6 +89,20 @@ import {
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
+	CLAUDE_CODE_FAMILY_TOOL_NAMES,
+	CLAUDE_CODE_MCP_SERVER_NAME,
+	ClaudeCodeFamilyMailbox,
+	type ClaudeCodeFamilySendInput,
+	createClaudeCodeFamilyMcpServer,
+} from "./claude-code-coordination.js";
+import {
+	CLAUDE_CODE_COORDINATION_PROMPT,
+	ClaudeCodeRuntime,
+	type ClaudeCodeRuntimeSnapshot,
+	claudeCodeNativeTools,
+} from "./claude-code-runtime.js";
+import type { StartClaudeCodeQuery } from "./claude-code-sdk.js";
+import {
 	COMPACT_SKILL_NAME,
 	type CompactionResult,
 	calculateContextTokens,
@@ -165,6 +179,7 @@ import {
 	type CustomMessage,
 	createCompactionOutcomeMessage,
 	createHeartbeatPromptMessage,
+	createManualContinueMessage,
 	createRlmChildFailureMessage,
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
@@ -175,8 +190,15 @@ import {
 	isSessionSlashCommandMessage,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+	MANUAL_CONTINUE_PROMPT,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
+import {
+	findExactModelReferenceMatch,
+	parseRlmRuntimeCandidate,
+	type RlmRuntimeCandidate,
+	resolveRlmRoleCandidates,
+} from "./model-resolver.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import {
@@ -203,6 +225,7 @@ import {
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import {
+	adaptNativeRlmChildRuntime,
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
@@ -212,7 +235,7 @@ import {
 	findRlmModelMatches,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
-	normalizeRequestedRlmSubagentThinkingLevel,
+	type RlmChildRuntime,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -428,7 +451,11 @@ export interface AgentSessionConfig {
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
+	/** Host responsible for creating native RLM subagent runtimes. */
 	subagentRuntimeHost?: SubagentRuntimeHost;
+	/** Test/embedding seam for the external Claude Code SDK query. */
+	startClaudeCodeQuery?: StartClaudeCodeQuery;
+	/** Host-side autonomous continuation policy. */
 	autonomous?: AgentAutonomousConfig;
 	prewarmIpythonKernel?: boolean;
 	autoRefineReviewer?: AutoRefineReviewer;
@@ -876,8 +903,15 @@ interface RlmChildRun {
 	publication: AgentMessageDeferred;
 	/** Resolves after terminal result publication and detached-run cleanup finish. */
 	settlement: AgentMessageDeferred;
-	/** Child session, once its runtime exists. Used to cancel nested child runs. */
+	/** Runtime-neutral lifecycle handle, once either child runtime exists. */
+	runtime?: RlmChildRuntime;
+	/** Live-worker family coordination for an external Claude child. */
+	familyMailbox?: ClaudeCodeFamilyMailbox;
+	/** Native child session, once its runtime exists. Used to cancel nested child runs. */
 	session?: AgentSession;
+	/** True when an external child has replied to its parent since its latest parent input. */
+	externalRepliedToParent?: boolean;
+	/** True once the detached run task has finished its catch and cleanup paths. */
 	settled: boolean;
 	/** Do not inject a late terminal notice after the parent session is aborted. */
 	suppressTerminalNotice?: boolean;
@@ -900,9 +934,14 @@ interface RlmChildRun {
 	unsubscribe?: () => void;
 }
 
-interface RlmSubagentModelSelection {
-	model: Model<Api>;
-}
+type RlmSubagentModelSelection =
+	| { runtime: "native"; model: Model<Api>; thinkingLevel?: ThinkingLevel }
+	| {
+			runtime: "claude-code";
+			model: string;
+			selector: string;
+			thinkingLevel?: ThinkingLevel;
+	  };
 
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
@@ -1144,6 +1183,7 @@ export class AgentSession {
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
+	private readonly _startClaudeCodeQuery?: StartClaudeCodeQuery;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
 	private _abandonedRlmQuiescenceChildIds = new Set<string>();
@@ -1248,6 +1288,7 @@ export class AgentSession {
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
+		this._startClaudeCodeQuery = config.startClaudeCodeQuery;
 		// A resumed child may have replied before this process started; false would
 		// claim knowledge that is not present in the session transcript.
 		this._repliedToParentSinceTask =
@@ -3098,6 +3139,27 @@ export class AgentSession {
 		}
 	}
 
+	private async _agentMessageRosterWithExternalChildren(): Promise<AgentFamilyRosterResult> {
+		const roster = (await this.handleAgentMessageHostRequest("agent_message.list_agents")) as AgentFamilyRosterResult;
+		const entries = [...roster.entries];
+		for (const run of this._activeRlmChildRuns.values()) {
+			if (!run.familyMailbox || run.detachedDeletion || entries.some((entry) => entry.id === run.id)) continue;
+			entries.push({
+				relationship: "child",
+				name: run.sessionName,
+				id: run.id,
+				depth: roster.current.depth + 1,
+				status:
+					run.status === "queued" || run.status === "running"
+						? "running"
+						: run.status === "error"
+							? "inactive"
+							: "idle",
+			});
+		}
+		return { ...roster, entries };
+	}
+
 	handleAgentMessageHostRequest(
 		type: string,
 		payload: Record<string, unknown> = {},
@@ -3123,6 +3185,8 @@ export class AgentSession {
 				return this._agentMessageController.sendAgentMessage({
 					target: assertDirectAgentMessageTarget(payload.target),
 					message: normalizeAgentSessionMessage(payload.message),
+					id: typeof payload.id === "string" ? payload.id : undefined,
+					replyTo: typeof payload.replyTo === "string" ? payload.replyTo : undefined,
 				});
 			}
 			default:
@@ -4030,6 +4094,7 @@ export class AgentSession {
 			this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 			this._autoRefineBranchVersion++;
 			this._cancelActiveRlmChildRuns("Parent session disposed");
+			this._disposeExternalRlmChildRuntimes();
 			for (const unsubscribe of this._rlmChildUnsubscribes.values()) {
 				unsubscribe();
 			}
@@ -4444,11 +4509,36 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
-		return this._prompt(text, options);
+		const normalized = this._normalizeManualContinuation(text, options);
+		return this._prompt(normalized.text, normalized.options);
 	}
 
 	async promptUntilAccepted(text: string, options?: PromptOptions): Promise<void> {
-		return this._prompt(text, { ...options, returnAfterAccepted: true });
+		const normalized = this._normalizeManualContinuation(text, options);
+		return this._prompt(normalized.text, { ...normalized.options, returnAfterAccepted: true });
+	}
+
+	private _normalizeManualContinuation(
+		text: string,
+		options?: PromptOptions,
+	): { text: string; options?: PromptOptions } {
+		if (
+			text.trim() !== "." ||
+			options?.internalPrompt ||
+			options?.customMessage ||
+			(options?.images?.length ?? 0) > 0 ||
+			(options?.content?.length ?? 0) > 0
+		) {
+			return { text, options };
+		}
+		return {
+			text: MANUAL_CONTINUE_PROMPT,
+			options: {
+				...options,
+				customMessage: createManualContinueMessage(),
+				internalPrompt: true,
+			},
+		};
 	}
 
 	async promptAndWait(text: string, options?: PromptOptions): Promise<void> {
@@ -6840,6 +6930,7 @@ export class AgentSession {
 		this.abortRetry();
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");
+		this._disposeExternalRlmChildRuntimes();
 		this._goalAbortInProgress = this._goalState.status === "active";
 		this.agent.abort();
 		if (this._goalAbortInProgress) {
@@ -8949,14 +9040,24 @@ export class AgentSession {
 			Object.assign(
 				handlers,
 				createAgentMessageHostHandlers({
-					roster: async () =>
-						(await this.handleAgentMessageHostRequest("agent_message.list_agents")) as AgentFamilyRosterResult,
+					roster: () => this._agentMessageRosterWithExternalChildren(),
 					awaitPendingChildPublication: (selector) => this._awaitPendingRlmChildPublication(selector),
 					sendAgentMessage: async (input) => {
-						const receipt = (await this.handleAgentMessageHostRequest("agent_message.send", {
-							target: input.target,
-							message: input.message,
-						})) as AgentSessionMessageReceipt;
+						const external = [...this._activeRlmChildRuns.values()].some(
+							(run) => run.familyMailbox && (run.id === input.target || run.sessionName === input.target),
+						);
+						const receipt = external
+							? await this._receiveExternalRlmChildMessage(input.target, {
+									message: input.message,
+									id: input.id,
+									replyTo: input.replyTo,
+								})
+							: ((await this.handleAgentMessageHostRequest("agent_message.send", {
+									target: input.target,
+									message: input.message,
+									id: input.id,
+									replyTo: input.replyTo,
+								})) as AgentSessionMessageReceipt);
 						if (this._rlmDepth > 0) {
 							let addressedParent = input.receiverRole === "parent";
 							if (input.receiverRole === undefined && this._agentMessageController?.roster) {
@@ -9164,8 +9265,7 @@ export class AgentSession {
 			spawnCode: options.spawnCode,
 			sessionDir: options.sessionDir,
 			model: options.model,
-			thinkingLevel:
-				options.thinkingLevel ?? (clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel),
+			thinkingLevel: clampThinkingLevel(options.model, options.thinkingLevel ?? this.thinkingLevel) as ThinkingLevel,
 			serviceTier:
 				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
 			scopedModels: [...this._scopedModels],
@@ -9271,6 +9371,14 @@ export class AgentSession {
 		}
 	}
 
+	private _disposeExternalRlmChildRuntimes(): void {
+		for (const run of [...this._activeRlmChildRuns.values()]) {
+			if (run.runtime?.runtimeKind !== "claude-code") continue;
+			void run.runtime.dispose();
+			this._removeRlmSubagentTracking(run.id, run);
+		}
+	}
+
 	private _cancelRlmChildRun(run: RlmChildRun, reason: string): boolean {
 		if (run.status !== "running" && run.status !== "queued") {
 			return false;
@@ -9279,7 +9387,8 @@ export class AgentSession {
 		if (this._sessionInputPumpSuspended) this._abandonRlmRunForQuiescence(run);
 		run.error = reason;
 		run.publication.reject(new Error(reason));
-		run.abort();
+		if (run.runtime) run.runtime.abort(reason);
+		else run.abort();
 		// Surface the cancellation immediately; the run's own terminal update is
 		// delayed indefinitely when the child is stuck mid-stream, which is
 		// exactly when users reach for the kill.
@@ -9287,6 +9396,50 @@ export class AgentSession {
 		return true;
 	}
 
+	/** Deliver ordered follow-up input to a retained external direct child. */
+	private _resolveExternalRlmChild(target: string): RlmChildRun {
+		const matches = [...this._activeRlmChildRuns.values()].filter(
+			(run) =>
+				!run.detachedDeletion &&
+				run.familyMailbox &&
+				(run.id === target || run.sessionName === target || run.runtime?.sessionId === target),
+		);
+		if (matches.length === 0) throw new Error(`No retained external RLM child matches "${target}"`);
+		if (matches.length > 1) throw new Error(`RLM child selector "${target}" is ambiguous`);
+		return matches[0]!;
+	}
+
+	private async _receiveExternalRlmChildMessage(
+		target: string,
+		input: { message: string; id?: string; replyTo?: string },
+	): Promise<AgentSessionMessageReceipt> {
+		const run = this._resolveExternalRlmChild(target);
+		const familyMailbox = run.familyMailbox!;
+		const receipt = await familyMailbox.receive({
+			message: input.message,
+			id: input.id,
+			replyTo: input.replyTo,
+			from: {
+				activeSessionId: await this._currentActiveSessionId(),
+				sessionId: this.sessionId,
+				sessionName: this.sessionName,
+			},
+			fromRelationship: "parent",
+		});
+		if (receipt.handoff !== "retry") {
+			run.externalRepliedToParent = false;
+			run.emitUpdate?.();
+		}
+		return receipt;
+	}
+
+	/** Deliver and durably retain ordered follow-up input for an external direct child. */
+	async deliverRlmChildInput(target: string, message: string): Promise<"queued" | "woken"> {
+		const receipt = await this._receiveExternalRlmChildMessage(target, { message });
+		return receipt.deliveryStatus === "delivered" ? "woken" : "queued";
+	}
+
+	/** Status of a direct RLM child run, while the run is still tracked. */
 	getRlmChildRunStatus(childId: string): RlmChildAgentStatus | undefined {
 		return this._activeRlmChildRuns.get(childId)?.status;
 	}
@@ -9308,7 +9461,7 @@ export class AgentSession {
 		);
 		if (!run) return undefined;
 		await run.publication.promise;
-		return run.session?.sessionId;
+		return run.session?.sessionId ?? run.runtime?.sessionId;
 	}
 
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {
@@ -9340,7 +9493,7 @@ export class AgentSession {
 			subagents.push({
 				rlm_child_id: run.id,
 				active_session_id: daemonChild?.activeSessionId ?? null,
-				session_id: daemonChild?.sessionId ?? run.session?.sessionId ?? null,
+				session_id: daemonChild?.sessionId ?? run.session?.sessionId ?? run.runtime?.sessionId ?? null,
 				session_name: daemonChild?.sessionName ?? run.session?.sessionName ?? run.sessionName,
 				session_dir: run.sessionDir,
 				status: run.status === "done" ? "completed" : run.status === "error" ? "error" : "running",
@@ -9638,6 +9791,7 @@ export class AgentSession {
 	}
 
 	private _removeRlmSubagentTracking(childId: string, run?: RlmChildRun): void {
+		run?.familyMailbox?.close();
 		run?.unsubscribe?.();
 		this._rlmChildUnsubscribes.get(childId)?.();
 		this._rlmChildUnsubscribes.delete(childId);
@@ -9651,6 +9805,8 @@ export class AgentSession {
 			run.abort = noopRlmChildAbort;
 			run.unsubscribe = undefined;
 			run.session = undefined;
+			run.runtime = undefined;
+			run.familyMailbox = undefined;
 		}
 	}
 
@@ -9691,6 +9847,12 @@ export class AgentSession {
 				this._emitRlmSubagentRemoval(subagent);
 			}
 			const liveSession = run.session;
+			if (!liveSession && run.runtime?.runtimeKind === "claude-code") {
+				await run.runtime.dispose();
+				this._deletedRlmChildIds.add(childId);
+				this._removeRlmSubagentTracking(childId, run);
+				return { subagent };
+			}
 			if (run.status === "error" && !liveSession && run.settled) {
 				this._deletedRlmChildIds.add(childId);
 				this._removeRlmSubagentTracking(childId, run);
@@ -10006,36 +10168,443 @@ export class AgentSession {
 	}
 
 	async findRlmModels(query: string, limit: number): Promise<RlmFindModelsResult> {
-		return {
-			models: findRlmModelMatches(query, await this._authenticatedRlmModels(), limit),
-		};
+		const executableModels = await this._authenticatedRlmModels();
+		const normalizedQuery = query.toLowerCase().replace(/[^a-z0-9]+/g, "");
+		const roleMatches = Object.keys(this.settingsManager.getModelRoles())
+			.sort()
+			.flatMap((role) => {
+				let candidates: RlmRuntimeCandidate[];
+				try {
+					candidates = resolveRlmRoleCandidates(role, this.settingsManager.getModelRoles());
+				} catch {
+					return [];
+				}
+				return candidates.map((candidate) => {
+					const nativeModel =
+						candidate.runtime === "native"
+							? findExactModelReferenceMatch(candidate.modelReference, this._modelRegistry.getAll())
+							: undefined;
+					const executableModel =
+						candidate.runtime === "native"
+							? findExactModelReferenceMatch(candidate.modelReference, executableModels)
+							: undefined;
+					const slash = candidate.modelReference.indexOf("/");
+					const provider =
+						nativeModel?.provider ??
+						(candidate.runtime === "claude-code" ? "claude-code" : candidate.modelReference.slice(0, slash));
+					const id =
+						nativeModel?.id ??
+						(candidate.runtime === "claude-code"
+							? candidate.modelReference
+							: candidate.modelReference.slice(slash + 1));
+					return {
+						provider,
+						id,
+						name: `@${role} → ${candidate.selector}`,
+						selector: `@${role}`,
+						role,
+						concreteSelector: candidate.selector,
+						runtime: candidate.runtime,
+						available:
+							candidate.runtime === "claude-code"
+								? this.settingsManager.getClaudeCodeExecutable() !== undefined
+								: executableModel !== undefined,
+						...(candidate.thinkingLevel ? { effort: candidate.thinkingLevel } : {}),
+					};
+				});
+			})
+			.filter((match) => {
+				if (!normalizedQuery) return true;
+				return [match.selector, match.concreteSelector, match.name]
+					.map((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, ""))
+					.some((value) => value.includes(normalizedQuery));
+			});
+		const nativeMatches = findRlmModelMatches(query, executableModels, limit);
+		return { models: [...roleMatches, ...nativeMatches].slice(0, limit) };
 	}
 
 	private async _resolveRlmSubagentModel(reference: string | undefined): Promise<RlmSubagentModelSelection> {
 		const parentModel = this.model;
-		if (!parentModel) {
-			throw new Error(formatNoModelSelectedMessage());
-		}
-		if (!reference) {
-			return { model: parentModel };
+		if (!parentModel) throw new Error(formatNoModelSelectedMessage());
+
+		const taskRole = this.settingsManager.getModelRole("task");
+		const effectiveReference = reference ?? (taskRole === undefined ? undefined : "@task");
+		if (!effectiveReference) return { runtime: "native", model: parentModel };
+
+		if (effectiveReference.startsWith("@")) {
+			const role = effectiveReference.slice(1);
+			if (!role) throw new Error("RLM model role name must not be empty");
+			const candidates = resolveRlmRoleCandidates(role, this.settingsManager.getModelRoles());
+			if (candidates[0]?.runtime === "claude-code") {
+				if (!this.settingsManager.getClaudeCodeExecutable()) {
+					throw new Error(`RLM model role "@${role}" has no available Claude Code executable`);
+				}
+				const candidate = candidates[0];
+				return {
+					runtime: "claude-code",
+					model: candidate.modelReference,
+					selector: candidate.selector,
+					thinkingLevel: candidate.thinkingLevel,
+				};
+			}
+			const executableModels = await this._authenticatedRlmModels();
+			for (const candidate of candidates) {
+				const model = findExactModelReferenceMatch(candidate.modelReference, executableModels);
+				if (!model) continue;
+				const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
+				if (!auth.ok) continue;
+				return { runtime: "native", model, thinkingLevel: candidate.thinkingLevel };
+			}
+			throw new Error(`RLM model role "@${role}" has no executable candidates`);
 		}
 
-		const normalizedReference = reference.toLowerCase();
+		if (effectiveReference.startsWith("claude-code/")) {
+			const candidate = parseRlmRuntimeCandidate(effectiveReference);
+			if (!this.settingsManager.getClaudeCodeExecutable()) {
+				throw new Error(
+					`Requested subagent runtime "${candidate.selector}" has no configured Claude Code executable`,
+				);
+			}
+			return {
+				runtime: "claude-code",
+				model: candidate.modelReference,
+				selector: candidate.selector,
+				thinkingLevel: candidate.thinkingLevel,
+			};
+		}
+
+		const normalizedReference = effectiveReference.toLowerCase();
 		if (`${parentModel.provider}/${parentModel.id}`.toLowerCase() === normalizedReference) {
-			return { model: parentModel };
+			return { runtime: "native", model: parentModel };
 		}
 		const model = (await this._authenticatedRlmModels()).find(
 			(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === normalizedReference,
 		);
 		if (!model) {
-			throw new Error(`Requested subagent model "${reference}" is unavailable, unauthenticated, or expired`);
+			throw new Error(
+				`Requested subagent model "${effectiveReference}" is unavailable, unauthenticated, or expired`,
+			);
 		}
 
 		const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
-			throw new Error(`Requested subagent model "${reference}" failed authentication preflight`);
+			throw new Error(`Requested subagent model "${effectiveReference}" failed authentication preflight`);
 		}
-		return { model };
+		return { runtime: "native", model };
+	}
+
+	private async _claudeCodeFamilyRoster(run: RlmChildRun): Promise<AgentFamilyRosterResult> {
+		const parentRoster = this._agentMessageController?.roster
+			? await this._agentMessageController.roster()
+			: {
+					current: {
+						name: this.sessionName ?? this.sessionId,
+						id: this.sessionId,
+						depth: this._rlmDepth,
+					},
+					entries: [],
+				};
+		const siblings = parentRoster.entries
+			.filter((entry) => entry.relationship === "child" && entry.id !== run.id)
+			.map((entry) => ({ ...entry, relationship: "sibling" as const }));
+		for (const candidate of this._activeRlmChildRuns.values()) {
+			if (
+				candidate.id === run.id ||
+				siblings.some(
+					(entry) =>
+						entry.id === candidate.id ||
+						entry.id === candidate.session?.sessionId ||
+						entry.name === candidate.sessionName,
+				)
+			) {
+				continue;
+			}
+			siblings.push({
+				relationship: "sibling",
+				name: candidate.sessionName,
+				id: candidate.id,
+				depth: parentRoster.current.depth + 1,
+				status:
+					candidate.status === "queued" || candidate.status === "running"
+						? "running"
+						: candidate.status === "error"
+							? "inactive"
+							: "idle",
+			});
+		}
+		return {
+			current: {
+				name: run.sessionName,
+				id: run.id,
+				depth: parentRoster.current.depth + 1,
+			},
+			entries: [
+				{
+					relationship: "parent",
+					name: parentRoster.current.name,
+					id: parentRoster.current.id,
+					depth: parentRoster.current.depth,
+					status: "running",
+				},
+				...siblings.sort((a, b) => a.name.localeCompare(b.name)),
+			],
+		};
+	}
+
+	private async _sendClaudeCodeFamilyMessage(
+		run: RlmChildRun,
+		input: ClaudeCodeFamilySendInput,
+	): Promise<AgentSessionMessageReceipt> {
+		const roster = await this._claudeCodeFamilyRoster(run);
+		const matches = roster.entries.filter(
+			(entry) =>
+				entry.relationship === input.receiverRole &&
+				(input.receiverRole === "parent" || entry.id === input.receiverName || entry.name === input.receiverName),
+		);
+		if (matches.length !== 1) {
+			throw new Error(
+				matches.length === 0
+					? `No ${input.receiverRole} matches ${input.receiverName ?? "this parent"}`
+					: `${input.receiverRole} selector is ambiguous`,
+			);
+		}
+		const target = matches[0]!;
+		if (input.receiverRole === "sibling") {
+			const externalSibling = this._activeRlmChildRuns.get(target.id);
+			if (externalSibling?.familyMailbox) {
+				return externalSibling.familyMailbox.receive({
+					message: input.message,
+					id: input.id,
+					replyTo: input.replyTo,
+					from: {
+						activeSessionId: run.id,
+						sessionId: run.runtime?.sessionId ?? run.id,
+						sessionName: run.sessionName,
+					},
+					fromRelationship: "sibling",
+				});
+			}
+		}
+		const controller = this._agentMessageController;
+		if (!controller?.sendExternalChildAgentMessage) {
+			throw new Error("Claude Code family sending requires a daemon-backed parent session");
+		}
+		const receipt = await controller.sendExternalChildAgentMessage({
+			childId: run.id,
+			childSessionId: run.runtime?.sessionId,
+			childName: run.sessionName,
+			target: target.id,
+			message: input.message,
+			receiverRole: input.receiverRole,
+			id: input.id,
+			replyTo: input.replyTo,
+		});
+		if (input.receiverRole === "parent") {
+			run.externalRepliedToParent = true;
+			run.emitUpdate?.();
+		}
+		return receipt;
+	}
+
+	private _startClaudeCodeRlmChildRun(options: {
+		prompt: string;
+		selection: Extract<RlmSubagentModelSelection, { runtime: "claude-code" }>;
+		childNodeId: string;
+		sessionName: string;
+		sessionDir: string;
+		startedAt: number;
+	}): RlmSpawnHandle {
+		const { prompt, selection, childNodeId, sessionName, sessionDir, startedAt } = options;
+		const executable = this.settingsManager.getClaudeCodeExecutable();
+		if (!executable)
+			throw new Error(`Requested subagent runtime "${selection.selector}" has no configured executable`);
+		const parentAssistantForUsage = this._findLastAssistantMessage();
+		let runtime: ClaudeCodeRuntime;
+		const run: RlmChildRun = {
+			id: childNodeId,
+			prompt,
+			sessionName,
+			sessionDir,
+			status: "queued",
+			settled: false,
+			abort: () => runtime.abort("RLM child cancelled"),
+			publication: createAgentMessageDeferred(),
+		};
+		const familyMailbox = new ClaudeCodeFamilyMailbox({
+			target: {
+				activeSessionId: childNodeId,
+				sessionId: childNodeId,
+				sessionName,
+				runtimeKind: "subagent",
+			},
+			storage: {
+				read: () => this.sessionManager.getEntries(),
+				append: (customType, details) => {
+					this.sessionManager.appendCustomMessageEntryWithRollback(customType, "", false, details);
+				},
+			},
+			list: () => this._claudeCodeFamilyRoster(run),
+			send: (input) => this._sendClaudeCodeFamilyMessage(run, input),
+			deliver: (message) => runtime.deliver(message),
+		});
+		const mcpServer = createClaudeCodeFamilyMcpServer(familyMailbox);
+		runtime = new ClaudeCodeRuntime({
+			prompt: `[task from parent]\n\n${prompt}`,
+			model: selection.model,
+			effort: selection.thinkingLevel,
+			executable,
+			cwd: this._cwd,
+			appendSystemPrompt: CLAUDE_CODE_COORDINATION_PROMPT,
+			tools: claudeCodeNativeTools(this.getActiveToolNames()),
+			mcpServers: { [CLAUDE_CODE_MCP_SERVER_NAME]: mcpServer },
+			requiredTools: CLAUDE_CODE_FAMILY_TOOL_NAMES,
+			startQuery: this._startClaudeCodeQuery,
+		});
+		let latest = runtime.snapshot;
+		let durationMs: number | undefined;
+		let attributedUsage = { ...latest.usage };
+		const attributeCompletedUsage = (snapshot: ClaudeCodeRuntimeSnapshot) => {
+			const delta: Usage = {
+				input: snapshot.usage.input - attributedUsage.input,
+				output: snapshot.usage.output - attributedUsage.output,
+				cacheRead: snapshot.usage.cacheRead - attributedUsage.cacheRead,
+				cacheWrite: snapshot.usage.cacheWrite - attributedUsage.cacheWrite,
+				totalTokens: snapshot.usage.totalTokens - attributedUsage.totalTokens,
+				cost: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					total: snapshot.usage.cost - attributedUsage.cost,
+				},
+			};
+			const origin = attributedUsage.requests === 0 ? "spawn_task" : "agent_message";
+			attributedUsage = { ...snapshot.usage };
+			if (delta.totalTokens <= 0 && delta.cost.total <= 0) return;
+			const parentAssistant = this._findLastAssistantMessage() ?? parentAssistantForUsage;
+			if (!parentAssistant) return;
+			attributeChildUsage(parentAssistant.usage, delta);
+			const parentEntry = this._findAssistantEntryForMessage(parentAssistant);
+			if (parentEntry) {
+				this.sessionManager.appendChildUsageAttribution(parentEntry.id, delta, parentAssistant.usage, origin);
+			}
+		};
+		const runtimeHandle: RlmChildRuntime = {
+			runtimeKind: "claude-code",
+			modelSelector: selection.selector,
+			sessionName,
+			get sessionId() {
+				return latest.sessionId;
+			},
+			abort: (reason) => {
+				familyMailbox.close(reason);
+				runtime.abort(reason);
+			},
+			dispose: () => {
+				familyMailbox.close();
+				runtime.dispose();
+			},
+			deliver: (message) => runtime.deliver(message),
+		};
+		run.runtime = runtimeHandle;
+		run.familyMailbox = familyMailbox;
+
+		const emitChildUpdate = () => {
+			const activity: RlmChildAgentActivity | undefined = latest.runningTool
+				? { kind: "executing", toolName: latest.runningTool }
+				: latest.status === "running"
+					? { kind: latest.answerPreview ? "writing" : "waiting" }
+					: undefined;
+			this._emit({
+				type: "rlm_child_update",
+				child: {
+					id: childNodeId,
+					parentId: this._rlmParentNodeId,
+					sessionName,
+					model: selection.selector,
+					label: rlmChildLabel(prompt),
+					status: run.status,
+					durationMs,
+					answerPreview: latest.answerPreview,
+					toolUseCount: latest.toolUseCount > 0 ? latest.toolUseCount : undefined,
+					tokenCount: latest.usage.totalTokens || undefined,
+					sessionDir,
+					activity,
+					repliedSinceTask: run.externalRepliedToParent,
+					error: run.error,
+				},
+			});
+		};
+		run.emitUpdate = emitChildUpdate;
+		run.unsubscribe = runtime.subscribe((snapshot) => {
+			latest = snapshot;
+			run.status = snapshot.status === "starting" || snapshot.status === "queued" ? "queued" : snapshot.status;
+			run.error = snapshot.error;
+			if (snapshot.status === "done" || snapshot.status === "error" || snapshot.status === "cancelled") {
+				durationMs = Date.now() - startedAt;
+			}
+			if (snapshot.status === "error" || snapshot.status === "cancelled") {
+				familyMailbox.close(snapshot.error);
+			}
+			if (snapshot.status === "done") attributeCompletedUsage(snapshot);
+			emitChildUpdate();
+		});
+		this._activeRlmChildRuns.set(run.id, run);
+		run.publication.resolve();
+		emitChildUpdate();
+
+		void (async () => {
+			await runtime.start();
+			const terminal = await runtime.initialCompletion;
+			if (terminal.status === "done") {
+				if (!run.detachedDeletion && !run.externalRepliedToParent) {
+					const notice = createRlmChildTerminalNoticeMessage({
+						kind: "completed_without_reply",
+						childId: run.id,
+						sessionName,
+						lastAssistantTextPreview: terminal.answerPreview,
+					});
+					await this._promptInjectedMessage(notice.content as string, notice, {
+						streamingBehavior: "followUp",
+						queueIfBusy: true,
+						returnAfterAccepted: true,
+						suppressAutonomousContinuation: true,
+					}).catch(() => undefined);
+				}
+			} else if (terminal.status === "error" && !run.detachedDeletion) {
+				const failure = createRlmChildFailureMessage({
+					childId: run.id,
+					sessionName,
+					error: terminal.error ?? "unknown Claude Code runtime error",
+				});
+				await this._promptInjectedMessage(failure.content as string, failure, {
+					streamingBehavior: "followUp",
+					queueIfBusy: true,
+					returnAfterAccepted: true,
+					suppressAutonomousContinuation: true,
+				}).catch(() => undefined);
+			}
+		})()
+			.catch((error: unknown) => {
+				run.status = "error";
+				run.error = error instanceof Error ? error.message : String(error);
+				emitChildUpdate();
+				runtime.dispose();
+			})
+			.finally(() => {
+				run.settled = true;
+				if (run.detachedDeletion || this._disposed || this._disposing) {
+					runtime.dispose();
+					this._removeRlmSubagentTracking(run.id, run);
+				}
+			});
+
+		return {
+			rlm_child_id: childNodeId,
+			name: sessionName,
+			session_dir: sessionDir,
+			model: selection.selector,
+		};
 	}
 
 	private async _startRlmChildRun(
@@ -10085,6 +10654,16 @@ export class AgentSession {
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
 		const startedAt = Date.now();
+		if (modelSelection.runtime === "claude-code") {
+			return this._startClaudeCodeRlmChildRun({
+				prompt,
+				selection: modelSelection,
+				childNodeId,
+				sessionName,
+				sessionDir: childSessionDir,
+				startedAt,
+			});
+		}
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		const label = rlmChildLabel(prompt);
 		let answerPreview: string | undefined;
@@ -10141,7 +10720,8 @@ export class AgentSession {
 			childSession = child;
 			if (this._activeRlmChildRuns.get(run.id) !== run) return;
 			run.session = child;
-			run.abort = () => void child.abort();
+			run.runtime = adaptNativeRlmChildRuntime(child);
+			run.abort = () => run.runtime?.abort("RLM child cancelled");
 			run.publication.resolve();
 			// Cancellation may have been admitted while runtime construction was
 			// blocked and run.abort was still a no-op.
@@ -10155,7 +10735,7 @@ export class AgentSession {
 				spawnCode,
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
-				thinkingLevel: requestedThinkingLevel,
+				thinkingLevel: modelSelection.thinkingLevel,
 			}),
 			onSessionPublished: publishChildSession,
 		};

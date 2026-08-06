@@ -17,6 +17,7 @@ import type { InputSource } from "../../core/extensions/types.js";
 import type { GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
+import type { CustomMessage } from "../../core/messages.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
 import type {
@@ -455,7 +456,11 @@ export interface AgentConnectionPromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	queueIfBusy?: boolean;
 	source?: InputSource;
-	/** Cancels only while admission waits; accepted prompts remain session-owned. */
+	/** Host-authored message to persist instead of a visible user message. */
+	customMessage?: CustomMessage;
+	/** Bypass user input expansion and handlers for a host-authored prompt. */
+	internalPrompt?: boolean;
+	/** Cancel admission while it is still waiting; accepted prompts remain session-owned. */
 	signal?: AbortSignal;
 }
 

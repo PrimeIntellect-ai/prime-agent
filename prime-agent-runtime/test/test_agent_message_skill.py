@@ -35,6 +35,43 @@ class AgentMessageSkillTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'mode'"):
             asyncio.run(module.send("hello", receiver_role="parent", mode="follow_up"))
 
+    def test_inbox_wait_and_correlation_request_construction(self) -> None:
+        spec = importlib.util.spec_from_file_location("agent_message_mailbox", SKILL)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        host = AsyncMock(return_value={"messages": []})
+        with patch.object(module, "host_request", host), patch.object(module, "_emit_sent_message"):
+            asyncio.run(
+                module.send(
+                    "answer",
+                    receiver_role="parent",
+                    message_id="agentmsg-stable",
+                    reply_to="agentmsg-question",
+                )
+            )
+            asyncio.run(module.inbox(limit=7, consume=True, sender="parent", reply_to="agentmsg-question"))
+            asyncio.run(module.wait(timeout=1.25, sender="parent", reply_to="agentmsg-question"))
+        self.assertEqual(host.await_args_list[0].args[1]["id"], "agentmsg-stable")
+        self.assertEqual(host.await_args_list[0].args[1]["reply_to"], "agentmsg-question")
+        self.assertEqual(host.await_args_list[1].args, (
+            "agent_message.inbox",
+            {"limit": 7, "consume": True, "sender": "parent", "reply_to": "agentmsg-question"},
+        ))
+        self.assertEqual(host.await_args_list[2].args[1]["timeout_ms"], 1250)
+
+    def test_mailbox_bounds(self) -> None:
+        spec = importlib.util.spec_from_file_location("agent_message_bounds", SKILL)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with self.assertRaisesRegex(ValueError, "between 1 and 100"):
+            asyncio.run(module.inbox(limit=0))
+        with self.assertRaisesRegex(ValueError, "at most 300"):
+            asyncio.run(module.wait(timeout=301))
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            asyncio.run(module.inbox(sender=" "))
+
 
 if __name__ == "__main__":
     unittest.main()

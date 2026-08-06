@@ -27,6 +27,8 @@ The editor can be replaced temporarily by built-in UI such as `/settings` or by 
 | Images | Paste with Ctrl+V, Alt+V on Windows, or drag into the terminal |
 | Shell command | `!command` runs and sends output to the model |
 | Hidden shell command | `!!command` runs without sending output to the model |
+| Continue | Enter `.` by itself to resume the most recent intent without adding a visible user message |
+| Clear draft | Ctrl+C clears text when the editor is non-empty; with an empty editor it keeps the existing interrupt/exit behavior |
 | External editor | Ctrl+G opens `$VISUAL` or `$EDITOR` |
 
 See [Keybindings](keybindings.md) for all shortcuts and customization.

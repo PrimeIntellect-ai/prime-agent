@@ -119,6 +119,18 @@ describe("daemon protocol helpers", () => {
 		);
 	});
 
+	it("capability-gates mailbox commands for both compatibility directions", () => {
+		expect(DAEMON_SCHEMA_REVISION).toBe(17);
+		expect(DAEMON_COMMAND_COMPATIBILITY.agent_message_inbox).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 16,
+			capability: "family_mailbox",
+		});
+		expect(DAEMON_COMMAND_COMPATIBILITY.agent_message_wait).toEqual(DAEMON_COMMAND_COMPATIBILITY.agent_message_inbox);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("family_mailbox");
+		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual({ minProtocol: 7 });
+	});
+
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
 			minProtocol: 7,

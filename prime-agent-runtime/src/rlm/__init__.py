@@ -38,6 +38,7 @@ class RLMModel:
     id: str
     name: str
     selector: str
+    concrete_selector: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,6 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
             def _resolve_result() -> None:
                 if not future.done():
                     future.set_result({k: v for k, v in reply.items() if k != "status"})
-                    comm.close()
 
             loop.call_soon_threadsafe(_resolve_result)
             return
@@ -121,7 +121,6 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
             def _resolve_error() -> None:
                 if not future.done():
                     future.set_exception(RuntimeError(str(message)))
-                    comm.close()
 
             loop.call_soon_threadsafe(_resolve_error)
             return
@@ -130,7 +129,6 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
         def _resolve_unexpected() -> None:
             if not future.done():
                 future.set_exception(RuntimeError(unexpected))
-                comm.close()
 
         loop.call_soon_threadsafe(_resolve_unexpected)
 
@@ -167,7 +165,16 @@ def _model_from_payload(payload: Any) -> RLMModel:
     selector = payload.get("selector")
     if not all(isinstance(value, str) and value for value in (provider, model_id, name, selector)):
         raise RuntimeError("rlm.find_models returned an invalid model entry")
-    return RLMModel(provider=provider, id=model_id, name=name, selector=selector)
+    concrete_selector = payload.get("concreteSelector")
+    if concrete_selector is not None and (not isinstance(concrete_selector, str) or not concrete_selector):
+        raise RuntimeError("rlm.find_models returned an invalid model entry")
+    return RLMModel(
+        provider=provider,
+        id=model_id,
+        name=name,
+        selector=selector,
+        concrete_selector=concrete_selector,
+    )
 
 
 async def find_models(query: str = "", limit: int = 8) -> list[RLMModel]:

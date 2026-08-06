@@ -8,6 +8,13 @@ export const AGENT_MESSAGE_CUSTOM_TYPE = "agent_message";
 export const AGENT_MESSAGE_SKILL_NAME = "agent-message";
 export const AGENT_MESSAGE_IMPORT_NAME = "agent_message";
 export const AGENT_MESSAGE_SOURCE = "agent_message";
+export const AGENT_MESSAGE_ACCEPTED_CUSTOM_TYPE = "agent_message.accepted";
+export const AGENT_MESSAGE_CONSUMED_CUSTOM_TYPE = "agent_message.consumed";
+export const AGENT_MESSAGE_HANDOFF_CUSTOM_TYPE = "agent_message.handoff";
+export const DEFAULT_AGENT_MESSAGE_INBOX_LIMIT = 20;
+export const MAX_AGENT_MESSAGE_INBOX_LIMIT = 100;
+export const DEFAULT_AGENT_MESSAGE_WAIT_TIMEOUT_MS = 30_000;
+export const MAX_AGENT_MESSAGE_WAIT_TIMEOUT_MS = 300_000;
 export const AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL = "Agent message received";
 export const DEFAULT_AGENT_MESSAGE_MAX_CHARS = 16_384;
 export const DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION = 20;
@@ -113,6 +120,7 @@ export interface AgentSessionMessagePayload {
 	id: string;
 	source: typeof AGENT_MESSAGE_SOURCE;
 	message: string;
+	replyTo?: string;
 	from?: AgentSessionMessageSender;
 	/** Sender relationship from the receiver's point of view. */
 	fromRelationship?: AgentFamilyRelationship;
@@ -122,6 +130,7 @@ export interface AgentSessionMessagePayload {
 export interface AgentSessionMessageDetails {
 	id: string;
 	message: string;
+	replyTo?: string;
 	from?: AgentSessionMessageSender;
 	fromRelationship?: AgentFamilyRelationship;
 	target?: AgentSessionMessageEndpoint;
@@ -132,6 +141,8 @@ export interface AgentSessionMessage extends CustomMessage<AgentSessionMessageDe
 	content: string;
 	details: AgentSessionMessageDetails;
 }
+
+export type AgentSessionMessageHandoff = "waiter" | "context" | "queue" | "retry";
 
 export interface AgentSessionMessageReceipt {
 	id: string;
@@ -146,12 +157,70 @@ export interface AgentSessionMessageReceipt {
 	/** Present only for queued messages: when it was placed behind current work. */
 	queuedAt?: string;
 	deliveryMode?: "steer";
+	replyTo?: string;
+	acceptedAt?: string;
+	targetSequence?: number;
+	handoff?: AgentSessionMessageHandoff;
 }
 
 export interface AgentSessionMessageSendInput {
 	target: string;
 	message: string;
 	receiverRole?: AgentFamilyRelationship;
+	id?: string;
+	replyTo?: string;
+}
+
+export interface AgentSessionExternalChildSendInput extends AgentSessionMessageSendInput {
+	childId: string;
+	childSessionId?: string;
+	childName: string;
+}
+
+export interface AgentSessionMailboxEnvelope extends AgentSessionMessagePayload {
+	acceptedAt: string;
+	sequence: number;
+}
+
+export interface AgentSessionMailboxFilter {
+	sender?: string;
+	replyTo?: string;
+}
+
+export interface AgentSessionMailboxInboxInput extends AgentSessionMailboxFilter {
+	limit?: number;
+	consume?: boolean;
+}
+
+export interface AgentSessionMailboxInboxResult {
+	messages: AgentSessionMailboxEnvelope[];
+}
+
+export interface AgentSessionMailboxWaitInput extends AgentSessionMailboxFilter {
+	timeoutMs?: number;
+}
+
+export interface AgentSessionMailboxWaitResult {
+	message?: AgentSessionMailboxEnvelope;
+}
+
+export interface AgentSessionMailboxAcceptedDetails {
+	envelope: AgentSessionMailboxEnvelope;
+}
+
+export interface AgentSessionMailboxConsumedDetails {
+	messageId: string;
+	targetSessionId?: string;
+	sequence: number;
+	consumedAt: string;
+}
+
+export interface AgentSessionMailboxHandoffDetails {
+	messageId: string;
+	targetSessionId: string;
+	handoff: Exclude<AgentSessionMessageHandoff, "retry">;
+	deliveryStatus: AgentSessionMessageDeliveryStatus;
+	handedOffAt: string;
 }
 
 export interface AgentSessionMessageController {
@@ -161,6 +230,12 @@ export interface AgentSessionMessageController {
 	assertSessionNameAvailable?(input: AgentSessionNameAvailabilityInput): void | Promise<void>;
 	setSessionName?(name: string): void | Promise<void>;
 	sendAgentMessage(input: AgentSessionMessageSendInput): Promise<AgentSessionMessageReceipt>;
+	sendExternalChildAgentMessage?(input: AgentSessionExternalChildSendInput): Promise<AgentSessionMessageReceipt>;
+	inboxAgentMessages?(input: AgentSessionMailboxInboxInput): Promise<AgentSessionMailboxInboxResult>;
+	waitForAgentMessage?(
+		input: AgentSessionMailboxWaitInput,
+		signal?: AbortSignal,
+	): Promise<AgentSessionMailboxWaitResult>;
 }
 
 export interface AgentSessionMessageSafetyStatus {
@@ -399,6 +474,7 @@ export function createAgentSessionMessagePrompt(payload: AgentSessionMessagePayl
 	}
 	lines.push(`To: ${formatAgentSessionMessageEndpoint(payload.target)}`);
 	lines.push(`Message id: ${payload.id}`);
+	if (payload.replyTo) lines.push(`Reply to: ${payload.replyTo}`);
 	lines.push("");
 	lines.push(payload.message);
 	return lines.join("\n");
@@ -416,6 +492,7 @@ export function createAgentSessionMessage(
 		details: {
 			id: payload.id,
 			message: payload.message,
+			replyTo: payload.replyTo,
 			from: payload.from,
 			fromRelationship: payload.fromRelationship,
 			target: payload.target,
@@ -441,6 +518,7 @@ export function createAgentSessionMessageReceipt(
 	payload: AgentSessionMessagePayload,
 	status: AgentSessionMessageDeliveryStatus,
 	at = new Date().toISOString(),
+	acceptance?: { acceptedAt: string; sequence: number; handoff: AgentSessionMessageHandoff },
 ): AgentSessionMessageReceipt {
 	return {
 		id: payload.id,
@@ -451,6 +529,14 @@ export function createAgentSessionMessageReceipt(
 		deliveryStatus: status,
 		...(status === "delivered" ? { deliveredAt: at } : { queuedAt: at }),
 		deliveryMode: "steer",
+		...(payload.replyTo ? { replyTo: payload.replyTo } : {}),
+		...(acceptance
+			? {
+					acceptedAt: acceptance.acceptedAt,
+					targetSequence: acceptance.sequence,
+					handoff: acceptance.handoff,
+				}
+			: {}),
 	};
 }
 
@@ -523,7 +609,10 @@ export class AgentSessionMessageRateLimiter {
 }
 
 export function createAgentMessageHostHandlers(
-	controller: Pick<AgentSessionMessageController, "roster" | "sendAgentMessage" | "awaitPendingChildPublication">,
+	controller: Pick<
+		AgentSessionMessageController,
+		"roster" | "sendAgentMessage" | "awaitPendingChildPublication" | "inboxAgentMessages" | "waitForAgentMessage"
+	>,
 ): Record<string, HostRequestHandler> {
 	return {
 		"agent_message.list_agents": async () => {
@@ -552,6 +641,8 @@ export function createAgentMessageHostHandlers(
 							target: entry.id,
 							message: payload.message as string,
 							receiverRole: entry.relationship,
+							id: typeof payload.id === "string" ? `${payload.id}:${entry.id}` : undefined,
+							replyTo: typeof payload.reply_to === "string" ? payload.reply_to : undefined,
 						}),
 					),
 				);
@@ -601,9 +692,189 @@ export function createAgentMessageHostHandlers(
 				target,
 				message: payload.message,
 				receiverRole: payload.receiver_role as AgentFamilyRelationship,
+				id: typeof payload.id === "string" ? payload.id : undefined,
+				replyTo: typeof payload.reply_to === "string" ? payload.reply_to : undefined,
 			})) as unknown as Record<string, unknown>;
 		},
+		"agent_message.inbox": async (payload) => {
+			if (!controller.inboxAgentMessages) throw new Error("agent mailbox is not available in this session");
+			return (await controller.inboxAgentMessages({
+				limit: normalizeAgentMessageInboxLimit(payload.limit),
+				consume: payload.consume === true,
+				sender: normalizeOptionalAgentMessageFilter(payload.sender, "sender"),
+				replyTo: normalizeOptionalAgentMessageFilter(payload.reply_to, "reply_to"),
+			})) as unknown as Record<string, unknown>;
+		},
+		"agent_message.wait": async (payload, signal) => {
+			if (!controller.waitForAgentMessage) throw new Error("agent mailbox is not available in this session");
+			return (await controller.waitForAgentMessage(
+				{
+					timeoutMs: normalizeAgentMessageWaitTimeout(payload.timeout_ms),
+					sender: normalizeOptionalAgentMessageFilter(payload.sender, "sender"),
+					replyTo: normalizeOptionalAgentMessageFilter(payload.reply_to, "reply_to"),
+				},
+				signal,
+			)) as unknown as Record<string, unknown>;
+		},
 	};
+}
+
+export function normalizeAgentMessageInboxLimit(value: unknown): number {
+	if (value === undefined) return DEFAULT_AGENT_MESSAGE_INBOX_LIMIT;
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_AGENT_MESSAGE_INBOX_LIMIT) {
+		throw new Error(`agent_message.inbox limit must be an integer between 1 and ${MAX_AGENT_MESSAGE_INBOX_LIMIT}`);
+	}
+	return value;
+}
+
+export function normalizeAgentMessageWaitTimeout(value: unknown): number {
+	if (value === undefined) return DEFAULT_AGENT_MESSAGE_WAIT_TIMEOUT_MS;
+	if (
+		typeof value !== "number" ||
+		!Number.isInteger(value) ||
+		value < 1 ||
+		value > MAX_AGENT_MESSAGE_WAIT_TIMEOUT_MS
+	) {
+		throw new Error(
+			`agent_message.wait timeout_ms must be an integer between 1 and ${MAX_AGENT_MESSAGE_WAIT_TIMEOUT_MS}`,
+		);
+	}
+	return value;
+}
+
+function normalizeOptionalAgentMessageFilter(value: unknown, name: string): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value !== "string" || !value.trim()) throw new Error(`agent_message ${name} must be a non-empty string`);
+	return value.trim();
+}
+
+export function matchesAgentSessionMailboxFilter(
+	envelope: AgentSessionMailboxEnvelope,
+	filter: AgentSessionMailboxFilter,
+): boolean {
+	const senderMatches =
+		filter.sender === undefined ||
+		[
+			envelope.from?.sessionId,
+			envelope.from?.activeSessionId,
+			envelope.from?.sessionName,
+			envelope.from?.clientId,
+		].includes(filter.sender);
+	return senderMatches && (filter.replyTo === undefined || envelope.replyTo === filter.replyTo);
+}
+
+export function projectAgentSessionMailbox(
+	entries: readonly unknown[],
+	targetSessionId?: string,
+): AgentSessionMailboxEnvelope[] {
+	const accepted = new Map<string, AgentSessionMailboxEnvelope>();
+	const consumedIds = new Set<string>();
+	const consumedTargets = new Set<string>();
+	const key = (sessionId: string, messageId: string) => JSON.stringify([sessionId, messageId]);
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const candidate = entry as { type?: unknown; customType?: unknown; details?: unknown };
+		if (candidate.type !== "custom_message" || !candidate.details || typeof candidate.details !== "object") continue;
+		if (candidate.customType === AGENT_MESSAGE_ACCEPTED_CUSTOM_TYPE) {
+			const envelope = (candidate.details as { envelope?: unknown }).envelope;
+			if (
+				isAgentSessionMailboxEnvelope(envelope) &&
+				(targetSessionId === undefined || envelope.target.sessionId === targetSessionId)
+			) {
+				const acceptanceKey = key(envelope.target.sessionId, envelope.id);
+				if (!accepted.has(acceptanceKey)) accepted.set(acceptanceKey, envelope);
+			}
+		} else if (candidate.customType === AGENT_MESSAGE_CONSUMED_CUSTOM_TYPE) {
+			const details = candidate.details as { messageId?: unknown; targetSessionId?: unknown };
+			if (typeof details.messageId !== "string") continue;
+			if (typeof details.targetSessionId === "string") {
+				consumedTargets.add(key(details.targetSessionId, details.messageId));
+			} else {
+				consumedIds.add(details.messageId);
+			}
+		}
+	}
+	return [...accepted.values()]
+		.filter(
+			(envelope) =>
+				!consumedIds.has(envelope.id) && !consumedTargets.has(key(envelope.target.sessionId, envelope.id)),
+		)
+		.sort((a, b) => a.sequence - b.sequence);
+}
+
+export function nextAgentSessionMailboxSequence(entries: readonly unknown[], targetSessionId?: string): number {
+	let sequence = 0;
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const candidate = entry as { type?: unknown; customType?: unknown; details?: unknown };
+		if (candidate.type !== "custom_message" || candidate.customType !== AGENT_MESSAGE_ACCEPTED_CUSTOM_TYPE) continue;
+		const envelope = (candidate.details as { envelope?: unknown } | undefined)?.envelope;
+		if (
+			isAgentSessionMailboxEnvelope(envelope) &&
+			(targetSessionId === undefined || envelope.target.sessionId === targetSessionId)
+		) {
+			sequence = Math.max(sequence, envelope.sequence);
+		}
+	}
+	return sequence + 1;
+}
+
+export function findAgentSessionMailboxAcceptance(
+	entries: readonly unknown[],
+	messageId: string,
+	targetSessionId?: string,
+): AgentSessionMailboxEnvelope | undefined {
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const candidate = entry as { type?: unknown; customType?: unknown; details?: unknown };
+		if (candidate.type !== "custom_message" || candidate.customType !== AGENT_MESSAGE_ACCEPTED_CUSTOM_TYPE) continue;
+		const envelope = (candidate.details as { envelope?: unknown } | undefined)?.envelope;
+		if (
+			isAgentSessionMailboxEnvelope(envelope) &&
+			envelope.id === messageId &&
+			(targetSessionId === undefined || envelope.target.sessionId === targetSessionId)
+		) {
+			return envelope;
+		}
+	}
+	return undefined;
+}
+
+export function findAgentSessionMailboxHandoff(
+	entries: readonly unknown[],
+	messageId: string,
+	targetSessionId: string,
+): AgentSessionMailboxHandoffDetails | undefined {
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const candidate = entry as { type?: unknown; customType?: unknown; details?: unknown };
+		if (candidate.type !== "custom_message" || candidate.customType !== AGENT_MESSAGE_HANDOFF_CUSTOM_TYPE) continue;
+		const details = candidate.details as Partial<AgentSessionMailboxHandoffDetails> | undefined;
+		if (
+			details?.messageId === messageId &&
+			details.targetSessionId === targetSessionId &&
+			(details.handoff === "waiter" || details.handoff === "context" || details.handoff === "queue") &&
+			(details.deliveryStatus === "delivered" || details.deliveryStatus === "queued") &&
+			typeof details.handedOffAt === "string"
+		) {
+			return details as AgentSessionMailboxHandoffDetails;
+		}
+	}
+	return undefined;
+}
+
+function isAgentSessionMailboxEnvelope(value: unknown): value is AgentSessionMailboxEnvelope {
+	if (!value || typeof value !== "object") return false;
+	const envelope = value as Partial<AgentSessionMailboxEnvelope>;
+	return (
+		typeof envelope.id === "string" &&
+		envelope.source === AGENT_MESSAGE_SOURCE &&
+		typeof envelope.message === "string" &&
+		typeof envelope.acceptedAt === "string" &&
+		typeof envelope.sequence === "number" &&
+		!!envelope.target &&
+		typeof envelope.target.sessionId === "string"
+	);
 }
 
 function formatAgentSessionMessageMetadata(value: string): string {

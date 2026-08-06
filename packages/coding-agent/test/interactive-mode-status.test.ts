@@ -21,6 +21,7 @@ import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
 import { emptyGoalState, type GoalState } from "../src/core/goals.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { MANUAL_CONTINUE_CUSTOM_TYPE, MANUAL_CONTINUE_PROMPT } from "../src/core/messages.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -886,6 +887,24 @@ describe("InteractiveMode submit handling", () => {
 			pasteSnapshot,
 			images: [[9, image]],
 		});
+	});
+
+	test("turns a lone dot into a hidden manual continuation", async () => {
+		const fakeThis = createSubmitHandlerHarness();
+
+		await fakeThis.defaultEditor.onSubmit?.(".");
+
+		expect(fakeThis.agentConnection.prompt).toHaveBeenCalledWith(
+			MANUAL_CONTINUE_PROMPT,
+			expect.objectContaining({
+				customMessage: expect.objectContaining({
+					customType: MANUAL_CONTINUE_CUSTOM_TYPE,
+					display: false,
+				}),
+				internalPrompt: true,
+			}),
+		);
+		expect(fakeThis.editor.addToHistory).not.toHaveBeenCalled();
 	});
 
 	test("routes ! shortcuts to executeBash on the agent connection", async () => {

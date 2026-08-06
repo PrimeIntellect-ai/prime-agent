@@ -897,6 +897,8 @@ export class DaemonAgentConnection implements AgentConnection {
 					streamingBehavior: options?.streamingBehavior,
 					queueIfBusy: options?.queueIfBusy,
 					source: options?.source,
+					customMessage: options?.customMessage,
+					internalPrompt: options?.internalPrompt,
 				},
 				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
 			);
@@ -922,6 +924,8 @@ export class DaemonAgentConnection implements AgentConnection {
 			streamingBehavior: options.streamingBehavior,
 			queueIfBusy: options.queueIfBusy,
 			source: options.source,
+			customMessage: options.customMessage,
+			internalPrompt: options.internalPrompt,
 			admissionId,
 		} as Extract<DaemonCommandBody, { type: typeof type }>;
 		let promptError: unknown;

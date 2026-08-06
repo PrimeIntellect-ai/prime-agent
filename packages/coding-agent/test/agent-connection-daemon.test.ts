@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { createManualContinueMessage, MANUAL_CONTINUE_PROMPT } from "../src/core/messages.js";
 import { MissingSessionCwdError } from "../src/core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../src/core/session-import-errors.js";
 import {
@@ -800,6 +801,22 @@ describe("DaemonAgentConnection", () => {
 			message: "queued input",
 			streamingBehavior: "followUp",
 			queueIfBusy: true,
+		});
+	});
+
+	it("forwards hidden internal continuation prompts", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		const customMessage = createManualContinueMessage(123);
+
+		await connection.prompt(MANUAL_CONTINUE_PROMPT, { customMessage, internalPrompt: true });
+
+		expect(fakeClient.requests.at(-1)).toMatchObject({
+			type: "prompt",
+			activeSessionId: "active-1",
+			message: MANUAL_CONTINUE_PROMPT,
+			customMessage,
+			internalPrompt: true,
 		});
 	});
 

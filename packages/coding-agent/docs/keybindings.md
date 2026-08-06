@@ -92,7 +92,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.interrupt` | *(none)* | Interrupt current operation |
-| `app.clear` | `ctrl+c` | Interrupt current operation, then exit |
+| `app.clear` | `ctrl+c` | Clear draft text; with an empty editor, interrupt the current operation, then exit |
 | `app.input.clear` | `escape` | Clear input |
 | `app.exit` | `ctrl+d` | Exit (when editor empty) |
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |

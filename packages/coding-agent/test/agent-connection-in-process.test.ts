@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener, PromptOptions } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { emptyGoalState } from "../src/core/goals.js";
+import { createManualContinueMessage, MANUAL_CONTINUE_PROMPT } from "../src/core/messages.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type { AgentConnectionEvent, AgentConnectionState } from "../src/modes/agent-connection/types.js";
 
@@ -174,6 +175,24 @@ describe("InProcessAgentConnection", () => {
 			finishTurn();
 		},
 	);
+	it("forwards hidden internal continuation prompts to the session", async () => {
+		const session = createFakeSession("manual-continue", []);
+		const prompt = vi.fn((_message: string, options?: PromptOptions) => {
+			options?.preflightResult?.(true);
+			return Promise.resolve();
+		});
+		Object.assign(session.session, { prompt });
+		const connection = new InProcessAgentConnection(asRuntime(new FakeRuntime(session.session)));
+		const customMessage = createManualContinueMessage(123);
+
+		await connection.prompt(MANUAL_CONTINUE_PROMPT, { customMessage, internalPrompt: true });
+
+		expect(prompt).toHaveBeenCalledWith(
+			MANUAL_CONTINUE_PROMPT,
+			expect.objectContaining({ customMessage, internalPrompt: true }),
+		);
+	});
+
 	it("forwards prompt admission cancellation to the session", async () => {
 		const session = createFakeSession("prompt-cancellation", []);
 		const prompt = vi.fn(

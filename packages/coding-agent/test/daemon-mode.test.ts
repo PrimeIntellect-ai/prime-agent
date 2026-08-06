@@ -323,6 +323,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -712,6 +713,7 @@ describe("daemon mode helpers", () => {
 				rlmChildId: "child-1",
 			},
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-child",
 				sessionName: defaultSubagentName,
 				isStreaming: false,
@@ -1829,6 +1831,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -1879,6 +1882,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: true,
@@ -1929,6 +1933,7 @@ describe("daemon mode helpers", () => {
 				...targetState.runtime,
 				cwd: "/tmp",
 				session: {
+					sessionManager: makeMailboxSessionManager(),
 					sessionId: `session-${targetState.activeSessionId}`,
 					sessionName: targetState.activeSessionId,
 					isStreaming: false,
@@ -2157,6 +2162,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -2222,6 +2228,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: true,
@@ -2291,6 +2298,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: true,
@@ -2365,6 +2373,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: true,
@@ -2413,6 +2422,7 @@ describe("daemon mode helpers", () => {
 				...state.runtime,
 				cwd: "/tmp",
 				session: {
+					sessionManager: makeMailboxSessionManager(),
 					sessionId: `session-${name}`,
 					sessionName: name,
 					isStreaming: true,
@@ -2475,6 +2485,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -2959,6 +2970,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3027,6 +3039,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3084,6 +3097,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3139,6 +3153,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3193,6 +3208,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3253,6 +3269,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: true,
@@ -3313,6 +3330,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3381,6 +3399,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: true,
@@ -3434,6 +3453,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3485,6 +3505,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3554,6 +3575,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3625,6 +3647,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3688,6 +3711,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3768,6 +3792,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3822,6 +3847,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3877,6 +3903,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3938,6 +3965,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -3998,6 +4026,7 @@ describe("daemon mode helpers", () => {
 			...targetState.runtime,
 			cwd: "/tmp",
 			session: {
+				sessionManager: makeMailboxSessionManager(),
 				sessionId: "session-target",
 				sessionName: "Target",
 				isStreaming: false,
@@ -10316,16 +10345,33 @@ function makeAgentFamilyState(
 			unfinishedActionCount: 0,
 			messages: [],
 			state: { pendingToolCalls: new Set(), streamingMessage: undefined },
-			sessionManager: {
+			sessionManager: makeMailboxSessionManager({
 				getCwd: () => "/tmp",
 				getHeader: () => ({ created: new Date(0).toISOString() }),
-			},
+			}),
 			hasRunningRlmChildren: () => false,
 			getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			acceptAgentMessagePrompt,
 		},
 	} as never;
 	return { state, acceptAgentMessagePrompt };
+}
+
+function makeMailboxSessionManager(extra: Record<string, unknown> = {}) {
+	const entries: unknown[] = [];
+	return {
+		...extra,
+		getEntries: () => [...entries],
+		appendCustomMessageEntryWithRollback: (
+			customType: string,
+			content: string,
+			display: boolean,
+			details: unknown,
+		) => {
+			entries.push({ type: "custom_message", customType, content, display, details });
+			return `mailbox-${entries.length}`;
+		},
+	};
 }
 
 function makeState(activeSessionId: string, parentActiveSessionId?: string): ActiveSessionState {

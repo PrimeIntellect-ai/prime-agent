@@ -215,6 +215,35 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
+	it("falls back locally when an old daemon lacks the family mailbox capability", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, [], DAEMON_SCHEMA_REVISION - 1);
+
+		await expect(
+			client.request({ type: "agent_message_inbox", activeSessionId: "active-1", limit: 20 }),
+		).rejects.toThrow("does not support family_mailbox");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it("sends mailbox requests only after capability negotiation", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["family_mailbox"], DAEMON_SCHEMA_REVISION);
+
+		const request = client.request({ type: "agent_message_wait", activeSessionId: "active-1", timeoutMs: 1000 });
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		client.close();
+		await expect(request).rejects.toThrow("closed before the operation completed");
+	});
+
 	it("does not send subagent deletion to an old daemon without the capability", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();

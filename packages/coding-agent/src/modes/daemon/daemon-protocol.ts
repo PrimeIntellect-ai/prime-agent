@@ -61,14 +61,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-// Revision 17 gates authoritative child rosters and transient owned-session recovery context.
-// Revision 18 adds the opt-in RLM quiescence barrier to headless completion.
-// Revision 19 adds daemon-held session input pauses.
-// Revision 20 lets cancellation target a prompt the session owns but has not started.
-// Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
-// Revision 22 scopes ACP MCP replacement and cleanup to a connection owner.
-export const DAEMON_SCHEMA_REVISION = 22;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-22-4d515169dc6b";
+// Revision 23 adds capability-gated durable family mailbox commands and receipt metadata.
+export const DAEMON_SCHEMA_REVISION = 23;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-23-226b44019dad";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -113,7 +108,8 @@ export type DaemonServerCapability =
 	| "rlm_quiescence_barrier"
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
-	| "acp_mcp_servers";
+	| "acp_mcp_servers"
+	| "family_mailbox";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -157,7 +153,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"owned_session_recovery_context",
 	"rlm_quiescence_barrier",
 	"session_input_pause",
-	"acp_mcp_servers",
+	"family_mailbox",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -427,6 +423,7 @@ export type DaemonCommand =
 			source?: InputSource;
 			agentMessageId?: string;
 			customMessage?: CustomMessage;
+			internalPrompt?: boolean;
 			/** Unique only when the caller needs cancellable pre-ownership admission. */
 			admissionId?: string;
 	  }
@@ -449,6 +446,8 @@ export type DaemonCommand =
 			queueIfBusy?: boolean;
 			expandPromptTemplates?: boolean;
 			source?: InputSource;
+			customMessage?: CustomMessage;
+			internalPrompt?: boolean;
 			/** Unique only when the caller needs cancellable pre-ownership admission. */
 			admissionId?: string;
 	  }
@@ -496,6 +495,25 @@ export type DaemonCommand =
 			/** Internal worker-origin marker; public clients remain unrestricted. */
 			agentOrigin?: boolean;
 			deliveryMode?: AgentSessionMessageDeliveryMode;
+			messageId?: string;
+			replyTo?: string;
+	  }
+	| {
+			id?: string;
+			type: "agent_message_inbox";
+			activeSessionId: string;
+			limit?: number;
+			consume?: boolean;
+			sender?: string;
+			replyTo?: string;
+	  }
+	| {
+			id?: string;
+			type: "agent_message_wait";
+			activeSessionId: string;
+			timeoutMs?: number;
+			sender?: string;
+			replyTo?: string;
 	  }
 	| { id?: string; type: "agent_messages_status"; activeSessionId?: string }
 	| { id?: string; type: "agent_messages_pause"; activeSessionId?: string }
@@ -686,6 +704,11 @@ const CLIENT_OWNED_DAEMON_COMMAND = {
 	minProtocol: 7,
 	capability: "client_owned_sessions",
 } as const;
+const FAMILY_MAILBOX_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 16,
+	capability: "family_mailbox",
+} as const;
 const DELETE_RLM_SUBAGENT_COMMAND = {
 	minProtocol: 7,
 	capability: "delete_rlm_subagent",
@@ -735,6 +758,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	append_custom_message: LEGACY_DAEMON_COMMAND,
 	resume_queue: SESSION_INPUT_ADMISSION_COMMAND,
 	send_message: LEGACY_DAEMON_COMMAND,
+	agent_message_inbox: FAMILY_MAILBOX_COMMAND,
+	agent_message_wait: FAMILY_MAILBOX_COMMAND,
 	agent_messages_status: LEGACY_DAEMON_COMMAND,
 	agent_messages_pause: LEGACY_DAEMON_COMMAND,
 	agent_messages_resume: LEGACY_DAEMON_COMMAND,

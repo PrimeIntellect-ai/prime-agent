@@ -31,7 +31,7 @@ if child is not None:
   for the current agent's parent, siblings, and children. It includes inactive
   family members and sorts parent, siblings by name, then children by name; it
   does not expose a global daemon session list.
-- `await agent_message.send(message, receiver_role="parent" | "sibling" | "child", receiver_name=None)` — sends one direct
+- `await agent_message.send(message, receiver_role="parent" | "sibling" | "child", receiver_name=None, message_id=None, reply_to=None)` — sends one direct
   text message to an active session. Sending to an idle completed subagent
   starts an ordinary follow-up turn in that same child session and context.
   The child remains available only until its parent session closes. The daemon
@@ -46,6 +46,16 @@ if child is not None:
   context; `"queued"` means a steering message was accepted and will deliver when
   the target's current work allows (`send` does not block waiting for that).
   Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
+  Every call creates a stable source ID before routing; pass `message_id` to retry
+  the same acceptance and `reply_to` to correlate a response. Durable receipts add
+  `acceptedAt`, `targetSequence`, and `handoff` without changing the status union.
+- `await agent_message.inbox(limit=20, consume=False, sender=None, reply_to=None)` —
+  returns up to 100 retained messages in target-local oldest-first order. The
+  default peeks; `consume=True` appends consumption before returning rows.
+- `await agent_message.wait(timeout=30, sender=None, reply_to=None)` — consumes the
+  oldest retained match or waits event-first for a future match. `timeout` is in
+  seconds, must be positive, and is capped at 300. Timeout returns no message;
+  interruption, comm close, session passivation, and shutdown cancel the wait.
 
 ## Safety
 
