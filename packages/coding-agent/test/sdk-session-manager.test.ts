@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -59,6 +59,54 @@ describe("createAgentSession session manager defaults", () => {
 
 		expect(session.sessionManager).toBe(sessionManager);
 		expect(session.sessionManager.isPersisted()).toBe(false);
+
+		session.dispose();
+	});
+
+	it("rebuilds provider-native history for an explicit resume model", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		expect(model).toBeTruthy();
+		const sessionManager = SessionManager.inMemory(cwd);
+		sessionManager.appendModelChange("openai-codex", "gpt-5.3-codex");
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "history before native compaction" }],
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({
+			...fauxAssistantMessage("old response"),
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-5.3-codex",
+		});
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "retained message" }],
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCompaction(
+			"provider-native placeholder",
+			firstKeptEntryId,
+			100,
+			undefined,
+			false,
+			undefined,
+			{
+				provider: "openai-codex",
+				replacementHistory: [{ type: "compaction", encrypted_content: "opaque-state" }],
+				compactionItem: { type: "compaction", encrypted_content: "opaque-state" },
+			},
+		);
+
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: model!,
+			sessionManager,
+		});
+
+		expect(JSON.stringify(session.messages)).toContain("history before native compaction");
+		expect(session.messages.some((message) => "providerPayload" in message)).toBe(false);
 
 		session.dispose();
 	});

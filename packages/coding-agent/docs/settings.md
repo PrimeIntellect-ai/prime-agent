@@ -134,13 +134,17 @@ prime-agent --offline
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.native` | boolean | `true` | Prefer provider-native compaction when the active API supports it |
+
+Supported OpenAI Codex models use the native `/responses/compact` operation by default. Prime Agent stores the returned opaque history in the session and replays it only to the same provider. A provider switch re-expands the original append-only entries. Unsupported providers, an explicit `false`, and native failures before a valid result use the existing local summary path.
 
 ```json
 {
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 20000
+    "keepRecentTokens": 20000,
+    "native": true
   }
 }
 ```

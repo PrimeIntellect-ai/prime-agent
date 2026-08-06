@@ -572,6 +572,19 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("provider-native compaction", () => {
+		it("defaults to enabled and accepts an explicit opt-out", () => {
+			const defaultManager = SettingsManager.create(projectDir, agentDir);
+			expect(defaultManager.getCompactionNative()).toBe(true);
+			expect(defaultManager.getCompactionSettings().native).toBe(true);
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { native: false } }));
+			const disabledManager = SettingsManager.create(projectDir, agentDir);
+			expect(disabledManager.getCompactionNative()).toBe(false);
+			expect(disabledManager.getCompactionSettings().native).toBe(false);
+		});
+	});
+
 	describe("idle worker eviction", () => {
 		it("defaults to 90 minutes and treats none as off", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

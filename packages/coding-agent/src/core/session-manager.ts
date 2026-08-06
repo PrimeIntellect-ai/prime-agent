@@ -1,5 +1,13 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	ProviderNativeCompactionResult,
+	ServiceTier,
+	TextContent,
+	Usage,
+} from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -126,9 +134,18 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Opaque history returned by a provider-native compaction operation. */
+	providerNativeCompaction?: ProviderNativeCompactionResult;
+	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	fromHook?: boolean;
 	customInstructions?: string;
+}
+
+export function canReplayCompactionWithProvider(compaction: CompactionEntry, provider?: string): boolean {
+	return (
+		compaction.providerNativeCompaction === undefined || compaction.providerNativeCompaction.provider === provider
+	);
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
@@ -415,10 +432,17 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+/**
+ * Build the session context from entries using tree traversal.
+ * If leafId is provided, walks from that entry to root.
+ * Handles compaction and branch summaries along the path.
+ * Pass null as activeProvider to restrict selection to portable compaction boundaries.
+ */
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	activeProvider?: string | null,
 ): SessionContext {
 	if (!byId) {
 		byId = new Map<string, SessionEntry>();
@@ -465,8 +489,15 @@ export function buildSessionContext(
 			model = { provider: entry.provider, modelId: entry.modelId };
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			model = { provider: entry.message.provider, modelId: entry.message.model };
-		} else if (entry.type === "compaction") {
+		}
+	}
+
+	const replayProvider = activeProvider === undefined ? model?.provider : (activeProvider ?? undefined);
+	for (let i = path.length - 1; i >= 0; i--) {
+		const entry = path[i];
+		if (entry.type === "compaction" && canReplayCompactionWithProvider(entry, replayProvider)) {
 			compaction = entry;
+			break;
 		}
 	}
 
@@ -486,6 +517,8 @@ export function buildSessionContext(
 			target.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
 	};
+
+	const providerNativeCompaction = compaction?.providerNativeCompaction;
 
 	if (compaction) {
 		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
@@ -512,6 +545,13 @@ export function buildSessionContext(
 				compaction.timestamp,
 				compaction.customInstructions,
 				retainedMessages.length,
+				providerNativeCompaction
+					? {
+							type: "openaiResponsesHistory",
+							provider: providerNativeCompaction.provider,
+							items: providerNativeCompaction.replacementHistory,
+						}
+					: undefined,
 			),
 			...retainedMessages,
 		);
@@ -521,6 +561,7 @@ export function buildSessionContext(
 			appendMessage(entry);
 		}
 	} else {
+		// No compatible compaction boundary: rebuild from original append-only entries.
 		for (const entry of path) {
 			appendMessage(entry);
 		}
@@ -1447,6 +1488,7 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		customInstructions?: string,
+		providerNativeCompaction?: ProviderNativeCompactionResult,
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1456,6 +1498,7 @@ export class SessionManager {
 			summary,
 			firstKeptEntryId,
 			tokensBefore,
+			providerNativeCompaction,
 			details,
 			fromHook,
 			customInstructions,
@@ -1763,13 +1806,17 @@ export class SessionManager {
 		return path;
 	}
 
-	buildSessionContext(): SessionContext {
+	/**
+	 * Build the session context (what gets sent to the LLM).
+	 * Uses tree traversal from current leaf.
+	 */
+	buildSessionContext(activeProvider?: string): SessionContext {
 		// Pass fileEntries directly rather than getEntries(): the resolved context
 		// is computed from the leaf-to-root walk over byId (which already excludes
 		// the header), so the entries argument is only a fallback for an undefined
 		// leaf — never hit here since leafId is always set or null. Avoids an O(n)
 		// array copy on every call (attach, get_session_context, agent init, ...).
-		return buildSessionContext(this.fileEntries as SessionEntry[], this.leafId, this.byId);
+		return buildSessionContext(this.fileEntries as SessionEntry[], this.leafId, this.byId, activeProvider);
 	}
 
 	getHeader(): SessionHeader | null {

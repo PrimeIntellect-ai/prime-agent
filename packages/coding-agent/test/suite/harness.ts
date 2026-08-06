@@ -7,7 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
-import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@earendil-works/pi-ai";
+import type {
+	FauxModelDefinition,
+	FauxProviderRegistration,
+	FauxResponseStep,
+	Model,
+	ProviderNativeCompactionFunction,
+} from "@earendil-works/pi-ai";
 import { registerFauxProvider } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageController } from "../../src/core/agent-messages.js";
 import type { AgentObserveController } from "../../src/core/agent-observe.js";
@@ -64,6 +70,7 @@ export interface HarnessOptions {
 	api?: string;
 	provider?: string;
 	models?: FauxModelDefinition[];
+	nativeCompact?: ProviderNativeCompactionFunction<string>;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -113,6 +120,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		api: options.api,
 		provider: options.provider,
 		models: options.models,
+		compact: options.nativeCompact,
 	});
 	fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();

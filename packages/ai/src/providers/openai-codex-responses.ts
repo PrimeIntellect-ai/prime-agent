@@ -28,6 +28,8 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
+	ProviderNativeCompactionOptions,
+	ProviderNativeCompactionResult,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -44,6 +46,7 @@ import { convertResponsesMessages, convertResponsesTools, processResponsesStream
 import { buildBaseOptions } from "./simple-options.js";
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+export const OPENAI_CODEX_COMPACTION_TIMEOUT_MS = 180_000;
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
@@ -64,6 +67,29 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
+}
+
+export type OpenAICodexCompactionOptions = ProviderNativeCompactionOptions;
+
+export type OpenAICodexCompactionItem =
+	| (Record<string, unknown> & { type: "compaction"; encrypted_content: string })
+	| (Record<string, unknown> & { type: "compaction_summary"; encrypted_content: string });
+
+export interface OpenAICodexCompactionResult extends ProviderNativeCompactionResult {
+	compactionItem: OpenAICodexCompactionItem;
+}
+
+export class OpenAICodexCompactionHttpError extends Error {
+	readonly status: number;
+	readonly responseBody: string;
+
+	constructor(status: number, statusText: string, responseBody: string) {
+		const details = responseBody ? `: ${responseBody}` : "";
+		super(`OpenAI Codex compaction failed (${status} ${statusText})${details}`);
+		this.name = "OpenAICodexCompactionHttpError";
+		this.status = status;
+		this.responseBody = responseBody;
+	}
 }
 
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
@@ -316,6 +342,71 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 	} satisfies OpenAICodexResponsesOptions);
 };
 
+export const compactOpenAICodexResponses = async (
+	model: Model<"openai-codex-responses">,
+	context: Context,
+	options: OpenAICodexCompactionOptions,
+): Promise<OpenAICodexCompactionResult> => {
+	const apiKey = options.apiKey || getEnvApiKey(model.provider) || "";
+	if (!apiKey) {
+		throw new Error(`No API key for provider: ${model.provider}`);
+	}
+
+	const accountId = extractAccountId(apiKey);
+	let body: unknown = {
+		model: model.id,
+		input: convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+			includeSystemPrompt: false,
+		}),
+		instructions: options.instructions,
+	};
+	const nextBody = await options.onPayload?.(body, model);
+	if (nextBody !== undefined) body = nextBody;
+
+	const headers = buildSSEHeaders(model.headers, options.headers, accountId, apiKey, options.sessionId);
+	headers.delete("accept");
+	const requestTimeout = createRequestTimeout(options.signal, options.timeoutMs);
+
+	try {
+		requestTimeout.signal.throwIfAborted();
+		const response = await fetch(resolveCodexCompactionUrl(model.baseUrl), {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+			signal: requestTimeout.signal,
+		});
+		await options.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+
+		if (!response.ok) {
+			const responseBody = await response.text().catch(() => "");
+			throw new OpenAICodexCompactionHttpError(response.status, response.statusText, responseBody);
+		}
+
+		const data = (await response.json()) as { output?: unknown } | undefined;
+		const output = data?.output;
+		if (!Array.isArray(output)) {
+			throw new Error("OpenAI Codex compaction response missing output array");
+		}
+
+		const compactionItem = output.at(-1);
+		if (!isOpenAICodexCompactionItem(compactionItem)) {
+			throw new Error("OpenAI Codex compaction response missing final compaction item");
+		}
+
+		return {
+			provider: model.provider,
+			replacementHistory: output.filter(isOpenAICodexReplacementHistoryItem),
+			compactionItem,
+		};
+	} finally {
+		requestTimeout.dispose();
+	}
+};
+
+// ============================================================================
+// Request Building
+// ============================================================================
+
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
@@ -411,6 +502,51 @@ function resolveCodexUrl(baseUrl?: string): string {
 	if (normalized.endsWith("/codex/responses")) return normalized;
 	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
 	return `${normalized}/codex/responses`;
+}
+
+function resolveCodexCompactionUrl(baseUrl?: string): string {
+	return `${resolveCodexUrl(baseUrl)}/compact`;
+}
+
+function isOpenAICodexCompactionItem(item: unknown): item is OpenAICodexCompactionItem {
+	if (!item || typeof item !== "object") return false;
+	const candidate = item as Record<string, unknown>;
+	return (
+		(candidate.type === "compaction" || candidate.type === "compaction_summary") &&
+		typeof candidate.encrypted_content === "string" &&
+		candidate.encrypted_content.length > 0
+	);
+}
+
+function isOpenAICodexReplacementHistoryItem(item: unknown): item is Record<string, unknown> {
+	if (!item || typeof item !== "object") return false;
+	const candidate = item as Record<string, unknown>;
+	if (isOpenAICodexCompactionItem(candidate)) return true;
+	return candidate.type === "message" && (candidate.role === "user" || candidate.role === "assistant");
+}
+
+function createRequestTimeout(
+	callerSignal: AbortSignal | undefined,
+	timeoutMs: number | undefined,
+): { signal: AbortSignal; dispose: () => void } {
+	const controller = new AbortController();
+	const requestTimeoutMs = timeoutMs && timeoutMs > 0 ? timeoutMs : OPENAI_CODEX_COMPACTION_TIMEOUT_MS;
+	const onCallerAbort = () => controller.abort(callerSignal?.reason);
+
+	if (callerSignal?.aborted) onCallerAbort();
+	else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+
+	const timer = setTimeout(() => {
+		controller.abort(new Error(`OpenAI Codex compaction request timed out after ${requestTimeoutMs}ms`));
+	}, requestTimeoutMs);
+
+	return {
+		signal: controller.signal,
+		dispose: () => {
+			clearTimeout(timer);
+			callerSignal?.removeEventListener("abort", onCallerAbort);
+		},
+	};
 }
 
 function resolveCodexWebSocketUrl(baseUrl?: string): string {
