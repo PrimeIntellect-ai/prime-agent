@@ -4,8 +4,10 @@ import {
 	defaultModelPerProvider,
 	findInitialModel,
 	parseModelPattern,
+	parseRlmRuntimeCandidate,
 	resolveCliModel,
 	resolveModelScopeFromModels,
+	resolveRlmRoleCandidates,
 } from "../src/core/model-resolver.js";
 
 const mockModels: Model<"anthropic-messages">[] = [
@@ -638,5 +640,60 @@ describe("default model selection", () => {
 
 		expect(result.model?.provider).toBe("prime-inference");
 		expect(result.model?.id).toBe("openai/gpt-5.5");
+	});
+});
+
+describe("RLM role candidates", () => {
+	test("preserves nested provider model ids and parses effort from the right", () => {
+		expect(
+			resolveRlmRoleCandidates("deepseek", {
+				deepseek: ["openrouter/missing:model", "openrouter/deepseek/deepseek-v4-flash-0731:max"],
+			}),
+		).toEqual([
+			{
+				runtime: "native",
+				selector: "openrouter/missing:model",
+				modelReference: "openrouter/missing:model",
+			},
+			{
+				runtime: "native",
+				selector: "openrouter/deepseek/deepseek-v4-flash-0731",
+				modelReference: "openrouter/deepseek/deepseek-v4-flash-0731",
+				thinkingLevel: "max",
+			},
+		]);
+	});
+
+	test("accepts an OMP-style role string with a trailing effort suffix", () => {
+		expect(
+			resolveRlmRoleCandidates("copilot-grok", {
+				"copilot-grok": "github-copilot/grok-4.5:high",
+			}),
+		).toEqual([
+			{
+				runtime: "native",
+				selector: "github-copilot/grok-4.5",
+				modelReference: "github-copilot/grok-4.5",
+				thinkingLevel: "high",
+			},
+		]);
+	});
+
+	test("recognizes Claude Code without treating it as a provider model", () => {
+		expect(parseRlmRuntimeCandidate("claude-code/claude-opus-4-7:high")).toEqual({
+			runtime: "claude-code",
+			selector: "claude-code/claude-opus-4-7",
+			modelReference: "claude-opus-4-7",
+			thinkingLevel: "high",
+		});
+	});
+
+	test("rejects empty and mixed-runtime roles", () => {
+		expect(() => resolveRlmRoleCandidates("empty", { empty: [] })).toThrow('role "@empty" has no candidates');
+		expect(() =>
+			resolveRlmRoleCandidates("mixed", {
+				mixed: ["openai/gpt-5.5", "claude-code/claude-opus-4-7"],
+			}),
+		).toThrow('role "@mixed" mixes native and claude-code runtime candidates');
 	});
 });

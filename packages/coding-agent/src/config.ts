@@ -15,6 +15,7 @@ import {
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
+import { resolveSettingsFile } from "./settings-files.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
 
@@ -604,6 +605,11 @@ export function appendRotatingLog(logPath: string, message: string, maxBytes: nu
 /** Get path to auth.json */
 export function getAuthPath(): string {
 	return join(getAgentDir(), "auth.json");
+}
+
+/** Get the active global settings path, defaulting to settings.json when none exists. */
+export function getSettingsPath(): string {
+	return resolveSettingsFile(getAgentDir()).path;
 }
 
 /** Get path to cron jobs store */

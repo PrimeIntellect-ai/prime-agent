@@ -1,13 +1,13 @@
 # Settings
 
-Prime Agent uses JSON settings files with project settings overriding global settings.
+Prime Agent accepts JSON or YAML settings files, with project settings overriding global settings.
 
 | Location | Scope |
 |----------|-------|
-| `~/.prime/agent/settings.json` | Global (all projects) |
-| `.prime/agent/settings.json` | Project (current directory) |
+| `~/.prime/agent/settings.json`, `~/.prime/agent/settings.yml`, or `~/.prime/agent/settings.yaml` | Global (all projects) |
+| `.prime/agent/settings.json`, `.prime/agent/settings.yml`, or `.prime/agent/settings.yaml` | Project (current directory) |
 
-Edit directly or use `/settings` for common options.
+Use exactly one settings file per scope. Prime Agent preserves the selected format when it saves changes and creates `settings.json` when no file exists. Edit the file directly or use `/settings` for common options.
 
 ## All Settings
 
@@ -33,6 +33,25 @@ Edit directly or use `/settings` for common options.
   }
 }
 ```
+
+### Recursive child routes
+
+`modelRoles` names reusable RLM model routes. A role accepts one selector or an ordered selector list. Prime Agent selects the first authenticated native candidate. An omitted `model` argument uses `task` when that role exists; otherwise it inherits the parent model. Exact `provider/model` selectors keep their existing behavior.
+
+```yaml
+modelRoles:
+  task: openai-codex/gpt-5.6-luna:high
+  copilot-grok: github-copilot/grok-4.5:high
+  luna: openai-codex/gpt-5.6-luna:high
+  deepseek: openrouter/deepseek/deepseek-v4-flash-0731:max
+  claude: claude-code/claude-opus-4-7:high
+claudeCode:
+  executable: /absolute/path/to/claude
+```
+
+Append `:<effort>` to a model string to bind the role's effort, as in `github-copilot/grok-4.5:high`. Call `await rlm("task", model="@luna")` or use the result's `concrete_selector` from `await rlm.find_models("luna")`. Project roles merge over global roles by name.
+
+`claude-code/<model>` selects an external Claude Agent SDK child rather than a `pi-ai` provider. The configured executable supplies Claude authentication. Prime Agent denies Claude's native `Agent`, `Task`, and `SendMessage` tools and provides an in-process family adapter for listing, correlated send, retained inbox, and wait operations. Claude queries and follow-up input remain live only while the parent worker lives; daemon passivation or replacement closes them, and cold revival does not reconstruct them.
 
 ### UI & Display
 
@@ -202,7 +221,7 @@ Normally the package manager's global modules location is queried using `root -g
 |---------|------|---------|-------------|
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
 
-`idleEvictionMinutes` is a global daemon policy and is read only from `~/.prime/agent/settings.json`. Set it to a positive number to configure the idle threshold.
+`idleEvictionMinutes` is a global daemon policy and is read only from the global settings file. Set it to a positive number to configure the idle threshold.
 
 ### Sessions
 
@@ -214,7 +233,7 @@ Normally the package manager's global modules location is queried using `root -g
 { "sessionDir": ".prime/agent/sessions" }
 ```
 
-When multiple sources specify a session directory, precedence is `--session-dir`, `PRIME_AGENT_SESSION_DIR`, the legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in `settings.json`.
+When multiple sources specify a session directory, precedence is `--session-dir`, `PRIME_AGENT_SESSION_DIR`, the legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in the settings file.
 
 ### Model Cycling
 
@@ -238,7 +257,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 These settings define where to load extensions, skills, prompts, and themes from.
 
-Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Paths in `.prime/agent/settings.json` resolve relative to `.prime/agent`. Absolute paths and `~` are supported.
+Paths in the global settings file resolve relative to `~/.prime/agent`. Paths in the project settings file resolve relative to `.prime/agent`. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -316,7 +335,7 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.prime/agent/settings.json`) override global settings. Nested objects are merged:
+Project settings override global settings. Nested objects are merged; this JSON example has the same meaning in YAML:
 
 ```json
 // ~/.prime/agent/settings.json (global)

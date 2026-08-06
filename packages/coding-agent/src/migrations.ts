@@ -18,6 +18,7 @@ import {
 import { basename, dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir, getSessionsDir } from "./config.js";
 import { migrateKeybindingsConfig } from "./core/keybindings.js";
+import { parseSettingsDocument, resolveSettingsFile, stringifySettingsDocument } from "./settings-files.js";
 import { readFirstLineSync } from "./utils/file-lines.js";
 
 const MIGRATION_GUIDE_URL =
@@ -26,7 +27,7 @@ const EXTENSIONS_DOC_URL =
 	"https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md";
 
 /**
- * Migrate legacy oauth.json and settings.json apiKeys to auth.json.
+ * Migrate legacy oauth.json and settings apiKeys to auth.json.
  *
  * @returns Array of provider names that were migrated
  */
@@ -34,7 +35,6 @@ export function migrateAuthToAuthJson(): string[] {
 	const agentDir = getAgentDir();
 	const authPath = join(agentDir, "auth.json");
 	const oauthPath = join(agentDir, "oauth.json");
-	const settingsPath = join(agentDir, "settings.json");
 
 	// Skip if auth.json already exists
 	if (existsSync(authPath)) return [];
@@ -56,11 +56,12 @@ export function migrateAuthToAuthJson(): string[] {
 		}
 	}
 
-	// Migrate settings.json apiKeys
-	if (existsSync(settingsPath)) {
-		try {
-			const content = readFileSync(settingsPath, "utf-8");
-			const settings = JSON.parse(content);
+	// Migrate legacy apiKeys from the active JSON or YAML settings document.
+	try {
+		const settingsFile = resolveSettingsFile(agentDir);
+		if (settingsFile.exists) {
+			const content = readFileSync(settingsFile.path, "utf-8");
+			const settings = parseSettingsDocument(content);
 			if (settings.apiKeys && typeof settings.apiKeys === "object") {
 				for (const [provider, key] of Object.entries(settings.apiKeys)) {
 					if (!migrated[provider] && typeof key === "string") {
@@ -69,11 +70,11 @@ export function migrateAuthToAuthJson(): string[] {
 					}
 				}
 				delete settings.apiKeys;
-				writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+				writeFileSync(settingsFile.path, stringifySettingsDocument(settings, settingsFile.format));
 			}
-		} catch {
-			// Skip on error
 		}
+	} catch {
+		// Skip on error
 	}
 
 	if (Object.keys(migrated).length > 0) {

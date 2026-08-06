@@ -11,6 +11,7 @@ import { APP_NAME } from "../config.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { isPrivatePrimeInferenceModel } from "./prime-inference-models.js";
+import type { ModelRoleSelector } from "./settings-manager.js";
 
 const log = getLogger("coding-agent.model-resolver");
 
@@ -56,6 +57,85 @@ export interface ScopedModel {
 	model: Model<Api>;
 	/** Thinking level if explicitly specified in pattern (e.g., "model:high"), undefined otherwise */
 	thinkingLevel?: ThinkingLevel;
+}
+
+export const CLAUDE_CODE_RUNTIME_PREFIX = "claude-code/";
+export type RlmRuntimeKind = "native" | "claude-code";
+
+export interface RlmRuntimeCandidate {
+	runtime: RlmRuntimeKind;
+	selector: string;
+	modelReference: string;
+	thinkingLevel?: ThinkingLevel;
+}
+
+function parseOptionalThinkingLevel(
+	value: string,
+	supportedLevels?: readonly ThinkingLevel[],
+): { value: string; thinkingLevel?: ThinkingLevel } {
+	const colon = value.lastIndexOf(":");
+	if (colon <= 0) return { value };
+	const suffix = value.slice(colon + 1);
+	if (!isValidThinkingLevel(suffix) || (supportedLevels && !supportedLevels.includes(suffix))) return { value };
+	return { value: value.slice(0, colon), thinkingLevel: suffix };
+}
+
+/** Parse one configured RLM candidate without consulting the model catalog. */
+export function parseRlmRuntimeCandidate(rawSelector: string): RlmRuntimeCandidate {
+	const selector = rawSelector.trim();
+	if (!selector) throw new Error("RLM model role candidates must be non-empty strings");
+
+	if (selector.startsWith(CLAUDE_CODE_RUNTIME_PREFIX)) {
+		const parsed = parseOptionalThinkingLevel(selector.slice(CLAUDE_CODE_RUNTIME_PREFIX.length).trim(), [
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+		const modelReference = parsed.value.trim();
+		if (!modelReference) throw new Error(`Claude runtime selector "${selector}" names no model`);
+		return {
+			runtime: "claude-code",
+			selector: `${CLAUDE_CODE_RUNTIME_PREFIX}${modelReference}`,
+			modelReference,
+			...(parsed.thinkingLevel ? { thinkingLevel: parsed.thinkingLevel } : {}),
+		};
+	}
+
+	const parsed = parseOptionalThinkingLevel(selector);
+	const slash = parsed.value.indexOf("/");
+	if (slash <= 0 || slash === parsed.value.length - 1) {
+		throw new Error(`RLM model role candidate "${selector}" must be provider-qualified`);
+	}
+	return {
+		runtime: "native",
+		selector: parsed.value,
+		modelReference: parsed.value,
+		...(parsed.thinkingLevel ? { thinkingLevel: parsed.thinkingLevel } : {}),
+	};
+}
+
+/** Resolve and validate the ordered candidates configured for one named RLM role. */
+export function resolveRlmRoleCandidates(
+	role: string,
+	modelRoles: Readonly<Record<string, ModelRoleSelector>>,
+): RlmRuntimeCandidate[] {
+	const value = modelRoles[role];
+	if (value === undefined) throw new Error(`Unknown RLM model role "@${role}"`);
+	const rawCandidates = Array.isArray(value) ? value : [value];
+	if (rawCandidates.length === 0) throw new Error(`RLM model role "@${role}" has no candidates`);
+	const candidates = rawCandidates.map((candidate) => {
+		if (typeof candidate !== "string") {
+			throw new Error(`RLM model role "@${role}" candidates must be strings`);
+		}
+		return parseRlmRuntimeCandidate(candidate);
+	});
+	const runtimes = new Set(candidates.map((candidate) => candidate.runtime));
+	if (runtimes.size > 1) {
+		throw new Error(`RLM model role "@${role}" mixes native and claude-code runtime candidates`);
+	}
+	return candidates;
 }
 
 /**

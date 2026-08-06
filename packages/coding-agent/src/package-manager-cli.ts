@@ -129,7 +129,7 @@ function printPackageCommandHelp(command: PackageCommand): void {
 Install a package and add it to settings.
 
 Options:
-  --local    Install project-locally (${CONFIG_DIR_NAME}/settings.json)
+  --local    Install project-locally (${CONFIG_DIR_NAME}/settings file)
 
 Examples:
   ${APP_NAME} package install npm:@foo/bar
@@ -148,7 +148,7 @@ Examples:
 Remove a package and its source from settings.
 
 Options:
-  --local    Remove from project settings (${CONFIG_DIR_NAME}/settings.json)
+  --local    Remove from project settings (${CONFIG_DIR_NAME}/settings file)
 
 Examples:
   ${APP_NAME} package remove npm:@foo/bar

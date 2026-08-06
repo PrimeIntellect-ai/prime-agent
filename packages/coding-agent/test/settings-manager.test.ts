@@ -479,6 +479,99 @@ describe("SettingsManager", () => {
 			});
 		});
 	});
+	describe("model roles", () => {
+		it("merges project roles over global roles and returns defensive copies", async () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ modelRoles: { luna: "openai-codex/gpt-5.6-luna:high", task: "global/task" } }),
+			);
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ modelRoles: { task: ["project/missing", "project/task:max"] } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getModelRoles()).toEqual({
+				luna: "openai-codex/gpt-5.6-luna:high",
+				task: ["project/missing", "project/task:max"],
+			});
+			const task = manager.getModelRole("task") as string[];
+			task.push("mutated/outside");
+			expect(manager.getModelRole("task")).toEqual(["project/missing", "project/task:max"]);
+
+			manager.setModelRoles({ deepseek: "openrouter/deepseek/deepseek-v4-flash-0731:max" });
+			await manager.flush();
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).modelRoles).toEqual({
+				deepseek: "openrouter/deepseek/deepseek-v4-flash-0731:max",
+			});
+		});
+
+		it("loads interchangeable YAML settings and preserves their format when saving roles", async () => {
+			const globalPath = join(agentDir, "settings.yml");
+			const projectPath = join(projectDir, ".prime", "agent", "settings.yaml");
+			writeFileSync(
+				globalPath,
+				`modelRoles:
+  copilot-grok: github-copilot/grok-4.5:high
+  task: global/task:low
+`,
+			);
+			writeFileSync(
+				projectPath,
+				`modelRoles:
+  task: project/task:max
+`,
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getModelRoles()).toEqual({
+				"copilot-grok": "github-copilot/grok-4.5:high",
+				task: "project/task:max",
+			});
+			manager.setModelRoles({ "copilot-grok": "github-copilot/grok-4.5:high" });
+			await manager.flush();
+
+			const saved = readFileSync(globalPath, "utf8");
+			expect(saved).toContain("modelRoles:");
+			expect(saved).toContain("copilot-grok: github-copilot/grok-4.5:high");
+			expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
+		});
+
+		it("rejects ambiguous JSON and YAML settings files without overwriting either", async () => {
+			const jsonPath = join(agentDir, "settings.json");
+			const yamlPath = join(agentDir, "settings.yml");
+			writeFileSync(jsonPath, JSON.stringify({ theme: "dark" }));
+			writeFileSync(yamlPath, "theme: light\n");
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.drainErrors("global")[0]?.error.message).toContain("Multiple settings files");
+			manager.setDefaultThinkingLevel("high");
+			await manager.flush();
+			expect(readFileSync(jsonPath, "utf8")).toBe(JSON.stringify({ theme: "dark" }));
+			expect(readFileSync(yamlPath, "utf8")).toBe("theme: light\n");
+		});
+	});
+
+	describe("Claude Code runtime", () => {
+		it("merges the non-secret executable setting with project precedence", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ claudeCode: { executable: "/global/claude" } }),
+			);
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ claudeCode: { executable: "/project/claude" } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getClaudeCodeExecutable()).toBe("/project/claude");
+		});
+
+		it("treats an empty executable as unavailable", () => {
+			const manager = SettingsManager.inMemory({ claudeCode: { executable: "  " } });
+			expect(manager.getClaudeCodeExecutable()).toBeUndefined();
+		});
+	});
+
 	describe("idle worker eviction", () => {
 		it("defaults to 90 minutes and treats none as off", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

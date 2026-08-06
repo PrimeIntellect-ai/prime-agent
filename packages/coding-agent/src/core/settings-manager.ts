@@ -4,6 +4,12 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import {
+	parseSettingsDocument,
+	resolveSettingsFile,
+	type SettingsFileFormat,
+	stringifySettingsDocument,
+} from "../settings-files.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -72,7 +78,13 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface ClaudeCodeSettings {
+	/** Claude Code executable used by the external RLM runtime. Authentication remains executable-owned. */
+	executable?: string;
+}
+
 export type TransportSetting = Transport;
+export type ModelRoleSelector = string | string[];
 
 /**
  * Package source for npm/git packages.
@@ -134,6 +146,8 @@ export interface Settings {
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 1
+	modelRoles?: Record<string, ModelRoleSelector>;
+	claudeCode?: ClaudeCodeSettings;
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
@@ -213,6 +227,7 @@ export type SettingsScope = "global" | "project";
 
 export interface SettingsStorage {
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
+	getFormat?(scope: SettingsScope): SettingsFileFormat;
 }
 
 export interface SettingsError {
@@ -221,12 +236,20 @@ export interface SettingsError {
 }
 
 export class FileSettingsStorage implements SettingsStorage {
-	private globalSettingsPath: string;
-	private projectSettingsPath: string;
+	private readonly globalSettingsDirectory: string;
+	private readonly projectSettingsDirectory: string;
 
 	constructor(cwd: string, agentDir: string) {
-		this.globalSettingsPath = join(agentDir, "settings.json");
-		this.projectSettingsPath = join(cwd, CONFIG_DIR_NAME, "settings.json");
+		this.globalSettingsDirectory = agentDir;
+		this.projectSettingsDirectory = join(cwd, CONFIG_DIR_NAME);
+	}
+
+	private settingsFile(scope: SettingsScope) {
+		return resolveSettingsFile(scope === "global" ? this.globalSettingsDirectory : this.projectSettingsDirectory);
+	}
+
+	getFormat(scope: SettingsScope): SettingsFileFormat {
+		return this.settingsFile(scope).format;
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -257,16 +280,16 @@ export class FileSettingsStorage implements SettingsStorage {
 	}
 
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
-		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
+		const settingsFile = this.settingsFile(scope);
+		const path = settingsFile.path;
 		const dir = dirname(path);
 
 		let release: (() => void) | undefined;
 		try {
-			const fileExists = existsSync(path);
-			if (fileExists) {
+			if (settingsFile.exists) {
 				release = this.acquireLockSyncWithRetry(path);
 			}
-			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
+			const current = settingsFile.exists ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
 				if (!existsSync(dir)) {
@@ -386,8 +409,7 @@ export class SettingsManager {
 		if (!content) {
 			return {};
 		}
-		const settings = JSON.parse(content);
-		return SettingsManager.migrateSettings(settings);
+		return SettingsManager.migrateSettings(parseSettingsDocument(content));
 	}
 
 	private static tryLoadFromStorage(
@@ -571,9 +593,7 @@ export class SettingsManager {
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
-			const currentFileSettings = current
-				? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>)
-				: {};
+			const currentFileSettings = current ? SettingsManager.migrateSettings(parseSettingsDocument(current)) : {};
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
 				const value = snapshotSettings[field];
@@ -591,7 +611,10 @@ export class SettingsManager {
 				}
 			}
 
-			return JSON.stringify(mergedSettings, null, 2);
+			return stringifySettingsDocument(
+				mergedSettings as Record<string, unknown>,
+				this.storage.getFormat?.(scope) ?? "json",
+			);
 		});
 	}
 
@@ -770,6 +793,25 @@ export class SettingsManager {
 
 	getRlmMaxDepth(): number | undefined {
 		return this.globalSettings.rlmMaxDepth;
+	}
+
+	getModelRoles(): Record<string, ModelRoleSelector> {
+		return structuredClone(this.settings.modelRoles ?? {});
+	}
+
+	getModelRole(role: string): ModelRoleSelector | undefined {
+		return structuredClone(this.settings.modelRoles?.[role]);
+	}
+
+	getClaudeCodeExecutable(): string | undefined {
+		const executable = this.settings.claudeCode?.executable?.trim();
+		return executable || undefined;
+	}
+
+	setModelRoles(modelRoles: Record<string, ModelRoleSelector>): void {
+		this.globalSettings.modelRoles = structuredClone(modelRoles);
+		this.markModified("modelRoles");
+		this.save();
 	}
 
 	setRlmMaxDepth(maxDepth: number): void {

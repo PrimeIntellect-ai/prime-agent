@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
-import { migrateLegacySessionDirsToSessionRoot, migrateSessionsFromAgentRoot } from "../src/migrations.js";
+import {
+	migrateAuthToAuthJson,
+	migrateLegacySessionDirsToSessionRoot,
+	migrateSessionsFromAgentRoot,
+} from "../src/migrations.js";
+import { parseSettingsDocument } from "../src/settings-files.js";
 
 describe("session migrations", () => {
 	const tempDirs: string[] = [];
@@ -18,6 +23,30 @@ describe("session migrations", () => {
 		for (const dir of tempDirs.splice(0)) {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("migrates legacy API keys from YAML without changing the settings format", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-migrations-"));
+		tempDirs.push(agentDir);
+		process.env[ENV_AGENT_DIR] = agentDir;
+		const settingsPath = join(agentDir, "settings.yml");
+		writeFileSync(
+			settingsPath,
+			`apiKeys:
+  fake-provider: fake-key
+modelRoles:
+  copilot-grok: github-copilot/grok-4.5:high
+`,
+		);
+
+		expect(migrateAuthToAuthJson()).toEqual(["fake-provider"]);
+		expect(JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"))).toEqual({
+			"fake-provider": { type: "api_key", key: "fake-key" },
+		});
+		expect(parseSettingsDocument(readFileSync(settingsPath, "utf8"))).toEqual({
+			modelRoles: { "copilot-grok": "github-copilot/grok-4.5:high" },
+		});
+		expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
 	});
 
 	it("moves legacy per-cwd session files into the flat session root", () => {
