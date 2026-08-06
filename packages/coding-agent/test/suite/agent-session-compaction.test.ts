@@ -417,6 +417,34 @@ describe("AgentSession compaction characterization", () => {
 		expect(result.summary).toContain("local summary");
 	});
 
+	it("retains the native failure and skips an oversized local fallback request", async () => {
+		const nativeCompact = vi.fn(async () => {
+			throw new Error("native endpoint unavailable");
+		});
+		const harness = await createHarness({
+			models: [{ id: "small-context", contextWindow: 4096, maxTokens: 512 }],
+			settings: { compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 512 } },
+			nativeCompact,
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("one response"),
+			fauxAssistantMessage("two response"),
+			fauxAssistantMessage("local summary must remain unused"),
+		]);
+		await harness.session.prompt("界".repeat(5000));
+		await harness.session.prompt("two");
+		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
+
+		await expect(harness.session.compact()).rejects.toThrow(
+			/Provider-native compaction failed: native endpoint unavailable.*Local fallback failed: Local compaction requires approximately \d+ tokens, exceeding the 4096-token context window/,
+		);
+
+		expect(nativeCompact).toHaveBeenCalledOnce();
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+	});
+
 	it("uses local summarization when native compaction is disabled", async () => {
 		const nativeCompact = vi.fn(async () => ({
 			provider: "faux",

@@ -512,6 +512,32 @@ export function buildSummarizationPrompt(customInstructions?: string, previousSu
 	return `${basePrompt}\n\n${KERNEL_PERSIST_SUMMARY_NOTE}`;
 }
 
+function buildSummaryRequestText(
+	currentMessages: AgentMessage[],
+	customInstructions?: string,
+	previousSummary?: string,
+): string {
+	const conversationText = serializeConversation(convertToLlm(currentMessages));
+	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	if (previousSummary) {
+		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+	}
+	return promptText + buildSummarizationPrompt(customInstructions, previousSummary);
+}
+
+function estimateTextTokens(text: string): number {
+	let asciiCharacters = 0;
+	for (let index = 0; index < text.length; index++) {
+		if (text.charCodeAt(index) <= 0x7f) asciiCharacters++;
+	}
+	const nonAsciiBytes = Buffer.byteLength(text, "utf8") - asciiCharacters;
+	return Math.ceil(asciiCharacters / 4) + nonAsciiBytes;
+}
+
+function estimateSummaryRequestTokens(promptText: string, maxOutputTokens: number): number {
+	return estimateTextTokens(SUMMARIZATION_SYSTEM_PROMPT) + estimateTextTokens(promptText) + maxOutputTokens;
+}
+
 /**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
@@ -529,15 +555,7 @@ export async function generateSummary(
 ): Promise<string> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
-	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
-	// Serialize before the LLM call so it summarizes rather than continues this conversation.
-	const llmMessages = convertToLlm(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
-	}
-	promptText += basePrompt;
+	const promptText = buildSummaryRequestText(currentMessages, customInstructions, previousSummary);
 
 	const summarizationMessages = [
 		{
@@ -569,6 +587,25 @@ export async function generateSummary(
 
 	return textContent;
 }
+
+// ============================================================================
+// Compaction Preparation (for extensions)
+// ============================================================================
+
+export class CompactionContextLimitError extends Error {
+	readonly estimatedTokens: number;
+	readonly contextWindow: number;
+
+	constructor(estimatedTokens: number, contextWindow: number, model: Model<any>) {
+		super(
+			`Local compaction requires approximately ${estimatedTokens} tokens, exceeding the ${contextWindow}-token context window for ${model.provider}/${model.id}`,
+		);
+		this.name = "CompactionContextLimitError";
+		this.estimatedTokens = estimatedTokens;
+		this.contextWindow = contextWindow;
+	}
+}
+
 export interface CompactionPreparation {
 	/** UUID of first entry to keep */
 	firstKeptEntryId: string;
@@ -683,6 +720,53 @@ Summarize the prefix to provide context for the retained suffix:
 
 Be concise. Focus on what's needed to understand the kept suffix.`;
 
+function buildTurnPrefixRequestText(messages: AgentMessage[]): string {
+	const conversationText = serializeConversation(convertToLlm(messages));
+	return `<conversation>
+${conversationText}
+</conversation>
+
+${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+}
+
+function assertLocalCompactionFits(
+	preparation: CompactionPreparation,
+	model: Model<any>,
+	customInstructions?: string,
+): void {
+	if (model.contextWindow <= 0) return;
+
+	const historyMaxTokens = Math.floor(0.8 * preparation.settings.reserveTokens);
+	const turnPrefixMaxTokens = Math.floor(0.5 * preparation.settings.reserveTokens);
+	let largestRequestTokens = 0;
+	if (preparation.isSplitTurn && preparation.turnPrefixMessages.length > 0) {
+		if (preparation.messagesToSummarize.length > 0) {
+			const historyPrompt = buildSummaryRequestText(
+				preparation.messagesToSummarize,
+				customInstructions,
+				preparation.previousSummary,
+			);
+			largestRequestTokens = estimateSummaryRequestTokens(historyPrompt, historyMaxTokens);
+		}
+		const turnPrefixPrompt = buildTurnPrefixRequestText(preparation.turnPrefixMessages);
+		largestRequestTokens = Math.max(
+			largestRequestTokens,
+			estimateSummaryRequestTokens(turnPrefixPrompt, turnPrefixMaxTokens),
+		);
+	} else {
+		const historyPrompt = buildSummaryRequestText(
+			preparation.messagesToSummarize,
+			customInstructions,
+			preparation.previousSummary,
+		);
+		largestRequestTokens = estimateSummaryRequestTokens(historyPrompt, historyMaxTokens);
+	}
+
+	if (largestRequestTokens > model.contextWindow) {
+		throw new CompactionContextLimitError(largestRequestTokens, model.contextWindow, model);
+	}
+}
+
 export const PROVIDER_NATIVE_COMPACTION_SUMMARY =
 	"Provider-native compaction preserved opaque history for this session.";
 
@@ -782,6 +866,10 @@ export async function compact(
 		fileOps,
 		settings,
 	} = preparation;
+
+	assertLocalCompactionFits(preparation, model, customInstructions);
+
+	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
 
 	if (isSplitTurn && turnPrefixMessages.length > 0) {
@@ -851,9 +939,7 @@ async function generateTurnPrefixSummary(
 	thinkingLevel?: ThinkingLevel,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = buildTurnPrefixRequestText(messages);
 	const summarizationMessages = [
 		{
 			role: "user" as const,

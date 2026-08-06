@@ -68,6 +68,8 @@
 - Changed explicit RLM model-role effort suffixes to pass their exact value to the provider even when model capability metadata marks that effort unsupported.
 - Changed file-backed settings to hot-reload global and project JSON or YAML edits, including `modelRoles`, while retaining runtime overrides.
 - Changed Ctrl+C to clear non-empty editor text before applying its existing interrupt and exit behavior to an empty editor.
+- Fixed large fragmented session-worker frames repeatedly copying their accumulated bytes and starving daemon commands such as session-tree requests.
+- Fixed native compaction failures launching an oversized local fallback request; Prime now checks the rebuilt portable request against the model context window and reports both failure causes.
 
 ## [0.7.0] - 2026-08-05
 

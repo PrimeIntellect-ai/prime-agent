@@ -51,7 +51,10 @@ export function encodePrivateFrame<THeader extends object>(
 }
 
 export class PrivateFrameDecoder<THeader extends object> {
-	private buffered: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+	private chunks: Buffer<ArrayBufferLike>[] = [];
+	private firstChunkIndex = 0;
+	private firstChunkOffset = 0;
+	private bufferedLength = 0;
 
 	constructor(
 		private readonly validateHeader: PrivateFrameHeaderValidator<THeader>,
@@ -59,20 +62,20 @@ export class PrivateFrameDecoder<THeader extends object> {
 	) {}
 
 	get bufferedBytes(): number {
-		return this.buffered.length;
+		return this.bufferedLength;
 	}
 
 	push(chunk: Uint8Array): PrivateFrame<THeader>[] {
 		if (chunk.length > 0) {
-			const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-			this.buffered = this.buffered.length === 0 ? buffer : Buffer.concat([this.buffered, buffer]);
+			this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+			this.bufferedLength += chunk.length;
 		}
 
 		const frames: PrivateFrame<THeader>[] = [];
-		let offset = 0;
-		while (this.buffered.length - offset >= FRAME_PREFIX_BYTES) {
-			const headerLength = this.buffered.readUInt32BE(offset);
-			const payloadLength = this.buffered.readUInt32BE(offset + 4);
+		while (this.bufferedLength >= FRAME_PREFIX_BYTES) {
+			const prefix = this.peekBytes(FRAME_PREFIX_BYTES);
+			const headerLength = prefix.readUInt32BE(0);
+			const payloadLength = prefix.readUInt32BE(4);
 			assertFrameLength("header length", headerLength, this.limits.maxHeaderBytes);
 			assertFrameLength("payload length", payloadLength, this.limits.maxPayloadBytes);
 			if (headerLength === 0) {
@@ -80,15 +83,14 @@ export class PrivateFrameDecoder<THeader extends object> {
 			}
 
 			const frameLength = FRAME_PREFIX_BYTES + headerLength + payloadLength;
-			if (this.buffered.length - offset < frameLength) {
+			if (this.bufferedLength < frameLength) {
 				break;
 			}
 
-			const headerStart = offset + FRAME_PREFIX_BYTES;
-			const payloadStart = headerStart + headerLength;
+			const headerBuffer = this.peekBytes(FRAME_PREFIX_BYTES + headerLength).subarray(FRAME_PREFIX_BYTES);
 			let decoded: unknown;
 			try {
-				decoded = JSON.parse(this.buffered.toString("utf8", headerStart, payloadStart));
+				decoded = JSON.parse(headerBuffer.toString("utf8"));
 			} catch (error) {
 				throw new Error(
 					`Invalid private frame header JSON: ${error instanceof Error ? error.message : String(error)}`,
@@ -98,22 +100,80 @@ export class PrivateFrameDecoder<THeader extends object> {
 				throw new Error("Invalid private frame routing header");
 			}
 
-			frames.push({
-				header: decoded,
-				payload: Buffer.from(this.buffered.subarray(payloadStart, payloadStart + payloadLength)),
-			});
-			offset += frameLength;
-		}
-
-		if (offset > 0) {
-			this.buffered = Buffer.from(this.buffered.subarray(offset));
+			this.consumeBytes(FRAME_PREFIX_BYTES + headerLength);
+			frames.push({ header: decoded, payload: this.readBytes(payloadLength) });
 		}
 		return frames;
 	}
 
 	finish(): void {
-		if (this.buffered.length !== 0) {
-			throw new Error(`Private frame channel ended with ${this.buffered.length} incomplete bytes`);
+		if (this.bufferedLength !== 0) {
+			throw new Error(`Private frame channel ended with ${this.bufferedLength} incomplete bytes`);
+		}
+	}
+
+	private peekBytes(length: number): Buffer<ArrayBufferLike> {
+		const first = this.chunks[this.firstChunkIndex];
+		if (first && first.length - this.firstChunkOffset >= length) {
+			return first.subarray(this.firstChunkOffset, this.firstChunkOffset + length);
+		}
+
+		const result = Buffer.allocUnsafe(length);
+		this.copyBytes(result, length);
+		return result;
+	}
+
+	private readBytes(length: number): Buffer<ArrayBufferLike> {
+		const result = Buffer.allocUnsafe(length);
+		this.copyBytes(result, length);
+		this.consumeBytes(length);
+		return result;
+	}
+
+	private copyBytes(target: Buffer<ArrayBufferLike>, length: number): void {
+		let chunkIndex = this.firstChunkIndex;
+		let chunkOffset = this.firstChunkOffset;
+		let targetOffset = 0;
+		while (targetOffset < length) {
+			const chunk = this.chunks[chunkIndex];
+			if (!chunk) {
+				throw new Error("Private frame decoder buffer underflow");
+			}
+			const copyLength = Math.min(length - targetOffset, chunk.length - chunkOffset);
+			chunk.copy(target, targetOffset, chunkOffset, chunkOffset + copyLength);
+			targetOffset += copyLength;
+			chunkOffset += copyLength;
+			if (chunkOffset === chunk.length) {
+				chunkIndex++;
+				chunkOffset = 0;
+			}
+		}
+	}
+
+	private consumeBytes(length: number): void {
+		let remaining = length;
+		while (remaining > 0) {
+			const chunk = this.chunks[this.firstChunkIndex];
+			if (!chunk) {
+				throw new Error("Private frame decoder buffer underflow");
+			}
+			const consumed = Math.min(remaining, chunk.length - this.firstChunkOffset);
+			remaining -= consumed;
+			this.firstChunkOffset += consumed;
+			if (this.firstChunkOffset === chunk.length) {
+				this.firstChunkIndex++;
+				this.firstChunkOffset = 0;
+			}
+		}
+
+		this.bufferedLength -= length;
+		if (this.bufferedLength === 0) {
+			this.chunks = [];
+			this.firstChunkIndex = 0;
+			this.firstChunkOffset = 0;
+		} else if (this.firstChunkIndex >= 1024) {
+			this.chunks = this.chunks.slice(this.firstChunkIndex);
+			this.firstChunkIndex = 0;
 		}
 	}
 }
