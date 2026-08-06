@@ -33,6 +33,14 @@ export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_r
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
+export const MANUAL_CONTINUE_CUSTOM_TYPE = "manual_continue";
+export const MANUAL_CONTINUE_PROMPT = `<system-notice>
+Continue.
+
+- Resume the most recent intent and carry unfinished work to completion.
+- If interrupted mid-step, continue from that point.
+- Do not pause to summarize progress, reconfirm the plan, or ask whether to proceed.
+</system-notice>`;
 
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
@@ -277,6 +285,16 @@ export function createCustomMessage(
 	};
 }
 
+export function createManualContinueMessage(timestamp = Date.now()): CustomMessage {
+	return {
+		role: "custom",
+		customType: MANUAL_CONTINUE_CUSTOM_TYPE,
+		content: MANUAL_CONTINUE_PROMPT,
+		display: false,
+		timestamp,
+	};
+}
+
 export function createSessionSlashCommandMessage(
 	command: SessionSlashCommand,
 	details: Omit<SessionSlashCommandDetails, "command"> = {},
@@ -442,6 +460,13 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "custom": {
+					if (m.customType === MANUAL_CONTINUE_CUSTOM_TYPE) {
+						return {
+							role: "user",
+							content: [{ type: "text", text: MANUAL_CONTINUE_PROMPT }],
+							timestamp: m.timestamp,
+						};
+					}
 					if (
 						m.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE ||
 						m.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE ||

@@ -4989,7 +4989,8 @@ export class InteractiveMode {
 				this.clearSideQuestion({ abort: true });
 				this.flushPendingBashComponents();
 				const images = this.collectImagesFor(text);
-				this.editor.addToHistory?.(text);
+				const manualContinue = text === "." && (images?.length ?? 0) === 0;
+				if (!manualContinue) this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				const promptStashAfterClear = this.promptStash;
 				submissionOutcome = (await this.admitPendingStartupPrompts?.()) ?? "admitted";

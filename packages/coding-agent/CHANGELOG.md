@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Changed a lone `.` submission to resume the prior intent through a hidden host continuation without adding a visible user message.
 
 ## [0.7.2] - 2026-08-11
 

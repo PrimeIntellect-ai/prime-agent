@@ -179,6 +179,7 @@ import {
 	type CustomMessage,
 	createCompactionOutcomeMessage,
 	createHeartbeatPromptMessage,
+	createManualContinueMessage,
 	createRlmChildFailureMessage,
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
@@ -187,6 +188,7 @@ import {
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
+	MANUAL_CONTINUE_PROMPT,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
@@ -4451,12 +4453,37 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
-		return this._prompt(text, options);
+		const normalized = this._normalizeManualContinuation(text, options);
+		return this._prompt(normalized.text, normalized.options);
 	}
 
 	/** Resolve once the session has accepted ownership, before queued or active execution completes. */
 	async promptUntilAccepted(text: string, options?: PromptOptions): Promise<void> {
-		return this._prompt(text, { ...options, returnAfterAccepted: true });
+		const normalized = this._normalizeManualContinuation(text, options);
+		return this._prompt(normalized.text, { ...normalized.options, returnAfterAccepted: true });
+	}
+
+	private _normalizeManualContinuation(
+		text: string,
+		options?: PromptOptions,
+	): { text: string; options?: PromptOptions } {
+		if (
+			text.trim() !== "." ||
+			options?.internalPrompt ||
+			options?.customMessage ||
+			(options?.images?.length ?? 0) > 0 ||
+			(options?.content?.length ?? 0) > 0
+		) {
+			return { text, options };
+		}
+		return {
+			text: MANUAL_CONTINUE_PROMPT,
+			options: {
+				...options,
+				customMessage: createManualContinueMessage(),
+				internalPrompt: true,
+			},
+		};
 	}
 
 	async promptAndWait(text: string, options?: PromptOptions): Promise<void> {
