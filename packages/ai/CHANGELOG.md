@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added an OpenRouter OAuth provider so OpenRouter can be authenticated with a browser sign-in instead of an API key ([#775](https://github.com/PrimeIntellect-ai/prime-agent/pull/775) by [@andrew-scott-fischer](https://github.com/andrew-scott-fischer)).
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05

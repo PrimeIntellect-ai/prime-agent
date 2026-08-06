@@ -5,6 +5,7 @@
  * for OAuth-based providers:
  * - Anthropic (Claude Pro/Max)
  * - GitHub Copilot
+ * - OpenRouter
  */
 
 // Anthropic
@@ -19,6 +20,8 @@ export {
 } from "./github-copilot.js";
 // OpenAI Codex (ChatGPT OAuth)
 export { loginOpenAICodex, openaiCodexOAuthProvider, refreshOpenAICodexToken } from "./openai-codex.js";
+// OpenRouter
+export { loginOpenRouter, openrouterOAuthProvider, refreshOpenRouterToken } from "./openrouter.js";
 
 export * from "./types.js";
 
@@ -29,12 +32,14 @@ export * from "./types.js";
 import { anthropicOAuthProvider } from "./anthropic.js";
 import { githubCopilotOAuthProvider } from "./github-copilot.js";
 import { openaiCodexOAuthProvider } from "./openai-codex.js";
+import { openrouterOAuthProvider } from "./openrouter.js";
 import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface } from "./types.js";
 
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	anthropicOAuthProvider,
 	githubCopilotOAuthProvider,
 	openaiCodexOAuthProvider,
+	openrouterOAuthProvider,
 ];
 
 const oauthProviderRegistry = new Map<string, OAuthProviderInterface>(

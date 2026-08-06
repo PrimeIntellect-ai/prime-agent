@@ -11,6 +11,7 @@
 - Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade prime-agent` ([#844](https://github.com/PrimeIntellect-ai/prime-agent/issues/844))
 - Fixed the agents view collapsing expanded subagent lists when returning from an opened agent ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
 - Kept the subagent summary row visible and selectable while its list is expanded in the agents view, so pressing enter on it collapses the list again ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
+- Added OpenRouter to `/login` as a subscription provider, alongside the existing API-key entry ([#775](https://github.com/PrimeIntellect-ai/prime-agent/pull/775) by [@andrew-scott-fischer](https://github.com/andrew-scott-fischer)).
 
 ## [0.7.1] - 2026-08-07
 

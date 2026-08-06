@@ -18,6 +18,7 @@ Use `/login` in interactive mode, then select a provider:
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
+- OpenRouter
 
 Use `/logout` to clear credentials. Tokens are stored in `~/.prime/agent/auth.json` and auto-refresh when expired.
 
@@ -34,6 +35,12 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
 - If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
+
+### OpenRouter
+
+- `/login` opens a browser flow where you configure the key OpenRouter issues
+- If credentials stop working, run `/login` again
+- `OPENROUTER_API_KEY` still works and appears as a separate "OpenRouter" entry in `/login`; `auth.json` holds one credential per provider, so an OAuth login replaces a stored API key
 
 ## API Keys
 
