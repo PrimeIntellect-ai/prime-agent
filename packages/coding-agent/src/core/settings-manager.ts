@@ -1,16 +1,19 @@
 import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import {
+	isSettingsFileName,
 	parseSettingsDocument,
 	resolveSettingsFile,
 	type SettingsFileFormat,
 	stringifySettingsDocument,
 } from "../settings-files.js";
+import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../utils/fs-watch.js";
 
+const SETTINGS_RELOAD_DEBOUNCE_MS = 100;
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
 
@@ -229,6 +232,7 @@ export type SettingsScope = "global" | "project";
 export interface SettingsStorage {
 	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
 	getFormat?(scope: SettingsScope): SettingsFileFormat;
+	watch?(onChange: () => void): () => void;
 }
 
 export interface SettingsError {
@@ -251,6 +255,51 @@ export class FileSettingsStorage implements SettingsStorage {
 
 	getFormat(scope: SettingsScope): SettingsFileFormat {
 		return this.settingsFile(scope).format;
+	}
+
+	watch(onChange: () => void): () => void {
+		const directories = [...new Set([this.globalSettingsDirectory, this.projectSettingsDirectory])];
+		const stops = directories.map((directory) => {
+			let watcher: FSWatcher | null = null;
+			let retryTimer: NodeJS.Timeout | undefined;
+			let stopped = false;
+
+			const start = () => {
+				if (stopped) return;
+				watcher = watchWithErrorHandler(
+					directory,
+					(_eventType, filename) => {
+						if (filename === null || isSettingsFileName(filename)) onChange();
+					},
+					() => {
+						closeWatcher(watcher);
+						watcher = null;
+						if (!stopped && retryTimer === undefined) {
+							retryTimer = setTimeout(() => {
+								retryTimer = undefined;
+								start();
+							}, FS_WATCH_RETRY_DELAY_MS);
+							retryTimer.unref();
+						}
+					},
+				);
+				if (watcher) {
+					watcher.unref();
+					onChange();
+				}
+			};
+
+			start();
+			return () => {
+				stopped = true;
+				if (retryTimer) clearTimeout(retryTimer);
+				closeWatcher(watcher);
+			};
+		});
+
+		return () => {
+			for (const stop of stops) stop();
+		};
 	}
 
 	private acquireLockSyncWithRetry(path: string): () => void {
@@ -336,8 +385,10 @@ export class SettingsManager {
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
-	private settings: Settings;
+	private settings: Settings = {};
 	private runtimeOverrides: Settings = {};
+	private stopWatching: (() => void) | undefined;
+	private reloadTimer: NodeJS.Timeout | undefined;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
@@ -361,7 +412,33 @@ export class SettingsManager {
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.refreshMergedSettings();
+		this.stopWatching = this.storage.watch?.(() => this.scheduleReload());
+	}
+
+	private scheduleReload(): void {
+		if (this.reloadTimer) clearTimeout(this.reloadTimer);
+		this.reloadTimer = setTimeout(() => {
+			this.reloadTimer = undefined;
+			void this.reload();
+		}, SETTINGS_RELOAD_DEBOUNCE_MS);
+		this.reloadTimer.unref();
+	}
+
+	private refreshMergedSettings(): void {
+		this.settings = deepMergeSettings(
+			deepMergeSettings(this.globalSettings, this.projectSettings),
+			this.runtimeOverrides,
+		);
+	}
+
+	dispose(): void {
+		if (this.reloadTimer) {
+			clearTimeout(this.reloadTimer);
+			this.reloadTimer = undefined;
+		}
+		this.stopWatching?.();
+		this.stopWatching = undefined;
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -521,13 +598,13 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.refreshMergedSettings();
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
 		this.runtimeOverrides = deepMergeSettings(this.runtimeOverrides, overrides);
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.refreshMergedSettings();
 	}
 
 	/** Mark a global field as modified during this session */
@@ -620,7 +697,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.refreshMergedSettings();
 
 		if (this.globalSettingsLoadError) {
 			this.recordError(
@@ -643,7 +720,7 @@ export class SettingsManager {
 
 	private saveProjectSettings(settings: Settings): void {
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.refreshMergedSettings();
 
 		if (this.projectSettingsLoadError) {
 			this.recordError(

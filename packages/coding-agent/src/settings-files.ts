@@ -16,6 +16,10 @@ const SETTINGS_FILE_NAMES: ReadonlyArray<{ name: string; format: SettingsFileFor
 	{ name: "settings.yaml", format: "yaml" },
 ];
 
+export function isSettingsFileName(filename: string): boolean {
+	return SETTINGS_FILE_NAMES.some((candidate) => candidate.name === filename);
+}
+
 /** Resolve the one settings document in a directory, preserving JSON as the creation default. */
 export function resolveSettingsFile(directory: string): ResolvedSettingsFile {
 	const existing = SETTINGS_FILE_NAMES.map((candidate) => ({

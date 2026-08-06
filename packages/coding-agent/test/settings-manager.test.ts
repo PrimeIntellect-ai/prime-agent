@@ -1,8 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
+
+const SETTINGS_WATCH_READY_MS = 25;
+const SETTINGS_WATCH_SETTLE_MS = 250;
 
 describe("SettingsManager", () => {
 	const testDir = join(process.cwd(), "test-settings-tmp");
@@ -21,6 +24,67 @@ describe("SettingsManager", () => {
 		if (existsSync(testDir)) {
 			rmSync(testDir, { recursive: true });
 		}
+	});
+
+	describe("file watching", () => {
+		it("reloads global model roles and other settings after an external edit", async () => {
+			const settingsPath = join(agentDir, "settings.yml");
+			writeFileSync(
+				settingsPath,
+				`defaultThinkingLevel: low
+modelRoles:
+  task: provider/old:low
+`,
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			await new Promise((resolve) => setTimeout(resolve, SETTINGS_WATCH_READY_MS));
+
+			writeFileSync(
+				settingsPath,
+				`defaultThinkingLevel: high
+modelRoles:
+  task: provider/new:high
+`,
+			);
+
+			await vi.waitFor(() => {
+				expect(manager.getDefaultThinkingLevel()).toBe("high");
+				expect(manager.getModelRole("task")).toBe("provider/new:high");
+			});
+			manager.dispose();
+		});
+
+		it("reloads project settings after an atomic file replacement", async () => {
+			const projectSettingsDir = join(projectDir, ".prime", "agent");
+			const settingsPath = join(projectSettingsDir, "settings.json");
+			const replacementPath = join(projectSettingsDir, "settings.next.json");
+			writeFileSync(settingsPath, JSON.stringify({ modelRoles: { review: "provider/old" } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			await new Promise((resolve) => setTimeout(resolve, SETTINGS_WATCH_READY_MS));
+
+			writeFileSync(replacementPath, JSON.stringify({ modelRoles: { review: "provider/new:medium" } }));
+			renameSync(replacementPath, settingsPath);
+
+			await vi.waitFor(() => expect(manager.getModelRole("review")).toBe("provider/new:medium"));
+			manager.dispose();
+		});
+
+		it("keeps runtime overrides across watched reloads and stops after disposal", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "file-old", theme: "dark" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			await new Promise((resolve) => setTimeout(resolve, SETTINGS_WATCH_READY_MS));
+			manager.applyOverrides({ defaultProvider: "runtime" });
+
+			writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "file-new", theme: "light" }));
+			await vi.waitFor(() => expect(manager.getTheme()).toBe("light"));
+			expect(manager.getDefaultProvider()).toBe("runtime");
+
+			manager.dispose();
+			writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "ignored", theme: "midnight" }));
+			await new Promise((resolve) => setTimeout(resolve, SETTINGS_WATCH_SETTLE_MS));
+			expect(manager.getTheme()).toBe("light");
+		});
 	});
 
 	describe("preserves externally added settings", () => {

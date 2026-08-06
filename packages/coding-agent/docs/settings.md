@@ -7,7 +7,7 @@ Prime Agent accepts JSON or YAML settings files, with project settings overridin
 | `~/.prime/agent/settings.json`, `~/.prime/agent/settings.yml`, or `~/.prime/agent/settings.yaml` | Global (all projects) |
 | `.prime/agent/settings.json`, `.prime/agent/settings.yml`, or `.prime/agent/settings.yaml` | Project (current directory) |
 
-Use exactly one settings file per scope. Prime Agent preserves the selected format when it saves changes and creates `settings.json` when no file exists. Edit the file directly or use `/settings` for common options.
+Use exactly one settings file per scope. Prime Agent preserves the selected format when it saves changes and creates `settings.json` when no file exists. Edit the file directly or use `/settings` for common options. Prime Agent watches both settings directories and reloads changed documents. Settings read for each operation, including `modelRoles`, take effect on the next operation. Settings used to construct runtime resources still require `/reload` or a new session.
 
 ## All Settings
 
