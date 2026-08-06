@@ -42,6 +42,23 @@ describe("private worker framing", () => {
 		]);
 	});
 
+	it("decodes a fragmented multi-megabyte payload without stalling", () => {
+		const payload = Buffer.alloc(16 * 1024 * 1024, 0xab);
+		const encoded = encodePrivateFrame({ type: "snapshot", requestId: "large" }, payload);
+		const decoder = new PrivateFrameDecoder(isTestHeader);
+		const frames = [];
+
+		for (let offset = 0; offset < encoded.length; offset += 1024) {
+			frames.push(...decoder.push(encoded.subarray(offset, offset + 1024)));
+		}
+
+		expect(frames).toHaveLength(1);
+		expect(frames[0]?.header).toEqual({ type: "snapshot", requestId: "large" });
+		expect(frames[0]?.payload.equals(payload)).toBe(true);
+		expect(decoder.bufferedBytes).toBe(0);
+		decoder.finish();
+	});
+
 	it("rejects invalid lengths, JSON, and routing headers", () => {
 		const oversized = Buffer.alloc(8);
 		oversized.writeUInt32BE(1025, 0);
