@@ -77,6 +77,14 @@ prime-agent update [--force]         # Update Prime Agent
 prime-agent shutdown [--force]       # Stop every agent, worker, and background service
 ```
 
+## Nix
+
+Works on macOS and Linux with x86_64 and ARM64. Install [Nix](https://nixos.org/download/), then run:
+
+```bash
+nix run github:PrimeIntellect-ai/prime-agent
+```
+
 ## Built for Long-Running Work
 Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
 
