@@ -122,6 +122,39 @@ describe("native RLM named-role provider fallback", () => {
 		).toEqual(["primary", "fallback"]);
 	});
 
+	it("sends an explicit role effort even when the registered model marks it unsupported", async () => {
+		const provider = "role-explicit-effort";
+		let requestMapping: string | null | undefined;
+		const harness = await createHarness({
+			rlmDepth: 0,
+			rlmMaxDepth: 1,
+			provider,
+			models: [
+				{
+					id: "restricted",
+					reasoning: true,
+					thinkingLevelMap: { high: null, max: "max" },
+				},
+			],
+			settings: { modelRoles: { task: `${provider}/restricted:high` } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			(_context, _options, _state, model) => {
+				requestMapping = model.thinkingLevelMap?.high;
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		const handle = await harness.session.runRlmChild("use explicit effort");
+		const child = await waitForChild(harness, handle.rlm_child_id);
+		await waitForChildStatus(harness, handle.rlm_child_id, "completed");
+
+		expect(child.thinkingLevel).toBe("high");
+		expect(requestMapping).toBe("high");
+		expect(harness.getModel("restricted")?.thinkingLevelMap?.high).toBeNull();
+	});
+
 	it("re-expands provider-native history before a cross-provider fallback request", async () => {
 		const provider = "role-fallback-native-primary";
 		const fallbackProvider = "role-fallback-native-secondary";

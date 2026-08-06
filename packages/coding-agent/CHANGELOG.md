@@ -65,6 +65,7 @@
 
 - Changed agent-message acceptance to persist hidden mailbox state before returning a receipt. Model-visible prompt delivery remains separate from retained mailbox state.
 - Changed a lone `.` interactive submission to resume the prior intent through a hidden host continuation instead of adding a visible user message.
+- Changed explicit RLM model-role effort suffixes to pass their exact value to the provider even when model capability metadata marks that effort unsupported.
 - Changed Ctrl+C to clear non-empty editor text before applying its existing interrupt and exit behavior to an empty editor.
 
 ## [0.7.0] - 2026-08-05

@@ -148,6 +148,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				name: registeredModel.name,
 				api: registeredModel.api,
 				reasoning: registeredModel.reasoning,
+				thinkingLevelMap: registeredModel.thinkingLevelMap,
 				input: registeredModel.input,
 				cost: registeredModel.cost,
 				contextWindow: registeredModel.contextWindow,

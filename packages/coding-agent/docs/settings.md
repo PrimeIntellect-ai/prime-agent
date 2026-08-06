@@ -49,7 +49,7 @@ claudeCode:
   executable: /absolute/path/to/claude
 ```
 
-Append `:<effort>` to a model string to bind the role's effort, as in `github-copilot/grok-4.5:high`. Call `await rlm("task", model="@luna")` or use the result's `concrete_selector` from `await rlm.find_models("luna")`. Project roles merge over global roles by name.
+Append `:<effort>` to a model string to bind the role's exact provider effort, even when the model catalog marks that effort unsupported, as in `github-copilot/grok-4.5:high`. Call `await rlm("task", model="@luna")` or use the result's `concrete_selector` from `await rlm.find_models("luna")`. Project roles merge over global roles by name.
 
 A native child retains its admitted role order for its resident lifetime. A retryable provider failure that occurs before the response produces text, thinking, or tool calls advances immediately to the next available and authenticated candidate. The new candidate uses its configured effort and a fresh same-model retry budget without changing global model or thinking defaults. Prime Agent checks candidate availability and authentication again at the switch. Exact selectors and `claude-code/<model>` children do not use role fallback.
 
