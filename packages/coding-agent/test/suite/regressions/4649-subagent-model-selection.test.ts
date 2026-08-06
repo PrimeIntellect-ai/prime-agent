@@ -486,6 +486,43 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
+	it("uses the active parent model for a newly loaded role when discovery omits it", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "parent-model", reasoning: true }],
+		});
+		try {
+			harness.settingsManager.applyOverrides({ modelRoles: { sol: `${provider}/parent-model:high` } });
+			vi.spyOn(harness.session.modelRegistry, "getExecutableModels").mockResolvedValue([]);
+
+			await expect(harness.session.findRlmModels("sol", 8)).resolves.toEqual({
+				models: [
+					{
+						provider,
+						id: "parent-model",
+						name: `@sol → ${provider}/parent-model`,
+						selector: "@sol",
+						role: "sol",
+						concreteSelector: `${provider}/parent-model`,
+						runtime: "native",
+						available: true,
+						effort: "high",
+					},
+				],
+			});
+
+			harness.setResponses([fauxAssistantMessage("role child answer")]);
+			const result = await harness.session.runRlmChild("use the newly loaded role", { model: "@sol" });
+			expect(result.model).toBe(`${provider}/parent-model`);
+			await vi.waitFor(async () => {
+				const childEntry = (await harness.session.listRlmSubagents()).subagents[0];
+				expect(harness.session.getRlmChildSession(childEntry!.rlm_child_id)?.thinkingLevel).toBe("high");
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("uses a configured task role only when the model argument is omitted", async () => {
 		const harness = await createHarness({
 			provider,

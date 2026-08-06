@@ -10308,6 +10308,7 @@ export class AgentSession {
 
 	async findRlmModels(query: string, limit: number): Promise<RlmFindModelsResult> {
 		const executableModels = await this._authenticatedRlmModels();
+		const parentModel = this.model;
 		const normalizedQuery = query.toLowerCase().replace(/[^a-z0-9]+/g, "");
 		const roleMatches = Object.keys(this.settingsManager.getModelRoles())
 			.sort()
@@ -10325,7 +10326,9 @@ export class AgentSession {
 							: undefined;
 					const executableModel =
 						candidate.runtime === "native"
-							? findExactModelReferenceMatch(candidate.modelReference, executableModels)
+							? ((parentModel
+									? findExactModelReferenceMatch(candidate.modelReference, [parentModel])
+									: undefined) ?? findExactModelReferenceMatch(candidate.modelReference, executableModels))
 							: undefined;
 					const slash = candidate.modelReference.indexOf("/");
 					const provider =
@@ -10388,7 +10391,9 @@ export class AgentSession {
 			}
 			const executableModels = await this._authenticatedRlmModels();
 			for (const [index, candidate] of candidates.entries()) {
-				const registeredModel = findExactModelReferenceMatch(candidate.modelReference, executableModels);
+				const registeredModel =
+					findExactModelReferenceMatch(candidate.modelReference, [parentModel]) ??
+					findExactModelReferenceMatch(candidate.modelReference, executableModels);
 				if (!registeredModel) continue;
 				const auth = await this._modelRegistry.getApiKeyAndHeaders(registeredModel);
 				if (!auth.ok) continue;
