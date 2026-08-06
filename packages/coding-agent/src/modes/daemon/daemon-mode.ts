@@ -2617,6 +2617,7 @@ export class AgentDaemon {
 				sessionOptions: {
 					model: options.model,
 					thinkingLevel: options.thinkingLevel,
+					rlmModelCandidates: options.modelCandidates,
 					serviceTier: options.serviceTier,
 					scopedModels: options.scopedModels,
 					initialActiveToolNames: options.activeToolNames,

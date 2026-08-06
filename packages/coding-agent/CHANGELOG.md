@@ -57,6 +57,7 @@
 - Fixed the bundled `websearch` skill description and missing-key guidance omitting the `/login` → **MCP Connections** step required to configure Serper.
 - Fixed `retry_worker` cancelling its own recovery when a stopped session worker left a saved stop marker behind, leaving the session stuck at "Session worker is not connected".
 - Added ordered RLM model-role configuration, with authenticated candidate selection, `rlm.find_models` discovery, and documented `task`, Luna, and DeepSeek routes. Model strings accept trailing effort suffixes such as `github-copilot/grok-4.5:high`.
+- Added immediate runtime provider fallback for native RLM children admitted through ordered model roles. Each fallback candidate keeps its configured effort and receives a fresh retry budget without changing global defaults.
 - Added provider-native OpenAI Codex compaction with opaque history persistence, same-provider replay, cancellation and timeout bounds, and automatic local-summary fallback. Native compaction is enabled by default.
 - Added interchangeable `settings.yml` and `settings.yaml` loading and format-preserving writes alongside `settings.json`.
 - Added `claude-code/<model>` RLM children through the Claude Agent SDK. The configured executable retains authentication, while Prime Agent retains admission, status, usage, cancellation, deletion, and family coordination.
