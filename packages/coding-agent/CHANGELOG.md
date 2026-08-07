@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Fixed active goals repeatedly starting provider turns while waiting on external input by adding model-callable pause and resume controls.
 
 ## [0.7.2] - 2026-08-11
 
