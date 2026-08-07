@@ -13,6 +13,7 @@ interface FakeOpenAIClientOptions {
 interface CapturedCompletionsPayload {
 	prompt_cache_key?: string;
 	prompt_cache_retention?: "24h" | "in-memory" | null;
+	session_id?: string;
 }
 
 const mockState = vi.hoisted(() => ({
@@ -141,6 +142,26 @@ describe("openai-completions prompt caching", () => {
 
 		expect(payload?.prompt_cache_key).toBeUndefined();
 		expect(payload?.prompt_cache_retention).toBeUndefined();
+	});
+
+	it("groups OpenRouter Chat Completions requests by the Prime session identifier", async () => {
+		const model = createModel({
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
+		const { payload } = await captureRequest({ sessionId: "019fd549-abb7-734a-9c7d-d7a2944fab30" }, model);
+
+		expect(payload?.session_id).toBe("019fd549-abb7-734a-9c7d-d7a2944fab30");
+	});
+
+	it("omits the OpenRouter session identifier for other OpenAI-compatible providers", async () => {
+		const model = createModel({
+			provider: "custom-proxy",
+			baseUrl: "https://proxy.example.com/v1",
+		});
+		const { payload } = await captureRequest({ sessionId: "session-proxy" }, model);
+
+		expect(payload?.session_id).toBeUndefined();
 	});
 
 	it("uses PI_CACHE_RETENTION for direct OpenAI requests", async () => {

@@ -119,6 +119,10 @@ The `key` field supports three formats:
 
 OAuth credentials are also stored here after `/login` and managed automatically.
 
+### OpenRouter
+
+Prime Agent sends its opaque local session UUID as OpenRouter's `session_id` request field. OpenRouter groups related requests in its dashboard and uses the identifier for sticky upstream routing. Prime Agent still sends the complete conversation context on every request.
+
 ### Prime Inference
 
 Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.

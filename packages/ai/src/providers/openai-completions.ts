@@ -515,10 +515,11 @@ function buildParams(
 ) {
 	const messages = convertMessages(model, context, compat);
 
-	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
+	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & { session_id?: string } = {
 		model: model.id,
 		messages,
 		stream: true,
+		session_id: model.provider === "openrouter" ? options?.sessionId : undefined,
 		prompt_cache_key:
 			(model.baseUrl.includes("api.openai.com") && cacheRetention !== "none") ||
 			(cacheRetention === "long" && compat.supportsLongCacheRetention)
