@@ -28,16 +28,44 @@ if child is not None:
 
 - `await agent_observe.list_agents()` returns `current` and `agents`. Each
   agent includes active session id, session id, optional name, runtime kind,
-  cwd, status, streaming state, message count, pending count, and a latest
-  message preview. The list is restricted to self, parent, siblings, and direct
-  children. For direct children, `await rlm.list_subagents()` also exposes
-  parent-owned lifecycle handles.
+  cwd, status, streaming state, message count, pending count, in-flight
+  tool-call progress, and a latest message preview. The list is restricted to
+  self, parent, siblings, and direct children. For direct children,
+  `await rlm.list_subagents()` also exposes parent-owned lifecycle handles.
 - `await agent_observe.get_agent(target)` returns `agent`, where `agent`
   contains one agent summary. `target` is resolved like other live-session
   selectors: active id, session id/name, or unambiguous suffix.
 - `await agent_observe.recent_messages(target, limit=8, max_chars=800)`
   returns up to `limit` recent bounded message previews for the target session.
   `limit` must be 1-50, and `max_chars` must be 80-2000.
+
+## Detecting a wedged child
+
+`status` is `"tool"` whenever a tool call is in flight, which is true of a child
+three seconds into a fast command and a child forty minutes into a blocked one.
+Every summary also carries the time dimension:
+
+- `pendingToolCallCount`: tool calls executing right now.
+- `oldestPendingToolCallStartedAt`: epoch milliseconds at which the
+  longest-running one started. Absent when nothing is in flight.
+- `pendingToolCallElapsedMs`: how long that call has been running, measured when
+  the summary was built.
+
+The `bash` tool's `timeout` is optional with no default, so a call that blocks
+indefinitely is ordinary behaviour rather than an error path. Write the policy
+against elapsed time:
+
+```python
+snapshot = await agent_observe.get_agent(handle.name)
+agent = snapshot["agent"]
+stuck_for = agent.get("pendingToolCallElapsedMs") or 0
+if agent["status"] == "tool" and stuck_for > 10 * 60 * 1000:
+    await agent_message.send(
+        "You have been in one tool call for over ten minutes. Report what it is waiting on.",
+        receiver_role="child",
+        receiver_name=handle.name,
+    )
+```
 
 ## Safety
 

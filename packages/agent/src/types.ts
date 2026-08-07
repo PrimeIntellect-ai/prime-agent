@@ -340,6 +340,12 @@ export interface AgentState {
 	readonly streamingMessage?: AgentMessage;
 	/** Tool call ids currently executing. */
 	readonly pendingToolCalls: ReadonlySet<string>;
+	/**
+	 * Epoch milliseconds at which each in-flight tool call started executing.
+	 * Keyed by the same ids as {@link pendingToolCalls}, so an observer can tell a
+	 * call that started three seconds ago from one that has been blocked for an hour.
+	 */
+	readonly pendingToolCallStartedAt: ReadonlyMap<string, number>;
 	/** Error message from the most recent failed or aborted assistant turn, if any. */
 	readonly errorMessage?: string;
 }

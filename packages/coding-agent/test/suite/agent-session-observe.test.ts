@@ -17,6 +17,7 @@ function createController(): AgentObserveController {
 				messageCount: 1,
 				queuedCount: 0,
 				isSessionActive: false,
+				pendingToolCallCount: 0,
 			},
 			agents: [],
 		})),
@@ -33,6 +34,7 @@ function createController(): AgentObserveController {
 				messageCount: 3,
 				queuedCount: 0,
 				isSessionActive: false,
+				pendingToolCallCount: 0,
 			},
 		})),
 		recentMessages: vi.fn((input) => ({
@@ -48,6 +50,7 @@ function createController(): AgentObserveController {
 				messageCount: 3,
 				queuedCount: 0,
 				isSessionActive: false,
+				pendingToolCallCount: 0,
 			},
 			messages: [{ index: 2, role: "assistant", text: "working", truncated: false }],
 			limit: input.limit ?? 8,

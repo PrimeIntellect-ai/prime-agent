@@ -75,6 +75,7 @@ import {
 	createAgentObserveMessagePreview,
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
+	summarizeInFlightToolCalls,
 } from "../../core/agent-observe.js";
 import { type AgentSession, type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
@@ -2890,6 +2891,8 @@ export class AgentDaemon {
 				messageCount: passive.info.messageCount,
 				queuedCount: 0,
 				isSessionActive: false,
+				// A passive subagent has no live agent, so nothing is in flight.
+				pendingToolCallCount: 0,
 				...(passive.chain.length === 1 && passive.rootParentState
 					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
 					: {}),
@@ -2971,6 +2974,7 @@ export class AgentDaemon {
 			messageCount: summary.messageCount,
 			queuedCount: summary.sessionActions.queuedCount,
 			isSessionActive: summary.isSessionActive,
+			...summarizeInFlightToolCalls(session.state.pendingToolCallStartedAt),
 			...(summary.parentActiveSessionId ? { parentActiveSessionId: summary.parentActiveSessionId } : {}),
 			...(summary.parentSessionId ? { parentSessionId: summary.parentSessionId } : {}),
 			...(summary.rlmChildId ? { rlmChildId: summary.rlmChildId } : {}),

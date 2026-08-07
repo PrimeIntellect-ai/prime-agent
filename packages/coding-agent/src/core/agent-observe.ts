@@ -18,6 +18,16 @@ export interface AgentObserveAgentSummary {
 	messageCount: number;
 	queuedCount: number;
 	isSessionActive: boolean;
+	/**
+	 * Tool calls the observed agent is executing right now. `status: "tool"` says a
+	 * call is in flight but not how many or for how long, so a child three seconds
+	 * into a bash call and a child forty minutes into a blocked one looked identical.
+	 */
+	pendingToolCallCount: number;
+	/** Epoch ms at which the longest-running in-flight tool call started. */
+	oldestPendingToolCallStartedAt?: number;
+	/** How long that call has been running, measured when the summary was built. */
+	pendingToolCallElapsedMs?: number;
 	parentActiveSessionId?: string;
 	parentSessionId?: string;
 	rlmChildId?: string;
@@ -86,6 +96,36 @@ export function createAgentObserveHostHandlers(controller: AgentObserveControlle
 				maxChars: normalizeOptionalInteger(payload.max_chars ?? payload.maxChars, "agent_observe.recent max_chars"),
 			})) as unknown as Record<string, unknown>;
 		},
+	};
+}
+
+/**
+ * Progress fields for an observed agent's in-flight tool calls. Both the start
+ * timestamp and the elapsed duration are reported: elapsed is what a "treat a child
+ * stuck for more than N minutes as wedged" policy reads directly, while the
+ * timestamp lets a caller recompute against its own clock or across two polls.
+ */
+export function summarizeInFlightToolCalls(
+	startedAt: ReadonlyMap<string, number>,
+	now = Date.now(),
+): Pick<
+	AgentObserveAgentSummary,
+	"pendingToolCallCount" | "oldestPendingToolCallStartedAt" | "pendingToolCallElapsedMs"
+> {
+	let oldest: number | undefined;
+	for (const value of startedAt.values()) {
+		if (oldest === undefined || value < oldest) {
+			oldest = value;
+		}
+	}
+	if (oldest === undefined) {
+		return { pendingToolCallCount: startedAt.size };
+	}
+	return {
+		pendingToolCallCount: startedAt.size,
+		oldestPendingToolCallStartedAt: oldest,
+		// A clock that moved backwards must not report a negative duration.
+		pendingToolCallElapsedMs: Math.max(0, now - oldest),
 	};
 }
 
