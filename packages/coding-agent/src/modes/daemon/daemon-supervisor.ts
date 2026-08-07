@@ -2098,11 +2098,15 @@ export class DaemonSupervisor {
 		if (finalization) {
 			await Promise.race([finalization.catch(() => undefined), unrefDelay(STALE_RECLAIM_WAIT_MS)]);
 		}
-		const reclaimed = this.workers.get(worker.descriptor.workerId) !== worker;
-		if (reclaimed) {
-			this.log(`Reclaimed stale registration for stopped worker ${worker.descriptor.workerId}`);
+		if (this.workers.get(worker.descriptor.workerId) === worker) {
+			// The process is confirmed dead, so the registration must never be
+			// reused; slow cleanup fails the resume honestly instead.
+			throw new Error(
+				`Stopped session worker ${worker.descriptor.workerId} is still being cleaned up; retry shortly`,
+			);
 		}
-		return reclaimed;
+		this.log(`Reclaimed stale registration for stopped worker ${worker.descriptor.workerId}`);
+		return true;
 	}
 
 	private async promoteOwnedWorker(client: DaemonSocketClient, worker: ResidentWorker): Promise<void> {

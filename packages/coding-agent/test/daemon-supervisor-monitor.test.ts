@@ -2598,6 +2598,49 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("fails resume honestly when confirmed-dead cleanup outlasts the bounded wait", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-slow-cleanup",
+				pid: 111_117,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			client: undefined,
+			recovery: undefined,
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			// Cleanup hangs past the bounded reclaim wait.
+			stopWorker: vi.fn(() => new Promise<void>(() => {})),
+			persistWorker: vi.fn(),
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			reclaimStaleWorkerRegistration(target: object): Promise<boolean>;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(false);
+		try {
+			const reclaim = supervisor.reclaimStaleWorkerRegistration(worker);
+			const outcome = reclaim.then(
+				() => "reused",
+				() => "failed",
+			);
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			// The dead registration is never handed back to the resume path.
+			await expect(outcome).resolves.toBe("failed");
+		} finally {
+			aliveSpy.mockRestore();
+		}
+	});
+
 	it("shares one stop between concurrent resume reclaims", async () => {
 		const worker = {
 			descriptor: {
