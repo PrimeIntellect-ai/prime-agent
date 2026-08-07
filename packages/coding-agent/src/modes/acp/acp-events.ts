@@ -1,4 +1,6 @@
+import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
+import type { ActProjectionEvent, ActStartEvent } from "../../core/act-events.js";
 import type { AgentConnectionSessionEvent } from "../agent-connection/types.js";
 import type { PrimeAgentIpythonMeta, PrimeAgentSessionMeta } from "./acp-meta.js";
 import { primeAgentMeta } from "./acp-meta.js";
@@ -14,10 +16,7 @@ import { primeAgentMeta } from "./acp-meta.js";
 export type AcpToolKind = "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "other";
 export type AcpToolStatus = "pending" | "in_progress" | "completed" | "failed";
 
-export interface AcpSessionUpdate {
-	sessionUpdate: string;
-	[key: string]: unknown;
-}
+export type AcpSessionUpdate = SessionUpdate;
 
 /** prime-agent's model-facing tool is IPython; bash is the secondary escape hatch. */
 export const IPYTHON_TOOL_NAME = "ipython";
@@ -122,14 +121,278 @@ function ipythonRichOutput(result: unknown): PrimeAgentIpythonMeta | undefined {
 }
 
 /**
- * Correlates streaming bash output with its run.
+ * Correlates stateful synthetic ACP tool calls.
  *
- * `bash_output` carries no `runId`, so the id of the most recent `bash_start` is
- * tracked here. Output would otherwise be attributed to a bare fallback id that
- * no `bash_start` ever used, leaving the chunks unattached to any tool call.
+ * `bash_output` carries no `runId`, so the most recent `bash_start` supplies it.
+ * An Act tool call accumulates standard content because ACP tool-call updates
+ * replace the content collection rather than append to it.
  */
+interface ActiveAcpAct {
+	start: ActStartEvent;
+	lastSequence: number;
+	progressChunks: string[];
+	progressChars: number;
+	contentTruncated: boolean;
+	truncationPublished: boolean;
+	lastAssistantStream?: "thinking" | "text";
+	pendingChars: number;
+	progressUpdates: number;
+}
+
 export interface AcpEventMappingState {
 	activeBashRunId?: string;
+	activeActs?: Map<string, ActiveAcpAct>;
+	closedActIds?: Set<string>;
+}
+
+const ACT_TOOL_CALL_PREFIX = "prime-agent-act";
+export const ACP_ACT_CONTENT_MAX_CHARS = 32_768;
+export const ACP_ACT_PROGRESS_UPDATE_MAX = 32;
+const ACP_ACT_TERMINAL_RESERVE_CHARS = 4352;
+const ACP_ACT_TRUNCATION_MARKER = "\n[Act progress truncated]";
+const ACP_ACT_PROGRESS_MAX_CHARS =
+	ACP_ACT_CONTENT_MAX_CHARS - ACP_ACT_TERMINAL_RESERVE_CHARS - ACP_ACT_TRUNCATION_MARKER.length - 1;
+const ACP_ACT_ASSISTANT_FLUSH_CHARS = 1024;
+const ACP_ACT_PENDING_CHUNK_MAX = 1024;
+
+export function actToolCallId(actId: string): string {
+	return `${ACT_TOOL_CALL_PREFIX}-${actId}`;
+}
+
+function activeActs(state: AcpEventMappingState): Map<string, ActiveAcpAct> {
+	if (!state.activeActs) state.activeActs = new Map();
+	return state.activeActs;
+}
+
+function closedActIds(state: AcpEventMappingState): Set<string> {
+	if (!state.closedActIds) state.closedActIds = new Set();
+	return state.closedActIds;
+}
+
+// Bound duplicate-terminal memory for long-lived ACP sessions.
+const MAX_CLOSED_ACT_IDS = 256;
+
+function rememberClosedAct(closed: Set<string>, actId: string): void {
+	closed.add(actId);
+	if (closed.size <= MAX_CLOSED_ACT_IDS) return;
+	const oldest = closed.values().next().value;
+	if (oldest !== undefined) closed.delete(oldest);
+}
+
+function actTruncatedFields(event: ActProjectionEvent): string[] | undefined {
+	const fields: string[] = [];
+	switch (event.event) {
+		case "start":
+		case "terminal":
+			if (event.promptTruncated) fields.push("prompt");
+			if (event.event === "terminal" && event.errorTruncated) fields.push("error");
+			break;
+		case "assistant_delta":
+			if (event.textTruncated) fields.push("text");
+			break;
+		case "cell_start":
+			if (event.codeTruncated) fields.push("code");
+			break;
+		case "cell_terminal":
+			if (event.stdoutTruncated) fields.push("stdout");
+			if (event.stderrTruncated) fields.push("stderr");
+			if (event.resultTruncated) fields.push("result");
+			if (event.errorTruncated) fields.push("error");
+	}
+	return fields.length > 0 ? fields : undefined;
+}
+
+function actMeta(
+	event: ActProjectionEvent,
+	start: ActStartEvent | undefined,
+	contentTruncated = false,
+): Record<string, unknown> {
+	const truncatedFields = actTruncatedFields(event);
+	return primeAgentMeta({
+		act: {
+			actId: event.actId,
+			outerToolCallId: event.outerToolCallId,
+			sequence: event.sequence,
+			event: event.event,
+			model: event.event === "terminal" ? event.model : start?.model,
+			cancellationCapability:
+				event.event === "terminal" ? event.cancellationCapability : start?.cancellationCapability,
+			...(event.event === "assistant_delta" ? { stream: event.stream } : {}),
+			...(event.event === "cell_start" ? { cellId: event.cellId, cellStatus: "start" as const } : {}),
+			...(event.event === "cell_terminal" ? { cellId: event.cellId, cellStatus: event.status } : {}),
+			...(event.event === "terminal" ? { terminalStatus: event.status, usage: event.usage } : {}),
+			contentTruncated,
+			contentMaxChars: ACP_ACT_CONTENT_MAX_CHARS,
+			...(truncatedFields ? { truncatedFields } : {}),
+		},
+	});
+}
+
+function compactActProgress(active: ActiveAcpAct): string {
+	if (active.progressChunks.length === 1) return active.progressChunks[0] ?? "";
+	const text = active.progressChunks.join("");
+	active.progressChunks = text ? [text] : [];
+	return text;
+}
+
+function appendActProgress(active: ActiveAcpAct, text: string): { changed: boolean; truncatedNow: boolean } {
+	if (text.length === 0 || active.contentTruncated) return { changed: false, truncatedNow: false };
+	const remaining = ACP_ACT_PROGRESS_MAX_CHARS - active.progressChars;
+	const retained = text.slice(0, Math.max(0, remaining));
+	if (retained) active.progressChunks.push(retained);
+	active.progressChars += retained.length;
+	active.pendingChars += retained.length;
+	// Coalesce token-sized deltas even when the progress-update ceiling has
+	// already stopped wire publication.
+	if (active.progressChunks.length >= ACP_ACT_PENDING_CHUNK_MAX) compactActProgress(active);
+	if (retained.length === text.length) return { changed: retained.length > 0, truncatedNow: false };
+	active.contentTruncated = true;
+	return { changed: retained.length > 0, truncatedNow: true };
+}
+
+function appendActAssistant(active: ActiveAcpAct, stream: "thinking" | "text", text: string) {
+	if (text.length === 0) return { changed: false, truncatedNow: false };
+	const label = active.lastAssistantStream === stream ? "" : `\n[${stream}]\n`;
+	active.lastAssistantStream = stream;
+	return appendActProgress(active, `${label}${text}`);
+}
+
+function actProgressContent(active: ActiveAcpAct): string {
+	return `${compactActProgress(active)}${active.contentTruncated ? ACP_ACT_TRUNCATION_MARKER : ""}`;
+}
+
+function actTerminalContent(
+	active: ActiveAcpAct | undefined,
+	event: Extract<ActProjectionEvent, { event: "terminal" }>,
+): { text: string; truncated: boolean } {
+	const terminal = `Act ${event.status}.${event.error ? `\n${event.error}` : ""}`;
+	const terminalTruncated = terminal.length > ACP_ACT_TERMINAL_RESERVE_CHARS;
+	const terminalText = terminal.slice(0, ACP_ACT_TERMINAL_RESERVE_CHARS);
+	const progress = active ? actProgressContent(active) : "";
+	return {
+		text: `${progress}${progress ? "\n" : ""}${terminalText}`,
+		truncated: (active?.contentTruncated ?? false) || terminalTruncated,
+	};
+}
+
+function actStandardContent(text: string) {
+	return [{ type: "content" as const, content: textContent(text) }];
+}
+
+function shouldPublishActProgress(active: ActiveAcpAct, options: { force: boolean; truncatedNow: boolean }): boolean {
+	if (active.progressUpdates >= ACP_ACT_PROGRESS_UPDATE_MAX) return false;
+	const first = active.progressUpdates === 0;
+	const flush = active.pendingChars >= ACP_ACT_ASSISTANT_FLUSH_CHARS;
+	const publishTruncation = options.truncatedNow && !active.truncationPublished;
+	if (!first && !options.force && !flush && !publishTruncation) return false;
+	active.progressUpdates += 1;
+	active.pendingChars = 0;
+	if (active.contentTruncated) active.truncationPublished = true;
+	return true;
+}
+
+function actCellTerminalText(event: Extract<ActProjectionEvent, { event: "cell_terminal" }>): string {
+	const parts = [`Cell ${event.cellId} ${event.status}:`];
+	if (event.stdout) parts.push(`stdout:\n${event.stdout}`);
+	if (event.stderr) parts.push(`stderr:\n${event.stderr}`);
+	if (event.result !== undefined) parts.push(`result:\n${event.result}`);
+	if (event.error !== undefined) parts.push(`error:\n${event.error}`);
+	return parts.join("\n");
+}
+
+function actUpdates(event: ActProjectionEvent, state: AcpEventMappingState): AcpSessionUpdate[] {
+	const acts = activeActs(state);
+	const closed = closedActIds(state);
+	if (closed.has(event.actId)) return [];
+
+	if (event.event === "start") {
+		if (acts.has(event.actId)) return [];
+		const active: ActiveAcpAct = {
+			start: event,
+			lastSequence: event.sequence,
+			progressChunks: [],
+			progressChars: 0,
+			contentTruncated: false,
+			truncationPublished: false,
+			pendingChars: 0,
+			progressUpdates: 0,
+		};
+		acts.set(event.actId, active);
+		return [
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: actToolCallId(event.actId),
+				title: `Act (${event.model.id})`,
+				kind: "execute" satisfies AcpToolKind,
+				status: "in_progress" satisfies AcpToolStatus,
+				rawInput: { prompt: event.prompt },
+				_meta: actMeta(event, event, active.contentTruncated),
+			},
+		];
+	}
+
+	const active = acts.get(event.actId);
+	if (!active) {
+		if (event.event !== "terminal") return [];
+		rememberClosedAct(closed, event.actId);
+		const terminalContent = actTerminalContent(undefined, event);
+		return [
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: actToolCallId(event.actId),
+				title: `Act (${event.model.id})`,
+				kind: "execute" satisfies AcpToolKind,
+				status: (event.status === "done" ? "completed" : "failed") satisfies AcpToolStatus,
+				rawInput: { prompt: event.prompt },
+				content: actStandardContent(terminalContent.text),
+				_meta: actMeta(event, undefined, terminalContent.truncated),
+			},
+		];
+	}
+	if (event.sequence <= active.lastSequence) return [];
+	active.lastSequence = event.sequence;
+
+	let append = { changed: false, truncatedNow: false };
+	let force = false;
+	switch (event.event) {
+		case "assistant_delta":
+			append = appendActAssistant(active, event.stream, event.text);
+			break;
+		case "cell_start":
+			append = appendActProgress(active, `\nCell ${event.cellId} start:\n${event.code}`);
+			force = true;
+			break;
+		case "cell_terminal":
+			append = appendActProgress(active, `\n${actCellTerminalText(event)}`);
+			force = true;
+			break;
+		case "terminal": {
+			acts.delete(event.actId);
+			rememberClosedAct(closed, event.actId);
+			const terminalContent = actTerminalContent(active, event);
+			return [
+				{
+					sessionUpdate: "tool_call_update",
+					toolCallId: actToolCallId(event.actId),
+					status: (event.status === "done" ? "completed" : "failed") satisfies AcpToolStatus,
+					content: actStandardContent(terminalContent.text),
+					_meta: actMeta(event, active.start, terminalContent.truncated),
+				},
+			];
+		}
+	}
+
+	if (!append.changed && !append.truncatedNow) return [];
+	if (!shouldPublishActProgress(active, { force, truncatedNow: append.truncatedNow })) return [];
+	return [
+		{
+			sessionUpdate: "tool_call_update",
+			toolCallId: actToolCallId(event.actId),
+			status: "in_progress" satisfies AcpToolStatus,
+			content: actStandardContent(actProgressContent(active)),
+			_meta: actMeta(event, active.start, active.contentTruncated),
+		},
+	];
 }
 
 export function acpUpdatesForSessionEvent(
@@ -137,6 +400,9 @@ export function acpUpdatesForSessionEvent(
 	state: AcpEventMappingState = {},
 ): AcpSessionUpdate[] {
 	switch (event.type) {
+		case "act_event":
+			return actUpdates(event, state);
+
 		case "message_update":
 			if (event.message.role !== "assistant") return [];
 			return assistantDeltaUpdates(event.assistantMessageEvent);

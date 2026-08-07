@@ -16,6 +16,7 @@ import {
 	type KernelSentAgentMessage,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
+import type { RootForegroundLease } from "../root-foreground-lease.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { parseIpythonBashCell } from "./ipython-cell-code.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -49,6 +50,12 @@ except Exception as _prime_agent_rlm_error:
                 "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
             )
+
+        async def act(self, prompt):
+            self._raise_missing()
+
+        def done(self, value):
+            self._raise_missing()
 
         async def run(self, prompt, **kwargs):
             self._raise_missing()
@@ -279,6 +286,7 @@ export interface IpythonToolOptions {
 	sessionId?: string;
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
+	foregroundLease?: RootForegroundLease;
 	pythonSkills?: readonly PythonSkillRuntimeInfo[];
 	/** Per-session artifact dir where the kernel namespace snapshot is stored. Omit to disable snapshots. */
 	snapshotDir?: string;
@@ -489,6 +497,7 @@ export class IpythonKernelProvisioner {
 				env: this.options?.env,
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
+				foregroundLease: this.options?.foregroundLease,
 				pythonSkills: this.options?.pythonSkills,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
 				snapshot: snapshotDir
@@ -589,6 +598,7 @@ async function executeWithBusyKernelChoice(
 			return {
 				result: await m.execute(code, {
 					signal,
+					outerToolCallId: toolCallId,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)

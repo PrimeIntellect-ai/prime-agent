@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AGENT_MESSAGE_DISPLAY_MIME, KernelManager, type KernelSentAgentMessage } from "../src/core/kernel/index.js";
+import {
+	AGENT_MESSAGE_DISPLAY_MIME,
+	type HostRequestHandlers,
+	KernelManager,
+	type KernelSentAgentMessage,
+} from "../src/core/kernel/index.js";
+import { RootForegroundLease } from "../src/core/root-foreground-lease.js";
 
 async function waitForCalls(mock: { mock: { calls: unknown[][] } }, count: number): Promise<void> {
 	for (let i = 0; i < 20; i++) {
@@ -9,6 +15,47 @@ async function waitForCalls(mock: { mock: { calls: unknown[][] } }, count: numbe
 		await Promise.resolve();
 	}
 	expect(mock.mock.calls.length).toBeGreaterThanOrEqual(count);
+}
+
+function sentMessageTypes(mock: { mock: { calls: unknown[][] } }): string[] {
+	return mock.mock.calls.flatMap((call) => {
+		const frames = call[0];
+		if (!Array.isArray(frames) || !Buffer.isBuffer(frames[2])) return [];
+		const header = JSON.parse(frames[2].toString()) as { msg_type?: unknown };
+		return typeof header.msg_type === "string" ? [header.msg_type] : [];
+	});
+}
+
+function mockRunningManager(
+	hostHandlers?: HostRequestHandlers,
+	foregroundLease?: RootForegroundLease,
+): {
+	manager: KernelManager;
+	shellSend: ReturnType<typeof vi.fn>;
+	controlSend: ReturnType<typeof vi.fn>;
+} {
+	const manager = new KernelManager({ cwd: process.cwd(), hostHandlers, foregroundLease });
+	const shellSend = vi.fn(async (_frames: Buffer[]) => {});
+	const controlSend = vi.fn(async (_frames: Buffer[]) => {});
+	Object.assign(manager as unknown as Record<string, unknown>, {
+		state: "running",
+		connection: {
+			ip: "127.0.0.1",
+			transport: "tcp",
+			shell_port: 1,
+			iopub_port: 2,
+			stdin_port: 3,
+			control_port: 4,
+			hb_port: 5,
+			signature_scheme: "hmac-sha256",
+			key: "test-key",
+			kernel_name: "python3",
+		},
+		shell: { send: shellSend, close: vi.fn() },
+		control: { send: controlSend, close: vi.fn() },
+		start: async () => {},
+	});
+	return { manager, shellSend, controlSend };
 }
 
 describe("KernelManager abort handling", () => {
@@ -123,10 +170,11 @@ describe("KernelManager abort handling", () => {
 		expect(shellSend).toHaveBeenCalledTimes(1);
 
 		controller.abort();
+		await waitForCalls(controlSend, 1);
+		expect(sentMessageTypes(controlSend)).toContain("interrupt_request");
 		await vi.advanceTimersByTimeAsync(1000);
 
 		await expect(executePromise).resolves.toMatchObject({ status: "aborted" });
-		expect(controlSend).toHaveBeenCalled();
 		expect(kernelKill).not.toHaveBeenCalled();
 
 		const internals = manager as unknown as {
@@ -314,52 +362,307 @@ describe("KernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
-	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
+	it("lets the Act host request delay interruption for its correlated execution", async () => {
 		vi.useFakeTimers();
-		const manager = new KernelManager({
-			cwd: process.cwd(),
-			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		let hostStarted: () => void = () => {};
+		const started = new Promise<void>((resolve) => {
+			hostStarted = resolve;
 		});
-		let releaseQueue: () => void = () => {};
-		const previousExecution = new Promise<void>((resolve) => {
-			releaseQueue = resolve;
-		});
-		const executeInner = vi.fn(
-			async (_code: string, opts: { signal?: AbortSignal }) =>
-				await new Promise<{ stdout: string; stderr: string; status: "aborted"; durationMs: number }>((resolve) => {
-					opts.signal?.addEventListener(
-						"abort",
-						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
-						{ once: true },
-					);
-				}),
-		);
-		Object.assign(
-			manager as unknown as {
-				state: "running";
-				executionQueue: Promise<void>;
-				executeInner: typeof executeInner;
-				start: () => Promise<void>;
+		const foreground = new RootForegroundLease();
+		const { manager, shellSend, controlSend } = mockRunningManager(
+			{
+				"rlm.act": async (_payload, signal, channel) => {
+					hostStarted();
+					await new Promise<void>((resolve) => {
+						const abort = () => {
+							channel?.interruptAfterGrace?.(100);
+							resolve();
+						};
+						signal?.addEventListener("abort", abort, { once: true });
+						if (signal?.aborted) abort();
+					});
+					return { outcome: "cancelled" };
+				},
 			},
-			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {} },
+			foreground,
 		);
+		const controller = new AbortController();
+		const execution = manager.execute("await rlm.act('block')", { signal: controller.signal });
+		let settlements = 0;
+		void execution.then(
+			() => settlements++,
+			() => settlements++,
+		);
+		await waitForCalls(shellSend, 1);
+		const internals = manager as unknown as {
+			activeExecution?: { requestMsgId: string };
+			startHostRequestFromComm(commId: string, data: unknown, parentMessageId?: string): void;
+			handleExecutionMessage(incoming: {
+				header: { msg_type: string };
+				parent_header: Record<string, unknown>;
+				metadata: Record<string, unknown>;
+				content: Record<string, unknown>;
+			}): void;
+		};
+		const requestMsgId = internals.activeExecution?.requestMsgId;
+		if (!requestMsgId) throw new Error("expected active execution");
+		internals.startHostRequestFromComm("act-comm", { type: "rlm.act", prompt: "block" }, requestMsgId);
+		await started;
 
-		const snapshot = (
-			manager as unknown as {
-				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
-			}
-		).captureSnapshot({ executionTimeoutMs: 5000 });
-		await vi.advanceTimersByTimeAsync(5000);
-		expect(executeInner).not.toHaveBeenCalled();
-
-		releaseQueue();
-		await waitForCalls(executeInner, 1);
-		const signal = executeInner.mock.calls[0]?.[1].signal;
-		expect(signal?.aborted).toBe(false);
-		await vi.advanceTimersByTimeAsync(4999);
-		expect(signal?.aborted).toBe(false);
+		controller.abort();
+		expect(sentMessageTypes(controlSend)).not.toContain("interrupt_request");
+		await vi.advanceTimersByTimeAsync(99);
+		expect(sentMessageTypes(controlSend)).not.toContain("interrupt_request");
 		await vi.advanceTimersByTimeAsync(1);
-		expect(signal?.aborted).toBe(true);
-		await expect(snapshot).resolves.toBeNull();
+		expect(sentMessageTypes(controlSend).filter((type) => type === "interrupt_request")).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(900);
+		expect(settlements).toBe(0);
+		expect(foreground.actActive).toBe(true);
+
+		internals.handleExecutionMessage({
+			header: { msg_type: "status" },
+			parent_header: { msg_id: requestMsgId },
+			metadata: {},
+			content: { execution_state: "idle" },
+		});
+		await expect(execution).resolves.toMatchObject({ status: "aborted" });
+		expect(settlements).toBe(1);
+		expect(foreground.actActive).toBe(false);
+		manager.disposeSync();
+	});
+
+	it("restores immediate interrupt after the Act host request settles", async () => {
+		vi.useFakeTimers();
+		const { manager, shellSend, controlSend } = mockRunningManager({
+			"rlm.act": async () => ({ outcome: "done" }),
+		});
+		const controller = new AbortController();
+		const execution = manager.execute("await rlm.act('finish')\nwhile True: pass", { signal: controller.signal });
+		await waitForCalls(shellSend, 1);
+		const internals = manager as unknown as {
+			activeExecution?: { requestMsgId: string; interruptOwnerCommId?: string };
+			startHostRequestFromComm(commId: string, data: unknown, parentMessageId?: string): void;
+			handleExecutionMessage(incoming: {
+				header: { msg_type: string };
+				parent_header: Record<string, unknown>;
+				metadata: Record<string, unknown>;
+				content: Record<string, unknown>;
+			}): void;
+		};
+		const requestMsgId = internals.activeExecution?.requestMsgId;
+		if (!requestMsgId) throw new Error("expected active execution");
+		internals.startHostRequestFromComm("act-comm", { type: "rlm.act", prompt: "finish" }, requestMsgId);
+		for (let index = 0; index < 20 && internals.activeExecution?.interruptOwnerCommId; index++) {
+			await Promise.resolve();
+		}
+		expect(internals.activeExecution?.interruptOwnerCommId).toBeUndefined();
+
+		controller.abort();
+		await waitForCalls(controlSend, 2);
+		expect(sentMessageTypes(controlSend)).toContain("interrupt_request");
+		internals.handleExecutionMessage({
+			header: { msg_type: "status" },
+			parent_header: { msg_id: requestMsgId },
+			metadata: {},
+			content: { execution_state: "idle" },
+		});
+		await expect(execution).resolves.toMatchObject({ status: "aborted" });
+		manager.disposeSync();
+	});
+
+	it("does not deliver a delayed Act interrupt to a later root execution", async () => {
+		vi.useFakeTimers();
+		let hostStarted: () => void = () => {};
+		const started = new Promise<void>((resolve) => {
+			hostStarted = resolve;
+		});
+		const { manager, shellSend, controlSend } = mockRunningManager({
+			"rlm.act": async (_payload, signal, channel) => {
+				hostStarted();
+				await new Promise<void>((resolve) => {
+					const abort = () => {
+						channel?.interruptAfterGrace?.(100);
+						resolve();
+					};
+					signal?.addEventListener("abort", abort, { once: true });
+					if (signal?.aborted) abort();
+				});
+				return { outcome: "cancelled" };
+			},
+		});
+		const controller = new AbortController();
+		const first = manager.execute("await rlm.act('block')", { signal: controller.signal });
+		await waitForCalls(shellSend, 1);
+		const internals = manager as unknown as {
+			activeExecution?: { requestMsgId: string };
+			startHostRequestFromComm(commId: string, data: unknown, parentMessageId?: string): void;
+			handleExecutionMessage(incoming: {
+				header: { msg_type: string };
+				parent_header: Record<string, unknown>;
+				metadata: Record<string, unknown>;
+				content: Record<string, unknown>;
+			}): void;
+		};
+		const firstRequestId = internals.activeExecution?.requestMsgId;
+		if (!firstRequestId) throw new Error("expected first execution");
+		internals.startHostRequestFromComm("act-comm", { type: "rlm.act", prompt: "block" }, firstRequestId);
+		await started;
+		controller.abort();
+		internals.handleExecutionMessage({
+			header: { msg_type: "status" },
+			parent_header: { msg_id: firstRequestId },
+			metadata: {},
+			content: { execution_state: "idle" },
+		});
+		await expect(first).resolves.toMatchObject({ status: "aborted" });
+
+		const second = manager.execute("x = 1");
+		for (let index = 0; index < 20; index++) {
+			const activeRequestId = internals.activeExecution?.requestMsgId;
+			if (activeRequestId && activeRequestId !== firstRequestId) break;
+			await Promise.resolve();
+		}
+		const secondRequestId = internals.activeExecution?.requestMsgId;
+		if (!secondRequestId || secondRequestId === firstRequestId) throw new Error("expected later execution");
+		await vi.advanceTimersByTimeAsync(100);
+		expect(sentMessageTypes(controlSend)).not.toContain("interrupt_request");
+		internals.handleExecutionMessage({
+			header: { msg_type: "status" },
+			parent_header: { msg_id: secondRequestId },
+			metadata: {},
+			content: { execution_state: "idle" },
+		});
+		await expect(second).resolves.toMatchObject({ status: "ok" });
+		manager.disposeSync();
+	});
+
+	it("preserves an aborted result when foreground admission is cancelled", async () => {
+		const foreground = new RootForegroundLease();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const active = foreground.run("root-turn", () => gate);
+		const { manager, shellSend } = mockRunningManager(undefined, foreground);
+		const controller = new AbortController();
+		const execution = manager.execute("never_sent = True", { signal: controller.signal });
+		controller.abort();
+		await expect(execution).resolves.toMatchObject({ status: "aborted" });
+		expect(shellSend).not.toHaveBeenCalled();
+		release();
+		await active;
+		manager.disposeSync();
+	});
+
+	it("releases kernel foreground ownership when shutdown rejects an active execution", async () => {
+		const foreground = new RootForegroundLease();
+		const { manager, shellSend } = mockRunningManager(undefined, foreground);
+		const execution = manager.execute("await never_finishes()");
+		await waitForCalls(shellSend, 1);
+		const later = vi.fn(async () => {});
+		const queued = foreground.run("root-turn", later);
+		manager.disposeSync();
+		await expect(execution).rejects.toThrow();
+		await queued;
+		expect(later).toHaveBeenCalledTimes(1);
+		expect(foreground.busy).toBe(false);
+	});
+
+	it("shares FIFO foreground admission with root turns and later root cells", async () => {
+		const foreground = new RootForegroundLease();
+		const { manager, shellSend } = mockRunningManager(undefined, foreground);
+		const order: string[] = [];
+		const first = manager.execute("x = 1");
+		await waitForCalls(shellSend, 1);
+		const internals = manager as unknown as {
+			activeExecution?: { requestMsgId: string };
+			handleExecutionMessage(incoming: {
+				header: { msg_type: string };
+				parent_header: Record<string, unknown>;
+				metadata: Record<string, unknown>;
+				content: Record<string, unknown>;
+			}): void;
+		};
+		const firstRequestId = internals.activeExecution?.requestMsgId;
+		if (!firstRequestId) throw new Error("expected first execution");
+		const turn = foreground.run("root-turn", async () => {
+			order.push("turn");
+		});
+		const second = manager.execute("x = 2").then((result) => {
+			order.push("cell");
+			return result;
+		});
+		await Promise.resolve();
+		expect(shellSend).toHaveBeenCalledTimes(1);
+
+		internals.handleExecutionMessage({
+			header: { msg_type: "status" },
+			parent_header: { msg_id: firstRequestId },
+			metadata: {},
+			content: { execution_state: "idle" },
+		});
+		await first;
+		await turn;
+		await waitForCalls(shellSend, 2);
+		expect(order).toEqual(["turn"]);
+		const secondRequestId = internals.activeExecution?.requestMsgId;
+		if (!secondRequestId || secondRequestId === firstRequestId) throw new Error("expected second execution");
+		internals.handleExecutionMessage({
+			header: { msg_type: "status" },
+			parent_header: { msg_id: secondRequestId },
+			metadata: {},
+			content: { execution_state: "idle" },
+		});
+		await second;
+		expect(order).toEqual(["turn", "cell"]);
+		manager.disposeSync();
+	});
+
+	it("projects Act only while its correlated host request owns the root cell", async () => {
+		let finishHost!: () => void;
+		const hostGate = new Promise<void>((resolve) => {
+			finishHost = resolve;
+		});
+		const foreground = new RootForegroundLease();
+		const { manager, shellSend } = mockRunningManager(
+			{
+				"rlm.act": async () => {
+					await hostGate;
+					return { outcome: "done" };
+				},
+			},
+			foreground,
+		);
+		const execution = manager.execute("await rlm.act('work')");
+		await waitForCalls(shellSend, 1);
+		const internals = manager as unknown as {
+			activeExecution?: { requestMsgId: string };
+			startHostRequestFromComm(commId: string, data: unknown, parentMessageId?: string): void;
+			handleExecutionMessage(incoming: {
+				header: { msg_type: string };
+				parent_header: Record<string, unknown>;
+				metadata: Record<string, unknown>;
+				content: Record<string, unknown>;
+			}): void;
+		};
+		const requestMsgId = internals.activeExecution?.requestMsgId;
+		if (!requestMsgId) throw new Error("expected active execution");
+		internals.startHostRequestFromComm("act-comm", { type: "rlm.act", prompt: "work" }, requestMsgId);
+		for (let index = 0; index < 20 && !foreground.actActive; index++) await Promise.resolve();
+		expect(foreground.actActive).toBe(true);
+		finishHost();
+		for (let index = 0; index < 20; index++) await Promise.resolve();
+		expect(foreground.actActive).toBe(true);
+		expect(foreground.busy).toBe(true);
+		internals.handleExecutionMessage({
+			header: { msg_type: "status" },
+			parent_header: { msg_id: requestMsgId },
+			metadata: {},
+			content: { execution_state: "idle" },
+		});
+		await execution;
+		expect(foreground.actActive).toBe(false);
+		expect(foreground.busy).toBe(false);
+		manager.disposeSync();
 	});
 });

@@ -390,6 +390,7 @@ describe("daemon supervisor resident workers", () => {
 
 		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
+		expect(client.hello?.serverCapabilities).toContain("rlm_act_stream");
 		const created = await client.request({
 			type: "create",
 			sessionPath: parentSessionFile,
@@ -429,9 +430,12 @@ describe("daemon supervisor resident workers", () => {
 		const attached = await client.request({
 			type: "attach",
 			activeSessionId: child.manager.getSessionId(),
-			capabilities: ["attach_snapshot", "event_sequence", "slim_attach"],
+			capabilities: ["attach_snapshot", "event_sequence", "slim_attach", "rlm_act_stream"],
 		});
 		if (!attached.success) throw new Error(attached.error);
+		expect(attached.data).toMatchObject({
+			client: { capabilities: expect.arrayContaining(["rlm_act_stream"]) },
+		});
 
 		const afterAttach = await client.request({ type: "list" });
 		const hydratedSummary = requireSessionList(afterAttach.success ? afterAttach.data : undefined).find(

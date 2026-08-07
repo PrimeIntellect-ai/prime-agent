@@ -684,6 +684,27 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 }
 
 describe("InteractiveMode submit handling", () => {
+	test("keeps a running Act steering instruction on the standard submit path", async () => {
+		const prompt = vi.fn(async () => {});
+		const fakeThis = createSubmitHandlerHarness({
+			agentConnection: {
+				prompt,
+				executeBash: vi.fn(async () => {}),
+				getState: vi.fn(async () => ({ isBashRunning: false })),
+			},
+		});
+
+		// ActExecutionComponent is presentation-only. While its running control
+		// hint is visible, submit still uses the Phase 4 connection steering path.
+		await fakeThis.defaultEditor.onSubmit?.("redirect the active Act");
+
+		expect(prompt).toHaveBeenCalledWith("redirect the active Act", {
+			images: [],
+			streamingBehavior: "steer",
+			queueIfBusy: true,
+		});
+	});
+
 	test.each(["normal Enter", "installed custom editor"])("captures exact rich state for %s", async () => {
 		const image = { type: "image", data: "base64", mimeType: "image/png" };
 		const pasteSnapshot = { pastes: [[1, "expanded paste"]] as const, pasteCounter: 2 };

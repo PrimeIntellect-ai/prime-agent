@@ -8,6 +8,7 @@ import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
 import { recordOrphanProcessState } from "../orphan-process-journal.js";
+import type { RootForegroundHandle, RootForegroundLease } from "../root-foreground-lease.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { type ForkedKernelHandle, ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
@@ -46,6 +47,7 @@ const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
 const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
+const ACT_CELL_INTERRUPT_GRACE_MS = 100;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
@@ -69,9 +71,24 @@ export const HOST_COMM_TARGET = "host.request";
  * This legacy unary compatibility alias remains the dispatcher and registration
  * contract while context-aware handlers are staged separately below.
  */
+export interface HostRequestChannel {
+	readonly signal: AbortSignal;
+	/** Tool-call id of the managed Execute request that opened this host request. */
+	readonly outerToolCallId?: string;
+	/** Aborts when the correlated outer execution requests an inner-cell interrupt. */
+	readonly interruptSignal?: AbortSignal;
+	/** Send one non-terminal event to the requesting kernel code. */
+	send(event: Record<string, unknown>): Promise<void>;
+	/** Receive the next message sent by the requesting kernel code. */
+	receive(signal?: AbortSignal): Promise<Record<string, unknown>>;
+	/** Interrupt the correlated outer execution after cooperative cancellation gets a chance to finish. */
+	interruptAfterGrace?(graceMs?: number): void;
+}
+
 export type HostRequestHandler = (
 	payload: Record<string, unknown>,
 	signal?: AbortSignal,
+	channel?: HostRequestChannel,
 ) => Promise<Record<string, unknown>>;
 
 /**
@@ -171,6 +188,7 @@ export interface KernelManagerOptions {
 	env?: Record<string, string>;
 	sessionId?: string;
 	hostHandlers?: HostRequestHandlers;
+	foregroundLease?: RootForegroundLease;
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
@@ -186,6 +204,8 @@ export interface KernelStartOptions {
 export interface ExecuteOptions {
 	/** Aborting interrupts the kernel via the control channel. */
 	signal?: AbortSignal;
+	/** Root tool call correlated with this managed execution. */
+	outerToolCallId?: string;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
 	onLateSentAgentMessage?: (message: KernelSentAgentMessage) => void;
 	/** Cap stdout / stderr / result at this many characters. Default 65536. */
@@ -405,6 +425,9 @@ interface ActiveExecution {
 	sentAgentMessages: KernelSentAgentMessage[];
 	error?: ExecuteResult["error"];
 	status: ExecuteResult["status"];
+	interruptOwnerCommId?: string;
+	foregroundToken?: symbol;
+	actForegroundExits: Set<() => void>;
 	settled: boolean;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
@@ -433,6 +456,78 @@ function createDeferred<T>(): Deferred<T> {
 	});
 	return { promise, resolve, reject };
 }
+
+class KernelHostRequestChannel implements HostRequestChannel {
+	private readonly messages: Record<string, unknown>[] = [];
+	private readonly waiters: Deferred<Record<string, unknown>>[] = [];
+	private closedError: Error | undefined;
+
+	constructor(
+		readonly signal: AbortSignal,
+		readonly outerToolCallId: string | undefined,
+		readonly interruptSignal: AbortSignal | undefined,
+		private readonly sendEvent: (event: Record<string, unknown>) => Promise<void>,
+		private readonly interruptCorrelatedExecution: () => Promise<void>,
+		private readonly trackGraceInterrupt: (completion: Promise<void>) => void,
+	) {
+		signal.addEventListener("abort", () => this.close(new Error("host request channel aborted")), { once: true });
+	}
+
+	interruptAfterGrace(graceMs = ACT_CELL_INTERRUPT_GRACE_MS): void {
+		let resolveCompletion: () => void = () => {};
+		const completion = new Promise<void>((resolve) => {
+			resolveCompletion = resolve;
+		});
+		this.trackGraceInterrupt(completion);
+		const timer = globalThis.setTimeout(() => {
+			void this.interruptCorrelatedExecution()
+				.catch(() => undefined)
+				.finally(resolveCompletion);
+		}, graceMs);
+		if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
+	}
+
+	async send(event: Record<string, unknown>): Promise<void> {
+		if (this.closedError) throw this.closedError;
+		await this.sendEvent(event);
+	}
+
+	receive(signal?: AbortSignal): Promise<Record<string, unknown>> {
+		if (signal?.aborted) return Promise.reject(new Error("host request channel receive aborted"));
+		const message = this.messages.shift();
+		if (message) return Promise.resolve(message);
+		if (this.closedError) return Promise.reject(this.closedError);
+		const waiter = createDeferred<Record<string, unknown>>();
+		const abort = () => {
+			const index = this.waiters.indexOf(waiter);
+			if (index >= 0) this.waiters.splice(index, 1);
+			waiter.reject(new Error("host request channel receive aborted"));
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		this.waiters.push(waiter);
+		return waiter.promise.finally(() => signal?.removeEventListener("abort", abort));
+	}
+
+	deliver(value: unknown): void {
+		if (this.closedError) return;
+		if (!isRecord(value)) {
+			this.close(new Error("host request channel message must be an object"));
+			return;
+		}
+		const waiter = this.waiters.shift();
+		if (waiter) waiter.resolve(value);
+		else this.messages.push(value);
+	}
+
+	close(error = new Error("host request channel closed")): void {
+		if (this.closedError) return;
+		this.closedError = error;
+		for (const waiter of this.waiters.splice(0)) waiter.reject(error);
+		this.messages.length = 0;
+	}
+}
+
+// ---- wire format ---------------------------------------------------------
 
 function buildMessage(
 	msgType: string,
@@ -591,13 +686,14 @@ function installSignalHandlersOnce(): void {
 export class KernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
+		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "foregroundLease" | "pythonSkills" | "snapshot"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
 	private readonly commTargets = new Map<string, string>();
 	private readonly handledHostRequestCommIds = new Set<string>();
 	private readonly hostRequestAbortControllers = new Map<string, AbortController>();
+	private readonly hostRequestChannels = new Map<string, KernelHostRequestChannel>();
 	private kernel?: ChildProcess;
 	// Set instead of `kernel` for forkserver-forked kernels (not our child):
 	// signaling/liveness go through the forkserver, never process.kill.
@@ -624,6 +720,7 @@ export class KernelManager {
 	// attribute their spawning program.
 	private lastCellCode?: string;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	private readonly pendingGraceInterrupts = new Set<Promise<void>>();
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
 	private startGeneration = 0;
@@ -639,6 +736,7 @@ export class KernelManager {
 			env: options.env,
 			sessionId: options.sessionId,
 			hostHandlers: options.hostHandlers,
+			foregroundLease: options.foregroundLease,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
 			username: options.username ?? "prime-agent",
@@ -958,12 +1056,38 @@ export class KernelManager {
 	}
 
 	async execute(code: string, opts: ExecuteOptions = {}): Promise<ExecuteResult> {
+		const foreground = this.options.foregroundLease;
+		if (!foreground || opts.signal?.aborted) return this.executeWithForeground(code, opts);
+		const started = Date.now();
+		let handle: RootForegroundHandle;
+		try {
+			handle = await foreground.acquire("root-cell", opts.signal);
+		} catch (error) {
+			if (opts.signal?.aborted) {
+				return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
+			}
+			throw error;
+		}
+		try {
+			return await handle.run(() => this.executeWithForeground(code, opts));
+		} finally {
+			if (handle.owned && this.activeExecution?.opts === opts) {
+				this.activeExecutionIdleWaiters.add(handle.release);
+			} else {
+				handle.release();
+			}
+		}
+	}
+
+	private async executeWithForeground(code: string, opts: ExecuteOptions): Promise<ExecuteResult> {
 		const result = await this.enqueueExecute(code, opts);
+		const active = this.activeExecution;
+		if (active?.opts === opts && active.actForegroundExits.size > 0) {
+			await this.waitForActiveExecutionIdle();
+		}
 		// Refresh the on-disk snapshot after real work so a later resume (or a
 		// crash before graceful shutdown) revives the most recent namespace.
-		if (result.status === "ok") {
-			this.scheduleSnapshot();
-		}
+		if (result.status === "ok") this.scheduleSnapshot();
 		return result;
 	}
 
@@ -1055,6 +1179,8 @@ export class KernelManager {
 			attachments: [],
 			sentAgentMessages: [],
 			status: "ok",
+			foregroundToken: this.options.foregroundLease?.currentToken,
+			actForegroundExits: new Set(),
 			settled: false,
 			resolve: result.resolve,
 			reject: result.reject,
@@ -1074,7 +1200,7 @@ export class KernelManager {
 			this.resolveExecution(execution, { clearActive: false });
 		};
 		const onAbort = () => {
-			void this.interrupt().catch(() => undefined);
+			if (!execution.interruptOwnerCommId) void this.interrupt().catch(() => undefined);
 			clearAbortTimer();
 			abortTimer = globalThis.setTimeout(forceAbort, KERNEL_ABORT_GRACE_MS);
 			if (abortTimer && typeof abortTimer === "object" && "unref" in abortTimer) {
@@ -1318,6 +1444,8 @@ export class KernelManager {
 			});
 		}
 		if (didClearActive) {
+			for (const exitAct of execution.actForegroundExits) exitAct();
+			execution.actForegroundExits.clear();
 			this.notifyActiveExecutionIdle();
 		}
 	}
@@ -1357,6 +1485,8 @@ export class KernelManager {
 			return;
 		}
 		this.activeExecution = undefined;
+		for (const exitAct of execution.actForegroundExits) exitAct();
+		execution.actForegroundExits.clear();
 		execution.reject(error);
 		this.notifyActiveExecutionIdle();
 	}
@@ -1366,6 +1496,17 @@ export class KernelManager {
 			resolve();
 		}
 		this.activeExecutionIdleWaiters.clear();
+	}
+
+	private waitForActiveExecutionIdle(): Promise<void> {
+		if (!this.activeExecution) return Promise.resolve();
+		return new Promise<void>((resolve) => {
+			this.activeExecutionIdleWaiters.add(resolve);
+			if (!this.activeExecution) {
+				this.activeExecutionIdleWaiters.delete(resolve);
+				resolve();
+			}
+		});
 	}
 
 	private waitForActiveExecutionToClear(signal: AbortSignal | undefined, timeoutMs: number): Promise<boolean> {
@@ -1428,6 +1569,8 @@ export class KernelManager {
 		}
 
 		if (msgType === "comm_close") {
+			this.hostRequestChannels.get(commId)?.close();
+			this.hostRequestChannels.delete(commId);
 			this.hostRequestAbortControllers.get(commId)?.abort();
 			this.hostRequestAbortControllers.delete(commId);
 			this.commTargets.delete(commId);
@@ -1453,11 +1596,15 @@ export class KernelManager {
 
 		const targetName = this.commTargets.get(commId);
 		if (msgType === "comm_msg" && targetName === HOST_COMM_TARGET) {
-			this.startHostRequestFromComm(
-				commId,
-				content.data,
-				typeof incoming.parent_header.msg_id === "string" ? incoming.parent_header.msg_id : undefined,
-			);
+			const channel = this.hostRequestChannels.get(commId);
+			if (channel) channel.deliver(content.data);
+			else {
+				this.startHostRequestFromComm(
+					commId,
+					content.data,
+					typeof incoming.parent_header.msg_id === "string" ? incoming.parent_header.msg_id : undefined,
+				);
+			}
 		}
 	}
 
@@ -1469,14 +1616,42 @@ export class KernelManager {
 		const controller = new AbortController();
 		this.hostRequestAbortControllers.set(commId, controller);
 		const execution = this.activeExecution;
-		const executionSignal =
-			execution && execution.requestMsgId === parentMessageId ? execution.opts.signal : undefined;
+		const correlatedExecution = execution?.requestMsgId === parentMessageId ? execution : undefined;
+		const claimsInterrupt =
+			isRecord(data) &&
+			data.type === "rlm.act" &&
+			correlatedExecution !== undefined &&
+			!correlatedExecution.interruptOwnerCommId;
+		if (claimsInterrupt) correlatedExecution.interruptOwnerCommId = commId;
+		const exitActForeground =
+			claimsInterrupt && correlatedExecution.foregroundToken
+				? this.options.foregroundLease?.enterAct(correlatedExecution.foregroundToken)
+				: undefined;
+		if (exitActForeground) correlatedExecution?.actForegroundExits.add(exitActForeground);
+		const executionSignal = correlatedExecution?.opts.signal;
+		const channel = new KernelHostRequestChannel(
+			controller.signal,
+			correlatedExecution?.opts.outerToolCallId,
+			executionSignal,
+			async (event) => {
+				await this.sendCommMessage(commId, { ...event, status: "event" });
+			},
+			async () => {
+				if (this.activeExecution?.requestMsgId === parentMessageId) await this.interrupt();
+			},
+			(completion) => {
+				this.pendingGraceInterrupts.add(completion);
+				void completion.finally(() => this.pendingGraceInterrupts.delete(completion));
+			},
+		);
+		this.hostRequestChannels.set(commId, channel);
 		const abortFromExecution = () => controller.abort();
 		executionSignal?.addEventListener("abort", abortFromExecution, { once: true });
+		if (executionSignal?.aborted) abortFromExecution();
 
 		const task = (async () => {
 			try {
-				const result = await this.handleHostRequest(data, controller.signal);
+				const result = await this.handleHostRequest(data, controller.signal, channel);
 				try {
 					await this.sendCommMessage(commId, { status: "ok", ...result });
 				} catch (replyError) {
@@ -1498,14 +1673,25 @@ export class KernelManager {
 		this.inFlightHostRequests.add(task);
 		void task.finally(() => {
 			this.inFlightHostRequests.delete(task);
+			if (correlatedExecution?.interruptOwnerCommId === commId) {
+				correlatedExecution.interruptOwnerCommId = undefined;
+			}
 			executionSignal?.removeEventListener("abort", abortFromExecution);
+			channel.close();
+			if (this.hostRequestChannels.get(commId) === channel) {
+				this.hostRequestChannels.delete(commId);
+			}
 			if (this.hostRequestAbortControllers.get(commId) === controller) {
 				this.hostRequestAbortControllers.delete(commId);
 			}
 		});
 	}
 
-	private async handleHostRequest(data: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
+	private async handleHostRequest(
+		data: unknown,
+		signal: AbortSignal | undefined,
+		channel: HostRequestChannel,
+	): Promise<Record<string, unknown>> {
 		if (!isRecord(data)) {
 			throw new Error("host request payload must be an object");
 		}
@@ -1521,7 +1707,7 @@ export class KernelManager {
 		// the in-flight execution; detached spawns (asyncio.create_task) fire after
 		// the scheduling cell goes idle, so fall back to that last cell's source.
 		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-		return handler({ ...data, cellSourceCode }, signal);
+		return handler({ ...data, cellSourceCode }, signal, channel);
 	}
 
 	private async sendCommMessage(commId: string, data: Record<string, unknown>): Promise<void> {
@@ -1595,6 +1781,13 @@ export class KernelManager {
 		this.startPromise = undefined;
 	}
 
+	private abortHostRequests(): void {
+		for (const channel of this.hostRequestChannels.values()) channel.close();
+		this.hostRequestChannels.clear();
+		for (const controller of this.hostRequestAbortControllers.values()) controller.abort();
+		this.hostRequestAbortControllers.clear();
+	}
+
 	private async waitForKernelExit(): Promise<void> {
 		const kernel = this.kernel;
 		if (kernel) {
@@ -1607,11 +1800,6 @@ export class KernelManager {
 		while (this.forkedKernel === forked && !(await this.forkedKernelDead(forked))) {
 			await sleep(25);
 		}
-}
-
-	private abortHostRequests(): void {
-		for (const controller of this.hostRequestAbortControllers.values()) controller.abort();
-		this.hostRequestAbortControllers.clear();
 	}
 
 	private async waitForHostRequestsToSettle(tasks: Promise<void>[], timeoutMs: number): Promise<void> {
@@ -1844,6 +2032,9 @@ export class KernelManager {
 	/** Graceful cleanup. Waits briefly for in-flight host request handlers before closing sockets. */
 	dispose(): Promise<void> {
 		return (async () => {
+			// Let any claimed grace interrupt either stop its correlated cell or observe
+			// that the execution is already idle before taking the final snapshot.
+			await Promise.allSettled([...this.pendingGraceInterrupts]);
 			// Captured before any await: teardowns and newer starts bump the counter.
 			const generation = this.startGeneration;
 			// Final namespace flush while the kernel is still live (session end / reload).

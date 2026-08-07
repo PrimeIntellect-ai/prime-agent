@@ -20,6 +20,7 @@ Use exactly one settings file per scope. Prime Agent preserves the selected form
 | `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `defaultServiceTier` | string | `"default"` | Default provider service tier: `"auto"`, `"default"`, `"flex"`, `"scale"`, or `"priority"` |
 | `rlmAllowedServiceTiers` | array | `[defaultServiceTier]` | Service tiers allowed as explicit `rlm(..., service_tier=...)` overrides; use JSON `null` for Python `None` |
+| `rlmActDefaultModel` | string | - | Named-role or concrete native model selector used when `rlm.act(...)` omits `model`; omission fails when unset |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
@@ -63,6 +64,16 @@ claudeCode:
 ```
 
 Append `:<effort>` to a model string to bind the role's exact provider effort, even when the model catalog marks that effort unsupported, as in `github-copilot/grok-4.5:high`. Call `await rlm("task", model="@luna")` or use the result's `concrete_selector` from `await rlm.find_models("luna")`. Project roles merge over global roles by name.
+
+Act has no implicit model. Configure a default selector when callers should be able to omit `model`:
+
+```yaml
+rlmActDefaultModel: "@luna"
+modelRoles:
+  luna: openai-codex/gpt-5.6-luna:high
+```
+
+Without `rlmActDefaultModel`, every call must pass `model` explicitly. The setting accepts the same named-role and concrete native selectors as the `model` argument.
 
 A native child retains its admitted role order for its resident lifetime. A retryable provider failure that occurs before the response produces text, thinking, or tool calls advances immediately to the next available and authenticated candidate. The new candidate uses its configured effort and a fresh same-model retry budget without changing global model or thinking defaults. Prime Agent checks candidate availability and authentication again at the switch. Exact selectors and `claude-code/<model>` children do not use role fallback.
 

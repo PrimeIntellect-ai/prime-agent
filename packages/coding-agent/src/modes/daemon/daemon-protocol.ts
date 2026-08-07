@@ -61,9 +61,14 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-// Revision 23 adds capability-gated durable family mailbox commands and receipt metadata.
-export const DAEMON_SCHEMA_REVISION = 23;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-23-226b44019dad";
+// Revision 17 adds capability-gated durable family mailboxes, authoritative child rosters, and owned-session recovery context.
+// Revision 18 adds nested Act events and the opt-in RLM quiescence barrier.
+// Revision 19 adds Act model-handoff metadata and daemon-held session input pauses.
+// Revision 20 adds session-only model selection and cancellation of owned pending prompts.
+// Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
+// Revision 22 scopes ACP MCP replacement and cleanup to a connection owner.
+export const DAEMON_SCHEMA_REVISION = 22;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-22-619e850b1cf1";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -81,7 +86,8 @@ export type DaemonClientCapability =
 	| "extension_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
-	| "client_owned_sessions";
+	| "client_owned_sessions"
+	| "rlm_act_stream";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
 	status: DaemonPromptAdmissionCancellationStatus;
@@ -103,13 +109,14 @@ export type DaemonServerCapability =
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
 	| "queue_message_mutation"
+	| "family_mailbox"
 	| "authoritative_child_roster"
 	| "owned_session_recovery_context"
 	| "rlm_quiescence_barrier"
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
-	| "family_mailbox";
+	| "session_model_selection";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -135,6 +142,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"slim_attach",
 	"chunked_snapshot",
 	"client_owned_sessions",
+	"rlm_act_stream",
 ];
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -149,11 +157,13 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"prompt_admission_cancellation",
 	"owned_prompt_cancellation",
 	"queue_message_mutation",
+	"family_mailbox",
+	"session_model_selection",
 	"authoritative_child_roster",
 	"owned_session_recovery_context",
 	"rlm_quiescence_barrier",
 	"session_input_pause",
-	"family_mailbox",
+	"acp_mcp_servers",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -609,7 +619,14 @@ export type DaemonCommand =
 			promoteOwnedSession?: boolean;
 	  }
 	| { id?: string; type: "heartbeat_update"; activeSessionId: string; action: AgentHeartbeatUpdateAction }
-	| { id?: string; type: "set_model"; activeSessionId: string; provider: string; modelId: string }
+	| {
+			id?: string;
+			type: "set_model";
+			activeSessionId: string;
+			provider: string;
+			modelId: string;
+			persistDefault?: boolean;
+	  }
 	| { id?: string; type: "cycle_model"; activeSessionId: string; direction?: "forward" | "backward" }
 	| { id?: string; type: "set_scoped_models"; activeSessionId: string; scopedModels: AgentConnectionScopedModel[] }
 	| { id?: string; type: "set_thinking_level"; activeSessionId: string; level: ThinkingLevel }
@@ -706,7 +723,7 @@ const CLIENT_OWNED_DAEMON_COMMAND = {
 } as const;
 const FAMILY_MAILBOX_COMMAND = {
 	minProtocol: 7,
-	minSchemaRevision: 16,
+	minSchemaRevision: 17,
 	capability: "family_mailbox",
 } as const;
 const DELETE_RLM_SUBAGENT_COMMAND = {
@@ -1068,6 +1085,23 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	extension_ui_request: LEGACY_DAEMON_COMMAND,
 	extension_error: LEGACY_DAEMON_COMMAND,
 } as const satisfies Record<DaemonOutbound["type"], DaemonCommandCompatibility>;
+
+export const DAEMON_SESSION_EVENT_COMPATIBILITY = {
+	act_event: {
+		minProtocol: 7,
+		minSchemaRevision: 19,
+		capability: "rlm_act_stream",
+	},
+} as const satisfies Partial<Record<AgentConnectionSessionEvent["type"], DaemonCommandCompatibility>>;
+
+export function daemonClientSupportsSessionEvent(
+	capabilities: ReadonlySet<DaemonClientCapability>,
+	event: AgentConnectionSessionEvent,
+): boolean {
+	const compatibility =
+		DAEMON_SESSION_EVENT_COMPATIBILITY[event.type as keyof typeof DAEMON_SESSION_EVENT_COMPATIBILITY];
+	return compatibility?.capability === undefined || capabilities.has(compatibility.capability);
+}
 
 export function createDaemonCommandEnvelope<TCommand extends DaemonCommand>(
 	command: TCommand,

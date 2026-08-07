@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
@@ -517,6 +517,59 @@ describe("AgentSessionRuntime characterization", () => {
 			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
 			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
 		]);
+	});
+
+	it("loads same-file replacement state after outgoing teardown persistence", async () => {
+		let outgoingManager: SessionManager | undefined;
+		const actId = "same-file-replacement-act";
+		const usage = {
+			input: 10,
+			output: 2,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 12,
+			cost: { input: 0.1, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.12 },
+		};
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_shutdown", (event) => {
+				if (event.reason !== "resume" || !outgoingManager) return;
+				outgoingManager.appendActTerminal(actId, "cancelled", usage, {
+					model: { provider: "faux", id: "luna" },
+				});
+			});
+		});
+		outgoingManager = runtime.session.sessionManager;
+		await runtime.session.prompt("flush before same-file replacement");
+		outgoingManager.appendActStart(actId, {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+		const sessionFile = runtime.session.sessionFile;
+		if (!sessionFile) throw new Error("persistent runtime has no session file");
+
+		await runtime.switchSession(sessionFile);
+
+		const physicalEntries = readFileSync(sessionFile, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { type?: string; actId?: string; status?: string });
+		expect(physicalEntries.filter((entry) => entry.type === "act_terminal" && entry.actId === actId)).toEqual([
+			expect.objectContaining({ status: "cancelled" }),
+		]);
+		expect(
+			runtime.session.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "act_terminal" && entry.actId === actId),
+		).toEqual([expect.objectContaining({ status: "cancelled", usage })]);
+		expect(runtime.session.getContextTree().totalUsage.cost.total).toBeCloseTo(usage.cost.total);
+
+		faux.setResponses([fauxAssistantMessage("replacement prompt succeeded")]);
+		await runtime.session.prompt("continue after same-file replacement");
+		expect(runtime.session.getLastAssistantText()).toBe("replacement prompt succeeded");
 	});
 
 	it("honors session_before_switch cancellation for new and resume", async () => {

@@ -1,4 +1,7 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import { actCancellationPromptBoundary } from "../src/core/act-cancellation.js";
+import { ACT_SYSTEM_PROMPT } from "../src/core/act-lane.js";
+import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../src/core/kernel/bootstrap.js";
 import { buildRlmPrompt } from "../src/core/prompts/index.js";
 import type { HarnessState } from "../src/core/refinement/index.js";
 import type { Skill } from "../src/core/skills.js";
@@ -36,6 +39,74 @@ function pythonSkill(name: string, importName = name.replaceAll("-", "_")): Skil
 }
 
 describe("buildRlmPrompt", () => {
+	test("encourages both Act participants to share named IPython state", () => {
+		const prompt = buildRlmPrompt({
+			cwd: "/repo",
+			messagesPath: "/repo/.pi/sessions/session.jsonl",
+			installedSkills: [],
+		});
+
+		expect(prompt).toContain("Treat the live IPython namespace as the handoff between you and Act");
+		expect(prompt).toContain("leave useful state in named variables for your next inspection");
+		expect(ACT_SYSTEM_PROMPT).toContain("Treat named variables as the handoff between you and the directing model");
+		expect(ACT_SYSTEM_PROMPT).toContain("leave useful intermediate state or results in clear variable names");
+	});
+	test("builds the rlm prompt without recursion", () => {
+		const prompt = buildRlmPrompt({
+			cwd: "/repo",
+			messagesPath: "/repo/.pi/sessions/session.jsonl",
+			installedSkills: ["websearch", "refine"],
+			activeTools: ["ipython"],
+			allowRecursion: false,
+		});
+
+		expect(prompt).toBe(
+			[
+				"You are a general purpose agent that uses code to solve tasks.",
+				"You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.",
+				"When you are done, stop calling tools and state your final answer.",
+				"",
+				"Working directory: /repo",
+				"Conversation log: /repo/.pi/sessions/session.jsonl",
+				"Recursive agent depth: 0",
+				`Pre-installed Python packages: ${DEFAULT_RLM_EXTRA_IMPORT_LABELS.join(", ")}.`,
+				"Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module).",
+				"",
+				"Installed Python skill modules (pre-imported): `websearch`, `refine`.",
+				"Read each skill's SKILL.md for its API. Inspect a module with `help(<skill>)` or `dir(<skill>)`, then inspect a documented callable with `inspect.signature(<skill>.<function>)`.",
+				"Each skill is also available as a shell command by the same name: `<skill> ...`. Discover its CLI usage with `<skill> --help`.",
+				"",
+				"IPython is the agent's long-lived notebook: a persistent control environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, write small helper functions, and preserve useful state across turns or compaction.",
+				"",
+				"Do not assume IPython is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use IPython to coordinate the process and analyze what comes back.",
+				"",
+				"When running shell commands from IPython, use `%%bash` cells. If you use `%%bash`, it must be the first line of the code cell: no comments, spaces, blank lines, imports, or Python statements before it. Avoid `!cmd` shell escapes for project commands so shell behavior is explicit and multi-line commands share one shell context.",
+				"",
+				"Important: do not install dependencies into the IPython kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. For example, in a Python repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, or the active project interpreter from the repo root. Treat failures from that native environment as the relevant result.",
+				"",
+				"Use Python for reading, searching, and editing files — it gives you reusable variables you can slice, filter, and act on without re-reading. Always assign read/search results to named variables so you can revisit them later.",
+				"",
+				"Each `%%bash` cell runs in a throw-away subshell, so shell-level state (`cd`, `export`, `source`, shell variables) does NOT carry to later cells. Keep dependent shell steps inside one `%%bash` cell when they need shared shell state, or use kernel-level equivalents that survive across calls: `%cd <dir>` for the working directory and `os.environ['VAR'] = '...'` (or `%env VAR=...`) for environment variables — these apply to all subsequent `%%bash` calls.",
+				"",
+				"Python state in the kernel, by contrast, persists across cells: named variables, helper functions, classes, imports, notes, parsed outputs, and helper data structures all remain available in every later turn. Tool calls are themselves Python `await` expressions, so their return values can be bound to variables and composed into program logic just like any other call.",
+				"",
+				"Continual harness state is available as `rlm.harness` and `rlm.get_harness_state()`. CRUD calls are local to this Prime Agent session by default: `rlm.harness.create_memory(...)`, `rlm.harness.update_memory(...)`, `rlm.harness.delete_memory(...)`, `rlm.harness.create_skill(...)`, `rlm.harness.update_skill(...)`, `rlm.harness.delete_skill(...)`, `rlm.harness.create_subagent(...)`, `rlm.harness.update_subagent(...)`, `rlm.harness.delete_subagent(...)`, `rlm.harness.create_prompt_note(...)`, `rlm.harness.update_prompt_note(...)`, `rlm.harness.delete_prompt_note(...)`, plus `rlm.harness.record_refinement(...)` and `rlm.harness.overview()`. Use `global_=True` only for stable cross-session lessons; Python reserves `global`, so literal `global=True` is invalid syntax.",
+				"",
+				"Terminology: continual harness names the persisted prompt, memory, skill, and subagent layer; RLM names the runtime, IPython kernel, and native call interface exposed to the model.",
+				"",
+				"RLM-native call contract: installed Python skills are pre-imported modules. Read the matching SKILL.md and call its documented function, such as `await <skill_import>.<function>(...)`; when a CLI exists, use `<skill_import> ...` from shell. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a reusable delegation spec with `await rlm('sub-task')`; admission returns a child handle immediately. Results arrive only through an available messaging capability or files, never as an `rlm()` return value. Do not invent non-native wrappers such as `call_skill(...)` or `run_subagent(...)`.",
+				"",
+				"Use `rlm.act()` for one inspectable action expected to take roughly 30 seconds to 5 minutes; prefer shorter actions. You remain responsible for architecture, synthesis, decomposition, and acceptance. After every Act result, regain control and inspect decisive source, diff, or test evidence before choosing the next bounded action. Bad: `await rlm.act('Implement every phase of the migration plan, verify everything, and ship it')`. Good: `result = await rlm.act('Inspect the parser owner, fix the delimiter advance, run parser.test.ts, and return the diff and test result')`.",
+				"Set up a retained Act lane once with stable context: working directory, editing or verification authority, return contract, and the expectation that later calls are a sequence of bounded actions. The lane keeps its transcript, so later calls should be terse deltas: first `await rlm.act('In /repo, you may edit parser files and run focused tests. Return the inspected diff and raw test result. First inspect the parser owner.')`; then `await rlm.act('Now run the StarPC baseline')`; then `await rlm.act('Now fix the failing delimiter case and rerun its focused test')`. Restate any changed or ambiguous constraint, for example `await rlm.act('Now verify only; do not edit. Work from /repo/wt/review and return raw test output')`. Inspect every returned result yourself.",
+				"Treat the live IPython namespace as the handoff between you and Act. Bind useful clients, datasets, parsed structures, helpers, and intermediate results to clear variable names before calling Act, and mention those variables in the action. Ask Act to reuse them and leave useful state in named variables for your next inspection instead of reconstructing it through prompt text.",
+				"Omit `model` only when `rlmActDefaultModel` configures a default, or pass an ordinary named-role or concrete native selector. One retained lane runs serialized full cells in this live IPython namespace and finishes with `rlm.done(value)`. Assign the result to preserve its exact in-kernel object without displaying its representation. Act shares this root session's authority, is distinct from asynchronous isolated `rlm(...)` children, and only one Act may run at a time.",
+				actCancellationPromptBoundary(),
+				"",
+				"Treat continual harness refinement as a small, evidence-backed update after observing a repeated failure or reusable tactic: diagnose the issue, update the smallest relevant continual harness component, validate on the next action, then record the outcome. Use `await refine.run()` to turn repeated delegation patterns into reusable subagent specs, repeated procedures into skills, durable facts/preferences into memories, and narrow behavioral policies into prompt addendums. It returns immediately and runs when the current turn ends, so continue working normally after calling it. Do not rewrite the whole continual harness when a focused memory, skill, prompt note, or subagent spec is enough.",
+			].join("\n"),
+		);
+	});
+
 	test("defaults omitted activeTools to ipython guidance", () => {
 		const prompt = buildRlmPrompt({
 			cwd: "/repo",
@@ -47,6 +118,47 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("A callable `rlm` is already in your global namespace");
 		expect(prompt).toContain("IPython is the agent's long-lived notebook");
 		expect(prompt).toContain("Each `%%bash` cell runs in a throw-away subshell");
+	});
+
+	test("offers Act only to the root IPython actor", () => {
+		const root = buildRlmPrompt({
+			cwd: "/repo",
+			messagesPath: "/repo/session.jsonl",
+			activeTools: ["ipython"],
+			depth: 0,
+		});
+		const child = buildRlmPrompt({
+			cwd: "/repo",
+			messagesPath: "/repo/child.jsonl",
+			activeTools: ["ipython"],
+			depth: 1,
+		});
+
+		expect(root).toContain("one inspectable action expected to take roughly 30 seconds to 5 minutes");
+		expect(root).toContain("Implement every phase of the migration plan");
+		expect(root).toContain("Now run the StarPC baseline");
+		expect(root).toContain("Now verify only; do not edit");
+		expect(root).toContain("finishes with `rlm.done(value)`");
+		expect(root).toContain(actCancellationPromptBoundary());
+		expect(child).not.toContain("rlm.act(prompt)");
+	});
+
+	test("publishes the native Windows Act cancellation boundary", () => {
+		const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		try {
+			const prompt = buildRlmPrompt({
+				cwd: "C:\\repo",
+				messagesPath: "C:\\repo\\session.jsonl",
+				activeTools: ["ipython"],
+				depth: 0,
+			});
+			expect(prompt).toContain(
+				"On native Windows, synchronous Python and blocking shell work have no prompt-stop guarantee",
+			);
+			expect(prompt).toContain("do not claim they stopped until they return");
+		} finally {
+			platform.mockRestore();
+		}
 	});
 
 	test("discovers requested models through a bounded authenticated host search", () => {

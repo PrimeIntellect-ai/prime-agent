@@ -13,6 +13,7 @@ Events are defined in [`AgentSessionEvent`](../src/core/agent-session.ts):
 ```typescript
 type AgentSessionEvent =
   | AgentEvent
+  | ActProjectionEvent
   | { type: "session_action_update"; actions: SessionActionSnapshot }
   | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
   | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
@@ -21,6 +22,8 @@ type AgentSessionEvent =
 ```
 
 `session_action_update` emits literal queued actions separately from active scheduler work whenever either projection changes. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
+
+A root `rlm.act()` call also emits an additive `act_event` stream. Each event carries the Act id, the exact outer IPython tool-call id, and a monotonic sequence local to that Act. The ordered variants are `start`, assistant `assistant_delta`, `cell_start`, `cell_terminal`, and one self-contained `terminal`. Start and terminal include the resolved model and exact cancellation capability. Terminal also includes status and usage. Text fields carry explicit truncation flags. The stream never includes the Python object returned by `rlm.done()` or private retained-lane message identities.
 
 Base events from [`AgentEvent`](../../agent/src/types.ts):
 

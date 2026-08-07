@@ -82,6 +82,9 @@ export interface HarnessOptions {
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	startClaudeCodeQuery?: StartClaudeCodeQuery;
 	persistSession?: boolean;
+	tempDir?: string;
+	sessionFile?: string;
+	preserveTempDir?: boolean;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
 	autonomous?: AgentAutonomousConfig;
@@ -115,7 +118,8 @@ function createTempDir(): string {
 }
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
-	const tempDir = createTempDir();
+	const tempDir = options.tempDir ?? createTempDir();
+	mkdirSync(tempDir, { recursive: true });
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
 		api: options.api,
 		provider: options.provider,
@@ -128,9 +132,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = options.persistSession
-		? SessionManager.create(tempDir, join(tempDir, "sessions"))
-		: SessionManager.inMemory();
+	const sessionManager = options.sessionFile
+		? SessionManager.open(options.sessionFile, join(tempDir, "sessions"), tempDir)
+		: options.persistSession
+			? SessionManager.create(tempDir, join(tempDir, "sessions"))
+			: SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -164,6 +170,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			model,
 			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
 			tools: [],
+			messages: sessionManager.buildSessionContext().messages,
 		},
 		convertToLlm,
 		onPayload: async (payload) => {
@@ -209,7 +216,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		startClaudeCodeQuery: options.startClaudeCodeQuery,
 		baseToolsOverride: toolMap,
 		extensionRunnerRef,
-		rlmDepth: options.rlmDepth,
+		rlmDepth: options.rlmDepth ?? 0,
 		rlmMaxDepth: options.rlmMaxDepth,
 		autonomous: options.autonomous,
 		autoRefineReviewer: options.autoRefineReviewer,
@@ -241,7 +248,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		cleanup() {
 			session.dispose();
 			fauxProvider.unregister();
-			if (existsSync(tempDir)) {
+			if (!options.preserveTempDir && existsSync(tempDir)) {
 				// Spawned fixture processes may still be flushing their final registry
 				// writes; retry briefly instead of failing the suite on ENOTEMPTY.
 				rmSync(tempDir, { recursive: true, force: true, maxRetries: 40, retryDelay: 50 });

@@ -29,7 +29,9 @@ import { deserializeDaemonError } from "../daemon/daemon-errors.js";
 import {
 	collectDaemonClientEnv,
 	collectDaemonLaunchEnv,
+	DAEMON_SESSION_EVENT_COMPATIBILITY,
 	type DaemonAttachResult,
+	type DaemonClientCapability,
 	type DaemonCommand,
 	type DaemonEventCursor,
 	type DaemonOutbound,
@@ -116,6 +118,33 @@ const updateTransportReconnects = new WeakMap<DaemonClient, Promise<void>>();
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function daemonSupportsActStream(client: DaemonClient): boolean {
+	const compatibility = DAEMON_SESSION_EVENT_COMPATIBILITY.act_event;
+	const hello = client.hello;
+	return (
+		hello !== undefined &&
+		hello.protocol.version >= compatibility.minProtocol &&
+		(hello.schemaRevision ?? 0) >= compatibility.minSchemaRevision &&
+		client.supportsServerCapability(compatibility.capability)
+	);
+}
+
+function daemonAttachCapabilities(
+	client: DaemonClient,
+	supportsExtensionUi: boolean,
+	ownedSession: boolean,
+): DaemonClientCapability[] {
+	return [
+		"attach_snapshot",
+		"event_sequence",
+		...(supportsExtensionUi ? (["extension_ui"] as const) : []),
+		"slim_attach",
+		"chunked_snapshot",
+		...(ownedSession ? (["client_owned_sessions"] as const) : []),
+		...(daemonSupportsActStream(client) ? (["rlm_act_stream"] as const) : []),
+	];
 }
 
 function formatErrorSentence(error: unknown): string {
@@ -323,14 +352,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			activeSessionId: this.activeSessionId,
 			supportsExtensionUi,
 			clientId: this.clientId,
-			capabilities: [
-				"attach_snapshot",
-				"event_sequence",
-				...(supportsExtensionUi ? (["extension_ui"] as const) : []),
-				"slim_attach",
-				"chunked_snapshot",
-				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
-			],
+			capabilities: daemonAttachCapabilities(this.client, supportsExtensionUi, this.options.ownedSession === true),
 			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 			launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
 			...(this.options.ownedSession &&
@@ -1282,14 +1304,11 @@ export class DaemonAgentConnection implements AgentConnection {
 				targetActiveSessionId,
 				supportsExtensionUi,
 				clientId: this.clientId,
-				capabilities: [
-					"attach_snapshot",
-					"event_sequence",
-					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
-					"slim_attach",
-					"chunked_snapshot",
-					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
-				],
+				capabilities: daemonAttachCapabilities(
+					this.client,
+					supportsExtensionUi,
+					this.options.ownedSession === true,
+				),
 				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
 				telemetryDisabled: this.options.telemetryDisabled,
@@ -1606,6 +1625,13 @@ export class DaemonAgentConnection implements AgentConnection {
 					this.snapshotRecoveryPromises.delete(message.snapshotId);
 				}
 			}
+			return;
+		}
+		if (
+			message.type === "session_event" &&
+			message.event.type === "act_event" &&
+			!daemonSupportsActStream(this.client)
+		) {
 			return;
 		}
 		if (this.isStaleSequencedMessage(message)) {

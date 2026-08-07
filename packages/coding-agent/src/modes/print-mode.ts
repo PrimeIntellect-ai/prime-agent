@@ -7,12 +7,13 @@
  */
 
 import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ActStartEvent, ActTerminalEvent } from "../core/act-events.js";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import { type AgentAutonomousStatus, type AutonomousLimitReason, autonomousLimitReason } from "../core/autonomous.js";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
 import { killTrackedDetachedChildren } from "../utils/shell.js";
 import { InProcessAgentConnection } from "./agent-connection/in-process-agent-connection.js";
-import type { AgentConnection } from "./agent-connection/types.js";
+import type { AgentConnection, AgentConnectionSessionEvent } from "./agent-connection/types.js";
 import { latestAutonomousGateAttempt, selectHeadlessTerminalResult } from "./headless-completion.js";
 
 /**
@@ -43,6 +44,48 @@ function describeAutonomousLimit(status: AgentAutonomousStatus, reason: Autonomo
 	return `timeoutMs reached (${elapsed}/${status.limits.timeoutMs})`;
 }
 
+export const TEXT_PRINT_ACT_TERMINAL_PREFIX = "Act terminal: ";
+const TEXT_PRINT_CLOSED_ACT_MAX = 256;
+
+class TextPrintActTracker {
+	private readonly starts = new Map<string, ActStartEvent>();
+	private readonly emittedTerminals = new Set<string>();
+
+	observe(event: AgentConnectionSessionEvent): void {
+		if (event.type !== "act_event") return;
+		if (event.event === "start") {
+			this.starts.set(event.actId, event);
+			return;
+		}
+		if (event.event !== "terminal" || this.emittedTerminals.has(event.actId)) return;
+		this.emittedTerminals.add(event.actId);
+		if (this.emittedTerminals.size > TEXT_PRINT_CLOSED_ACT_MAX) {
+			const oldest = this.emittedTerminals.values().next().value;
+			if (oldest !== undefined) this.emittedTerminals.delete(oldest);
+		}
+		const start = this.starts.get(event.actId);
+		this.starts.delete(event.actId);
+		console.error(`${TEXT_PRINT_ACT_TERMINAL_PREFIX}${JSON.stringify(this.terminalRecord(event, start))}`);
+	}
+
+	private terminalRecord(terminal: ActTerminalEvent, start: ActStartEvent | undefined): object {
+		return {
+			type: "act_terminal",
+			actId: terminal.actId,
+			outerToolCallId: terminal.outerToolCallId,
+			sequence: terminal.sequence,
+			status: terminal.status,
+			prompt: start?.prompt ?? terminal.prompt,
+			promptTruncated: start?.promptTruncated ?? terminal.promptTruncated,
+			model: terminal.model,
+			cancellationCapability: terminal.cancellationCapability,
+			usage: terminal.usage,
+			...(terminal.error === undefined ? {} : { error: terminal.error }),
+			errorTruncated: terminal.errorTruncated,
+		};
+	}
+}
+
 /**
  * Run in print (single-shot) mode.
  * Sends prompts to the agent and outputs the result.
@@ -68,6 +111,7 @@ async function runPrintModeWithConnectionInternal(
 	let exitCode = 0;
 	let disposed = false;
 	let unsubscribe: (() => void) | undefined;
+	const textActTracker = new TextPrintActTracker();
 	const signalCleanupHandlers: Array<() => void> = [];
 
 	const disposeConnection = async (): Promise<void> => {
@@ -102,8 +146,9 @@ async function runPrintModeWithConnectionInternal(
 		}
 
 		unsubscribe = connection.subscribe((event) => {
-			if (mode === "json" && event.type === "session_event") {
-				writeRawStdout(`${JSON.stringify(event.event)}\n`);
+			if (event.type === "session_event") {
+				if (mode === "json") writeRawStdout(`${JSON.stringify(event.event)}\n`);
+				else textActTracker.observe(event.event);
 			}
 			if (event.type === "extension_error") {
 				console.error(`Extension error (${event.extensionPath}): ${event.error}`);

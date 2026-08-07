@@ -259,6 +259,12 @@ const image = new Image(
 );
 ```
 
+## Nested Act Execution
+
+Interactive mode correlates a supported `act_event` stream with its outer IPython component. `ActExecutionComponent` owns only actor separators, task framing, event ordering, and terminal status. It delegates assistant thinking/text to `AssistantMessageComponent` and every shared-IPython cell to `IPythonCellComponent`, the same components used by the directing model. Act has no independent labels, command summaries, folding, line counts, duration, truncation, spacing, or output renderer.
+
+The component is presentation-only. Editor submission continues through the session's ordinary steering path, and interrupt keys continue through the session's ordinary abort path. Older or unsupported connections emit no nested event and therefore render the ordinary IPython component unchanged. The reducer bounds prompts, aggregate progress, cells, Acts per root tool, and retained late terminals; truncation and omission are visible.
+
 ## Keyboard Input
 
 Use `matchesKey()` for key detection:

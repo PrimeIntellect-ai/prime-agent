@@ -4216,6 +4216,60 @@ describe("daemon mode helpers", () => {
 		).toBe(false);
 	});
 
+	it("isolates the Act stream capability per attached session without consuming ordinary event sequence", () => {
+		const client = makeClient("client", "active");
+		const actMessage: DaemonOutbound = {
+			type: "session_event",
+			activeSessionId: "active",
+			event: {
+				type: "act_event",
+				actId: "act-1",
+				outerToolCallId: "outer-tool-1",
+				sequence: 1,
+				event: "assistant_delta",
+				stream: "text",
+				text: "working",
+				textTruncated: false,
+			},
+		};
+		expect(shouldSendDaemonOutboundToClient(client, actMessage)).toBe(false);
+		setDaemonClientSessionCapabilities(client, "active", new Set(["rlm_act_stream"]));
+		setDaemonClientSessionCapabilities(client, "other", new Set());
+		expect(shouldSendDaemonOutboundToClient(client, actMessage)).toBe(true);
+		expect(shouldSendDaemonOutboundToClient(client, { ...actMessage, activeSessionId: "other" })).toBe(false);
+		expect(
+			shouldSendDaemonOutboundToClient(client, {
+				type: "session_event",
+				activeSessionId: "other",
+				event: {
+					type: "session_action_update",
+					actions: { queuedCount: 0, steering: [], followUps: [] },
+				},
+			}),
+		).toBe(true);
+
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active");
+		state.eventGeneration = "generation-1";
+		state.lastEventSequence = 7;
+		const addMeta = Reflect.get(daemon, "addSessionEventMeta").bind(daemon) as (
+			state: ActiveSessionState,
+			message: DaemonOutbound,
+		) => DaemonOutbound;
+		expect(addMeta(state, actMessage)).toEqual(actMessage);
+		expect(state.lastEventSequence).toBe(7);
+		const ordinary = addMeta(state, {
+			type: "session_event",
+			activeSessionId: "active",
+			event: { type: "turn_start" },
+		});
+		expect(ordinary).toMatchObject({ meta: { sequence: 8 } });
+		expect(state.lastEventSequence).toBe(8);
+	});
+
 	it("delivers session closure while a client is snapshotting and backpressured", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },

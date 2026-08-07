@@ -262,11 +262,18 @@ import {
 	type ThemeColor,
 	theme,
 } from "./theme/theme.js";
-import { setWorkingPulseFrame, WORKING_ICON_INTERVAL_MS } from "./theme/working-icon.js";
+import {
+	getWorkingPulseFrame,
+	setWorkingPulseFrame,
+	WORKING_ICON_INTERVAL_MS,
+	workingIconFrame,
+} from "./theme/working-icon.js";
 
 interface Expandable {
 	setExpanded(expanded: boolean): void;
 }
+
+const MAX_LATE_ACT_TERMINALS = 32;
 
 interface PendingToolCallRenderInput {
 	id: string;
@@ -953,6 +960,11 @@ export class InteractiveMode {
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private ipythonToolComponents = new Map<string, ToolExecutionComponent>();
 	private lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
+	private activeActTray: { actId: string; model: string; thinkingLevel?: string } | undefined;
+	private lateActTerminals = new Map<
+		string,
+		Extract<AgentConnectionSessionEvent, { type: "act_event" }> & { event: "terminal" }
+	>();
 	private pendingToolCreations = new Set<string>();
 	private startedToolCalls = new Set<string>();
 	private pendingToolGeneration = 0;
@@ -2858,6 +2870,8 @@ export class InteractiveMode {
 		this.renderRecap();
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
+		this.lateActTerminals?.clear();
+		this.activeActTray = undefined;
 		this.resetSubagentSummary();
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
@@ -2952,6 +2966,14 @@ export class InteractiveMode {
 		);
 	}
 
+	private getLateActTerminals(): Map<
+		string,
+		Extract<AgentConnectionSessionEvent, { type: "act_event" }> & { event: "terminal" }
+	> {
+		if (!this.lateActTerminals) this.lateActTerminals = new Map();
+		return this.lateActTerminals;
+	}
+
 	private registerIpythonToolComponent(toolName: string, toolCallId: string, component: ToolExecutionComponent): void {
 		if (toolName !== "ipython") {
 			return;
@@ -2959,6 +2981,12 @@ export class InteractiveMode {
 		this.ipythonToolComponents.set(toolCallId, component);
 		for (const lateMessage of this.lateIpythonSentAgentMessages.get(toolCallId) ?? []) {
 			component.appendSentAgentMessage(lateMessage);
+		}
+		const terminals = this.getLateActTerminals();
+		for (const [key, event] of terminals) {
+			if (event.outerToolCallId !== toolCallId) continue;
+			component.appendActEvent(event);
+			terminals.delete(key);
 		}
 	}
 
@@ -5479,6 +5507,33 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
+			case "act_event": {
+				if (event.event === "start") {
+					this.activeActTray = {
+						actId: event.actId,
+						model: event.model.name?.trim() || event.model.id,
+						thinkingLevel: event.thinkingLevel,
+					};
+					this.subagentSummaryLine.invalidate();
+				} else if (event.event === "terminal" && this.activeActTray?.actId === event.actId) {
+					this.activeActTray = undefined;
+					this.subagentSummaryLine.invalidate();
+				}
+				const component = this.ipythonToolComponents.get(event.outerToolCallId);
+				if (component) {
+					component.appendActEvent(event);
+				} else if (event.event === "terminal") {
+					const terminals = this.getLateActTerminals();
+					terminals.set(`${event.outerToolCallId}:${event.actId}`, event);
+					if (terminals.size > MAX_LATE_ACT_TERMINALS) {
+						const oldest = terminals.keys().next().value;
+						if (oldest !== undefined) terminals.delete(oldest);
+					}
+				}
+				this.ui.requestRender();
+				break;
+			}
+
 			case "tool_execution_start": {
 				this.startedToolCalls.add(event.toolCallId);
 				let component = this.pendingTools.get(event.toolCallId);
@@ -5953,11 +6008,21 @@ export class InteractiveMode {
 		const modelLabel = this.getModelTrayLabel();
 		const hasChildren = this.options.sessionHasChildren === true || (this.subagentSnapshots?.size ?? 0) > 0;
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
+		const actLabel = this.getActTrayLabel();
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
+		return [agentsHint, depthLabel, modelLabel, actLabel, shortcutsHint]
 			.filter((label): label is string => label !== undefined)
 			.join("  ");
+	}
+
+	private getActTrayLabel(): string | undefined {
+		const active = this.activeActTray;
+		if (!active) return undefined;
+		const parts = [active.model];
+		if (active.thinkingLevel && active.thinkingLevel !== "off") parts.push(active.thinkingLevel);
+		const pulse = theme.fg("bashMode", workingIconFrame(getWorkingPulseFrame()));
+		return `${theme.fg("dim", "│")}  ${pulse} ${theme.fg("accent", `act: ${parts.join(" • ")}`)}`;
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -6375,6 +6440,7 @@ export class InteractiveMode {
 		const messagesToRender = options.limitTranscript ? initialRenderMessages(transcriptMessages) : transcriptMessages;
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
+		this.lateActTerminals?.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		const toolNames: string[] = [];
 		for (const message of messagesToRender) {

@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ActProjectionEvent } from "../src/core/act-events.js";
 import type { AgentAutonomousStatus } from "../src/core/autonomous.js";
 import {
 	createCompactionOutcomeMessage,
@@ -9,7 +10,7 @@ import {
 } from "../src/core/messages.js";
 import type { SessionShutdownEvent } from "../src/index.js";
 import { selectHeadlessTerminalResult } from "../src/modes/headless-completion.js";
-import { runPrintMode } from "../src/modes/print-mode.js";
+import { runPrintMode, TEXT_PRINT_ACT_TERMINAL_PREFIX } from "../src/modes/print-mode.js";
 
 const output = vi.hoisted(() => ({ write: vi.fn(), flush: vi.fn(async () => {}) }));
 vi.mock("../src/core/output-guard.js", () => ({
@@ -53,6 +54,69 @@ type FakeRuntimeHost = {
 	dispose: ReturnType<typeof vi.fn>;
 	setRebindSession: ReturnType<typeof vi.fn>;
 };
+
+const actUsage = {
+	input: 3,
+	output: 5,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 8,
+	cost: { input: 0.003, output: 0.005, cacheRead: 0, cacheWrite: 0, total: 0.008 },
+};
+
+function createActEvents(actId: string, status: "done" | "error" | "cancelled"): ActProjectionEvent[] {
+	const outerToolCallId = `outer-${actId}`;
+	return [
+		{
+			type: "act_event",
+			actId,
+			outerToolCallId,
+			sequence: 1,
+			event: "start",
+			prompt: `prompt ${actId}`,
+			promptTruncated: false,
+			model: { provider: "test", id: "test-model" },
+			cancellationCapability: "posix-managed",
+		},
+		{
+			type: "act_event",
+			actId,
+			outerToolCallId,
+			sequence: 2,
+			event: "assistant_delta",
+			stream: "text",
+			text: `working ${actId}`,
+			textTruncated: false,
+		},
+		{
+			type: "act_event",
+			actId,
+			outerToolCallId,
+			sequence: 3,
+			event: "terminal",
+			status,
+			prompt: `prompt ${actId}`,
+			promptTruncated: false,
+			model: { provider: "test", id: "test-model" },
+			cancellationCapability: "posix-managed",
+			usage: actUsage,
+			...(status === "error" ? { error: "provider failed" } : {}),
+			errorTruncated: false,
+		},
+	];
+}
+
+function emitDuringPrompt(runtimeHost: FakeRuntimeHost, events: ActProjectionEvent[]): void {
+	let listener: ((event: ActProjectionEvent) => void | Promise<void>) | undefined;
+	runtimeHost.session.subscribe.mockImplementation((next: typeof listener) => {
+		listener = next;
+		return () => {};
+	});
+	runtimeHost.session.promptAndWait.mockImplementation(async () => {
+		if (!listener) throw new Error("print mode did not subscribe before prompting");
+		for (const event of events) await listener(event);
+	});
+}
 
 function createAssistantMessage(options?: {
 	text?: string;
@@ -284,6 +348,108 @@ describe("runPrintMode", () => {
 		expect(session.promptAndWait).toHaveBeenCalledWith("hello", {});
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	it("emits ordered Act envelopes unchanged in JSON mode", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "sol answer" }));
+		const events = [
+			...createActEvents("done-act", "done"),
+			...createActEvents("error-act", "error"),
+			...createActEvents("cancel-act", "cancelled"),
+		];
+		emitDuringPrompt(runtimeHost, events);
+		output.write.mockClear();
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "json",
+			initialMessage: "project acts",
+		});
+
+		expect(exitCode).toBe(0);
+		const records = output.write.mock.calls.map(([line]) => JSON.parse(String(line)) as ActProjectionEvent);
+		expect(records).toEqual(events);
+		expect(records.map((event) => event.sequence)).toEqual([1, 2, 3, 1, 2, 3, 1, 2, 3]);
+		expect(records.filter((event) => event.event === "terminal").map((event) => event.status)).toEqual([
+			"done",
+			"error",
+			"cancelled",
+		]);
+		expect(JSON.stringify(records)).not.toContain('"value"');
+	});
+
+	it.each(["done", "error", "cancelled"] as const)(
+		"prints one compact %s Act terminal to stderr without changing final stdout or exit status",
+		async (status) => {
+			const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "sol answer" }));
+			const events = createActEvents(`${status}-act`, status);
+			emitDuringPrompt(runtimeHost, [...events, events.at(-1)!]);
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			output.write.mockClear();
+
+			const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+				initialMessage: "project act terminal",
+			});
+
+			expect(exitCode).toBe(0);
+			expect(output.write.mock.calls).toEqual([["sol answer\n"]]);
+			expect(errorSpy).toHaveBeenCalledOnce();
+			const line = String(errorSpy.mock.calls[0]?.[0]);
+			expect(line.startsWith(TEXT_PRINT_ACT_TERMINAL_PREFIX)).toBe(true);
+			const record = JSON.parse(line.slice(TEXT_PRINT_ACT_TERMINAL_PREFIX.length)) as Record<string, unknown>;
+			expect(record).toMatchObject({
+				type: "act_terminal",
+				actId: `${status}-act`,
+				outerToolCallId: `outer-${status}-act`,
+				sequence: 3,
+				status,
+				prompt: `prompt ${status}-act`,
+				promptTruncated: false,
+				model: { provider: "test", id: "test-model" },
+				cancellationCapability: "posix-managed",
+				usage: { totalTokens: 8 },
+				errorTruncated: false,
+			});
+			expect(record).not.toHaveProperty("value");
+		},
+	);
+
+	it("prints a self-contained terminal when text mode attaches after the Act start", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "sol answer" }));
+		const terminal = createActEvents("late-act", "done").at(-1)!;
+		emitDuringPrompt(runtimeHost, [terminal]);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		output.write.mockClear();
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "late attachment",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(output.write.mock.calls).toEqual([["sol answer\n"]]);
+		const line = String(errorSpy.mock.calls[0]?.[0]);
+		expect(JSON.parse(line.slice(TEXT_PRINT_ACT_TERMINAL_PREFIX.length))).toMatchObject({
+			type: "act_terminal",
+			actId: "late-act",
+			prompt: "prompt late-act",
+			status: "done",
+		});
+	});
+
+	it("preserves unsupported text fallback without an Act stderr record", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "ordinary answer" }));
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		output.write.mockClear();
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "ordinary prompt",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(output.write.mock.calls).toEqual([["ordinary answer\n"]]);
+		expect(errorSpy).not.toHaveBeenCalled();
 	});
 
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {

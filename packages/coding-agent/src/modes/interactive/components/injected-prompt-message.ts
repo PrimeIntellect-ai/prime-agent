@@ -112,8 +112,9 @@ export class InjectedPromptMessageComponent extends Container {
 		this.header.setText(this.headerText());
 		this.content.addChild(this.header);
 		if (this.expanded && this.message.customType !== IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
+			const text = readCustomText(this.message);
 			this.content.addChild(
-				new Markdown(readCustomText(this.message), 1, 0, this.markdownTheme, {
+				new Markdown(text, 1, 0, this.markdownTheme, {
 					color: (text: string) => theme.fg("customMessageText", text),
 				}),
 			);

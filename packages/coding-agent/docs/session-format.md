@@ -279,6 +279,31 @@ interface ChildUsageAttributionEntry extends SessionEntryBase {
 
 Reload applies `aggregateUsage` to the target assistant message. Context-tree accounting can then subtract `childUsage` when reporting the parent node's own usage.
 
+### ActStartEntry and ActTerminalEntry
+
+A persisted root records the retained Act lane without placing its messages in the root model context:
+
+```typescript
+interface ActStartEntry extends SessionEntryBase {
+  type: "act_start";
+  actId: string;
+  usageBaseline: Usage;  // Cumulative private-lane usage before this Act
+}
+
+interface ActTerminalEntry extends SessionEntryBase {
+  type: "act_terminal";
+  actId: string;
+  status: "done" | "cancelled" | "error" | "interrupted";
+  usage: Usage;          // Selected low-level model delta for this Act
+  model?: { provider: string; id: string };
+  error?: string;        // Bounded host/provider description
+}
+```
+
+The terminal never contains the returned Python object. On resume, a current-branch start without a terminal is closed once as `interrupted`; the recorded baseline recovers persisted private-lane usage without replaying work. These entries are additive v3 bookkeeping that older readers ignore while traversing the same entry chain, so the session version does not change.
+
+The private lane messages use an ordinary session file at `session-artifacts/<root-session-id>/act/session.jsonl`. They are restored only into the private Act session, whose accepted model changes use ordinary `model_change` entries. Root totals add terminal Act usage separately, leaving Sol's assistant usage and context-window measurement unchanged.
+
 ### CustomMessageEntry
 
 Extension-injected messages that DO participate in LLM context.
@@ -350,7 +375,7 @@ Entries form a tree:
    - Then messages after compaction
 4. Converts `BranchSummaryEntry` and `CustomMessageEntry` to appropriate message formats
 
-Bookkeeping entries such as child usage attribution, session lifecycle, agent status, and git state are ignored when building model context.
+Bookkeeping entries such as child usage attribution, Act lifecycle, session lifecycle, agent status, and git state are ignored when building model context.
 
 ## Parsing Example
 

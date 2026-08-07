@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import type { ActStartEvent } from "../src/core/act-events.js";
 import { createManualContinueMessage, MANUAL_CONTINUE_PROMPT } from "../src/core/messages.js";
 import { MissingSessionCwdError } from "../src/core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../src/core/session-import-errors.js";
@@ -628,6 +629,20 @@ function createConnectionState(activeSessionId: string, sessionId: string): Agen
 		scopedModels: [],
 		activeToolNames: ["ipython"],
 		contextUsage: undefined,
+	};
+}
+
+function actStartEvent(): ActStartEvent {
+	return {
+		type: "act_event",
+		actId: "act-1",
+		outerToolCallId: "outer-tool-1",
+		sequence: 1,
+		event: "start",
+		prompt: "inspect",
+		promptTruncated: false,
+		model: { provider: "test", id: "test-model" },
+		cancellationCapability: "posix-managed",
 	};
 }
 
@@ -2850,6 +2865,138 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "attach",
 			resumeCursor: { generation: "generation-new", sequence: 1 },
+		});
+	});
+
+	it("negotiates the Act stream in both version directions without disturbing ordinary sequence", async () => {
+		const oldDaemon = new FakeDaemonClient();
+		const oldConnection = new DaemonAgentConnection(asDaemonClient(oldDaemon), "active-1");
+		const oldEvents: AgentConnectionEvent[] = [];
+		oldConnection.subscribe((event) => {
+			oldEvents.push(event);
+		});
+		await oldConnection.attach();
+		expect(oldDaemon.requests[0]).toMatchObject({ type: "attach" });
+		expect((oldDaemon.requests[0] as Extract<DaemonCommand, { type: "attach" }>).capabilities).not.toContain(
+			"rlm_act_stream",
+		);
+
+		oldDaemon.emitMessage({ type: "session_event", activeSessionId: "active-1", event: actStartEvent() });
+		oldDaemon.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "outer-tool-1",
+				toolName: "ipython",
+				args: { code: "await rlm.act('inspect')" },
+			},
+			meta: {
+				id: "generation-active-1:13",
+				protocol: DAEMON_PROTOCOL_INFO,
+				activeSessionId: "active-1",
+				sequence: 13,
+				cursor: { generation: "generation-active-1", sequence: 13 },
+				emittedAt: "2026-01-01T00:00:00.000Z",
+			},
+		});
+		expect(oldEvents).toEqual([
+			{
+				type: "session_event",
+				event: expect.objectContaining({ type: "tool_execution_start", toolCallId: "outer-tool-1" }),
+			},
+		]);
+
+		const newDaemon = new FakeDaemonClient();
+		newDaemon.serverCapabilities.add("rlm_act_stream");
+		const newConnection = new DaemonAgentConnection(asDaemonClient(newDaemon), "active-1");
+		const newEvents: AgentConnectionEvent[] = [];
+		newConnection.subscribe((event) => {
+			newEvents.push(event);
+		});
+		await newConnection.attach();
+		expect((newDaemon.requests[0] as Extract<DaemonCommand, { type: "attach" }>).capabilities).toContain(
+			"rlm_act_stream",
+		);
+		newDaemon.emitMessage({ type: "session_event", activeSessionId: "active-1", event: actStartEvent() });
+		newDaemon.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "outer-tool-1",
+				toolName: "ipython",
+				args: { code: "await rlm.act('inspect')" },
+			},
+			meta: {
+				id: "generation-active-1:13",
+				protocol: DAEMON_PROTOCOL_INFO,
+				activeSessionId: "active-1",
+				sequence: 13,
+				cursor: { generation: "generation-active-1", sequence: 13 },
+				emittedAt: "2026-01-01T00:00:00.000Z",
+			},
+		});
+		expect(newEvents).toEqual([
+			{ type: "session_event", event: actStartEvent() },
+			{
+				type: "session_event",
+				event: expect.objectContaining({ type: "tool_execution_start", toolCallId: "outer-tool-1" }),
+			},
+		]);
+		expect(newDaemon.requests).toHaveLength(1);
+		newDaemon.emitMessage({
+			type: "session_replaced",
+			activeSessionId: "active-1",
+			state: createConnectionState("active-1", "session-replaced"),
+			messages: [],
+			meta: {
+				id: "generation-active-1:14",
+				protocol: DAEMON_PROTOCOL_INFO,
+				activeSessionId: "active-1",
+				sequence: 14,
+				cursor: { generation: "generation-active-1", sequence: 14 },
+				emittedAt: "2026-01-01T00:00:00.000Z",
+			},
+		});
+		newDaemon.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: { ...actStartEvent(), actId: "act-after-replacement" },
+		});
+		expect(newEvents.slice(-2)).toEqual([
+			{
+				type: "session_replaced",
+				state: createConnectionState("active-1", "session-replaced"),
+				messages: [],
+			},
+			{
+				type: "session_event",
+				event: { ...actStartEvent(), actId: "act-after-replacement" },
+			},
+		]);
+
+		newDaemon.serverCapabilities.delete("rlm_act_stream");
+		await newConnection.attach();
+		expect((newDaemon.requests.at(-1) as Extract<DaemonCommand, { type: "attach" }>).capabilities).not.toContain(
+			"rlm_act_stream",
+		);
+		newDaemon.emitMessage({ type: "session_event", activeSessionId: "active-1", event: actStartEvent() });
+		expect(newEvents).toHaveLength(4);
+
+		oldDaemon.serverCapabilities.add("rlm_act_stream");
+		await oldConnection.attach();
+		expect((oldDaemon.requests.at(-1) as Extract<DaemonCommand, { type: "attach" }>).capabilities).toContain(
+			"rlm_act_stream",
+		);
+		oldDaemon.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: { ...actStartEvent(), actId: "act-after-reconnect" },
+		});
+		expect(oldEvents.at(-1)).toEqual({
+			type: "session_event",
+			event: { ...actStartEvent(), actId: "act-after-reconnect" },
 		});
 	});
 

@@ -8,6 +8,7 @@ import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 
 interface SupervisorHarness {
 	workers: Map<string, unknown>;
+	clients: Set<DaemonSocketClient>;
 	forwardToWorker(worker: unknown, command: DaemonCommand, timeoutMs?: number): Promise<DaemonResponse>;
 	handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonResponse | undefined>;
 	handleWorkerFrame(worker: unknown, frame: unknown): void;
@@ -38,6 +39,92 @@ function worker(lifecycle: "ready" | "recovering", connected = true) {
 }
 
 describe("daemon supervisor heartbeat aggregation", () => {
+	it("forwards Act events only to opted-in clients for the addressed session", () => {
+		const supervisor = createSupervisorHarness();
+		const writes = (capabilitiesByActiveSessionId: Map<string, Set<"rlm_act_stream">>) => {
+			const values: string[] = [];
+			const client = {
+				id: `client-${supervisor.clients.size}`,
+				socket: {
+					destroyed: false,
+					write: (value: Uint8Array) => {
+						values.push(Buffer.from(value).toString("utf8"));
+						return true;
+					},
+				},
+				attachedActiveSessionIds: new Set(["active-1"]),
+				detachInput: vi.fn(),
+				supportsExtensionUi: false,
+				capabilities: new Set(),
+				capabilitiesByActiveSessionId,
+			} as unknown as DaemonSocketClient;
+			supervisor.clients.add(client);
+			return values;
+		};
+		const supported = writes(new Map([["active-1", new Set(["rlm_act_stream"])]]));
+		const unsupported = writes(new Map([["active-1", new Set()]]));
+		const wrongSession = writes(new Map([["other", new Set(["rlm_act_stream"])]]));
+		const message = {
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "act_event",
+				actId: "act-1",
+				outerToolCallId: "outer-tool-1",
+				sequence: 1,
+				event: "assistant_delta",
+				stream: "text",
+				text: "working",
+				textTruncated: false,
+			},
+		};
+		supervisor.handleWorkerFrame(
+			{
+				snapshotCache: new Map(),
+				snapshotLoads: new Map(),
+				transcriptCaches: new Map(),
+			},
+			{
+				header: {
+					kind: "outbound",
+					outboundType: "session_event",
+					activeSessionId: "active-1",
+					sessionEventType: "act_event",
+					payloadEncoding: "jsonl",
+				},
+				payload: Buffer.from(`${JSON.stringify(message)}\n`),
+			},
+		);
+		expect(supported).toEqual([`${JSON.stringify(message)}\n`]);
+		expect(unsupported).toEqual([]);
+		expect(wrongSession).toEqual([]);
+	});
+	it("unions worker subscriptions from capabilities on the same session only", () => {
+		const supervisor = createSupervisorHarness();
+		const client = {
+			attachedActiveSessionIds: new Set(["active-1", "active-2"]),
+			capabilities: new Set(),
+			capabilitiesByActiveSessionId: new Map([
+				["active-1", new Set(["rlm_act_stream"])],
+				["active-2", new Set(["extension_ui"])],
+			]),
+		} as unknown as DaemonSocketClient;
+		supervisor.clients.add(client);
+		const subscription = Reflect.get(supervisor, "workerSubscriptionCapabilities").bind(supervisor) as (
+			activeSessionId: string,
+		) => { capabilities: string[]; supportsExtensionUi: boolean };
+		expect(subscription("active-1")).toEqual({
+			capabilities: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot", "rlm_act_stream"],
+			supportsExtensionUi: false,
+		});
+		expect(subscription("active-2")).toEqual({
+			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			supportsExtensionUi: true,
+		});
+		client.attachedActiveSessionIds.delete("active-1");
+		expect(subscription("active-1").capabilities).not.toContain("rlm_act_stream");
+	});
+
 	it("uses the last complete worker snapshot during recovery", async () => {
 		const supervisor = createSupervisorHarness();
 		const first = worker("ready");

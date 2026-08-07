@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
+from ._act import _ActCellResult, _ActInterrupted, _run_cells, done
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 try:
@@ -22,6 +24,7 @@ except Exception:  # pragma: no cover - only available in kernels
     get_ipython = None  # type: ignore[assignment]
 
 HOST_COMM_TARGET = "host.request"
+ACT_CANCELLATION_CAPABILITY = "posix-managed" if os.name == "posix" else "cooperative-only"
 RLM_SERVICE_TIERS = ("auto", "default", "flex", "scale", "priority")
 
 
@@ -29,6 +32,15 @@ def _validate_service_tier(value: Any) -> None:
     if value is None or value in RLM_SERVICE_TIERS:
         return
     raise ValueError(f"service_tier must be one of {', '.join(RLM_SERVICE_TIERS)} or None")
+
+
+class ActError(RuntimeError):
+    """An Act ended without an accepted terminal value."""
+
+
+class ActCancelledError(ActError):
+    """The host accepted Act cancellation under ACT_CANCELLATION_CAPABILITY."""
+
 
 
 @dataclass(frozen=True)
@@ -88,6 +100,140 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
         session_dir=Path(session_dir),
         model=model,
     )
+
+
+class _ActExchange:
+    def __init__(self, prompt: str, model: str | None = None) -> None:
+        if Comm is None:
+            raise ActError("Jupyter comm support is unavailable in this kernel")
+        _install_control_comm_handlers()
+        self._loop = asyncio.get_running_loop()
+        self._messages: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._cancelled = asyncio.Event()
+        self._closed = False
+        self._comm = Comm(target_name=HOST_COMM_TARGET, primary=False)
+        self._comm.on_msg(self._on_message)
+        self._comm.on_close(self._on_close)
+        payload: dict[str, str] = {"prompt": prompt, "type": "rlm.act"}
+        if model is not None:
+            payload["model"] = model
+        self._comm.open(data=payload)
+
+    def _on_message(self, message: dict[str, Any]) -> None:
+        content = message.get("content", {})
+        reply = content.get("data", {}) if isinstance(content, dict) else {}
+        if not isinstance(reply, dict):
+            return
+
+        def deliver() -> None:
+            if not self._closed:
+                if reply.get("status") == "aborted" or (
+                    reply.get("status") == "ok" and reply.get("outcome") == "cancelled"
+                ):
+                    self._cancelled.set()
+                self._messages.put_nowait(reply)
+
+        self._loop.call_soon_threadsafe(deliver)
+
+    def _on_close(self, _message: dict[str, Any]) -> None:
+        def deliver() -> None:
+            if not self._closed:
+                self._cancelled.set()
+                self._messages.put_nowait({"status": "aborted"})
+
+        self._loop.call_soon_threadsafe(deliver)
+
+    async def wait_cancelled(self) -> None:
+        await self._cancelled.wait()
+
+    async def cells(self) -> AsyncIterator[str]:
+        while True:
+            message = await self._messages.get()
+            status = message.get("status")
+            if status == "event" and message.get("type") == "cell":
+                code = message.get("code")
+                if not isinstance(code, str):
+                    raise ActError("Act returned a cell event without string code")
+                yield code
+                continue
+            if status == "ok":
+                if message.get("outcome") == "cancelled":
+                    raise _ActInterrupted
+                return
+            if status == "error":
+                raise ActError(str(message.get("error") or "Act host failed"))
+            if status == "aborted":
+                raise _ActInterrupted
+            raise ActError(f"Act returned an unexpected message: {message!r}")
+
+    async def send_cell_result(self, result: _ActCellResult) -> None:
+        self._comm.send(
+            data={
+                "type": "cell_result",
+                "durationMs": result.duration_ms,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "result": result.result,
+                "error": result.error,
+            }
+        )
+
+    async def acknowledge_done(self) -> None:
+        self._comm.send(data={"type": "done"})
+        message = await self._messages.get()
+        status = message.get("status")
+        if status == "ok" and message.get("outcome") == "done":
+            return
+        if status == "ok" and message.get("outcome") == "cancelled":
+            raise _ActInterrupted
+        if status == "error":
+            raise ActError(str(message.get("error") or "Act completion failed"))
+        if status == "aborted":
+            raise _ActInterrupted
+        raise ActError(f"Act completion returned an unexpected message: {message!r}")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._comm.close()
+
+
+async def act(prompt: str, model: str | None = None) -> Any:
+    """Run one retained low-level task with an optional ordinary model selector.
+
+    Cancellation always aborts provider work and cooperative awaited Python.
+    ``ACT_CANCELLATION_CAPABILITY == "posix-managed"`` additionally covers a
+    correlated synchronous inner-cell interrupt and managed ``%%bash`` process
+    groups. ``"cooperative-only"`` does not promise to stop synchronous Python
+    or blocking shell work before it returns.
+    """
+    if not isinstance(prompt, str):
+        raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty")
+    if model is not None and not isinstance(model, str):
+        raise TypeError(f"model must be str or None, got {type(model).__name__}")
+    if isinstance(model, str):
+        model = model.strip()
+        if not model:
+            raise ValueError("model must not be empty")
+    exchange = _ActExchange(prompt, model)
+    try:
+        return await _run_cells(
+            exchange.cells(),
+            cancel=exchange.wait_cancelled(),
+            on_cell_result=exchange.send_cell_result,
+            on_done=exchange.acknowledge_done,
+        )
+    except _ActInterrupted as error:
+        raise ActCancelledError("Act was cancelled") from error
+    except ActError:
+        raise
+    except RuntimeError as error:
+        raise ActError(str(error)) from error
+    finally:
+        exchange.close()
 
 
 async def host_request(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -309,8 +455,13 @@ _harness_state = _HarnessProxy()
 
 
 class _RLMCallable:
+    ACT_CANCELLATION_CAPABILITY = ACT_CANCELLATION_CAPABILITY
     harness = _harness_state
     get_harness_state = staticmethod(get_harness_state)
+    done = staticmethod(done)
+
+    async def act(self, prompt: str, model: str | None = None) -> Any:
+        return await act(prompt, model)
 
     async def run(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
@@ -340,6 +491,9 @@ class _CallableModule(types.ModuleType):
 sys.modules[__name__].__class__ = _CallableModule
 
 __all__ = [
+    "ACT_CANCELLATION_CAPABILITY",
+    "ActCancelledError",
+    "ActError",
     "HarnessEntry",
     "HarnessScope",
     "HarnessState",
@@ -350,7 +504,9 @@ __all__ = [
     "RLMSpawnHandle",
     "RLMSubagent",
     "RefinementEvent",
+    "act",
     "delete_subagent",
+    "done",
     "find_models",
     "get_harness_state",
     "harness",

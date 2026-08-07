@@ -5,7 +5,7 @@
  * Responses and events are emitted as JSON lines on stdout.
  */
 
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
@@ -20,7 +20,11 @@ import type { GoalState } from "../../core/goals.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import type { AgentConnectionHeartbeat, AgentConnectionSourceInfo } from "../agent-connection/types.js";
+import type {
+	AgentConnectionHeartbeat,
+	AgentConnectionSessionEvent,
+	AgentConnectionSourceInfo,
+} from "../agent-connection/types.js";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -352,5 +356,5 @@ export type RpcExtensionUIResponse =
 export type RpcCommandType = RpcCommand["type"];
 
 export type RpcObservedSessionEvent =
-	| { type: "observed_session_event"; activeSessionId: string; event: AgentEvent }
+	| { type: "observed_session_event"; activeSessionId: string; event: AgentConnectionSessionEvent }
 	| { type: "observed_session_closed"; activeSessionId: string; error?: string };

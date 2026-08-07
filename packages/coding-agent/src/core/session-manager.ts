@@ -45,9 +45,9 @@ const SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS = 256;
 const SESSION_STREAMING_LOAD_THRESHOLD_BYTES = 128 * 1024 * 1024;
 const SESSION_ASYNC_PARSE_YIELD_BYTES = 4 * 1024 * 1024;
 
-// Entry types that can represent user intent (vs. daemon bookkeeping like
-// session_state/agent_status/git_state/child_usage_attributed). Used by
-// hasUserContent to decide whether a message-less draft is safe to discard.
+// Entry types that can represent user intent. Runtime bookkeeping such as
+// session state, agent status, git state, child usage, and Act lifecycle does
+// not. Used by hasUserContent to decide whether a message-less draft is safe to discard.
 const CONTENT_ENTRY_TYPES = new Set([
 	"message",
 	"custom_message",
@@ -175,6 +175,26 @@ export interface ChildUsageAttributionEntry extends SessionEntryBase {
 	origin?: "spawn_task" | "agent_message" | "direct_user";
 }
 
+/** Start of one retained-lane Act. The usage baseline makes crash recovery auditable. */
+export interface ActStartEntry extends SessionEntryBase {
+	type: "act_start";
+	actId: string;
+	usageBaseline: Usage;
+}
+
+export type ActTerminalStatus = "done" | "cancelled" | "error" | "interrupted";
+
+/** Terminal fact for one Act. Python values and executable work are never persisted. */
+export interface ActTerminalEntry extends SessionEntryBase {
+	type: "act_terminal";
+	actId: string;
+	status: ActTerminalStatus;
+	usage: Usage;
+	model?: { provider: string; id: string };
+	error?: string;
+}
+
+/** Label entry for user-defined bookmarks/markers on entries. */
 export interface LabelEntry extends SessionEntryBase {
 	type: "label";
 	targetId: string;
@@ -232,6 +252,8 @@ export type SessionEntry =
 	| BranchSummaryEntry
 	| CustomEntry
 	| ChildUsageAttributionEntry
+	| ActStartEntry
+	| ActTerminalEntry
 	| CustomMessageEntry
 	| LabelEntry
 	| SessionInfoEntry
@@ -1409,7 +1431,11 @@ export class SessionManager {
 		if (!this.persist || !this.sessionFile) return;
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		const shouldPersistWithoutAssistant = entry.type === "session_state" || entry.type === "session_info";
+		const shouldPersistWithoutAssistant =
+			entry.type === "session_state" ||
+			entry.type === "session_info" ||
+			entry.type === "act_start" ||
+			entry.type === "act_terminal";
 		if (!hasAssistant && !shouldPersistWithoutAssistant) {
 			this.flushed = false;
 			return;
@@ -1550,6 +1576,43 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Append a retained-lane Act start fact. Returns entry id. */
+	appendActStart(actId: string, usageBaseline: Usage): string {
+		const entry: ActStartEntry = {
+			type: "act_start",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			actId,
+			usageBaseline: cloneUsage(usageBaseline),
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a retained-lane Act terminal fact. Returns entry id. */
+	appendActTerminal(
+		actId: string,
+		status: ActTerminalStatus,
+		usage: Usage,
+		options?: { model?: { provider: string; id: string }; error?: string },
+	): string {
+		const entry: ActTerminalEntry = {
+			type: "act_terminal",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			actId,
+			status,
+			usage: cloneUsage(usage),
+			...(options?.model ? { model: { ...options.model } } : {}),
+			...(options?.error ? { error: options.error } : {}),
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a session info entry (e.g., display name). Returns entry id. */
 	appendSessionInfo(name: string): string {
 		const entry: SessionInfoEntry = {
 			type: "session_info",
@@ -1601,7 +1664,7 @@ export class SessionManager {
 
 	/**
 	 * True when the session holds user-meaningful persisted content, as opposed to
-	 * only daemon-written bookkeeping (session_state, agent_status, git_state) or
+	 * only runtime bookkeeping (session_state, agent_status, git_state, Act lifecycle) or
 	 * the default model/thinking entries every new session is created with. Used by
 	 * the daemon discard guard to decide whether a message-less draft is safe to
 	 * delete (that guard always also requires zero messages).

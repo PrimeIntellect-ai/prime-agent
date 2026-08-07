@@ -346,6 +346,16 @@ describe("InProcessAgentConnection", () => {
 			type: "session_action_update",
 			actions: { queuedCount: 2, steering: ["new"], followUps: ["later"] },
 		});
+		newSession.emit({
+			type: "act_event",
+			actId: "act-1",
+			outerToolCallId: "outer-tool-1",
+			sequence: 2,
+			event: "assistant_delta",
+			stream: "text",
+			text: "working",
+			textTruncated: false,
+		});
 
 		expect(events).toEqual([
 			{
@@ -353,6 +363,19 @@ describe("InProcessAgentConnection", () => {
 				event: {
 					type: "session_action_update",
 					actions: { queuedCount: 2, steering: ["new"], followUps: ["later"] },
+				},
+			},
+			{
+				type: "session_event",
+				event: {
+					type: "act_event",
+					actId: "act-1",
+					outerToolCallId: "outer-tool-1",
+					sequence: 2,
+					event: "assistant_delta",
+					stream: "text",
+					text: "working",
+					textTruncated: false,
 				},
 			},
 		]);

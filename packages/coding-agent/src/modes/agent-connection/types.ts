@@ -1,5 +1,6 @@
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, ServiceTier, TextContent, Transport, Usage } from "@earendil-works/pi-ai";
+import type { ActProjectionEvent } from "../../core/act-events.js";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AuthSourceToken } from "../../core/auth-storage.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
@@ -202,6 +203,21 @@ export interface AgentConnectionChildUsageAttributionEntry extends AgentConnecti
 	origin?: "spawn_task" | "agent_message" | "direct_user";
 }
 
+export interface AgentConnectionActStartEntry extends AgentConnectionSessionEntryBase {
+	type: "act_start";
+	actId: string;
+	usageBaseline: Usage;
+}
+
+export interface AgentConnectionActTerminalEntry extends AgentConnectionSessionEntryBase {
+	type: "act_terminal";
+	actId: string;
+	status: "done" | "cancelled" | "error" | "interrupted";
+	usage: Usage;
+	model?: { provider: string; id: string };
+	error?: string;
+}
+
 export interface AgentConnectionCustomMessageEntry extends AgentConnectionSessionEntryBase {
 	type: "custom_message";
 	customType: string;
@@ -249,6 +265,8 @@ export type AgentConnectionSessionEntry =
 	| AgentConnectionBranchSummaryEntry
 	| AgentConnectionCustomEntry
 	| AgentConnectionChildUsageAttributionEntry
+	| AgentConnectionActStartEntry
+	| AgentConnectionActTerminalEntry
 	| AgentConnectionCustomMessageEntry
 	| AgentConnectionLabelEntry
 	| AgentConnectionSessionInfoEntry
@@ -574,6 +592,7 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 
 export type AgentConnectionSessionEvent =
 	| AgentEvent
+	| ActProjectionEvent
 	| { type: "ipython_sent_agent_message"; toolCallId: string; message: KernelSentAgentMessage }
 	| { type: "session_action_update"; actions: SessionActionSnapshot }
 	| {

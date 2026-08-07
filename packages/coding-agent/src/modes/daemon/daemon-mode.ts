@@ -168,6 +168,7 @@ import {
 	type DaemonSessionSnapshot,
 	type DaemonUpdateRestartManifest,
 	type DaemonUpdateRestartSession,
+	daemonClientSupportsSessionEvent,
 	failure,
 	isDaemonCommandEnvelope,
 	isDaemonDialogExtensionUiRequest,
@@ -7551,7 +7552,7 @@ type SequencedDaemonOutbound = Extract<
 
 function isSequencedSessionOutbound(message: DaemonOutbound): message is SequencedDaemonOutbound {
 	return (
-		message.type === "session_event" ||
+		(message.type === "session_event" && message.event.type !== "act_event") ||
 		message.type === "session_status" ||
 		message.type === "session_replaced" ||
 		message.type === "session_resynced" ||
@@ -7562,6 +7563,15 @@ function isSequencedSessionOutbound(message: DaemonOutbound): message is Sequenc
 }
 
 export function shouldSendDaemonOutboundToClient(client: DaemonSocketClient, message: DaemonOutbound): boolean {
+	if (
+		message.type === "session_event" &&
+		!daemonClientSupportsSessionEvent(
+			daemonClientCapabilitiesForSession(client, message.activeSessionId),
+			message.event,
+		)
+	) {
+		return false;
+	}
 	return (
 		message.type !== "extension_ui_request" ||
 		!isDaemonDialogExtensionUiRequest(message.method) ||

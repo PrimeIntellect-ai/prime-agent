@@ -416,15 +416,32 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 
 		const previousSessionFile = this.session.sessionFile;
 		const lease = this.acquireReplacementLease(sessionPath);
+		const openSessionManager = () => {
+			const manager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+			assertSessionCwdExists(manager, this.cwd);
+			return manager;
+		};
 		let sessionManager: SessionManager;
 		try {
-			sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
-			assertSessionCwdExists(sessionManager, this.cwd);
+			sessionManager = openSessionManager();
 		} catch (error) {
 			this.releaseUncommittedLease(lease);
 			throw error;
 		}
+		const reloadAfterTeardown =
+			previousSessionFile !== undefined &&
+			canonicalSessionPath(previousSessionFile) === canonicalSessionPath(sessionPath);
 		await this.teardownForReplacement("resume", sessionManager.getSessionFile(), lease);
+		if (reloadAfterTeardown) {
+			try {
+				// Teardown can append terminal lifecycle facts to the same file. Reopen
+				// only after it finishes so recovery never reconstructs a stale branch.
+				sessionManager = openSessionManager();
+			} catch (error) {
+				this.releaseUncommittedLease(lease);
+				throw error;
+			}
+		}
 		await this.buildAndApplyReplacement(
 			() =>
 				this.scopedBuild(() =>

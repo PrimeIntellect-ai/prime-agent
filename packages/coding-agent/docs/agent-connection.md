@@ -82,6 +82,8 @@ An initial or replacement snapshot combines:
 
 Connection events cover session events, replacement and resynchronization snapshots, extension UI requests, connection status, and terminal closure. The adapter updates its cache before notifying the UI.
 
+Nested Act progress is one additive session event union. In-process connections forward it directly. Daemon connections negotiate `rlm_act_stream` per attachment and preserve the event's Act-local sequence and exact outer-tool correlation without changing the daemon cursor sequence. The event is intentionally absent from snapshots and replay; a reconnect or unsupported peer retains the ordinary outer IPython event as the bounded fallback.
+
 Some connection types still reuse internal `AgentMessage`, `AgentEvent`, and model types. Those are local TypeScript contracts, not promises of a stable public network schema.
 
 ## Reconnect and Replay
@@ -102,7 +104,7 @@ The protocol does not promise that every historical event remains replayable. Du
 
 ## Command Lifecycle and Idempotency
 
-The public daemon protocol is JSONL-framed and currently at protocol v4. Commands may be sent in versioned envelopes containing protocol metadata, client ID, and command ID.
+The public daemon protocol is JSONL-framed and currently at protocol v7. Commands may be sent in versioned envelopes containing protocol metadata, client ID, and command ID.
 
 Mutating commands are recorded before dispatch. A repeated completed command returns its recorded result. A command known to have been received but lacking a durable result is reported as uncertain instead of being replayed blindly. Clients acknowledge durable results so old journal entries can be compacted.
 

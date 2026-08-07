@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
+import type { ActCancellationCapability } from "./act-cancellation.js";
 import type { RlmChildAgentStatus } from "./agent-session.js";
 import { calculateContextTokens, estimateContextTokens } from "./compaction/index.js";
 import type { ContextUsage } from "./extensions/index.js";
@@ -11,15 +12,22 @@ import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } fro
 export type ContextWindowResolver = (provider: string, modelId: string) => number | undefined;
 
 /**
- * One agent in the context overview: the main session or an RLM (sub-)agent.
- * `ownUsage` excludes descendants; `totalUsage` includes completed descendants, matching /usage.
+ * One execution context in the overview: the main session, retained Act lane,
+ * or an RLM (sub-)agent.
+ *
+ * `ownUsage` excludes descendant usage (child usage attributions subtracted),
+ * so own usage summed over a tree never double-counts. `totalUsage` is the
+ * attributed aggregate: own plus all completed descendants, matching what
+ * /usage reports for the session.
  */
 export interface ContextTreeNode {
-	/** "root" for the session itself; sub-xxxx for an RLM child. */
+	/** "root", "act", or an RLM child node id such as "sub-xxxx". */
 	id: string;
 	label: string;
 	status: "active" | RlmChildAgentStatus;
 	model?: { provider: string; id: string };
+	/** Current host guarantee, present only for the retained Act node. */
+	cancellationCapability?: ActCancellationCapability;
 	ownUsage: Usage;
 	totalUsage: Usage;
 	contextUsage?: ContextUsage;
@@ -62,9 +70,9 @@ function compactLabel(text: string, maxLength = 80): string {
 
 /**
  * Usage totals for one agent: `totalUsage` sums the branch's assistant usage
- * (attributed aggregates, so descendants are included), `ownUsage` removes the
- * attributions targeting those assistants. Attribution entries are matched by
- * target across ALL entries, not just the branch: attributions rewrite the
+ * (attributed aggregates, so descendants are included) plus retained-lane Act
+ * terminal deltas. `ownUsage` removes child attributions and excludes Act usage.
+ * Attribution entries are matched by target across ALL entries, not just the branch: attributions rewrite the
  * target assistant's usage no matter which branch they were appended on, so a
  * fork that keeps the assistant but drops the attribution entry must still
  * subtract it.
@@ -89,6 +97,11 @@ export function computeOwnAndTotalUsage(
 	for (const entry of allEntries) {
 		if (entry.type === "child_usage_attributed" && branchAssistantIds.has(entry.targetId)) {
 			subtractAssistantUsage(ownUsage, entry.childUsage);
+		}
+	}
+	for (const entry of branch) {
+		if (entry.type === "act_terminal") {
+			addAssistantUsage(totalUsage, entry.usage);
 		}
 	}
 	return { ownUsage, totalUsage };

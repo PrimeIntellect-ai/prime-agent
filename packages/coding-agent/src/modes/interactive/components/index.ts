@@ -1,3 +1,10 @@
+export {
+	ACT_COMPONENT_MAX_ACTS_PER_TOOL,
+	ActExecutionComponent,
+	type ActExecutionState,
+	createActExecutionState,
+	reduceActExecutionState,
+} from "./act-execution.js";
 // UI Components for extensions
 
 export { AgentMessageComponent } from "./agent-message.js";

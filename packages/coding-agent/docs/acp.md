@@ -66,6 +66,8 @@ Session activity arrives as `session/update` notifications:
 
 IPython is Prime Agent's model-facing tool, so a cell is a `tool_call` of kind `execute` whose `rawInput` carries the cell source.
 
+A nested Act appears as one synthetic ACP tool call beneath the outer IPython call. Standard content updates retain the ordered prefix of assistant and shared-cell progress, including recoverable cell errors, and only the Act terminal closes the synthetic call. Prime Agent metadata carries the Act id, outer-tool correlation, sequence, resolved model, cancellation capability, terminal usage, and truncation facts. A vanilla ACP client may ignore the metadata and still receives valid standard tool-call updates. The projection retains at most 32,768 characters, reserves terminal space, coalesces token deltas, and publishes a visible truncation marker rather than growing without bound. It never includes the returned Python object or private lane identities.
+
 ## Prime Agent extensions
 
 Prime Agent has capabilities ACP has no field for: subagents, autonomous quality gates, goals, heartbeats, continual-harness refinement, compaction, and rich IPython output. These travel in a reverse-domain `_meta` envelope:

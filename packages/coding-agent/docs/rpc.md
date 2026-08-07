@@ -938,6 +938,16 @@ When complete:
 
 Use `toolCallId` to correlate events. The `partialResult` in `tool_execution_update` contains the accumulated output so far (not just the delta), allowing clients to simply replace their display on each update.
 
+### act_event
+
+A nested Act is an additive event stream correlated to its outer IPython tool call:
+
+```json
+{"type":"act_event","actId":"act-1","outerToolCallId":"call-ipython","sequence":1,"event":"start","prompt":"inspect state","promptTruncated":false,"model":{"provider":"prime","id":"model"},"cancellationCapability":"posix-managed"}
+```
+
+Sequences are monotonic within one Act. Progress contains only assistant thinking/text deltas and `shared_ipython` cell start/terminal facts. One self-contained terminal repeats the bounded prompt, resolved model, and exact cancellation capability and adds `done`, `error`, or `cancelled` status plus usage. Main-session events are emitted directly. An observed session wraps the unchanged event in `observed_session_event`. The union never contains the Python object returned by `rlm.done()` or private lane message identities.
+
 ### session_action_update
 
 Emitted whenever literal queued actions or the active scheduler action changes.

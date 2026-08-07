@@ -381,6 +381,52 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		]);
 	});
 
+	it("emits the ordered typed Act envelope on the main RPC session", async () => {
+		const result = await runRpc([{ id: "prompt", type: "prompt", message: "act-stream" }]);
+		expect(result.stderr).toBe("");
+		expect(result.stdout[0]).toEqual({ id: "prompt", type: "response", command: "prompt", success: true });
+		const events = result.stdout.slice(1) as Array<Record<string, unknown>>;
+		expect(events.map((event) => event.event)).toEqual([
+			"start",
+			"assistant_delta",
+			"cell_start",
+			"cell_terminal",
+			"terminal",
+		]);
+		expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
+		expect(events.every((event) => event.type === "act_event" && event.actId === "main-act")).toBe(true);
+		expect(events.at(-1)).toMatchObject({ event: "terminal", status: "done", usage: { totalTokens: 8 } });
+		expect(JSON.stringify(events)).not.toContain('"value"');
+	});
+
+	it("emits the complete Act union for an observed RPC session", async () => {
+		const result = await runRpc([{ id: "observe", type: "observe", activeSessionId: "act-child" }]);
+		expect(result.stderr).toBe("");
+		expect(result.stdout[0]).toMatchObject({
+			id: "observe",
+			type: "response",
+			command: "observe",
+			success: true,
+		});
+		const observed = result.stdout.slice(1) as Array<{
+			type: string;
+			activeSessionId: string;
+			event: Record<string, unknown>;
+		}>;
+		expect(observed).toHaveLength(10);
+		expect(observed.every((record) => record.type === "observed_session_event")).toBe(true);
+		expect(observed.every((record) => record.activeSessionId === "act-child")).toBe(true);
+		expect(observed.slice(0, 5).map((record) => record.event.sequence)).toEqual([1, 2, 3, 4, 5]);
+		expect(observed.slice(5).map((record) => record.event.sequence)).toEqual([1, 2, 3, 4, 5]);
+		expect(observed[4]?.event).toMatchObject({ actId: "observed-error", event: "terminal", status: "error" });
+		expect(observed[9]?.event).toMatchObject({
+			actId: "observed-cancel",
+			event: "terminal",
+			status: "cancelled",
+		});
+		expect(JSON.stringify(observed)).not.toContain('"value"');
+	});
+
 	it("drains accepted daemon RPC prompt work before EOF", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-rpc-eof-"));
 		tempRoots.add(root);

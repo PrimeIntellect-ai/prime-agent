@@ -1,3 +1,4 @@
+import { actCancellationPromptBoundary } from "../act-cancellation.js";
 import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../kernel/bootstrap.js";
 
 export interface RlmPromptOptions {
@@ -174,6 +175,16 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 
 	if (hasIpython) {
 		parts.push("", IPYTHON_CONTROL_PROMPT);
+		if (depth === 0) {
+			parts.push(
+				"",
+				"Use `rlm.act()` for one inspectable action expected to take roughly 30 seconds to 5 minutes; prefer shorter actions. You remain responsible for architecture, synthesis, decomposition, and acceptance. After every Act result, regain control and inspect decisive source, diff, or test evidence before choosing the next bounded action. Bad: `await rlm.act('Implement every phase of the migration plan, verify everything, and ship it')`. Good: `result = await rlm.act('Inspect the parser owner, fix the delimiter advance, run parser.test.ts, and return the diff and test result')`.",
+				"Set up a retained Act lane once with stable context: working directory, editing or verification authority, return contract, and the expectation that later calls are a sequence of bounded actions. The lane keeps its transcript, so later calls should be terse deltas: first `await rlm.act('In /repo, you may edit parser files and run focused tests. Return the inspected diff and raw test result. First inspect the parser owner.')`; then `await rlm.act('Now run the StarPC baseline')`; then `await rlm.act('Now fix the failing delimiter case and rerun its focused test')`. Restate any changed or ambiguous constraint, for example `await rlm.act('Now verify only; do not edit. Work from /repo/wt/review and return raw test output')`. Inspect every returned result yourself.",
+				"Treat the live IPython namespace as the handoff between you and Act. Bind useful clients, datasets, parsed structures, helpers, and intermediate results to clear variable names before calling Act, and mention those variables in the action. Ask Act to reuse them and leave useful state in named variables for your next inspection instead of reconstructing it through prompt text.",
+				"Omit `model` only when `rlmActDefaultModel` configures a default, or pass an ordinary named-role or concrete native selector. One retained lane runs serialized full cells in this live IPython namespace and finishes with `rlm.done(value)`. Assign the result to preserve its exact in-kernel object without displaying its representation. Act shares this root session's authority, is distinct from asynchronous isolated `rlm(...)` children, and only one Act may run at a time.",
+				actCancellationPromptBoundary(),
+			);
+		}
 		if (installedSkills.includes("refine")) {
 			parts.push(
 				"",

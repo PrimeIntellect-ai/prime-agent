@@ -5,7 +5,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
@@ -18,7 +18,7 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import type { AgentConnectionHeartbeat, AgentConnectionSessionEvent } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import type {
 	RpcCommand,
@@ -63,7 +63,7 @@ export interface ModelInfo {
 	reasoning: boolean;
 }
 
-export type RpcEventListener = (event: AgentEvent) => void;
+export type RpcEventListener = (event: AgentConnectionSessionEvent) => void;
 export type RpcObservedSessionListener = (event: RpcObservedSessionEvent) => void;
 
 // ============================================================================
@@ -560,9 +560,9 @@ export class RpcClient {
 	/**
 	 * Collect events until agent becomes idle.
 	 */
-	collectEvents(timeout = 60000): Promise<AgentEvent[]> {
+	collectEvents(timeout = 60000): Promise<AgentConnectionSessionEvent[]> {
 		return new Promise((resolve, reject) => {
-			const events: AgentEvent[] = [];
+			const events: AgentConnectionSessionEvent[] = [];
 			const timer = setTimeout(() => {
 				unsubscribe();
 				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
@@ -582,7 +582,11 @@ export class RpcClient {
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
+	async promptAndWait(
+		message: string,
+		images?: ImageContent[],
+		timeout = 60000,
+	): Promise<AgentConnectionSessionEvent[]> {
 		const eventsPromise = this.collectEvents(timeout);
 		await this.prompt(message, images);
 		return eventsPromise;
@@ -617,7 +621,7 @@ export class RpcClient {
 			// Otherwise it's an event
 			for (const listener of [...this.eventListeners]) {
 				try {
-					listener(data as AgentEvent);
+					listener(data as AgentConnectionSessionEvent);
 				} catch {
 					// Listener failures must not block other RPC subscribers.
 				}

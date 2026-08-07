@@ -73,7 +73,7 @@ Due ticks are claimed and advanced before prompt delivery. A crash therefore doe
 
 Resident workers keep scheduling across supervisor replacement. Worker recovery marks uncertain claims interrupted, keeps the advanced schedule, and resumes future ticks only. The supervisor routes schedule commands and merges worker summaries for global listing.
 
-## Public Daemon Protocol v4
+## Public Daemon Protocol v7
 
 The public local socket is JSONL-framed. The current protocol provides:
 
@@ -86,9 +86,12 @@ The public local socket is JSONL-framed. The current protocol provides:
 - file-backed transcript caches above 4 MiB;
 - resident and client-owned worker lifecycle commands;
 - daemon-side headless completion, session-header, bash, and retry operations; and
-- structured errors for recoverable cases such as an already-active session or uncertain mutation result.
+- structured errors for recoverable cases such as an already-active session or uncertain mutation result; and
+- schema revision 16's additive, capability-gated `rlm_act_stream` events.
 
 Protocol version and schema revision are independent. A compatible addition can be capability-gated or require a schema revision; an incompatible wire change requires a protocol bump.
+
+An attached client receives nested Act events only when it advertises `rlm_act_stream`. A new daemon suppresses only those additive events for an older client; the ordinary outer IPython events remain available. A new client attached to an older daemon sees no server capability and uses the same fallback. Act events are live progress, not snapshot or replay state.
 
 Protocol v1 is retained only for the one-release update handoff that prepares and stops an older daemon. A busy older daemon that cannot produce a recovery manifest is left running.
 

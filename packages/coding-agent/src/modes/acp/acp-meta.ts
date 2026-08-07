@@ -1,7 +1,11 @@
+import type { Usage } from "@earendil-works/pi-ai";
+import type { ActCancellationCapability } from "../../core/act-cancellation.js";
+import type { ActEventModel, ActProjectionEvent } from "../../core/act-events.js";
+
 /**
  * Namespaced `_meta` payloads for prime-agent capabilities that ACP has no
- * native concept for (IPython cell semantics, RLM subagents, autonomous gates,
- * goals, heartbeats, continual harness state).
+ * native concept for (IPython cell semantics, nested Act progress, RLM
+ * subagents, autonomous gates, goals, heartbeats, continual harness state).
  *
  * ACP reserves `_meta` on capability objects, notifications, tool calls, and
  * content blocks precisely so agents can carry non-standard data. Vanilla ACP
@@ -72,6 +76,23 @@ export interface PrimeAgentAgentMessageMeta {
 	deliveryStatus?: string;
 }
 
+export interface PrimeAgentActMeta {
+	actId: string;
+	outerToolCallId: string;
+	sequence: number;
+	event: ActProjectionEvent["event"];
+	model?: ActEventModel;
+	cancellationCapability?: ActCancellationCapability;
+	stream?: "thinking" | "text";
+	cellId?: string;
+	cellStatus?: "start" | "ok" | "error" | "cancelled";
+	terminalStatus?: "done" | "cancelled" | "error";
+	usage?: Usage;
+	truncatedFields?: string[];
+	contentTruncated: boolean;
+	contentMaxChars: number;
+}
+
 export interface PrimeAgentCwdMeta {
 	/** The cwd the client asked for. */
 	requested: string;
@@ -124,6 +145,7 @@ export interface PrimeAgentSessionMeta {
 	/** Observed subagent and autonomous-continuation counts at completion. */
 	quiescence?: PrimeAgentQuiescenceMeta;
 	ipython?: PrimeAgentIpythonMeta;
+	act?: PrimeAgentActMeta;
 }
 
 /** Wrap a prime-agent payload in its reverse-domain `_meta` envelope. */
