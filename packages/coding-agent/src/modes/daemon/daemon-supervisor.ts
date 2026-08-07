@@ -4596,6 +4596,14 @@ export class DaemonSupervisor {
 		if (!recoveryCleanup) {
 			worker.stopRevision++;
 		}
+		// A retry can rescind this stop and relaunch the worker with a new
+		// process while we await below; never remove the successor's state.
+		const entryPid = worker.descriptor.pid;
+		const assertWorkerNotRelaunched = () => {
+			if (!directChild && worker.descriptor.pid !== entryPid) {
+				throw new Error(`Session worker ${worker.descriptor.workerId} was relaunched during stop`);
+			}
+		};
 		try {
 			if (removeDescriptor) {
 				this.persistWorkerStopTombstone(worker, archiveSession);
@@ -4692,11 +4700,13 @@ export class DaemonSupervisor {
 		if (directChild) {
 			await directChild.closed;
 		}
+		assertWorkerNotRelaunched();
 		if (removeDescriptor && worker.descriptor.archiveOnStop) {
 			if (force) {
 				this.reclaimStoppedWorkerCronLock(worker);
 			}
 			await this.finalizeArchivedWorkerStop(worker);
+			assertWorkerNotRelaunched();
 		}
 		this.workers.delete(worker.descriptor.workerId);
 		if (removeDescriptor) {

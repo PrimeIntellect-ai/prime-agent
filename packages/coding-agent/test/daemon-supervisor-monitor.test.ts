@@ -1898,6 +1898,65 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("aborts stale stop cleanup when the worker was relaunched during an await", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-relaunched-during-stop",
+				pid: 111_115,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString() as string | undefined,
+				archiveOnStop: true,
+			},
+			client: undefined,
+			summaries: new Map(),
+			snapshotCache: new Map(),
+			transcriptCaches: new Map(),
+			snapshotGenerations: new Map(),
+			snapshotLoads: new Map(),
+			intentionalStop: true,
+			stopRevision: 0,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			shuttingDown: false,
+			persistWorker: vi.fn(),
+			persistWorkerStopTombstone: vi.fn(),
+			reclaimStoppedWorkerCronLock: vi.fn(),
+			// Archival yields, and a retry relaunches the worker meanwhile.
+			finalizeArchivedWorkerStop: vi.fn(async () => {
+				worker.descriptor.pid = 222_222;
+				worker.descriptor.stopRequestedAt = undefined;
+			}),
+			deleteWorkerDescriptor: vi.fn(),
+			syncAgentPeers: vi.fn(async () => {}),
+			broadcastHeartbeatsChanged: vi.fn(),
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as unknown as {
+			stopWorker(
+				target: object,
+				removeDescriptor: boolean,
+				force?: boolean,
+				archiveSession?: boolean,
+			): Promise<void>;
+			deleteWorkerDescriptor: ReturnType<typeof vi.fn>;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(false);
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(false);
+		try {
+			await expect(supervisor.stopWorker(worker, true, true, true)).rejects.toThrow("was relaunched during stop");
+
+			// The relaunched worker's registration and descriptor must survive.
+			expect(workers.has(worker.descriptor.workerId)).toBe(true);
+			expect(supervisor.deleteWorkerDescriptor).not.toHaveBeenCalled();
+		} finally {
+			existsSpy.mockRestore();
+			aliveSpy.mockRestore();
+		}
+	});
+
 	it("keeps waiting when process identity is transiently unobservable", async () => {
 		vi.useFakeTimers();
 		const worker = {
