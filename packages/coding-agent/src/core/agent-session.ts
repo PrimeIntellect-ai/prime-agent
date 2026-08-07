@@ -238,6 +238,10 @@ import {
 	canSelectSessionAction,
 	type DeliveryPolicy,
 	type DeliveryRecord,
+	type QueuedMessageLane,
+	type QueuedMessageMutation,
+	type QueuedMessageMutationStatus,
+	queuedMessageLaneDeliveryPolicy,
 	type RuntimeActivity,
 	type SessionAction,
 	type SessionActionSnapshot,
@@ -6103,12 +6107,87 @@ export class AgentSession {
 		return { steering: removedSteering, followUp: removedFollowUp };
 	}
 
+	/**
+	 * Mutate a single visible queued message, addressed by its position in the same
+	 * projection the session-action snapshot publishes. expectedText must match the
+	 * item's current preview so clients never edit a shifted queue by accident.
+	 */
+	mutateQueuedMessage(
+		lane: QueuedMessageLane,
+		index: number,
+		expectedText: string,
+		mutation: QueuedMessageMutation,
+	): QueuedMessageMutationStatus {
+		const policy = queuedMessageLaneDeliveryPolicy(lane);
+		const projection = visibleSessionActionProjection(this._actionStore.queuedActions(policy));
+		const item = projection[index];
+		if (!item || queuedAgentMessagePreview(item) !== expectedText) return "rejected";
+		if (mutation.type === "delete") {
+			const error = new Error("Queued prompt was deleted before delivery.");
+			this._rejectAgentMessage(item.agentMessageId, error);
+			this._cancelSessionActions((candidate) => candidate === item, error);
+			this._emitQueueUpdate();
+			return "applied";
+		}
+		if (mutation.type === "move") {
+			const neighbor = projection[index + mutation.direction];
+			if (!neighbor) return "rejected";
+			this._actionStore.swapQueued(item, neighbor);
+			this._emitQueueUpdate();
+			return "applied";
+		}
+		if (
+			item.payload.kind === "turn" &&
+			(item.payload.acceptedAgentMessage ||
+				item.payload.records.some((record) => record.role === "primary" && record.message.role !== "user"))
+		) {
+			return "rejected";
+		}
+		const images = mutation.images?.map((image) => ({ ...image }));
+		if (item.payload.kind === "session_command") {
+			const command = parseSessionSlashCommand(mutation.text);
+			if (!command) return "invalid";
+			item.payload.text = mutation.text;
+			item.payload.command = command;
+			if (mutation.images !== undefined) item.payload.images = images?.length ? images : undefined;
+		} else {
+			item.payload.text = mutation.text;
+			const text = { type: "text" as const, text: mutation.text };
+			if (mutation.images !== undefined) {
+				item.payload.images = images?.length ? images : undefined;
+				item.payload.content = [text, ...(images?.map((image) => ({ ...image })) ?? [])];
+			} else if (item.payload.content) {
+				item.payload.content = [text, ...item.payload.content.filter((block) => block.type !== "text")];
+			}
+			item.payload.preview = undefined;
+			item.payload.prepared = undefined;
+			for (const record of item.payload.records) {
+				if (record.role === "primary" && record.message.role === "user") {
+					record.message.content = item.payload.content?.map((block) => ({ ...block })) ?? mutation.text;
+				}
+			}
+		}
+		const targetPolicy = queuedMessageLaneDeliveryPolicy(mutation.lane);
+		if (targetPolicy !== policy) {
+			item.queueKey = undefined;
+			item.wake = mutation.lane === "steering" ? "on_lower_boundary" : "external_resume";
+			this._actionStore.moveQueued(item, targetPolicy, this._actionStore.queuedActions(targetPolicy).length);
+		}
+		this.resumeQueuedWork();
+		this._emitQueueUpdate();
+		return "applied";
+	}
+
 	get queuedActionCount(): number {
 		return visibleSessionActionProjection(this._actionStore.queuedActions()).length;
 	}
 
 	get unfinishedActionCount(): number {
 		return this._actionStore.unfinishedActions().length;
+	}
+
+	get isQueuedWorkSuspended(): boolean {
+		return this._sessionInputPumpSuspended;
 	}
 
 	get isSessionActive(): boolean {

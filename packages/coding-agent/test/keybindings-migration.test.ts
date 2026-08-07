@@ -26,6 +26,7 @@ describe("keybindings migration", () => {
 		const agentDir = createAgentDir({
 			cursorUp: ["up", "ctrl+p"],
 			expandTools: "ctrl+x",
+			"app.message.dequeue": "alt+u",
 		});
 		const previousAgentDir = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = agentDir;
@@ -43,6 +44,7 @@ describe("keybindings migration", () => {
 		expect(migrated).toEqual({
 			"tui.editor.cursorUp": ["up", "ctrl+p"],
 			"app.tools.expand": "ctrl+x",
+			"app.message.navigateOlder": "alt+u",
 		});
 	});
 

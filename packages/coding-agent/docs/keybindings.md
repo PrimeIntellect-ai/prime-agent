@@ -132,7 +132,10 @@ Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, 
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
 | `app.messages.expand` | `ctrl+p` | Collapse or expand agent-to-agent messages |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
-| `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
+| `app.message.navigateOlder` | `alt+up` | Select the next older pending message |
+| `app.message.navigateNewer` | `alt+down` | Select the next newer pending message or restore the draft |
+| `app.message.moveEarlier` | `ctrl+alt+up` | Move the selected pending message one place earlier in its queue |
+| `app.message.moveLater` | `ctrl+alt+down` | Move the selected pending message one place later in its queue |
 
 ### Tree Navigation
 

@@ -190,6 +190,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_model_catalog",
 	"get_available_models",
 	"get_queue",
+	"mutate_queued_message",
 	"clear_queue",
 	"abort_and_clear_queue",
 	"cron_list",

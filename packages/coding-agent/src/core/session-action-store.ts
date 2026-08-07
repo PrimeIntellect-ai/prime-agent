@@ -1,11 +1,23 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { UserMessage } from "@earendil-works/pi-ai";
+import type { ImageContent, UserMessage } from "@earendil-works/pi-ai";
 import type { InputSource } from "./extensions/index.js";
 import type { CustomMessage } from "./messages.js";
 import type { SessionSlashCommand } from "./slash-commands.js";
 
 export type DeliveryPolicy = "next_turn_boundary" | "when_run_idle";
 export type WakePolicy = "immediate" | "on_lower_boundary" | "external_resume";
+
+export type QueuedMessageLane = "steering" | "followUp";
+
+export function queuedMessageLaneDeliveryPolicy(lane: QueuedMessageLane): DeliveryPolicy {
+	return lane === "steering" ? "next_turn_boundary" : "when_run_idle";
+}
+
+export type QueuedMessageMutation =
+	| { type: "delete" }
+	| { type: "move"; direction: -1 | 1 }
+	| { type: "replace"; text: string; images?: ImageContent[]; lane: QueuedMessageLane };
+export type QueuedMessageMutationStatus = "applied" | "rejected" | "invalid";
 
 export interface SessionActionSnapshot {
 	queuedCount: number;
@@ -228,6 +240,30 @@ export class ActionStore<TAction extends SessionAction = SessionAction> {
 
 	rollback(action: TAction, proof?: RollbackProof): void {
 		transitionSessionAction(action, { state: "queued" }, { rollbackProof: proof });
+	}
+
+	swapQueued(left: TAction, right: TAction): void {
+		if (left.lifecycle.state !== "queued" || right.lifecycle.state !== "queued" || left.delivery !== right.delivery) {
+			throw new Error("Only queued actions in the same lane can be swapped");
+		}
+		const list = this.list(left.delivery);
+		const leftIndex = list.indexOf(left);
+		const rightIndex = list.indexOf(right);
+		if (leftIndex < 0 || rightIndex < 0) throw new Error("Queued action is not owned by this store");
+		[list[leftIndex], list[rightIndex]] = [right, left];
+	}
+
+	moveQueued(action: TAction, delivery: DeliveryPolicy, index: number): void {
+		if (action.lifecycle.state !== "queued") throw new Error("Only queued actions can be moved");
+		const source = this.list(action.delivery);
+		const sourceIndex = source.indexOf(action);
+		if (sourceIndex < 0) throw new Error(`Session action ${action.id} is not owned by this store`);
+		source.splice(sourceIndex, 1);
+		action.delivery = delivery;
+		const target = this.list(delivery);
+		const queued = target.filter((item) => item.lifecycle.state === "queued");
+		const before = queued[Math.max(0, Math.min(index, queued.length))];
+		target.splice(before ? target.indexOf(before) : target.length, 0, action);
 	}
 
 	queuedActions(policy?: DeliveryPolicy): readonly TAction[] {

@@ -18,7 +18,12 @@ import type { GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
-import type { SessionActionSnapshot } from "../../core/session-action-store.js";
+import type {
+	QueuedMessageLane,
+	QueuedMessageMutation,
+	QueuedMessageMutationStatus,
+	SessionActionSnapshot,
+} from "../../core/session-action-store.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type { SessionStats } from "../../core/session-stats.js";
 
@@ -513,6 +518,11 @@ export interface AgentConnectionQueueState {
 	followUp: string[];
 }
 
+export type AgentConnectionQueuedMessageLane = QueuedMessageLane;
+export type AgentConnectionQueuedMessageMutation = QueuedMessageMutation;
+/** "unsupported" is returned only by remote connections whose daemon predates queued-message mutation. */
+export type AgentConnectionQueuedMessageMutationStatus = QueuedMessageMutationStatus | "unsupported";
+
 export interface AgentConnectionHeartbeat {
 	job: AgentCronJob;
 	sessionName?: string;
@@ -643,6 +653,12 @@ export interface AgentConnection {
 		callbacks?: AgentConnectionSessionListCallbacks,
 	): Promise<AgentConnectionSavedSessionInfo[]>;
 	getQueue(): Promise<AgentConnectionQueueState>;
+	mutateQueuedMessage(
+		lane: AgentConnectionQueuedMessageLane,
+		index: number,
+		expectedText: string,
+		mutation: AgentConnectionQueuedMessageMutation,
+	): Promise<AgentConnectionQueuedMessageMutationStatus>;
 	clearQueue(): Promise<AgentConnectionQueueState>;
 	abortAndClearQueue(): Promise<AgentConnectionQueueState>;
 	listCronJobs(options?: { includeInactive?: boolean }): Promise<AgentCronJob[]>;

@@ -18,6 +18,7 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { CustomMessage } from "../../core/messages.js";
+import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type {
@@ -96,7 +97,8 @@ export type DaemonServerCapability =
 	// identity). Clients must check before sending.
 	| "transient_bash"
 	| "session_input_admission"
-	| "prompt_admission_cancellation";
+	| "prompt_admission_cancellation"
+	| "queue_message_mutation";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -134,6 +136,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"transient_bash",
 	"session_input_admission",
 	"prompt_admission_cancellation",
+	"queue_message_mutation",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -508,6 +511,15 @@ export type DaemonCommand =
 	| { id?: string; type: "get_model_catalog"; activeSessionId: string }
 	| { id?: string; type: "get_available_models"; activeSessionId: string }
 	| { id?: string; type: "get_queue"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "mutate_queued_message";
+			activeSessionId: string;
+			lane: QueuedMessageLane;
+			index: number;
+			expectedText: string;
+			mutation: QueuedMessageMutation;
+	  }
 	| { id?: string; type: "clear_queue"; activeSessionId: string }
 	| { id?: string; type: "abort_and_clear_queue"; activeSessionId: string }
 	| { id?: string; type: "cron_list"; activeSessionId?: string; includeInactive?: boolean }
@@ -682,6 +694,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,
+	mutate_queued_message: { minProtocol: 7, minSchemaRevision: 14, capability: "queue_message_mutation" },
 	clear_queue: LEGACY_DAEMON_COMMAND,
 	abort_and_clear_queue: LEGACY_DAEMON_COMMAND,
 	cron_list: LEGACY_DAEMON_COMMAND,

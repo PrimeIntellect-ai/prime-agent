@@ -93,6 +93,7 @@ type SubmitHarness = PromptStashHarness & {
 	updatePendingMessagesDisplay: Mock;
 	ui: { requestRender: Mock };
 	showError: Mock;
+	queueSelection: { isBrowsing: boolean };
 	submittedInputBehavior: "steer" | "followUp";
 	inputSubmissionGeneration: number;
 	inputSubmissionsPending: number;
@@ -199,6 +200,7 @@ function createSubmitHarness(
 		updatePendingMessagesDisplay: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		showError: vi.fn(),
+		queueSelection: { isBrowsing: false },
 		submittedInputBehavior: "steer",
 		inputSubmissionGeneration: 0,
 		inputSubmissionsPending: 0,
