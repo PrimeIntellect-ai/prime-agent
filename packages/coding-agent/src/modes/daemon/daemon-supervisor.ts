@@ -2005,7 +2005,7 @@ export class DaemonSupervisor {
 		const ownerClientId = command.lifecycle === "client_owned" ? clientId : undefined;
 		if (command.sessionPath) {
 			const activeMatches = this.matchWorkers(command.sessionPath);
-			if (activeMatches.length === 1) {
+			if (activeMatches.length === 1 && !(await this.reclaimStaleWorkerRegistration(activeMatches[0]!.worker))) {
 				return this.reuseWorkerForCreate(activeMatches[0]!.worker, ownerClientId, command.sessionPath);
 			}
 			if (activeMatches.length > 1) {
@@ -2017,7 +2017,7 @@ export class DaemonSupervisor {
 				: await this.catalog.resolve(command.sessionPath, config.cwd ?? process.cwd(), config.sessionDir);
 			createCommand = { ...createCommand, sessionPath };
 			const existing = this.findWorkerBySessionFile(sessionPath);
-			if (existing) {
+			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
 				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
 			}
 			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
@@ -2066,6 +2066,32 @@ export class DaemonSupervisor {
 			return worker;
 		}
 		throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
+	}
+
+	/**
+	 * A stopping worker whose process already died can strand its registration
+	 * (for example when the stop timed out and its finalization was interrupted
+	 * by a supervisor restart). Such a registration would block reopening the
+	 * saved transcript forever, so complete the interrupted stop and let the
+	 * caller launch a fresh worker for the saved session.
+	 */
+	private async reclaimStaleWorkerRegistration(worker: ResidentWorker): Promise<boolean> {
+		if (worker.client !== undefined || worker.recovery !== undefined) {
+			return false;
+		}
+		if (!this.isWorkerStopping(worker)) {
+			return false;
+		}
+		if (isProcessAlive(worker.descriptor.pid)) {
+			return false;
+		}
+		try {
+			await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
+			this.log(`Reclaimed stale registration for stopped worker ${worker.descriptor.workerId}`);
+		} catch (error) {
+			this.reportCleanupFailure(`stale worker registration ${worker.descriptor.workerId}`, error);
+		}
+		return this.workers.get(worker.descriptor.workerId) !== worker;
 	}
 
 	private async promoteOwnedWorker(client: DaemonSocketClient, worker: ResidentWorker): Promise<void> {

@@ -893,6 +893,88 @@ describe("daemon supervisor resident workers", () => {
 	);
 
 	it(
+		"resumes a saved session immediately after a worker stop fails and the process dies",
+		{ tags: ["process-stress"], timeout: 45_000 },
+		async () => {
+			const root = tempDir();
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			const sessionDir = join(agentDir, "sessions");
+			const socketPath = join(
+				tmpdir(),
+				`prime-supervisor-resume-heal-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+			);
+			mkdirSync(projectDir, { recursive: true });
+			const sessionManager = SessionManager.create(projectDir, sessionDir);
+			sessionManager.appendMessage({ role: "user", content: "resume me", timestamp: 1 });
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) {
+				throw new Error("Fixture session did not persist");
+			}
+
+			const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+			const client = await connectEventually(socketPath, supervisor);
+			const created = await client.request({
+				type: "create",
+				sessionPath: sessionFile,
+				lifecycle: "client_owned",
+				config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+			});
+			if (!created.success) {
+				throw new Error(created.error);
+			}
+			const summary = requireSummary(created.data);
+			if (!summary.workerPid) {
+				throw new Error("Resident worker did not expose its pid");
+			}
+			workerPids.add(summary.workerPid);
+			const activeSessionId = summary.activeSessionId ?? summary.id;
+
+			// A suspended worker forces the stop past its deadline, leaving a
+			// tombstoned registration for a process that dies moments later.
+			process.kill(summary.workerPid, "SIGSTOP");
+			const stopResult = await client.request({ type: "complete_owned_session", activeSessionId }, 30_000);
+			expect(stopResult).toMatchObject({
+				success: false,
+				error: expect.stringContaining("did not stop"),
+			});
+			process.kill(summary.workerPid, "SIGKILL");
+			await waitForProcessGone(summary.workerPid);
+			workerPids.delete(summary.workerPid);
+
+			// Resuming the saved transcript must not be blocked by the stale
+			// registration: the supervisor reclaims it and launches a fresh worker.
+			const resumed = await client.request({
+				type: "create",
+				sessionPath: sessionFile,
+				config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+			});
+			expect(resumed.success).toBe(true);
+			const resumedSummary = requireSummary(resumed.success ? resumed.data : undefined);
+			expect(resumedSummary.sessionId).toBe(summary.sessionId);
+			expect(resumedSummary.workerPid).not.toBe(summary.workerPid);
+			expect(resumedSummary.workerState).toBe("ready");
+			if (resumedSummary.workerPid) {
+				workerPids.add(resumedSummary.workerPid);
+			}
+
+			const attached = await client.request({
+				type: "attach",
+				activeSessionId: resumedSummary.activeSessionId ?? resumedSummary.id,
+			});
+			expect(attached.success).toBe(true);
+
+			await client.request({ type: "shutdown" });
+			client.close();
+			await waitForSocketGone(socketPath);
+			if (resumedSummary.workerPid) {
+				await waitForProcessGone(resumedSummary.workerPid);
+				workerPids.delete(resumedSummary.workerPid);
+			}
+		},
+	);
+
+	it(
 		"does not resurrect an intentionally stopped root when the supervisor dies during kill",
 		{ tags: ["process-stress"], timeout: 30_000 },
 		async () => {
