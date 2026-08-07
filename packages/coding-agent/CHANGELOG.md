@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Fixed an empty OpenAI Codex discovery catalog blocking configured RLM child models that remain usable through interactive selection. Nonempty catalogs still restrict child admission to the models they list.
 
 ## [0.7.2] - 2026-08-11
 

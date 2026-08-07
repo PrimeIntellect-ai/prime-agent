@@ -110,6 +110,70 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
+	it("uses configured Codex models when discovery returns an empty catalog", async () => {
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({
+			provider: codexProvider,
+			models: [{ id: "parent-model" }, { id: "spark-model" }],
+		});
+		const fetchModels = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ models: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		vi.stubGlobal("fetch", fetchModels);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+
+			await expect(harness.session.findRlmModels("spark", 8)).resolves.toMatchObject({
+				models: [{ selector: `${codexProvider}/spark-model` }],
+			});
+			harness.setResponses([fauxAssistantMessage("exact child answer")]);
+			const exact = await harness.session.runRlmChild("use exact Spark", {
+				model: `${codexProvider}/spark-model`,
+			});
+
+			expect(exact.model).toBe(`${codexProvider}/spark-model`);
+			expect(fetchModels).toHaveBeenCalledOnce();
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
+	it("does not trust a malformed nonempty Codex catalog", async () => {
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({
+			provider: codexProvider,
+			models: [{ id: "parent-model" }, { id: "spark-model" }],
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(JSON.stringify({ models: [{}] }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					}),
+			),
+		);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+
+			await expect(harness.session.findRlmModels("spark", 8)).resolves.toEqual({ models: [] });
+			await expect(
+				harness.session.runRlmChild("reject malformed discovery", {
+					model: `${codexProvider}/spark-model`,
+				}),
+			).rejects.toThrow("is unavailable, unauthenticated, or expired");
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
 	it("includes private Prime models authorized for the selected team", async () => {
 		const harness = await createHarness({ provider, models: [{ id: "parent-model" }] });
 		const fetchModels = vi.fn(

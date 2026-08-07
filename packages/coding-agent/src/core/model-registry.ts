@@ -392,13 +392,18 @@ function readOpenAICodexModelIds(value: unknown): Set<string> {
 		throw new Error("Invalid OpenAI Codex model catalog");
 	}
 	return new Set(
-		value.models.flatMap((model) => {
+		value.models.map((model) => {
 			if (!model || typeof model !== "object" || !("slug" in model) || typeof model.slug !== "string") {
-				return [];
+				throw new Error("Invalid OpenAI Codex model catalog");
 			}
-			return [model.slug];
+			return model.slug;
 		}),
 	);
+}
+
+function filterModelsByOpenAICodexCatalog(models: Model<Api>[], modelIds: Set<string>): Model<Api>[] {
+	if (modelIds.size === 0) return models;
+	return models.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
 }
 
 const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE = "prime-inference-private-models.json";
@@ -980,7 +985,7 @@ export class ModelRegistry {
 		const authFingerprint = createHash("sha256").update(auth.apiKey).digest("hex");
 		const cached = this.openAICodexModelsCache;
 		if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
-			return availableModels.filter((model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id));
+			return filterModelsByOpenAICodexCatalog(availableModels, cached.modelIds);
 		}
 
 		const accountId = readOpenAICodexAccountId(auth.apiKey);
@@ -1002,12 +1007,10 @@ export class ModelRegistry {
 			}
 			const modelIds = readOpenAICodexModelIds(await response.json());
 			this.openAICodexModelsCache = { authFingerprint, modelIds, refreshedAt: Date.now() };
-			return availableModels.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
+			return filterModelsByOpenAICodexCatalog(availableModels, modelIds);
 		} catch {
 			if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
-				return availableModels.filter(
-					(model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id),
-				);
+				return filterModelsByOpenAICodexCatalog(availableModels, cached.modelIds);
 			}
 			return availableModels.filter((model) => model.provider !== "openai-codex");
 		}
