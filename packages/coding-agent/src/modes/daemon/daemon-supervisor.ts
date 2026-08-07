@@ -2082,7 +2082,9 @@ export class DaemonSupervisor {
 		if (!this.isWorkerStopping(worker)) {
 			return false;
 		}
-		if (isProcessAlive(worker.descriptor.pid)) {
+		// Identity-aware: a pid recycled by an unrelated process counts as gone,
+		// so the stale registration is still reclaimed (and never signalled).
+		if (this.isWorkerProcessCurrent(worker)) {
 			return false;
 		}
 		try {

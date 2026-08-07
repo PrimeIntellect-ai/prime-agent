@@ -2512,6 +2512,46 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("reclaims a stale registration whose pid was recycled by another process", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-recycled-registration",
+				pid: 111_113,
+				processStartId: "proc:original",
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			client: undefined,
+			recovery: undefined,
+			intentionalStop: true,
+			stopRevision: 0,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const stopWorker = vi.fn(async () => {
+			workers.delete(worker.descriptor.workerId);
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			stopWorker,
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			reclaimStaleWorkerRegistration(target: object): Promise<boolean>;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const sessionLeaseModule = await import("../src/core/session-lease.js");
+		// The pid is alive, but it belongs to an unrelated process now.
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
+		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue("proc:recycled");
+		try {
+			await expect(supervisor.reclaimStaleWorkerRegistration(worker)).resolves.toBe(true);
+			expect(stopWorker).toHaveBeenCalledWith(worker, true, true, false);
+		} finally {
+			aliveSpy.mockRestore();
+			startIdSpy.mockRestore();
+		}
+	});
+
 	it("does not reclaim a stopping worker whose process is still alive", async () => {
 		const worker = {
 			descriptor: {
