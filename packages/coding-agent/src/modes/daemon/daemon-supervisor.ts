@@ -2089,9 +2089,11 @@ export class DaemonSupervisor {
 			await finalization.catch(() => undefined);
 			return this.workers.get(worker.descriptor.workerId) !== worker;
 		}
-		// Identity-aware: a pid recycled by an unrelated process counts as gone,
-		// so the stale registration is still reclaimed (and never signalled).
-		if (this.isWorkerProcessCurrent(worker)) {
+		// Identity-aware and conservative: a pid recycled by an unrelated process
+		// counts as gone (so the stale registration is still reclaimed and never
+		// signalled), but an unobservable identity is left alone.
+		const identity = this.workerProcessIdentity(worker);
+		if (identity !== "gone" && identity !== "replaced") {
 			return false;
 		}
 		try {
