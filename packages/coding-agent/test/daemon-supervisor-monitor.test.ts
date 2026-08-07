@@ -2584,12 +2584,62 @@ describe("daemon worker supervisor monitoring", () => {
 			reclaimStaleWorkerRegistration(target: object): Promise<boolean>;
 		};
 
-		const reclaim = supervisor.reclaimStaleWorkerRegistration(worker);
-		releaseFinalization();
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(false);
+		try {
+			const reclaim = supervisor.reclaimStaleWorkerRegistration(worker);
+			releaseFinalization();
 
-		// The reclaim defers to the finalizer's cleanup instead of duplicating it.
-		await expect(reclaim).resolves.toBe(true);
-		expect(stopWorker).not.toHaveBeenCalled();
+			// The reclaim defers to the finalizer's cleanup instead of duplicating it.
+			await expect(reclaim).resolves.toBe(true);
+			expect(stopWorker).not.toHaveBeenCalled();
+		} finally {
+			aliveSpy.mockRestore();
+		}
+	});
+
+	it("shares one stop between concurrent resume reclaims", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-concurrent-reclaim",
+				pid: 111_116,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			client: undefined,
+			recovery: undefined,
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const stopWorker = vi.fn(async () => {
+			workers.delete(worker.descriptor.workerId);
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			shuttingDown: false,
+			stopWorker,
+			persistWorker: vi.fn(),
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			reclaimStaleWorkerRegistration(target: object): Promise<boolean>;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(false);
+		try {
+			const results = await Promise.all([
+				supervisor.reclaimStaleWorkerRegistration(worker),
+				supervisor.reclaimStaleWorkerRegistration(worker),
+			]);
+
+			expect(results).toEqual([true, true]);
+			// Both concurrent resumes share the single-flighted finalizer stop.
+			expect(stopWorker).toHaveBeenCalledTimes(1);
+		} finally {
+			aliveSpy.mockRestore();
+		}
 	});
 
 	it("does not reclaim a stopping worker whose process is still alive", async () => {

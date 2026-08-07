@@ -139,6 +139,7 @@ const DEFERRED_RECOVERY_RECHECK_MS = 5000;
 const STOP_FINALIZATION_RECHECK_MS = 250;
 const STOP_FINALIZATION_SIGKILL_GRACE_MS = 5000;
 const STOP_FINALIZATION_RETRY_MS = 5000;
+const STALE_RECLAIM_WAIT_MS = 10_000;
 // Polling loops probe existence cheaply via kill(0); the ps-backed zombie and
 // identity checks are throttled so a wedged worker cannot saturate the
 // supervisor event loop with synchronous subprocess spawns.
@@ -2079,30 +2080,29 @@ export class DaemonSupervisor {
 		if (worker.client !== undefined || worker.recovery !== undefined) {
 			return false;
 		}
-		if (!this.isWorkerStopping(worker)) {
+		if (worker.descriptor.stopRequestedAt === undefined) {
 			return false;
 		}
-		// A timed-out stop may already have a background finalizer completing
-		// this exact cleanup; wait for it instead of running a duplicate stop.
-		const finalization = worker.stopFinalization;
-		if (finalization) {
-			await finalization.catch(() => undefined);
-			return this.workers.get(worker.descriptor.workerId) !== worker;
-		}
-		// Identity-aware and conservative: a pid recycled by an unrelated process
-		// counts as gone (so the stale registration is still reclaimed and never
-		// signalled), but an unobservable identity is left alone.
+		// Fail fast before waiting on anything: only a confirmed-dead process is
+		// reclaimable. A live, unknown, or still-stopping worker is left alone
+		// and the caller reports the session as already active.
 		const identity = this.workerProcessIdentity(worker);
 		if (identity !== "gone" && identity !== "replaced") {
 			return false;
 		}
-		try {
-			await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
-			this.log(`Reclaimed stale registration for stopped worker ${worker.descriptor.workerId}`);
-		} catch (error) {
-			this.reportCleanupFailure(`stale worker registration ${worker.descriptor.workerId}`, error);
+		// Single cleanup path: the background stop finalizer is identity-aware,
+		// retrying, and single-flighted, so concurrent resumes share one stop.
+		// The wait is bounded so a resume request always returns promptly.
+		this.scheduleWorkerStopFinalization(worker);
+		const finalization = worker.stopFinalization;
+		if (finalization) {
+			await Promise.race([finalization.catch(() => undefined), unrefDelay(STALE_RECLAIM_WAIT_MS)]);
 		}
-		return this.workers.get(worker.descriptor.workerId) !== worker;
+		const reclaimed = this.workers.get(worker.descriptor.workerId) !== worker;
+		if (reclaimed) {
+			this.log(`Reclaimed stale registration for stopped worker ${worker.descriptor.workerId}`);
+		}
+		return reclaimed;
 	}
 
 	private async promoteOwnedWorker(client: DaemonSocketClient, worker: ResidentWorker): Promise<void> {
