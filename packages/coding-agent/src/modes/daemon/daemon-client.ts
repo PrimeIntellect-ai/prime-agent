@@ -6,10 +6,12 @@ import {
 	createDaemonCommandEnvelope,
 	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
 	DAEMON_PROTOCOL_VERSION,
+	type DaemonClientId,
 	type DaemonClosingReason,
 	type DaemonCommand,
 	type DaemonCommandCompatibility,
 	type DaemonCommandEnvelope,
+	type DaemonCommandId,
 	type DaemonOutbound,
 	type DaemonProtocolVersion,
 	type DaemonRequestProgress,
@@ -34,6 +36,24 @@ export type DaemonClientProgressListener = (message: DaemonRequestProgress) => v
 
 export interface DaemonClientRequestOptions {
 	onProgress?: DaemonClientProgressListener;
+	/**
+	 * Wire id for this command, overriding the per-instance counter.
+	 *
+	 * The supervisor keys its command journal on [clientId, commandId], so a caller
+	 * that retries a mutating command across separate client instances must present
+	 * the same pair on every attempt for the retry to be recognized as a duplicate
+	 * rather than executed again.
+	 */
+	commandId?: DaemonCommandId;
+}
+
+export interface DaemonClientOptions {
+	/**
+	 * Protocol client id to present instead of a fresh per-instance one. Pair with
+	 * {@link DaemonClientRequestOptions.commandId} to keep a retried mutating command
+	 * on one journal key.
+	 */
+	clientId?: DaemonClientId;
 }
 
 interface PendingDaemonRequest {
@@ -111,7 +131,7 @@ export class DaemonClient {
 	private readonly closeListeners = new Set<DaemonClientCloseListener>();
 	private readonly pendingRequests = new Map<string, PendingDaemonRequest>();
 	private requestId = 0;
-	private readonly protocolClientId = `daemon-client:${randomUUID()}`;
+	private readonly protocolClientId: DaemonClientId;
 	private requestRecoveryEnabled = false;
 	private reconnectOptions?: DaemonClientReconnectOptions;
 	private autoReconnectPromise?: Promise<void>;
@@ -125,7 +145,12 @@ export class DaemonClient {
 		timeout: ReturnType<typeof setTimeout>;
 	}>();
 
-	constructor(private readonly socketPath: string) {}
+	constructor(
+		private readonly socketPath: string,
+		options: DaemonClientOptions = {},
+	) {
+		this.protocolClientId = options.clientId ?? `daemon-client:${randomUUID()}`;
+	}
 
 	get hello(): DaemonHello | undefined {
 		return this.helloMessage;
@@ -353,7 +378,10 @@ export class DaemonClient {
 			);
 		}
 
-		const id = `daemon_${++this.requestId}`;
+		const id = options.commandId ?? `daemon_${++this.requestId}`;
+		if (this.pendingRequests.has(id)) {
+			throw new Error(`Daemon command id "${id}" is already in flight on this client`);
+		}
 		const fullCommand = { ...command, id } as DaemonCommand | DaemonWorkerCommand;
 		const wireCommand: DaemonCommand | DaemonWorkerCommand | DaemonCommandEnvelope = publicEnvelopeProtocolVersion
 			? createDaemonCommandEnvelope(

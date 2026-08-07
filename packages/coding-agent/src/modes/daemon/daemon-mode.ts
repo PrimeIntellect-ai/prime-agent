@@ -5463,8 +5463,18 @@ export class AgentDaemon {
 		}
 		const deadline = Date.now() + 30_000;
 		let lastError: unknown;
+		// The supervisor journals mutating commands under [clientId, commandId] and
+		// replays a completed result instead of re-executing. A fresh DaemonClient
+		// mints a new protocol client id and restarts its request counter, so retrying
+		// on a new client presented a new key for the same logical message and the
+		// supervisor enqueued another steering prompt. Pin both halves of the key for
+		// the lifetime of this send so every attempt is recognized as the same command.
+		const idempotency = {
+			clientId: `daemon-client:${randomUUID()}`,
+			commandId: `send_message_${randomUUID()}`,
+		};
 		while (Date.now() < deadline && !this.shuttingDown) {
-			const client = new DaemonClient(supervisorSocketPath);
+			const client = new DaemonClient(supervisorSocketPath, { clientId: idempotency.clientId });
 			let receivedResponse = false;
 			try {
 				await client.connect(1000);
@@ -5478,6 +5488,7 @@ export class AgentDaemon {
 						agentOrigin: true,
 					},
 					30_000,
+					{ commandId: idempotency.commandId },
 				);
 				receivedResponse = true;
 				if (!response.success) {
