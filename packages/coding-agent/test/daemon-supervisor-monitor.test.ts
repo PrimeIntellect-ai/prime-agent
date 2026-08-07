@@ -1957,6 +1957,58 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("re-verifies identity at SIGKILL time even within the throttle window", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-kill-window-recycle",
+				pid: 111_118,
+				processStartId: "proc:original",
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const stopWorker = vi.fn(async () => {
+			workers.delete(worker.descriptor.workerId);
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			shuttingDown: false,
+			stopWorker,
+			persistWorker: vi.fn(),
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const sessionLeaseModule = await import("../src/core/session-lease.js");
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		// The worker is current on the throttled polls, but the pid is recycled
+		// by the time the SIGKILL deadline arrives.
+		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue("proc:original");
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			await vi.advanceTimersByTimeAsync(4900);
+			startIdSpy.mockReturnValue("proc:recycled");
+			await vi.advanceTimersByTimeAsync(2000);
+
+			// The fresh check at signal time sees the recycled pid and holds fire.
+			expect(killSpy).not.toHaveBeenCalled();
+		} finally {
+			existsSpy.mockRestore();
+			aliveSpy.mockRestore();
+			killSpy.mockRestore();
+			startIdSpy.mockRestore();
+		}
+	});
+
 	it("keeps waiting when process identity is transiently unobservable", async () => {
 		vi.useFakeTimers();
 		const worker = {

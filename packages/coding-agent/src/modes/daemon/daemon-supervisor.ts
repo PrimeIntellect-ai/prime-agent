@@ -4682,7 +4682,9 @@ export class DaemonSupervisor {
 		if (force && isWorkerProcessAlive()) {
 			if (directChild) {
 				directChild.child.kill("SIGKILL");
-			} else if (identityVerdict === "current") {
+			} else if (this.workerProcessIdentity(worker) === "current") {
+				// Fresh, unthrottled check: the cached verdict may be up to 500ms
+				// old, long enough for the pid to be recycled.
 				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 			}
 			const forceDeadline = Date.now() + 1000;
@@ -4796,7 +4798,13 @@ export class DaemonSupervisor {
 				break;
 			}
 			if (!killed && stoppedCanSignal && Date.now() >= sigkillDeadline) {
-				signalProcessGroupOrProcess(pid, "SIGKILL");
+				// Fresh, unthrottled identity check right before signalling: the
+				// cached verdict may be up to 500ms old, long enough for the pid
+				// to be recycled by an unrelated process.
+				const observedNow = processStartId === undefined ? undefined : getProcessStartId(pid);
+				if (processStartId === undefined || observedNow === processStartId) {
+					signalProcessGroupOrProcess(pid, "SIGKILL");
+				}
 				killed = true;
 			}
 			await unrefDelay(STOP_FINALIZATION_RECHECK_MS);
