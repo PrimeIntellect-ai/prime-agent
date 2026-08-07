@@ -4535,6 +4535,18 @@ export class DaemonSupervisor {
 		renameSync(tempPath, path);
 	}
 
+	/** True when the registered pid is alive and still the process we launched. */
+	private isWorkerProcessCurrent(worker: ResidentWorker): boolean {
+		if (!isProcessAlive(worker.descriptor.pid)) {
+			return false;
+		}
+		if (worker.descriptor.processStartId === undefined) {
+			return true;
+		}
+		const observed = getProcessStartId(worker.descriptor.pid);
+		return observed === undefined || observed === worker.descriptor.processStartId;
+	}
+
 	private async stopWorker(
 		worker: ResidentWorker,
 		removeDescriptor: boolean,
@@ -4618,13 +4630,14 @@ export class DaemonSupervisor {
 			worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
-		} else if (isProcessAlive(worker.descriptor.pid)) {
+		} else if (this.isWorkerProcessCurrent(worker)) {
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGTERM");
 		}
+		// Identity-aware: a recycled pid is treated as gone and never signalled.
 		const isWorkerProcessAlive = () =>
 			directChild
 				? directChild.child.exitCode === null && directChild.child.signalCode === null
-				: isProcessAlive(worker.descriptor.pid);
+				: this.isWorkerProcessCurrent(worker);
 		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
@@ -4681,24 +4694,43 @@ export class DaemonSupervisor {
 	}
 
 	private async finalizeTimedOutWorkerStop(worker: ResidentWorker): Promise<void> {
+		// Bind to the exact process generation being stopped: a retry can rescind
+		// the stop and relaunch with a new pid, and the OS can recycle the old
+		// pid. The finalizer must never follow either successor.
+		const pid = worker.descriptor.pid;
+		const processStartId = worker.descriptor.processStartId ?? getProcessStartId(pid);
+		const stopRevision = worker.stopRevision;
+		const isStopGenerationCurrent = () =>
+			this.workers.get(worker.descriptor.workerId) === worker &&
+			worker.stopRevision === stopRevision &&
+			worker.descriptor.stopRequestedAt !== undefined &&
+			worker.descriptor.pid === pid;
+		const isStoppedProcessAlive = () => {
+			if (!isProcessAlive(pid)) {
+				return false;
+			}
+			if (processStartId === undefined) {
+				return true;
+			}
+			const observed = getProcessStartId(pid);
+			return observed === undefined || observed === processStartId;
+		};
 		const sigkillDeadline = Date.now() + STOP_FINALIZATION_SIGKILL_GRACE_MS;
 		let killed = false;
 		while (!this.shuttingDown) {
-			if (!isProcessAlive(worker.descriptor.pid)) {
+			if (!isStopGenerationCurrent()) {
+				return;
+			}
+			if (!isStoppedProcessAlive()) {
 				break;
 			}
 			if (!killed && Date.now() >= sigkillDeadline) {
-				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
+				signalProcessGroupOrProcess(pid, "SIGKILL");
 				killed = true;
 			}
 			await unrefDelay(STOP_FINALIZATION_RECHECK_MS);
 		}
-		if (this.shuttingDown || this.workers.get(worker.descriptor.workerId) !== worker) {
-			return;
-		}
-		if (worker.descriptor.stopRequestedAt === undefined) {
-			// The stop was rescinded (for example by an explicit retry) while the
-			// process was still exiting; leave the registration to that flow.
+		if (this.shuttingDown || !isStopGenerationCurrent()) {
 			return;
 		}
 		try {

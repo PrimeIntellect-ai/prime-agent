@@ -1791,6 +1791,105 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("never follows a relaunched worker pid after a retry rescinds the stop", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-relaunched",
+				pid: 111_111,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString() as string | undefined,
+			},
+			intentionalStop: true,
+			stopRevision: 3,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			stopWorker,
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			const finalization = worker.stopFinalization;
+
+			// An explicit retry rescinds the stop and relaunches with a new pid
+			// while the old process is still wedged.
+			await vi.advanceTimersByTimeAsync(1000);
+			worker.descriptor.stopRequestedAt = undefined;
+			worker.intentionalStop = false;
+			worker.stopRevision = 4;
+			worker.descriptor.pid = 222_222;
+
+			await vi.advanceTimersByTimeAsync(20_000);
+			await finalization;
+
+			// The healthy relaunched worker must never be signalled or stopped.
+			expect(killSpy).not.toHaveBeenCalledWith(222_222, "SIGKILL");
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(stopWorker).not.toHaveBeenCalled();
+		} finally {
+			aliveSpy.mockRestore();
+			killSpy.mockRestore();
+		}
+	});
+
+	it("treats a recycled pid as gone instead of killing its new owner", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-recycled-pid",
+				pid: 111_112,
+				processStartId: "proc:original",
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			stopWorker,
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const sessionLeaseModule = await import("../src/core/session-lease.js");
+		// The pid is alive, but it now belongs to an unrelated process.
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue("proc:recycled");
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			const finalization = worker.stopFinalization;
+
+			await vi.advanceTimersByTimeAsync(20_000);
+			await finalization;
+
+			// The original worker is gone, so the stop is finalized without ever
+			// signalling the unrelated pid owner.
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(stopWorker).toHaveBeenCalledWith(worker, true, true, false);
+		} finally {
+			aliveSpy.mockRestore();
+			killSpy.mockRestore();
+			startIdSpy.mockRestore();
+		}
+	});
+
 	it("leaves a rescinded stop to the retry flow instead of finalizing it", async () => {
 		vi.useFakeTimers();
 		const worker = {
