@@ -74,7 +74,6 @@ describe("InteractiveMode /rlm-max-depth", () => {
 				},
 			},
 			handleRlmMaxDepthCommand: vi.fn(() => commandPending),
-			queueSelection: { isBrowsing: false },
 			submittedInputBehavior: "steer",
 			inputSubmissionGeneration: 0,
 			inputSubmissionsPending: 0,

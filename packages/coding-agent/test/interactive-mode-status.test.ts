@@ -601,7 +601,6 @@ type SubmitHandlerHarness = {
 	admitPendingStartupPrompts?: () => Promise<"admitted" | "retained" | "lifecycle-cancelled">;
 	isShuttingDown?: boolean;
 	returnToAgentsViewRequested?: boolean;
-	queueSelection: { isBrowsing: boolean };
 	submittedInputBehavior: "steer" | "followUp";
 	latestEditorPromptStash?: unknown;
 	pendingSubmittedPromptStash?: unknown;
@@ -655,7 +654,6 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 			}
 		).retainStartupPromptDrafts,
 		nextImageMarkerId: 1,
-		queueSelection: { isBrowsing: false },
 		submittedInputBehavior: "steer",
 		inputSubmissionGeneration: 0,
 		inputSubmissionsPending: 0,

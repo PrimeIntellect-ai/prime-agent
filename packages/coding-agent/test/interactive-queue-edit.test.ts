@@ -13,6 +13,8 @@ type Harness = {
 	showError: (message: string) => void;
 	ui: { requestRender: () => void };
 	agentConnection: { mutateQueuedMessage: ReturnType<typeof vi.fn>; abort?: ReturnType<typeof vi.fn> };
+	queueMutationChain: Promise<void>;
+	enqueueQueueMutation: <T>(run: () => Promise<T>) => Promise<T>;
 	applyQueueSelection: (text: string, targetLane: "steering" | "followUp") => Promise<boolean>;
 	browseQueueSelection: (direction: -1 | 1) => void;
 	moveQueueSelection: (direction: -1 | 1) => void;
@@ -41,6 +43,8 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		showError: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		agentConnection: { mutateQueuedMessage: vi.fn(async () => mutateResult), abort: vi.fn(async () => {}) },
+		queueMutationChain: Promise.resolve(),
+		enqueueQueueMutation: proto.enqueueQueueMutation,
 		applyQueueSelection: proto.applyQueueSelection,
 		browseQueueSelection: proto.browseQueueSelection,
 		moveQueueSelection: proto.moveQueueSelection,
@@ -121,6 +125,74 @@ describe("interactive queued-message editing", () => {
 				direction: -1,
 			}),
 		);
+	});
+
+	it("does not clobber typing that happened while the mutation was in flight", async () => {
+		let resolveMutation: (status: string) => void = () => {};
+		const harness = createHarness({ steering: ["s1"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveMutation = resolve;
+				}),
+		);
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.editor.setText(""); // Enter cleared the editor
+		const pending = harness.applyQueueSelection("s1 edited", "steering");
+		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalled());
+		harness.editor.setText("newer typing");
+		resolveMutation("rejected");
+		await pending;
+		expect(harness.editor.getText()).toBe("newer typing");
+	});
+
+	it("serializes rapid moves so the second uses the refreshed selection", async () => {
+		const harness = createHarness({ steering: ["s1", "s2", "s3"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(async (_lane, index) => {
+			// Emulate the server event: the item moved one place earlier.
+			const steering = [...harness.connectionQueue.steering];
+			[steering[index - 1], steering[index]] = [steering[index]!, steering[index - 1]!];
+			harness.connectionQueue = { steering, followUp: [] };
+			harness.queueSelection.sync(harness.connectionQueue);
+			return "applied";
+		});
+		harness.browseQueueSelection(-1); // s3 at index 2
+		harness.moveQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		await harness.queueMutationChain;
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenNthCalledWith(1, "steering", 2, "s3", {
+			type: "move",
+			direction: -1,
+		});
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenNthCalledWith(2, "steering", 1, "s3", {
+			type: "move",
+			direction: -1,
+		});
+		expect(harness.connectionQueue.steering).toEqual(["s3", "s1", "s2"]);
+	});
+
+	it("restores the stashed draft when the browsed item is consumed externally", () => {
+		const harness = createHarness({ steering: [], followUp: ["f1"] });
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		expect(harness.editor.getText()).toBe("f1");
+		// The item is delivered: the queue update drops the selection.
+		harness.connectionQueue = { steering: [], followUp: [] };
+		const dropped = harness.queueSelection.sync(harness.connectionQueue);
+		expect(dropped).toBe("f1");
+		if (dropped !== undefined && harness.editor.getText() === dropped) {
+			harness.setEditorTextFromQueueSelection(harness.queueSelection.reset());
+		}
+		expect(harness.editor.getText()).toBe("draft");
+	});
+
+	it("deduplicates repeated image markers in a replace", () => {
+		const harness = createHarness({ steering: [], followUp: [] });
+		harness.pastedImages.set(1, { type: "image", data: "a", mimeType: "image/png" });
+		expect(harness.collectQueueReplaceImages("[image #1] and again [image #1]")).toEqual([
+			{ type: "image", data: "a", mimeType: "image/png" },
+		]);
 	});
 });
 

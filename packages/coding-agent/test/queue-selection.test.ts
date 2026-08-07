@@ -31,11 +31,11 @@ describe("QueueSelection", () => {
 		selection.move(queue, "draft", -1);
 		selection.move(queue, "", -1);
 		selection.move(queue, "", -1); // s2
-		selection.sync({ steering: ["s1", "s2"], followUp: ["f2"] });
+		expect(selection.sync({ steering: ["s1", "s2"], followUp: ["f2"] })).toBeUndefined();
 		expect(selection.selected).toEqual({ lane: "steering", index: 1, text: "s2" });
-		selection.sync({ steering: ["s0", "s2"], followUp: [] }); // retarget by text
+		expect(selection.sync({ steering: ["s0", "s2"], followUp: [] })).toBeUndefined(); // retarget by text
 		expect(selection.selected).toEqual({ lane: "steering", index: 1, text: "s2" });
-		selection.sync({ steering: ["s0"], followUp: ["s2"] }); // same text, other lane: drop
+		expect(selection.sync({ steering: ["s0"], followUp: ["s2"] })).toBe("s2"); // same text, other lane: drop
 		expect(selection.isBrowsing).toBe(false);
 	});
 
