@@ -6978,8 +6978,20 @@ export class InteractiveMode {
 				type: "move",
 				direction,
 			});
-			if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
-			else if (status !== "applied") this.showStatus("Queue changed; reorder not applied");
+			if (status === "applied") {
+				// A daemon's queue event can arrive after the response; swap the
+				// local mirror now so a queued follow-up move addresses the new
+				// index. The later event resyncs to the same state.
+				const lane = this.connectionQueue[selected.lane];
+				const target = selected.index + direction;
+				if (lane[selected.index] === selected.text && target >= 0 && target < lane.length) {
+					[lane[selected.index], lane[target]] = [lane[target] as string, selected.text];
+					this.queueSelection.sync(this.connectionQueue);
+					this.updatePendingMessagesDisplay();
+					this.ui.requestRender();
+				}
+			} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
+			else this.showStatus("Queue changed; reorder not applied");
 		}).catch((error) => this.showError(error instanceof Error ? error.message : String(error)));
 	}
 

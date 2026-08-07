@@ -147,16 +147,10 @@ describe("interactive queued-message editing", () => {
 		expect(harness.editor.getText()).toBe("newer typing");
 	});
 
-	it("serializes rapid moves so the second uses the refreshed selection", async () => {
+	it("serializes rapid moves and addresses the second with the post-move index before any queue event", async () => {
+		// The daemon's session_action_update can arrive after the mutation response,
+		// so the local mirror must be updated optimistically between chained moves.
 		const harness = createHarness({ steering: ["s1", "s2", "s3"], followUp: [] });
-		harness.agentConnection.mutateQueuedMessage.mockImplementation(async (_lane, index) => {
-			// Emulate the server event: the item moved one place earlier.
-			const steering = [...harness.connectionQueue.steering];
-			[steering[index - 1], steering[index]] = [steering[index]!, steering[index - 1]!];
-			harness.connectionQueue = { steering, followUp: [] };
-			harness.queueSelection.sync(harness.connectionQueue);
-			return "applied";
-		});
 		harness.browseQueueSelection(-1); // s3 at index 2
 		harness.moveQueueSelection(-1);
 		harness.moveQueueSelection(-1);
