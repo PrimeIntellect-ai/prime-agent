@@ -13,6 +13,16 @@ export function shouldUseWindowsShell(command: string): boolean {
 	return commandName.endsWith(".cmd") || commandName.endsWith(".bat") || WINDOWS_SHELL_COMMANDS.has(commandName);
 }
 
+/** Cheap kill(0) existence probe; counts zombies as existing. */
+export function processIdExists(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
 /** A zombie has already exited; it only lingers until its parent reaps it. */
 export function isZombieProcess(pid: number): boolean {
 	if (process.platform === "win32") {
@@ -38,12 +48,7 @@ export function isZombieProcess(pid: number): boolean {
 
 /** True only for a process that is actually running: zombies do not count. */
 export function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
-	return !isZombieProcess(pid);
+	return processIdExists(pid) && !isZombieProcess(pid);
 }
 
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {

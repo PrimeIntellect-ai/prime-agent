@@ -1718,6 +1718,7 @@ describe("daemon worker supervisor monitoring", () => {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
 			stopWorker,
+			persistWorker: vi.fn(),
 			log: vi.fn(),
 			reportCleanupFailure: vi.fn(),
 		}) as {
@@ -1764,6 +1765,7 @@ describe("daemon worker supervisor monitoring", () => {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
 			stopWorker,
+			persistWorker: vi.fn(),
 			log: vi.fn(),
 			reportCleanupFailure: vi.fn(),
 		}) as {
@@ -1809,12 +1811,14 @@ describe("daemon worker supervisor monitoring", () => {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
 			stopWorker,
+			persistWorker: vi.fn(),
 			log: vi.fn(),
 			reportCleanupFailure: vi.fn(),
 		}) as {
 			scheduleWorkerStopFinalization(target: object): void;
 		};
 		const childProcessModule = await import("../src/utils/child-process.js");
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
 		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
 		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
 		try {
@@ -1837,6 +1841,7 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(killSpy).not.toHaveBeenCalled();
 			expect(stopWorker).not.toHaveBeenCalled();
 		} finally {
+			existsSpy.mockRestore();
 			aliveSpy.mockRestore();
 			killSpy.mockRestore();
 		}
@@ -1861,6 +1866,7 @@ describe("daemon worker supervisor monitoring", () => {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
 			stopWorker,
+			persistWorker: vi.fn(),
 			log: vi.fn(),
 			reportCleanupFailure: vi.fn(),
 		}) as {
@@ -1869,6 +1875,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const childProcessModule = await import("../src/utils/child-process.js");
 		const sessionLeaseModule = await import("../src/core/session-lease.js");
 		// The pid is alive, but it now belongs to an unrelated process.
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
 		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
 		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
 		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue("proc:recycled");
@@ -1884,9 +1891,59 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(killSpy).not.toHaveBeenCalled();
 			expect(stopWorker).toHaveBeenCalledWith(worker, true, true, false);
 		} finally {
+			existsSpy.mockRestore();
 			aliveSpy.mockRestore();
 			killSpy.mockRestore();
 			startIdSpy.mockRestore();
+		}
+	});
+
+	it("retries finalization after a transient cleanup failure", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-transient-cleanup",
+				pid: process.pid,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const stopWorker = vi
+			.fn(async () => {
+				workers.delete(worker.descriptor.workerId);
+			})
+			.mockImplementationOnce(async () => {
+				throw new Error("archive temporarily unavailable");
+			});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			shuttingDown: false,
+			stopWorker,
+			persistWorker: vi.fn(),
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(false);
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			const finalization = worker.stopFinalization;
+
+			await vi.advanceTimersByTimeAsync(20_000);
+			await finalization;
+
+			// The first attempt failed transiently; the registration is still
+			// cleaned up by a retry instead of being stranded forever.
+			expect(stopWorker).toHaveBeenCalledTimes(2);
+			expect(workers.size).toBe(0);
+		} finally {
+			aliveSpy.mockRestore();
 		}
 	});
 
@@ -1909,6 +1966,7 @@ describe("daemon worker supervisor monitoring", () => {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
 			stopWorker,
+			persistWorker: vi.fn(),
 			log: vi.fn(),
 			reportCleanupFailure: vi.fn(),
 		}) as {
