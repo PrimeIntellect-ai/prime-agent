@@ -161,6 +161,9 @@ export interface HeartbeatPromptDetails {
 	runCount: number;
 	nextRunAt?: string;
 	lastRunAt?: string;
+	/** Scheduled fires swallowed since the previous delivery. */
+	missedRunCount?: number;
+	lastSkippedAt?: string;
 }
 
 export interface IpythonStateRestoredDetails {
@@ -398,6 +401,29 @@ export function isCompactionOutcomeMessage(message: unknown): message is Compact
 	);
 }
 
+/**
+ * The delivered heartbeat text.
+ *
+ * `runCount`/`lastRunAt` live in the message details, which `convertToLlm` drops,
+ * so a heartbeat-driven agent could not tell "beat 3 of 3" from "beat 3 of 40" and
+ * saw no sign that fires had been swallowed while it was busy. The instruction stays
+ * last so it remains the final thing the model reads.
+ */
+export function formatHeartbeatPromptContent(job: AgentCronJob): string {
+	const facts = [
+		`beat ${job.runCount + 1}`,
+		`schedule ${job.schedule.expression}`,
+		job.lastRunAt ? `previous delivery ${job.lastRunAt}` : "first delivery",
+	];
+	const missed = job.missedRunCount ?? 0;
+	if (missed > 0) {
+		const fires = missed === 1 ? "fire" : "fires";
+		const when = job.lastSkippedAt ? ` (most recent ${job.lastSkippedAt})` : "";
+		facts.push(`${missed} scheduled ${fires} skipped while this session was busy${when}`);
+	}
+	return `<heartbeat>\n${facts.join("\n")}\n</heartbeat>\n\n${job.prompt}`;
+}
+
 export function createHeartbeatPromptMessage(
 	job: AgentCronJob,
 	timestamp = Date.now(),
@@ -405,7 +431,7 @@ export function createHeartbeatPromptMessage(
 	return {
 		role: "custom",
 		customType: HEARTBEAT_PROMPT_CUSTOM_TYPE,
-		content: job.prompt,
+		content: formatHeartbeatPromptContent(job),
 		display: true,
 		details: {
 			jobId: job.id,
@@ -414,6 +440,8 @@ export function createHeartbeatPromptMessage(
 			runCount: job.runCount,
 			nextRunAt: job.nextRunAt,
 			lastRunAt: job.lastRunAt,
+			...(job.missedRunCount ? { missedRunCount: job.missedRunCount } : {}),
+			...(job.lastSkippedAt ? { lastSkippedAt: job.lastSkippedAt } : {}),
 		},
 		timestamp,
 	};

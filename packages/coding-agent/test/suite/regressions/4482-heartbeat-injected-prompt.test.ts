@@ -5,7 +5,11 @@ import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type AgentCronJob, shouldDeferHeartbeatCronJob } from "../../../src/core/cron-jobs.js";
 import { createGoalContextMessage, type GoalState } from "../../../src/core/goals.js";
-import { createHeartbeatPromptMessage, HEARTBEAT_PROMPT_CUSTOM_TYPE } from "../../../src/core/messages.js";
+import {
+	createHeartbeatPromptMessage,
+	formatHeartbeatPromptContent,
+	HEARTBEAT_PROMPT_CUSTOM_TYPE,
+} from "../../../src/core/messages.js";
 import {
 	InjectedPromptMessageComponent,
 	isInjectedPromptMessage,
@@ -129,11 +133,9 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 			customType: HEARTBEAT_PROMPT_CUSTOM_TYPE,
 			display: true,
 		});
-		expect(getMessageText(harness.session.messages[0])).toBe(
-			"Check whether the long-running task needs another step.",
-		);
+		expect(getMessageText(harness.session.messages[0])).toBe(formatHeartbeatPromptContent(createHeartbeat()));
 		expect(providerMessages.at(-1)).toMatchObject({ role: "user" });
-		expect(getMessageText(providerMessages.at(-1))).toBe("Check whether the long-running task needs another step.");
+		expect(getMessageText(providerMessages.at(-1))).toBe(formatHeartbeatPromptContent(createHeartbeat()));
 	});
 
 	it("runs heartbeat prompts through before_agent_start handlers", async () => {
@@ -255,7 +257,7 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		await promptPromise;
 
 		expect(queuedPendingContextText).toBe("pending heartbeat context");
-		expect(queuedHeartbeatText).toBe("Check whether the long-running task needs another step.");
+		expect(queuedHeartbeatText).toBe(formatHeartbeatPromptContent(createHeartbeat()));
 		expect(
 			queueEvents.some((event) =>
 				event.followUp.includes("Heartbeat prompt: Check whether the long-running task needs another step."),
@@ -303,7 +305,7 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		await Promise.all([ordinary, heartbeat]);
 		await harness.session.waitForIdle();
 
-		expect(providerOrder).toEqual(["ordinary first", createHeartbeat().prompt]);
+		expect(providerOrder).toEqual(["ordinary first", formatHeartbeatPromptContent(createHeartbeat())]);
 	});
 
 	it("waits for a queued-work pause before admitting a streaming heartbeat", async () => {
@@ -363,7 +365,9 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 			(context) => {
 				deliveredOrder = context.messages
 					.map(getMessageText)
-					.filter((text) => ["context A", "context B", createHeartbeat().prompt].includes(text));
+					.filter((text) =>
+						["context A", "context B", formatHeartbeatPromptContent(createHeartbeat())].includes(text),
+					);
 				return fauxAssistantMessage("heartbeat handled");
 			},
 		]);
@@ -387,7 +391,7 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		await originalTurn;
 		await harness.session.waitForIdle();
 
-		expect(deliveredOrder).toEqual(["context A", "context B", createHeartbeat().prompt]);
+		expect(deliveredOrder).toEqual(["context A", "context B", formatHeartbeatPromptContent(createHeartbeat())]);
 	});
 
 	it("returns raw text when clearing queued heartbeat prompts while previews remain labeled", async () => {

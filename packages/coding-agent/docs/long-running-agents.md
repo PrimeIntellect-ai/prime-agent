@@ -156,6 +156,25 @@ await rlm_heartbeat.update(first["heartbeat"]["id"], status="pause")
 
 RLM heartbeats are distinct from the user's `/heartbeat`; the Python skill cannot replace or clear the user-owned heartbeat.
 
+### Fires that land on a busy session
+
+A fire is declined when the session is busy — streaming, compacting, retrying, running bash, or holding unfinished actions. The declined fire is re-armed on the schedule's original phase rather than restarting the interval from the moment it was declined, and every fire that comes and goes during one busy window is coalesced into a single backlog count.
+
+The next delivered beat carries that context. Each heartbeat prompt is prefixed with a `<heartbeat>` block naming the beat number, the schedule, the previous delivery time, and — when there is a backlog — how many fires were skipped and when the most recent one was:
+
+```text
+<heartbeat>
+beat 7
+schedule every 5m
+previous delivery 2026-01-01T12:05:00.000Z
+2 scheduled fires skipped while this session was busy (most recent 2026-01-01T12:15:00.000Z)
+</heartbeat>
+
+Check the deployment and report meaningful changes
+```
+
+The backlog resets once a beat is delivered. `/heartbeat status` shows it as `Missed: <n> since last run`, and the daemon job listing as `missed=<n>`.
+
 ### General schedules
 
 Schedule a one-time or recurring prompt for an addressable agent:

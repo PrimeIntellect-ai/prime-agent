@@ -9617,6 +9617,10 @@ export class InteractiveMode {
 			`${theme.fg("dim", "Last:")} ${last}`,
 			`${theme.fg("dim", "Runs:")} ${job.runCount}`,
 		];
+		if (job.missedRunCount) {
+			const skipped = job.lastSkippedAt ? `, most recent ${new Date(job.lastSkippedAt).toLocaleString()}` : "";
+			lines.push(`${theme.fg("dim", "Missed:")} ${job.missedRunCount} since last run${skipped}`);
+		}
 		if (job.lastError) {
 			lines.push(`${theme.fg("dim", "Error:")} ${job.lastError}`);
 		}

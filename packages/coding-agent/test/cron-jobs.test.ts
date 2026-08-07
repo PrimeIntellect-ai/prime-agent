@@ -1128,11 +1128,14 @@ describe("AgentCronScheduler", () => {
 		const handled = await scheduler.runDue(new Date("2026-01-01T12:39:00.000Z"));
 
 		expect(handled).toBe(0);
+		// The skipped fire was due at 12:39, so the next one stays on the original
+		// cadence at 12:44 rather than restarting the interval from the skip time.
 		expect(store.getHeartbeat("active-1")).toMatchObject({
 			id: job.id,
 			status: "active",
-			nextRunAt: "2026-01-01T12:45:00.000Z",
+			nextRunAt: "2026-01-01T12:44:00.000Z",
 			lastSkippedAt: "2026-01-01T12:40:00.000Z",
+			missedRunCount: 1,
 			runCount: 0,
 		});
 		expect(store.getHeartbeat("active-1")).not.toHaveProperty("lastRunAt");
@@ -1277,7 +1280,7 @@ describe("AgentCronScheduler", () => {
 		});
 	});
 
-	it("reschedules a skipped dispatch from the skip time", () => {
+	it("reschedules a skipped dispatch on the original cadence", () => {
 		const store = new AgentCronJobStore(makeStorePath(tempDirs));
 		const heartbeat = store.createHeartbeat({
 			activeSessionId: "active-1",
@@ -1299,8 +1302,9 @@ describe("AgentCronScheduler", () => {
 		});
 
 		expect(store.list().find((job) => job.id === heartbeat.id)).toMatchObject({
-			nextRunAt: "2026-01-01T12:34:27.000Z",
+			nextRunAt: "2026-01-01T12:34:20.000Z",
 			lastSkippedAt: "2026-01-01T12:34:17.000Z",
+			missedRunCount: 1,
 			runCount: 0,
 		});
 	});

@@ -50,6 +50,11 @@ export interface AgentCronJob {
 	nextRunAt?: string;
 	lastRunAt?: string;
 	lastSkippedAt?: string;
+	/**
+	 * Scheduled fires swallowed since the last delivered run, including fires
+	 * coalesced away while the session stayed busy. Reset when a run is delivered.
+	 */
+	missedRunCount?: number;
 	lastError?: string;
 	runCount: number;
 }
@@ -111,6 +116,8 @@ interface CronJobsState {
 export const SESSION_SCHEDULED_JOBS_FILENAME = "scheduled-jobs.json";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
+/** Upper bound on schedule steps walked while coalescing skipped fires. */
+const MAX_COALESCED_SKIPS = 10_000;
 const ONE_SECOND_MS = 1000;
 const ONE_MINUTE_MS = 60_000;
 export const DEFAULT_HEARTBEAT_SCHEDULE = "every 5m";
@@ -651,7 +658,7 @@ export class AgentCronJobStore {
 					: job.schedule.kind === "interval"
 						? nextRunAtForSchedule(job.schedule, now)
 						: undefined;
-			updated = {
+			updated = withoutMissedRunCount({
 				...job,
 				status: job.schedule.kind === "once" ? "completed" : "active",
 				nextRunAt: nextRunAt?.toISOString(),
@@ -659,7 +666,7 @@ export class AgentCronJobStore {
 				lastError,
 				runCount: job.runCount + 1,
 				updatedAt: now.toISOString(),
-			};
+			});
 			return updated;
 		});
 		if (updated) {
@@ -668,7 +675,7 @@ export class AgentCronJobStore {
 		return updated;
 	}
 
-	recordSkipResult(id: string, result: { now?: Date }): AgentCronJob | undefined {
+	recordSkipResult(id: string, result: { now?: Date; scheduledFor?: string }): AgentCronJob | undefined {
 		const now = result.now ?? new Date();
 		let updated: AgentCronJob | undefined;
 		const jobs = this.readJobs().map((job) => {
@@ -679,13 +686,8 @@ export class AgentCronJobStore {
 				updated = job;
 				return job;
 			}
-			const nextRunAt = nextRunAtForSchedule(job.schedule, now);
-			updated = {
-				...job,
-				nextRunAt: nextRunAt?.toISOString(),
-				lastSkippedAt: now.toISOString(),
-				updatedAt: now.toISOString(),
-			};
+			const { nextRunAt, missed } = rescheduleAfterSkip(job, result.scheduledFor ?? job.nextRunAt, now);
+			updated = withSkipAccounting({ ...job, nextRunAt: nextRunAt?.toISOString() }, now, missed);
 			return updated;
 		});
 		if (updated) {
@@ -729,24 +731,26 @@ export class AgentCronJobStore {
 					return job;
 				}
 				if (result.outcome === "skipped" && result.error === undefined) {
-					const nextRunAt = nextRunAtForSchedule(job.schedule, now);
-					updated = {
-						...job,
-						status: job.schedule.kind === "once" ? "completed" : job.status,
-						nextRunAt: nextRunAt?.toISOString(),
-						lastSkippedAt: now.toISOString(),
-						updatedAt: now.toISOString(),
-					};
+					const { nextRunAt, missed } = rescheduleAfterSkip(job, dispatch.scheduledFor, now);
+					updated = withSkipAccounting(
+						{
+							...job,
+							status: job.schedule.kind === "once" ? "completed" : job.status,
+							nextRunAt: nextRunAt?.toISOString(),
+						},
+						now,
+						missed,
+					);
 					return updated;
 				}
-				updated = {
+				updated = withoutMissedRunCount({
 					...job,
 					status: job.schedule.kind === "once" ? "completed" : job.status,
 					lastRunAt: now.toISOString(),
 					lastError: result.error === undefined ? undefined : errorMessage(result.error),
 					runCount: job.runCount + 1,
 					updatedAt: now.toISOString(),
-				};
+				});
 				return updated;
 			});
 			return [];
@@ -1246,7 +1250,8 @@ export function formatAgentCronJob(job: AgentCronJob): string {
 	const error = job.lastError ? ` error=${job.lastError}` : "";
 	const label = job.label ? ` label="${job.label}"` : "";
 	const skipped = job.lastSkippedAt ? ` skipped=${new Date(job.lastSkippedAt).toLocaleString()}` : "";
-	return `${job.id} ${job.status}${label} next=${next} last=${last}${skipped} runs=${job.runCount} schedule="${job.schedule.expression}" prompt="${preview}"${error}`;
+	const missed = job.missedRunCount ? ` missed=${job.missedRunCount}` : "";
+	return `${job.id} ${job.status}${label} next=${next} last=${last}${skipped}${missed} runs=${job.runCount} schedule="${job.schedule.expression}" prompt="${preview}"${error}`;
 }
 
 function consumeDeliveryOption(text: string): { deliveryMode: AgentHeartbeatDeliveryMode | undefined; rest: string } {
@@ -1490,6 +1495,54 @@ function stripMatchingQuotes(value: string): string {
 	return value;
 }
 
+/**
+ * Re-arm a job whose fire was declined, advancing from the beat that was skipped
+ * rather than from the skip time.
+ *
+ * Advancing from `now` restarted an interval schedule's phase on every skip and
+ * erased the fact that a long busy window swallowed more than one beat. Stepping
+ * the schedule forward from `scheduledFor` keeps the cadence and counts every fire
+ * that was coalesced away, so the next delivered beat can report the gap. The
+ * returned time is always strictly after `now`, so a busy session cannot make the
+ * scheduler spin on an already-due job.
+ */
+function rescheduleAfterSkip(
+	job: AgentCronJob,
+	scheduledFor: string | undefined,
+	now: Date,
+): { nextRunAt: Date | undefined; missed: number } {
+	const missedAt = scheduledFor === undefined ? undefined : Date.parse(scheduledFor);
+	if (missedAt === undefined || !Number.isFinite(missedAt)) {
+		return { nextRunAt: nextRunAtForSchedule(job.schedule, now), missed: 1 };
+	}
+	let missed = 1;
+	let next = nextRunAtForSchedule(job.schedule, new Date(missedAt));
+	for (let step = 0; next && next.getTime() <= now.getTime() && step < MAX_COALESCED_SKIPS; step++) {
+		missed++;
+		next = nextRunAtForSchedule(job.schedule, next);
+	}
+	// A pathologically short schedule against a long busy window would otherwise
+	// walk the whole gap; fall back to the plain advance and keep the count honest.
+	if (next && next.getTime() <= now.getTime()) {
+		return { nextRunAt: nextRunAtForSchedule(job.schedule, now), missed };
+	}
+	return { nextRunAt: next, missed };
+}
+
+function withSkipAccounting(job: AgentCronJob, now: Date, missed: number): AgentCronJob {
+	return {
+		...job,
+		lastSkippedAt: now.toISOString(),
+		missedRunCount: (job.missedRunCount ?? 0) + missed,
+		updatedAt: now.toISOString(),
+	};
+}
+
+function withoutMissedRunCount(job: AgentCronJob): AgentCronJob {
+	const { missedRunCount: _missedRunCount, ...rest } = job;
+	return rest;
+}
+
 function isDueJob(job: AgentCronJob, now: Date): boolean {
 	return job.status === "active" && job.nextRunAt !== undefined && Date.parse(job.nextRunAt) <= now.getTime();
 }
@@ -1584,7 +1637,9 @@ function claimDueInState(state: CronJobsState, dueAt: Date, claimedAt: Date): Ag
 			? { ...job, nextRunAt, updatedAt: claimedAt.toISOString() }
 			: withoutNextRunAt({ ...job, updatedAt: claimedAt.toISOString() });
 		if (claimedJobIds.has(job.id)) {
-			return { ...advanced, lastSkippedAt: claimedAt.toISOString() };
+			// A fire that lands while the previous dispatch is still outstanding is
+			// swallowed just like one the session declines, so it is counted the same way.
+			return withSkipAccounting(advanced, claimedAt, 1);
 		}
 		const dispatch: AgentCronDispatchRecord = {
 			id: randomUUID(),
