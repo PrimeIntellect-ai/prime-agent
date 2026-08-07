@@ -1699,6 +1699,141 @@ describe("daemon worker supervisor monitoring", () => {
 		]);
 	});
 
+	it("finalizes a timed-out stop once the worker process dies", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-timed-out-stop",
+				pid: process.pid,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		let alive = true;
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			stopWorker,
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockImplementation(() => alive);
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			const finalization = worker.stopFinalization;
+			expect(finalization).toBeDefined();
+
+			await vi.advanceTimersByTimeAsync(500);
+			expect(stopWorker).not.toHaveBeenCalled();
+
+			alive = false;
+			await vi.advanceTimersByTimeAsync(500);
+			await finalization;
+
+			expect(stopWorker).toHaveBeenCalledWith(worker, true, true, false);
+			expect(worker.stopFinalization).toBeUndefined();
+		} finally {
+			aliveSpy.mockRestore();
+		}
+	});
+
+	it("escalates a stuck stop to SIGKILL before finalizing", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-stuck-stop",
+				pid: process.pid,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+				archiveOnStop: true,
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		let alive = true;
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			stopWorker,
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockImplementation(() => alive);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation((_pid, signal) => {
+			if (signal === "SIGKILL") {
+				alive = false;
+			}
+		});
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			const finalization = worker.stopFinalization;
+
+			await vi.advanceTimersByTimeAsync(10_000);
+			await finalization;
+
+			expect(killSpy).toHaveBeenCalledWith(worker.descriptor.pid, "SIGKILL");
+			expect(stopWorker).toHaveBeenCalledWith(worker, true, true, true);
+		} finally {
+			aliveSpy.mockRestore();
+			killSpy.mockRestore();
+		}
+	});
+
+	it("leaves a rescinded stop to the retry flow instead of finalizing it", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-rescinded-stop",
+				pid: process.pid,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString() as string | undefined,
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		let alive = true;
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			stopWorker,
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockImplementation(() => alive);
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			const finalization = worker.stopFinalization;
+
+			// An explicit retry revives the worker while its process is exiting.
+			worker.descriptor.stopRequestedAt = undefined;
+			worker.intentionalStop = false;
+			alive = false;
+			await vi.advanceTimersByTimeAsync(500);
+			await finalization;
+
+			expect(stopWorker).not.toHaveBeenCalled();
+		} finally {
+			aliveSpy.mockRestore();
+		}
+	});
+
 	it("ignores malformed persisted worker descriptors", () => {
 		const descriptorDir = mkdtempSync(join(tmpdir(), "prime-supervisor-descriptor-test-"));
 		try {

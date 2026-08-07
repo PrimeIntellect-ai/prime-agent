@@ -43,7 +43,7 @@ import {
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
 import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
-import { signalProcessGroupOrProcess } from "../../utils/child-process.js";
+import { isProcessAlive, signalProcessGroupOrProcess } from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
@@ -136,6 +136,8 @@ const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 const UPDATE_RESTART_PREPARE_DEADLINE_MS = 100_000;
 const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
+const STOP_FINALIZATION_RECHECK_MS = 250;
+const STOP_FINALIZATION_SIGKILL_GRACE_MS = 5000;
 const OWNED_WORKER_DISCONNECT_GRACE_MS = 30_000;
 const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
@@ -261,6 +263,7 @@ interface ResidentWorker {
 	intentionalStop: boolean;
 	stopRevision: number;
 	launchEnv?: Record<string, string>;
+	stopFinalization?: Promise<void>;
 	ownerCleanupTimer?: ReturnType<typeof setTimeout>;
 	promotedOwnerClientId?: string;
 	updateRestartPrepareClient?: DaemonWorkerClient;
@@ -509,15 +512,6 @@ function workerSocketPath(supervisorSocketPath: string, workerId: string): strin
 
 function looksLikeSessionPath(selector: string): boolean {
 	return isAbsolute(selector) || selector.endsWith(".jsonl") || selector.includes("/") || selector.includes("\\");
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
 }
 
 function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
@@ -4648,6 +4642,9 @@ export class DaemonSupervisor {
 		}
 		if (isWorkerProcessAlive()) {
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
+			if (removeDescriptor) {
+				this.scheduleWorkerStopFinalization(worker);
+			}
 			throw new Error(`Session worker ${worker.descriptor.workerId} did not stop${force ? " after SIGKILL" : ""}`);
 		}
 		if (directChild) {
@@ -4666,6 +4663,49 @@ export class DaemonSupervisor {
 		if (!this.shuttingDown) {
 			void this.syncAgentPeers().catch(() => undefined);
 			this.broadcastHeartbeatsChanged();
+		}
+	}
+
+	/**
+	 * A stop that timed out leaves a tombstoned registration behind. Keep
+	 * escalating in the background until the process is gone, then finish the
+	 * interrupted cleanup instead of leaving a dead worker registered forever.
+	 */
+	private scheduleWorkerStopFinalization(worker: ResidentWorker): void {
+		if (worker.stopFinalization) {
+			return;
+		}
+		worker.stopFinalization = this.finalizeTimedOutWorkerStop(worker).finally(() => {
+			worker.stopFinalization = undefined;
+		});
+	}
+
+	private async finalizeTimedOutWorkerStop(worker: ResidentWorker): Promise<void> {
+		const sigkillDeadline = Date.now() + STOP_FINALIZATION_SIGKILL_GRACE_MS;
+		let killed = false;
+		while (!this.shuttingDown) {
+			if (!isProcessAlive(worker.descriptor.pid)) {
+				break;
+			}
+			if (!killed && Date.now() >= sigkillDeadline) {
+				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
+				killed = true;
+			}
+			await unrefDelay(STOP_FINALIZATION_RECHECK_MS);
+		}
+		if (this.shuttingDown || this.workers.get(worker.descriptor.workerId) !== worker) {
+			return;
+		}
+		if (worker.descriptor.stopRequestedAt === undefined) {
+			// The stop was rescinded (for example by an explicit retry) while the
+			// process was still exiting; leave the registration to that flow.
+			return;
+		}
+		try {
+			await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
+			this.log(`Finalized timed-out stop for worker ${worker.descriptor.workerId}`);
+		} catch (error) {
+			this.reportCleanupFailure(`timed-out worker stop ${worker.descriptor.workerId}`, error);
 		}
 	}
 
