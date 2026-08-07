@@ -4541,18 +4541,24 @@ export class DaemonSupervisor {
 	}
 
 	/**
-	 * True when the registered pid is alive and still the process we launched.
-	 * With a recorded identity this fails closed: an unavailable observation is
-	 * treated as a different process so a recycled pid is never signalled.
+	 * Verdict on whether the registered pid is still the process we launched.
+	 * Callers must be conservative in both directions: signal a pid only on
+	 * "current" (never SIGKILL a recycled pid), and clean up a registration
+	 * only on "gone"/"replaced" (never orphan a live worker because a
+	 * transient identity lookup failed).
 	 */
-	private isWorkerProcessCurrent(worker: ResidentWorker): boolean {
+	private workerProcessIdentity(worker: ResidentWorker): "current" | "replaced" | "gone" | "unknown" {
 		if (!isProcessAlive(worker.descriptor.pid)) {
-			return false;
+			return "gone";
 		}
 		if (worker.descriptor.processStartId === undefined) {
-			return true;
+			return "current";
 		}
-		return getProcessStartId(worker.descriptor.pid) === worker.descriptor.processStartId;
+		const observed = getProcessStartId(worker.descriptor.pid);
+		if (observed === undefined) {
+			return "unknown";
+		}
+		return observed === worker.descriptor.processStartId ? "current" : "replaced";
 	}
 
 	private async stopWorker(
@@ -4638,12 +4644,14 @@ export class DaemonSupervisor {
 			worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
-		} else if (this.isWorkerProcessCurrent(worker)) {
+		} else if (this.workerProcessIdentity(worker) === "current") {
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGTERM");
 		}
-		// Identity-aware: a recycled pid is treated as gone and never signalled.
-		// kill(0) runs on every poll; the expensive identity check is throttled.
-		let identityVerdict = true;
+		// Identity-aware in both directions: a replaced pid counts as gone (never
+		// signal a recycled pid) while an unknown identity counts as alive (never
+		// clean up a possibly-live worker on a transient lookup failure). kill(0)
+		// runs on every poll; the expensive identity check is throttled.
+		let identityVerdict: "current" | "replaced" | "gone" | "unknown" = "current";
 		let identityCheckedAt = 0;
 		const isWorkerProcessAlive = () => {
 			if (directChild) {
@@ -4655,9 +4663,9 @@ export class DaemonSupervisor {
 			const now = Date.now();
 			if (now - identityCheckedAt >= LIVENESS_IDENTITY_RECHECK_MS) {
 				identityCheckedAt = now;
-				identityVerdict = this.isWorkerProcessCurrent(worker);
+				identityVerdict = this.workerProcessIdentity(worker);
 			}
-			return identityVerdict;
+			return identityVerdict !== "replaced" && identityVerdict !== "gone";
 		};
 		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
@@ -4666,7 +4674,7 @@ export class DaemonSupervisor {
 		if (force && isWorkerProcessAlive()) {
 			if (directChild) {
 				directChild.child.kill("SIGKILL");
-			} else {
+			} else if (identityVerdict === "current") {
 				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 			}
 			const forceDeadline = Date.now() + 1000;
@@ -4741,7 +4749,11 @@ export class DaemonSupervisor {
 			worker.stopRevision === stopRevision &&
 			worker.descriptor.stopRequestedAt !== undefined &&
 			worker.descriptor.pid === pid;
+		// A replaced pid counts as gone (never SIGKILL a recycled pid); an
+		// unobservable identity counts as alive (never clean up a possibly-live
+		// worker). kill(0) probes every poll; ps-backed checks are throttled.
 		let stoppedVerdict = true;
+		let stoppedCanSignal = true;
 		let stoppedCheckedAt = 0;
 		const isStoppedProcessAlive = () => {
 			if (!processIdExists(pid)) {
@@ -4756,10 +4768,11 @@ export class DaemonSupervisor {
 				stoppedVerdict = false;
 			} else if (processStartId === undefined) {
 				stoppedVerdict = true;
+				stoppedCanSignal = true;
 			} else {
-				// Fail closed: an unobservable identity is treated as a different
-				// process so a recycled pid is never SIGKILLed.
-				stoppedVerdict = getProcessStartId(pid) === processStartId;
+				const observed = getProcessStartId(pid);
+				stoppedVerdict = observed !== processStartId ? observed === undefined : true;
+				stoppedCanSignal = observed === processStartId;
 			}
 			return stoppedVerdict;
 		};
@@ -4772,7 +4785,7 @@ export class DaemonSupervisor {
 			if (!isStoppedProcessAlive()) {
 				break;
 			}
-			if (!killed && Date.now() >= sigkillDeadline) {
+			if (!killed && stoppedCanSignal && Date.now() >= sigkillDeadline) {
 				signalProcessGroupOrProcess(pid, "SIGKILL");
 				killed = true;
 			}

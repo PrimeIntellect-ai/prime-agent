@@ -1898,6 +1898,55 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("keeps waiting when process identity is transiently unobservable", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-unknown-identity-stop",
+				pid: 111_114,
+				processStartId: "proc:original",
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			stopWorker,
+			persistWorker: vi.fn(),
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const sessionLeaseModule = await import("../src/core/session-lease.js");
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		// Identity observation fails transiently (e.g. ps unavailable).
+		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue(undefined);
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+
+			await vi.advanceTimersByTimeAsync(20_000);
+
+			// The possibly-live worker is neither signalled nor cleaned up.
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(stopWorker).not.toHaveBeenCalled();
+			expect(worker.stopFinalization).toBeDefined();
+		} finally {
+			existsSpy.mockRestore();
+			aliveSpy.mockRestore();
+			killSpy.mockRestore();
+			startIdSpy.mockRestore();
+		}
+	});
+
 	it("retries finalization after a transient cleanup failure", async () => {
 		vi.useFakeTimers();
 		const worker = {
