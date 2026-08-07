@@ -943,7 +943,10 @@ describe("daemon supervisor resident workers", () => {
 			workerPids.delete(summary.workerPid);
 
 			// Resuming the saved transcript must not be blocked by the stale
-			// registration: the supervisor reclaims it and launches a fresh worker.
+			// registration. Whichever cleanup wins the race — the background stop
+			// finalizer or the resume-time reclaim (each covered deterministically
+			// by unit tests) — the user-visible guarantee is the same: the resume
+			// below must succeed with a fresh worker.
 			const resumed = await client.request({
 				type: "create",
 				sessionPath: sessionFile,

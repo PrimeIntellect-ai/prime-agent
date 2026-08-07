@@ -2082,6 +2082,13 @@ export class DaemonSupervisor {
 		if (!this.isWorkerStopping(worker)) {
 			return false;
 		}
+		// A timed-out stop may already have a background finalizer completing
+		// this exact cleanup; wait for it instead of running a duplicate stop.
+		const finalization = worker.stopFinalization;
+		if (finalization) {
+			await finalization.catch(() => undefined);
+			return this.workers.get(worker.descriptor.workerId) !== worker;
+		}
 		// Identity-aware: a pid recycled by an unrelated process counts as gone,
 		// so the stale registration is still reclaimed (and never signalled).
 		if (this.isWorkerProcessCurrent(worker)) {

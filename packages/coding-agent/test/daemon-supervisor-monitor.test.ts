@@ -2552,6 +2552,46 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("waits for an in-flight stop finalization instead of stopping twice", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-finalizing",
+				pid: process.pid,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			client: undefined,
+			recovery: undefined,
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		let releaseFinalization!: () => void;
+		worker.stopFinalization = new Promise<void>((resolveFinalization) => {
+			releaseFinalization = () => {
+				workers.delete(worker.descriptor.workerId);
+				resolveFinalization();
+			};
+		});
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			stopWorker,
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			reclaimStaleWorkerRegistration(target: object): Promise<boolean>;
+		};
+
+		const reclaim = supervisor.reclaimStaleWorkerRegistration(worker);
+		releaseFinalization();
+
+		// The reclaim defers to the finalizer's cleanup instead of duplicating it.
+		await expect(reclaim).resolves.toBe(true);
+		expect(stopWorker).not.toHaveBeenCalled();
+	});
+
 	it("does not reclaim a stopping worker whose process is still alive", async () => {
 		const worker = {
 			descriptor: {
