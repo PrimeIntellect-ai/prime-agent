@@ -75,6 +75,7 @@ describe("built-in slash commands", () => {
 	test("marks argument commands as taking a free-form argument", () => {
 		for (const [name, argumentHint] of [
 			["model", "[search]"],
+			["switch", "[search]"],
 			["export", "[path]"],
 			["import", "<path.jsonl>"],
 			["name", "[name]"],
