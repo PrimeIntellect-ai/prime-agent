@@ -16,6 +16,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { getOpenRouterHeaders } from "../utils/openrouter-headers.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -184,6 +185,9 @@ function createClient(
 
 	const compat = getCompat(model);
 	const headers = { ...model.headers };
+	if (model.provider === "openrouter") {
+		Object.assign(headers, getOpenRouterHeaders());
+	}
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilotHeaders = buildCopilotDynamicHeaders({
