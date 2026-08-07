@@ -1,9 +1,21 @@
 import type { Api, Model, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel } from "../types.js";
 
+/**
+ * Default ceiling on requested output tokens. Most catalog models advertise a far larger
+ * maxTokens than a turn needs, so requests are capped unless the value was configured explicitly.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32000;
+
+function resolveMaxTokens(model: Model<Api>): number | undefined {
+	if (model.maxTokens <= 0) return undefined;
+	if (model.maxTokensExplicit) return model.maxTokens;
+	return Math.min(model.maxTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+}
+
 export function buildBaseOptions(model: Model<Api>, options?: SimpleStreamOptions, apiKey?: string): StreamOptions {
 	return {
 		temperature: options?.temperature,
-		maxTokens: options?.maxTokens ?? (model.maxTokens > 0 ? Math.min(model.maxTokens, 32000) : undefined),
+		maxTokens: options?.maxTokens ?? resolveMaxTokens(model),
 		signal: options?.signal,
 		apiKey: apiKey || options?.apiKey,
 		transport: options?.transport,

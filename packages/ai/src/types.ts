@@ -458,6 +458,11 @@ export interface Model<TApi extends Api> {
 	};
 	contextWindow: number;
 	maxTokens: number;
+	/**
+	 * Set when maxTokens came from explicit configuration rather than the model catalog.
+	 * Explicit values bypass DEFAULT_MAX_OUTPUT_TOKENS so a configured cap reaches the provider unchanged.
+	 */
+	maxTokensExplicit?: boolean;
 	/** Flagship model surfaced above non-featured models of the same provider in pickers. */
 	featured?: boolean;
 	headers?: Record<string, string>;
