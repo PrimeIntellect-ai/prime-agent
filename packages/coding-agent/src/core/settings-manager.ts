@@ -27,6 +27,12 @@ export interface AutoRefineSettings {
 	cooldownMs?: number; // default: 20 minutes
 }
 
+/** Budgets for the continual harness overview injected into the system prompt. */
+export interface HarnessOverviewSettings {
+	maxEntriesPerKind?: number; // default: 6 (0-500)
+	maxContentLength?: number; // default: 180 characters (40-4000)
+}
+
 export interface ProviderRetrySettings {
 	timeoutMs?: number; // SDK/provider request timeout in milliseconds
 	maxRetries?: number; // SDK/provider retry attempts
@@ -135,6 +141,7 @@ export interface Settings {
 	theme?: string;
 	compaction?: CompactionSettings;
 	autoRefine?: AutoRefineSettings;
+	harnessOverview?: HarnessOverviewSettings;
 	agentTraces?: AgentTracesSettings;
 	telemetry?: TelemetrySettings;
 	branchSummary?: BranchSummarySettings;
@@ -894,6 +901,17 @@ export class SettingsManager {
 				0,
 				typeof cooldownMs === "number" && Number.isFinite(cooldownMs) ? cooldownMs : 20 * 60_000,
 			),
+		};
+	}
+
+	/**
+	 * Overview budgets are returned unresolved: `formatHarnessStateForPrompt` owns the
+	 * defaults and the clamp, so a value set here cannot widen the prompt past its cap.
+	 */
+	getHarnessOverviewSettings(): HarnessOverviewSettings {
+		return {
+			maxEntriesPerKind: this.settings.harnessOverview?.maxEntriesPerKind,
+			maxContentLength: this.settings.harnessOverview?.maxContentLength,
 		};
 	}
 

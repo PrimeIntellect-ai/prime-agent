@@ -917,6 +917,98 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(event.changes, ["single change"])
             self.assertEqual(state.refinements[0].changes, ["single change"])
 
+    def test_local_overview_points_at_the_global_store(self) -> None:
+        # Regression for #819: a spawned child starts with an empty local store while
+        # its system prompt was built from the merged local + global state. The local
+        # overview must name the global store, its counts, and how to read it.
+        previous_global = os.environ.get("RLM_GLOBAL_HARNESS_STATE_DIR")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            global_dir = Path(temp_dir) / "global"
+            os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = str(global_dir)
+            try:
+                global_state = HarnessState(global_dir / "harness_state.json", scope="global")
+                global_state.create_memory("Durable lesson", "global content", id="durable_lesson")
+
+                child = HarnessState(Path(temp_dir) / "child" / "harness_state.json")
+                overview = child.overview()
+
+                self.assertIn("Harness state (local)", overview)
+                self.assertIn("global store (not listed above)", overview)
+                self.assertIn(str(global_dir), overview)
+                self.assertIn("memory: 1", overview)
+                self.assertIn("list(<kind>, global_=True)", overview)
+                self.assertIn("include_global=True", overview)
+
+                # The global overview itself must not point at itself.
+                self.assertNotIn("global store (not listed above)", global_state.overview())
+            finally:
+                if previous_global is None:
+                    os.environ.pop("RLM_GLOBAL_HARNESS_STATE_DIR", None)
+                else:
+                    os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = previous_global
+
+    def test_include_global_returns_the_merged_view(self) -> None:
+        previous_global = os.environ.get("RLM_GLOBAL_HARNESS_STATE_DIR")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            global_dir = Path(temp_dir) / "global"
+            os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = str(global_dir)
+            try:
+                global_state = HarnessState(global_dir / "harness_state.json", scope="global")
+                global_state.create_memory("Global only", "global content", id="global_only")
+                global_state.create_memory("Shadowed", "global content", id="shadowed")
+
+                child = HarnessState(Path(temp_dir) / "child" / "harness_state.json")
+                child.create_memory("Shadowed", "local content", id="shadowed")
+
+                self.assertEqual([entry.id for entry in child.list("memory")], ["shadowed"])
+
+                merged = child.list("memory", include_global=True)
+                self.assertEqual(sorted(entry.id for entry in merged), ["global_only", "shadowed"])
+                # A local entry shadows the global entry with the same id, matching the
+                # host-side merge that produced the system prompt.
+                shadowed = next(entry for entry in merged if entry.id == "shadowed")
+                self.assertEqual(shadowed.content, "local content")
+                self.assertEqual(shadowed.scope, "local")
+
+                combined = child.overview(include_global=True)
+                self.assertIn("Harness state (local)", combined)
+                self.assertIn("Harness state (global)", combined)
+                self.assertIn("[global:global_only]", combined)
+
+                # global_=True still reads the global store alone.
+                self.assertEqual(
+                    sorted(entry.id for entry in child.list("memory", global_=True)),
+                    ["global_only", "shadowed"],
+                )
+            finally:
+                if previous_global is None:
+                    os.environ.pop("RLM_GLOBAL_HARNESS_STATE_DIR", None)
+                else:
+                    os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = previous_global
+
+    def test_overview_omits_global_pointer_without_a_global_store(self) -> None:
+        previous_global = os.environ.get("RLM_GLOBAL_HARNESS_STATE_DIR")
+        previous_agent_dir = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            shared = Path(temp_dir) / "shared" / "harness_state.json"
+            os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = str(shared.parent)
+            os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = str(Path(temp_dir) / "agent")
+            try:
+                # A local store that resolves to the same file as the global store has
+                # nothing to point at.
+                state = HarnessState(shared)
+                self.assertNotIn("global store (not listed above)", state.overview())
+                self.assertEqual(state.list("memory", include_global=True), [])
+            finally:
+                if previous_global is None:
+                    os.environ.pop("RLM_GLOBAL_HARNESS_STATE_DIR", None)
+                else:
+                    os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = previous_global
+                if previous_agent_dir is None:
+                    os.environ.pop("PRIME_AGENT_CODING_AGENT_DIR", None)
+                else:
+                    os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = previous_agent_dir
+
     def test_unknown_kind_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")

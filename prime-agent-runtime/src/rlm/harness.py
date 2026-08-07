@@ -422,7 +422,20 @@ class HarnessState:
         self.save()
         return True
 
-    def list(self, kind: HarnessKind | None = None, *, global_: bool = False, **kwargs: Any) -> list[HarnessEntry]:
+    def list(
+        self,
+        kind: HarnessKind | None = None,
+        *,
+        global_: bool = False,
+        include_global: bool = False,
+        **kwargs: Any,
+    ) -> list[HarnessEntry]:
+        """Entries in this store, optionally merged with the global store.
+
+        ``include_global=True`` returns the same union the host builds this session's
+        system prompt from, so a spawned child can read every entry its prompt was
+        derived from in one call. ``global_=True`` still reads the global store alone.
+        """
         if target := self._global_target(global_, kwargs):
             return target.list(kind)
         self._sync_from_disk()
@@ -432,7 +445,24 @@ class HarnessState:
             if current_kind not in self.entries:
                 raise ValueError(f"unknown harness kind {current_kind!r}; expected one of {_KINDS}")
             records.extend(self.entries[current_kind].values())
+        if include_global and (global_state := self._global_peer()) is not None:
+            local_keys = {(entry.kind, entry.id) for entry in records}
+            records.extend(
+                entry for entry in global_state.list(kind) if (entry.kind, entry.id) not in local_keys
+            )
         return sorted(records, key=lambda entry: (entry.kind, entry.path, entry.title, entry.id))
+
+    def _global_peer(self) -> "HarnessState | None":
+        """The global store, when it exists and is not this store itself."""
+        if self.scope == "global":
+            return None
+        try:
+            target = get_harness_state(state_dir=self._global_target_state_dir, global_=True)
+        except (OSError, RuntimeError):
+            return None
+        if self.file_path is not None and target.file_path == self.file_path:
+            return None
+        return target
 
     def create(
         self,
@@ -718,10 +748,23 @@ class HarnessState:
             plan.append(f"Immediate validation step: {next_step}")
         return plan
 
-    def overview(self, *, max_entries_per_kind: int = 20, global_: bool = False, **kwargs: Any) -> str:
+    def overview(
+        self,
+        *,
+        max_entries_per_kind: int = 20,
+        global_: bool = False,
+        include_global: bool = False,
+        **kwargs: Any,
+    ) -> str:
         if target := self._global_target(global_, kwargs):
             return target.overview(max_entries_per_kind=max_entries_per_kind)
         self._sync_from_disk()
+        if include_global and (peer := self._global_peer()) is not None:
+            body = self._overview_body(max_entries_per_kind, include_global_pointer=False)
+            return f"{body}\n\n{peer.overview(max_entries_per_kind=max_entries_per_kind)}"
+        return self._overview_body(max_entries_per_kind)
+
+    def _overview_body(self, max_entries_per_kind: int, *, include_global_pointer: bool = True) -> str:
         lines = [
             f"Harness state ({self.scope}): {self.file_path}",
             "Call contract: installed Python skills use await <skill_import>(...) or a matching shell CLI; "
@@ -765,7 +808,29 @@ class HarnessState:
                 lines.append(f"  - [{event.id}] {event.trigger}: {', '.join(event.changes)}")
         else:
             lines.append("refinements: 0")
+        if include_global_pointer:
+            lines.extend(self._global_pointer_lines())
         return "\n".join(lines)
+
+    def _global_pointer_lines(self) -> list[str]:
+        """Name the global store from a local overview.
+
+        A spawned child starts with an empty local store while its system prompt was
+        built from the merged local + global state. Without this pointer the first
+        thing such a child reads is an empty overview that never mentions the global
+        store exists, so it concludes the harness is empty.
+        """
+        peer = self._global_peer()
+        if peer is None:
+            return []
+        peer._sync_from_disk()
+        counts = ", ".join(f"{kind}: {len(peer.entries[kind])}" for kind in _KINDS)
+        return [
+            f"global store (not listed above): {peer.file_path}",
+            f"  {counts}, refinements: {len(peer.refinements)}",
+            "  read it with overview(global_=True), list(<kind>, global_=True), or get(<kind>, 'global:<id>'); "
+            "pass include_global=True to overview()/list() for the merged view this session's system prompt was built from",
+        ]
 
     def snapshot(self, *, global_: bool = False, **kwargs: Any) -> dict[str, Any]:
         if target := self._global_target(global_, kwargs):

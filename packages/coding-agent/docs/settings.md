@@ -126,6 +126,26 @@ prime-agent --offline
 }
 ```
 
+### Continual Harness Overview
+
+Budgets for the continual harness overview injected into the system prompt. Entries are listed most-recently-updated first, so raising the cap adds older entries rather than reshuffling the ones already shown.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `harnessOverview.maxEntriesPerKind` | number | `6` | Entries rendered per kind (prompt/memory/skill/subagent), clamped to 0-500 |
+| `harnessOverview.maxContentLength` | number | `180` | Characters of each entry's body, clamped to 40-4000 |
+
+```json
+{
+  "harnessOverview": {
+    "maxEntriesPerKind": 20,
+    "maxContentLength": 400
+  }
+}
+```
+
+Entries beyond the cap are not lost. The overview reports how many were withheld, and the kernel can read them with `rlm.harness.list("<kind>")` for the session-local store, `rlm.harness.list("<kind>", global_=True)` for the cross-session store, or `rlm.harness.list("<kind>", include_global=True)` for the merged view the prompt was built from.
+
 ### Branch Summary
 
 | Setting | Type | Default | Description |

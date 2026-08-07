@@ -212,6 +212,18 @@ Session-local state lives in the session artifact directory under `harness/harne
 
 `/refine` runs a dedicated review over the current trajectory and applies small create/update/delete edits. Rollback uses recorded before/after snapshots. The base system prompt remains immutable; refinements are supplemental state.
 
+### Reading state the prompt did not show
+
+The system-prompt overview is a truncated, most-recently-updated-first sample of the merged local + global state, capped by the `harnessOverview` setting. `rlm.harness` resolves to the session-local store, which is empty for a freshly spawned child, so a local read is not a view of everything the prompt was built from:
+
+```python
+rlm.harness.overview()                            # local store; names the global store and its counts
+rlm.harness.overview(global_=True)                # cross-session store only
+rlm.harness.overview(include_global=True)         # both, matching what built the system prompt
+rlm.harness.list("memory", include_global=True)   # merged entries; local shadows global on id collision
+rlm.harness.get("memory", "global:<id>")          # a single entry by its displayed id
+```
+
 ## Goal Requests
 
 The bundled `goal` Python skill is a thin host-bridge client:

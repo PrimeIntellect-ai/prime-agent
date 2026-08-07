@@ -20,6 +20,10 @@
 - Fixed workers with no live connection reporting as `ready`; stopping workers now report a `stopping` state, are hidden from live sessions, and no longer receive daemon-wide commands ([#850](https://github.com/PrimeIntellect-ai/prime-agent/pull/850)).
 - Fixed timed-out worker stops stranding dead-but-registered workers ("Session worker is not connected"); stops now finalize in the background once the process exits, and zombie processes are no longer counted as alive ([#851](https://github.com/PrimeIntellect-ai/prime-agent/pull/851)).
 - Fixed sessions becoming permanently unopenable after a stale worker registration was left behind; open/resume now self-heals by finishing the old cleanup and starting a fresh worker ([#852](https://github.com/PrimeIntellect-ai/prime-agent/pull/852)).
+- Changed the continual harness overview to rank entries by recency instead of an alphabetical path sort, so the newest lessons survive truncation ([#819](https://github.com/PrimeIntellect-ai/prime-agent/issues/819))
+- Added the `harnessOverview` setting to raise the continual harness overview's per-kind entry cap and body length ([#819](https://github.com/PrimeIntellect-ai/prime-agent/issues/819))
+- Fixed the continual harness overview naming withheld entries by count alone, with no call that reads them ([#819](https://github.com/PrimeIntellect-ai/prime-agent/issues/819))
+- Added `include_global=True` to `rlm.harness.overview()` and `rlm.harness.list()`, and made a local overview name the global store, its counts, and how to read it ([#819](https://github.com/PrimeIntellect-ai/prime-agent/issues/819))
 
 ## [0.7.1] - 2026-08-07
 

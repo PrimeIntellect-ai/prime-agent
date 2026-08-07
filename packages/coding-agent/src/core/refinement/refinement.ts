@@ -26,6 +26,12 @@ const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
+const MIN_OVERVIEW_ENTRY_LIMIT = 0;
+const MAX_OVERVIEW_ENTRY_LIMIT = 500;
+const MIN_OVERVIEW_CONTENT_LIMIT = 40;
+const MAX_OVERVIEW_CONTENT_LIMIT = 4_000;
+/** Entries per kind handed to the refiner, which sees far more context than the system prompt. */
+const REFINER_OVERVIEW_ENTRY_LIMIT = 40;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
@@ -426,6 +432,61 @@ function compactText(text: string, maxLength: number): string {
 	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+/** Configurable overview budgets, surfaced to users as the `harnessOverview` setting. */
+export interface HarnessOverviewLimits {
+	maxEntriesPerKind?: number;
+	maxContentLength?: number;
+}
+
+function entryRecency(entry: HarnessEntry): number {
+	const updated = Date.parse(entry.updated_at);
+	if (Number.isFinite(updated)) {
+		return updated;
+	}
+	const created = Date.parse(entry.created_at);
+	return Number.isFinite(created) ? created : 0;
+}
+
+/**
+ * Overview slots are scarce, so the entries that survive truncation must be the ones
+ * most likely to matter rather than the ones whose paths sort first: most recently
+ * written, then most refined. The trailing path/title/id comparison only breaks exact
+ * ties, keeping the rendered order stable across builds of the same state.
+ */
+function compareHarnessEntriesForOverview(a: HarnessEntry, b: HarnessEntry): number {
+	const recency = entryRecency(b) - entryRecency(a);
+	if (recency !== 0) {
+		return recency;
+	}
+	if (b.version !== a.version) {
+		return b.version - a.version;
+	}
+	return [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0"));
+}
+
+function rankHarnessEntriesForOverview(entries: Record<string, HarnessEntry>): HarnessEntry[] {
+	return Object.values(entries).sort(compareHarnessEntriesForOverview);
+}
+
+/**
+ * The overview is the only place the model learns that hidden entries exist, so the
+ * overflow line has to name the call that reads them. Without it the prompt advises
+ * inspecting the underlying entry while leaving no reachable path to do so.
+ */
+function overflowReadHint(kind: RefinementKind, includeIpythonExamples: boolean): string {
+	if (!includeIpythonExamples) {
+		return `raise \`harnessOverview.maxEntriesPerKind\` in settings.json to show more ${kind} entries`;
+	}
+	return `read them with \`rlm.harness.list("${kind}")\` for this session's local store and \`rlm.harness.list("${kind}", global_=True)\` for the cross-session global store, or raise \`harnessOverview.maxEntriesPerKind\` in settings.json`;
+}
+
+function clampOverviewLimit(value: number | undefined, fallback: number, min: number, max: number): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		return fallback;
+	}
+	return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
 export function formatHarnessStateForPrompt(
 	state: HarnessState,
 	options: {
@@ -437,9 +498,19 @@ export function formatHarnessStateForPrompt(
 		includeRefineExamples?: boolean;
 	} = {},
 ): string {
-	const maxEntriesPerKind = options.maxEntriesPerKind ?? DEFAULT_OVERVIEW_ENTRY_LIMIT;
+	const maxEntriesPerKind = clampOverviewLimit(
+		options.maxEntriesPerKind,
+		DEFAULT_OVERVIEW_ENTRY_LIMIT,
+		MIN_OVERVIEW_ENTRY_LIMIT,
+		MAX_OVERVIEW_ENTRY_LIMIT,
+	);
 	const maxRefinements = options.maxRefinements ?? DEFAULT_OVERVIEW_REFINEMENT_LIMIT;
-	const maxContentLength = options.maxContentLength ?? DEFAULT_OVERVIEW_CONTENT_LIMIT;
+	const maxContentLength = clampOverviewLimit(
+		options.maxContentLength,
+		DEFAULT_OVERVIEW_CONTENT_LIMIT,
+		MIN_OVERVIEW_CONTENT_LIMIT,
+		MAX_OVERVIEW_CONTENT_LIMIT,
+	);
 	const includeIpythonExamples = options.includeIpythonExamples ?? true;
 	const includeRefineExamples = options.includeRefineExamples ?? includeIpythonExamples;
 	const lines = [
@@ -447,6 +518,7 @@ export function formatHarnessStateForPrompt(
 		"",
 		"Local continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.",
 		"The continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.",
+		`Each kind lists its most recently updated entries first, capped at ${maxEntriesPerKind} per kind. A "+N more" line means the remaining entries exist but are not shown here; read them from the store instead of assuming they are absent.`,
 		"Default to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.",
 		"Use these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.",
 		"",
@@ -464,9 +536,7 @@ export function formatHarnessStateForPrompt(
 
 	let totalEntries = 0;
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
-		const entries = Object.values(state.entries[kind]).sort((a, b) =>
-			[a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
-		);
+		const entries = rankHarnessEntriesForOverview(state.entries[kind]);
 		totalEntries += entries.length;
 		// Render subagent specs as a task-shaped roster the model can match against — the
 		// analogue of Claude Code's agent-type menu — rather than a bare count. In
@@ -496,7 +566,7 @@ export function formatHarnessStateForPrompt(
 		}
 		const overflow = entries.length - Math.min(entries.length, maxEntriesPerKind);
 		if (overflow > 0) {
-			lines.push(`- +${overflow} more ${kind} entries`);
+			lines.push(`- +${overflow} more ${kind} entries not shown: ${overflowReadHint(kind, includeIpythonExamples)}`);
 		}
 		lines.push("");
 	}
@@ -522,9 +592,11 @@ export function formatHarnessStateForPrompt(
 function overviewForPrompt(state: HarnessState): string {
 	const lines: string[] = [];
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
-		const entries = Object.values(state.entries[kind]);
+		// Same recency ranking as the system-prompt overview: when this list is
+		// truncated the refiner must still see the entries most likely to need an edit.
+		const entries = rankHarnessEntriesForOverview(state.entries[kind]);
 		lines.push(`${kind}: ${entries.length}`);
-		for (const entry of entries.slice(0, 40)) {
+		for (const entry of entries.slice(0, REFINER_OVERVIEW_ENTRY_LIMIT)) {
 			const content = entry.content.replace(/\s+/g, " ").slice(0, 240);
 			const argumentsText =
 				entry.kind === "skill" && Object.keys(entry.arguments).length > 0
@@ -538,8 +610,8 @@ function overviewForPrompt(state: HarnessState): string {
 				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${content}`,
 			);
 		}
-		if (entries.length > 40) {
-			lines.push(`- +${entries.length - 40} more ${kind} entries`);
+		if (entries.length > REFINER_OVERVIEW_ENTRY_LIMIT) {
+			lines.push(`- +${entries.length - REFINER_OVERVIEW_ENTRY_LIMIT} more ${kind} entries`);
 		}
 	}
 	return lines.join("\n");
