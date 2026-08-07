@@ -35,6 +35,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import { getOpenRouterHeaders } from "../utils/openrouter-headers.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
@@ -560,6 +561,9 @@ function createClient(
 	}
 
 	const headers = { ...model.headers };
+	if (model.provider === "openrouter") {
+		Object.assign(headers, getOpenRouterHeaders());
+	}
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilotHeaders = buildCopilotDynamicHeaders({
