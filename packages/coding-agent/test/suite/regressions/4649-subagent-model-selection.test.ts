@@ -110,6 +110,87 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
+	it("uses configured Codex models when discovery returns an empty catalog", async () => {
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({
+			provider: codexProvider,
+			models: [
+				{ id: "parent-model", reasoning: true },
+				{ id: "spark-model", reasoning: true },
+			],
+			settings: { modelRoles: { spark: `${codexProvider}/spark-model:high` } },
+		});
+		const fetchModels = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ models: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		vi.stubGlobal("fetch", fetchModels);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+
+			await expect(harness.session.findRlmModels("spark", 8)).resolves.toMatchObject({
+				models: [
+					{
+						selector: "@spark",
+						concreteSelector: `${codexProvider}/spark-model`,
+						available: true,
+					},
+					{ selector: `${codexProvider}/spark-model` },
+				],
+			});
+
+			harness.setResponses([fauxAssistantMessage("exact child answer"), fauxAssistantMessage("role child answer")]);
+			const exact = await harness.session.runRlmChild("use exact Spark", {
+				model: `${codexProvider}/spark-model`,
+			});
+			const role = await harness.session.runRlmChild("use the Spark role", { model: "@spark" });
+
+			expect(exact.model).toBe(`${codexProvider}/spark-model`);
+			expect(role.model).toBe(`${codexProvider}/spark-model`);
+			expect(fetchModels).toHaveBeenCalledOnce();
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
+	it("does not trust a malformed nonempty Codex catalog", async () => {
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({
+			provider: codexProvider,
+			models: [{ id: "parent-model" }, { id: "spark-model" }],
+			settings: { modelRoles: { spark: `${codexProvider}/spark-model:high` } },
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(JSON.stringify({ models: [{}] }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					}),
+			),
+		);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+
+			await expect(harness.session.findRlmModels("spark", 8)).resolves.toMatchObject({
+				models: [{ selector: "@spark", available: false }],
+			});
+			await expect(
+				harness.session.runRlmChild("reject malformed discovery", {
+					model: `${codexProvider}/spark-model`,
+				}),
+			).rejects.toThrow("is unavailable, unauthenticated, or expired");
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
 	it("includes private Prime models authorized for the selected team", async () => {
 		const harness = await createHarness({ provider, models: [{ id: "parent-model" }] });
 		const fetchModels = vi.fn(

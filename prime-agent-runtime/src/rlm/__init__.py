@@ -46,6 +46,7 @@ class RLMModel:
     name: str
     selector: str
     concrete_selector: str | None = None
+    available: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -176,12 +177,16 @@ def _model_from_payload(payload: Any) -> RLMModel:
     concrete_selector = payload.get("concreteSelector")
     if concrete_selector is not None and (not isinstance(concrete_selector, str) or not concrete_selector):
         raise RuntimeError("rlm.find_models returned an invalid model entry")
+    available = payload.get("available")
+    if available is not None and not isinstance(available, bool):
+        raise RuntimeError("rlm.find_models returned an invalid model entry")
     return RLMModel(
         provider=provider,
         id=model_id,
         name=name,
         selector=selector,
         concrete_selector=concrete_selector,
+        available=available,
     )
 
 

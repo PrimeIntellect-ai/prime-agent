@@ -73,6 +73,8 @@
 - Changed Ctrl+C to clear non-empty editor text before applying its existing interrupt and exit behavior to an empty editor.
 - Fixed large fragmented session-worker frames repeatedly copying their accumulated bytes and starving daemon commands such as session-tree requests.
 - Fixed native compaction failures launching an oversized local fallback request; Prime now checks the rebuilt portable request against the model context window and reports both failure causes.
+- Fixed an empty OpenAI Codex discovery catalog blocking configured RLM child models that remain usable through interactive selection. Nonempty catalogs still restrict child admission to the models they list.
+- Fixed Python `rlm.find_models` results discarding the availability state of configured model roles.
 
 ## [0.7.0] - 2026-08-05
 
