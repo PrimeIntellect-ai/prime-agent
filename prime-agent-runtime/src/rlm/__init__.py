@@ -22,6 +22,13 @@ except Exception:  # pragma: no cover - only available in kernels
     get_ipython = None  # type: ignore[assignment]
 
 HOST_COMM_TARGET = "host.request"
+RLM_SERVICE_TIERS = ("auto", "default", "flex", "scale", "priority")
+
+
+def _validate_service_tier(value: Any) -> None:
+    if value is None or value in RLM_SERVICE_TIERS:
+        return
+    raise ValueError(f"service_tier must be one of {', '.join(RLM_SERVICE_TIERS)} or None")
 
 
 @dataclass(frozen=True)
@@ -144,9 +151,12 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
     ``model`` selects a child with an exact ``provider/model`` selector.
+    ``service_tier`` requests an allowed override of the parent tier for this child.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if "service_tier" in kwargs:
+        _validate_service_tier(kwargs["service_tier"])
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
 

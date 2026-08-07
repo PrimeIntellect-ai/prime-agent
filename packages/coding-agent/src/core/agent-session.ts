@@ -223,6 +223,7 @@ import {
 	createRlmRunHostHandler,
 	findRlmModelMatches,
 	normalizeRequestedRlmSubagentModel,
+	normalizeRequestedRlmSubagentServiceTier,
 	normalizeRequestedRlmSubagentSessionName,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
@@ -9013,7 +9014,9 @@ export class AgentSession {
 		spawnCode?: string;
 		sessionDir: string;
 		model: Model<any>;
+		serviceTier?: ServiceTier;
 	}): CreateRlmSubagentRuntimeOptions {
+		const serviceTier = options.serviceTier === undefined ? this.serviceTier : options.serviceTier;
 		return {
 			parentSession: this,
 			id: options.id,
@@ -9023,8 +9026,7 @@ export class AgentSession {
 			sessionDir: options.sessionDir,
 			model: options.model,
 			thinkingLevel: clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel,
-			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+			serviceTier: serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : serviceTier,
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
@@ -9686,13 +9688,24 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, ...unsupported } = kwargs;
+		const { name: rawName, model: rawModel, service_tier: rawServiceTier, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
 		}
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
+		const requestedServiceTier = normalizeRequestedRlmSubagentServiceTier(rawServiceTier);
+		if (requestedServiceTier !== undefined) {
+			const allowedServiceTiers = this.settingsManager.getRlmAllowedServiceTiers();
+			if (!allowedServiceTiers.includes(requestedServiceTier)) {
+				const allowedValues =
+					allowedServiceTiers.map((tier) => (tier === null ? "null" : tier)).join(", ") || "none";
+				throw new Error(
+					`rlm.run service_tier ${String(rawServiceTier)} is not allowed; allowed values are ${allowedValues}`,
+				);
+			}
+		}
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -9782,6 +9795,7 @@ export class AgentSession {
 				spawnCode,
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
+				serviceTier: requestedServiceTier,
 			}),
 			onSessionPublished: publishChildSession,
 		};

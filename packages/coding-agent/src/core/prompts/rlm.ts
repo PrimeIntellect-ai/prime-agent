@@ -128,7 +128,8 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"",
 			"A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
 			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
-			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`.",
+			"A child inherits your model and service tier when those options are omitted. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`.",
+			"`service_tier` may be `auto`, `default`, `flex`, `scale`, `priority`, or `None`, but only values in the `rlmAllowedServiceTiers` settings array are accepted. When that setting is absent, only `defaultServiceTier` is allowed. `priority` is clamped to `default` when the selected child model does not support fast mode.",
 		);
 		if (hasAgentMessage) {
 			parts.push(
@@ -178,6 +179,7 @@ export function buildSubagentGuidance(
 		"# Delegating to sub-agents",
 		"",
 		"Spawn independent, self-contained work with `handle = await rlm('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.",
+		"Set a child's service tier only when its value appears in `rlmAllowedServiceTiers`; omit it to inherit the parent's tier. When the setting is absent, only `defaultServiceTier` is allowed. Explicit `priority` remains subject to child-model fast-mode clamping.",
 	];
 	if (options.hasAgentMessage) {
 		lines.push(

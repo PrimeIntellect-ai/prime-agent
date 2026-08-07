@@ -127,6 +127,8 @@ export interface Settings {
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
+	/** Service tiers that rlm(...) may request explicitly; defaults to defaultServiceTier. */
+	rlmAllowedServiceTiers?: ServiceTier[];
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 1
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
 	transport?: TransportSetting; // default: "auto"
@@ -766,6 +768,12 @@ export class SettingsManager {
 		this.globalSettings.defaultServiceTier = serviceTier;
 		this.markModified("defaultServiceTier");
 		this.save();
+	}
+
+	getRlmAllowedServiceTiers(): ServiceTier[] {
+		return this.settings.rlmAllowedServiceTiers
+			? [...this.settings.rlmAllowedServiceTiers]
+			: [this.getDefaultServiceTier()];
 	}
 
 	getRlmMaxDepth(): number | undefined {

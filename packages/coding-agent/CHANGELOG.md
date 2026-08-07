@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Added config-gated per-spawn RLM service-tier selection with validation, inheritance, and fast-mode clamping.
 
 ## [0.7.2] - 2026-08-11
 

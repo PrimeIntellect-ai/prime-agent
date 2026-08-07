@@ -502,6 +502,19 @@ describe("SettingsManager", () => {
 			expect(servers?.shared).toEqual({ type: "http", url: "https://project.shared/mcp" });
 		});
 	});
+
+	describe("RLM service-tier allowlist", () => {
+		it("defaults to the configured default service tier and accepts an explicit array", () => {
+			expect(SettingsManager.inMemory().getRlmAllowedServiceTiers()).toEqual(["default"]);
+			expect(SettingsManager.inMemory({ defaultServiceTier: "flex" }).getRlmAllowedServiceTiers()).toEqual(["flex"]);
+			expect(
+				SettingsManager.inMemory({
+					rlmAllowedServiceTiers: ["default", "priority"],
+				}).getRlmAllowedServiceTiers(),
+			).toEqual(["default", "priority"]);
+		});
+	});
+
 	describe("idle worker eviction", () => {
 		it("defaults to 90 minutes and treats none as off", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

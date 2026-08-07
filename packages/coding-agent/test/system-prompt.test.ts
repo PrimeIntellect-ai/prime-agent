@@ -111,6 +111,9 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("exact returned selector");
 		expect(prompt).toContain("An unavailable requested model fails spawn");
 		expect(prompt).toContain("decide whether to retry or omit `model`");
+		expect(prompt).toContain("`service_tier` may be `auto`, `default`, `flex`, `scale`, `priority`, or `None`");
+		expect(prompt).toContain("only values in the `rlmAllowedServiceTiers` settings array are accepted");
+		expect(prompt).toContain("When that setting is absent, only `defaultServiceTier` is allowed");
 		expect(prompt).not.toContain("model choices for subagents");
 	});
 
