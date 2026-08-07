@@ -15,6 +15,7 @@ import { getEnvApiKey, getPrimeTeamId } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
 	AssistantMessage,
+	AssistantMessageEvent,
 	CacheRetention,
 	Context,
 	ImageContent,
@@ -37,6 +38,7 @@ import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
+import { streamSimpleOpenAIResponses } from "./openai-responses.js";
 import { buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -437,14 +439,108 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	const clampedReasoning = reasoningSpecified ? clampThinkingLevel(model, requestedReasoning) : undefined;
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
 	const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
-
-	return streamOpenAICompletions(model, context, {
+	const chatOptions = {
 		...base,
 		reasoningEffort,
 		reasoningEnabled: reasoningSpecified ? clampedReasoning !== "off" : undefined,
 		toolChoice,
-	} satisfies OpenAICompletionsOptions);
+	} satisfies OpenAICompletionsOptions;
+
+	if (model.provider === "openrouter" && options?.openRouterResponses) {
+		return streamOpenRouterResponsesWithChatFallback(model, context, options, chatOptions);
+	}
+
+	return streamOpenAICompletions(model, context, chatOptions);
 };
+
+function streamOpenRouterResponsesWithChatFallback(
+	model: Model<"openai-completions">,
+	context: Context,
+	options: SimpleStreamOptions,
+	chatOptions: OpenAICompletionsOptions,
+): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	const { compat, ...modelWithoutCompat } = model;
+	const responsesModel: Model<"openai-responses"> = {
+		...modelWithoutCompat,
+		api: "openai-responses",
+		compat: {
+			sendSessionIdHeader: false,
+			supportsLongCacheRetention: false,
+			openRouterRouting: compat?.openRouterRouting,
+		},
+	};
+
+	(async () => {
+		let started = false;
+		try {
+			const responsesStream = streamSimpleOpenAIResponses(responsesModel, context, options);
+			for await (const event of responsesStream) {
+				if (event.type === "start") started = true;
+				if (
+					event.type === "error" &&
+					!started &&
+					!options.signal?.aborted &&
+					isOpenRouterResponsesTransportFailure(event.error)
+				) {
+					await forwardAssistantEvents(stream, streamOpenAICompletions(model, context, chatOptions));
+					return;
+				}
+				stream.push(event);
+			}
+			stream.end();
+		} catch (error) {
+			const reason = options.signal?.aborted ? "aborted" : "error";
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [],
+				api: responsesModel.api,
+				provider: responsesModel.provider,
+				model: responsesModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: reason,
+				errorMessage: error instanceof Error ? error.message : String(error),
+				timestamp: Date.now(),
+			};
+			stream.push({ type: "error", reason, error: message });
+			stream.end();
+		}
+	})();
+
+	return stream;
+}
+
+async function forwardAssistantEvents(
+	target: AssistantMessageEventStream,
+	source: AsyncIterable<AssistantMessageEvent>,
+): Promise<void> {
+	for await (const event of source) target.push(event);
+	target.end();
+}
+
+function isOpenRouterResponsesTransportFailure(message: AssistantMessage): boolean {
+	const diagnostic = message.diagnostics
+		?.slice()
+		.reverse()
+		.find((entry) => entry.type === "provider_stream_failure");
+	const status = diagnostic?.details?.status;
+	const kind = diagnostic?.details?.kind;
+
+	if (status === 404 || status === 405 || status === 501) return true;
+	if (kind === "server_error" || kind === "malformed_response") return true;
+	if (kind !== "invalid_request") return false;
+
+	return /(?:responses?|endpoint).*(?:unsupported|not supported|unavailable|not found)|(?:unsupported|not supported|unavailable).*(?:responses?|endpoint)/i.test(
+		message.errorMessage ?? "",
+	);
+}
 
 function createClient(
 	model: Model<"openai-completions">,

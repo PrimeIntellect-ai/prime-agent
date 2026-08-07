@@ -55,6 +55,21 @@ A native child retains its admitted role order for its resident lifetime. A retr
 
 `claude-code/<model>` selects an external Claude Agent SDK child rather than a `pi-ai` provider. The configured executable supplies Claude authentication. Prime Agent denies Claude's native `Agent`, `Task`, and `SendMessage` tools and provides an in-process family adapter for listing, correlated send, retained inbox, and wait operations. Claude queries and follow-up input remain live only while the parent worker lives; daemon passivation or replacement closes them, and cold revival does not reconstruct them.
 
+### OpenRouter Transport
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `openRouter.responses` | boolean | `false` | Prefer OpenRouter's stateless Responses API and fall back to Chat Completions only when the Responses transport is unavailable before streaming starts |
+
+Prime Agent sends its opaque local session UUID as `session_id` on both OpenRouter transports. OpenRouter uses it for dashboard grouping and sticky upstream routing. When prompt caching is enabled, Responses also sends the same value as `prompt_cache_key`. Both transports send the complete conversation context on every request.
+
+```yaml
+openRouter:
+  responses: true
+```
+
+Prime Agent reads this setting for every provider request, so an external JSON or YAML edit applies to the next request without `/reload`. Chat Completions remains the default. When Responses is enabled, cancellation, context overflow, authentication, rate limiting, invalid input, and failures after streaming starts do not cross transports.
+
 ### UI & Display
 
 | Setting | Type | Default | Description |

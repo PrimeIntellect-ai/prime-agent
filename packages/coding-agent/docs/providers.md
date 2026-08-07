@@ -123,6 +123,8 @@ OAuth credentials are also stored here after `/login` and managed automatically.
 
 Prime Agent sends its opaque local session UUID as OpenRouter's `session_id` request field. OpenRouter groups related requests in its dashboard and uses the identifier for sticky upstream routing. Prime Agent still sends the complete conversation context on every request.
 
+OpenRouter uses Chat Completions by default. Set `openRouter.responses: true` in `settings.json`, `settings.yml`, or `settings.yaml` to prefer the stateless Responses API. Prime Agent falls back to Chat only when Responses is unavailable before streaming starts. The setting is read for each request and therefore hot reloads without restarting the session.
+
 ### Prime Inference
 
 Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.

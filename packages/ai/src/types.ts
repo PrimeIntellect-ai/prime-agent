@@ -179,6 +179,8 @@ export interface SimpleStreamOptions extends StreamOptions {
 	reasoning?: ModelThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
+	/** Prefer OpenRouter's stateless Responses transport, with a pre-stream Chat fallback. */
+	openRouterResponses?: boolean;
 }
 
 // Generic StreamFunction with typed options.
@@ -367,6 +369,8 @@ export interface OpenAIResponsesCompat {
 	sendSessionIdHeader?: boolean;
 	/** Whether the provider supports `prompt_cache_retention: "24h"`. Default: true. */
 	supportsLongCacheRetention?: boolean;
+	/** OpenRouter-specific routing preferences for Responses requests. */
+	openRouterRouting?: OpenRouterRouting;
 }
 
 /** Compatibility settings for Anthropic Messages-compatible APIs. */

@@ -32,6 +32,8 @@ describe("SettingsManager", () => {
 			writeFileSync(
 				settingsPath,
 				`defaultThinkingLevel: low
+openRouter:
+  responses: false
 modelRoles:
   task: provider/old:low
 `,
@@ -42,6 +44,8 @@ modelRoles:
 			writeFileSync(
 				settingsPath,
 				`defaultThinkingLevel: high
+openRouter:
+  responses: true
 modelRoles:
   task: provider/new:high
 `,
@@ -49,6 +53,7 @@ modelRoles:
 
 			await vi.waitFor(() => {
 				expect(manager.getDefaultThinkingLevel()).toBe("high");
+				expect(manager.getOpenRouterResponses()).toBe(true);
 				expect(manager.getModelRole("task")).toBe("provider/new:high");
 			});
 			manager.dispose();
@@ -633,6 +638,13 @@ modelRoles:
 		it("treats an empty executable as unavailable", () => {
 			const manager = SettingsManager.inMemory({ claudeCode: { executable: "  " } });
 			expect(manager.getClaudeCodeExecutable()).toBeUndefined();
+		});
+	});
+
+	describe("OpenRouter Responses transport", () => {
+		it("defaults to Chat Completions and accepts an explicit opt-in", () => {
+			expect(SettingsManager.inMemory().getOpenRouterResponses()).toBe(false);
+			expect(SettingsManager.inMemory({ openRouter: { responses: true } }).getOpenRouterResponses()).toBe(true);
 		});
 	});
 
