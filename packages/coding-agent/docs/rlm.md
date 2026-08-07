@@ -55,11 +55,15 @@ Each `%%bash` cell is a temporary subshell, while Python state and `%cd` changes
 The callable `rlm` object is preloaded in the kernel. Spawn a child with a direct call:
 
 ```python
-handle = await rlm("Review the authentication flow for security issues", name="auth-reviewer")
+handle = await rlm(
+    "Review the authentication flow for security issues",
+    name="auth-reviewer",
+    service_tier="default",
+)
 print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 ```
 
-The call returns immediately after task admission with a child handle; it never waits for or returns the child's answer. The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model.
+The call returns immediately after task admission with a child handle; it never waits for or returns the child's answer. The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, service tier, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model or service tier. Valid service tiers are `auto`, `default`, `flex`, `scale`, `priority`, and `None`; `priority` is clamped to `default` for child models without fast-mode support. Explicit `service_tier` overrides must be listed in the `rlmAllowedServiceTiers` settings array; when that setting is unset, only the configured `defaultServiceTier` is allowed. Omitting `service_tier` preserves parent-tier inheritance.
 
 Spawn independent children in separate calls and end the turn instead of awaiting completion:
 

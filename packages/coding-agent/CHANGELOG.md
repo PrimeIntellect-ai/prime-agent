@@ -54,6 +54,7 @@
 
 ## [0.7.1] - 2026-08-07
 
+- Added config-gated per-spawn RLM service-tier selection with validation, inheritance, and fast-mode clamping.
 - Fixed the bundled `websearch` skill description and missing-key guidance omitting the `/login` → **MCP Connections** step required to configure Serper.
 - Fixed `retry_worker` cancelling its own recovery when a stopped session worker left a saved stop marker behind, leaving the session stuck at "Session worker is not connected".
 - Added OpenRouter dashboard grouping and sticky routing through the existing opaque Prime session identifier.

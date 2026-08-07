@@ -18,8 +18,21 @@ Use exactly one settings file per scope. Prime Agent preserves the selected form
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
+| `defaultServiceTier` | string | `"default"` | Default provider service tier: `"auto"`, `"default"`, `"flex"`, `"scale"`, or `"priority"` |
+| `rlmAllowedServiceTiers` | array | `[defaultServiceTier]` | Service tiers allowed as explicit `rlm(..., service_tier=...)` overrides; use JSON `null` for Python `None` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
+
+An RLM child inherits the parent service tier when `service_tier` is omitted. Explicit overrides require an entry in `rlmAllowedServiceTiers`. For example, opt in to `priority` with:
+
+```json
+{
+  "defaultServiceTier": "default",
+  "rlmAllowedServiceTiers": ["default", "flex", "priority"]
+}
+```
+
+When `rlmAllowedServiceTiers` is absent, its effective value contains only `defaultServiceTier`.
 
 #### thinkingBudgets
 

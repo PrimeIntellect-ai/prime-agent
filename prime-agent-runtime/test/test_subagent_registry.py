@@ -94,6 +94,30 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
+    def test_forwards_per_spawn_service_tier_to_host(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "sub-a1b2c3d4",
+                "name": "priority-worker",
+                "session_dir": "/tmp/parent/sub-a1b2c3d4",
+                "model": "openai-codex/gpt-5.5",
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            asyncio.run(rlm_module.rlm("use the priority tier", service_tier="priority"))
+            asyncio.run(rlm_module.rlm("use the default tier", service_tier=None))
+
+        self.assertEqual(host_request.await_args_list[0].args[1]["kwargs"]["service_tier"], "priority")
+        self.assertIsNone(host_request.await_args_list[1].args[1]["kwargs"]["service_tier"])
+
+    def test_rejects_invalid_per_spawn_service_tier(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "service_tier must be one of auto, default, flex, scale, priority or None",
+        ):
+            asyncio.run(rlm_module.rlm("invalid tier", service_tier="fast"))
+
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(
             return_value={
