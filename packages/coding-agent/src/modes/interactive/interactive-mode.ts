@@ -7691,7 +7691,7 @@ export class InteractiveMode {
 	private async applySelectedModel(model: AgentConnectionModel, persistDefault = true): Promise<void> {
 		const connection = this.agentConnection;
 		const sessionId = this.connectionState?.sessionId;
-		await connection.setModel(model.provider, model.id);
+		await connection.setModel(model.provider, model.id, { persistDefault });
 		const state = await connection.getState();
 		if (
 			this.agentConnection !== connection ||

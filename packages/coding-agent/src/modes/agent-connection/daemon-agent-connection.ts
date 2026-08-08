@@ -1136,12 +1136,20 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 	}
 
-	async setModel(provider: string, modelId: string): Promise<AgentConnectionModel> {
+	async setModel(
+		provider: string,
+		modelId: string,
+		options?: { persistDefault?: boolean },
+	): Promise<AgentConnectionModel> {
+		if (options?.persistDefault === false && !this.client.supportsServerCapability("session_model_selection")) {
+			throw new DaemonCapabilityUnavailableError("set_model", "session_model_selection");
+		}
 		return this.requestData<AgentConnectionModel>({
 			type: "set_model",
 			activeSessionId: this.activeSessionId,
 			provider,
 			modelId,
+			...(options?.persistDefault === undefined ? {} : { persistDefault: options.persistDefault }),
 		});
 	}
 

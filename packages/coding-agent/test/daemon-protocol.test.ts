@@ -133,6 +133,7 @@ describe("daemon protocol helpers", () => {
 		});
 		expect(DAEMON_COMMAND_COMPATIBILITY.agent_message_wait).toEqual(DAEMON_COMMAND_COMPATIBILITY.agent_message_inbox);
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("family_mailbox");
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("session_model_selection");
 		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual({ minProtocol: 7 });
 	});
 

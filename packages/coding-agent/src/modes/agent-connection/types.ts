@@ -746,7 +746,7 @@ export interface AgentConnection {
 	executeBashAndWait(command: string): Promise<BashResult>;
 	abortBash(): Promise<void>;
 
-	setModel(provider: string, modelId: string): Promise<AgentConnectionModel>;
+	setModel(provider: string, modelId: string, options?: { persistDefault?: boolean }): Promise<AgentConnectionModel>;
 	cycleModel(direction?: "forward" | "backward"): Promise<AgentConnectionModelCycleResult | undefined>;
 	setScopedModels(scopedModels: AgentConnectionScopedModel[]): Promise<void>;
 	setThinkingLevel(level: ThinkingLevel): Promise<void>;

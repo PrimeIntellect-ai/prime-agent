@@ -449,7 +449,11 @@ export class InProcessAgentConnection implements AgentConnection {
 		this.session.abortBash();
 	}
 
-	async setModel(provider: string, modelId: string): Promise<AgentConnectionModel> {
+	async setModel(
+		provider: string,
+		modelId: string,
+		options?: { persistDefault?: boolean },
+	): Promise<AgentConnectionModel> {
 		const availableModels = await this.session.modelRegistry.refreshAvailableModels();
 		const model = availableModels.find((candidate) => {
 			return candidate.provider === provider && candidate.id === modelId;
@@ -457,7 +461,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		if (!model) {
 			throw new Error(`Model not found: ${provider}/${modelId}`);
 		}
-		await this.session.setModel(model);
+		await this.session.setModel(model, options);
 		return model;
 	}
 

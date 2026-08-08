@@ -2371,7 +2371,7 @@ describe("InteractiveMode model selection persistence", () => {
 
 		await fakeThis.applySelectedModel(model);
 
-		expect(fakeThis.agentConnection.setModel).toHaveBeenCalledWith("openai", "gpt-5.5");
+		expect(fakeThis.agentConnection.setModel).toHaveBeenCalledWith("openai", "gpt-5.5", { persistDefault: true });
 		expect(fakeThis.uiServices.settingsManager.setDefaultModelAndProvider).toHaveBeenCalledWith("openai", "gpt-5.5");
 		expect(order).toEqual(["connection", "settings"]);
 		expect(fakeThis.patchConnectionState).toHaveBeenCalledWith({
@@ -2444,7 +2444,7 @@ describe("InteractiveMode model selection persistence", () => {
 
 		await fakeThis.handleModelCommand("gpt-5.5");
 
-		expect(fakeThis.agentConnection.setModel).toHaveBeenCalledWith("openai", "gpt-5.5");
+		expect(fakeThis.agentConnection.setModel).toHaveBeenCalledWith("openai", "gpt-5.5", { persistDefault: true });
 		expect(fakeThis.uiServices.settingsManager.setDefaultModelAndProvider).toHaveBeenCalledWith("openai", "gpt-5.5");
 		expect(fakeThis.patchConnectionState).toHaveBeenCalledWith({
 			model,
@@ -2714,7 +2714,7 @@ describe("InteractiveMode model selection persistence", () => {
 
 		expect(loginProvider).toHaveBeenCalledWith(provider);
 		expect(getModelCatalog).toHaveBeenCalledTimes(1);
-		expect(applySelectedModel).toHaveBeenCalledWith(model);
+		expect(applySelectedModel).toHaveBeenCalledWith(model, true);
 		expect(hide).toHaveBeenCalledTimes(1);
 		await expect(result).resolves.toBeUndefined();
 	});

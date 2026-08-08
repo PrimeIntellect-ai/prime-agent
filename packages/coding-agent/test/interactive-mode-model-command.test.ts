@@ -4,7 +4,7 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 type ModelSelectionContext = {
 	agentConnection: {
-		setModel: (provider: string, modelId: string) => Promise<void>;
+		setModel: (provider: string, modelId: string, options?: { persistDefault?: boolean }) => Promise<void>;
 		getState: () => Promise<{
 			sessionId: string;
 			model: AgentConnectionModel;
@@ -59,7 +59,7 @@ describe("interactive model selection", () => {
 
 		await prototype.applySelectedModel.call(context, model, false);
 
-		expect(context.agentConnection.setModel).toHaveBeenCalledWith("openai", "gpt-test");
+		expect(context.agentConnection.setModel).toHaveBeenCalledWith("openai", "gpt-test", { persistDefault: false });
 		expect(context.settingsManager.setDefaultModelAndProvider).not.toHaveBeenCalled();
 	});
 
@@ -68,6 +68,7 @@ describe("interactive model selection", () => {
 
 		await prototype.applySelectedModel.call(context, model);
 
+		expect(context.agentConnection.setModel).toHaveBeenCalledWith("openai", "gpt-test", { persistDefault: true });
 		expect(context.settingsManager.setDefaultModelAndProvider).toHaveBeenCalledWith("openai", "gpt-test");
 	});
 });
