@@ -24,20 +24,47 @@ if child is not None:
     await rlm.delete_subagent(child)
 ```
 
-## API
+## Import
 
-- `await agent_observe.list_agents()` returns `current` and `agents`. Each
-  agent includes active session id, session id, optional name, runtime kind,
-  cwd, status, streaming state, message count, pending count, and a latest
-  message preview. The list is restricted to self, parent, siblings, and direct
-  children. For direct children, `await rlm.list_subagents()` also exposes
-  parent-owned lifecycle handles.
-- `await agent_observe.get_agent(target)` returns `agent`, where `agent`
-  contains one agent summary. `target` is resolved like other live-session
-  selectors: active id, session id/name, or unambiguous suffix.
-- `await agent_observe.recent_messages(target, limit=8, max_chars=800)`
-  returns up to `limit` recent bounded message previews for the target session.
-  `limit` must be 1-50, and `max_chars` must be 80-2000.
+```python
+import agent_observe
+```
+
+## API Reference
+
+```python
+async def list_agents() -> dict
+```
+Returns `current` and `agents`. Each agent includes active session id, session id,
+optional name, runtime kind, cwd, status, streaming state, message count, pending
+count, and a latest message preview. Restricted to self, parent, siblings, and direct
+children. For direct children, `await rlm.list_subagents()` also exposes parent-owned
+lifecycle handles.
+
+---
+
+```python
+async def get_agent(target: str) -> dict
+```
+Returns `agent` — one session summary. `target` is resolved as: active session id,
+session id/name, or unambiguous suffix.
+
+---
+
+```python
+async def recent_messages(
+    target: str,
+    limit: int = 8,
+    max_chars: int = 800,
+) -> dict
+```
+Returns up to `limit` recent bounded message previews for `target`.
+- `limit`: 1–50 (host-validated).
+- `max_chars`: 80–2000 per message (host-validated).
+
+**Functions that do NOT exist (common mistakes):**
+- `agent_observe.observe()` — does not exist; use `list_agents()` or `get_agent()`.
+- `agent_observe.list_messages()` — does not exist; use `recent_messages()`.
 
 ## Safety
 
