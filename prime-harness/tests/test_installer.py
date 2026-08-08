@@ -458,6 +458,35 @@ def test_tailor_preserves_existing_manifest_and_writes_review_sidecar(tmp_repo):
     assert json.loads(sidecar.read_text(encoding="utf-8"))["profiles"]["default"]["required"]
 
 
+def test_strict_doctor_validates_invoked_repository_not_cwd(tmp_repo):
+    (tmp_repo / "src/pkg").mkdir(parents=True)
+    (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    (tmp_repo / "tests").mkdir()
+    (tmp_repo / "tests/test_ok.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    installed_a = run_install(tmp_repo, "--tailor")
+    assert installed_a.returncode == 0
+
+    repo_b = tmp_repo.parent / f"{tmp_repo.name}-repo-b"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo_b)], check=True)
+    subprocess.run(["git", "-C", str(repo_b), "config", "user.email", "harness@test.local"], check=True)
+    subprocess.run(["git", "-C", str(repo_b), "config", "user.name", "Harness Test"], check=True)
+    (repo_b / "README.md").write_text("repo b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_b), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repo_b), "commit", "-qm", "init"], check=True)
+    installed_b = run_install(repo_b)
+    assert installed_b.returncode == 0
+
+    doctor = subprocess.run(
+        [sys.executable, str(repo_b / "harness/doctor.py"), "--strict", "--json"],
+        cwd=tmp_repo, capture_output=True, text=True, timeout=120,
+    )
+    assert doctor.returncode == 2
+    report = json.loads(doctor.stdout)
+    applicability = next(item for item in report["checks"] if item["name"] == "manifest-applicability")
+    assert applicability["level"] == "FAIL"
+    assert "quick:compile" in applicability["detail"]
+
+
 def test_doctor_rejects_oversized_manifest_before_parsing(tmp_repo):
     installed = run_install(tmp_repo)
     assert installed.returncode == 0

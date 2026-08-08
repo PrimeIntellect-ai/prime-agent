@@ -35,11 +35,9 @@ KERNEL_DEPS = ["sympy", "hypothesis", "pytest", "yaml"]
 
 
 def repo_root() -> Path:
-    cur = Path.cwd().resolve()
-    for candidate in (cur, *cur.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return cur
+    # Doctor belongs to <repo>/harness/doctor.py. Bind diagnostics to that
+    # installation, never to an unrelated caller CWD used for absolute invocation.
+    return Path(__file__).resolve().parent.parent
 
 
 class Report:
