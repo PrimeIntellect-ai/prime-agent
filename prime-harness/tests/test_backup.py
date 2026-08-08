@@ -187,6 +187,117 @@ def test_corruption_traversal_duplicates_symlink_and_sqlite_tampering_fail_close
         backup.verify_backup(sqlite_tampered)
 
 
+@pytest.mark.parametrize(
+    "archive_path",
+    [
+        "session/note.txt:hidden",
+        "session/NUL",
+        "session/con.txt",
+        "session/LPT9.log",
+        "session/COM¹.data",
+        "session/trailing-dot.",
+        "session/trailing-space ",
+        "session/question?.txt",
+        "session/control-\x1f.txt",
+    ],
+)
+def test_windows_unsafe_archive_components_are_rejected_cross_platform(tmp_path, archive_path):
+    project, session, global_harness, connection = make_sources(tmp_path)
+    valid = tmp_path / "valid.zip"
+    try:
+        backup.create_backup(project_root=project, session_dir=session, global_harness=global_harness, output=valid)
+    finally:
+        connection.close()
+    original = archive_members(valid)
+    ordinary = next(name for name in original if name.endswith("evidence.json"))
+
+    def rename_to_unsafe_path(members):
+        manifest = json.loads(members[backup.MANIFEST_NAME])
+        item = next(item for item in manifest["files"] if item["path"] == ordinary)
+        payload = members.pop(ordinary)
+        item["path"] = archive_path
+        members[archive_path] = payload
+        members[backup.MANIFEST_NAME] = backup._canonical_json(manifest)
+        return members
+
+    forged = tmp_path / (hashlib.sha256(archive_path.encode("utf-8")).hexdigest() + ".zip")
+    rewrite_zip(valid, forged, rename_to_unsafe_path)
+    with pytest.raises(backup.BackupError, match="Windows-(?:unsafe|ambiguous)|reserved-device"):
+        backup.verify_backup(forged)
+    destination = tmp_path / "unsafe-restore"
+    with pytest.raises(backup.BackupError):
+        backup.restore_backup(forged, destination)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("privileged_mode", [0o4755, 0o2755, 0o1755])
+def test_privileged_manifest_modes_are_rejected_before_restore(tmp_path, privileged_mode):
+    project, session, global_harness, connection = make_sources(tmp_path)
+    valid = tmp_path / "valid.zip"
+    try:
+        backup.create_backup(project_root=project, session_dir=session, global_harness=global_harness, output=valid)
+    finally:
+        connection.close()
+
+    def add_privileged_mode(members):
+        manifest = json.loads(members[backup.MANIFEST_NAME])
+        ordinary = next(item for item in manifest["files"] if item["path"].endswith("evidence.json"))
+        ordinary["mode"] = privileged_mode
+        members[backup.MANIFEST_NAME] = backup._canonical_json(manifest)
+        return members
+
+    forged = tmp_path / f"privileged-{privileged_mode:o}.zip"
+    rewrite_zip(valid, forged, add_privileged_mode)
+    with pytest.raises(backup.BackupError, match="privileged or invalid mode bits"):
+        backup.verify_backup(forged)
+    destination = tmp_path / "privileged-restore"
+    with pytest.raises(backup.BackupError):
+        backup.restore_backup(forged, destination)
+    assert not destination.exists()
+
+
+def test_closed_uncheckpointed_wal_is_captured_by_sqlite_backup(tmp_path):
+    project = tmp_path / "project"
+    artifacts = project / "artifacts" / "harness"
+    session = tmp_path / "session"
+    global_harness = tmp_path / "global-harness"
+    artifacts.mkdir(parents=True)
+    session.mkdir()
+    global_harness.mkdir()
+    (session / "state.json").write_text("{}\n", encoding="utf-8")
+    database = artifacts / "evidence.db"
+    crash_writer = r'''import os
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+connection.execute("PRAGMA wal_autocheckpoint=0")
+connection.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY, claim TEXT NOT NULL)")
+connection.commit()
+connection.execute("INSERT INTO evidence(claim) VALUES (?)", ("committed before simulated crash",))
+connection.commit()
+os._exit(0)
+'''
+    writer = subprocess.run([sys.executable, "-c", crash_writer, str(database)], capture_output=True, text=True, timeout=60)
+    assert writer.returncode == 0, writer.stdout + writer.stderr
+    wal = Path(str(database) + "-wal")
+    assert wal.is_file() and wal.stat().st_size > 32
+
+    archive = tmp_path / "closed-uncheckpointed-wal.zip"
+    created = backup.create_backup(project_root=project, session_dir=session, global_harness=global_harness, output=archive)
+    assert created["status"] == "pass"
+    restored = tmp_path / "restored-wal"
+    backup.restore_backup(archive, restored)
+    restored_database = restored / "project/artifacts/harness/evidence.db"
+    connection = sqlite3.connect(restored_database.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        assert connection.execute("SELECT claim FROM evidence").fetchall() == [("committed before simulated crash",)]
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        connection.close()
+
+
 def test_restore_rejects_nonempty_destination_without_mutation(tmp_path):
     project, session, global_harness, connection = make_sources(tmp_path)
     archive = tmp_path / "valid.zip"

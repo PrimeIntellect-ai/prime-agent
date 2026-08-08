@@ -78,16 +78,36 @@ def _strict_json(raw: bytes) -> Any:
         raise BackupError("manifest is not strict UTF-8 JSON") from exc
 
 
+WINDOWS_FORBIDDEN_CHARS = frozenset('<>:"|?*')
+WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"}
+    | {f"COM{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")}
+    | {f"LPT{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")}
+)
+
+
+def _safe_windows_component(component: str) -> None:
+    if component.endswith((" ", ".")):
+        raise BackupError(f"Windows-ambiguous archive component: {component!r}")
+    if any(ord(character) < 32 or character in WINDOWS_FORBIDDEN_CHARS for character in component):
+        raise BackupError(f"Windows-unsafe archive component: {component!r}")
+    device_stem = component.split(".", 1)[0].rstrip(" .").upper()
+    if device_stem in WINDOWS_DEVICE_NAMES:
+        raise BackupError(f"Windows reserved-device archive component: {component!r}")
+
+
 def _safe_archive_path(value: Any, *, directory: bool = False) -> str:
     if not isinstance(value, str) or not value or "\x00" in value or "\\" in value:
         raise BackupError(f"unsafe archive path: {value!r}")
     if unicodedata.normalize("NFC", value) != value:
         raise BackupError(f"archive path is not NFC-normalized: {value!r}")
     path = PurePosixPath(value)
-    if path.is_absolute() or path.parts[0].endswith(":") or any(part in {"", ".", ".."} for part in path.parts):
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise BackupError(f"unsafe archive path: {value!r}")
+    for component in path.parts:
+        _safe_windows_component(component)
     canonical = path.as_posix()
-    if canonical != value.rstrip("/"):
+    if canonical != value:
         raise BackupError(f"non-canonical archive path: {value!r}")
     if canonical == MANIFEST_NAME:
         raise BackupError("manifest cannot list itself")
@@ -96,6 +116,12 @@ def _safe_archive_path(value: Any, *, directory: bool = False) -> str:
     if not directory and canonical in ROOT_PREFIXES.values():
         raise BackupError(f"root path cannot be a file: {canonical}")
     return canonical
+
+
+def _safe_mode(value: Any, path: str) -> int:
+    if type(value) is not int or not 0 <= value <= 0o777:
+        raise BackupError(f"privileged or invalid mode bits for {path}: {value!r}")
+    return value
 
 
 def _lstat_kind(path: Path) -> str:
@@ -186,18 +212,19 @@ def _sqlite_snapshot(source: Path, destination: Path) -> None:
 
 def _write_member(archive: zipfile.ZipFile, archive_path: str, source: Path, *, sqlite_snapshot: bool, temp_dir: Path) -> dict[str, Any]:
     stat_result = source.stat(follow_symlinks=False)
+    source_mode = _safe_mode(stat.S_IMODE(stat_result.st_mode), archive_path)
     payload = source
     if sqlite_snapshot:
         payload = temp_dir / (hashlib.sha256(str(source).encode("utf-8")).hexdigest() + ".db")
         _sqlite_snapshot(source, payload)
-    info = _zip_info(archive_path, stat.S_IMODE(stat_result.st_mode), stat_result.st_mtime_ns)
+    info = _zip_info(archive_path, source_mode, stat_result.st_mtime_ns)
     with payload.open("rb") as input_handle, archive.open(info, "w") as output_handle:
         digest, size = _sha256_stream(input_handle, output_handle)
     return {
         "path": archive_path,
         "sha256": digest,
         "size": size,
-        "mode": stat.S_IMODE(stat_result.st_mode),
+        "mode": source_mode,
         "mtime_ns": stat_result.st_mtime_ns,
         "sqlite_snapshot": sqlite_snapshot,
     }
@@ -244,7 +271,8 @@ def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path
                 raise BackupError(f"duplicate backup path: {archive_path}")
             seen_paths.add(archive_path)
             source_stat = source.stat(follow_symlinks=False)
-            directories.append({"path": archive_path, "mode": stat.S_IMODE(source_stat.st_mode), "mtime_ns": source_stat.st_mtime_ns})
+            source_mode = _safe_mode(stat.S_IMODE(source_stat.st_mode), archive_path)
+            directories.append({"path": archive_path, "mode": source_mode, "mtime_ns": source_stat.st_mtime_ns})
         for archive_path, source in source_files:
             archive_path = _safe_archive_path(archive_path)
             if archive_path in seen_paths:
@@ -308,8 +336,9 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
         path = _safe_archive_path(item["path"], directory=True)
         if path in paths:
             raise BackupError(f"duplicate manifest path: {path}")
-        if type(item["mode"]) is not int or not 0 <= item["mode"] <= 0o7777 or type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0:
+        if type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0:
             raise BackupError(f"invalid directory metadata: {path}")
+        _safe_mode(item["mode"], path)
         paths.add(path)
     for item in files:
         if not isinstance(item, dict) or set(item) != {"path", "sha256", "size", "mode", "mtime_ns", "sqlite_snapshot"}:
@@ -319,8 +348,9 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
             raise BackupError(f"duplicate manifest path: {path}")
         if not isinstance(item["sha256"], str) or len(item["sha256"]) != 64 or any(ch not in "0123456789abcdef" for ch in item["sha256"]):
             raise BackupError(f"invalid SHA-256 in manifest: {path}")
-        if type(item["size"]) is not int or item["size"] < 0 or type(item["mode"]) is not int or not 0 <= item["mode"] <= 0o7777 or type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0 or type(item["sqlite_snapshot"]) is not bool:
+        if type(item["size"]) is not int or item["size"] < 0 or type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0 or type(item["sqlite_snapshot"]) is not bool:
             raise BackupError(f"invalid file metadata: {path}")
+        _safe_mode(item["mode"], path)
         if item["sqlite_snapshot"] and not path.endswith("/evidence.db"):
             raise BackupError(f"unexpected SQLite snapshot marker: {path}")
         paths.add(path)

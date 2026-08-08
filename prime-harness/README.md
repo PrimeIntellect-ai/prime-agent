@@ -272,11 +272,13 @@ one atomic ZIP archive:
 - project `artifacts/harness` except its `backups/` subtree; and
 - global `~/.prime/agent/harness` (recorded as absent when not yet created).
 
-It copies every `evidence.db` with SQLite's online backup API, records a strict
+It copies every `evidence.db` with SQLite's online backup API, including
+committed frames from a live or crash-left uncheckpointed WAL, records a strict
 manifest of paths, sizes, SHA-256 hashes, modes, and timestamps, then verifies
 the completed archive before reporting success. Source and archive symlinks,
-special files, duplicate names, traversal/noncanonical paths, corruption, and
-invalid SQLite snapshots fail closed.
+special files, duplicate names, traversal/noncanonical paths, Windows ADS or
+reserved-device components, privileged setuid/setgid/sticky modes, corruption,
+and invalid SQLite snapshots fail closed on every platform.
 
     python -S harness/backup.py create
     python -S harness/backup.py verify artifacts/harness/backups/prime-harness-....zip
