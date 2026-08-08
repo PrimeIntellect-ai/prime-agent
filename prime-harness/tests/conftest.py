@@ -13,7 +13,7 @@ import pytest
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = HARNESS_ROOT / "template" / ".prime" / "agent" / "skills"
 
-for package in ("harness-orchestrator", "sci-verify", "evidence-ledger", "external-critic"):
+for package in ("harness-orchestrator", "sci-verify", "evidence-ledger", "external-critic", "repo-map"):
     src = SKILLS_DIR / package / "src"
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))

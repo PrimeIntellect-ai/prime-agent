@@ -7,7 +7,7 @@ built for long-running scientific (physics/mathematics) codebases.
 complexity onto the model — it must write correct Python to delegate,
 verify, and manage state, and any slip creates drift, incomplete changes, or
 subtle bugs. This harness does *not* wrap Prime Agent in another agent
-framework (Prime stays the authoritative runtime). Instead it installs four
+framework (Prime stays the authoritative runtime). Instead it installs five
 narrow, deterministic layers the architecture is missing:
 
 1. **Deterministic scientific oracles** (`sci-verify` + the composite gate)
@@ -15,6 +15,7 @@ narrow, deterministic layers the architecture is missing:
 3. **Delegation & budget discipline** (`harness-orchestrator` + operating policy)
 4. **Independent cross-harness criticism** (`external-critic` — your
    "Prime produces → Codex/Claude audits" loop, automated)
+5. **Bounded graph-ranked reconnaissance** (`repo-map`)
 
 Everything is built against **verified Prime Agent v0.7.0 interfaces** (see
 [Compatibility](#compatibility)) — real skill formats, real autonomous-gate
@@ -55,11 +56,12 @@ your-repo/
 │   ├── APPEND_SYSTEM.md         # operating policy, appended to the system prompt
 │   ├── settings.json            # autoRefine OFF (refinement is governed, not automatic)
 │   ├── prompts/                 # /harness-task, /harness-audit, /harness-refine
-│   └── skills/                  # 4 Python-backed skills (auto-installed into the kernel)
+│   └── skills/                  # 5 Python-backed skills (auto-installed into the kernel)
 │       ├── harness-orchestrator/
 │       ├── sci-verify/
 │       ├── evidence-ledger/
-│       └── external-critic/
+│       ├── external-critic/
+│       └── repo-map/
 ├── harness/
 │   ├── verify.py                # composite gate (stdlib-only; autonomous-gate safe)
 │   ├── scorecard.py             # privacy-safe durable telemetry (stdlib-only)
@@ -216,6 +218,29 @@ a vacuous quick pass cannot recover another profile's substantive failure.
 | `GATE_HISTORY_FAILURES` | info | Earlier failures were recovered by a newer substantive pass in the same profile. |
 | `EVIDENCE_OUTSIDE_TASK` | info | Time-window ledger rows not named by task `evidence_ids` were excluded. |
 
+## Independent critic panels
+
+`external_critic.review()` remains the backward-compatible single-critic API.
+For phase/goal closure, `external_critic.review_panel()` freezes one commit and
+diff, creates private non-git copies, then launches Claude and Codex
+concurrently with identical instructions and no access to one another's
+response. It preserves every tool position and clusters only exact canonical
+path/line/claim identities; similar findings remain separately visible:
+
+```python
+panel = external_critic.review_panel(base="TASK_BASE", head="HEAD")
+assert panel["status"] == "done" and panel["verdict"] != "inconclusive"
+```
+
+Presence, severity, location, and wording disagreements are surfaced in both
+the normalized finding and a top-level disagreement list; maximum severity is
+conservative. Missing tools, timeout, nonzero exit, or malformed output yields
+a `partial`/`error` panel, never a false clean result. Immutable panel
+artifacts and a locked, hash-chained append-only
+`panel-verdict-ledger.jsonl` retain provenance. Closing a finding via
+`record_panel_verdict()` requires a rationale, named verifier, and evidence
+IDs. Findings remain untrusted input until independently falsified or rebutted.
+
 ## Deterministic evaluation and refinement replay
 
 `checks/evalset/corpus.json` is a versioned 16-task public baseline spanning
@@ -297,14 +322,66 @@ before copying any state back into live locations. Backup files are integrity
 artifacts, not encrypted secrets: store and transmit them under the same or
 stronger access controls as the session and evidence ledger.
 
+## Bounded repository mapping
+
+`repo-map` performs read-only, Git-indexed reconnaissance before broad edits.
+It extracts Python AST and conservative TypeScript/JavaScript lexical
+declarations, builds scope/import-aware reference and containment edges, and
+ranks symbols with deterministic personalized PageRank. The default callable
+returns declaration-only text whose complete UTF-8 byte length is no greater
+than the requested budget:
+
+```python
+text = await repo_map(
+    query="agent session retry", root=".", token_budget=5000,
+)
+print(text)
+```
+
+One byte is charged per provider-independent upper-bound unit, intentionally
+more conservative than a provider tokenizer. JSON metadata is explicit
+`format="json"` and labels that only its map field is budgeted. Inventory uses
+Git tracked plus non-ignored untracked files; `.prime` skill sources remain
+visible while Git ignores, credentials, vendor/build/artifacts,
+generated/minified files, symlinks/gitlinks/reparse points, binaries, and hard
+limits fail closed or produce an explicit partial result. Output never embeds
+source snippets, literals/comments/docstrings, raw query text, or absolute
+paths. Python edges respect lexical shadows and explicit imports; the
+TypeScript/JavaScript lexer skips inert comment/string/template/regex text.
+Rankings are navigation hints, never evidence: inspect selected source before
+making claims.
+
 ## Model routing
 
-Roster roles accept an optional exact `provider/model` selector (from
-`rlm.find_models()` inside a session — selectors are credential-bound, so the
-harness never hardcodes them). Recommended split: keep the strongest model as
-root synthesizer; route implementation/extraction children to cheaper models
-after you've benchmarked them on your own tasks; use a *different vendor* for
-`external-critic` than the root model, for genuine diversity.
+Roster roles accept an optional exact `provider/model` selector from
+`rlm.find_models()`. `checks/evalset/model-routing-v1.json` defines six
+oracle-isolated tasks (symbolic, precision, convergence, invariant,
+adversarial audit, and provenance), and `harness/model_routing.py` scores
+captured child result files without another model. Require at least three tasks
+per candidate; this campaign ran all six for every discovered selector. The
+scorer/oracle was written after response capture, and candidate prompts forbade
+public corpus/baseline/reference and peer-result access.
+
+Measured 2026-08-08 snapshot (8 available Anthropic child selectors; accuracy
+first, exact-contract then selector as deterministic tie breaks):
+
+| Roster role | Primary measured selector | First fallbacks | Score |
+|---|---|---|---:|
+| implementation-engineer | `anthropic/claude-fable-5` | `anthropic/claude-opus-4-5`, `anthropic/claude-opus-4-5-20251101` | 1.000 |
+| symbolic-auditor | `anthropic/claude-fable-5` | same | 1.000 |
+| numerical-auditor | `anthropic/claude-fable-5` | same | 1.000 |
+| adversarial-reviewer | `anthropic/claude-fable-5` | same | 1.000 |
+| literature-engineer | `anthropic/claude-fable-5` | same | 1.000 |
+| experiment-operator | `anthropic/claude-fable-5` | same | 1.000 |
+
+Seven candidates scored 1.000 overall; `claude-haiku-4-5` scored 0.944 because
+one 36-digit cancellation answer lost the correction term. The pinned Haiku
+answered all tasks correctly but violated exact task-key names, recorded
+separately as contract rate 0. No latency/cost claim is made, so ties are not
+presented as quality differences. Selectors are credential-bound and may
+change: regenerate the JSON report for each environment rather than silently
+hardcoding the roster. Use a different vendor for `external-critic` when
+available to preserve reviewer diversity.
 
 ## Governed refinement (`/harness-refine`)
 

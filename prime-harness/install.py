@@ -56,8 +56,8 @@ Next steps
 7. Review the pinned-action `.github/workflows/prime-harness.yml`; its public
    holdout job is transport smoke only. Inject real holdouts from protected CI.
 
-The four skills (harness_orchestrator, sci_verify, evidence_ledger,
-external_critic) appear in <available_skills> once the session starts.
+The five skills (harness_orchestrator, sci_verify, evidence_ledger,
+external_critic, repo_map) appear in <available_skills> once the session starts.
 """.rstrip()
 
 
