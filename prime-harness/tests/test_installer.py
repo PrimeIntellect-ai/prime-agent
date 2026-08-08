@@ -202,6 +202,29 @@ def test_tailored_manifest_passes_doctor_static_applicability(tmp_repo):
     assert applicability["level"] == "PASS"
 
 
+def test_tailor_ignores_installer_owned_example_checks_on_reinstall(tmp_repo):
+    first = run_install(tmp_repo)
+    assert first.returncode == 0, first.stdout + first.stderr
+    original = (tmp_repo / "harness/manifest.json").read_bytes()
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert (tmp_repo / "harness/manifest.json").read_bytes() == original
+    assert not (tmp_repo / "harness/manifest.tailored.json").exists()
+
+
+def test_tailor_recognizes_user_extension_of_installed_example_checks(tmp_repo):
+    first = run_install(tmp_repo)
+    assert first.returncode == 0
+    custom = tmp_repo / "checks/properties/test_project_property.py"
+    custom.write_text("def test_project_property(): assert True\n", encoding="utf-8")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sidecar = json.loads((tmp_repo / "harness/manifest.tailored.json").read_text(encoding="utf-8"))
+    unit = next(entry for entry in sidecar["profiles"]["default"]["required"] if entry["name"] == "unit")
+    assert "checks/properties" in unit["command"]
+
+
 def test_tailor_refuses_vacuous_repo_before_installing(tmp_repo):
     proc = run_install(tmp_repo, "--tailor")
     assert proc.returncode != 0

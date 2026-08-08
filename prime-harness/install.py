@@ -16,6 +16,7 @@ import filecmp
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -57,7 +58,59 @@ def _is_linklike(path: Path) -> bool:
     if path.is_symlink():
         return True
     is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction and is_junction())
+    if is_junction and is_junction():
+        return True
+    try:
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return True
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _bounded_inventory(base: Path) -> dict[str, Path] | None:
+    """Inventory a small regular tree without following link/reparse entries."""
+    files: dict[str, Path] = {}
+    pending: list[tuple[Path, int]] = [(base, 0)]
+    seen = 0
+    while pending:
+        directory, depth = pending.pop()
+        if depth > 8:
+            return None
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
+        except OSError:
+            return None
+        for path in entries:
+            if path.name == "__pycache__" or path.suffix.lower() in IGNORED_TEMPLATE_SUFFIXES:
+                continue
+            seen += 1
+            if seen > 256 or _is_linklike(path):
+                return None
+            try:
+                if path.is_dir():
+                    pending.append((path, depth + 1))
+                elif path.is_file():
+                    files[path.relative_to(base).as_posix()] = path
+                else:
+                    return None
+            except OSError:
+                return None
+    return files
+
+
+def _template_only_subtree(target: Path, relative: str) -> bool:
+    source = TEMPLATE / relative
+    destination = target / relative
+    if not source.is_dir() or not destination.is_dir():
+        return False
+    source_files = _bounded_inventory(source)
+    destination_files = _bounded_inventory(destination)
+    if source_files is None or destination_files is None or set(source_files) != set(destination_files):
+        return False
+    return all(
+        filecmp.cmp(str(source_files[name]), str(destination_files[name]), shallow=False)
+        for name in source_files
+    )
 
 
 def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
@@ -104,7 +157,9 @@ def tailor_manifest(target: Path) -> dict[str, object]:
 
     test_dirs = [
         item for item in ("tests", "test", "checks/properties", "checks/invariants", "checks/reference_cases")
-        if (target / item).is_dir() and not _is_linklike(target / item)
+        if (target / item).is_dir()
+        and not _is_linklike(target / item)
+        and not _template_only_subtree(target, item)
     ]
     pyproject_text = _bounded_text(target / "pyproject.toml")
     if pyproject_text is not None:
@@ -158,7 +213,7 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         "changed-files": {"min_applicable_checks": 1, "required": changed, "conditional": []},
     }
     holdout = target / "checks/hidden_holdout"
-    if holdout.is_dir():
+    if holdout.is_dir() and not _is_linklike(holdout) and not _template_only_subtree(target, "checks/hidden_holdout"):
         profiles["holdout"] = {
             "min_applicable_checks": 1,
             "required": [_check("hidden-holdout", "python -m pytest -q checks/hidden_holdout", "checks/hidden_holdout", 1800)],
