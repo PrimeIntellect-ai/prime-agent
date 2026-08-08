@@ -24,28 +24,61 @@ if child is not None:
     # Keep the child until this follow-up finishes so its result remains observable.
 ```
 
-## API
+## Import
 
-- `await agent_message.list_agents()` — returns `current` (`name`, `id`, `depth`)
-  and family-scoped `entries` (`relationship`, `name`, `id`, `depth`, `status`)
-  for the current agent's parent, siblings, and children. It includes inactive
-  family members and sorts parent, siblings by name, then children by name; it
-  does not expose a global daemon session list.
-- `await agent_message.send(message, receiver_role="parent" | "sibling" | "child", receiver_name=None)` — sends one direct
-  text message to an active session. Sending to an idle completed subagent
-  starts an ordinary follow-up turn in that same child session and context.
-  The child remains available only until its parent session closes. The daemon
-  resolves `receiver_role` within the current agent family; `receiver_name` is
-  required for siblings and children and omitted for the unique parent.
-  `send("all", message)` broadcasts only to the family roster and returns
-  `{receipts: [...]}` in roster order; successful entries are ordinary receipts
-  and failed entries contain the target id and a short `error`. One failed delivery
-  does not reject successful deliveries. Messages always use steering delivery so
-  a busy target sees them during its active run. Returns a receipt with a
-  `deliveryStatus` field: `"delivered"` means the message reached an idle target's
-  context; `"queued"` means a steering message was accepted and will deliver when
-  the target's current work allows (`send` does not block waiting for that).
-  Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
+```python
+import agent_message
+```
+
+## API Reference
+
+```python
+async def list_agents() -> dict
+```
+Returns `current` (`name`, `id`, `depth`) and family-scoped `entries` (each with
+`relationship`, `name`, `id`, `depth`, `status`) for parent, siblings, and direct
+children. Includes inactive family members. Does not expose a global daemon session
+list.
+
+---
+
+```python
+async def send(
+    message: str,
+    broadcast_message: str | None = None,
+    *,
+    receiver_role: "parent" | "sibling" | "child" | None = None,
+    receiver_name: str | None = None,
+) -> dict
+```
+
+**Direct message** (most common):
+```python
+receipt = await agent_message.send(
+    "Please inspect the latest result.",
+    receiver_role="child",
+    receiver_name=child.session_name,
+)
+```
+- `receiver_role`: required — `"parent"`, `"sibling"`, or `"child"`.
+- `receiver_name`: required for `"sibling"` and `"child"`; must be omitted for `"parent"`.
+- Returns a receipt dict with `deliveryStatus` (`"delivered"` or `"queued"`), plus
+  `deliveredAt` or `queuedAt` depending on status. Messages always use steering
+  delivery so a busy target sees them at the next tool boundary.
+
+**Broadcast to all family members:**
+```python
+receipt = await agent_message.send("all", broadcast_message="Status check — please reply.")
+```
+- First arg must be the literal string `"all"`.
+- `broadcast_message` carries the text to send.
+- `receiver_role` and `receiver_name` must be omitted for broadcasts.
+- Returns `{receipts: [...]}` in roster order; failed entries contain `id` and `error`.
+  One failed delivery does not cancel successful ones.
+
+**Functions that do NOT exist (common mistakes):**
+- `agent_message.list_messages()` — does not exist; use `agent_observe.recent_messages()`.
+- `agent_message.observe()` — does not exist; use the `agent-observe` skill.
 
 ## Safety
 
