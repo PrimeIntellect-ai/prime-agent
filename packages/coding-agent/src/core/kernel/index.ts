@@ -648,6 +648,9 @@ export class KernelManager {
 				cwd: this.options.cwd,
 				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
 				stdio: ["ignore", "pipe", "pipe"],
+				// Console-less daemon workers on Windows otherwise allocate a fresh
+				// visible console per child; its lifecycle can kill the kernel (#660/#825).
+				windowsHide: true,
 			});
 			this.kernel = kernel;
 
