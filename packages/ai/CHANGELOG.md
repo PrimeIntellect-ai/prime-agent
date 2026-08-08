@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ## [0.7.2] - 2026-08-11
+- Added fast mode support (`speed: "fast"`) for `claude-opus-5` and `claude-opus-4-8` on the Anthropic API, enabling up to 2.5× higher output tokens/second via the `fast-mode-2026-02-01` beta ([#867](https://github.com/PrimeIntellect-ai/prime-agent/issues/867)).
 
 ## [0.7.1] - 2026-08-07
 
