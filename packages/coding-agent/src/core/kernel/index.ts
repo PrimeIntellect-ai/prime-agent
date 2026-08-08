@@ -24,7 +24,16 @@ import {
 
 const DELIM = Buffer.from("<IDS|MSG>");
 const PROTOCOL_VERSION = "5.3";
-const PORTS_RESOLVE_TIMEOUT_MS = 5000;
+/**
+ * How long to wait for a starting kernel to publish its resolved ports.
+ *
+ * Windows pays a much slower interpreter start than Linux or macOS, and several
+ * kernels starting at once — a sharded test run, or a daemon bringing up
+ * sessions in parallel — pushes it past five seconds. The wait loop below exits
+ * early when the kernel dies, so a longer budget never delays a real failure;
+ * it only stops a slow start being reported as a broken one.
+ */
+const PORTS_RESOLVE_TIMEOUT_MS = process.platform === "win32" ? 15_000 : 5000;
 const READY_TIMEOUT_MS = 5000;
 // Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
