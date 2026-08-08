@@ -29,7 +29,15 @@ def test_load_task_state_tolerates_unknown_fields(tmp_repo):
     assert orch.load_task_state().task_id == "t-002"
 
 
-def test_admit_denies_trivial_and_unverifiable(tmp_repo):
+def test_admit_denies_trivial_and_unverifiable(tmp_repo, monkeypatch):
+    async def unbounded_budget():
+        return {"remaining_tokens": None, "min_goal_tokens_to_spawn": 20_000}
+
+    async def no_reconcile():
+        return {"marked_dead": []}
+
+    monkeypatch.setattr(orch, "budget_status", unbounded_budget)
+    monkeypatch.setattr(orch, "reconcile", no_reconcile)
     denied = asyncio.run(orch.admit("implementation-engineer", "rename a variable",
                                     independent_subproblem=False,
                                     objective_verifier_available=True))
@@ -140,7 +148,11 @@ def test_spawn_failure_releases_reservation(tmp_repo, monkeypatch):
     assert orch._load_registry() == {}  # reservation rolled back → respawn possible
 
 
-def test_run_overview(tmp_repo):
+def test_run_overview(tmp_repo, monkeypatch):
+    async def unbounded_budget():
+        return {"remaining_tokens": None, "min_goal_tokens_to_spawn": 20_000}
+
+    monkeypatch.setattr(orch, "budget_status", unbounded_budget)
     orch.new_task("t-003", "objective")
     overview = asyncio.run(orch.run())
     assert overview["task_state"]["task_id"] == "t-003"
