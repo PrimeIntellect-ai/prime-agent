@@ -1,0 +1,397 @@
+{
+  "corpus_version": "1.0.0",
+  "default_seed": 20260808,
+  "promotion_policy": {
+    "minimum_category_rate": 0.5,
+    "minimum_score_rate": 0.75,
+    "repetitions": 2
+  },
+  "reference_executor_sha256": "ed4f139817f312ffbb8bd1776b9167a5bdd9a38abf1d3cf42cf26db52a8818e0",
+  "response_contracts": {
+    "convergence": {
+      "observed_order": "finite number"
+    },
+    "invariant": {
+      "conserved": "boolean",
+      "relative_drift": "finite number"
+    },
+    "numeric": {
+      "values": {
+        "<precision_digits>": "finite decimal string for every requested ladder rung"
+      }
+    },
+    "symbolic": {
+      "assumptions": [
+        "exact condition strings in the prompt/task; [] if none"
+      ],
+      "counterexample": {
+        "variable": "finite number; required only for not_equivalent"
+      },
+      "verdict": "universally_equivalent | equivalent_under_assumptions | not_equivalent"
+    }
+  },
+  "schema_version": 1,
+  "tasks": [
+    {
+      "category": "symbolic",
+      "expected_verdict": "universally_equivalent",
+      "id": "sym-binomial-square",
+      "lhs": "(x+1)**2",
+      "prompt": "Classify (x+1)^2 = x^2+2x+1 over real x. Return the symbolic answer contract.",
+      "random_samples": 12,
+      "required_assumptions": [],
+      "rhs": "x**2+2*x+1",
+      "sample_domain": {
+        "x": [
+          -20,
+          20
+        ]
+      },
+      "trap_samples": [],
+      "valid_samples": [
+        {
+          "x": -3
+        },
+        {
+          "x": 0
+        },
+        {
+          "x": 2.5
+        }
+      ]
+    },
+    {
+      "category": "symbolic",
+      "expected_verdict": "equivalent_under_assumptions",
+      "id": "sym-sqrt-square-sign",
+      "lhs": "sqrt(x**2)",
+      "prompt": "Classify sqrt(x^2) = x over real x and give the minimal listed condition.",
+      "random_samples": 12,
+      "required_assumptions": [
+        "x >= 0"
+      ],
+      "rhs": "x",
+      "sample_domain": {
+        "x": [
+          0,
+          20
+        ]
+      },
+      "trap_samples": [
+        {
+          "x": -1
+        },
+        {
+          "x": -7
+        }
+      ],
+      "valid_samples": [
+        {
+          "x": 0
+        },
+        {
+          "x": 0.5
+        },
+        {
+          "x": 4
+        }
+      ]
+    },
+    {
+      "category": "symbolic",
+      "expected_verdict": "universally_equivalent",
+      "id": "sym-log-exp-real",
+      "lhs": "log(exp(x))",
+      "prompt": "Classify log(exp(x)) = x for real x.",
+      "random_samples": 12,
+      "required_assumptions": [],
+      "rhs": "x",
+      "sample_domain": {
+        "x": [
+          -10,
+          10
+        ]
+      },
+      "trap_samples": [],
+      "valid_samples": [
+        {
+          "x": -5
+        },
+        {
+          "x": 0
+        },
+        {
+          "x": 5
+        }
+      ]
+    },
+    {
+      "category": "symbolic",
+      "expected_verdict": "equivalent_under_assumptions",
+      "id": "sym-cancel-domain",
+      "lhs": "x/x",
+      "prompt": "Classify x/x = 1 over real x, retaining domain restrictions.",
+      "random_samples": 12,
+      "required_assumptions": [
+        "x != 0"
+      ],
+      "rhs": "1",
+      "sample_domain": {
+        "x": [
+          0.01,
+          20
+        ]
+      },
+      "trap_samples": [
+        {
+          "x": 0
+        }
+      ],
+      "valid_samples": [
+        {
+          "x": -2
+        },
+        {
+          "x": 0.25
+        },
+        {
+          "x": 8
+        }
+      ]
+    },
+    {
+      "category": "symbolic",
+      "expected_verdict": "equivalent_under_assumptions",
+      "id": "sym-sqrt-product",
+      "lhs": "sqrt(a*b)",
+      "prompt": "Classify sqrt(a*b) = sqrt(a)*sqrt(b) over reals and list the sufficient real-domain assumptions used.",
+      "random_samples": 12,
+      "required_assumptions": [
+        "a >= 0",
+        "b >= 0"
+      ],
+      "rhs": "sqrt(a)*sqrt(b)",
+      "sample_domain": {
+        "a": [
+          0,
+          10
+        ],
+        "b": [
+          0,
+          10
+        ]
+      },
+      "trap_samples": [
+        {
+          "a": -1,
+          "b": -1
+        }
+      ],
+      "valid_samples": [
+        {
+          "a": 0,
+          "b": 3
+        },
+        {
+          "a": 2,
+          "b": 8
+        }
+      ]
+    },
+    {
+      "category": "symbolic",
+      "expected_verdict": "not_equivalent",
+      "id": "sym-missing-cross-term",
+      "lhs": "(a+b)**2",
+      "prompt": "Classify (a+b)^2 = a^2+b^2 over real a,b. If false, give a numerical counterexample.",
+      "random_samples": 0,
+      "required_assumptions": [],
+      "rhs": "a**2+b**2",
+      "sample_domain": {},
+      "trap_samples": [
+        {
+          "a": 1,
+          "b": 1
+        },
+        {
+          "a": 2,
+          "b": -3
+        }
+      ],
+      "valid_samples": [
+        {
+          "a": 0,
+          "b": 3
+        },
+        {
+          "a": -2,
+          "b": 0
+        }
+      ]
+    },
+    {
+      "category": "numeric",
+      "id": "num-sqrt-two",
+      "max_tolerance_digits": 60,
+      "precisions_digits": [
+        18,
+        36,
+        72
+      ],
+      "prompt": "Return sqrt(2) as decimal strings at 18, 36, and 72 decimal-digit working precisions.",
+      "reference": {
+        "algorithm": "sqrt",
+        "value": "2"
+      }
+    },
+    {
+      "category": "numeric",
+      "id": "num-expm1-cancellation",
+      "max_tolerance_digits": 60,
+      "precisions_digits": [
+        18,
+        36,
+        72
+      ],
+      "prompt": "Evaluate exp(1e-20)-1 without cancellation at 18, 36, and 72 decimal-digit working precisions.",
+      "reference": {
+        "algorithm": "expm1",
+        "value": "1e-20"
+      }
+    },
+    {
+      "category": "numeric",
+      "id": "num-log1p-cancellation",
+      "max_tolerance_digits": 60,
+      "precisions_digits": [
+        18,
+        36,
+        72
+      ],
+      "prompt": "Evaluate log(1+1e-25) without cancellation at 18, 36, and 72 decimal-digit working precisions.",
+      "reference": {
+        "algorithm": "log1p",
+        "value": "1e-25"
+      }
+    },
+    {
+      "category": "numeric",
+      "id": "num-gravity-scale",
+      "max_tolerance_digits": 60,
+      "precisions_digits": [
+        18,
+        36,
+        72
+      ],
+      "prompt": "Compute G*m1*m2/r for G=6.67430e-11, m1=5.9722e24, m2=7.342e22, r=3.844e8 at the precision ladder.",
+      "reference": {
+        "algorithm": "product_divide",
+        "divisor": "3.844e8",
+        "factors": [
+          "6.67430e-11",
+          "5.9722e24",
+          "7.342e22"
+        ]
+      }
+    },
+    {
+      "category": "convergence",
+      "errors": [
+        0.08,
+        0.04,
+        0.02,
+        0.01
+      ],
+      "expected_order": 1.0,
+      "id": "conv-first-order",
+      "order_tolerance": 0.03,
+      "prompt": "Infer the observed order from the supplied resolution/error sequence.",
+      "resolutions": [
+        20,
+        40,
+        80,
+        160
+      ]
+    },
+    {
+      "category": "convergence",
+      "errors": [
+        0.01,
+        0.0025,
+        0.000625,
+        0.00015625
+      ],
+      "expected_order": 2.0,
+      "id": "conv-second-order",
+      "order_tolerance": 0.03,
+      "prompt": "Infer the observed order from the supplied resolution/error sequence.",
+      "resolutions": [
+        16,
+        32,
+        64,
+        128
+      ]
+    },
+    {
+      "category": "convergence",
+      "errors": [
+        0.16,
+        0.01,
+        0.000625,
+        3.90625e-05
+      ],
+      "expected_order": 4.0,
+      "id": "conv-fourth-order",
+      "order_tolerance": 0.03,
+      "prompt": "Infer the observed order from the supplied resolution/error sequence.",
+      "resolutions": [
+        8,
+        16,
+        32,
+        64
+      ]
+    },
+    {
+      "category": "invariant",
+      "id": "inv-energy-conserved",
+      "prompt": "Determine whether the energy series is conserved at rtol=1e-10 and report maximum relative drift.",
+      "report_tolerance": 1e-14,
+      "rtol": 1e-10,
+      "scale_floor": 1e-30,
+      "series": [
+        2.0,
+        2.000000000001,
+        1.999999999999,
+        2.0000000000005
+      ]
+    },
+    {
+      "category": "invariant",
+      "id": "inv-mass-drift",
+      "prompt": "Determine whether the mass series is conserved at rtol=1e-4 and report maximum relative drift.",
+      "report_tolerance": 1e-12,
+      "rtol": 0.0001,
+      "scale_floor": 1e-30,
+      "series": [
+        10.0,
+        10.1,
+        10.2,
+        10.3
+      ]
+    },
+    {
+      "category": "invariant",
+      "id": "inv-zero-momentum",
+      "prompt": "Determine whether near-zero total momentum is conserved using the supplied scale floor and report drift.",
+      "report_tolerance": 1e-15,
+      "rtol": 1e-12,
+      "scale_floor": 1.0,
+      "series": [
+        0.0,
+        1e-14,
+        -2e-14,
+        5e-15
+      ]
+    }
+  ]
+}

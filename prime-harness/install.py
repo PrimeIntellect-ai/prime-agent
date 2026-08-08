@@ -23,7 +23,18 @@ TEMPLATE = Path(__file__).resolve().parent / "template"
 GITIGNORE_BLOCK = [
     "# prime-harness runtime state (evidence db, gate logs, child results)",
     "artifacts/harness/",
+    "# Python transient bytecode",
+    "__pycache__/",
+    "*.py[cod]",
 ]
+
+IGNORED_TEMPLATE_DIRS = {"__pycache__"}
+IGNORED_TEMPLATE_SUFFIXES = {".pyc", ".pyo"}
+
+
+def is_ignored_template_artifact(path: Path) -> bool:
+    """Return whether an installer source path is transient Python bytecode."""
+    return bool(IGNORED_TEMPLATE_DIRS.intersection(path.parts)) or path.suffix.lower() in IGNORED_TEMPLATE_SUFFIXES
 
 NEXT_STEPS = """
 Next steps
@@ -38,8 +49,9 @@ Next steps
    Python-backed skills to install into the kernel).
 5. In the session:  /harness-task my-first-task <objective>
    Bounded autonomous bursts:  harness/burst.sh feature "<prompt>"  (or burst.ps1)
-6. Outside the kernel, generate durable telemetry:
+6. Outside the kernel, generate durable telemetry and replay the eval baseline:
    python -S harness/scorecard.py --output artifacts/harness/scorecard-latest.json
+   python -S harness/replay.py --executor checks/evalset/executors/reference_adapter.py --snapshot checks/evalset/snapshots/baseline-v1.json --require-perfect
 
 The four skills (harness_orchestrator, sci_verify, evidence_ledger,
 external_critic) appear in <available_skills> once the session starts.
@@ -66,7 +78,7 @@ def main() -> int:
     copied, skipped_same, skipped_diff, overwritten = [], [], [], []
 
     for source in sorted(TEMPLATE.rglob("*")):
-        if source.is_dir() or "__pycache__" in source.parts:
+        if source.is_dir() or is_ignored_template_artifact(source):
             continue
         rel = source.relative_to(TEMPLATE)
         dest = target / rel

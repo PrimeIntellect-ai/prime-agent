@@ -62,6 +62,8 @@ your-repo/
 │       └── external-critic/
 ├── harness/
 │   ├── verify.py                # composite gate (stdlib-only; autonomous-gate safe)
+│   ├── scorecard.py             # privacy-safe durable telemetry (stdlib-only)
+│   ├── replay.py                # deterministic eval-snapshot scorer (stdlib-only)
 │   ├── manifest.json            # gate profiles: quick / default / changed-files / holdout
 │   ├── roster.yaml              # retained-specialist roster
 │   ├── config.json              # caps, budget floor, critic config
@@ -70,6 +72,7 @@ your-repo/
 ├── checks/                      # NOT named "verification/" — Prime Agent's
 │   │                            # autonomous gate excludes that exact dir name
 │   │                            # from changed-workspace detection
+│   ├── evalset/                 # versioned 16-task corpus + baseline snapshot
 │   ├── properties/              # Hypothesis property tests (example included)
 │   ├── invariants/              # conservation/symmetry suites
 │   ├── reference_cases/         # independent-oracle comparisons
@@ -213,6 +216,37 @@ a vacuous quick pass cannot recover another profile's substantive failure.
 | `GATE_HISTORY_FAILURES` | info | Earlier failures were recovered by a newer substantive pass in the same profile. |
 | `EVIDENCE_OUTSIDE_TASK` | info | Time-window ledger rows not named by task `evidence_ids` were excluded. |
 
+## Deterministic evaluation and refinement replay
+
+`checks/evalset/corpus.json` is a versioned 16-task public baseline spanning
+symbolic assumption traps, Decimal precision ladders, convergence orders, and
+invariant drift. Standard-library-only `harness/replay.py` never accepts
+caller-supplied answer bundles. It invokes a digest-pinned trusted adapter twice
+per task, supplies the frozen local+global harness state, strips oracle fields
+from each challenge, and independently verifies the returned JSON behavior.
+Malformed, errored, unstable, below-threshold, or unbound runs fail closed.
+
+```bash
+python -S harness/replay.py \
+  --executor checks/evalset/executors/reference_adapter.py \
+  --snapshot checks/evalset/snapshots/baseline-v1.json \
+  --require-perfect \
+  --output artifacts/harness/replay/baseline.json
+```
+
+The reference adapter is a single-snapshot corpus self-test; its path and exact
+digest are rejected for comparisons. Semantic derivatives cannot be detected
+from public tasks alone and are instead barred by adapter review plus private
+holdouts. A production adapter under `harness/replay_adapters/` must actually
+instantiate behavior from the supplied state. Candidate provenance binds the
+adapter, corpus, complete baseline bundle and state, plus exactly one append-only local
+refinement event while global state remains unchanged. Comparison also requires stable repetitions,
+corpus/category minimums, no task regression, and no lower total. Exit 0,
+`status=pass`, and `eligible_for_promotion=true` derive from one decision.
+See `checks/evalset/README.md` for protocol, confinement, and capture details.
+The public corpus measures regression rather than secrecy; CI-only holdouts
+remain separate.
+
 ## Model routing
 
 Roster roles accept an optional exact `provider/model` selector (from
@@ -231,10 +265,14 @@ case study, capable of reward-hacking its objective. Policy here:
   occurrences), via `/harness-refine`.
 - Snapshot before, diff after (`harness_snapshot`/`harness_diff`), smallest
   viable edit, local scope by default.
-- A refinement stays *provisional* (ledger `unverified`) until later
-  gate-passing work confirms it; contradicted → the agent reports the id and
-  **you** run `/refine rollback <id>` (rollback is deliberately human-only —
-  the kernel refine skill has no rollback parameter).
+- Before refinement, capture and deterministically replay a fresh evalset
+  response bundle. After refinement, independently capture a candidate bound to
+  that baseline and require a no-regression `replay.py` comparison.
+- A passing replay is necessary but not sufficient: the refinement stays
+  *provisional* (ledger `unverified`) until later held-out/gate-passing work
+  confirms it. A replay failure or later contradiction blocks promotion and the
+  agent reports the id so **you** can run `/refine rollback <id>` (rollback is
+  deliberately human-only; the kernel refine skill has no rollback parameter).
 - The `holdout` gate profile exists for humans/CI to catch gaming — run it
   before promoting refinements or merging.
 
