@@ -54,7 +54,7 @@ export function createAgentConnectionState(
 			thinkingLevel: scoped.thinkingLevel,
 		})),
 		activeToolNames: session.getActiveToolNames(),
-		contextUsage: session.getContextUsage(),
+		contextUsage: sessionStats.contextUsage,
 		sessionCost: sessionStats.cost,
 		// Baseline recap; the daemon overlays the live summary on attach.
 		recap: persistedRecap(sessionManager),
