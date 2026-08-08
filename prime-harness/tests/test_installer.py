@@ -344,6 +344,15 @@ def test_tailor_rejects_link_descendant_in_test_directory(tmp_repo):
     assert not (tmp_repo / "harness/manifest.json").exists()
 
 
+def test_tailor_rejects_runner_name_used_only_as_echo_argument(tmp_repo):
+    (tmp_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "echo jest"}}), encoding="utf-8"
+    )
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+
+
 def test_tailor_rejects_trivially_vacuous_node_test_script(tmp_repo):
     (tmp_repo / "package.json").write_text(
         json.dumps({"scripts": {"test": "true"}}), encoding="utf-8"

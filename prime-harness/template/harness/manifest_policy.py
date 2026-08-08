@@ -53,6 +53,14 @@ def load_manifest_object(path: Path, max_bytes: int = MAX_MANIFEST_BYTES) -> dic
             raise ManifestPolicyError(f"manifest exceeds {max_bytes}-byte size limit")
         if (after.st_dev, after.st_ino) != identity or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != metadata:
             raise ManifestPolicyError("manifest changed while being read")
+        pathname_after = path.lstat()
+        pathname_attributes = getattr(pathname_after, "st_file_attributes", 0)
+        if (
+            (pathname_after.st_dev, pathname_after.st_ino) != identity
+            or not stat.S_ISREG(pathname_after.st_mode)
+            or pathname_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            raise ManifestPolicyError("manifest pathname changed while being read")
         try:
             value = json.loads(payload.decode("utf-8-sig"))
         except (UnicodeError, json.JSONDecodeError) as exc:

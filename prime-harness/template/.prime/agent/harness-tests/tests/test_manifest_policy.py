@@ -107,3 +107,30 @@ def test_load_manifest_object_rejects_oversize_and_nonobject(tmp_path):
     path.write_text("[]", encoding="utf-8")
     with pytest.raises(POLICY.ManifestPolicyError, match="JSON object"):
         POLICY.load_manifest_object(path)
+
+
+def test_load_manifest_object_rejects_pathname_replacement_during_read(tmp_path, monkeypatch):
+    path = tmp_path / "manifest.json"
+    path.write_text('{"profiles": {"original": {}}}', encoding="utf-8")
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text('{"profiles": {"replacement": {}}}', encoding="utf-8")
+    real_read = POLICY.os.read
+    real_lstat = Path.lstat
+    swapped = False
+
+    def swapping_read(descriptor, amount):
+        nonlocal swapped
+        data = real_read(descriptor, amount)
+        swapped = True
+        return data
+
+    def replacement_lstat(candidate):
+        if swapped and candidate == path:
+            return real_lstat(replacement)
+        return real_lstat(candidate)
+
+    monkeypatch.setattr(POLICY.os, "read", swapping_read)
+    monkeypatch.setattr(Path, "lstat", replacement_lstat)
+    with pytest.raises(POLICY.ManifestPolicyError, match="changed"):
+        POLICY.load_manifest_object(path)
+    assert swapped is True

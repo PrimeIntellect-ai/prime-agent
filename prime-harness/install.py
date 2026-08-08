@@ -223,12 +223,19 @@ def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
 
 
 def _credible_node_test_script(script: str) -> bool:
-    normalized = " ".join(script.casefold().split())
+    """Accept only a test runner appearing as a command, never as an argument."""
+    prefix = r"(?:(?:cross-env(?:-shell)?\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*)"
     runner = re.compile(
-        r"(?:^|[ ;&|])(?:node --test\b|jest\b|vitest\b|mocha\b|ava\b|tap\b|tape\b|"
-        r"cypress(?: run)?\b|playwright test\b|(?:npm|pnpm|yarn) run test(?::[a-z0-9_.-]+)?\b)"
+        r"^" + prefix
+        + r"(?:(?:npx|pnpm exec|yarn dlx)\s+)?"
+        + r"(?:node\s+--test\b|jest\b|vitest\b|mocha\b|ava\b|tap\b|tape\b|"
+        + r"cypress(?:\s+run)?\b|playwright\s+test\b|"
+        + r"(?:npm|pnpm|yarn)\s+run\s+test(?::[a-z0-9_.-]+)?\b)"
     )
-    return bool(runner.search(normalized))
+    for segment in re.split(r"&&|\|\||;", script.casefold()):
+        if runner.match(" ".join(segment.strip().split())):
+            return True
+    return False
 
 
 def tailor_manifest(target: Path) -> dict[str, object]:
