@@ -161,6 +161,20 @@ When timing a long prompt, compare total wall time, not `completion_tokens / ela
 
 Ollama's built-in MLX backend (0.19 preview, 0.30 stable) is a separate thing from `mlx_lm.server` and requires more than 32 GB of unified memory, so it is unavailable on smaller machines regardless of Ollama version.
 
+#### Model sizing on a 24 GB machine
+
+Tested and rejected, so nobody re-downloads 31 GB to rediscover it:
+
+| Model | Weights | Resident | Result |
+|---|---|---|---|
+| `qwen3.6:27b` | 17 GB | — | never loaded; drove swap to 19.5 GB |
+| `devstral:24b` | 14 GB | 18 GB | loaded 100% GPU but only 6.1 tok/s, 10% memory free |
+| `Qwen3-14B-4bit` | 8 GB | ~10 GB | 11.4 tok/s, machine stays comfortable |
+
+`sysctl iogpu.wired_limit_mb` reports what the GPU may claim, not what is free — macOS, the browser, and any other model server share the same unified memory. Sizing a model against that limit rather than against actual free memory is what put a 17 GB model into swap. The practical ceiling for weights on a 24 GB machine is 12–14 GB, so the 14B class is the right tier and 24B upward is not.
+
+Two smaller traps. Resident footprint runs well above download size once the KV cache is allocated — `devstral:24b` is a 14 GB download that occupies 18 GB at 32k context. And some models carry a large built-in chat template: the same 38-token prompt bills 1251 tokens against `devstral:24b`, overhead paid on every request.
+
 ### Config and asset resolution
 
 User config: `~/.prime/agent/` (sessions, session-artifacts, auth.json, kernel-venv, logs). Project config: `.prime/agent/`. Overrides: `PRIME_AGENT_CODING_AGENT_DIR`, `PRIME_AGENT_SESSION_DIR`.
