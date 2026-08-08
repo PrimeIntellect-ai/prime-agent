@@ -1,0 +1,431 @@
+from __future__ import annotations
+
+import ast
+import json
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+HARNESS_ROOT = Path(__file__).resolve().parents[1]
+SCORECARD = HARNESS_ROOT / "template" / "harness" / "scorecard.py"
+FIXTURE = HARNESS_ROOT / "tests" / "fixtures" / "scorecard"
+
+
+def git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def prepare_recorded_fixture(repo: Path) -> dict[str, Path]:
+    (repo / ".gitignore").write_text("artifacts/harness/\n", encoding="utf-8")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-qm", "ignore telemetry")
+    base = git(repo, "rev-parse", "HEAD")
+
+    artifacts = repo / "artifacts" / "harness"
+    telemetry = artifacts / "recorded"
+    telemetry.mkdir(parents=True)
+    session = telemetry / "session.jsonl"
+    registry = telemetry / "rlm-subagents.jsonl"
+    child = telemetry / "child-a.jsonl"
+    shutil.copy2(FIXTURE / "session.jsonl", session)
+    shutil.copy2(FIXTURE / "child-a.jsonl", child)
+    registry_entries = [
+        json.loads(line)
+        for line in (FIXTURE / "rlm-subagents.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    for entry in registry_entries:
+        entry["sessionFile"] = str(child) if entry["sessionFile"] == "CHILD_SESSION_A" else str(telemetry / "missing.jsonl")
+        entry["parentSessionFile"] = str(session)
+    registry.write_text("\n".join(json.dumps(entry) for entry in registry_entries) + "\n", encoding="utf-8")
+
+    task = json.loads((FIXTURE / "task-state.json").read_text(encoding="utf-8"))
+    task["base_commit"] = base
+    task_state = artifacts / "task-state.json"
+    task_state.write_text(json.dumps(task), encoding="utf-8")
+    shutil.copytree(FIXTURE / "gate-logs", artifacts / "gate-logs")
+    results = artifacts / "results"
+    results.mkdir()
+    result_a = results / "auditor-a.json"
+    shutil.copy2(FIXTURE / "result-a.json", result_a)
+    children_data = json.loads((FIXTURE / "children.json").read_text(encoding="utf-8"))
+    children_data["auditor-a"]["result_path"] = str(result_a)
+    children_data["auditor-dead"]["result_path"] = str(results / "missing-dead.json")
+    children_state = artifacts / "children.json"
+    children_state.write_text(json.dumps(children_data), encoding="utf-8")
+
+    evidence = artifacts / "evidence.db"
+    rows = json.loads((FIXTURE / "evidence-rows.json").read_text(encoding="utf-8"))
+    connection = sqlite3.connect(evidence)
+    try:
+        connection.execute("CREATE TABLE evidence (id TEXT, status TEXT, verifier TEXT, created_at TEXT)")
+        connection.executemany(
+            "INSERT INTO evidence (id, status, verifier, created_at) VALUES (:id, :status, :verifier, :created_at)",
+            rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    source = repo / "src" / "change.py"
+    source.parent.mkdir()
+    source.write_text("\n".join(f"value_{index} = {index}" for index in range(120)) + "\n", encoding="utf-8")
+    return {
+        "artifacts": artifacts,
+        "task_state": task_state,
+        "session": session,
+        "registry": registry,
+        "children_state": children_state,
+        "result_a": result_a,
+        "evidence": evidence,
+        "gate_logs": artifacts / "gate-logs",
+    }
+
+
+def run_scorecard(repo: Path, paths: dict[str, Path], *extra: str, output_name: str = "scorecard.json") -> tuple[subprocess.CompletedProcess[str], dict]:
+    output = paths["artifacts"] / output_name
+    markdown = paths["artifacts"] / f"{output_name}.md"
+    command = [
+        sys.executable,
+        "-S",
+        str(SCORECARD),
+        "--repo",
+        str(repo),
+        "--task-state",
+        str(paths["task_state"]),
+        "--session-file",
+        str(paths["session"]),
+        "--registry",
+        str(paths["registry"]),
+        "--children-state",
+        str(paths["children_state"]),
+        "--evidence-db",
+        str(paths["evidence"]),
+        "--gate-logs",
+        str(paths["gate_logs"]),
+        "--now",
+        "2026-01-03T00:00:00Z",
+        "--output",
+        str(output),
+        "--markdown",
+        str(markdown),
+        *extra,
+    ]
+    proc = subprocess.run(command, cwd=repo, capture_output=True, text=True, timeout=120)
+    payload = json.loads(output.read_text(encoding="utf-8")) if output.is_file() else {}
+    return proc, payload
+
+
+def test_recorded_fixture_metrics_and_privacy(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    proc, scorecard = run_scorecard(tmp_repo, paths)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == ""
+    assert scorecard["schema_version"] == 1
+    assert scorecard["generated_at"] == "2026-01-03T00:00:00Z"
+    assert scorecard["task"]["task_id"] == "fixture-task"
+    assert scorecard["task"]["phases_passed"] == 1
+    assert scorecard["task"]["phases_total"] == 3
+    assert scorecard["goal"]["remaining_tokens"] == 600
+    assert scorecard["usage"]["parent"]["totalTokens"] == 27
+    assert scorecard["usage"]["known_task_total"]["totalTokens"] == 43
+    assert scorecard["usage"]["duplicate_event_count"] == 1
+
+    children = {child["name"]: child for child in scorecard["usage"]["children"]}
+    assert children["auditor-a"]["model"] == "fixture/model-a"
+    assert children["auditor-a"]["usage"]["totalTokens"] == 16
+    assert children["auditor-a"]["usage"]["cost"]["total"] == 0.093
+    assert children["auditor-a"]["attribution"]["target_ids"] == ["spawn-turn"]
+    assert children["auditor-a"]["reported"] is True
+    assert children["auditor-dead"]["usage"]["totalTokens"] == 0
+    assert children["auditor-dead"]["status"] == "completed"  # exact legal daemon status
+    assert children["auditor-dead"]["result_contract"] == "missing"
+    assert children["auditor-dead"]["dead"] is True
+    assert len(scorecard["usage"]["unattributed"]) == 1
+
+    assert scorecard["gates"]["runs_total"] == 2
+    assert scorecard["gates"]["pass_rate"] == 0.5
+    assert scorecard["gates"]["substantive_pass_rate"] == 0.5
+    assert scorecard["gates"]["latest"]["status"] == "pass"
+    assert scorecard["gates"]["unrecovered_profiles"] == []
+    assert scorecard["verification"]["records_total"] == 3
+    assert scorecard["verification"]["activity_records"] == 3
+    assert scorecard["verification"]["missing_task_evidence_ids"] == 1
+    assert scorecard["verification"]["outside_task_records"] == 1
+    assert scorecard["code_churn"]["code_lines_changed"] == 120
+    assert scorecard["verification"]["records_per_100_code_lines"] == 2.5
+
+    alert_codes = {alert["code"] for alert in scorecard["alerts"]}
+    assert "GATE_HISTORY_FAILURES" in alert_codes
+    assert "GATE_FAILURE" not in alert_codes
+    assert {"DEAD_CHILD", "UNVERIFIED_VERIFIER_METADATA", "EVIDENCE_ID_MISSING"}.issubset(alert_codes)
+    assert {"ACTIVE_CHILD_MISMATCH", "UNATTRIBUTED_CHILD_USAGE", "EVIDENCE_OUTSIDE_TASK"}.issubset(alert_codes)
+
+    serialized = json.dumps(scorecard)
+    markdown = (paths["artifacts"] / "scorecard.json.md").read_text(encoding="utf-8")
+    for secret in ("PRIVATE", "spawn-child-code", "different-code", "private action"):
+        assert secret not in serialized
+        assert secret not in markdown
+
+
+def test_same_artifacts_and_clock_produce_identical_json(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    first_proc, first = run_scorecard(tmp_repo, paths, output_name="first.json")
+    second_proc, second = run_scorecard(tmp_repo, paths, output_name="second.json")
+    assert first_proc.returncode == second_proc.returncode == 0
+    assert first == second
+
+
+def test_stale_child_and_heuristic_threshold_alerts(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    lines = [json.loads(line) for line in paths["registry"].read_text(encoding="utf-8").splitlines()]
+    lines = [entry for entry in lines if not (entry["childId"] == "child-a" and entry["status"] == "completed")]
+    paths["registry"].write_text("\n".join(json.dumps(entry) for entry in lines) + "\n", encoding="utf-8")
+    paths["result_a"].unlink()  # running + old durable activity + no valid contract
+    proc, scorecard = run_scorecard(
+        tmp_repo,
+        paths,
+        "--stale-minutes",
+        "30",
+        "--min-evidence-per-100-lines",
+        "3",
+        output_name="stale.json",
+    )
+    assert proc.returncode == 0
+    codes = {alert["code"] for alert in scorecard["alerts"]}
+    assert "STALE_CHILD" in codes
+    assert "VERIFICATION_BEHIND_CHURN" in codes
+
+
+def test_ambiguous_spawn_mapping_fails_open_without_double_count(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    duplicate = {
+        "type": "rlm_subagent",
+        "childId": "child-c",
+        "sessionName": "ambiguous-c",
+        "sessionFile": str(paths["artifacts"] / "recorded" / "missing-c.jsonl"),
+        "parentSessionFile": str(paths["session"]),
+        "spawnCode": "spawn-child-code()",
+        "status": "completed",
+        "createdAt": "2026-01-01T01:00:31Z",
+        "updatedAt": "2026-01-01T02:00:00Z",
+    }
+    with paths["registry"].open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(duplicate) + "\n")
+    proc, scorecard = run_scorecard(tmp_repo, paths, output_name="ambiguous.json")
+    assert proc.returncode == 0
+    assert len(scorecard["usage"]["ambiguous"]) == 1
+    assert scorecard["usage"]["totals"]["totalTokens"] == 0
+    assert all(child["usage"]["totalTokens"] == 0 for child in scorecard["usage"]["children"])
+
+
+def test_missing_inputs_are_best_effort_and_fail_on_is_opt_in(tmp_repo: Path) -> None:
+    missing = tmp_repo / "missing"
+    command = [
+        sys.executable,
+        "-S",
+        str(SCORECARD),
+        "--repo",
+        str(tmp_repo),
+        "--task-state",
+        str(missing / "task.json"),
+        "--session-file",
+        str(missing / "session.jsonl"),
+        "--registry",
+        str(missing / "registry.jsonl"),
+        "--evidence-db",
+        str(missing / "evidence.db"),
+        "--gate-logs",
+        str(missing / "gates"),
+        "--now",
+        "2026-01-03T00:00:00Z",
+    ]
+    proc = subprocess.run(command, cwd=tmp_repo, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    scorecard = json.loads(proc.stdout)
+    codes = {alert["code"] for alert in scorecard["alerts"]}
+    assert {"NO_TASK_STATE", "TELEMETRY_MISSING", "NO_GATE_RUNS", "INPUT_ANOMALY"}.issubset(codes)
+    strict = subprocess.run([*command, "--fail-on", "critical"], cwd=tmp_repo, capture_output=True, text=True, timeout=120)
+    assert strict.returncode == 1
+
+
+def test_invalid_threshold_exits_two(tmp_repo: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-S", str(SCORECARD), "--repo", str(tmp_repo), "--stale-minutes", "-1"],
+        cwd=tmp_repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 2
+    assert "invalid" in proc.stderr
+
+
+def test_scorecard_imports_only_stdlib() -> None:
+    tree = ast.parse(SCORECARD.read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".", 1)[0])
+    assert imported <= sys.stdlib_module_names
+
+
+
+def test_vacuous_new_profile_cannot_mask_unrecovered_default_failure(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    shutil.rmtree(paths["gate_logs"] / "20260102T020000Z-default")
+    quick = paths["gate_logs"] / "20260102T030000Z-quick"
+    quick.mkdir()
+    (quick / "gate-result.json").write_text(
+        json.dumps({
+            "status": "pass",
+            "profile": "quick",
+            "passed": [],
+            "failed": [],
+            "skipped": ["compile"],
+            "results": [{"name": "compile", "status": "skipped", "reason": "missing"}],
+        }),
+        encoding="utf-8",
+    )
+    proc, scorecard = run_scorecard(tmp_repo, paths, output_name="profiles.json")
+    assert proc.returncode == 0
+    assert scorecard["gates"]["pass_rate"] == 0.5
+    assert scorecard["gates"]["substantive_runs"] == 1
+    assert scorecard["gates"]["substantive_pass_rate"] == 0.0
+    assert scorecard["gates"]["profiles"]["default"]["unrecovered_failure"] is True
+    assert scorecard["gates"]["profiles"]["quick"]["vacuous_passes"] == 1
+    codes = {alert["code"] for alert in scorecard["alerts"]}
+    assert {"GATE_PROFILE_UNRECOVERED", "GATE_VACUOUS_PASS"}.issubset(codes)
+    assert "GATE_HISTORY_FAILURES" not in codes
+
+
+def test_now_is_inclusive_upper_bound_for_every_durable_stream(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    future_session = [
+        {
+            "type": "message",
+            "id": "future-message",
+            "timestamp": "2030-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "toolCall", "arguments": {"code": "future-code()"}}],
+                "usage": {
+                    "input": 1000,
+                    "output": 1000,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "totalTokens": 2000,
+                    "cost": {"input": 10, "output": 10, "cacheRead": 0, "cacheWrite": 0, "total": 20},
+                },
+            },
+        },
+        {
+            "type": "custom",
+            "customType": "thread_goal_state",
+            "id": "future-goal",
+            "timestamp": "2030-01-01T00:00:01Z",
+            "data": {"active": True, "status": "active", "goalId": "future", "tokenBudget": 1000, "tokensUsed": 999},
+        },
+    ]
+    with paths["session"].open("a", encoding="utf-8") as handle:
+        for entry in future_session:
+            handle.write(json.dumps(entry) + "\n")
+    future_registry = {
+        "type": "rlm_subagent",
+        "childId": "child-a",
+        "sessionName": "auditor-a",
+        "sessionFile": str(paths["artifacts"] / "recorded" / "child-a.jsonl"),
+        "parentSessionFile": str(paths["session"]),
+        "spawnCode": "future-code()",
+        "status": "deleted",
+        "createdAt": 1767229230000,
+        "updatedAt": "2030-01-01T00:00:00Z",
+    }
+    with paths["registry"].open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(future_registry) + "\n")
+    future_gate = paths["gate_logs"] / "20300101T000000Z-default"
+    future_gate.mkdir()
+    (future_gate / "gate-result.json").write_text(
+        json.dumps({"status": "fail", "profile": "default", "results": [{"name": "future", "status": "fail"}]}),
+        encoding="utf-8",
+    )
+    connection = sqlite3.connect(paths["evidence"])
+    try:
+        connection.execute(
+            "INSERT INTO evidence (id, status, verifier, created_at) VALUES (?, ?, ?, ?)",
+            ("future-evidence", "verified", "future", "2030-01-01T00:00:00Z"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    task["evidence_ids"].append("future-evidence")
+    paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+
+    proc, scorecard = run_scorecard(tmp_repo, paths, output_name="bounded.json")
+    assert proc.returncode == 0
+    assert scorecard["usage"]["parent"]["totalTokens"] == 27
+    assert scorecard["goal"]["goal_id"] == "goal-fixture"
+    assert scorecard["gates"]["runs_total"] == 2
+    assert scorecard["children"]["records"][0]["status"] == "completed"
+    assert scorecard["verification"]["records_total"] == 3
+    assert scorecard["verification"]["missing_task_evidence_ids"] == 2
+    assert "FUTURE_EVENT" in {alert["code"] for alert in scorecard["alerts"]}
+
+
+def test_child_result_path_is_confined_to_artifact_root(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    outside = tmp_repo / "outside-result.json"
+    outside.write_text(json.dumps({"status": "pass", "summary": "PRIVATE OUTSIDE RESULT"}), encoding="utf-8")
+    children = json.loads(paths["children_state"].read_text(encoding="utf-8"))
+    children["auditor-dead"]["result_path"] = str(outside)
+    paths["children_state"].write_text(json.dumps(children), encoding="utf-8")
+    proc, scorecard = run_scorecard(tmp_repo, paths, output_name="confined.json")
+    assert proc.returncode == 0
+    dead = next(child for child in scorecard["children"]["records"] if child["name"] == "auditor-dead")
+    assert dead["result_contract"] == "outside_artifact_root"
+    assert dead["dead"] is True
+    assert "children_state:result_path_rejected" in scorecard["warnings"]
+    assert "PRIVATE OUTSIDE RESULT" not in json.dumps(scorecard)
+
+
+def test_markdown_escapes_untrusted_child_names(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    malicious = "<script>alert(1)</script>|`child`"
+    registry = [json.loads(line) for line in paths["registry"].read_text(encoding="utf-8").splitlines()]
+    for entry in registry:
+        if entry["childId"] == "child-a":
+            entry["sessionName"] = malicious
+    paths["registry"].write_text("\n".join(json.dumps(entry) for entry in registry) + "\n", encoding="utf-8")
+    children = json.loads(paths["children_state"].read_text(encoding="utf-8"))
+    children[malicious] = children.pop("auditor-a")
+    paths["children_state"].write_text(json.dumps(children), encoding="utf-8")
+    proc, _scorecard = run_scorecard(tmp_repo, paths, output_name="escaped.json")
+    assert proc.returncode == 0
+    markdown = (paths["artifacts"] / "escaped.json.md").read_text(encoding="utf-8")
+    assert "<script>" not in markdown
+    assert "&lt;script&gt;" in markdown
+    assert "&#96;child&#96;" in markdown
+    assert "\\|" in markdown
+
+
+def test_incomplete_gate_archive_is_reported_not_counted_as_a_run(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    (paths["gate_logs"] / "20260102T040000Z-default").mkdir()
+    proc, scorecard = run_scorecard(tmp_repo, paths, output_name="incomplete-gate.json")
+    assert proc.returncode == 0
+    assert scorecard["gates"]["runs_total"] == 2
+    assert scorecard["gates"]["incomplete_archives"] == 1
+    assert "GATE_INCOMPLETE" in {alert["code"] for alert in scorecard["alerts"]}
+
+def test_readme_documents_every_emitted_alert_code() -> None:
+    source = SCORECARD.read_text(encoding="utf-8")
+    codes = set(re.findall(r'add_alert\(alerts, "([A-Z_]+)"', source))
+    readme = (HARNESS_ROOT / "README.md").read_text(encoding="utf-8")
+    assert codes
+    assert all(f"`{code}`" in readme for code in codes)

@@ -147,6 +147,72 @@ check inside a Prime Agent IPython kernel and skips in ordinary offline pytest.
 The complete v0.7.1 runtime findings and unresolved-surface reasons are in
 `docs/prime-agent-v0.7.0-api-reference.md`.
 
+## Outside-kernel telemetry scorecard
+
+Generate a per-task scorecard from durable artifacts without importing Prime
+Agent, starting an IPython kernel, or disabling product telemetry:
+
+```bash
+python -S harness/scorecard.py \
+  --session-dir "$RLM_SESSION_DIR" \
+  --output artifacts/harness/scorecard-latest.json \
+  --markdown artifacts/harness/scorecard-latest.md
+```
+
+The stdlib-only reader combines root-session JSONL (including deduplicated
+`child_usage_attributed` events), the append-only daemon child registry,
+orchestrator `children.json` and result contracts, the read-only SQLite evidence
+ledger, archived gate results, task state, persistent goal events, and Git
+numstat churn. Ledger metrics include only IDs named by the task state; rows are
+never assigned to a task merely because their timestamps overlap. Per-child
+usage attribution uses an in-memory SHA-256 match between the parent tool call
+and registry `spawnCode`; prompt, reasoning, tool source, response text,
+objective text (including hashes), child summaries, and evidence claims are
+never emitted.
+Ambiguous mappings fail open into an unattributed bucket rather than guessing or
+double-counting. Use explicit `--session-file`/`--registry` paths when running
+outside an environment that exports `RLM_SESSION_DIR`. `--now` makes replay
+deterministic, and `--fail-on critical` turns actionable alerts into a monitor
+exit code without changing the default best-effort exit 0.
+
+The verification-to-churn rate is a triage heuristic, **not** a correctness
+score: it counts task-attributed verified/refuted/inconclusive activity per 100
+changed source lines. Gate metrics explicitly say *archived* because early gate
+errors may exit before creating an archive. Raw, substantive (at least one
+applicable check or a failure), per-check, and per-profile rates remain separate;
+a vacuous quick pass cannot recover another profile's substantive failure.
+`--now` is an inclusive upper bound for replay, not just a display timestamp.
+
+### Scorecard alert list
+
+| Code | Severity | Meaning / action |
+|---|---|---|
+| `NO_TASK_STATE` | critical | Task state is missing; restore or initialize it before trusting task-scoped metrics. |
+| `UNRESOLVED_CLAIMS` | critical | Resolve or explicitly disposition task claims before completion. |
+| `BRANCH_MISMATCH` | critical | Switch to the working branch recorded in task state. |
+| `GOAL_BUDGET_LOW` | critical | Remaining persistent-goal tokens are below the configured percentage. |
+| `GATE_FAILURE` | critical | The latest archived composite gate failed or errored; fix and rerun it. |
+| `GATE_PROFILE_UNRECOVERED` | critical | A profile's latest substantive run still fails even if another profile later passed vacuously. |
+| `TASK_ATTRIBUTION_GAP` | critical | Task state has no evidence IDs; do not guess ownership from timestamps. |
+| `EVIDENCE_ID_MISSING` | critical | A task evidence ID is absent from the readable ledger snapshot. |
+| `UNVERIFIED_VERIFIER_METADATA` | critical | A `verified` ledger row lacks a named verifier; repair its provenance. |
+| `DEAD_CHILD` | critical | A child has a failed/dead terminal registry state; reconcile and inspect its result. |
+| `TELEMETRY_MISSING` | critical | Root session JSONL is unavailable; provide the correct session path. |
+| `GOAL_MISSING` | warning | No durable `thread_goal_state` event was found. |
+| `GOAL_INACTIVE` | warning | The latest durable goal snapshot is not active. |
+| `NO_GATE_RUNS` | warning | No archived gate result exists inside the task window. |
+| `NO_APPLICABLE_GATE_CHECKS` | warning | Gate runs exist, but every run was vacuous. |
+| `GATE_VACUOUS_PASS` | warning | A passing archive executed zero applicable checks; exclude it from the substantive rate. |
+| `GATE_INCOMPLETE` | warning | An archived result had missing/unknown schema fields. |
+| `VERIFICATION_BEHIND_CHURN` | warning | Evidence activity is below the configurable churn heuristic; add focused verification or document why it is inapplicable. |
+| `STALE_CHILD` | warning | A running child has no recent durable event; inspect before declaring it dead. |
+| `ACTIVE_CHILD_MISMATCH` | warning | Task-state active names and latest registry running names disagree. |
+| `UNATTRIBUTED_CHILD_USAGE` | warning | Attribution is absent or ambiguous; retain it separately rather than guessing. |
+| `FUTURE_EVENT` | warning | An event later than the inclusive `--now` clock was excluded from replay. |
+| `INPUT_ANOMALY` | warning | At least one input line/file/schema was missing or malformed; inspect `warnings`. |
+| `GATE_HISTORY_FAILURES` | info | Earlier failures were recovered by a newer substantive pass in the same profile. |
+| `EVIDENCE_OUTSIDE_TASK` | info | Time-window ledger rows not named by task `evidence_ids` were excluded. |
+
 ## Model routing
 
 Roster roles accept an optional exact `provider/model` selector (from

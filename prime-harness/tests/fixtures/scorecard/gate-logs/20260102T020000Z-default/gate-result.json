@@ -1,0 +1,23 @@
+{
+  "status": "pass",
+  "profile": "default",
+  "passed": [
+    "unit"
+  ],
+  "failed": [],
+  "skipped": [
+    "lean"
+  ],
+  "results": [
+    {
+      "name": "unit",
+      "status": "pass",
+      "returncode": 0
+    },
+    {
+      "name": "lean",
+      "status": "skipped",
+      "reason": "missing"
+    }
+  ]
+}
