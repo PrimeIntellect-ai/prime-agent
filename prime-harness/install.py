@@ -15,8 +15,10 @@ import argparse
 import filecmp
 import json
 import os
+import re
 import shutil
 import stat
+import tempfile
 import subprocess
 import sys
 from pathlib import Path
@@ -147,7 +149,7 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     for path in top_level:
         if path.name in excluded or path.name.startswith(".") or not path.is_dir() or _is_linklike(path):
             continue
-        if (path / "__init__.py").is_file():
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path.name) and (path / "__init__.py").is_file():
             python_roots.append(path.name)
     python_roots = sorted(set(python_roots))
     if python_roots:
@@ -229,13 +231,23 @@ def tailor_manifest(target: Path) -> dict[str, object]:
 
 def atomic_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
     try:
-        temporary.write_text(
-            json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8", newline="\n",
-        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
     finally:
         try:
             temporary.unlink()

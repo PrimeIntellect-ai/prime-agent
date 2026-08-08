@@ -154,6 +154,16 @@ def test_tailor_uses_simulation_and_pyproject_pytest_markers(tmp_repo):
     assert "pyproject.toml:pytest" in manifest["_detected"]
 
 
+def test_tailor_rejects_shell_metacharacters_in_detected_package_names(tmp_repo):
+    dangerous = tmp_repo / "pkg & echo PWNED"
+    dangerous.mkdir()
+    (dangerous / "__init__.py").write_text("", encoding="utf-8")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / "harness/manifest.json").exists()
+
+
 def test_tailor_fails_closed_when_top_level_scan_bound_is_exceeded(tmp_repo):
     for index in range(520):
         (tmp_repo / f"marker-{index:03d}").write_text("x", encoding="utf-8")
