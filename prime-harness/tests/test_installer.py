@@ -115,6 +115,30 @@ def test_doctor_passes_on_fresh_install(tmp_repo):
     assert proc.returncode == 0, f"doctor failed:\n{proc.stdout}\n{proc.stderr}"
 
 
+def test_bounded_text_rejects_file_replaced_between_check_and_open(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("installer_race_test", INSTALL)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    victim = tmp_path / "package.json"
+    victim.write_text('{"scripts": {}}', encoding="utf-8")
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b"x" * 2048)
+    real_open = os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path) == victim:
+            swapped = True
+            os.replace(replacement, victim)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", racing_open)
+    assert module._bounded_text(victim, limit=1024) is None
+    assert swapped is True
+
+
 def test_tailor_generates_nonvacuous_manifest_from_repo_layout(tmp_repo):
     (tmp_repo / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n", encoding="utf-8")
     (tmp_repo / "src/sample").mkdir(parents=True)
@@ -152,6 +176,14 @@ def test_tailor_uses_simulation_and_pyproject_pytest_markers(tmp_repo):
     assert entries["compile"]["skip_if_missing"] == "simulation"
     assert entries["unit"]["skip_if_missing"] == "pyproject.toml"
     assert "pyproject.toml:pytest" in manifest["_detected"]
+
+
+def test_tailor_rejects_empty_source_directory_as_vacuous(tmp_repo):
+    (tmp_repo / "src").mkdir()
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / "harness/manifest.json").exists()
 
 
 def test_tailor_rejects_shell_metacharacters_in_detected_package_names(tmp_repo):
@@ -242,6 +274,25 @@ def test_tailor_refuses_vacuous_repo_before_installing(tmp_repo):
     assert not (tmp_repo / ".prime/agent/APPEND_SYSTEM.md").exists()
 
 
+def test_repeated_identical_tailor_is_idempotent_without_sidecar(tmp_repo):
+    (tmp_repo / "src/pkg").mkdir(parents=True)
+    (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    (tmp_repo / "tests").mkdir()
+    (tmp_repo / "tests/test_pkg.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    first = run_install(tmp_repo, "--tailor")
+    assert first.returncode == 0, first.stdout + first.stderr
+    manifest = tmp_repo / "harness/manifest.json"
+    before = manifest.read_bytes()
+    before_mtime = manifest.stat().st_mtime_ns
+
+    second = run_install(tmp_repo, "--tailor")
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert manifest.read_bytes() == before
+    assert manifest.stat().st_mtime_ns == before_mtime
+    assert not (tmp_repo / "harness/manifest.tailored.json").exists()
+    assert "tailored manifest: unchanged" in second.stdout
+
+
 def test_tailor_preserves_existing_manifest_and_writes_review_sidecar(tmp_repo):
     (tmp_repo / "src/pkg").mkdir(parents=True)
     (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
@@ -257,6 +308,25 @@ def test_tailor_preserves_existing_manifest_and_writes_review_sidecar(tmp_repo):
     sidecar = tmp_repo / "harness/manifest.tailored.json"
     assert sidecar.is_file()
     assert json.loads(sidecar.read_text(encoding="utf-8"))["profiles"]["default"]["required"]
+
+
+def test_doctor_strict_rejects_traversal_marker_even_when_outside_exists(tmp_repo):
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0
+    outside = tmp_repo.parent / "outside-marker"
+    outside.write_text("x", encoding="utf-8")
+    manifest = {"profiles": {"default": {"required": [
+        {"name": "escape", "command": "echo unsafe", "skip_if_missing": "../outside-marker"}
+    ], "conditional": []}}}
+    (tmp_repo / "harness/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    doctor = subprocess.run(
+        [sys.executable, str(tmp_repo / "harness/doctor.py"), "--strict", "--json"],
+        cwd=tmp_repo, capture_output=True, text=True, timeout=120,
+    )
+    report = json.loads(doctor.stdout)
+    applicability = next(item for item in report["checks"] if item["name"] == "manifest-applicability")
+    assert applicability["level"] == "FAIL"
+    assert "escapes or ambiguously names" in applicability["detail"]
 
 
 def test_doctor_strict_reports_static_manifest_skips(tmp_repo):

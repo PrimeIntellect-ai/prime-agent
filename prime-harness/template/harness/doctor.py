@@ -21,7 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from manifest_policy import ManifestPolicyError, profile_minimum
+from manifest_policy import ManifestPolicyError, marker_status, profile_minimum
 
 SKILLS = {
     "harness-orchestrator": "harness_orchestrator",
@@ -246,13 +246,15 @@ def check_manifest_applicability(report: Report, root: Path, manifest: dict[str,
                 if marker is None:
                     applicable += 1
                     continue
-                if not isinstance(marker, str) or not marker or Path(marker).is_absolute():
-                    invalid.append(f"{profile_name}:{name} invalid skip_if_missing")
+                try:
+                    present, reason = marker_status(root, marker)
+                except ManifestPolicyError as exc:
+                    invalid.append(f"{profile_name}:{name} {exc}")
                     continue
-                if (root / marker).exists():
+                if present:
                     applicable += 1
                 else:
-                    skipped.append(f"{profile_name}:{name} ({marker})")
+                    skipped.append(f"{profile_name}:{name} ({reason})")
         if applicable < minimum:
             deficits.append(f"{profile_name} applicable={applicable} minimum={minimum}")
     details = invalid + deficits + skipped

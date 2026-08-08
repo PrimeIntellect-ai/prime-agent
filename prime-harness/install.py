@@ -100,6 +100,36 @@ def _bounded_inventory(base: Path) -> dict[str, Path] | None:
     return files
 
 
+def _contains_python_source(base: Path) -> bool:
+    """Find a regular Python source under a bounded, non-link tree walk."""
+    pending: list[tuple[Path, int]] = [(base, 0)]
+    seen = 0
+    while pending:
+        directory, depth = pending.pop()
+        if depth > 12:
+            raise TailorError(f"Python source scan exceeds depth limit under {base.name}")
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            raise TailorError(f"cannot scan Python source root {base.name}: {exc}") from exc
+        for path in entries:
+            if path.name == "__pycache__":
+                continue
+            seen += 1
+            if seen > 4096:
+                raise TailorError(f"Python source scan exceeds 4096-entry limit under {base.name}")
+            if _is_linklike(path):
+                raise TailorError(f"link/reparse entry forbidden while scanning {base.name}: {path.name}")
+            try:
+                if path.is_dir():
+                    pending.append((path, depth + 1))
+                elif path.is_file() and path.suffix.casefold() in {".py", ".pyi"}:
+                    return True
+            except OSError as exc:
+                raise TailorError(f"unstable entry while scanning {base.name}: {exc}") from exc
+    return False
+
+
 def _template_only_subtree(target: Path, relative: str) -> bool:
     source = TEMPLATE / relative
     destination = target / relative
@@ -116,12 +146,52 @@ def _template_only_subtree(target: Path, relative: str) -> bool:
 
 
 def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
+    """Read one stable regular file by descriptor with link and size denial."""
+    descriptor = -1
     try:
-        if not path.is_file() or _is_linklike(path) or path.stat().st_size > limit:
+        before = path.lstat()
+        attributes = getattr(before, "st_file_attributes", 0)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            or before.st_size > limit
+        ):
             return None
-        return path.read_text(encoding="utf-8")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        identity_before = (before.st_dev, before.st_ino)
+        identity_opened = (opened.st_dev, opened.st_ino)
+        if not stat.S_ISREG(opened.st_mode) or identity_opened != identity_before or opened.st_size > limit:
+            return None
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > limit:
+            return None
+        after = path.lstat()
+        after_attributes = getattr(after, "st_file_attributes", 0)
+        if (
+            (after.st_dev, after.st_ino) != identity_before
+            or stat.S_ISLNK(after.st_mode)
+            or after_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            return None
+        return data.decode("utf-8")
     except (OSError, UnicodeError):
         return None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def tailor_manifest(target: Path) -> dict[str, object]:
@@ -131,12 +201,10 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     detected: list[str] = []
 
     python_roots: list[str] = []
-    if (target / "src").is_dir() and not _is_linklike(target / "src"):
-        python_roots.append("src")
-    for simulation_dir in ("sim", "simulation", "simulations"):
-        candidate = target / simulation_dir
-        if candidate.is_dir() and not _is_linklike(candidate):
-            python_roots.append(simulation_dir)
+    for source_dir in ("src", "sim", "simulation", "simulations"):
+        candidate = target / source_dir
+        if candidate.is_dir() and not _is_linklike(candidate) and _contains_python_source(candidate):
+            python_roots.append(source_dir)
     # Source-layout-free packages are detected only one level deep; never walk
     # an untrusted or very large repository during installation.
     try:
@@ -149,7 +217,12 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     for path in top_level:
         if path.name in excluded or path.name.startswith(".") or not path.is_dir() or _is_linklike(path):
             continue
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path.name) and (path / "__init__.py").is_file():
+        package_init = path / "__init__.py"
+        if (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path.name)
+            and package_init.is_file()
+            and not _is_linklike(package_init)
+        ):
             python_roots.append(path.name)
     python_roots = sorted(set(python_roots))
     if python_roots:
@@ -255,6 +328,16 @@ def atomic_json(path: Path, value: object) -> None:
             pass
 
 
+def json_matches(path: Path, value: object) -> bool:
+    text = _bounded_text(path)
+    if text is None:
+        return False
+    try:
+        return json.loads(text) == value
+    except json.JSONDecodeError:
+        return False
+
+
 NEXT_STEPS = """
 Next steps
 ----------
@@ -355,15 +438,21 @@ def main() -> int:
             print(f"    - {rel}")
 
     if tailored is not None:
-        destination = (
-            target / "harness/manifest.json"
-            if not manifest_existed or args.force
-            else target / "harness/manifest.tailored.json"
-        )
-        if not args.dry_run:
-            atomic_json(destination, tailored)
-        print(f"{prefix}tailored manifest: {destination.relative_to(target)}"
-              + (" (review sidecar; existing manifest preserved)" if destination.name.endswith(".tailored.json") else ""))
+        installed_manifest = target / "harness/manifest.json"
+        if manifest_existed and not args.force and json_matches(installed_manifest, tailored):
+            print(f"{prefix}tailored manifest: unchanged")
+        else:
+            destination = (
+                installed_manifest
+                if not manifest_existed or args.force
+                else target / "harness/manifest.tailored.json"
+            )
+            unchanged = json_matches(destination, tailored)
+            if not args.dry_run and not unchanged:
+                atomic_json(destination, tailored)
+            action = "unchanged " if unchanged else ""
+            print(f"{prefix}tailored manifest: {action}{destination.relative_to(target)}"
+                  + (" (review sidecar; existing manifest preserved)" if destination.name.endswith(".tailored.json") else ""))
 
     if not args.dry_run:
         upstream_watch = target / "harness" / "upstream_check.py"

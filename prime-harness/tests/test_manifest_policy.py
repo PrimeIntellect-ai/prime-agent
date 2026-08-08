@@ -67,3 +67,27 @@ def test_allow_vacuous_is_explicit_and_reported_without_changing_count():
 def test_unknown_result_status_fails_closed():
     with pytest.raises(POLICY.ManifestPolicyError, match="unsupported status"):
         POLICY.coverage_fields([{"status": "maybe"}], 1, allow_vacuous=False)
+
+
+def test_marker_status_rejects_traversal_and_backslashes(tmp_path):
+    outside = tmp_path.parent / "outside-marker"
+    outside.write_text("x", encoding="utf-8")
+    with pytest.raises(POLICY.ManifestPolicyError, match="escapes"):
+        POLICY.marker_status(tmp_path, "../outside-marker")
+    with pytest.raises(POLICY.ManifestPolicyError, match="forward-slash"):
+        POLICY.marker_status(tmp_path, "dir\\marker")
+
+
+def test_marker_status_distinguishes_regular_missing_and_link_paths(tmp_path):
+    regular = tmp_path / "checks/unit"
+    regular.mkdir(parents=True)
+    assert POLICY.marker_status(tmp_path, "checks/unit") == (True, "present")
+    assert POLICY.marker_status(tmp_path, "checks/missing")[0] is False
+    link = tmp_path / "linked"
+    try:
+        link.symlink_to(regular, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation unavailable")
+    present, reason = POLICY.marker_status(tmp_path, "linked")
+    assert present is False
+    assert "link/reparse" in reason

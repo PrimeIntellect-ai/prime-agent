@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import stat
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 DEFAULT_MIN_APPLICABLE_CHECKS = 1
@@ -39,6 +41,28 @@ def validate_profiles(profiles: object) -> dict[str, int]:
             if not isinstance(entries, list):
                 raise ManifestPolicyError(f"profile {name!r} {section} must be a list")
     return minima
+
+
+def marker_status(root: Path, marker: object) -> tuple[bool, str]:
+    """Check a repo-relative marker without accepting traversal or link/reparse paths."""
+    if not isinstance(marker, str) or not marker or "\x00" in marker or "\\" in marker:
+        raise ManifestPolicyError("skip_if_missing must be a non-empty forward-slash path")
+    pure = PurePosixPath(marker)
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+        raise ManifestPolicyError(f"skip_if_missing escapes or ambiguously names the repository: {marker!r}")
+    current = root.resolve()
+    for part in pure.parts:
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return False, f"missing {marker}"
+        except OSError as exc:
+            return False, f"unreadable {marker}: {exc}"
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if stat.S_ISLNK(metadata.st_mode) or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+            return False, f"link/reparse component forbidden in {marker}"
+    return True, "present"
 
 
 def applicable_count(results: Iterable[Mapping[str, Any]]) -> int:
