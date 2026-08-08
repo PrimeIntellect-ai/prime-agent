@@ -132,6 +132,26 @@ prime-agent model list ollama                                    # provider and 
 prime-agent --provider ollama --model <id> --no-session -p "hi"  # round-trip through the agent
 ```
 
+#### MLX on Apple Silicon
+
+`mlx_lm.server` exposes an OpenAI-compatible endpoint and works as a provider with no special handling — same `openai-completions` api and same `compat` flags as Ollama. Tool calling is supported: it returns a well-formed `tool_calls` array with `finish_reason: tool_calls`, and the full agent loop drives IPython through it.
+
+```json
+"mlx": {
+  "baseUrl": "http://127.0.0.1:8080/v1",
+  "api": "openai-completions",
+  "apiKey": "mlx",
+  "compat": { "supportsDeveloperRole": false, "supportsReasoningEffort": false },
+  "models": [{ "id": "mlx-community/Qwen3-14B-4bit", "contextWindow": 32768 }]
+}
+```
+
+Unlike Ollama, MLX applies no artificial context cap — it serves the model's own `max_position_embeddings`, so read that from the model's `config.json` in the HuggingFace cache rather than probing the server, which does not advertise a window over `/v1/models`.
+
+On throughput, do not assume MLX wins. Measured on an M4 / 24 GB, `Qwen3-14B-4bit` on MLX ran at 11.5 tok/s against 12.9 tok/s for the 9.7B `qwen3.5:9b` on Ollama — MLX was slower in absolute terms while carrying 44% more parameters. Benchmark the specific model pair before switching; published 2x figures compare Ollama's own Metal and MLX backends on identical models, which is a different measurement.
+
+Ollama's built-in MLX backend (0.19 preview, 0.30 stable) is a separate thing from `mlx_lm.server` and requires more than 32 GB of unified memory, so it is unavailable on smaller machines regardless of Ollama version.
+
 ### Config and asset resolution
 
 User config: `~/.prime/agent/` (sessions, session-artifacts, auth.json, kernel-venv, logs). Project config: `.prime/agent/`. Overrides: `PRIME_AGENT_CODING_AGENT_DIR`, `PRIME_AGENT_SESSION_DIR`.
