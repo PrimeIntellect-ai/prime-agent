@@ -69,6 +69,20 @@ def _is_linklike(path: Path) -> bool:
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+def _bounded_entries(directory: Path, limit: int) -> list[Path] | None:
+    """Collect at most limit entries, consuming only the one excess sentinel."""
+    entries: list[Path] = []
+    try:
+        iterator = directory.iterdir()
+        for path in iterator:
+            if len(entries) >= limit:
+                return None
+            entries.append(path)
+    except OSError:
+        return None
+    return sorted(entries, key=lambda path: path.name.casefold())
+
+
 def _bounded_inventory(base: Path) -> dict[str, Path] | None:
     """Inventory a small regular tree without following link/reparse entries."""
     files: dict[str, Path] = {}
@@ -78,9 +92,8 @@ def _bounded_inventory(base: Path) -> dict[str, Path] | None:
         directory, depth = pending.pop()
         if depth > 8:
             return None
-        try:
-            entries = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
-        except OSError:
+        entries = _bounded_entries(directory, 256 - seen)
+        if entries is None:
             return None
         for path in entries:
             if path.name == "__pycache__" or path.suffix.lower() in IGNORED_TEMPLATE_SUFFIXES:
@@ -109,10 +122,9 @@ def _contains_python_source(base: Path) -> bool:
         directory, depth = pending.pop()
         if depth > 12:
             raise TailorError(f"Python source scan exceeds depth limit under {base.name}")
-        try:
-            entries = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
-        except OSError as exc:
-            raise TailorError(f"cannot scan Python source root {base.name}: {exc}") from exc
+        entries = _bounded_entries(directory, 4096 - seen)
+        if entries is None:
+            raise TailorError(f"Python source scan exceeds 4096-entry limit under {base.name}")
         for path in entries:
             if path.name == "__pycache__":
                 continue
@@ -203,6 +215,15 @@ def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
                 pass
 
 
+def _credible_node_test_script(script: str) -> bool:
+    normalized = " ".join(script.casefold().split())
+    runner = re.compile(
+        r"(?:^|[ ;&|])(?:node --test\b|jest\b|vitest\b|mocha\b|ava\b|tap\b|tape\b|"
+        r"cypress(?: run)?\b|playwright test\b|(?:npm|pnpm|yarn) run test(?::[a-z0-9_.-]+)?\b)"
+    )
+    return bool(runner.search(normalized))
+
+
 def tailor_manifest(target: Path) -> dict[str, object]:
     """Build a deterministic gate draft from bounded top-level project markers."""
     target = target.resolve()
@@ -216,12 +237,9 @@ def tailor_manifest(target: Path) -> dict[str, object]:
             python_roots.append(source_dir)
     # Source-layout-free packages are detected only one level deep; never walk
     # an untrusted or very large repository during installation.
-    try:
-        top_level = sorted(target.iterdir(), key=lambda path: path.name.casefold())
-    except OSError as exc:
-        raise TailorError(f"cannot scan target root: {exc}") from exc
-    if len(top_level) > 512:
-        raise TailorError("target root exceeds the 512-entry tailoring scan limit")
+    top_level = _bounded_entries(target, 512)
+    if top_level is None:
+        raise TailorError("target root exceeds the 512-entry tailoring scan limit or is unreadable")
     excluded = {".git", ".prime", ".github", "artifacts", "checks", "harness", "tests", "test", "node_modules"}
     for path in top_level:
         if path.name in excluded or path.name.startswith(".") or not path.is_dir() or _is_linklike(path):
@@ -278,7 +296,7 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         except json.JSONDecodeError:
             package = None
         script = package.get("scripts", {}).get("test") if isinstance(package, dict) and isinstance(package.get("scripts"), dict) else None
-        if isinstance(script, str) and script.strip() and "no test specified" not in script.casefold():
+        if isinstance(script, str) and _credible_node_test_script(script):
             checks.append(_check("node-test", "npm test", "package.json", 900))
             detected.append("package.json:test")
 
@@ -315,6 +333,24 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         "_detected": sorted(detected),
         "profiles": profiles,
     }
+
+
+def assert_safe_destination(root: Path, destination: Path) -> None:
+    """Reject any existing link/reparse or non-directory parent below root."""
+    root = root.resolve()
+    try:
+        relative = destination.relative_to(root)
+    except ValueError as exc:
+        raise TailorError(f"destination escapes target repository: {destination}") from exc
+    current = root
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        if not os.path.lexists(current):
+            continue
+        if _is_linklike(current):
+            raise TailorError(f"link/reparse destination forbidden: {relative.as_posix()}")
+        if index < len(relative.parts) - 1 and not current.is_dir():
+            raise TailorError(f"non-directory destination parent forbidden: {relative.as_posix()}")
 
 
 def atomic_json(path: Path, value: object) -> None:
@@ -406,12 +442,31 @@ def main() -> int:
             return 2
 
     copied, skipped_same, skipped_diff, overwritten = [], [], [], []
+    template_sources = [
+        source for source in sorted(TEMPLATE.rglob("*"))
+        if not source.is_dir() and not is_ignored_template_artifact(source)
+    ]
+    try:
+        for source in template_sources:
+            assert_safe_destination(target, target / source.relative_to(TEMPLATE))
+        for extra in (
+            target / ".gitignore",
+            target / "harness/manifest.tailored.json",
+            target / "artifacts/harness/upstream-watch/baseline.json",
+        ):
+            assert_safe_destination(target, extra)
+    except TailorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
-    for source in sorted(TEMPLATE.rglob("*")):
-        if source.is_dir() or is_ignored_template_artifact(source):
-            continue
+    for source in template_sources:
         rel = source.relative_to(TEMPLATE)
         dest = target / rel
+        try:
+            assert_safe_destination(target, dest)
+        except TailorError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if dest.exists():
             if filecmp.cmp(str(source), str(dest), shallow=False):
                 skipped_same.append(rel)
@@ -433,6 +488,11 @@ def main() -> int:
 
     # .gitignore merge (append-only, marker-guarded)
     gitignore = target / ".gitignore"
+    try:
+        assert_safe_destination(target, gitignore)
+    except TailorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
     missing_lines = [line for line in GITIGNORE_BLOCK if line not in existing.splitlines()]
     if any(not line.startswith("#") for line in missing_lines):
@@ -462,6 +522,11 @@ def main() -> int:
                 if not manifest_existed or args.force
                 else target / "harness/manifest.tailored.json"
             )
+            try:
+                assert_safe_destination(target, destination)
+            except TailorError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
             unchanged = json_matches(destination, tailored)
             if not args.dry_run and not unchanged:
                 atomic_json(destination, tailored)

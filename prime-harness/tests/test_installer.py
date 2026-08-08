@@ -168,6 +168,22 @@ def test_bounded_text_rejects_file_replaced_between_check_and_open(tmp_path, mon
     assert swapped is True
 
 
+def test_installer_rejects_linked_harness_destination_before_any_external_write(tmp_repo):
+    (tmp_repo / "src/pkg").mkdir(parents=True)
+    (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_repo.parent / f"{tmp_repo.name}-external-harness"
+    outside.mkdir()
+    try:
+        (tmp_repo / "harness").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation unavailable")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "link/reparse destination forbidden" in (proc.stdout + proc.stderr)
+    assert list(outside.iterdir()) == []
+    assert not (tmp_repo / ".prime/agent/APPEND_SYSTEM.md").exists()
+
+
 def test_tailor_generates_nonvacuous_manifest_from_repo_layout(tmp_repo):
     (tmp_repo / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n", encoding="utf-8")
     (tmp_repo / "src/sample").mkdir(parents=True)
@@ -242,6 +258,29 @@ def test_tailor_rejects_shell_metacharacters_in_detected_package_names(tmp_repo)
     assert not (tmp_repo / "harness/manifest.json").exists()
 
 
+def test_tailor_root_bound_stops_iteration_at_limit_plus_one(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("installer_bound_test", INSTALL)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    real_iterdir = Path.iterdir
+    requested = 0
+
+    def guarded_iterdir(path):
+        nonlocal requested
+        if path == tmp_path:
+            for index in range(513):
+                requested += 1
+                yield path / f"entry-{index:03d}"
+            raise AssertionError("tailoring exhausted entries beyond its advertised bound")
+        yield from real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    with pytest.raises(module.TailorError, match="512-entry tailoring scan limit"):
+        module.tailor_manifest(tmp_path)
+    assert requested == 513
+
+
 def test_tailor_fails_closed_when_top_level_scan_bound_is_exceeded(tmp_repo):
     for index in range(520):
         (tmp_repo / f"marker-{index:03d}").write_text("x", encoding="utf-8")
@@ -268,6 +307,16 @@ def test_tailor_rejects_linked_lean_marker(tmp_repo):
         (tmp_repo / "lakefile.lean").symlink_to(outside)
     except OSError:
         pytest.skip("file symlink creation unavailable")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / "harness/manifest.json").exists()
+
+
+def test_tailor_rejects_trivially_vacuous_node_test_script(tmp_repo):
+    (tmp_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "true"}}), encoding="utf-8"
+    )
     proc = run_install(tmp_repo, "--tailor")
     assert proc.returncode != 0
     assert "no executable project checks detected" in (proc.stdout + proc.stderr)
