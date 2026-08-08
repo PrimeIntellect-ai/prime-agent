@@ -134,3 +134,9 @@ def test_load_manifest_object_rejects_pathname_replacement_during_read(tmp_path,
     with pytest.raises(POLICY.ManifestPolicyError, match="changed"):
         POLICY.load_manifest_object(path)
     assert swapped is True
+
+
+@pytest.mark.parametrize("marker", ["d:/windows", "d:", "C:relative", "z:/"])
+def test_marker_status_rejects_windows_drive_markers_portably(tmp_path, marker):
+    with pytest.raises(POLICY.ManifestPolicyError, match="escapes"):
+        POLICY.marker_status(tmp_path, marker)

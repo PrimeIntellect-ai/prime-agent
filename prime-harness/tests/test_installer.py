@@ -487,6 +487,22 @@ def test_strict_doctor_validates_invoked_repository_not_cwd(tmp_repo):
     assert "quick:compile" in applicability["detail"]
 
 
+def test_doctor_missing_git_diagnostic_names_invoked_repository(tmp_repo):
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0
+    (tmp_repo / ".git").rename(tmp_repo / ".git-removed")
+    unrelated = tmp_repo.parent
+    doctor = subprocess.run(
+        [sys.executable, str(tmp_repo / "harness/doctor.py"), "--json"],
+        cwd=unrelated, capture_output=True, text=True, timeout=120,
+    )
+    report = json.loads(doctor.stdout)
+    git_check = next(item for item in report["checks"] if item["name"] == "git")
+    assert git_check["level"] == "FAIL"
+    assert str(tmp_repo) in git_check["detail"]
+    assert "at repository root" in git_check["detail"]
+
+
 def test_doctor_rejects_oversized_manifest_before_parsing(tmp_repo):
     installed = run_install(tmp_repo)
     assert installed.returncode == 0

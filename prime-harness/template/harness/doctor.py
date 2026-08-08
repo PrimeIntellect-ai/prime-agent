@@ -307,7 +307,7 @@ def main() -> int:
         if (root / ".git").exists():
             report.ok("git", f"{(git.stdout or '').strip()} — repo at {root}")
         else:
-            report.fail("git", f"no .git found at or above {Path.cwd()}", "run inside the project repository")
+            report.fail("git", f"no .git found at repository root {root}", "install into a Git repository root")
     else:
         report.fail("git", "git not found on PATH", "install git")
 

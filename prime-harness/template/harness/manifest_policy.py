@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import stat
 from pathlib import Path, PurePosixPath
@@ -113,7 +114,8 @@ def marker_status(root: Path, marker: object) -> tuple[bool, str]:
     if not isinstance(marker, str) or not marker or "\x00" in marker or "\\" in marker:
         raise ManifestPolicyError("skip_if_missing must be a non-empty forward-slash path")
     pure = PurePosixPath(marker)
-    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+    drive, _ = ntpath.splitdrive(marker)
+    if drive or pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
         raise ManifestPolicyError(f"skip_if_missing escapes or ambiguously names the repository: {marker!r}")
     current = root.resolve()
     for part in pure.parts:
