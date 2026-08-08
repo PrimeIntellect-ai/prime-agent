@@ -2671,7 +2671,7 @@ export class InteractiveMode {
 		this.contextUsageRefresh.lastSuccessGeneration = generation;
 		// Anything counted so far is now reflected in the snapshot; only later output is in-flight.
 		this.contextUsageTokenBaseline = this.activityTracker.getStatus().tokens;
-		this.patchConnectionState({ contextUsage: stats.contextUsage });
+		this.patchConnectionState({ contextUsage: stats.contextUsage, sessionCost: stats.cost });
 	}
 
 	private updateConnectionStateFromEvent(event: AgentConnectionSessionEvent): void {
@@ -6080,6 +6080,12 @@ export class InteractiveMode {
 		return keyHint("app.agents.back", "agents/resume");
 	}
 
+	private formatSessionCost(cost: number): string {
+		if (cost === 0) return "$0.00";
+		if (cost < 0.01) return `$${cost.toFixed(4)}`;
+		return `$${cost.toFixed(2)}`;
+	}
+
 	private getTrayContextLabel(): string | undefined {
 		const goalLabel = this.getTrayGoalLabel();
 		const heartbeatLabel = this.getTrayHeartbeatLabel();
@@ -6088,7 +6094,13 @@ export class InteractiveMode {
 			usage && typeof usage.tokens === "number" && typeof usage.percent === "number"
 				? `${formatTokenCount(usage.tokens)} (${Math.round(usage.percent)}%)`
 				: undefined;
-		return [goalLabel, heartbeatLabel, contextLabel].filter((label) => label !== undefined).join(" · ") || undefined;
+		const cost = this.connectionState?.sessionCost;
+		const costLabel = typeof cost === "number" ? this.formatSessionCost(cost) : undefined;
+		const usageWithCost =
+			contextLabel !== undefined && costLabel !== undefined
+				? `${contextLabel} · ${costLabel}`
+				: (contextLabel ?? costLabel);
+		return [goalLabel, heartbeatLabel, usageWithCost].filter((label) => label !== undefined).join(" · ") || undefined;
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {
