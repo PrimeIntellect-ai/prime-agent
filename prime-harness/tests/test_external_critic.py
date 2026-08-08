@@ -159,6 +159,10 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
     assert [record["record_type"] for record in records[-2:]] == ["panel_run", "finding_disposition"]
     assert records[-1] == disposition
     assert records[-1]["previous_record_sha256"] == records[-2]["record_sha256"]
+    with pytest.raises(ValueError, match="unknown panel_id"):
+        critic.record_panel_verdict("missing-panel", finding_id, "open", rationale="", evidence_ids=[], verifier="")
+    with pytest.raises(ValueError, match="does not belong"):
+        critic.record_panel_verdict(panel["panel_id"], "missing-finding", "open", rationale="", evidence_ids=[], verifier="")
     with pytest.raises(ValueError, match="require rationale"):
         critic.record_panel_verdict(panel["panel_id"], finding_id, "rebutted",
                                     rationale="", evidence_ids=[], verifier="")

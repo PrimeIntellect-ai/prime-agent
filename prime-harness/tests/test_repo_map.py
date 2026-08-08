@@ -155,17 +155,20 @@ def test_git_inventory_honors_ignore_and_includes_dot_prime_sources(tmp_path, mo
 
 def test_typescript_lexer_ignores_comments_strings_templates_and_regex(tmp_path):
     root = make_repo(tmp_path / "repo", {
-        "mod.ts": r'''/* function BlockCommentFake() {} */
+        "dep.ts": "export function imported(): number { return 1; }\n",
+        "mod.ts": r'''import { imported } from "./dep.js"
+/* function BlockCommentFake() {} */
 const text = "function StringFake() {}";
 const template = `function TemplateFake() {}`;
 const pattern = /function RegexFake\(\)/;
-export function RealSymbol(): number { return helper(); }
+export function RealSymbol(): number { return imported() + helper(); }
 const helper = (): number => 1;
 ''',
     })
     result = repo_map.map_repository(root, query="real helper fake", token_budget=4000, scope="tracked")
     names = {item["name"] for item in result["selected_symbols"]}
-    assert {"RealSymbol", "helper"} <= names
+    assert {"RealSymbol", "helper", "imported"} <= names
+    assert result["stats"]["edge_kinds"]["reference"] >= 1
     assert not {"BlockCommentFake", "StringFake", "TemplateFake", "RegexFake"} & names
     assert result["status"] == "complete"
 
@@ -237,3 +240,7 @@ def test_cli_text_default_and_explicit_json(tmp_path):
     assert payload["budget"]["map_budget_only"] is True
     assert payload["budget"]["default_run_full_payload"] is True
     assert payload["budget"]["used"] <= 800
+
+def test_duplicate_bindings_nested_kind_and_string_braces_are_conservative(tmp_path):
+ root=make_repo(tmp_path/"repo",{"a.py":"def foo(): return 1\ndef foo(): return 2\ndef caller(): return foo()\ndef outer():\n def inner(): return 1\n return inner()\n","b.ts":'function helper() {}\nfunction caller() { const s = "}"; helper(); }\n'})
+ symbols,edges,_=analyze_graph(root);by={(s.path,s.qualname):s for s in symbols};assert by[("a.py","foo")].id not in edges[by[("a.py","caller")].id];assert by[("a.py","outer.inner")].kind=="function";assert by[("b.ts","helper")].id in edges[by[("b.ts","caller")].id]

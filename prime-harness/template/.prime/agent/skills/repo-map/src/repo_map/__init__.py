@@ -364,12 +364,13 @@ def _python_analysis(source: _Source) -> _FileAnalysis:
                     imports[alias.asname or alias.name] = _ImportTarget(prefix, alias.name, False)
     symbols: list[_Symbol] = []
 
-    def visit(body: Iterable[ast.stmt], parents: tuple[str, ...] = (), parent_id: str | None = None) -> None:
+    def visit(body: Iterable[ast.stmt], parents: tuple[str, ...] = (), parent_id: str | None = None,
+              parent_is_class: bool = False) -> None:
         for node in body:
             name: str | None = None
             kind: str | None = None
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                name, kind = node.name, ("method" if parents and parent_id else "function")
+                name, kind = node.name, ("method" if parent_is_class else "function")
             elif isinstance(node, ast.ClassDef):
                 name, kind = node.name, "class"
             elif not parents and isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -391,7 +392,7 @@ def _python_analysis(source: _Source) -> _FileAnalysis:
                 symbols.append(symbol)
                 nested = getattr(node, "body", [])
                 if nested:
-                    visit(nested, (*parents, name), sid)
+                    visit(nested, (*parents, name), sid, isinstance(node, ast.ClassDef))
             elif isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
                 visit(getattr(node, "body", []), parents, parent_id)
                 visit(getattr(node, "orelse", []), parents, parent_id)
@@ -499,8 +500,8 @@ def _lex_ts(text: str) -> list[_Token]:
 def _matching_brace(tokens: list[_Token], start: int, left: str = "{", right: str = "}") -> int | None:
     depth = 0
     for index in range(start, len(tokens)):
-        if tokens[index].value == left: depth += 1
-        elif tokens[index].value == right:
+        if tokens[index].kind == "punct" and tokens[index].value == left: depth += 1
+        elif tokens[index].kind == "punct" and tokens[index].value == right:
             depth -= 1
             if depth == 0: return index
     return None
@@ -521,7 +522,14 @@ def _ts_analysis(source: _Source) -> _FileAnalysis:
         token = tokens[index]
         if token.value == "import":
             end = index + 1
-            while end < len(tokens) and tokens[end].value != ";": end += 1
+            while end < len(tokens) and tokens[end].value != ";":
+                if tokens[end].value == "from" and end + 1 < len(tokens) and tokens[end + 1].kind == "string":
+                    end += 2
+                    break
+                if tokens[end].kind == "string" and end == index + 1:
+                    end += 1
+                    break
+                end += 1
             segment = tokens[index + 1:end]
             from_index = next((i for i, item in enumerate(segment) if item.value == "from"), None)
             module = None
@@ -638,10 +646,11 @@ def _add_edge(edges: dict[str, dict[str, int]], source: str, target: str, weight
 def _build_graph(analyses: list[_FileAnalysis], max_edges: int) -> tuple[list[_Symbol], dict[str, dict[str, int]], dict[str, str]]:
     symbols = [symbol for analysis in analyses for symbol in analysis.symbols]
     by_id = {symbol.id: symbol for symbol in symbols}
-    by_file_top: dict[tuple[str, str], _Symbol] = {}
+    top_candidates: dict[tuple[str, str], list[_Symbol]] = {}
     for symbol in symbols:
         if "." not in symbol.qualname:
-            by_file_top.setdefault((symbol.path, symbol.name), symbol)
+            top_candidates.setdefault((symbol.path, symbol.name), []).append(symbol)
+    by_file_top = {key: values[0] for key, values in top_candidates.items() if len(values) == 1}
     known_python = {_module_name(analysis.source.path): analysis.source.path for analysis in analyses
                     if analysis.source.language == "python"}
     known_paths = {analysis.source.path for analysis in analyses}
@@ -851,7 +860,8 @@ def map_repository(
         "selected_symbols": selected,
         "stats": {"files_inventory": len(inventory), "files_parsed": len(analyses),
                   "symbols": len(symbols), "edges": sum(len(targets) for targets in edges.values()),
-                  "edge_kinds": kind_counts, "parse_failures": len(warnings),
+                  "edge_kinds": kind_counts,
+                  "parse_failures": sum(warning["code"] in {"PYTHON_PARSE_FAILED", "TSJS_NON_UTF8"} for warning in warnings),
                   "candidates_skipped_budget": skipped_budget},
         "warnings": warnings,
     }

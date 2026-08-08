@@ -223,8 +223,10 @@ a vacuous quick pass cannot recover another profile's substantive failure.
 `external_critic.review()` remains the backward-compatible single-critic API.
 For phase/goal closure, `external_critic.review_panel()` freezes one commit and
 diff, creates private non-git copies, then launches Claude and Codex
-concurrently with identical instructions and no access to one another's
-response. It preserves every tool position and clusters only exact canonical
+concurrently with identical instructions and without exchanging responses.
+Private copies prevent accidental file interference, but same-account processes
+are not an OS confidentiality boundary; hostile critics require external
+sandboxes. It preserves every tool position and clusters only exact canonical
 path/line/claim identities; similar findings remain separately visible:
 
 ```python

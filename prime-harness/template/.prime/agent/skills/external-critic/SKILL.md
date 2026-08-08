@@ -58,15 +58,18 @@ for finding in panel["findings"]:
 
 Claude and Codex launch concurrently with the same prompt in private copies of
 one detached freeze. Snapshot symlinks are replaced by inert link-text files,
-and `.git` pointers are removed from the workstream copies. Only exact
+and `.git` pointers are removed from the workstream copies. This prevents
+accidental interference, not deliberate same-account filesystem inspection;
+use an external OS sandbox for hostile critic processes. Only exact
 canonical path/line/claim identities are clustered; merely similar or negated
 findings remain separate and receive `possible_overlap_unmerged` links. All
 per-tool positions remain in the panel artifact. Presence, severity, location,
 and wording disagreements are listed explicitly; conservative maximum severity
 drives the open verdict.
 
-Every panel run appends to
-`artifacts/harness/critic/panel-verdict-ledger.jsonl`. The ledger is
+Every panel that reaches resolved-input execution appends to
+`artifacts/harness/critic/panel-verdict-ledger.jsonl`; preflight failures before
+a panel identity exists return structured errors but are not ledger events. The ledger is
 cross-process locked, append-only, and hash-chained. Close a finding only with
 provenance:
 

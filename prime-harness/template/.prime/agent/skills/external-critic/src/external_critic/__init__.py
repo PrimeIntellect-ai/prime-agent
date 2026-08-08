@@ -308,7 +308,11 @@ def review(
             return {"status": "error", "tool": tool, "base": base, "base_sha": base_sha, "head": head_sha,
                     "reason": f"invalid findings schema: {schema_error}",
                     "raw_output_path": str(raw_path)}
-        if _snapshot_fingerprint(snapshot) != snapshot_fingerprint:
+        try:
+            freeze_changed = _snapshot_fingerprint(snapshot) != snapshot_fingerprint
+        except RuntimeError:
+            freeze_changed = True
+        if freeze_changed:
             return {"status": "error", "tool": tool, "base": base, "base_sha": base_sha, "head": head_sha,
                     "reason": "critic modified its frozen snapshot (freeze violation)",
                     "raw_output_path": str(raw_path)}
@@ -609,6 +613,12 @@ def _append_panel_ledger(event: dict[str, Any], *, path: Path | None = None) -> 
         try:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > 5:
+                    lock_path.unlink()
+                    continue
+            except FileNotFoundError:
+                continue
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out acquiring panel ledger lock: {lock_path}")
             time.sleep(0.05)
@@ -660,6 +670,12 @@ def record_panel_verdict(
         raise ValueError("closed dispositions require rationale, verifier, and evidence_ids")
     if not all(isinstance(item, str) and item.strip() for item in evidence_ids):
         raise ValueError("evidence_ids must contain non-empty strings")
+    runs = [record for record in read_panel_ledger() if record.get("record_type") == "panel_run"
+            and record.get("panel_id") == panel_id]
+    if not runs:
+        raise ValueError(f"unknown panel_id: {panel_id}")
+    if finding_id not in runs[-1].get("finding_ids", []):
+        raise ValueError(f"finding_id {finding_id!r} does not belong to panel {panel_id!r}")
     return _append_panel_ledger({
         "record_type": "finding_disposition", "panel_id": panel_id,
         "finding_id": finding_id, "disposition": disposition,
