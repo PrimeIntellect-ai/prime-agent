@@ -275,17 +275,18 @@ one atomic ZIP archive:
 It copies every `evidence.db` with SQLite's online backup API, including
 committed frames from a live or crash-left uncheckpointed WAL, records a strict
 manifest of paths, sizes, SHA-256 hashes, modes, and timestamps, then verifies
-the completed archive before reporting success. Source and archive symlinks,
-special files, duplicate names, traversal/noncanonical paths, Windows ADS or
-reserved-device components, privileged setuid/setgid/sticky modes, corruption,
-and invalid SQLite snapshots fail closed on every platform.
+the completed archive before reporting success. Source and archive symlinks or
+Windows reparse points, concurrent source-identity swaps, special files,
+duplicate or case-colliding names, traversal/noncanonical paths, Windows ADS
+or reserved-device components, privileged setuid/setgid/sticky modes,
+corruption, and missing SQLite snapshot markers fail closed on every platform.
 
     python -S harness/backup.py create
     python -S harness/backup.py verify artifacts/harness/backups/prime-harness-....zip
     python -S harness/backup.py restore BACKUP.zip --destination ../harness-restore
 
-Restore accepts only a missing or empty destination, verifies before writing,
-extracts into a confined sibling staging directory, and atomically renames the
+Restore requires a destination path that does not yet exist, verifies before
+writing, extracts into a confined sibling staging directory, and atomically renames the
 staging tree into place. The restored layout has `session/`,
 `project/artifacts/harness/`, and (when present) `global/harness/`; inspect it
 before copying any state back into live locations. Backup files are integrity

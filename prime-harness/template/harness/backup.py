@@ -9,7 +9,7 @@ online backup API rather than as potentially torn files.
 Usage:
   python -S harness/backup.py create [--session-dir PATH] [--output PATH]
   python -S harness/backup.py verify ARCHIVE
-  python -S harness/backup.py restore ARCHIVE --destination EMPTY_PATH
+  python -S harness/backup.py restore ARCHIVE --destination ABSENT_PATH
 """
 
 from __future__ import annotations
@@ -124,13 +124,21 @@ def _safe_mode(value: Any, path: str) -> int:
     return value
 
 
+def _portable_path_key(path: str) -> str:
+    return "/".join(component.casefold() for component in PurePosixPath(path).parts)
+
+
 def _lstat_kind(path: Path) -> str:
     try:
-        mode = path.lstat().st_mode
+        stat_result = path.lstat()
     except OSError as exc:
         raise BackupError(f"cannot inspect source path: {path}") from exc
+    mode = stat_result.st_mode
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     if stat.S_ISLNK(mode):
         return "symlink"
+    if getattr(stat_result, "st_file_attributes", 0) & reparse_flag:
+        return "reparse"
     if stat.S_ISDIR(mode):
         return "directory"
     if stat.S_ISREG(mode):
@@ -138,10 +146,45 @@ def _lstat_kind(path: Path) -> str:
     return "special"
 
 
+def _file_identity(stat_result: os.stat_result) -> tuple[int, ...]:
+    if stat_result.st_ino:
+        return (stat_result.st_dev, stat_result.st_ino)
+    return (stat_result.st_dev, stat_result.st_ctime_ns, stat_result.st_size)
+
+
+def _regular_source_stat(path: Path) -> os.stat_result:
+    if _lstat_kind(path) != "file":
+        raise BackupError(f"source changed into a link or non-file: {path}")
+    return path.lstat()
+
+
+def _assert_source_identity(path: Path, expected: os.stat_result) -> None:
+    current = _regular_source_stat(path)
+    if _file_identity(current) != _file_identity(expected):
+        raise BackupError(f"source identity changed during backup: {path}")
+
+
+def _open_verified_source(path: Path, expected: os.stat_result) -> BinaryIO:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise BackupError(f"cannot safely open source file: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        _assert_source_identity(path, expected)
+        if not stat.S_ISREG(opened.st_mode) or _file_identity(opened) != _file_identity(expected):
+            raise BackupError(f"source identity changed during backup: {path}")
+        return os.fdopen(descriptor, "rb", closefd=True)
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
 def _walk_source(root: Path, prefix: str, *, exclude_backups: bool) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]]]:
     kind = _lstat_kind(root)
-    if kind == "symlink":
-        raise BackupError(f"source root must not be a symlink: {root}")
+    if kind in {"symlink", "reparse"}:
+        raise BackupError(f"source root must not be a symlink or reparse point: {root}")
     if kind != "directory":
         raise BackupError(f"source root is not a directory: {root}")
     directories: list[tuple[str, Path]] = [(prefix, root)]
@@ -156,8 +199,8 @@ def _walk_source(root: Path, prefix: str, *, exclude_backups: bool) -> tuple[lis
             if exclude_backups and rel.parts and rel.parts[0] == "backups":
                 continue
             child_kind = _lstat_kind(child)
-            if child_kind == "symlink":
-                raise BackupError(f"symlink sources are forbidden: {child}")
+            if child_kind in {"symlink", "reparse"}:
+                raise BackupError(f"symlink sources are forbidden (including reparse points): {child}")
             if child_kind != "directory":
                 raise BackupError(f"special source entry is forbidden: {child}")
             kept.append(name)
@@ -171,8 +214,8 @@ def _walk_source(root: Path, prefix: str, *, exclude_backups: bool) -> tuple[lis
             if exclude_backups and rel.parts and rel.parts[0] == "backups":
                 continue
             child_kind = _lstat_kind(child)
-            if child_kind == "symlink":
-                raise BackupError(f"symlink sources are forbidden: {child}")
+            if child_kind in {"symlink", "reparse"}:
+                raise BackupError(f"symlink sources are forbidden (including reparse points): {child}")
             if child_kind != "file":
                 raise BackupError(f"special source entry is forbidden: {child}")
             files.append((f"{prefix}/{rel.as_posix()}", child))
@@ -210,28 +253,39 @@ def _sqlite_snapshot(source: Path, destination: Path) -> None:
             src.close()
 
 
-def _write_member(archive: zipfile.ZipFile, archive_path: str, source: Path, *, sqlite_snapshot: bool, temp_dir: Path) -> dict[str, Any]:
-    stat_result = source.stat(follow_symlinks=False)
-    source_mode = _safe_mode(stat.S_IMODE(stat_result.st_mode), archive_path)
-    payload = source
+def _write_member(
+    archive: zipfile.ZipFile,
+    archive_path: str,
+    source: Path,
+    source_stat: os.stat_result,
+    *,
+    sqlite_snapshot: bool,
+    temp_dir: Path,
+) -> dict[str, Any]:
+    source_mode = _safe_mode(stat.S_IMODE(source_stat.st_mode), archive_path)
     if sqlite_snapshot:
         payload = temp_dir / (hashlib.sha256(str(source).encode("utf-8")).hexdigest() + ".db")
-        _sqlite_snapshot(source, payload)
-    info = _zip_info(archive_path, source_mode, stat_result.st_mtime_ns)
-    with payload.open("rb") as input_handle, archive.open(info, "w") as output_handle:
+        with _open_verified_source(source, source_stat):
+            _sqlite_snapshot(source, payload)
+            _assert_source_identity(source, source_stat)
+        input_handle = payload.open("rb")
+    else:
+        input_handle = _open_verified_source(source, source_stat)
+    info = _zip_info(archive_path, source_mode, source_stat.st_mtime_ns)
+    with input_handle, archive.open(info, "w") as output_handle:
         digest, size = _sha256_stream(input_handle, output_handle)
     return {
         "path": archive_path,
         "sha256": digest,
         "size": size,
         "mode": source_mode,
-        "mtime_ns": stat_result.st_mtime_ns,
+        "mtime_ns": source_stat.st_mtime_ns,
         "sqlite_snapshot": sqlite_snapshot,
     }
 
 
 def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path, output: Path | None = None, now: datetime | None = None) -> dict[str, Any]:
-    project_root = project_root.resolve()
+    project_root = project_root.expanduser().absolute()
     artifacts = project_root / "artifacts" / "harness"
     if _lstat_kind(project_root) != "directory":
         raise BackupError(f"project root is not a directory: {project_root}")
@@ -250,13 +304,13 @@ def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path
         output = artifacts / "backups" / f"prime-harness-{stamp}.zip"
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
+    if os.path.lexists(output):
         raise BackupError(f"backup output already exists: {output}")
 
     root_manifest: dict[str, Any] = {}
     directories: list[dict[str, Any]] = []
-    files: list[tuple[str, Path, str]] = []
-    seen_paths: set[str] = set()
+    files: list[tuple[str, Path, str, os.stat_result]] = []
+    seen_paths: dict[str, str] = {}
     for name, (root, exclude_backups) in roots.items():
         present = os.path.lexists(root)
         root_manifest[name] = {"archive_prefix": ROOT_PREFIXES[name], "present": present}
@@ -267,18 +321,22 @@ def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path
         source_dirs, source_files = _walk_source(root, ROOT_PREFIXES[name], exclude_backups=exclude_backups)
         for archive_path, source in source_dirs:
             archive_path = _safe_archive_path(archive_path, directory=True)
-            if archive_path in seen_paths:
-                raise BackupError(f"duplicate backup path: {archive_path}")
-            seen_paths.add(archive_path)
-            source_stat = source.stat(follow_symlinks=False)
+            path_key = _portable_path_key(archive_path)
+            if path_key in seen_paths:
+                raise BackupError(f"portable path collision: {seen_paths[path_key]} and {archive_path}")
+            seen_paths[path_key] = archive_path
+            if _lstat_kind(source) != "directory":
+                raise BackupError(f"source directory changed during backup: {source}")
+            source_stat = source.lstat()
             source_mode = _safe_mode(stat.S_IMODE(source_stat.st_mode), archive_path)
             directories.append({"path": archive_path, "mode": source_mode, "mtime_ns": source_stat.st_mtime_ns})
         for archive_path, source in source_files:
             archive_path = _safe_archive_path(archive_path)
-            if archive_path in seen_paths:
-                raise BackupError(f"duplicate backup path: {archive_path}")
-            seen_paths.add(archive_path)
-            files.append((archive_path, source, name))
+            path_key = _portable_path_key(archive_path)
+            if path_key in seen_paths:
+                raise BackupError(f"portable path collision: {seen_paths[path_key]} and {archive_path}")
+            seen_paths[path_key] = archive_path
+            files.append((archive_path, source, name, _regular_source_stat(source)))
 
     temp_output = output.parent / f".{output.name}.{os.getpid()}.tmp"
     if temp_output.exists():
@@ -288,9 +346,18 @@ def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path
         with tempfile.TemporaryDirectory(prefix="prime-harness-backup-") as temp_name:
             temp_dir = Path(temp_name)
             with zipfile.ZipFile(temp_output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
-                for archive_path, source, _root_name in sorted(files):
-                    sqlite_snapshot = source.name == "evidence.db"
-                    file_manifest.append(_write_member(archive, archive_path, source, sqlite_snapshot=sqlite_snapshot, temp_dir=temp_dir))
+                for archive_path, source, _root_name, source_stat in sorted(files):
+                    sqlite_snapshot = source.name.casefold() == "evidence.db"
+                    file_manifest.append(
+                        _write_member(
+                            archive,
+                            archive_path,
+                            source,
+                            source_stat,
+                            sqlite_snapshot=sqlite_snapshot,
+                            temp_dir=temp_dir,
+                        )
+                    )
                 manifest = {
                     "format": FORMAT,
                     "format_version": FORMAT_VERSION,
@@ -330,12 +397,15 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
     if not isinstance(directories, list) or not isinstance(files, list):
         raise BackupError("manifest directories/files must be lists")
     paths: set[str] = set()
+    portable_paths: dict[str, str] = {}
     for item in directories:
         if not isinstance(item, dict) or set(item) != {"path", "mode", "mtime_ns"}:
             raise BackupError("invalid directory manifest entry")
         path = _safe_archive_path(item["path"], directory=True)
-        if path in paths:
-            raise BackupError(f"duplicate manifest path: {path}")
+        path_key = _portable_path_key(path)
+        if path in paths or path_key in portable_paths:
+            raise BackupError(f"duplicate or non-portable manifest path collision: {path}")
+        portable_paths[path_key] = path
         if type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0:
             raise BackupError(f"invalid directory metadata: {path}")
         _safe_mode(item["mode"], path)
@@ -344,15 +414,18 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
         if not isinstance(item, dict) or set(item) != {"path", "sha256", "size", "mode", "mtime_ns", "sqlite_snapshot"}:
             raise BackupError("invalid file manifest entry")
         path = _safe_archive_path(item["path"])
-        if path in paths:
-            raise BackupError(f"duplicate manifest path: {path}")
+        path_key = _portable_path_key(path)
+        if path in paths or path_key in portable_paths:
+            raise BackupError(f"duplicate or non-portable manifest path collision: {path}")
+        portable_paths[path_key] = path
         if not isinstance(item["sha256"], str) or len(item["sha256"]) != 64 or any(ch not in "0123456789abcdef" for ch in item["sha256"]):
             raise BackupError(f"invalid SHA-256 in manifest: {path}")
         if type(item["size"]) is not int or item["size"] < 0 or type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0 or type(item["sqlite_snapshot"]) is not bool:
             raise BackupError(f"invalid file metadata: {path}")
         _safe_mode(item["mode"], path)
-        if item["sqlite_snapshot"] and not path.endswith("/evidence.db"):
-            raise BackupError(f"unexpected SQLite snapshot marker: {path}")
+        expected_sqlite_snapshot = PurePosixPath(path).name.casefold() == "evidence.db"
+        if item["sqlite_snapshot"] is not expected_sqlite_snapshot:
+            raise BackupError(f"SQLite snapshot marker does not match path: {path}")
         paths.add(path)
     file_paths = {item["path"] for item in files}
     for path in paths:
@@ -379,6 +452,9 @@ def _inspect_archive(archive_path: Path, *, extract_to: Path | None = None) -> d
             names = [info.filename for info in infos]
             if len(names) != len(set(names)):
                 raise BackupError("archive contains duplicate member names")
+            portable_names = [_portable_path_key(name) for name in names]
+            if len(portable_names) != len(set(portable_names)):
+                raise BackupError("archive contains case-insensitive member collisions")
             if names.count(MANIFEST_NAME) != 1:
                 raise BackupError("archive must contain exactly one manifest")
             for info in infos:
@@ -471,30 +547,24 @@ def verify_backup(archive_path: Path) -> dict[str, Any]:
 
 
 def restore_backup(archive_path: Path, destination: Path) -> dict[str, Any]:
-    """Restore through a sibling staging directory into a missing/empty target."""
+    """Restore through staging into a destination path that does not exist."""
     destination = destination.expanduser().resolve()
-    destination_existed = destination.exists()
-    if destination_existed:
+    if os.path.lexists(destination):
         if _lstat_kind(destination) != "directory":
             raise BackupError(f"restore destination is not a directory: {destination}")
         try:
             next(destination.iterdir())
         except StopIteration:
-            pass
-        else:
-            raise BackupError(f"restore destination must be empty: {destination}")
+            raise BackupError(f"restore destination must not already exist for atomic replacement: {destination}")
+        raise BackupError(f"restore destination must be empty: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.restore-", dir=destination.parent))
     staging.rmdir()
     try:
         result = _inspect_archive(archive_path, extract_to=staging)
-        if destination.exists():
-            destination.rmdir()
         os.replace(staging, destination)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
-        if destination_existed and not destination.exists():
-            destination.mkdir(parents=True, exist_ok=True)
         raise
     result.update({"destination": str(destination), "restored": True})
     return result
@@ -515,7 +585,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--output", type=Path)
     verify = subparsers.add_parser("verify", help="verify an archive without restoring it")
     verify.add_argument("archive", type=Path)
-    restore = subparsers.add_parser("restore", help="restore an archive into a missing or empty destination")
+    restore = subparsers.add_parser("restore", help="restore an archive into a destination path that does not exist")
     restore.add_argument("archive", type=Path)
     restore.add_argument("--destination", type=Path, required=True)
     return parser
