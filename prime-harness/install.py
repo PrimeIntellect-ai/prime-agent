@@ -113,34 +113,41 @@ def _bounded_inventory(base: Path) -> dict[str, Path] | None:
     return files
 
 
-def _contains_python_source(base: Path) -> bool:
-    """Find source only after validating the complete bounded non-link tree."""
+def _validated_regular_tree_files(base: Path, label: str, limit: int = 4096) -> list[Path]:
+    """Return files only after validating a complete bounded non-link tree."""
     pending: list[tuple[Path, int]] = [(base, 0)]
+    files: list[Path] = []
     seen = 0
-    found_source = False
     while pending:
         directory, depth = pending.pop()
         if depth > 12:
-            raise TailorError(f"Python source scan exceeds depth limit under {base.name}")
-        entries = _bounded_entries(directory, 4096 - seen)
+            raise TailorError(f"{label} scan exceeds depth limit")
+        entries = _bounded_entries(directory, limit - seen)
         if entries is None:
-            raise TailorError(f"Python source scan exceeds 4096-entry limit under {base.name}")
+            raise TailorError(f"{label} scan exceeds {limit}-entry limit")
         for path in entries:
             if path.name == "__pycache__":
                 continue
             seen += 1
-            if seen > 4096:
-                raise TailorError(f"Python source scan exceeds 4096-entry limit under {base.name}")
             if _is_linklike(path):
-                raise TailorError(f"link/reparse entry forbidden while scanning {base.name}: {path.name}")
+                raise TailorError(f"link/reparse entry forbidden while scanning {label}: {path.name}")
             try:
                 if path.is_dir():
                     pending.append((path, depth + 1))
-                elif path.is_file() and path.suffix.casefold() in {".py", ".pyi"}:
-                    found_source = True
+                elif path.is_file():
+                    files.append(path)
+                else:
+                    raise TailorError(f"non-regular entry forbidden while scanning {label}: {path.name}")
             except OSError as exc:
-                raise TailorError(f"unstable entry while scanning {base.name}: {exc}") from exc
-    return found_source
+                raise TailorError(f"unstable entry while scanning {label}: {exc}") from exc
+    return files
+
+
+def _contains_python_source(base: Path) -> bool:
+    return any(
+        path.suffix.casefold() in {".py", ".pyi"}
+        for path in _validated_regular_tree_files(base, f"Python source root {base.name}")
+    )
 
 
 def _template_only_subtree(target: Path, relative: str) -> bool:
@@ -250,6 +257,7 @@ def tailor_manifest(target: Path) -> dict[str, object]:
             and package_init.is_file()
             and not _is_linklike(package_init)
         ):
+            _contains_python_source(path)  # validates every descendant before recursive compileall
             python_roots.append(path.name)
     python_roots = sorted(set(python_roots))
     if python_roots:
@@ -257,12 +265,14 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         checks.append(_check("compile", f"python -m compileall -q {joined}", python_roots[0], 120))
         detected.extend(f"python-package:{item}" for item in python_roots)
 
-    test_dirs = [
-        item for item in ("tests", "test", "checks/properties", "checks/invariants", "checks/reference_cases")
-        if (target / item).is_dir()
-        and not _is_linklike(target / item)
-        and not _template_only_subtree(target, item)
-    ]
+    test_dirs: list[str] = []
+    for item in ("tests", "test", "checks/properties", "checks/invariants", "checks/reference_cases"):
+        candidate = target / item
+        if not candidate.is_dir() or _is_linklike(candidate):
+            continue
+        _validated_regular_tree_files(candidate, f"test directory {item}")
+        if not _template_only_subtree(target, item):
+            test_dirs.append(item)
     pyproject_text = _bounded_text(target / "pyproject.toml")
     if pyproject_text is not None:
         detected.append("pyproject.toml")

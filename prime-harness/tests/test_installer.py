@@ -223,6 +223,22 @@ def test_tailor_uses_simulation_and_pyproject_pytest_markers(tmp_repo):
     assert "pyproject.toml:pytest" in manifest["_detected"]
 
 
+def test_tailor_rejects_link_descendant_in_source_layout_free_package(tmp_repo):
+    package = tmp_repo / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    outside = tmp_repo.parent / f"{tmp_repo.name}-outside-module.py"
+    outside.write_text("secret = 1\n", encoding="utf-8")
+    try:
+        (package / "external.py").symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlink creation unavailable")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "link/reparse entry forbidden" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / "harness/manifest.json").exists()
+
+
 def test_tailor_rejects_link_descendant_after_regular_python_source(tmp_repo):
     source = tmp_repo / "src"
     source.mkdir()
@@ -310,6 +326,21 @@ def test_tailor_rejects_linked_lean_marker(tmp_repo):
     proc = run_install(tmp_repo, "--tailor")
     assert proc.returncode != 0
     assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / "harness/manifest.json").exists()
+
+
+def test_tailor_rejects_link_descendant_in_test_directory(tmp_repo):
+    tests = tmp_repo / "tests"
+    tests.mkdir()
+    outside = tmp_repo.parent / f"{tmp_repo.name}-outside-test.py"
+    outside.write_text("def test_external(): assert True\n", encoding="utf-8")
+    try:
+        (tests / "test_external.py").symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlink creation unavailable")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "link/reparse entry forbidden" in (proc.stdout + proc.stderr)
     assert not (tmp_repo / "harness/manifest.json").exists()
 
 
@@ -416,6 +447,21 @@ def test_tailor_preserves_existing_manifest_and_writes_review_sidecar(tmp_repo):
     sidecar = tmp_repo / "harness/manifest.tailored.json"
     assert sidecar.is_file()
     assert json.loads(sidecar.read_text(encoding="utf-8"))["profiles"]["default"]["required"]
+
+
+def test_doctor_rejects_oversized_manifest_before_parsing(tmp_repo):
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0
+    (tmp_repo / "harness/manifest.json").write_text(" " * 1_048_577 + "{}", encoding="utf-8")
+    doctor = subprocess.run(
+        [sys.executable, str(tmp_repo / "harness/doctor.py"), "--strict", "--json"],
+        cwd=tmp_repo, capture_output=True, text=True, timeout=120,
+    )
+    assert doctor.returncode == 2
+    report = json.loads(doctor.stdout)
+    manifest_check = next(item for item in report["checks"] if item["name"] == "manifest")
+    assert manifest_check["level"] == "FAIL"
+    assert "size limit" in manifest_check["detail"]
 
 
 def test_doctor_reports_nonobject_manifest_as_structured_failure(tmp_repo):

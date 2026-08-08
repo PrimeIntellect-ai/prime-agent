@@ -21,7 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from manifest_policy import ManifestPolicyError, marker_status, profile_minimum
+from manifest_policy import ManifestPolicyError, load_manifest_object, marker_status, profile_minimum
 
 SKILLS = {
     "harness-orchestrator": "harness_orchestrator",
@@ -364,23 +364,17 @@ def main() -> int:
 
     manifest = root / "harness" / "manifest.json"
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            report.fail("manifest", f"root must be a JSON object, got {type(data).__name__}",
-                        "fix harness/manifest.json")
+        data = load_manifest_object(manifest)
+        profiles_value = data.get("profiles", {})
+        profiles = sorted(profiles_value) if isinstance(profiles_value, dict) else []
+        if profiles:
+            report.ok("manifest", f"profiles: {', '.join(profiles)}")
+            if args.strict:
+                check_manifest_applicability(report, root, data)
         else:
-            profiles_value = data.get("profiles", {})
-            profiles = sorted(profiles_value) if isinstance(profiles_value, dict) else []
-            if profiles:
-                report.ok("manifest", f"profiles: {', '.join(profiles)}")
-                if args.strict:
-                    check_manifest_applicability(report, root, data)
-            else:
-                report.fail("manifest", "no profiles defined", "edit harness/manifest.json")
-    except FileNotFoundError:
-        report.fail("manifest", f"missing {manifest}", "re-run install.py")
-    except json.JSONDecodeError as exc:
-        report.fail("manifest", f"invalid JSON: {exc}", "fix harness/manifest.json")
+            report.fail("manifest", "no profiles defined", "edit harness/manifest.json")
+    except ManifestPolicyError as exc:
+        report.fail("manifest", str(exc), "fix harness/manifest.json")
 
     gate = run_quiet([sys.executable, str(root / "harness" / "verify.py"), "--list"], cwd=str(root))
     if gate and gate.returncode == 0:

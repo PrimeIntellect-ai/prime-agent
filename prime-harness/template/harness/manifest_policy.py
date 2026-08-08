@@ -3,16 +3,73 @@
 
 from __future__ import annotations
 
+import json
+import os
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 DEFAULT_MIN_APPLICABLE_CHECKS = 1
+MAX_MANIFEST_BYTES = 1_048_576
 RESULT_STATUSES = frozenset({"pass", "fail", "timeout", "error", "skipped"})
 
 
 class ManifestPolicyError(ValueError):
     """A manifest applicability policy value is malformed or unsafe."""
+
+
+def load_manifest_object(path: Path, max_bytes: int = MAX_MANIFEST_BYTES) -> dict[str, Any]:
+    """Load a stable, bounded, regular UTF-8 JSON manifest object."""
+    descriptor = -1
+    try:
+        before = path.lstat()
+        attributes = getattr(before, "st_file_attributes", 0)
+        if not stat.S_ISREG(before.st_mode) or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+            raise ManifestPolicyError("manifest must be a regular non-link file")
+        if before.st_size > max_bytes:
+            raise ManifestPolicyError(f"manifest exceeds {max_bytes}-byte size limit")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        identity = (opened.st_dev, opened.st_ino)
+        metadata = (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or identity != (before.st_dev, before.st_ino)
+            or opened.st_size > max_bytes
+        ):
+            raise ManifestPolicyError("manifest changed or exceeded its size limit before reading")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if len(payload) > max_bytes:
+            raise ManifestPolicyError(f"manifest exceeds {max_bytes}-byte size limit")
+        if (after.st_dev, after.st_ino) != identity or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != metadata:
+            raise ManifestPolicyError("manifest changed while being read")
+        try:
+            value = json.loads(payload.decode("utf-8-sig"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ManifestPolicyError(f"manifest is not valid UTF-8 JSON: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ManifestPolicyError(f"manifest root must be a JSON object, got {type(value).__name__}")
+        return value
+    except FileNotFoundError as exc:
+        raise ManifestPolicyError(f"manifest not found: {path}") from exc
+    except OSError as exc:
+        raise ManifestPolicyError(f"manifest could not be read safely: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def profile_minimum(profile: Mapping[str, Any], profile_name: str = "profile") -> int:

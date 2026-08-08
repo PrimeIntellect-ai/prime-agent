@@ -91,3 +91,19 @@ def test_marker_status_distinguishes_regular_missing_and_link_paths(tmp_path):
     present, reason = POLICY.marker_status(tmp_path, "linked")
     assert present is False
     assert "link/reparse" in reason
+
+
+def test_load_manifest_object_accepts_bounded_bom_json(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_bytes(b"\xef\xbb\xbf" + b'{"profiles": {}}')
+    assert POLICY.load_manifest_object(path) == {"profiles": {}}
+
+
+def test_load_manifest_object_rejects_oversize_and_nonobject(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_bytes(b" " * (POLICY.MAX_MANIFEST_BYTES + 1) + b"{}")
+    with pytest.raises(POLICY.ManifestPolicyError, match="size limit"):
+        POLICY.load_manifest_object(path)
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(POLICY.ManifestPolicyError, match="JSON object"):
+        POLICY.load_manifest_object(path)
