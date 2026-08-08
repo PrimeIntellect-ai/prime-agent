@@ -49,9 +49,12 @@ Next steps
    Python-backed skills to install into the kernel).
 5. In the session:  /harness-task my-first-task <objective>
    Bounded autonomous bursts:  harness/burst.sh feature "<prompt>"  (or burst.ps1)
-6. Outside the kernel, generate durable telemetry and replay the eval baseline:
+6. Outside the kernel, generate telemetry, replay the eval baseline, and back up state:
    python -S harness/scorecard.py --output artifacts/harness/scorecard-latest.json
    python -S harness/replay.py --executor checks/evalset/executors/reference_adapter.py --snapshot checks/evalset/snapshots/baseline-v1.json --require-perfect
+   python -S harness/backup.py create
+7. Review the pinned-action `.github/workflows/prime-harness.yml`; its public
+   holdout job is transport smoke only. Inject real holdouts from protected CI.
 
 The four skills (harness_orchestrator, sci_verify, evidence_ledger,
 external_critic) appear in <available_skills> once the session starts.

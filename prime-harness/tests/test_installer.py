@@ -28,6 +28,8 @@ def test_fresh_install_copies_everything(tmp_repo):
         "harness/verify.py",
         "harness/scorecard.py",
         "harness/replay.py",
+        "harness/backup.py",
+        ".github/workflows/prime-harness.yml",
         "harness/manifest.json",
         "harness/roster.yaml",
         "harness/doctor.py",
@@ -37,10 +39,13 @@ def test_fresh_install_copies_everything(tmp_repo):
         "harness/replay_adapters/README.md",
         "checks/properties/test_example_properties.py",
         "checks/hidden_holdout/README.md",
+        "checks/hidden_holdout/test_public_transport_smoke.py",
     ):
         assert (tmp_repo / expected).is_file(), f"missing {expected}"
     assert "harness/scorecard.py" in proc.stdout
     assert "harness/replay.py" in proc.stdout
+    assert "harness/backup.py create" in proc.stdout
+    assert ".github/workflows/prime-harness.yml" in proc.stdout
     gitignore = (tmp_repo / ".gitignore").read_text(encoding="utf-8")
     assert "artifacts/harness/" in gitignore
     assert "__pycache__/" in gitignore

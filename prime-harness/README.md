@@ -247,6 +247,49 @@ See `checks/evalset/README.md` for protocol, confinement, and capture details.
 The public corpus measures regression rather than secrecy; CI-only holdouts
 remain separate.
 
+## CI profiles and private holdouts
+
+Fresh installs include `.github/workflows/prime-harness.yml`. Its pinned-action
+matrix runs doctor first and then the existing `default` and `holdout`
+profiles; it does not rewrite `harness/manifest.json`. The checked-in holdout
+test is explicitly a **public transport smoke**, not a scientific holdout or a
+promotion signal.
+
+Real holdouts must remain outside the agent workspace. Use a protected private
+reusable workflow, an ephemeral protected-runner mount, or a separate private
+checkout with a short-lived read-only credential. Pin the candidate and test
+suite by immutable commit, do not run secret-bearing jobs for untrusted forks,
+and never expose test contents or detailed failures to the agent. See
+`checks/hidden_holdout/README.md`; the public template intentionally contains
+no secret names, credentials, repository coordinates, or private tests.
+
+## Integrity-checked backups
+
+`harness/backup.py` is a standard-library CLI that snapshots three roots in
+one atomic ZIP archive:
+
+- the current RLM session directory (`RLM_SESSION_DIR`, or `--session-dir`);
+- project `artifacts/harness` except its `backups/` subtree; and
+- global `~/.prime/agent/harness` (recorded as absent when not yet created).
+
+It copies every `evidence.db` with SQLite's online backup API, records a strict
+manifest of paths, sizes, SHA-256 hashes, modes, and timestamps, then verifies
+the completed archive before reporting success. Source and archive symlinks,
+special files, duplicate names, traversal/noncanonical paths, corruption, and
+invalid SQLite snapshots fail closed.
+
+    python -S harness/backup.py create
+    python -S harness/backup.py verify artifacts/harness/backups/prime-harness-....zip
+    python -S harness/backup.py restore BACKUP.zip --destination ../harness-restore
+
+Restore accepts only a missing or empty destination, verifies before writing,
+extracts into a confined sibling staging directory, and atomically renames the
+staging tree into place. The restored layout has `session/`,
+`project/artifacts/harness/`, and (when present) `global/harness/`; inspect it
+before copying any state back into live locations. Backup files are integrity
+artifacts, not encrypted secrets: store and transmit them under the same or
+stronger access controls as the session and evidence ledger.
+
 ## Model routing
 
 Roster roles accept an optional exact `provider/model` selector (from

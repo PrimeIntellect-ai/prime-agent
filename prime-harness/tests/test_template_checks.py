@@ -17,6 +17,7 @@ def test_fresh_template_check_suites_pass() -> None:
             "-q",
             "template/checks/properties",
             "template/checks/invariants",
+            "template/checks/hidden_holdout",
         ],
         cwd=HARNESS_ROOT,
         capture_output=True,
