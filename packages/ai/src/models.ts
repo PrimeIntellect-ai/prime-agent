@@ -37,11 +37,15 @@ export function getModels<TProvider extends KnownProvider>(
 }
 
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
-	return (
-		model.provider === "openai-codex" &&
-		model.api === "openai-codex-responses" &&
-		(model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-"))
-	);
+	if (model.provider === "openai-codex" && model.api === "openai-codex-responses") {
+		return (
+			model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-")
+		);
+	}
+	if (model.provider === "anthropic" && model.api === "anthropic-messages") {
+		return model.id === "claude-opus-5" || model.id === "claude-opus-4-8";
+	}
+	return false;
 }
 
 export interface CostOverrides {

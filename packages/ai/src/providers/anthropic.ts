@@ -173,6 +173,7 @@ export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
 const FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
+const FAST_MODE_BETA = "fast-mode-2026-02-01";
 
 function getAnthropicCompat(model: Model<"anthropic-messages">): Required<AnthropicMessagesCompat> {
 	return {
@@ -224,6 +225,13 @@ export interface AnthropicOptions extends StreamOptions {
 	 * `AnthropicVertex` that shares the same messaging API.
 	 */
 	client?: Anthropic;
+	/**
+	 * Enable fast mode for supported models (claude-opus-5, claude-opus-4-8).
+	 * Adds the fast-mode-2026-02-01 beta header and routes through the beta
+	 * messages endpoint with speed="fast" in the request body.
+	 * Claude API only — not available on Bedrock, Vertex, or Foundry.
+	 */
+	speed?: "fast";
 }
 
 function mergeHeaders(...headerSources: (Record<string, string | null> | undefined)[]): Record<string, string | null> {
@@ -507,6 +515,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					shouldUseFineGrainedToolStreamingBeta(model, context),
 					options?.headers,
 					copilotDynamicHeaders,
+					options?.speed === "fast",
 				);
 				client = created.client;
 				isOAuth = created.isOAuthToken;
@@ -527,7 +536,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
-			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
+			// beta.messages.create accepts a superset of params; cast to match the non-beta overload signature
+			const createFn =
+				options?.speed === "fast"
+					? (client.beta.messages.create.bind(client.beta.messages) as typeof client.messages.create)
+					: client.messages.create.bind(client.messages);
+			const response = await createFn({ ...params, stream: true }, requestOptions).asResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			const requestId = response.headers.get("request-id") ?? undefined;
 			stream.push({ type: "start", partial: output });
@@ -853,6 +867,7 @@ function createClient(
 	useFineGrainedToolStreamingBeta: boolean,
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
+	useFastMode?: boolean,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
 	// The beta header is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so skip it.
@@ -863,6 +878,9 @@ function createClient(
 	}
 	if (needsInterleavedBeta) {
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
+	}
+	if (useFastMode) {
+		betaFeatures.push(FAST_MODE_BETA);
 	}
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -1053,6 +1071,11 @@ function buildParams(
 		} else {
 			params.tool_choice = options.toolChoice;
 		}
+	}
+
+	if (options?.speed === "fast") {
+		// speed is in the beta MessageCreateParamsStreaming but not yet in the base type
+		(params as MessageCreateParamsStreaming & { speed?: "fast" }).speed = "fast";
 	}
 
 	return params;
