@@ -46,7 +46,8 @@
 		"typescript": "^7.0.2"
 	},
 	"engines": {
-		"node": ">=22.8.0"
+		"node": ">=22.8.0",
+		"npm": ">=11.10"
 	},
 	"version": "0.7.2",
 	"dependencies": {
