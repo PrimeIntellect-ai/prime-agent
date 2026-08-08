@@ -35,6 +35,10 @@ def test_fresh_install_copies_everything(tmp_repo):
         "harness/backup.py",
         "harness/model_routing.py",
         ".github/workflows/prime-harness.yml",
+        ".prime/agent/harness-tests/BUNDLE.md",
+        ".prime/agent/harness-tests/README.md",
+        ".prime/agent/harness-tests/tests/test_orchestrator.py",
+        ".prime/agent/harness-tests/tests/fixtures/scorecard/session.jsonl",
         "harness/manifest.json",
         "harness/roster.yaml",
         "harness/doctor.py",
@@ -103,3 +107,24 @@ def test_installer_ignores_python_cache_artifacts():
     assert installer.is_ignored_template_artifact(Path("pkg/module.pyc"))
     assert installer.is_ignored_template_artifact(Path("pkg/module.pyo"))
     assert not installer.is_ignored_template_artifact(Path("pkg/module.py"))
+
+
+def test_installed_component_selftests_match_upstream_sources():
+    source_root = HARNESS_ROOT / "tests"
+    bundle_root = HARNESS_ROOT / "template" / ".prime" / "agent" / "harness-tests" / "tests"
+    excluded = {"test_api_reference.py", "test_installer.py", "test_live_kernel_e2e.py"}
+    source_files = {
+        path.relative_to(source_root).as_posix(): path
+        for path in source_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+        and path.relative_to(source_root).as_posix() not in excluded
+    }
+    bundle_files = {
+        path.relative_to(bundle_root).as_posix(): path
+        for path in bundle_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    assert set(bundle_files) == set(source_files)
+    for relative, source in source_files.items():
+        assert bundle_files[relative].read_bytes() == source.read_bytes(), relative
+    assert (bundle_root.parent / "README.md").read_bytes() == (HARNESS_ROOT / "README.md").read_bytes()
