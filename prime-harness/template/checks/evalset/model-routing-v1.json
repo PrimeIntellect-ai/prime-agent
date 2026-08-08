@@ -1,5 +1,6 @@
 {
   "id": "model-routing-v1",
+  "minimum_overall_score": 0.75,
   "minimum_tasks_per_candidate": 3,
   "oracle_created_after_response_capture": true,
   "role_weights": {

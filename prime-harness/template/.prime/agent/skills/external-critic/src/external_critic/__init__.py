@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import stat
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -664,6 +665,22 @@ def record_panel_verdict(
         raise ValueError("closed dispositions require rationale, verifier, and evidence_ids")
     if not all(isinstance(item, str) and item.strip() for item in evidence_ids):
         raise ValueError("evidence_ids must contain non-empty strings")
+    database = harness_dir() / "evidence.db"
+    if disposition != "open":
+        if not database.is_file():
+            raise ValueError("evidence ledger is unavailable")
+        placeholders = ",".join("?" for _ in evidence_ids)
+        uri = database.resolve().as_uri() + "?mode=ro"
+        connection = sqlite3.connect(uri, uri=True)
+        try:
+            rows = connection.execute(
+                f"SELECT id, status, invalidated_at FROM evidence WHERE id IN ({placeholders})", evidence_ids
+            ).fetchall()
+        finally:
+            connection.close()
+        live_verified = {row[0] for row in rows if row[1] == "verified" and row[2] is None}
+        if live_verified != set(evidence_ids):
+            raise ValueError("closed dispositions require existing live verified evidence IDs")
     runs = [record for record in read_panel_ledger() if record.get("record_type") == "panel_run"
             and record.get("panel_id") == panel_id]
     if not runs:

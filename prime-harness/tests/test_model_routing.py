@@ -17,3 +17,6 @@ def test_response_paths_are_confined_and_hashed(tmp_path):
  except ValueError as e:assert "confined" in str(e)
  else:assert False
  r=mod.score_manifest({"response_root":str(tmp_path),"candidates":[{"selector":"m","response_path":"r.json"}]});assert r["candidates"][0]["response_sha256"]
+
+def test_three_recognized_but_wrong_answers_do_not_promote(tmp_path):
+ bad={"sym-sqrt-square-sign":{},"num-expm1-cancellation":{},"conv-fourth-order":{}};p=tmp_path/"r.json";p.write_text(json.dumps({"evidence":{"answers":bad}}));r=mod.score_manifest({"response_root":str(tmp_path),"candidates":[{"selector":"m","response_path":"r.json"}]});assert r["candidates"][0]["tasks_attempted"]==3;assert r["status"]=="fail";assert r["routing_table"]==[]

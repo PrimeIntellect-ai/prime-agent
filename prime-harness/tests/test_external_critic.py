@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import time
@@ -151,6 +152,14 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
     monkeypatch.setitem(critic._ADAPTERS, "codex", _python_adapter(finding))
     panel = critic.review_panel(base="HEAD^", timeout_seconds=10)
     finding_id = panel["findings"][0]["finding_id"]
+    database = tmp_repo / "artifacts/harness/evidence.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("CREATE TABLE evidence (id TEXT PRIMARY KEY, status TEXT, invalidated_at TEXT)")
+        connection.execute("INSERT INTO evidence VALUES ('ev-test-1', 'verified', NULL)")
+        connection.commit()
+    finally:
+        connection.close()
     disposition = critic.record_panel_verdict(
         panel["panel_id"], finding_id, "fixed", rationale="regression now passes",
         evidence_ids=["ev-test-1"], verifier="pytest regression",
@@ -163,6 +172,8 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
         critic.record_panel_verdict("missing-panel", finding_id, "open", rationale="", evidence_ids=[], verifier="")
     with pytest.raises(ValueError, match="does not belong"):
         critic.record_panel_verdict(panel["panel_id"], "missing-finding", "open", rationale="", evidence_ids=[], verifier="")
+    with pytest.raises(ValueError, match="live verified"):
+        critic.record_panel_verdict(panel["panel_id"], finding_id, "fixed", rationale="x", evidence_ids=["ev-fake"], verifier="fake")
     with pytest.raises(ValueError, match="require rationale"):
         critic.record_panel_verdict(panel["panel_id"], finding_id, "rebutted",
                                     rationale="", evidence_ids=[], verifier="")

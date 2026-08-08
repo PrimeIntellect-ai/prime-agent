@@ -14,7 +14,9 @@ def _load_evalset(path=None):
  if type(minimum) is not int or minimum<3 or minimum>len(tasks):raise ValueError("invalid evalset minimum_tasks_per_candidate")
  for role,weights in roles.items():
   if set(weights)-set(tasks) or abs(sum(float(v) for v in weights.values())-1)>1e-12:raise ValueError(f"invalid role weights: {role}")
- return data,tasks,roles,minimum,hashlib.sha256(raw).hexdigest()
+ threshold=float(data.get("minimum_overall_score",.75))
+ if not 0<=threshold<=1:raise ValueError("invalid minimum_overall_score")
+ return data,tasks,roles,minimum,threshold,hashlib.sha256(raw).hexdigest()
 def _answer(answers,task):
  if task in answers:return answers[task],True
  target=task.replace("-","_")
@@ -48,7 +50,7 @@ def score_answers(answers):
  a,_=_answer(answers,SUPPORTED_TASKS[4]);claim=str(a.get("claim","")).casefold() if isinstance(a,dict) else "";out[SUPPORTED_TASKS[4]]=float(isinstance(a,dict) and str(a.get("severity","")).casefold() in {"critical","major"} and any(x in claim for x in ("mismatch","hash","digest")) and any(x in claim for x in ("pass","success","accept")) and bool(a.get("falsification_test")))
  a,_=_answer(answers,SUPPORTED_TASKS[5]);out[SUPPORTED_TASKS[5]]=float(isinstance(a,dict) and a.get("supporting_ids")==["e1"] and a.get("rejected_ids")==["e2"] and "task" in str(a.get("reason","")).casefold());return out
 def score_manifest(manifest,evalset_path=None):
- evalset,tasks,roles,minimum,eval_hash=_load_evalset(evalset_path);root=Path(manifest["response_root"]).resolve();candidates=[]
+ evalset,tasks,roles,minimum,threshold,eval_hash=_load_evalset(evalset_path);root=Path(manifest["response_root"]).resolve();candidates=[]
  for item in manifest.get("candidates",[]):
   rel=Path(item["response_path"])
   if rel.is_absolute() or ".." in rel.parts:raise ValueError("response_path must be confined and relative")
@@ -62,7 +64,9 @@ def score_manifest(manifest,evalset_path=None):
  candidates.sort(key=lambda x:(-x["overall_score"],-x["exact_contract_rate"],x["selector"]));routes=[]
  for role in roles:
   ranked=sorted(candidates,key=lambda x:(-x["role_scores"][role],-x["overall_score"],-x["exact_contract_rate"],x["selector"]));routes.append({"role":role,"selector":ranked[0]["selector"],"measured_score":ranked[0]["role_scores"][role],"fallbacks":[x["selector"] for x in ranked[1:3]]}) if ranked else None
- status="pass" if candidates and all(x["tasks_attempted"]>=minimum for x in candidates) else "fail";return {"schema_version":1,"status":status,"evalset_sha256":eval_hash,"evalset_tasks":list(tasks),"minimum_tasks_per_candidate":minimum,"candidate_count":len(candidates),"candidates":candidates,"routing_table":routes}
+ status="pass" if candidates and all(x["tasks_attempted"]>=minimum and x["overall_score"]>=threshold for x in candidates) else "fail"
+ if status!="pass":routes=[]
+ return {"schema_version":1,"status":status,"evalset_sha256":eval_hash,"evalset_tasks":list(tasks),"minimum_tasks_per_candidate":minimum,"minimum_overall_score":threshold,"candidate_count":len(candidates),"candidates":candidates,"routing_table":routes}
 def main(argv=None):
  p=argparse.ArgumentParser();p.add_argument("manifest");p.add_argument("--evalset");p.add_argument("--output",required=True);a=p.parse_args(argv);result=score_manifest(json.loads(Path(a.manifest).read_text()),a.evalset);Path(a.output).parent.mkdir(parents=True,exist_ok=True);Path(a.output).write_text(json.dumps(result,indent=2,sort_keys=True)+"\n");print(json.dumps({"status":result["status"],"output":a.output,"candidates":result["candidate_count"]},sort_keys=True));return 0 if result["status"]=="pass" else 2
 if __name__=="__main__":raise SystemExit(main())

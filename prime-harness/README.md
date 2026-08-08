@@ -359,8 +359,10 @@ Roster roles accept an optional exact `provider/model` selector from
 `rlm.find_models()`. `checks/evalset/model-routing-v1.json` defines six
 oracle-isolated tasks (symbolic, precision, convergence, invariant,
 adversarial audit, and provenance), and `harness/model_routing.py` scores
-captured child result files without another model. Require at least three tasks
-per candidate; this campaign ran all six for every discovered selector. The
+captured, SHA-256-bound child result files without another model. Require at least three
+recognized tasks and a 0.75 overall score per candidate before emitting any route;
+this campaign ran all six for every discovered selector. The evalset digest is
+embedded in each report. The
 scorer/oracle was written after response capture, and candidate prompts forbade
 public corpus/baseline/reference and peer-result access.
 
