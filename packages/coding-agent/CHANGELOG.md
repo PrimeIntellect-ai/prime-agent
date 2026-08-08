@@ -9,6 +9,7 @@
 - Restored bare `prime-agent --resume` opening the agents view and the `/resume [id|path]` slash command; bare commands open the agents view and an argument resumes that session in place.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 - Fixed ctrl+p ("Toggle agent message expansion") only toggling received agent messages; it now expands and collapses sent agent messages together with received ones.
+- Fixed `rlm.find_models()` with no query returning an alphabetical slice from the first provider, which read as the complete set of reachable models ([#799](https://github.com/PrimeIntellect-ai/prime-agent/issues/799)).
 
 ## [0.7.2] - 2026-08-11
 
