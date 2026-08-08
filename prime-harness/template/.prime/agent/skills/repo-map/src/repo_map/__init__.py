@@ -548,7 +548,7 @@ def _ts_analysis(source: _Source) -> _FileAnalysis:
                         imports[item.value] = _ImportTarget(module, original, False)
                     elif following != "as" and item.value not in {"from"}:
                         imports.setdefault(item.value, _ImportTarget(module, item.value, False))
-            index = end + 1; continue
+            index = end + (1 if end < len(tokens) and tokens[end].value == ";" else 0); continue
         if token.value in definition_keywords and index + 1 < len(tokens) and tokens[index + 1].kind == "identifier":
             name_token = tokens[index + 1]
             kind = "function" if token.value == "function" else token.value

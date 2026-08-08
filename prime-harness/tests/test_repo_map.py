@@ -157,6 +157,7 @@ def test_typescript_lexer_ignores_comments_strings_templates_and_regex(tmp_path)
     root = make_repo(tmp_path / "repo", {
         "dep.ts": "export function imported(): number { return 1; }\n",
         "mod.ts": r'''import { imported } from "./dep.js"
+export function ImmediatelyAfter(): number { return imported(); }
 /* function BlockCommentFake() {} */
 const text = "function StringFake() {}";
 const template = `function TemplateFake() {}`;
@@ -167,7 +168,7 @@ const helper = (): number => 1;
     })
     result = repo_map.map_repository(root, query="real helper fake", token_budget=4000, scope="tracked")
     names = {item["name"] for item in result["selected_symbols"]}
-    assert {"RealSymbol", "helper", "imported"} <= names
+    assert {"RealSymbol", "ImmediatelyAfter", "helper", "imported"} <= names
     assert result["stats"]["edge_kinds"]["reference"] >= 1
     assert not {"BlockCommentFake", "StringFake", "TemplateFake", "RegexFake"} & names
     assert result["status"] == "complete"

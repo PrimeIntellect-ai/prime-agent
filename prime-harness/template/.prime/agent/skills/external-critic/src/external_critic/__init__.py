@@ -613,12 +613,6 @@ def _append_panel_ledger(event: dict[str, Any], *, path: Path | None = None) -> 
         try:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            try:
-                if time.time() - lock_path.stat().st_mtime > 5:
-                    lock_path.unlink()
-                    continue
-            except FileNotFoundError:
-                continue
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out acquiring panel ledger lock: {lock_path}")
             time.sleep(0.05)
