@@ -190,7 +190,10 @@ def test_reconcile_accepts_v071_session_name(tmp_repo, monkeypatch):
     assert entry["dead_reason"].startswith("session completed")
 
 
-def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch):
+@pytest.mark.parametrize(
+    "controller_mode", ("available", "unavailable", "api_drift")
+)
+def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, controller_mode):
     import types
 
     (tmp_repo / ".prime" / "agent").mkdir(parents=True)
@@ -237,13 +240,19 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch):
     )
 
     async def goal_get():
-        return {"goal": {"status": "active"}, "remaining_tokens": 1000,
+        return {"goal": {"status": "active"}, "remaining_tokens": None,
                 "completion_budget_report": None}
 
     async def send(message, broadcast_message=None, *, receiver_role=None, receiver_name=None):
         return {"deliveryStatus": "delivered"}
 
     async def message_list():
+        if controller_mode == "unavailable":
+            raise RuntimeError(
+                'host request type "agent_message.list_agents" is not available in this session'
+            )
+        if controller_mode == "api_drift":
+            return {"current": {}, "family": []}
         return {"current": {}, "entries": []}
 
     async def compact_status():
@@ -253,9 +262,21 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch):
         return {"pending": False, "in_flight": False}
 
     async def observe_list():
+        if controller_mode == "unavailable":
+            raise RuntimeError(
+                'host request type "agent_observe.list" is not available in this session'
+            )
+        if controller_mode == "api_drift":
+            return {"current": {}, "entries": []}
         return {"current": {}, "agents": []}
 
     async def heartbeat_list(include_inactive=False):
+        if controller_mode == "unavailable":
+            raise RuntimeError(
+                'host request type "rlm_heartbeat.list" is not available in this session'
+            )
+        if controller_mode == "api_drift":
+            return {"schedules": []}
         return {"heartbeats": []}
 
     modules = {
@@ -268,7 +289,28 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch):
         "rlm_heartbeat": types.SimpleNamespace(list=heartbeat_list),
     }
     monkeypatch.setattr(orch, "require_kernel_module", lambda name: modules[name])
+    if controller_mode == "api_drift":
+        with pytest.raises(orch.SelfcheckError) as caught:
+            asyncio.run(orch.selfcheck())
+        report = caught.value.report
+        assert report["status"] == "fail"
+        assert len(report["failures"]) == 3
+        assert {
+            item["contract_status"] for item in report["capabilities"].values()
+        } == {"api_drift"}
+        assert report["warnings"] == []
+        return
+
     report = asyncio.run(orch.selfcheck())
     assert report["status"] == "pass"
     assert report["failures"] == []
     assert len(report["checks"]) >= 15
+    expected_status = "available" if controller_mode == "available" else "unavailable"
+    assert {
+        item["status"] for item in report["capabilities"].values()
+    } == {expected_status}
+    if controller_mode == "available":
+        assert report["warnings"] == []
+    else:
+        assert len(report["warnings"]) == 3
+        assert len([item for item in report["checks"] if item["status"] == "warn"]) == 3

@@ -69,7 +69,9 @@ report = await harness_orchestrator.selfcheck()
 `selfcheck()` performs only read-only host round-trips and validates the
 load-bearing RLM, goal, messaging, compaction, refinement, observation,
 heartbeat, harness-CRUD, depth, governance, and telemetry contracts. It
-returns a detailed passing report or raises `SelfcheckError` with every drift
-found; a partial probe is never reported as success. The opt-in
-`tests/test_live_kernel_e2e.py` runs this same check inside a live kernel and
-skips under ordinary offline pytest.
+returns a detailed passing report or raises `SelfcheckError` with every API
+drift found. Session-optional heartbeat, messaging, and observation controllers
+that are not provisioned are recorded under `capabilities` and `warnings`
+instead of being misreported as drift; malformed responses from a provisioned
+controller still fail. The opt-in `tests/test_live_kernel_e2e.py` runs this same
+check inside a live kernel and skips under ordinary offline pytest.

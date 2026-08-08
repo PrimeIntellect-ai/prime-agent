@@ -624,8 +624,9 @@ async def selfcheck() -> dict[str, Any]:
 
     This intentionally performs host round-trips for read-only APIs. It never
     spawns/deletes a child, schedules work, changes a goal, or writes settings.
-    A contract mismatch raises :class:`SelfcheckError` with the complete report
-    instead of degrading to a misleading partial success.
+    A contract mismatch raises :class:`SelfcheckError` with the complete report.
+    Session-optional controller omissions are recorded as capability warnings,
+    while a provisioned controller with a changed API remains a hard failure.
     """
     import inspect
 
@@ -634,6 +635,7 @@ async def selfcheck() -> dict[str, Any]:
         "checks": [],
         "failures": [],
         "warnings": [],
+        "capabilities": {},
     }
 
     def check(name: str, condition: bool, observed: Any = None) -> None:
@@ -646,6 +648,34 @@ async def selfcheck() -> dict[str, Any]:
             report["failures"].append(
                 f"{name} (observed={observed!r})" if observed is not None else name
             )
+
+    def warn(name: str, observed: Any = None) -> None:
+        item: dict[str, Any] = {"name": name, "status": "warn"}
+        if observed is not None:
+            item["observed"] = observed
+        report["checks"].append(item)
+        report["warnings"].append(
+            f"{name} (observed={observed!r})" if observed is not None else name
+        )
+
+    def record_optional_controller_absence(
+        capability: str, request_type: str, exc: Exception
+    ) -> bool:
+        message = str(exc)
+        unavailable = re.fullmatch(
+            rf"host request type [\"']{re.escape(request_type)}[\"'] is not available in this session",
+            message,
+        )
+        if unavailable is None:
+            return False
+        observed = f"{type(exc).__name__}: {message}"
+        report["capabilities"][capability] = {
+            "status": "unavailable",
+            "request_type": request_type,
+            "reason": observed,
+        }
+        warn(f"{capability} controller unavailable in this session", observed)
+        return True
 
     # Core RLM module and read-only lifecycle/model catalog round-trips.
     try:
@@ -715,27 +745,44 @@ async def selfcheck() -> dict[str, Any]:
         )
         if isinstance(goal_info, dict) and goal_info.get("goal") is not None:
             remaining = goal_info.get("remaining_tokens")
-            check("goal remaining_tokens is numeric", isinstance(remaining, (int, float)), type(remaining).__name__)
+            check(
+                "goal remaining_tokens is numeric or unbounded",
+                remaining is None or isinstance(remaining, (int, float)),
+                type(remaining).__name__,
+            )
     except Exception as exc:
         check("goal.get live round-trip", False, f"{type(exc).__name__}: {exc}")
 
     # Messaging signatures are load-bearing: v0.7.1 has no `mode` kwarg.
     try:
         agent_message_mod = require_kernel_module("agent_message")
+        report["capabilities"]["agent_message"] = {
+            "status": "available",
+            "request_type": "agent_message.list_agents",
+        }
         send_signature = inspect.signature(agent_message_mod.send)
         send_parameters = send_signature.parameters
         required_send = {"message", "broadcast_message", "receiver_role", "receiver_name"}
         check("agent_message.send required parameters", required_send <= set(send_parameters), str(send_signature))
         check("agent_message.send has no undocumented mode kwarg", "mode" not in send_parameters, str(send_signature))
         family = await maybe_await(agent_message_mod.list_agents())
+        valid_family = (
+            isinstance(family, dict) and isinstance(family.get("current"), dict)
+            and isinstance(family.get("entries"), list)
+        )
+        report["capabilities"]["agent_message"]["contract_status"] = (
+            "pass" if valid_family else "api_drift"
+        )
         check(
             "agent_message.list_agents wire shape",
-            isinstance(family, dict) and isinstance(family.get("current"), dict)
-            and isinstance(family.get("entries"), list),
+            valid_family,
             sorted(family) if isinstance(family, dict) else type(family).__name__,
         )
     except Exception as exc:
-        check("agent_message live round-trips", False, f"{type(exc).__name__}: {exc}")
+        if not record_optional_controller_absence(
+            "agent_message", "agent_message.list_agents", exc
+        ):
+            check("agent_message live round-trips", False, f"{type(exc).__name__}: {exc}")
 
     # Compaction/refinement scheduling state must remain inspectable.
     for module_name, required_keys in (
@@ -756,26 +803,49 @@ async def selfcheck() -> dict[str, Any]:
     # These read-only family/scheduler surfaces are used for recovery diagnostics.
     try:
         observe_mod = require_kernel_module("agent_observe")
+        report["capabilities"]["agent_observe"] = {
+            "status": "available",
+            "request_type": "agent_observe.list",
+        }
         observed = await maybe_await(observe_mod.list_agents())
+        valid_observed = (
+            isinstance(observed, dict) and isinstance(observed.get("current"), dict)
+            and isinstance(observed.get("agents"), list)
+        )
+        report["capabilities"]["agent_observe"]["contract_status"] = (
+            "pass" if valid_observed else "api_drift"
+        )
         check(
             "agent_observe.list_agents wire shape",
-            isinstance(observed, dict) and isinstance(observed.get("current"), dict)
-            and isinstance(observed.get("agents"), list),
+            valid_observed,
             sorted(observed) if isinstance(observed, dict) else type(observed).__name__,
         )
     except Exception as exc:
-        check("agent_observe live round-trip", False, f"{type(exc).__name__}: {exc}")
+        if not record_optional_controller_absence("agent_observe", "agent_observe.list", exc):
+            check("agent_observe live round-trip", False, f"{type(exc).__name__}: {exc}")
 
     try:
         heartbeat_mod = require_kernel_module("rlm_heartbeat")
+        report["capabilities"]["rlm_heartbeat"] = {
+            "status": "available",
+            "request_type": "rlm_heartbeat.list",
+        }
         heartbeat_info = await maybe_await(heartbeat_mod.list(include_inactive=False))
+        valid_heartbeat = (
+            isinstance(heartbeat_info, dict)
+            and isinstance(heartbeat_info.get("heartbeats"), list)
+        )
+        report["capabilities"]["rlm_heartbeat"]["contract_status"] = (
+            "pass" if valid_heartbeat else "api_drift"
+        )
         check(
             "rlm_heartbeat.list wire shape",
-            isinstance(heartbeat_info, dict) and isinstance(heartbeat_info.get("heartbeats"), list),
+            valid_heartbeat,
             sorted(heartbeat_info) if isinstance(heartbeat_info, dict) else type(heartbeat_info).__name__,
         )
     except Exception as exc:
-        check("rlm_heartbeat live round-trip", False, f"{type(exc).__name__}: {exc}")
+        if not record_optional_controller_absence("rlm_heartbeat", "rlm_heartbeat.list", exc):
+            check("rlm_heartbeat live round-trip", False, f"{type(exc).__name__}: {exc}")
 
     # Provisioning context and governance settings.
     depth = os.environ.get("RLM_DEPTH")
