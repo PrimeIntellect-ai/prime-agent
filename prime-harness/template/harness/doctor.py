@@ -4,7 +4,7 @@
 Stdlib-only; runs under the project Python. Exit 0 = healthy (warnings OK),
 exit 2 = at least one FAIL.
 
-Usage: python harness/doctor.py [--json]
+Usage: python harness/doctor.py [--json] [--strict]
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from manifest_policy import ManifestPolicyError, profile_minimum
 
 SKILLS = {
     "harness-orchestrator": "harness_orchestrator",
@@ -224,9 +226,10 @@ def check_manifest_applicability(report: Report, root: Path, manifest: dict[str,
         if not isinstance(profile, dict):
             invalid.append(f"{profile_name}: profile is not an object")
             continue
-        minimum = profile.get("min_applicable_checks", 1)
-        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
-            invalid.append(f"{profile_name}: invalid min_applicable_checks={minimum!r}")
+        try:
+            minimum = profile_minimum(profile, str(profile_name))
+        except ManifestPolicyError as exc:
+            invalid.append(str(exc))
             continue
         applicable = 0
         for section in ("required", "conditional"):

@@ -46,6 +46,7 @@ def test_fresh_install_copies_everything(tmp_repo):
         "harness/manifest.json",
         "harness/roster.yaml",
         "harness/doctor.py",
+        "harness/manifest_policy.py",
         "harness/upstream_check.py",
         "harness/patches/prime-agent/windows-kernel-venv-python.patch",
         "harness/patches/prime-agent/windows-kernel-windows-hide.patch",
