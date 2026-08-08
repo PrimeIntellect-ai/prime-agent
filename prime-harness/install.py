@@ -101,9 +101,10 @@ def _bounded_inventory(base: Path) -> dict[str, Path] | None:
 
 
 def _contains_python_source(base: Path) -> bool:
-    """Find a regular Python source under a bounded, non-link tree walk."""
+    """Find source only after validating the complete bounded non-link tree."""
     pending: list[tuple[Path, int]] = [(base, 0)]
     seen = 0
+    found_source = False
     while pending:
         directory, depth = pending.pop()
         if depth > 12:
@@ -124,10 +125,10 @@ def _contains_python_source(base: Path) -> bool:
                 if path.is_dir():
                     pending.append((path, depth + 1))
                 elif path.is_file() and path.suffix.casefold() in {".py", ".pyi"}:
-                    return True
+                    found_source = True
             except OSError as exc:
                 raise TailorError(f"unstable entry while scanning {base.name}: {exc}") from exc
-    return False
+    return found_source
 
 
 def _template_only_subtree(target: Path, relative: str) -> bool:
@@ -162,7 +163,12 @@ def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
         opened = os.fstat(descriptor)
         identity_before = (before.st_dev, before.st_ino)
         identity_opened = (opened.st_dev, opened.st_ino)
-        if not stat.S_ISREG(opened.st_mode) or identity_opened != identity_before or opened.st_size > limit:
+        metadata_opened = (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or identity_opened != identity_before
+            or opened.st_size > limit
+        ):
             return None
         chunks: list[bytes] = []
         remaining = limit + 1
@@ -175,10 +181,13 @@ def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
         data = b"".join(chunks)
         if len(data) > limit:
             return None
+        opened_after = os.fstat(descriptor)
         after = path.lstat()
         after_attributes = getattr(after, "st_file_attributes", 0)
         if (
-            (after.st_dev, after.st_ino) != identity_before
+            (opened_after.st_dev, opened_after.st_ino) != identity_opened
+            or (opened_after.st_size, opened_after.st_mtime_ns, opened_after.st_ctime_ns) != metadata_opened
+            or (after.st_dev, after.st_ino) != identity_before
             or stat.S_ISLNK(after.st_mode)
             or after_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
         ):
@@ -250,7 +259,13 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         checks.append(_check("tox", "python -m tox -q", "tox.ini", 900))
         detected.append("tox.ini")
 
-    lake_marker = next((item for item in ("lakefile.lean", "lakefile.toml") if (target / item).is_file()), None)
+    lake_marker = next(
+        (
+            item for item in ("lakefile.lean", "lakefile.toml")
+            if (target / item).is_file() and not _is_linklike(target / item)
+        ),
+        None,
+    )
     if lake_marker:
         checks.append(_check("lean-build", "lake build", lake_marker, 900))
         detected.append(lake_marker)

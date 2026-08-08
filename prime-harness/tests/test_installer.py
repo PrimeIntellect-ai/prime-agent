@@ -115,6 +115,35 @@ def test_doctor_passes_on_fresh_install(tmp_repo):
     assert proc.returncode == 0, f"doctor failed:\n{proc.stdout}\n{proc.stderr}"
 
 
+def test_bounded_text_rejects_same_inode_mutation_during_read(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("installer_mutation_test", INSTALL)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    victim = tmp_path / "pyproject.toml"
+    original = b"[tool.pytest.ini_options]\n" + b"a" * 70000
+    replacement = b"[tool.other.ini_options] \n" + b"b" * (len(original) - 26)
+    assert len(replacement) == len(original)
+    victim.write_bytes(original)
+    real_read = os.read
+    mutated = False
+
+    def mutating_read(descriptor, amount):
+        nonlocal mutated
+        data = real_read(descriptor, amount)
+        if not mutated:
+            mutated = True
+            with victim.open("r+b") as handle:
+                handle.write(replacement)
+                handle.flush()
+                os.fsync(handle.fileno())
+        return data
+
+    monkeypatch.setattr(module.os, "read", mutating_read)
+    assert module._bounded_text(victim) is None
+    assert mutated is True
+
+
 def test_bounded_text_rejects_file_replaced_between_check_and_open(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("installer_race_test", INSTALL)
     assert spec and spec.loader
@@ -178,6 +207,23 @@ def test_tailor_uses_simulation_and_pyproject_pytest_markers(tmp_repo):
     assert "pyproject.toml:pytest" in manifest["_detected"]
 
 
+def test_tailor_rejects_link_descendant_after_regular_python_source(tmp_repo):
+    source = tmp_repo / "src"
+    source.mkdir()
+    (source / "a.py").write_text("value = 1\n", encoding="utf-8")
+    outside = tmp_repo.parent / f"{tmp_repo.name}-outside-source"
+    outside.mkdir()
+    (outside / "external.py").write_text("secret = 1\n", encoding="utf-8")
+    try:
+        (source / "zlink").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation unavailable")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "link/reparse entry forbidden" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / "harness/manifest.json").exists()
+
+
 def test_tailor_rejects_empty_source_directory_as_vacuous(tmp_repo):
     (tmp_repo / "src").mkdir()
     proc = run_install(tmp_repo, "--tailor")
@@ -213,6 +259,19 @@ def test_tailor_dry_run_does_not_write_manifest_or_template(tmp_repo):
     assert "[dry-run] tailored manifest" in proc.stdout
     assert not (tmp_repo / "harness/manifest.json").exists()
     assert not (tmp_repo / ".prime/agent/APPEND_SYSTEM.md").exists()
+
+
+def test_tailor_rejects_linked_lean_marker(tmp_repo):
+    outside = tmp_repo.parent / f"{tmp_repo.name}-lakefile.lean"
+    outside.write_text("package external\n", encoding="utf-8")
+    try:
+        (tmp_repo / "lakefile.lean").symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlink creation unavailable")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / "harness/manifest.json").exists()
 
 
 def test_tailor_detects_tox_lean_and_nonplaceholder_node_tests(tmp_repo):
@@ -308,6 +367,21 @@ def test_tailor_preserves_existing_manifest_and_writes_review_sidecar(tmp_repo):
     sidecar = tmp_repo / "harness/manifest.tailored.json"
     assert sidecar.is_file()
     assert json.loads(sidecar.read_text(encoding="utf-8"))["profiles"]["default"]["required"]
+
+
+def test_doctor_reports_nonobject_manifest_as_structured_failure(tmp_repo):
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0
+    (tmp_repo / "harness/manifest.json").write_text("[]", encoding="utf-8")
+    doctor = subprocess.run(
+        [sys.executable, str(tmp_repo / "harness/doctor.py"), "--strict", "--json"],
+        cwd=tmp_repo, capture_output=True, text=True, timeout=120,
+    )
+    assert doctor.returncode == 2
+    report = json.loads(doctor.stdout)
+    manifest_check = next(item for item in report["checks"] if item["name"] == "manifest")
+    assert manifest_check["level"] == "FAIL"
+    assert "JSON object" in manifest_check["detail"]
 
 
 def test_doctor_strict_rejects_traversal_marker_even_when_outside_exists(tmp_repo):

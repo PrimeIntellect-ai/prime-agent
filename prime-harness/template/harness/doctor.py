@@ -365,13 +365,18 @@ def main() -> int:
     manifest = root / "harness" / "manifest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        profiles = sorted(data.get("profiles", {}))
-        if profiles:
-            report.ok("manifest", f"profiles: {', '.join(profiles)}")
-            if args.strict:
-                check_manifest_applicability(report, root, data)
+        if not isinstance(data, dict):
+            report.fail("manifest", f"root must be a JSON object, got {type(data).__name__}",
+                        "fix harness/manifest.json")
         else:
-            report.fail("manifest", "no profiles defined", "edit harness/manifest.json")
+            profiles_value = data.get("profiles", {})
+            profiles = sorted(profiles_value) if isinstance(profiles_value, dict) else []
+            if profiles:
+                report.ok("manifest", f"profiles: {', '.join(profiles)}")
+                if args.strict:
+                    check_manifest_applicability(report, root, data)
+            else:
+                report.fail("manifest", "no profiles defined", "edit harness/manifest.json")
     except FileNotFoundError:
         report.fail("manifest", f"missing {manifest}", "re-run install.py")
     except json.JSONDecodeError as exc:
