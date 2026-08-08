@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
@@ -198,12 +198,15 @@ def scan_session(path: Path | None, start: datetime | None, end: datetime, warni
         warnings.append("session:missing")
         return result
     seen_usage_ids: set[str] = set()
+    effective_end = end + timedelta(seconds=FUTURE_EVENT_SKEW_SECONDS)
     for entry in iter_jsonl(path, warnings, "session"):
         result["entries_seen"] += 1
         timestamp = parse_time(entry.get("timestamp"))
-        if timestamp is not None and (timestamp - end).total_seconds() > FUTURE_EVENT_SKEW_SECONDS:
+        if timestamp is not None and timestamp > effective_end:
             warnings.append("session:future_entry")
-        in_window = timestamp is None or ((start is None or timestamp >= start) and timestamp <= end)
+        in_window = timestamp is None or (
+            (start is None or timestamp >= start) and timestamp <= effective_end
+        )
         entry_type = entry.get("type")
         if entry_type == "message":
             message = entry.get("message")
@@ -251,15 +254,15 @@ def scan_session(path: Path | None, start: datetime | None, end: datetime, warni
 def scan_registry(path: Path | None, start: datetime | None, now: datetime, stale_minutes: float,
                   warnings: list[str]) -> dict[str, Any]:
     latest: dict[str, dict[str, Any]] = {}
+    effective_now = now + timedelta(seconds=FUTURE_EVENT_SKEW_SECONDS)
     if path is None or not path.is_file():
         warnings.append("registry:missing")
     else:
         for entry in iter_jsonl(path, warnings, "registry"):
             child_id = entry.get("childId")
             entry_time = parse_time(entry.get("updatedAt")) or parse_time(entry.get("createdAt"))
-            if entry_time is not None and entry_time > now:
-                if (entry_time - now).total_seconds() > FUTURE_EVENT_SKEW_SECONDS:
-                    warnings.append("registry:future_entry")
+            if entry_time is not None and entry_time > effective_now:
+                warnings.append("registry:future_entry")
                 continue
             if isinstance(child_id, str) and child_id:
                 latest[child_id] = entry
@@ -345,13 +348,16 @@ def scan_children_state(path: Path, artifact_root: Path, start: datetime | None,
     records: dict[str, dict[str, Any]] = {}
     if data is None:
         return {"present": path.is_file(), "records": records}
+    effective_end = end + timedelta(seconds=FUTURE_EVENT_SKEW_SECONDS)
     for name, entry in data.items():
         if not isinstance(name, str) or not isinstance(entry, dict):
             warnings.append("children_state:invalid_entry")
             continue
         spawned = parse_time(entry.get("spawned_at")) or parse_time(entry.get("reserved_at"))
-        if spawned is not None and ((start is not None and spawned < start) or spawned > end):
-            if (spawned - end).total_seconds() > FUTURE_EVENT_SKEW_SECONDS:
+        if spawned is not None and (
+            (start is not None and spawned < start) or spawned > effective_end
+        ):
+            if spawned > effective_end:
                 warnings.append("children_state:future_entry")
             continue
         raw_result_path = entry.get("result_path")
@@ -897,7 +903,7 @@ def derive_alerts(scorecard: dict[str, Any], *, min_evidence_per_100_lines: floa
     if not scorecard["inputs"]["session_file_present"]:
         add_alert(alerts, "TELEMETRY_MISSING", "critical", "The root session JSONL was not readable.")
     if any("future_" in warning or ":future" in warning for warning in scorecard["warnings"]):
-        add_alert(alerts, "FUTURE_EVENT", "warning", "Events later than the inclusive scorecard clock were excluded.")
+        add_alert(alerts, "FUTURE_EVENT", "warning", "Events beyond the bounded live-clock skew were excluded.")
     if scorecard["warnings"]:
         add_alert(alerts, "INPUT_ANOMALY", "warning", "One or more durable inputs were missing or malformed.", count=len(scorecard["warnings"]))
     alerts.sort(key=lambda item: (SEVERITY_ORDER.get(item["severity"], 99), item["code"]))
@@ -929,7 +935,8 @@ def discover_session_file(session_dir: Path | None, registry: Path | None) -> Pa
         or os.environ.get("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
     )
     if override:
-        session_directories.append(Path(os.path.expanduser(override)))
+        explicit_candidate = Path(os.path.expanduser(override)) / session_name
+        return explicit_candidate if explicit_candidate.is_file() else None
     session_directories.append(session_dir.parent.parent / "sessions")
     coding_agent_dir = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
     if coding_agent_dir:

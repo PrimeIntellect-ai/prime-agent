@@ -198,6 +198,7 @@ def test_reconcile_accepts_v071_session_name(tmp_repo, monkeypatch):
         "api_drift",
         "session_optional_unavailable",
         "session_optional_not_in_kernel",
+        "session_optional_broken_import",
     ),
 )
 def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, controller_mode):
@@ -302,20 +303,36 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, contro
         "rlm_heartbeat": types.SimpleNamespace(list=heartbeat_list),
     }
     def require_module(name):
-        if controller_mode == "session_optional_not_in_kernel" and name in {"goal", "compact", "refine"}:
-            raise orch.NotInKernel(f"Module {name!r} is unavailable outside the kernel")
+        if controller_mode in {
+            "session_optional_not_in_kernel",
+            "session_optional_broken_import",
+        } and name in {"goal", "compact", "refine"}:
+            missing_name = (
+                name if controller_mode == "session_optional_not_in_kernel"
+                else "broken_controller_dependency"
+            )
+            cause = ModuleNotFoundError(
+                f"No module named {missing_name!r}", name=missing_name
+            )
+            try:
+                raise cause
+            except ModuleNotFoundError as exc:
+                raise orch.NotInKernel(
+                    f"Module {name!r} is unavailable outside the kernel"
+                ) from exc
         return modules[name]
 
     monkeypatch.setattr(orch, "require_kernel_module", require_module)
-    if controller_mode == "api_drift":
+    if controller_mode in {"api_drift", "session_optional_broken_import"}:
         with pytest.raises(orch.SelfcheckError) as caught:
             asyncio.run(orch.selfcheck())
         report = caught.value.report
         assert report["status"] == "fail"
         assert len(report["failures"]) == 3
-        assert {
-            item["contract_status"] for item in report["capabilities"].values()
-        } == {"api_drift"}
+        if controller_mode == "api_drift":
+            assert {
+                item["contract_status"] for item in report["capabilities"].values()
+            } == {"api_drift"}
         assert report["warnings"] == []
         return
 

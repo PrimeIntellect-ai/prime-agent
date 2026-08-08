@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 INSTALL = HARNESS_ROOT / "install.py"
 
@@ -61,6 +63,7 @@ def test_fresh_install_copies_everything(tmp_repo):
     assert "artifacts/harness/" in gitignore
     assert "__pycache__/" in gitignore
     assert "*.py[cod]" in gitignore
+    assert ".prime/agent/harness-tests/template" in gitignore
 
 
 def test_reinstall_is_idempotent(tmp_repo):
@@ -174,13 +177,21 @@ def test_installed_conftest_manages_template_link_without_shell_symlink(tmp_path
     installed_conftest.pytest_unconfigure(None)
     assert not os.path.lexists(link)
 
+    link.mkdir()
+    (link / "sentinel.txt").write_text("shadow-copy", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="does not resolve to the consumer root"):
+        installed_conftest.pytest_configure(None)
+    assert (link / "sentinel.txt").read_text(encoding="utf-8") == "shadow-copy"
+
 
 def test_customizable_consumer_contracts_are_not_frozen_in_installed_selftests():
     bundle_root = HARNESS_ROOT / "template/.prime/agent/harness-tests"
+    assert not (bundle_root / "tests/test_source_reviewability.py").exists()
     assert not (bundle_root / "tests/test_template_checks.py").exists()
     assert not (bundle_root / "tests/test_workflow.py").exists()
     bundle_doc = (bundle_root / "BUNDLE.md").read_text(encoding="utf-8").lower()
     assert "custom" in bundle_doc
+    assert "test_source_reviewability.py" in bundle_doc
     assert "test_template_checks.py" in bundle_doc and "test_workflow.py" in bundle_doc
 
 
@@ -191,6 +202,7 @@ def test_installed_component_selftests_match_upstream_sources():
         "test_api_reference.py",
         "test_installer.py",
         "test_live_kernel_e2e.py",
+        "test_source_reviewability.py",
         "test_template_checks.py",
         "test_workflow.py",
     }

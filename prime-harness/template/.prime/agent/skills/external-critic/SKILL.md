@@ -83,4 +83,6 @@ external_critic.record_panel_verdict(
 
 A missing CLI, timeout, nonzero exit, malformed response, or failed workstream
 makes the panel `partial`/`error` with verdict `inconclusive`; it can never be
-represented as zero findings.
+represented as zero findings. Closure evidence must be live, verified, created
+at or after the panel run, and explicitly name the exact `finding_id`; a generic
+reference to the shared `panel_id` is rejected.

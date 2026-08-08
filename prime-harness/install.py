@@ -26,6 +26,8 @@ GITIGNORE_BLOCK = [
     "# Python transient bytecode",
     "__pycache__/",
     "*.py[cod]",
+    "# pytest-managed installed harness link",
+    ".prime/agent/harness-tests/template",
 ]
 
 IGNORED_TEMPLATE_DIRS = {"__pycache__"}

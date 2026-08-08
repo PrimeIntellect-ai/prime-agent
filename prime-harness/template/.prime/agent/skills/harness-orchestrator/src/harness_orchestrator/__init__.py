@@ -670,7 +670,14 @@ async def selfcheck() -> dict[str, Any]:
             rf"host request type [\"']{re.escape(request_type)}[\"'] is not available in this session",
             message,
         )
-        if unavailable is None and not (allow_not_in_kernel and isinstance(exc, NotInKernel)):
+        missing_requested_controller = False
+        if allow_not_in_kernel and isinstance(exc, NotInKernel):
+            cause = exc.__cause__
+            missing_requested_controller = (
+                isinstance(cause, ModuleNotFoundError)
+                and cause.name == capability
+            )
+        if unavailable is None and not missing_requested_controller:
             return False
         observed = f"{type(exc).__name__}: {message}"
         report["capabilities"][capability] = {

@@ -34,6 +34,8 @@ FORMAT_VERSION = 1
 MANIFEST_NAME = "MANIFEST.json"
 BUFFER_SIZE = 1024 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+MAX_TOTAL_MEMBER_BYTES = 16 * 1024 * 1024 * 1024
 MAX_MTIME_NS = 4_102_444_800 * 1_000_000_000  # 2100-01-01 UTC
 ROOT_PREFIXES = {
     "session": "session",
@@ -314,6 +316,7 @@ def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path
     directories: list[dict[str, Any]] = []
     files: list[tuple[str, Path, str, os.stat_result]] = []
     seen_paths: dict[str, str] = {}
+    total_source_bytes = 0
     for name, (root, exclude_backups) in roots.items():
         present = os.path.lexists(root)
         root_manifest[name] = {"archive_prefix": ROOT_PREFIXES[name], "present": present}
@@ -339,7 +342,13 @@ def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path
             if path_key in seen_paths:
                 raise BackupError(f"portable path collision: {seen_paths[path_key]} and {archive_path}")
             seen_paths[path_key] = archive_path
-            files.append((archive_path, source, name, _regular_source_stat(source)))
+            source_stat = _regular_source_stat(source)
+            if source_stat.st_size > MAX_MEMBER_BYTES:
+                raise BackupError(f"member exceeds uncompressed size limit: {archive_path}")
+            total_source_bytes += source_stat.st_size
+            if total_source_bytes > MAX_TOTAL_MEMBER_BYTES:
+                raise BackupError("backup exceeds total uncompressed size limit")
+            files.append((archive_path, source, name, source_stat))
 
     temp_output = output.parent / f".{output.name}.{os.getpid()}.tmp"
     if temp_output.exists():
@@ -369,6 +378,7 @@ def create_backup(*, project_root: Path, session_dir: Path, global_harness: Path
                     "directories": sorted(directories, key=lambda item: item["path"]),
                     "files": sorted(file_manifest, key=lambda item: item["path"]),
                 }
+                _validate_manifest(manifest)
                 manifest_bytes = _canonical_json(manifest)
                 manifest_info = _zip_info(MANIFEST_NAME, 0o600, int(timestamp.timestamp() * 1_000_000_000))
                 archive.writestr(manifest_info, manifest_bytes)
@@ -413,6 +423,7 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
             raise BackupError(f"invalid directory metadata: {path}")
         _safe_mode(item["mode"], path)
         paths.add(path)
+    total_file_bytes = 0
     for item in files:
         if not isinstance(item, dict) or set(item) != {"path", "sha256", "size", "mode", "mtime_ns", "sqlite_snapshot"}:
             raise BackupError("invalid file manifest entry")
@@ -431,6 +442,11 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
             or type(item["sqlite_snapshot"]) is not bool
         ):
             raise BackupError(f"invalid file metadata: {path}")
+        if item["size"] > MAX_MEMBER_BYTES:
+            raise BackupError(f"member exceeds uncompressed size limit: {path}")
+        total_file_bytes += item["size"]
+        if total_file_bytes > MAX_TOTAL_MEMBER_BYTES:
+            raise BackupError("backup exceeds total uncompressed size limit")
         _safe_mode(item["mode"], path)
         expected_sqlite_snapshot = PurePosixPath(path).name.casefold() == "evidence.db"
         if item["sqlite_snapshot"] is not expected_sqlite_snapshot:
@@ -466,6 +482,7 @@ def _inspect_archive(archive_path: Path, *, extract_to: Path | None = None) -> d
                 raise BackupError("archive contains case-insensitive member collisions")
             if names.count(MANIFEST_NAME) != 1:
                 raise BackupError("archive must contain exactly one manifest")
+            archive_total_bytes = 0
             for info in infos:
                 if info.flag_bits & 0x1:
                     raise BackupError(f"encrypted archive member is forbidden: {info.filename}")
@@ -473,6 +490,13 @@ def _inspect_archive(archive_path: Path, *, extract_to: Path | None = None) -> d
                     raise BackupError(f"directory/symlink ZIP members are forbidden: {info.filename}")
                 if info.filename != MANIFEST_NAME:
                     _safe_archive_path(info.filename)
+                    if info.file_size > MAX_MEMBER_BYTES:
+                        raise BackupError(
+                            f"member exceeds uncompressed size limit: {info.filename}"
+                        )
+                    archive_total_bytes += info.file_size
+                    if archive_total_bytes > MAX_TOTAL_MEMBER_BYTES:
+                        raise BackupError("backup exceeds total uncompressed size limit")
             manifest_info = archive.getinfo(MANIFEST_NAME)
             if manifest_info.file_size > MAX_MANIFEST_BYTES:
                 raise BackupError("manifest is too large")

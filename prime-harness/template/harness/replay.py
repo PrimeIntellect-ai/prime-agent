@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import signal
 import subprocess
 import sys
 import tempfile
@@ -408,35 +409,90 @@ def _challenge(task: dict[str, Any], corpus: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _executor_command(
+    executor: Path,
+    version_info: tuple[int, ...] | None = None,
+) -> list[str]:
+    version = tuple(version_info or sys.version_info)
+    command = [sys.executable]
+    # -P was added in Python 3.11. Retain the supported 3.10 runtime rather
+    # than making every executor fail with "Unknown option" there.
+    if version[:2] >= (3, 11):
+        command.append("-P")
+    command.extend(("-S", str(executor)))
+    return command
+
+
+def _terminate_executor_tree(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+                creationflags=creationflags,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 def _run_executor(executor: Path, payload: dict[str, Any], timeout_seconds: float) -> tuple[Any | None, str | None]:
     # Scrub all PYTHON* variables ourselves (what -E would do), then pin the
-    # hash seed.  -P retains that seed while keeping the script directory out
-    # of sys.path; unlike -I it does not imply -E.
+    # hash seed.  -P retains that seed on 3.11+ while keeping the script
+    # directory out of sys.path; unlike -I it does not imply -E.
     environment = {
         key: value for key, value in os.environ.items()
         if not key.upper().startswith("PYTHON")
     }
     environment["PYTHONHASHSEED"] = "0"
+    popen_options: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_options["start_new_session"] = True
     try:
-        process = subprocess.run(
-            [sys.executable, "-P", "-S", str(executor)],
-            input=_canonical(payload),
+        process = subprocess.Popen(
+            _executor_command(executor),
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
             env=environment,
+            **popen_options,
         )
-    except subprocess.TimeoutExpired:
-        return None, "executor_timeout"
     except OSError:
         return None, "executor_launch_error"
+    try:
+        stdout, _stderr = process.communicate(
+            input=_canonical(payload), timeout=timeout_seconds
+        )
+    except subprocess.TimeoutExpired:
+        _terminate_executor_tree(process)
+        try:
+            process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            _terminate_executor_tree(process)
+        return None, "executor_timeout"
     if process.returncode != 0:
         return None, "executor_nonzero_exit"
-    if len(process.stdout) > 200_000:
+    if len(stdout) > 200_000:
         return None, "executor_output_too_large"
     try:
         response = json.loads(
-            process.stdout.decode("utf-8"),
+            stdout.decode("utf-8"),
             object_pairs_hook=_pairs_no_duplicates,
             parse_constant=_reject_json_constant,
         )

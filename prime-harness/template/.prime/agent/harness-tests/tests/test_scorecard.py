@@ -314,7 +314,7 @@ def test_vacuous_new_profile_cannot_mask_unrecovered_default_failure(tmp_repo: P
     assert "GATE_HISTORY_FAILURES" not in codes
 
 
-def test_small_live_append_clock_skew_is_excluded_without_future_warning(tmp_path: Path) -> None:
+def test_small_live_append_clock_skew_is_included_without_future_warning(tmp_path: Path) -> None:
     scorecard = load_scorecard_module()
     end = scorecard.parse_time("2026-01-03T00:00:00Z")
     assert end is not None
@@ -339,9 +339,14 @@ def test_small_live_append_clock_skew_is_excluded_without_future_warning(tmp_pat
         "too-new": {"spawned_at": "2026-01-03T00:00:05Z"},
     }), encoding="utf-8")
     warnings: list[str] = []
-    assert scorecard.scan_session(session, None, end, warnings)["goal"] is None
-    assert scorecard.scan_registry(registry, None, end, 30, warnings)["children"] == []
-    assert scorecard.scan_children_state(children, artifacts, None, end, warnings)["records"] == {}
+    assert scorecard.scan_session(session, None, end, warnings)["goal"]["goalId"] == "too-new"
+    assert [
+        child["child_id"]
+        for child in scorecard.scan_registry(registry, None, end, 30, warnings)["children"]
+    ] == ["too-new"]
+    assert "too-new" in scorecard.scan_children_state(
+        children, artifacts, None, end, warnings
+    )["records"]
     assert not any("future_entry" in warning for warning in warnings)
 
     session.write_text(session.read_text(encoding="utf-8").replace("00:00:05Z", "00:00:11Z"), encoding="utf-8")
@@ -373,6 +378,8 @@ def test_discover_session_file_honors_override_and_relocated_layout(tmp_path: Pa
     override_file.write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("PRIME_AGENT_SESSION_DIR", str(override_sessions))
     assert scorecard.discover_session_file(relocated_session_dir, None) == override_file
+    override_file.unlink()
+    assert scorecard.discover_session_file(relocated_session_dir, None) is None
 
 
 def test_now_is_inclusive_upper_bound_for_every_durable_stream(tmp_repo: Path) -> None:

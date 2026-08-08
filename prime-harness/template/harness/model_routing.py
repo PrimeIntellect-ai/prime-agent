@@ -35,6 +35,8 @@ def _load_evalset(path: str | Path | None = None):
         raise ValueError("evalset task IDs do not exactly match supported scoring oracles")
 
     roles = data.get("role_weights", {})
+    if not isinstance(roles, dict) or not roles:
+        raise ValueError("evalset role_weights must be non-empty")
     minimum_tasks = data.get("minimum_tasks_per_candidate")
     if type(minimum_tasks) is not int or not 3 <= minimum_tasks <= len(tasks):
         raise ValueError("invalid evalset minimum_tasks_per_candidate")
@@ -173,7 +175,14 @@ def score_manifest(
         relative, path = _confined_response_path(root, item["response_path"])
         raw = path.read_bytes()
         digest = hashlib.sha256(raw).hexdigest()
-        if item.get("sha256") and item["sha256"] != digest:
+        claimed_digest = item.get("sha256")
+        if (
+            not isinstance(claimed_digest, str)
+            or len(claimed_digest) != 64
+            or any(character not in "0123456789abcdef" for character in claimed_digest)
+        ):
+            raise ValueError("response sha256 is required as lowercase hexadecimal")
+        if claimed_digest != digest:
             raise ValueError("response sha256 mismatch")
         payload = json.loads(raw)
         answers = payload.get("evidence", {}).get("answers", {})

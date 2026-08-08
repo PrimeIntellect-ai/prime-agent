@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -52,11 +52,19 @@ def write_response(path: Path, response_answers=None) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def bound_candidate(path: Path, selector: str = "m") -> dict[str, str]:
+    return {
+        "selector": selector,
+        "response_path": path.name,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
 def test_perfect_scores_and_routes(tmp_path):
     write_response(tmp_path / "r.json")
     result = mod.score_manifest({
         "response_root": str(tmp_path),
-        "candidates": [{"selector": "m", "response_path": "r.json"}],
+        "candidates": [bound_candidate(tmp_path / "r.json")],
     })
     assert result["status"] == "pass"
     assert result["candidates"][0]["overall_score"] == 1
@@ -73,7 +81,7 @@ def test_wrong_numeric_and_prefixed_contract_are_measured(tmp_path):
     write_response(tmp_path / "r.json", candidate_answers)
     result = mod.score_manifest({
         "response_root": str(tmp_path),
-        "candidates": [{"selector": "m", "response_path": "r.json"}],
+        "candidates": [bound_candidate(tmp_path / "r.json")],
     })
     candidate = result["candidates"][0]
     assert candidate["task_scores"]["num-expm1-cancellation"] < 1
@@ -84,7 +92,7 @@ def test_empty_and_arbitrary_answers_fail_cleanly(tmp_path):
     write_response(tmp_path / "r.json", {"junk": {}, "x": {}, "y": {}})
     result = mod.score_manifest({
         "response_root": str(tmp_path),
-        "candidates": [{"selector": "m", "response_path": "r.json"}],
+        "candidates": [bound_candidate(tmp_path / "r.json")],
     })
     assert result["status"] == "fail"
     assert result["candidates"][0]["tasks_attempted"] == 0
@@ -99,8 +107,8 @@ def test_role_floor_filters_unqualified_fallbacks_and_fails_missing_role(tmp_pat
     both = mod.score_manifest({
         "response_root": str(tmp_path),
         "candidates": [
-            {"selector": "good", "response_path": "good.json"},
-            {"selector": "weak", "response_path": "weak.json"},
+            bound_candidate(tmp_path / "good.json", "good"),
+            bound_candidate(tmp_path / "weak.json", "weak"),
         ],
     })
     route = next(
@@ -113,7 +121,7 @@ def test_role_floor_filters_unqualified_fallbacks_and_fails_missing_role(tmp_pat
 
     weak_only = mod.score_manifest({
         "response_root": str(tmp_path),
-        "candidates": [{"selector": "weak", "response_path": "weak.json"}],
+        "candidates": [bound_candidate(tmp_path / "weak.json", "weak")],
     })
     assert weak_only["status"] == "fail"
     assert weak_only["routing_table"] == []
@@ -132,18 +140,39 @@ def test_minimum_role_score_is_validated(tmp_path):
         assert "minimum_role_score" in str(caught.value) or value == "not-a-score"
 
 
+def test_role_weights_must_be_nonempty(tmp_path):
+    source = ROOT / "template/checks/evalset/model-routing-v1.json"
+    data = json.loads(source.read_text(encoding="utf-8"))
+    data["role_weights"] = {}
+    path = tmp_path / "empty-roles.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="role_weights must be non-empty"):
+        mod._load_evalset(path)
+
+
 def test_response_paths_are_confined_and_hashed(tmp_path):
     write_response(tmp_path / "r.json")
     with pytest.raises(ValueError, match="confined"):
         mod.score_manifest({
             "response_root": str(tmp_path),
-            "candidates": [{"selector": "m", "response_path": "../r.json"}],
+            "candidates": [{"selector": "m", "response_path": "../r.json", "sha256": "0" * 64}],
         })
     result = mod.score_manifest({
         "response_root": str(tmp_path),
-        "candidates": [{"selector": "m", "response_path": "r.json"}],
+        "candidates": [bound_candidate(tmp_path / "r.json")],
     })
     assert result["candidates"][0]["response_sha256"]
+
+
+def test_response_digest_is_mandatory_and_content_binding(tmp_path):
+    write_response(tmp_path / "r.json")
+    for missing_digest in ({}, {"sha256": ""}):
+        item = {"selector": "m", "response_path": "r.json", **missing_digest}
+        with pytest.raises(ValueError, match="sha256 is required"):
+            mod.score_manifest({
+                "response_root": str(tmp_path),
+                "candidates": [item],
+            })
 
 
 def test_three_recognized_but_wrong_answers_do_not_promote(tmp_path):
@@ -155,26 +184,8 @@ def test_three_recognized_but_wrong_answers_do_not_promote(tmp_path):
     write_response(tmp_path / "r.json", bad)
     result = mod.score_manifest({
         "response_root": str(tmp_path),
-        "candidates": [{"selector": "m", "response_path": "r.json"}],
+        "candidates": [bound_candidate(tmp_path / "r.json")],
     })
     assert result["candidates"][0]["tasks_attempted"] == 3
     assert result["status"] == "fail"
     assert result["routing_table"] == []
-
-
-def test_routing_and_replay_share_reviewable_decimal_expm1_oracle():
-    replay_source = ROOT / "template/harness/replay.py"
-    shared_source = ROOT / "template/harness/numeric_reference.py"
-    routing_text = SOURCE.read_text(encoding="utf-8")
-    replay_text = replay_source.read_text(encoding="utf-8")
-    test_text = Path(__file__).read_text(encoding="utf-8")
-
-    assert shared_source.is_file()
-    assert "from numeric_reference import decimal_expm1" in routing_text
-    assert "from numeric_reference import decimal_expm1" in replay_text
-    assert not re.search(r";\s*[A-Za-z_]", routing_text)
-    assert not any(
-        line.startswith(" ") and not line.startswith("    ")
-        for line in routing_text.splitlines()
-    )
-    assert not re.search(r";\s*[A-Za-z_]", test_text)

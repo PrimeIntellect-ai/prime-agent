@@ -172,6 +172,34 @@ def test_manifest_mtime_has_portable_upper_bound(tmp_path):
     assert "Traceback" not in cli.stderr
 
 
+def test_restore_rejects_oversized_members_before_decompression(tmp_path):
+    project, session, global_harness, connection = make_sources(tmp_path)
+    archive = tmp_path / "baseline.zip"
+    try:
+        backup.create_backup(
+            project_root=project,
+            session_dir=session,
+            global_harness=global_harness,
+            output=archive,
+        )
+    finally:
+        connection.close()
+
+    oversized = tmp_path / "oversized.zip"
+
+    def inflate_declared_size(members):
+        manifest = json.loads(members[backup.MANIFEST_NAME])
+        manifest["files"][0]["size"] = backup.MAX_MEMBER_BYTES + 1
+        members[backup.MANIFEST_NAME] = backup._canonical_json(manifest)
+        return members
+
+    rewrite_zip(archive, oversized, inflate_declared_size)
+    destination = tmp_path / "must-not-exist"
+    with pytest.raises(backup.BackupError, match="member exceeds uncompressed size limit"):
+        backup.restore_backup(oversized, destination)
+    assert not destination.exists()
+
+
 def test_missing_global_root_is_recorded_not_fabricated(tmp_path):
     project, session, global_harness, connection = make_sources(tmp_path)
     shutil.rmtree(global_harness)

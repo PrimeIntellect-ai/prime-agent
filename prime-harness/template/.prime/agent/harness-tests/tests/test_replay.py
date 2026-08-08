@@ -182,6 +182,62 @@ def test_numeric_precision_ladder_cannot_be_empty_or_malformed(tmp_path):
     assert details == {"ladder_passed": 0, "ladder_total": 0, "shape_ok": True}
 
 
+def test_executor_command_supports_python_310_without_safe_path_flag(tmp_path):
+    replay = load_replay_module("prime_harness_replay_python310")
+    executor = tmp_path / "adapter.py"
+    assert replay._executor_command(executor, (3, 10)) == [
+        sys.executable,
+        "-S",
+        str(executor),
+    ]
+    current = replay._executor_command(executor, (3, 11))
+    assert current == [sys.executable, "-P", "-S", str(executor)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows descendant teardown contract")
+def test_executor_timeout_terminates_windows_descendants(tmp_path):
+    replay = load_replay_module("prime_harness_replay_process_tree")
+    pid_file = tmp_path / "descendant.pid"
+    executor = tmp_path / "spawns_descendant.py"
+    executor.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+        f"Path({str(pid_file)!r}).write_text(str(child.pid), encoding='ascii')\n"
+        "time.sleep(300)\n",
+        encoding="utf-8",
+    )
+
+    result, error = replay._run_executor(executor, {}, 1.0)
+    assert result is None and error == "executor_timeout"
+    descendant_pid = int(pid_file.read_text(encoding="ascii"))
+
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    def is_alive(pid):
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            assert kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        assert not is_alive(descendant_pid)
+    finally:
+        if is_alive(descendant_pid):
+            subprocess.run(
+                ["taskkill", "/PID", str(descendant_pid), "/T", "/F"],
+                capture_output=True,
+                timeout=15,
+            )
+
+
 def test_executor_honors_pinned_hash_seed_and_scrubs_python_environment(tmp_path, monkeypatch):
     replay = load_replay_module("prime_harness_replay_hash_seed")
     executor = tmp_path / "hash_adapter.py"
@@ -202,7 +258,7 @@ def test_executor_honors_pinned_hash_seed_and_scrubs_python_environment(tmp_path
     }
     expected_environment["PYTHONHASHSEED"] = "0"
     expected_process = subprocess.run(
-        [sys.executable, "-P", "-S", str(executor)],
+        replay._executor_command(executor),
         input=b"{}",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -224,7 +280,7 @@ def test_replay_imports_only_stdlib():
     for node in ast.walk(tree):
         if isinstance(node, ast.Import): imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module: imported.add(node.module.split(".")[0])
-    assert imported <= {"argparse", "ast", "decimal", "hashlib", "json", "math", "numeric_reference", "os", "pathlib", "random", "subprocess", "sys", "tempfile", "typing", "__future__"}
+    assert imported <= {"argparse", "ast", "decimal", "hashlib", "json", "math", "numeric_reference", "os", "pathlib", "random", "signal", "subprocess", "sys", "tempfile", "typing", "__future__"}
 
 
 def test_checked_baseline_executes_adapter_and_is_byte_stable_twice(replay_repo):

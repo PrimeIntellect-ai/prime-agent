@@ -50,6 +50,17 @@ def test_extract_deduplicates_identical_findings_arrays():
     assert critic._extract_json_array(f"```json\n{encoded}\n```\nRepeated: {encoded}") == findings
 
 
+def test_extract_ignores_bracket_arrays_inside_finding_strings():
+    findings = [{
+        "severity": "major",
+        "file": "module.py",
+        "claim": "quoted [{}] syntax must remain inert",
+        "evidence": "input [{}] and [] crash the parser",
+        "proposed_falsification_test": "parse the output",
+    }]
+    assert critic._extract_json_array(f"Review notes\n{json.dumps(findings)}") == findings
+
+
 def test_severity_counts():
     counts = critic._severity_counts([{"severity": "Major"}, {"severity": "major"}, {}])
     assert counts == {"major": 2, "info": 1}
@@ -175,6 +186,18 @@ def test_panel_ledger_recovers_stale_lock_without_waiting_for_timeout(tmp_repo, 
     assert not list(lock_path.parent.glob(lock_path.name + ".stale-*"))
 
 
+def test_panel_ledger_never_steals_a_stale_lock_from_live_owner(tmp_repo):
+    ledger_path = tmp_repo / "artifacts/harness/critic/live-owner-ledger.jsonl"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger_path.with_name(ledger_path.name + ".lock")
+    lock_path.write_text(f"{os.getpid()}\n", encoding="ascii")
+    stale = time.time() - 120
+    os.utime(lock_path, (stale, stale))
+
+    assert critic._recover_stale_panel_lock(lock_path) is False
+    assert lock_path.read_text(encoding="ascii") == f"{os.getpid()}\n"
+
+
 def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch):
     _commit_change(tmp_repo)
     finding = [{"severity": "major", "file": "module.py", "line": 1,
@@ -259,14 +282,15 @@ def test_panel_verdict_requires_finding_linked_post_panel_evidence(tmp_repo, mon
         rows = [
             ("ev-unrelated-late", "verified", None, "an unrelated verified claim", "", "pytest", "9999-01-01T00:00:00+00:00", "[]"),
             ("ev-linked-old", "verified", None, "old claim", f"covers {finding_id}", "pytest", "1900-01-01T00:00:00+00:00", "[]"),
-            ("ev-panel-linked-late", "verified", None, "panel closure", "", "pytest", "9999-01-01T00:00:00+00:00", json.dumps([panel["panel_id"]])),
+            ("ev-panel-linked-late", "verified", None, "generic panel administration", "", "pytest", "9999-01-01T00:00:00+00:00", json.dumps([panel["panel_id"]])),
+            ("ev-finding-linked-late", "verified", None, "finding closure", f"covers {finding_id}", "pytest", "9999-01-01T00:00:00+00:00", "[]"),
         ]
         connection.executemany("INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
         connection.commit()
     finally:
         connection.close()
 
-    with pytest.raises(ValueError, match="reference the finding_id or panel_id"):
+    with pytest.raises(ValueError, match="reference the finding_id"):
         critic.record_panel_verdict(
             panel["panel_id"], finding_id, "rebutted", rationale="unrelated",
             evidence_ids=["ev-unrelated-late"], verifier="pytest",
@@ -276,11 +300,16 @@ def test_panel_verdict_requires_finding_linked_post_panel_evidence(tmp_repo, mon
             panel["panel_id"], finding_id, "fixed", rationale="too old",
             evidence_ids=["ev-linked-old"], verifier="pytest",
         )
+    with pytest.raises(ValueError, match="reference the finding_id"):
+        critic.record_panel_verdict(
+            panel["panel_id"], finding_id, "fixed", rationale="generic panel row",
+            evidence_ids=["ev-panel-linked-late"], verifier="pytest",
+        )
     accepted = critic.record_panel_verdict(
         panel["panel_id"], finding_id, "fixed", rationale="linked and fresh",
-        evidence_ids=["ev-panel-linked-late"], verifier="pytest",
+        evidence_ids=["ev-finding-linked-late"], verifier="pytest",
     )
-    assert accepted["evidence_records"][0]["id"] == "ev-panel-linked-late"
+    assert accepted["evidence_records"][0]["id"] == "ev-finding-linked-late"
     assert accepted["evidence_records"][0]["verifier"] == "pytest"
 
 

@@ -29,6 +29,7 @@ import time
 import uuid
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -101,12 +102,38 @@ def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
                 return inner if all(isinstance(item, dict) for item in inner) else None
     except json.JSONDecodeError:
         pass
-    fence = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", text, flags=re.DOTALL)
-    candidates = fence + re.findall(r"(\[[^\[\]]*(?:\{.*?\})[^\[\]]*\])", text, flags=re.DOTALL)
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
+    # Collect balanced top-level arrays while honoring JSON string escapes. Regex
+    # extraction mistakes examples such as "input [{}]" inside a finding for a
+    # second response and turns a valid workstream into an availability failure.
+    candidates: list[str] = []
+    for fence_body in re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL):
+        candidates.append(fence_body.strip())
+
+    depth = 0
+    start: int | None = None
+    in_string = False
+    escaped = False
+    for index, character in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "[":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif character == "]" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidates.append(text[start : index + 1])
+                start = None
+
     distinct: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
         try:
@@ -611,8 +638,50 @@ def read_panel_ledger(path: str | os.PathLike[str] | None = None) -> list[dict[s
     return records
 
 
+def _pid_is_alive(pid: int) -> bool | None:
+    """Return process liveness, or None when the OS cannot prove either state."""
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        error_access_denied = 5
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return None if ctypes.get_last_error() == error_access_denied else False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return None
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return None
+    return True
+
+
+def _panel_lock_owner_alive(lock_path: Path) -> bool | None:
+    try:
+        owner_text = lock_path.read_text(encoding="ascii").strip()
+        return _pid_is_alive(int(owner_text))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        # An empty/corrupt lock may be left if the creator crashes before it
+        # writes its PID. Age still has to exceed the stale threshold below.
+        return False
+
+
 def _recover_stale_panel_lock(lock_path: Path) -> bool:
-    """Atomically quarantine a stale lock while serializing recovery attempts."""
+    """Quarantine an old lock only when its recorded owner is provably dead."""
     recovery_path = lock_path.with_name(lock_path.name + ".recovery")
     recovery_descriptor: int | None = None
     try:
@@ -654,6 +723,8 @@ def _recover_stale_panel_lock(lock_path: Path) -> bool:
         except FileNotFoundError:
             return True
         if age <= PANEL_LEDGER_STALE_SECONDS:
+            return False
+        if _panel_lock_owner_alive(lock_path) is not False:
             return False
         stale_path = lock_path.with_name(lock_path.name + ".stale-" + uuid.uuid4().hex)
         try:
@@ -717,6 +788,18 @@ def _append_panel_ledger(event: dict[str, Any], *, path: Path | None = None) -> 
             pass
 
 
+def _parse_aware_timestamp(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} has no valid created_at timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} has no valid created_at timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} created_at timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def record_panel_verdict(
     panel_id: str,
     finding_id: str,
@@ -773,20 +856,22 @@ def record_panel_verdict(
         if live_verified != set(evidence_ids):
             raise ValueError("closed dispositions require existing live verified evidence IDs")
         panel_created_at = panel_run.get("created_at")
-        if not isinstance(panel_created_at, str) or not panel_created_at:
-            raise ValueError("panel run has no valid created_at timestamp")
+        panel_created = _parse_aware_timestamp(panel_created_at, label="panel run")
         for evidence_id in evidence_ids:
             row = by_id[evidence_id]
             claim = row[3] or ""
             notes = row[4] or ""
             artifact_paths_raw = row[7] or "[]"
             linkage_text = "\n".join((str(claim), str(notes), str(artifact_paths_raw)))
-            if finding_id not in linkage_text and panel_id not in linkage_text:
+            if finding_id not in linkage_text:
                 raise ValueError(
-                    f"evidence {evidence_id!r} must reference the finding_id or panel_id"
+                    f"evidence {evidence_id!r} must reference the finding_id"
                 )
             created_at = row[6]
-            if not isinstance(created_at, str) or created_at < panel_created_at:
+            evidence_created = _parse_aware_timestamp(
+                created_at, label=f"evidence {evidence_id!r}"
+            )
+            if evidence_created < panel_created:
                 raise ValueError(
                     f"evidence {evidence_id!r} must be created at or after the panel run"
                 )
