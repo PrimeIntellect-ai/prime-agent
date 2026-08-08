@@ -1,0 +1,38 @@
+# Prime Harness re-applicable local patch: Windows uv-venv interpreter path
+# Origin: Prime-Agent commit b0b235d1 (remove when upstream PR #825 is merged).
+# Apply from the Prime-Agent repository root with: git apply <this-file>
+
+diff --git a/packages/coding-agent/src/core/kernel/bootstrap.ts b/packages/coding-agent/src/core/kernel/bootstrap.ts
+index 9b12b4b4..1996ebe0 100644
+--- a/packages/coding-agent/src/core/kernel/bootstrap.ts
++++ b/packages/coding-agent/src/core/kernel/bootstrap.ts
+@@ -718,6 +719,11 @@ async function hashRuntimeSource(sourceDir: string): Promise<string> {
+ 	return `sha256:${hash.digest("hex")}`;
+ }
+ 
++/** Interpreter path inside a uv-created venv: POSIX uses bin/, Windows Scripts/. */
++function venvPythonPath(venv: string): string {
++	return process.platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
++}
++
+ async function bootstrapVenv(
+ 	venv: string,
+ 	pythonSkills: readonly BootstrapPythonSkill[],
+@@ -725,7 +731,7 @@ async function bootstrapVenv(
+ ): Promise<void> {
+ 	await mkdir(path.dirname(venv), { recursive: true });
+ 	const uv = await ensureUv(options);
+-	const python = path.join(venv, "bin", "python");
++	const python = venvPythonPath(venv);
+ 	const sourceDir = await resolveRuntimeSourceDir();
+ 	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
+ 	const runtimeIdentity = await resolveRuntimeIdentity();
+@@ -886,7 +892,7 @@ async function ensureKernelPythonUncached(
+ 	}
+ 
+ 	const venv = await resolveWritableKernelVenvDir();
+-	const python = path.join(venv, "bin", "python");
++	const python = venvPythonPath(venv);
+ 	const runtimeIdentity = await resolveRuntimeIdentity();
+ 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+ 

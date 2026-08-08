@@ -1,0 +1,42 @@
+# Prime Harness re-applicable local patch: hide Windows kernel child consoles
+# Origin: Prime-Agent commit b0b235d1 (remove when upstream PR #825 is merged).
+# Apply from the Prime-Agent repository root with: git apply <this-file>
+
+diff --git a/packages/coding-agent/src/core/kernel/bootstrap.ts b/packages/coding-agent/src/core/kernel/bootstrap.ts
+index 9b12b4b4..1996ebe0 100644
+--- a/packages/coding-agent/src/core/kernel/bootstrap.ts
++++ b/packages/coding-agent/src/core/kernel/bootstrap.ts
+@@ -376,6 +376,7 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
+ 		const child = spawn(command, args, {
+ 			env: process.env,
+ 			stdio: options.stdio ?? "ignore",
++			windowsHide: true,
+ 		});
+ 		child.on("error", reject);
+ 		child.on("exit", (code, signal) => {
+diff --git a/packages/coding-agent/src/core/kernel/fork-server.ts b/packages/coding-agent/src/core/kernel/fork-server.ts
+index d5b5423a..c3f67446 100644
+--- a/packages/coding-agent/src/core/kernel/fork-server.ts
++++ b/packages/coding-agent/src/core/kernel/fork-server.ts
+@@ -175,6 +175,7 @@ class ForkServer {
+ 				const proc = spawn(this.params.python, ["-c", FORK_SERVER_SCRIPT, socketPath], {
+ 					env: this.launchEnv,
+ 					stdio: ["ignore", "ignore", "pipe"],
++					windowsHide: true,
+ 				});
+ 				this.proc = proc;
+ 				proc.stderr?.on("data", (buf: Buffer) => {
+diff --git a/packages/coding-agent/src/core/kernel/index.ts b/packages/coding-agent/src/core/kernel/index.ts
+index b760a2e1..1fd3c0e5 100644
+--- a/packages/coding-agent/src/core/kernel/index.ts
++++ b/packages/coding-agent/src/core/kernel/index.ts
+@@ -648,6 +648,9 @@ export class KernelManager {
+ 				cwd: this.options.cwd,
+ 				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
+ 				stdio: ["ignore", "pipe", "pipe"],
++				// Console-less daemon workers on Windows otherwise allocate a fresh
++				// visible console per child; its lifecycle can kill the kernel (#660/#825).
++				windowsHide: true,
+ 			});
+ 			this.kernel = kernel;
+ 

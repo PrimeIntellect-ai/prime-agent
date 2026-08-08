@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import json
 import shutil
 import subprocess
 import sys
@@ -126,6 +127,23 @@ def main() -> int:
         print(f"  kept local edits: {len(skipped_diff)} (template differs; use --force to overwrite)")
         for rel in skipped_diff:
             print(f"    - {rel}")
+
+    if not args.dry_run:
+        upstream_watch = target / "harness" / "upstream_check.py"
+        if upstream_watch.is_file():
+            baseline = subprocess.run(
+                [sys.executable, "-S", str(upstream_watch), "--repo", str(target),
+                 "--record-baseline", "--json"],
+                cwd=str(target), capture_output=True, text=True, timeout=120,
+            )
+            if baseline.returncode == 0:
+                try:
+                    action = json.loads(baseline.stdout).get("action", "recorded")
+                except json.JSONDecodeError:
+                    action = "recorded"
+                print(f"upstream baseline: {action}")
+            else:
+                print(f"warning: could not record upstream baseline: {baseline.stderr.strip()[:300]}")
 
     if args.check and not args.dry_run:
         print("\nrunning doctor...\n")

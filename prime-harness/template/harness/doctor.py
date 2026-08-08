@@ -10,6 +10,7 @@ Usage: python harness/doctor.py [--json]
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -163,6 +164,52 @@ def check_frontmatter(skill_md: Path) -> str | None:
     return None
 
 
+def check_upstream_watch(report: Report, root: Path) -> None:
+    helper = root / "harness" / "upstream_check.py"
+    if not helper.is_file():
+        report.fail("upstream-watch", f"missing {helper}", "re-run install.py")
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("prime_harness_upstream_check", helper)
+        if spec is None or spec.loader is None:
+            raise ImportError("could not create module spec")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        result = module.probe(root, check_pr=False)
+    except Exception as exc:
+        report.fail("upstream-watch", f"probe failed: {type(exc).__name__}: {exc}",
+                    "run python -S harness/upstream_check.py --json")
+        return
+    comparison = result.get("comparison", {})
+    status = comparison.get("status")
+    reasons = comparison.get("reasons", [])
+    if status == "stable":
+        current = result.get("current", {}).get("prime_agent", {})
+        digest = str(current.get("binary_sha256") or "")[:12]
+        report.ok(
+            "upstream-watch",
+            f"Prime Agent {current.get('version')} hash={digest}; both Windows patch signatures present",
+        )
+    elif status == "uninitialized":
+        report.warn(
+            "upstream-watch",
+            "install-time Prime Agent baseline is not recorded",
+            "python -S harness/upstream_check.py --record-baseline --json",
+        )
+    elif status == "unavailable" and (
+        not result.get("baseline_present")
+        or any("install-time Prime Agent" in str(reason) for reason in reasons)
+    ):
+        report.warn("upstream-watch", "; ".join(map(str, reasons)),
+                    "install/run Prime Agent, then explicitly replace the baseline")
+    else:
+        report.fail(
+            "upstream-watch",
+            f"{status}: " + "; ".join(map(str, reasons)),
+            "run python -S harness/upstream_check.py --check-pr --json and review before refreshing baseline",
+        )
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -218,6 +265,7 @@ def main() -> int:
                     "install Prime Agent (or run from source); the harness skills still install fine")
 
     kernel_python = resolve_kernel_python(report)
+    check_upstream_watch(report, root)
 
     # --- harness files ------------------------------------------------------
     skills_dir = root / ".prime" / "agent" / "skills"

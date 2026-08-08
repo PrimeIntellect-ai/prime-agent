@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -45,6 +46,9 @@ def test_fresh_install_copies_everything(tmp_repo):
         "harness/manifest.json",
         "harness/roster.yaml",
         "harness/doctor.py",
+        "harness/upstream_check.py",
+        "harness/patches/prime-agent/windows-kernel-venv-python.patch",
+        "harness/patches/prime-agent/windows-kernel-windows-hide.patch",
         "checks/evalset/corpus.json",
         "checks/evalset/model-routing-v1.json",
         "checks/evalset/executors/reference_adapter.py",
@@ -64,16 +68,24 @@ def test_fresh_install_copies_everything(tmp_repo):
     assert "__pycache__/" in gitignore
     assert "*.py[cod]" in gitignore
     assert ".prime/agent/harness-tests/template" in gitignore
+    baseline = json.loads((
+        tmp_repo / "artifacts/harness/upstream-watch/baseline.json"
+    ).read_text(encoding="utf-8"))
+    assert baseline["schema_version"] == 1
+    assert set(baseline["patch_state"]) == {"venv_python_path", "windows_hide"}
 
 
 def test_reinstall_is_idempotent(tmp_repo):
     run_install(tmp_repo)
     before = (tmp_repo / ".gitignore").read_text(encoding="utf-8")
+    baseline_path = tmp_repo / "artifacts/harness/upstream-watch/baseline.json"
+    baseline_before = baseline_path.read_bytes()
     proc = run_install(tmp_repo)
     assert proc.returncode == 0
     assert "new files:        0" in proc.stdout
     # .gitignore not duplicated
     assert (tmp_repo / ".gitignore").read_text(encoding="utf-8") == before
+    assert baseline_path.read_bytes() == baseline_before
 
 
 def test_local_edits_preserved_without_force(tmp_repo):
@@ -100,6 +112,26 @@ def test_doctor_passes_on_fresh_install(tmp_repo):
     proc = subprocess.run([sys.executable, str(tmp_repo / "harness" / "doctor.py")],
                           cwd=str(tmp_repo), capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, f"doctor failed:\n{proc.stdout}\n{proc.stderr}"
+
+
+def test_doctor_fails_on_recorded_prime_agent_drift(tmp_repo):
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0
+    baseline_path = tmp_repo / "artifacts/harness/upstream-watch/baseline.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline["prime_agent"]["binary_sha256"] = "0" * 64
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+
+    doctor = subprocess.run(
+        [sys.executable, str(tmp_repo / "harness/doctor.py")],
+        cwd=tmp_repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert doctor.returncode == 2
+    assert "[FAIL] upstream-watch" in doctor.stdout
+    assert "binary hash drift" in doctor.stdout
 
 
 def test_installer_ignores_python_cache_artifacts():

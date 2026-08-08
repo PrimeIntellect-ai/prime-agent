@@ -167,6 +167,32 @@ check inside a Prime Agent IPython kernel and skips in ordinary offline pytest.
 The complete v0.7.1 runtime findings and unresolved-surface reasons are in
 `docs/prime-agent-v0.7.0-api-reference.md`.
 
+## Prime Agent upstream drift and patch-retirement watch
+
+Installation records a create-once baseline at
+`artifacts/harness/upstream-watch/baseline.json`: the installed Prime Agent
+version and launcher hash, selfcheck-critical kernel source hashes, both local
+Windows patch signatures, and hashes of the archived re-application patches.
+Doctor compares the live installation to that baseline and fails on drift.
+Run the full bounded check (doctor, kernel-critical imports, and evidence-ledger
+recording) with:
+
+```bash
+python -S harness/upstream_check.py --check-pr --json
+```
+
+The scheduled `upstream-watch.yml` workflow separately queries the bounded
+GitHub API contract for upstream PR #825 and fails when it merges. At that
+point, review upstream behavior, retire the local patches if their fixes are
+present, and explicitly refresh the baseline only after approval:
+
+```bash
+python -S harness/upstream_check.py --record-baseline --force-baseline --json
+```
+
+Re-application patches are archived under
+`harness/patches/prime-agent/`; they are not applied automatically.
+
 ## Outside-kernel telemetry scorecard
 
 Generate a per-task scorecard from durable artifacts without importing Prime
