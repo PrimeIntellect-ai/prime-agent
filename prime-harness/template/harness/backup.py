@@ -208,7 +208,7 @@ def _walk_source(root: Path, prefix: str, *, exclude_backups: bool) -> tuple[lis
         dirnames[:] = kept
         for name in sorted(filenames):
             child = current_path / name
-            if name in {"evidence.db-wal", "evidence.db-shm", "evidence.db-journal"} and (current_path / "evidence.db").is_file():
+            if name.casefold() in {"evidence.db-wal", "evidence.db-shm", "evidence.db-journal"} and any(candidate.casefold() == "evidence.db" for candidate in filenames):
                 continue
             rel = (rel_current / name) if rel_current.parts else Path(name)
             if exclude_backups and rel.parts and rel.parts[0] == "backups":
@@ -233,14 +233,16 @@ def _zip_info(name: str, mode: int, mtime_ns: int) -> zipfile.ZipInfo:
     return info
 
 
-def _sqlite_snapshot(source: Path, destination: Path) -> None:
+def _sqlite_snapshot(source: Path, destination: Path, expected_source_stat: os.stat_result) -> None:
     uri = source.resolve().as_uri() + "?mode=ro"
     src = None
     dst = None
     try:
         src = sqlite3.connect(uri, uri=True, timeout=30)
+        _assert_source_identity(source, expected_source_stat)
         dst = sqlite3.connect(destination)
         src.backup(dst)
+        _assert_source_identity(source, expected_source_stat)
         row = dst.execute("PRAGMA integrity_check").fetchone()
         if row != ("ok",):
             raise BackupError(f"SQLite integrity_check failed while snapshotting {source}: {row}")
@@ -266,7 +268,7 @@ def _write_member(
     if sqlite_snapshot:
         payload = temp_dir / (hashlib.sha256(str(source).encode("utf-8")).hexdigest() + ".db")
         with _open_verified_source(source, source_stat):
-            _sqlite_snapshot(source, payload)
+            _sqlite_snapshot(source, payload, source_stat)
             _assert_source_identity(source, source_stat)
         input_handle = payload.open("rb")
     else:
@@ -548,7 +550,7 @@ def verify_backup(archive_path: Path) -> dict[str, Any]:
 
 def restore_backup(archive_path: Path, destination: Path) -> dict[str, Any]:
     """Restore through staging into a destination path that does not exist."""
-    destination = destination.expanduser().resolve()
+    destination = destination.expanduser().absolute()
     if os.path.lexists(destination):
         if _lstat_kind(destination) != "directory":
             raise BackupError(f"restore destination is not a directory: {destination}")

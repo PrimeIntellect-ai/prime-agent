@@ -276,10 +276,14 @@ It copies every `evidence.db` with SQLite's online backup API, including
 committed frames from a live or crash-left uncheckpointed WAL, records a strict
 manifest of paths, sizes, SHA-256 hashes, modes, and timestamps, then verifies
 the completed archive before reporting success. Source and archive symlinks or
-Windows reparse points, concurrent source-identity swaps, special files,
-duplicate or case-colliding names, traversal/noncanonical paths, Windows ADS
+Windows reparse points, stable source-identity changes during capture, special
+files, duplicate or case-colliding names, traversal/noncanonical paths, Windows ADS
 or reserved-device components, privileged setuid/setgid/sticky modes,
 corruption, and missing SQLite snapshot markers fail closed on every platform.
+The tool is an integrity/accident boundary, not isolation from a malicious
+process running concurrently with the same account: such a process can race
+filesystem names or rewrite the finished archive. Quiesce adversarial writers
+or use an OS filesystem snapshot before backup when that threat is in scope.
 
     python -S harness/backup.py create
     python -S harness/backup.py verify artifacts/harness/backups/prime-harness-....zip

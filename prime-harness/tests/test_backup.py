@@ -257,7 +257,8 @@ def test_privileged_manifest_modes_are_rejected_before_restore(tmp_path, privile
     assert not destination.exists()
 
 
-def test_closed_uncheckpointed_wal_is_captured_by_sqlite_backup(tmp_path):
+@pytest.mark.parametrize("database_name", ["evidence.db", "Evidence.DB"])
+def test_closed_uncheckpointed_wal_is_captured_by_sqlite_backup(tmp_path, database_name):
     project = tmp_path / "project"
     artifacts = project / "artifacts" / "harness"
     session = tmp_path / "session"
@@ -266,7 +267,7 @@ def test_closed_uncheckpointed_wal_is_captured_by_sqlite_backup(tmp_path):
     session.mkdir()
     global_harness.mkdir()
     (session / "state.json").write_text("{}\n", encoding="utf-8")
-    database = artifacts / "evidence.db"
+    database = artifacts / database_name
     crash_writer = r'''import os
 import sqlite3
 import sys
@@ -288,9 +289,13 @@ os._exit(0)
     archive = tmp_path / "closed-uncheckpointed-wal.zip"
     created = backup.create_backup(project_root=project, session_dir=session, global_harness=global_harness, output=archive)
     assert created["status"] == "pass"
+    manifest = json.loads(archive_members(archive)[backup.MANIFEST_NAME])
+    assert not any(item["path"].casefold().endswith(("evidence.db-wal", "evidence.db-shm", "evidence.db-journal")) for item in manifest["files"])
+    database_item = next(item for item in manifest["files"] if item["path"].casefold().endswith("/evidence.db"))
+    assert database_item["sqlite_snapshot"] is True
     restored = tmp_path / "restored-wal"
     backup.restore_backup(archive, restored)
-    restored_database = restored / "project/artifacts/harness/evidence.db"
+    restored_database = restored / "project/artifacts/harness" / database_name
     connection = sqlite3.connect(restored_database.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         assert connection.execute("SELECT claim FROM evidence").fetchall() == [("committed before simulated crash",)]
@@ -345,6 +350,26 @@ def test_source_identity_swap_is_rejected_before_read(tmp_path):
         backup._open_verified_source(source, expected)
 
 
+def test_intermediate_directory_swap_cannot_change_opened_file_identity(tmp_path):
+    parent = tmp_path / "scanned"
+    parent.mkdir()
+    source = parent / "state.json"
+    source.write_bytes(b"scanned identity")
+    expected = backup._regular_source_stat(source)
+    original_parent = tmp_path / "original-parent"
+    parent.rename(original_parent)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state.json").write_bytes(b"outside replacement")
+    try:
+        parent.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        parent.mkdir()
+        (parent / "state.json").write_bytes(b"replacement directory")
+    with pytest.raises(backup.BackupError, match="source identity changed"):
+        backup._open_verified_source(source, expected)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
 def test_windows_junction_source_is_rejected(tmp_path):
     project, session, global_harness, connection = make_sources(tmp_path)
@@ -361,6 +386,25 @@ def test_windows_junction_source_is_rejected(tmp_path):
             backup.create_backup(project_root=project, session_dir=session, global_harness=global_harness, output=tmp_path / "junction.zip")
     finally:
         connection.close()
+
+
+def test_dangling_destination_link_is_rejected_without_writing_target(tmp_path):
+    project, session, global_harness, connection = make_sources(tmp_path)
+    archive = tmp_path / "valid.zip"
+    try:
+        backup.create_backup(project_root=project, session_dir=session, global_harness=global_harness, output=archive)
+    finally:
+        connection.close()
+    target = tmp_path / "missing-target"
+    destination = tmp_path / "dangling-destination"
+    try:
+        destination.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    with pytest.raises(backup.BackupError, match="not a directory"):
+        backup.restore_backup(archive, destination)
+    assert destination.is_symlink()
+    assert not target.exists()
 
 
 def test_existing_empty_destination_is_rejected_to_preserve_atomic_rename(tmp_path):
