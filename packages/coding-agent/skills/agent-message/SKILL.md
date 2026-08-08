@@ -47,7 +47,7 @@ async def send(
     message: str,
     broadcast_message: str | None = None,
     *,
-    receiver_role: "parent" | "sibling" | "child" | None = None,
+    receiver_role: str | None = None,  # "parent", "sibling", or "child"
     receiver_name: str | None = None,
 ) -> dict
 ```
