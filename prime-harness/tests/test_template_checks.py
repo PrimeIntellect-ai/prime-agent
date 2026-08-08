@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+HARNESS_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_fresh_template_check_suites_pass() -> None:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "template/checks/properties",
+            "template/checks/invariants",
+        ],
+        cwd=HARNESS_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
