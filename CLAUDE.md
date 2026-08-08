@@ -103,6 +103,35 @@ Two things to preserve when touching this path:
 
 Test caveat: `packages/ai/test/stream.test.ts` and `test/context-overflow.test.ts` shell out to a real local `ollama` binary — including `ollama pull gpt-oss:20b` — when one is on PATH. Set `PI_NO_LOCAL_LLM=1` to skip those blocks (`./test.sh` already does).
 
+#### Ollama setup notes
+
+Two non-obvious things decide whether a local model works here at all.
+
+**The model must support tool calling.** Prime Agent drives everything through the IPython tool, so a completion-only or vision-only model cannot function as the agent no matter how it is configured. Check with `ollama show <model>` and look for `tools` under Capabilities before adding it to `models.json`.
+
+**The declared `contextWindow` must match what the server actually serves.** Ollama's default is 4096 regardless of the model's maximum, and it truncates silently rather than returning an overflow error — so a config claiming 32768 against a 4096 server degrades output with no diagnostic. 4096 is too small for the system prompt alone. Verify the real number by loading a model and reading the `CONTEXT` column:
+
+```bash
+ollama ps
+```
+
+Raise the server side with `OLLAMA_CONTEXT_LENGTH`. Under a Homebrew launchd install, add it to the existing `EnvironmentVariables` dict and reload with `launchctl`, not `brew services restart` — the latter regenerates the plist from the formula and silently drops every custom variable (including `OLLAMA_FLASH_ATTENTION` and `OLLAMA_KV_CACHE_TYPE`), dropping you back to 4096:
+
+```bash
+P=~/Library/LaunchAgents/homebrew.mxcl.ollama.plist
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:OLLAMA_CONTEXT_LENGTH string 32768" "$P"
+launchctl unload "$P" && launchctl load "$P"
+```
+
+`OLLAMA_KV_CACHE_TYPE=q8_0` roughly halves KV-cache memory, which is what makes a long context affordable on a laptop. The setting is global to the Ollama server, so every model loads at that context.
+
+End-to-end check once configured:
+
+```bash
+prime-agent model list ollama                                    # provider and models resolve
+prime-agent --provider ollama --model <id> --no-session -p "hi"  # round-trip through the agent
+```
+
 ### Config and asset resolution
 
 User config: `~/.prime/agent/` (sessions, session-artifacts, auth.json, kernel-venv, logs). Project config: `.prime/agent/`. Overrides: `PRIME_AGENT_CODING_AGENT_DIR`, `PRIME_AGENT_SESSION_DIR`.
