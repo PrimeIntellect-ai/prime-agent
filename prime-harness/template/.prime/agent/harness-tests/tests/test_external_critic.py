@@ -157,6 +157,7 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
     try:
         connection.execute("CREATE TABLE evidence (id TEXT PRIMARY KEY, status TEXT, invalidated_at TEXT)")
         connection.execute("INSERT INTO evidence VALUES ('ev-test-1', 'verified', NULL)")
+        connection.execute("INSERT INTO evidence VALUES ('ev-unverified', 'unverified', NULL)")
         connection.commit()
     finally:
         connection.close()
@@ -174,6 +175,11 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
         critic.record_panel_verdict(panel["panel_id"], "missing-finding", "open", rationale="", evidence_ids=[], verifier="")
     with pytest.raises(ValueError, match="live verified"):
         critic.record_panel_verdict(panel["panel_id"], finding_id, "fixed", rationale="x", evidence_ids=["ev-fake"], verifier="fake")
+    with pytest.raises(ValueError, match="live verified"):
+        critic.record_panel_verdict(
+            panel["panel_id"], finding_id, "fixed", rationale="x",
+            evidence_ids=["ev-unverified"], verifier="fake",
+        )
     with pytest.raises(ValueError, match="require rationale"):
         critic.record_panel_verdict(panel["panel_id"], finding_id, "rebutted",
                                     rationale="", evidence_ids=[], verifier="")

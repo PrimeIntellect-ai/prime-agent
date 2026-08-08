@@ -243,33 +243,48 @@ def invalidate(evidence_id: str, reason: str) -> dict[str, Any]:
 
 
 def ingest(path: str | os.PathLike[str], *, status_override: str | None = None) -> str:
-    """Ingest a harness artifact JSON (sci_verify result, child result, or
-    critic findings) as a ledger record pointing back at the artifact."""
+    """Ingest an untrusted harness artifact while preserving its provenance.
+
+    Artifact fields are self-attested, so neither ``status=pass`` nor a claimed
+    method/evidence payload can create a verified record. After independently
+    running the named verifier, callers must use :func:`record` explicitly.
+    """
     artifact = Path(path)
     data = read_json(artifact)
     if not isinstance(data, dict):
         raise ValueError(f"{artifact} is not a JSON object")
     claim = data.get("claim") or data.get("task") or data.get("summary") or artifact.stem
-    raw_status = (status_override or data.get("status") or "unverified").lower()
-    mapping = {"pass": "verified", "done": "unverified", "fail": "refuted",
+    raw_status = str(data.get("status") or "unverified").lower()
+    mapping = {"pass": "unverified", "done": "unverified", "fail": "refuted",
                "counterexample_found": "refuted", "error": "inconclusive"}
     status = mapping.get(raw_status, raw_status if raw_status in STATUSES else "unverified")
-    verifier = data.get("method") or data.get("verifier") or data.get("role")
-    if status == "verified":
-        has_verification_evidence = isinstance(data.get("evidence"), dict) and bool(data["evidence"])
-        if not isinstance(verifier, str) or not verifier.strip() or not has_verification_evidence:
-            status = "unverified"
-            verifier = None
+    if status_override is not None:
+        override = status_override.lower()
+        if override not in STATUSES:
+            raise ValueError(f"status_override must be one of {STATUSES}")
+        if override == "verified":
+            raise ValueError(
+                "ingest cannot create verified evidence from self-attested artifact fields; "
+                "run the verifier and call record(..., status='verified', verifier=...)"
+            )
+        status = override
+    reported_verifier = data.get("method") or data.get("verifier") or data.get("role")
+    note_fields = {
+        k: data[k] for k in ("evidence", "warnings", "recommended_action") if k in data
+    }
+    if isinstance(reported_verifier, str) and reported_verifier.strip():
+        note_fields["reported_verifier"] = reported_verifier.strip()
+    if raw_status == "pass":
+        note_fields["ingest_policy"] = "self-attested pass remains unverified"
     return record(
         str(claim)[:2000],
         status=status,
         claim_type=str(data.get("claim_type", "artifact")),
         assumptions=data.get("assumptions") if isinstance(data.get("assumptions"), dict) else {},
-        verifier=verifier,
+        verifier=None,
         artifacts=[str(artifact)],
         source=str(data.get("source") or "ingest"),
-        notes=json.dumps({k: data[k] for k in ("evidence", "warnings", "recommended_action") if k in data},
-                         default=str)[:4000],
+        notes=json.dumps(note_fields, default=str)[:4000],
     )
 
 

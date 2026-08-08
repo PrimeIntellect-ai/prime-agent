@@ -1,6 +1,6 @@
 ---
 name: evidence-ledger
-description: Canonical provenance-bearing store of scientific claims for this project (SQLite+FTS at artifacts/harness/evidence.db). Use record() after every verification outcome, search() BEFORE re-deriving or re-asserting any prior claim, invalidate() when new evidence contradicts a record, and ingest() to import sci_verify results, child result JSONs, or critic findings. Records carry status (verified/refuted/inconclusive/unverified/superseded), assumptions, commit SHA, verifier, artifacts, and confidence. A 'verified' record requires naming its verifier. Call `await evidence_ledger("query")` to search.
+description: Canonical provenance-bearing store of scientific claims for this project (SQLite+FTS at artifacts/harness/evidence.db). Use record() after every executed verification outcome, search() BEFORE re-deriving or re-asserting any prior claim, invalidate() when new evidence contradicts a record, and ingest() to quarantine untrusted sci_verify-shaped, child-result, or critic JSON as non-verified provenance. Records carry status (verified/refuted/inconclusive/unverified/superseded), assumptions, commit SHA, verifier, artifacts, and confidence. A 'verified' record requires an explicit record() call naming the verifier. Call `await evidence_ledger("query")` to search.
 ---
 
 # evidence-ledger
@@ -15,12 +15,15 @@ Discipline:
   automatically. `status="verified"` without a named verifier raises.
 - **Never delete — invalidate.** `invalidate(id, reason)` keeps history and
   removes the record from default retrieval.
-- **Ingest artifacts instead of retyping.** `ingest(path)` maps a sci_verify
-  result, child result JSON, or critic findings file into a record that points
-  back at the artifact. A pass becomes verified only when it carries a named
-  verification method/verifier and nonempty structured evidence; otherwise it
-  remains unverified. Fail/counterexample becomes refuted and error becomes
-  inconclusive.
+- **Ingest artifacts without trusting them.** `ingest(path)` maps a sci_verify-
+  shaped result, child result JSON, or critic findings file into a record that
+  points back at the artifact. Artifact fields are self-attested: a pass always
+  remains unverified even when it claims a method and structured evidence.
+  After actually running the verifier, create the verified record explicitly
+  with `record(..., status="verified", verifier="...")`. An ingest override
+  cannot promote to verified. Fail/counterexample maps to refuted and error to
+  inconclusive, preserving the artifact as a falsification lead rather than a
+  trusted verdict.
 - Scope claims by regime: put domain limits in `assumptions`, not prose.
 
 ```python

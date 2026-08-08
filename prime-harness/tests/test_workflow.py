@@ -17,17 +17,32 @@ def test_public_workflow_uses_existing_profiles_doctor_first_and_pinned_actions(
     job = document["jobs"]["public-gates"]
     assert job["strategy"]["matrix"]["profile"] == ["default", "holdout"]
     steps = job["steps"]
+    checkout = next(index for index, step in enumerate(steps) if step.get("name") == "Check out repository")
+    diff_base = next(
+        index for index, step in enumerate(steps)
+        if step.get("name") == "Resolve explicit gate diff base"
+    )
     selftests = next(
         index for index, step in enumerate(steps)
         if step.get("name") == "Run installed harness component self-tests"
     )
     doctor = next(index for index, step in enumerate(steps) if step.get("name") == "Doctor preflight")
     gate = next(index for index, step in enumerate(steps) if step.get("name", "").startswith("Run existing"))
-    assert selftests < doctor < gate
+    assert checkout < diff_base < selftests < doctor < gate
+    assert steps[checkout]["with"]["fetch-depth"] == 0
+    resolve_command = steps[diff_base]["run"]
+    assert "PR_BASE_SHA" in steps[diff_base]["env"]
+    assert "BEFORE_SHA" in steps[diff_base]["env"]
+    assert 'git merge-base HEAD "origin/$DEFAULT_BRANCH"' in resolve_command
+    assert 'git cat-file -e "$base^{commit}"' in resolve_command
+    assert "printf 'base=%s\\n' \"$base\" >> \"$GITHUB_OUTPUT\"" in resolve_command
     selftest_command = steps[selftests]["run"]
     assert "python -m pytest -q .prime/agent/harness-tests/tests" in selftest_command
     assert "trap 'rm -f .prime/agent/harness-tests/template' EXIT" in selftest_command
-    assert steps[gate]["run"] == 'python harness/verify.py --profile "${{ matrix.profile }}" --json'
+    assert steps[gate]["run"] == (
+        'python harness/verify.py --profile "${{ matrix.profile }}" '
+        '--base "${{ steps.diff-base.outputs.base }}" --json'
+    )
     uses = [step["uses"] for step in steps if "uses" in step]
     assert uses
     assert all(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}", value) for value in uses)

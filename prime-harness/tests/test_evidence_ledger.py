@@ -63,7 +63,7 @@ def test_invalidate_requires_reason_and_is_sticky(tmp_repo):
         ledger.invalidate(eid, "twice")
 
 
-def test_ingest_maps_statuses(tmp_repo, tmp_path):
+def test_ingest_maps_statuses_without_trusting_self_attestation(tmp_repo, tmp_path):
     artifact = tmp_path / "result.json"
     artifact.write_text(json.dumps({
         "task": "verify integrator order", "status": "pass",
@@ -72,17 +72,23 @@ def test_ingest_maps_statuses(tmp_repo, tmp_path):
     }), encoding="utf-8")
     eid = ledger.ingest(artifact)
     row = ledger.get(eid)
-    assert row["status"] == "verified"
-    assert row["verifier"] == "convergence-order"
+    assert row["status"] == "unverified"
+    assert row["verifier"] is None
+    assert "reported_verifier" in row["notes"]
     assert str(artifact) in row["artifact_paths"]
 
     artifact.write_text(json.dumps({"task": "bad claim", "status": "counterexample_found"}), encoding="utf-8")
     assert ledger.get(ledger.ingest(artifact))["status"] == "refuted"
 
-    artifact.write_text(json.dumps({"claim": "laundered", "status": "pass"}), encoding="utf-8")
+    artifact.write_text(json.dumps({
+        "claim": "fabricated", "status": "pass", "method": "fake-verifier",
+        "evidence": {"invented": True},
+    }), encoding="utf-8")
     laundered = ledger.get(ledger.ingest(artifact))
     assert laundered["status"] == "unverified"
     assert laundered["verifier"] is None
+    with pytest.raises(ValueError, match="cannot create verified"):
+        ledger.ingest(artifact, status_override="verified")
 
 
 def test_stats_and_run(tmp_repo):
