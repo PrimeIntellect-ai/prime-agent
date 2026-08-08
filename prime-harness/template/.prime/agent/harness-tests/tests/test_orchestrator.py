@@ -9,6 +9,19 @@ import pytest
 import harness_orchestrator as orch
 
 
+@pytest.fixture(autouse=True)
+def deterministic_unit_budget_authority(monkeypatch):
+    async def unbounded_budget():
+        return {
+            "goal": {"status": "active"},
+            "remaining_tokens": None,
+            "budget_authority_available": True,
+            "active_children": [],
+        }
+
+    monkeypatch.setattr(orch, "budget_status", unbounded_budget)
+
+
 def test_task_state_roundtrip(tmp_repo):
     state = orch.new_task("t-001", "verify the integrator", working_branch="agent/t-001")
     assert state.base_commit  # pinned to HEAD
@@ -51,6 +64,30 @@ def test_admit_denies_trivial_and_unverifiable(tmp_repo, monkeypatch):
     denied = asyncio.run(orch.admit("x", "y", independent_subproblem=True,
                                     objective_verifier_available=True, expected_minutes=1))
     assert not denied
+
+
+def test_admit_fails_closed_when_goal_budget_authority_is_unavailable(tmp_repo, monkeypatch):
+    async def unavailable_budget():
+        return {
+            "goal": None,
+            "remaining_tokens": None,
+            "budget_authority_available": False,
+            "active_children": [],
+        }
+
+    async def no_reconcile():
+        return {"marked_dead": []}
+
+    monkeypatch.setattr(orch, "budget_status", unavailable_budget)
+    monkeypatch.setattr(orch, "reconcile", no_reconcile)
+    admission = asyncio.run(orch.admit(
+        "implementation-engineer",
+        "large independent verifiable subtask",
+        independent_subproblem=True,
+        objective_verifier_available=True,
+    ))
+    assert not admission
+    assert any("budget authority unavailable" in reason for reason in admission.reasons)
 
 
 def test_spawn_writes_registry_and_contract(tmp_repo, fake_rlm):

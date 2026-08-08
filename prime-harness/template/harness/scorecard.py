@@ -183,7 +183,13 @@ def code_hash(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-def scan_session(path: Path | None, start: datetime | None, end: datetime, warnings: list[str]) -> dict[str, Any]:
+def scan_session(
+    path: Path | None,
+    start: datetime | None,
+    end: datetime,
+    warnings: list[str],
+    future_skew_seconds: float = FUTURE_EVENT_SKEW_SECONDS,
+) -> dict[str, Any]:
     result: dict[str, Any] = {
         "present": bool(path and path.is_file()),
         "parent_usage": empty_usage(),
@@ -198,7 +204,7 @@ def scan_session(path: Path | None, start: datetime | None, end: datetime, warni
         warnings.append("session:missing")
         return result
     seen_usage_ids: set[str] = set()
-    effective_end = end + timedelta(seconds=FUTURE_EVENT_SKEW_SECONDS)
+    effective_end = end + timedelta(seconds=future_skew_seconds)
     for entry in iter_jsonl(path, warnings, "session"):
         result["entries_seen"] += 1
         timestamp = parse_time(entry.get("timestamp"))
@@ -251,10 +257,16 @@ def scan_session(path: Path | None, start: datetime | None, end: datetime, warni
     return result
 
 
-def scan_registry(path: Path | None, start: datetime | None, now: datetime, stale_minutes: float,
-                  warnings: list[str]) -> dict[str, Any]:
+def scan_registry(
+    path: Path | None,
+    start: datetime | None,
+    now: datetime,
+    stale_minutes: float,
+    warnings: list[str],
+    future_skew_seconds: float = FUTURE_EVENT_SKEW_SECONDS,
+) -> dict[str, Any]:
     latest: dict[str, dict[str, Any]] = {}
-    effective_now = now + timedelta(seconds=FUTURE_EVENT_SKEW_SECONDS)
+    effective_now = now + timedelta(seconds=future_skew_seconds)
     if path is None or not path.is_file():
         warnings.append("registry:missing")
     else:
@@ -342,13 +354,19 @@ def confined_result_path(raw: Any, artifact_root: Path) -> Path | None:
         return None
 
 
-def scan_children_state(path: Path, artifact_root: Path, start: datetime | None,
-                        end: datetime, warnings: list[str]) -> dict[str, Any]:
+def scan_children_state(
+    path: Path,
+    artifact_root: Path,
+    start: datetime | None,
+    end: datetime,
+    warnings: list[str],
+    future_skew_seconds: float = FUTURE_EVENT_SKEW_SECONDS,
+) -> dict[str, Any]:
     data = read_json(path, warnings, "children_state") if path.is_file() else None
     records: dict[str, dict[str, Any]] = {}
     if data is None:
         return {"present": path.is_file(), "records": records}
-    effective_end = end + timedelta(seconds=FUTURE_EVENT_SKEW_SECONDS)
+    effective_end = end + timedelta(seconds=future_skew_seconds)
     for name, entry in data.items():
         if not isinstance(name, str) or not isinstance(entry, dict):
             warnings.append("children_state:invalid_entry")
@@ -960,7 +978,8 @@ def build_scorecard(*, root: Path, task_state_path: Path, session_file: Path | N
                     evidence_db: Path, gate_logs: Path, now: datetime,
                     stale_minutes: float, base_override: str | None,
                     min_evidence_per_100_lines: float, churn_alert_min_lines: int,
-                    goal_low_percent: float) -> dict[str, Any]:
+                    goal_low_percent: float,
+                    future_skew_seconds: float = FUTURE_EVENT_SKEW_SECONDS) -> dict[str, Any]:
     warnings: list[str] = []
     task_data = read_json(task_state_path, warnings, "task_state")
     task = task_summary(task_data)
@@ -969,14 +988,25 @@ def build_scorecard(*, root: Path, task_state_path: Path, session_file: Path | N
         warnings.append("task_state:invalid_created_at")
     if start is not None and start > now:
         warnings.append("task_state:future_created_at")
-    session = scan_session(session_file, start, now, warnings)
-    registry = scan_registry(registry_path, start, now, stale_minutes, warnings)
+    session = scan_session(
+        session_file, start, now, warnings, future_skew_seconds
+    )
+    registry = scan_registry(
+        registry_path, start, now, stale_minutes, warnings, future_skew_seconds
+    )
     usage = attribute_child_usage(session, registry, warnings)
     known_task_usage = empty_usage()
     add_usage(known_task_usage, public_usage(session["parent_usage"]), warnings, "usage:known_parent")
     add_usage(known_task_usage, usage["totals"], warnings, "usage:known_children")
     usage["known_task_total"] = public_usage(known_task_usage)
-    control = scan_children_state(children_state_path, task_state_path.parent, start, now, warnings)
+    control = scan_children_state(
+        children_state_path,
+        task_state_path.parent,
+        start,
+        now,
+        warnings,
+        future_skew_seconds,
+    )
     usage["children"] = enrich_child_lifecycle(usage["children"], control)
     gates = scan_gates(gate_logs, start, now, warnings)
     task_evidence_ids = [
@@ -1148,6 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
         min_evidence_per_100_lines=args.min_evidence_per_100_lines,
         churn_alert_min_lines=args.churn_alert_min_lines,
         goal_low_percent=args.goal_low_percent,
+        future_skew_seconds=(0.0 if args.now else FUTURE_EVENT_SKEW_SECONDS),
     )
     payload = json.dumps(scorecard, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
     if args.output:

@@ -862,6 +862,8 @@ def map_repository(
                   "symbols": len(symbols), "edges": len(edge_kinds),
                   "relationships": len(edge_kinds),
                   "graph_directed_edges": sum(len(targets) for targets in edges.values()),
+                  "max_edges_limit": max_edges,
+                  "max_edges_unit": "logical_relationships",
                   "edge_kinds": kind_counts,
                   "parse_failures": sum(warning["code"] in {"PYTHON_PARSE_FAILED", "TSJS_NON_UTF8"} for warning in warnings),
                   "candidates_skipped_budget": skipped_budget},

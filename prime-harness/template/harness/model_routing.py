@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -141,11 +143,26 @@ def score_answers(answers: dict[str, Any]) -> dict[str, float]:
     return scores
 
 
+def _is_link_like(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
 def _confined_response_path(root: Path, relative_value: str) -> tuple[Path, Path]:
     relative = Path(relative_value)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("response_path must be confined and relative")
-    path = (root / relative).resolve()
+    unresolved = root
+    for component in relative.parts:
+        unresolved = unresolved / component
+        if _is_link_like(unresolved):
+            raise ValueError("response_path must be a regular file without links")
+    path = unresolved.resolve()
     try:
         path.relative_to(root)
     except ValueError as exc:

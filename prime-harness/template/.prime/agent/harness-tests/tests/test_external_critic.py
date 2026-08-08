@@ -50,6 +50,12 @@ def test_extract_deduplicates_identical_findings_arrays():
     assert critic._extract_json_array(f"```json\n{encoded}\n```\nRepeated: {encoded}") == findings
 
 
+def test_extract_ignores_unpaired_quote_in_prose_before_array():
+    findings = [{"severity": "major", "file": "a.py", "claim": "x"}]
+    text = f'The 5" display path is affected\n{json.dumps(findings)}'
+    assert critic._extract_json_array(text) == findings
+
+
 def test_extract_ignores_bracket_arrays_inside_finding_strings():
     findings = [{
         "severity": "major",
@@ -59,6 +65,12 @@ def test_extract_ignores_bracket_arrays_inside_finding_strings():
         "proposed_falsification_test": "parse the output",
     }]
     assert critic._extract_json_array(f"Review notes\n{json.dumps(findings)}") == findings
+
+
+def test_finding_linkage_uses_exact_identifier_boundaries():
+    assert critic._references_exact_id("verified: finding-1.", "finding-1")
+    assert not critic._references_exact_id("verified: finding-10.", "finding-1")
+    assert not critic._references_exact_id("verified: prefix-finding-1-suffix", "finding-1")
 
 
 def test_severity_counts():
@@ -171,7 +183,8 @@ def test_panel_ledger_recovers_stale_lock_without_waiting_for_timeout(tmp_repo, 
     ledger_path = tmp_repo / "artifacts/harness/critic/stale-lock-ledger.jsonl"
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = ledger_path.with_name(ledger_path.name + ".lock")
-    lock_path.write_text("999999\n", encoding="ascii")
+    lock_path.write_text("4242\n", encoding="ascii")
+    monkeypatch.setattr(critic, "_pid_is_alive", lambda pid: False)
     stale = time.time() - 120
     os.utime(lock_path, (stale, stale))
     monotonic_values = iter((0.0, 16.0))

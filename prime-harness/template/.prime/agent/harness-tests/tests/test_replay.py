@@ -182,14 +182,42 @@ def test_numeric_precision_ladder_cannot_be_empty_or_malformed(tmp_path):
     assert details == {"ladder_passed": 0, "ladder_total": 0, "shape_ok": True}
 
 
-def test_executor_command_supports_python_310_without_safe_path_flag(tmp_path):
+def test_decimal_expm1_preserves_tiny_nonzero_reference():
+    replay = load_replay_module("prime_harness_replay_tiny_expm1")
+    assert replay.decimal_expm1("1e-500", 24) != 0
+    task = {
+        "id": "tiny-expm1",
+        "precisions_digits": [10],
+        "reference": {"algorithm": "expm1", "value": "1e-500"},
+        "tolerance": {"relative": "1e-8"},
+    }
+    passed, details = replay.verify_numeric(task, {"values": {"10": "0"}}, 0)
+    assert not passed
+    assert details["ladder_passed"] == 0
+
+
+def test_executor_command_supports_python_310_without_script_path_imports(tmp_path):
     replay = load_replay_module("prime_harness_replay_python310")
     executor = tmp_path / "adapter.py"
-    assert replay._executor_command(executor, (3, 10)) == [
-        sys.executable,
-        "-S",
-        str(executor),
-    ]
+    executor.write_text(
+        "import json, sys\njson.dump({'stdlib-json': True}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "json.py").write_text(
+        "raise RuntimeError('sibling module imported')\n", encoding="utf-8"
+    )
+    command = replay._executor_command(executor, (3, 10))
+    assert command[:3] == [sys.executable, "-S", "-c"]
+    process = subprocess.run(
+        command,
+        input=b"{}",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=tmp_path,
+        timeout=10,
+        check=True,
+    )
+    assert json.loads(process.stdout) == {"stdlib-json": True}
     current = replay._executor_command(executor, (3, 11))
     assert current == [sys.executable, "-P", "-S", str(executor)]
 

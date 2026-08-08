@@ -164,6 +164,18 @@ def test_response_paths_are_confined_and_hashed(tmp_path):
     assert result["candidates"][0]["response_sha256"]
 
 
+def test_response_symlink_is_rejected_before_resolution(tmp_path):
+    target = tmp_path / "target.json"
+    write_response(target)
+    link = tmp_path / "response.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("file symlink creation is unavailable")
+    with pytest.raises(ValueError, match="regular file"):
+        mod._confined_response_path(tmp_path.resolve(), "response.json")
+
+
 def test_response_digest_is_mandatory_and_content_binding(tmp_path):
     write_response(tmp_path / "r.json")
     for missing_digest in ({}, {"sha256": ""}):

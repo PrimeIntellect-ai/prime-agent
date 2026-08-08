@@ -230,13 +230,18 @@ class Admission:
 
 async def budget_status() -> dict[str, Any]:
     """Best-effort budget snapshot. Keys: goal, remaining_tokens, active_children."""
-    out: dict[str, Any] = {"goal": None, "remaining_tokens": None}
+    out: dict[str, Any] = {
+        "goal": None,
+        "remaining_tokens": None,
+        "budget_authority_available": False,
+    }
     try:
         goal_mod = require_kernel_module("goal")
         info = await maybe_await(goal_mod.get())
-        if isinstance(info, dict):
+        if isinstance(info, dict) and {"goal", "remaining_tokens"} <= set(info):
             out["goal"] = info.get("goal")
             out["remaining_tokens"] = info.get("remaining_tokens")
+            out["budget_authority_available"] = True
     except Exception:  # budget introspection must never crash the caller
         pass
     registry = _load_registry()
@@ -320,7 +325,9 @@ async def admit(
     budget = await budget_status()
     remaining = budget.get("remaining_tokens")
     floor = int(config.get("min_goal_tokens_to_spawn", 20000))
-    if isinstance(remaining, (int, float)) and remaining < floor:
+    if budget.get("budget_authority_available") is not True:
+        reasons.append("goal budget authority unavailable — delegation fails closed")
+    elif isinstance(remaining, (int, float)) and remaining < floor:
         reasons.append(f"goal budget remaining {remaining} < spawn floor {floor}")
 
     return Admission(admitted=not reasons, reasons=reasons)

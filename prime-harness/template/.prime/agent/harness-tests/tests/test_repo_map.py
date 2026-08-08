@@ -111,6 +111,8 @@ def test_max_edges_and_stats_count_logical_relationships_not_reverse_edges(tmp_p
     assert stats["edges"] == stats["relationships"] == 1
     assert stats["edge_kinds"] == {"reference": 1}
     assert stats["graph_directed_edges"] == 2
+    assert stats["max_edges_limit"] == 1
+    assert stats["max_edges_unit"] == "logical_relationships"
 
 
 def test_budget_covers_complete_default_callable_text_with_independent_byte_check(tmp_path):

@@ -359,6 +359,21 @@ def test_small_live_append_clock_skew_is_included_without_future_warning(tmp_pat
     assert {"session:future_entry", "registry:future_entry", "children_state:future_entry"} <= set(warnings)
 
 
+def test_explicit_historical_now_has_no_live_clock_skew(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    with paths["session"].open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "custom",
+            "customType": "thread_goal_state",
+            "timestamp": "2026-01-03T00:00:05Z",
+            "data": {"goalId": "after-explicit-cutoff"},
+        }) + "\n")
+    proc, scorecard = run_scorecard(tmp_repo, paths, output_name="strict-now.json")
+    assert proc.returncode == 0
+    assert scorecard["goal"]["goal_id"] == "goal-fixture"
+    assert "FUTURE_EVENT" in {alert["code"] for alert in scorecard["alerts"]}
+
+
 def test_discover_session_file_honors_override_and_relocated_layout(tmp_path: Path, monkeypatch) -> None:
     scorecard = load_scorecard_module()
     session_id = "session-123"

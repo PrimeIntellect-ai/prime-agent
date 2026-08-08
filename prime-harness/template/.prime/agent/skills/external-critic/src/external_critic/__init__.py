@@ -114,6 +114,15 @@ def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
     in_string = False
     escaped = False
     for index, character in enumerate(text):
+        if depth == 0:
+            # Quotes in surrounding prose are not JSON syntax. Start string
+            # tracking only after a candidate array has opened.
+            if character == "[":
+                start = index
+                depth = 1
+                in_string = False
+                escaped = False
+            continue
         if in_string:
             if escaped:
                 escaped = False
@@ -125,10 +134,8 @@ def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
         if character == '"':
             in_string = True
         elif character == "[":
-            if depth == 0:
-                start = index
             depth += 1
-        elif character == "]" and depth:
+        elif character == "]":
             depth -= 1
             if depth == 0 and start is not None:
                 candidates.append(text[start : index + 1])
@@ -788,6 +795,14 @@ def _append_panel_ledger(event: dict[str, Any], *, path: Path | None = None) -> 
             pass
 
 
+def _references_exact_id(text: str, identifier: str) -> bool:
+    boundary = r"A-Za-z0-9_-"
+    return re.search(
+        rf"(?<![{boundary}]){re.escape(identifier)}(?![{boundary}])",
+        text,
+    ) is not None
+
+
 def _parse_aware_timestamp(value: Any, *, label: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} has no valid created_at timestamp")
@@ -863,7 +878,7 @@ def record_panel_verdict(
             notes = row[4] or ""
             artifact_paths_raw = row[7] or "[]"
             linkage_text = "\n".join((str(claim), str(notes), str(artifact_paths_raw)))
-            if finding_id not in linkage_text:
+            if not _references_exact_id(linkage_text, finding_id):
                 raise ValueError(
                     f"evidence {evidence_id!r} must reference the finding_id"
                 )

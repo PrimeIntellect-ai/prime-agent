@@ -163,6 +163,16 @@ def test_installed_conftest_manages_template_link_without_shell_symlink(tmp_path
     installed_conftest = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(installed_conftest)
 
+    shallow_source = tmp_path / "prime-harness"
+    (shallow_source / "template").mkdir(parents=True)
+    monkeypatch.setattr(installed_conftest, "HARNESS_ROOT", shallow_source)
+    monkeypatch.setattr(
+        installed_conftest,
+        "_installed_repo_root",
+        lambda: (_ for _ in ()).throw(AssertionError("source layout must not index parents")),
+    )
+    installed_conftest.pytest_configure(None)
+
     consumer = tmp_path / "consumer"
     bundle = consumer / ".prime/agent/harness-tests"
     bundle.mkdir(parents=True)
@@ -189,6 +199,7 @@ def test_customizable_consumer_contracts_are_not_frozen_in_installed_selftests()
     assert not (bundle_root / "tests/test_source_reviewability.py").exists()
     assert not (bundle_root / "tests/test_template_checks.py").exists()
     assert not (bundle_root / "tests/test_workflow.py").exists()
+    assert (bundle_root / "tests/test_workflow_policy.py").is_file()
     bundle_doc = (bundle_root / "BUNDLE.md").read_text(encoding="utf-8").lower()
     assert "custom" in bundle_doc
     assert "test_source_reviewability.py" in bundle_doc

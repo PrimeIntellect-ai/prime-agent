@@ -27,23 +27,28 @@ def _installed_repo_root() -> Path:
 
 
 def _is_installed_layout() -> bool:
-    expected = _installed_repo_root() / ".prime" / "agent" / "harness-tests"
-    return HARNESS_ROOT.resolve() == expected.resolve()
+    suffix = tuple(part.casefold() for part in HARNESS_ROOT.parts[-3:])
+    return suffix == (".prime", "agent", "harness-tests")
 
 
 def pytest_configure(config) -> None:
     """Link installed bundle tests to the consumer root without shell tools."""
     global _CREATED_TEMPLATE_LINK
     template = HARNESS_ROOT / "template"
-    consumer_root = _installed_repo_root().resolve()
+    installed_layout = _is_installed_layout()
     if template.exists():
-        if _is_installed_layout() and template.resolve() != consumer_root:
-            raise RuntimeError(
-                f"installed harness template path does not resolve to the consumer root: {template}"
-            )
+        if installed_layout:
+            consumer_root = _installed_repo_root().resolve()
+            if template.resolve() != consumer_root:
+                raise RuntimeError(
+                    f"installed harness template path does not resolve to the consumer root: {template}"
+                )
+        return
+    if not installed_layout:
         return
     if os.path.lexists(template):
         raise RuntimeError(f"installed harness template link is broken: {template}")
+    consumer_root = _installed_repo_root().resolve()
     try:
         os.symlink(consumer_root, template, target_is_directory=True)
     except OSError:

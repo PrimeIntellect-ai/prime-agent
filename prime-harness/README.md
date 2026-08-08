@@ -299,6 +299,10 @@ Windows reparse points, stable source-identity changes during capture, special
 files, duplicate or case-colliding names, traversal/noncanonical paths, Windows ADS
 or reserved-device components, privileged setuid/setgid/sticky modes,
 corruption, and missing SQLite snapshot markers fail closed on every platform.
+To bound decompression and restore resource use, the format currently rejects
+members above 2 GiB and archives above 16 GiB uncompressed; rotate or shard
+larger local state before backup rather than silently producing an archive that
+this safety profile cannot restore.
 The tool is an integrity/accident boundary, not isolation from a malicious
 process running concurrently with the same account: such a process can race
 filesystem names or rewrite the finished archive. Quiesce adversarial writers

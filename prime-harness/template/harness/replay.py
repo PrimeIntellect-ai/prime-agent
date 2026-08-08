@@ -418,8 +418,13 @@ def _executor_command(
     # -P was added in Python 3.11. Retain the supported 3.10 runtime rather
     # than making every executor fail with "Unknown option" there.
     if version[:2] >= (3, 11):
-        command.append("-P")
-    command.extend(("-S", str(executor)))
+        command.extend(("-P", "-S", str(executor)))
+    else:
+        launcher = (
+            "import sys;del sys.path[0];import runpy;"
+            "runpy.run_path(sys.argv[1],run_name='__main__')"
+        )
+        command.extend(("-S", "-c", launcher, str(executor)))
     return command
 
 
