@@ -2897,16 +2897,10 @@ export class DaemonSupervisor {
 					if (!isOrphanProcessIdentityCurrent(orphan)) {
 						continue;
 					}
-					const { pid } = orphan;
-					try {
-						process.kill(-pid, "SIGKILL");
-					} catch {
-						try {
-							process.kill(pid, "SIGKILL");
-						} catch {
-							// The detached resource may already have exited.
-						}
-					}
+					// Tree kill: a detached resource can itself have children, and on
+					// Windows the inlined single-process fallback this replaces left
+					// every one of them running.
+					signalProcessGroupOrProcess(orphan.pid, "SIGKILL");
 				}
 				clearOrphanProcessJournal(orphanProcessJournalPath);
 			} catch (error) {

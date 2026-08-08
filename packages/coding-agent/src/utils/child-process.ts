@@ -1,4 +1,4 @@
-import { type ChildProcess, execFileSync } from "node:child_process";
+import { type ChildProcess, execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename } from "node:path";
@@ -51,7 +51,22 @@ export function isProcessAlive(pid: number): boolean {
 	return processIdExists(pid) && !isZombieProcess(pid);
 }
 
+/**
+ * Terminate a process and everything it spawned.
+ *
+ * Unix signals the process group, which reaches descendants in one call.
+ * Windows has no process groups to signal: `process.kill(-pid)` fails there and
+ * the fallback terminates exactly one process, so a worker's own children — a
+ * Python kernel, a detached autonomous gate — survive their parent and keep
+ * running until they finish on their own. `taskkill /T` walks the real process
+ * tree instead. It runs synchronously so teardown paths can rely on it having
+ * happened, and it is fast enough (tens of milliseconds) to sit in a shutdown.
+ */
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
+	if (process.platform === "win32") {
+		killWindowsProcessTree(pid);
+		return;
+	}
 	try {
 		process.kill(-pid, signal);
 		return;
@@ -62,6 +77,27 @@ export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals)
 		process.kill(pid, signal);
 	} catch {
 		// The process may already be fully reaped.
+	}
+}
+
+function killWindowsProcessTree(pid: number): void {
+	if (!Number.isInteger(pid) || pid <= 0) {
+		return;
+	}
+	try {
+		// `windowsHide` matters here: a daemon owns no console, having been spawned
+		// detached, and a console child of a console-less parent gets a new console
+		// *with a visible window* that outlives it. A teardown killing many
+		// processes would leave a desktop full of black windows to close by hand.
+		spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+	} catch {
+		// taskkill is unavailable or the tree is already gone; fall back to the
+		// single process so at least the root does not linger.
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Already reaped.
+		}
 	}
 }
 

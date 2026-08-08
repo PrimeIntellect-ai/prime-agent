@@ -12,6 +12,7 @@
 - Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade prime-agent` ([#844](https://github.com/PrimeIntellect-ai/prime-agent/issues/844))
 - Fixed the agents view collapsing expanded subagent lists when returning from an opened agent ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
 - Kept the subagent summary row visible and selectable while its list is expanded in the agents view, so pressing enter on it collapses the list again ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
+- Fixed worker teardown on Windows leaving detached descendants running. Windows has no process groups, so the kill reached only the named process; it now walks the real process tree ([#917](https://github.com/PrimeIntellect-ai/prime-agent/issues/917)).
 
 ## [0.7.1] - 2026-08-07
 
