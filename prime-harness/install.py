@@ -6,7 +6,7 @@ overwrites modified files unless --force. Idempotent: re-running against an
 installed target reports "unchanged" and touches nothing.
 
 Usage:
-  python install.py <target-repo> [--force] [--check] [--dry-run]
+  python install.py <target-repo> [--force] [--check] [--tailor] [--dry-run]
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import filecmp
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,131 @@ IGNORED_TEMPLATE_SUFFIXES = {".pyc", ".pyo"}
 def is_ignored_template_artifact(path: Path) -> bool:
     """Return whether an installer source path is transient Python bytecode."""
     return bool(IGNORED_TEMPLATE_DIRS.intersection(path.parts)) or path.suffix.lower() in IGNORED_TEMPLATE_SUFFIXES
+
+class TailorError(RuntimeError):
+    """The target layout cannot produce a non-vacuous gate manifest."""
+
+
+def _check(name: str, command: str, path: str, timeout: int) -> dict[str, object]:
+    return {
+        "name": name,
+        "command": command,
+        "skip_if_missing": path,
+        "timeout_seconds": timeout,
+    }
+
+
+def _is_linklike(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
+
+
+def tailor_manifest(target: Path) -> dict[str, object]:
+    """Build a deterministic gate draft from bounded top-level project markers."""
+    target = target.resolve()
+    checks: list[dict[str, object]] = []
+    detected: list[str] = []
+
+    python_roots: list[str] = []
+    if (target / "src").is_dir():
+        python_roots.append("src")
+    # Source-layout-free packages are detected only one level deep; never walk
+    # an untrusted or very large repository during installation.
+    try:
+        top_level = sorted(target.iterdir(), key=lambda path: path.name.casefold())
+    except OSError as exc:
+        raise TailorError(f"cannot scan target root: {exc}") from exc
+    if len(top_level) > 512:
+        raise TailorError("target root exceeds the 512-entry tailoring scan limit")
+    excluded = {".git", ".prime", ".github", "artifacts", "checks", "harness", "tests", "test", "node_modules"}
+    for path in top_level:
+        if path.name in excluded or path.name.startswith(".") or not path.is_dir() or _is_linklike(path):
+            continue
+        if (path / "__init__.py").is_file():
+            python_roots.append(path.name)
+    python_roots = sorted(set(python_roots))
+    if python_roots:
+        joined = " ".join(python_roots)
+        checks.append(_check("compile", f"python -m compileall -q {joined}", python_roots[0], 120))
+        detected.extend(f"python-package:{item}" for item in python_roots)
+
+    test_dirs = [item for item in ("tests", "test") if (target / item).is_dir()]
+    if test_dirs:
+        joined = " ".join(test_dirs)
+        checks.append(_check("unit", f"python -m pytest -q {joined}", test_dirs[0], 900))
+        detected.extend(f"python-tests:{item}" for item in test_dirs)
+    elif (target / "tox.ini").is_file():
+        checks.append(_check("tox", "python -m tox -q", "tox.ini", 900))
+        detected.append("tox.ini")
+
+    lake_marker = next((item for item in ("lakefile.lean", "lakefile.toml") if (target / item).is_file()), None)
+    if lake_marker:
+        checks.append(_check("lean-build", "lake build", lake_marker, 900))
+        detected.append(lake_marker)
+
+    package_json = target / "package.json"
+    if package_json.is_file() and not _is_linklike(package_json) and package_json.stat().st_size <= 1_048_576:
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            package = None
+        script = package.get("scripts", {}).get("test") if isinstance(package, dict) and isinstance(package.get("scripts"), dict) else None
+        if isinstance(script, str) and script.strip() and "no test specified" not in script.casefold():
+            checks.append(_check("node-test", "npm test", "package.json", 900))
+            detected.append("package.json:test")
+
+    if not checks:
+        raise TailorError(
+            "no executable project checks detected (expected Python package/tests, tox.ini, "
+            "lakefile, or a non-placeholder package.json test script)"
+        )
+
+    quick: list[dict[str, object]] = []
+    for entry in checks:
+        item = dict(entry)
+        if item["name"] == "unit":
+            item["command"] = str(item["command"]).replace("pytest -q", "pytest -q -x", 1)
+            item["timeout_seconds"] = 300
+        quick.append(item)
+    default = [dict(entry) for entry in checks]
+    changed = [dict(entry) for entry in checks]
+    profiles: dict[str, object] = {
+        "quick": {"min_applicable_checks": 1, "required": quick, "conditional": []},
+        "default": {"min_applicable_checks": 1, "required": default, "conditional": []},
+        "changed-files": {"min_applicable_checks": 1, "required": changed, "conditional": []},
+    }
+    holdout = target / "checks/hidden_holdout"
+    if holdout.is_dir():
+        profiles["holdout"] = {
+            "min_applicable_checks": 1,
+            "required": [_check("hidden-holdout", "python -m pytest -q checks/hidden_holdout", "checks/hidden_holdout", 1800)],
+            "conditional": [],
+        }
+        detected.append("checks/hidden_holdout")
+    return {
+        "_generated_by": "prime-harness install.py --tailor",
+        "_detected": sorted(detected),
+        "profiles": profiles,
+    }
+
+
+def atomic_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8", newline="\n",
+        )
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
 
 NEXT_STEPS = """
 Next steps
@@ -69,6 +195,7 @@ def main() -> int:
     parser.add_argument("target", help="path to the target repository root")
     parser.add_argument("--force", action="store_true", help="overwrite files that differ from the template")
     parser.add_argument("--check", action="store_true", help="run harness/doctor.py after installing")
+    parser.add_argument("--tailor", action="store_true", help="generate a non-vacuous manifest draft from the target layout")
     parser.add_argument("--dry-run", action="store_true", help="report actions without writing")
     args = parser.parse_args()
 
@@ -80,6 +207,15 @@ def main() -> int:
               f"(worktrees, commit provenance, changed-file gates)")
     if not TEMPLATE.is_dir():
         sys.exit(f"error: template directory missing at {TEMPLATE}")
+
+    manifest_existed = (target / "harness/manifest.json").exists()
+    tailored = None
+    if args.tailor:
+        try:
+            tailored = tailor_manifest(target)
+        except TailorError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     copied, skipped_same, skipped_diff, overwritten = [], [], [], []
 
@@ -127,6 +263,17 @@ def main() -> int:
         print(f"  kept local edits: {len(skipped_diff)} (template differs; use --force to overwrite)")
         for rel in skipped_diff:
             print(f"    - {rel}")
+
+    if tailored is not None:
+        destination = (
+            target / "harness/manifest.json"
+            if not manifest_existed or args.force
+            else target / "harness/manifest.tailored.json"
+        )
+        if not args.dry_run:
+            atomic_json(destination, tailored)
+        print(f"{prefix}tailored manifest: {destination.relative_to(target)}"
+              + (" (review sidecar; existing manifest preserved)" if destination.name.endswith(".tailored.json") else ""))
 
     if not args.dry_run:
         upstream_watch = target / "harness" / "upstream_check.py"

@@ -210,6 +210,58 @@ def check_upstream_watch(report: Report, root: Path) -> None:
         )
 
 
+def check_manifest_applicability(report: Report, root: Path, manifest: dict[str, object]) -> None:
+    """Fail strict doctor when gate entries are statically inapplicable."""
+    profiles = manifest.get("profiles")
+    if not isinstance(profiles, dict):
+        report.fail("manifest-applicability", "profiles must be an object", "regenerate or repair harness/manifest.json")
+        return
+    skipped: list[str] = []
+    deficits: list[str] = []
+    invalid: list[str] = []
+    for profile_name in sorted(profiles):
+        profile = profiles[profile_name]
+        if not isinstance(profile, dict):
+            invalid.append(f"{profile_name}: profile is not an object")
+            continue
+        minimum = profile.get("min_applicable_checks", 1)
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+            invalid.append(f"{profile_name}: invalid min_applicable_checks={minimum!r}")
+            continue
+        applicable = 0
+        for section in ("required", "conditional"):
+            entries = profile.get(section, [])
+            if not isinstance(entries, list):
+                invalid.append(f"{profile_name}:{section} is not a list")
+                continue
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    invalid.append(f"{profile_name}:{section}[{index}] is not an object")
+                    continue
+                name = str(entry.get("name") or f"{section}[{index}]")
+                marker = entry.get("skip_if_missing")
+                if marker is None:
+                    applicable += 1
+                    continue
+                if not isinstance(marker, str) or not marker or Path(marker).is_absolute():
+                    invalid.append(f"{profile_name}:{name} invalid skip_if_missing")
+                    continue
+                if (root / marker).exists():
+                    applicable += 1
+                else:
+                    skipped.append(f"{profile_name}:{name} ({marker})")
+        if applicable < minimum:
+            deficits.append(f"{profile_name} applicable={applicable} minimum={minimum}")
+    details = invalid + deficits + skipped
+    if details:
+        report.fail(
+            "manifest-applicability", "; ".join(details),
+            "run install.py <repo> --tailor, review the draft, and replace placeholder entries",
+        )
+    else:
+        report.ok("manifest-applicability", "all profile minima and skip_if_missing markers are currently satisfiable")
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -217,6 +269,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--strict", action="store_true", help="fail on statically skipped manifest entries")
     args = parser.parse_args()
 
     report = Report()
@@ -310,6 +363,8 @@ def main() -> int:
         profiles = sorted(data.get("profiles", {}))
         if profiles:
             report.ok("manifest", f"profiles: {', '.join(profiles)}")
+            if args.strict:
+                check_manifest_applicability(report, root, data)
         else:
             report.fail("manifest", "no profiles defined", "edit harness/manifest.json")
     except FileNotFoundError:

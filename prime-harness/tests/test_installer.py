@@ -114,6 +114,96 @@ def test_doctor_passes_on_fresh_install(tmp_repo):
     assert proc.returncode == 0, f"doctor failed:\n{proc.stdout}\n{proc.stderr}"
 
 
+def test_tailor_generates_nonvacuous_manifest_from_repo_layout(tmp_repo):
+    (tmp_repo / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n", encoding="utf-8")
+    (tmp_repo / "src/sample").mkdir(parents=True)
+    (tmp_repo / "src/sample/__init__.py").write_text("", encoding="utf-8")
+    (tmp_repo / "tests").mkdir()
+    (tmp_repo / "tests/test_sample.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    assert manifest["_generated_by"] == "prime-harness install.py --tailor"
+    for profile_name in ("quick", "default", "changed-files"):
+        profile = manifest["profiles"][profile_name]
+        assert profile["min_applicable_checks"] >= 1
+        assert profile["required"]
+        assert all(
+            not entry.get("skip_if_missing")
+            or (tmp_repo / entry["skip_if_missing"]).exists()
+            for entry in profile["required"]
+        )
+    assert {entry["name"] for entry in manifest["profiles"]["default"]["required"]} >= {"compile", "unit"}
+
+
+def test_tailor_detects_tox_lean_and_nonplaceholder_node_tests(tmp_repo):
+    (tmp_repo / "tox.ini").write_text("[tox]\nenvlist=py\n", encoding="utf-8")
+    (tmp_repo / "lakefile.lean").write_text("package sample\n", encoding="utf-8")
+    (tmp_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node --test"}}), encoding="utf-8"
+    )
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    names = {entry["name"] for entry in manifest["profiles"]["default"]["required"]}
+    assert names == {"tox", "lean-build", "node-test"}
+
+
+def test_tailored_manifest_passes_doctor_static_applicability(tmp_repo):
+    (tmp_repo / "src/pkg").mkdir(parents=True)
+    (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    (tmp_repo / "tests").mkdir()
+    (tmp_repo / "tests/test_pkg.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    installed = run_install(tmp_repo, "--tailor")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    doctor = subprocess.run(
+        [sys.executable, str(tmp_repo / "harness/doctor.py"), "--strict", "--json"],
+        cwd=tmp_repo, capture_output=True, text=True, timeout=120,
+    )
+    report = json.loads(doctor.stdout)
+    applicability = next(item for item in report["checks"] if item["name"] == "manifest-applicability")
+    assert applicability["level"] == "PASS"
+
+
+def test_tailor_refuses_vacuous_repo_before_installing(tmp_repo):
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / ".prime/agent/APPEND_SYSTEM.md").exists()
+
+
+def test_tailor_preserves_existing_manifest_and_writes_review_sidecar(tmp_repo):
+    (tmp_repo / "src/pkg").mkdir(parents=True)
+    (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    (tmp_repo / "tests").mkdir()
+    (tmp_repo / "tests/test_pkg.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    (tmp_repo / "harness").mkdir()
+    custom = {"profiles": {"custom": {"required": [], "conditional": []}}}
+    (tmp_repo / "harness/manifest.json").write_text(json.dumps(custom), encoding="utf-8")
+
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8")) == custom
+    sidecar = tmp_repo / "harness/manifest.tailored.json"
+    assert sidecar.is_file()
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["profiles"]["default"]["required"]
+
+
+def test_doctor_strict_reports_static_manifest_skips(tmp_repo):
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0
+    doctor = subprocess.run(
+        [sys.executable, str(tmp_repo / "harness/doctor.py"), "--strict", "--json"],
+        cwd=tmp_repo, capture_output=True, text=True, timeout=120,
+    )
+    report = json.loads(doctor.stdout)
+    applicability = next(item for item in report["checks"] if item["name"] == "manifest-applicability")
+    assert applicability["level"] == "FAIL"
+    assert "quick:compile" in applicability["detail"]
+    assert "quick:unit-fast" in applicability["detail"]
+
+
 def test_doctor_fails_on_recorded_prime_agent_drift(tmp_repo):
     installed = run_install(tmp_repo)
     assert installed.returncode == 0

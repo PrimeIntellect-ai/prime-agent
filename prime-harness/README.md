@@ -34,6 +34,21 @@ python install.py C:/path/to/your/physics-repo --check
 `--check` runs the preflight doctor. The installer is idempotent and never
 overwrites your local edits without `--force`.
 
+For a real project, generate a non-vacuous manifest from bounded top-level
+Python, tox, Lean, and Node markers instead of accepting template placeholders:
+
+```bash
+python install.py C:/path/to/project --tailor --check
+python -S C:/path/to/project/harness/doctor.py --strict
+```
+
+`--tailor` fails before installation if it cannot find any executable project
+check. On a fresh install it writes `harness/manifest.json`; when a manifest
+already exists it preserves that file and writes `manifest.tailored.json` for
+review (unless `--force` explicitly authorizes replacement). Strict doctor
+fails when a profile minimum is invalid or any `skip_if_missing` marker is
+currently absent.
+
 Then start a **new** Prime Agent session from the repo root (Python-backed
 skills install into the kernel venv at session setup — an existing session
 won't see them).
