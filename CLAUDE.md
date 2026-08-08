@@ -175,6 +175,25 @@ Tested and rejected, so nobody re-downloads 31 GB to rediscover it:
 
 Two smaller traps. Resident footprint runs well above download size once the KV cache is allocated — `devstral:24b` is a 14 GB download that occupies 18 GB at 32k context. And some models carry a large built-in chat template: the same 38-token prompt bills 1251 tokens against `devstral:24b`, overhead paid on every request.
 
+#### Making a local model the default
+
+`defaultProvider` and `defaultModel` in `~/.prime/agent/settings.json` are separate fields — `defaultModel` holds a bare model id, not a `provider/model` reference:
+
+```json
+"defaultProvider": "mlx",
+"defaultModel": "mlx-community/Qwen3-14B-4bit"
+```
+
+A model id containing `/` is safe here because `resolveModel` compares provider and id as distinct fields, but it is *not* safe on the command line: `--model` splits on the first slash, so `--model mlx-community/Qwen3-14B-4bit` resolves provider `mlx-community` and fails. Pass `--provider` separately for such ids.
+
+Verify which model actually served a request with JSON mode rather than trusting the reply:
+
+```bash
+prime-agent --mode json --no-session -p "hi"   # emits message.provider / message.model / message.api
+```
+
+This matters whenever cloud credentials are present. If the configured default fails to resolve, the run silently falls back to another provider and print mode looks identical, so a plausible answer is not evidence the intended model ran.
+
 ### Config and asset resolution
 
 User config: `~/.prime/agent/` (sessions, session-artifacts, auth.json, kernel-venv, logs). Project config: `.prime/agent/`. Overrides: `PRIME_AGENT_CODING_AGENT_DIR`, `PRIME_AGENT_SESSION_DIR`.
