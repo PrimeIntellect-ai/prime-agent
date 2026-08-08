@@ -25,6 +25,7 @@ export function createAgentConnectionState(
 ): AgentConnectionState {
 	const session = runtime.session;
 	const sessionManager = session.sessionManager;
+	const sessionStats = session.getSessionStats();
 	return {
 		activeSessionId,
 		cwd: sessionManager.getCwd(),
@@ -54,6 +55,7 @@ export function createAgentConnectionState(
 		})),
 		activeToolNames: session.getActiveToolNames(),
 		contextUsage: session.getContextUsage(),
+		sessionCost: sessionStats.cost,
 		// Baseline recap; the daemon overlays the live summary on attach.
 		recap: persistedRecap(sessionManager),
 	};

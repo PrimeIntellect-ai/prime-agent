@@ -348,6 +348,7 @@ export interface AgentConnectionState {
 	scopedModels: AgentConnectionScopedModel[];
 	activeToolNames: string[];
 	contextUsage: SessionStats["contextUsage"];
+	sessionCost?: number;
 	/** One-line recap of the agent's recent work, shown above the prompt. */
 	recap?: string;
 }
