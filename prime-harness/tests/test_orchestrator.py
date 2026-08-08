@@ -191,7 +191,14 @@ def test_reconcile_accepts_v071_session_name(tmp_repo, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "controller_mode", ("available", "unavailable", "api_drift")
+    "controller_mode",
+    (
+        "available",
+        "unavailable",
+        "api_drift",
+        "session_optional_unavailable",
+        "session_optional_not_in_kernel",
+    ),
 )
 def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, controller_mode):
     import types
@@ -240,6 +247,8 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, contro
     )
 
     async def goal_get():
+        if controller_mode == "session_optional_unavailable":
+            raise RuntimeError('host request type "goal.get" is not available in this session')
         return {"goal": {"status": "active"}, "remaining_tokens": None,
                 "completion_budget_report": None}
 
@@ -256,9 +265,13 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, contro
         return {"current": {}, "entries": []}
 
     async def compact_status():
+        if controller_mode == "session_optional_unavailable":
+            raise RuntimeError('host request type "compact.status" is not available in this session')
         return {"tokens": 1, "context_window": 2, "percent": 50.0, "scheduled": False}
 
     async def refine_status():
+        if controller_mode == "session_optional_unavailable":
+            raise RuntimeError('host request type "refine.status" is not available in this session')
         return {"pending": False, "in_flight": False}
 
     async def observe_list():
@@ -288,7 +301,12 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, contro
         "agent_observe": types.SimpleNamespace(list_agents=observe_list),
         "rlm_heartbeat": types.SimpleNamespace(list=heartbeat_list),
     }
-    monkeypatch.setattr(orch, "require_kernel_module", lambda name: modules[name])
+    def require_module(name):
+        if controller_mode == "session_optional_not_in_kernel" and name in {"goal", "compact", "refine"}:
+            raise orch.NotInKernel(f"Module {name!r} is unavailable outside the kernel")
+        return modules[name]
+
+    monkeypatch.setattr(orch, "require_kernel_module", require_module)
     if controller_mode == "api_drift":
         with pytest.raises(orch.SelfcheckError) as caught:
             asyncio.run(orch.selfcheck())
@@ -305,12 +323,15 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, contro
     assert report["status"] == "pass"
     assert report["failures"] == []
     assert len(report["checks"]) >= 15
-    expected_status = "available" if controller_mode == "available" else "unavailable"
-    assert {
-        item["status"] for item in report["capabilities"].values()
-    } == {expected_status}
+    capability_statuses = [item["status"] for item in report["capabilities"].values()]
     if controller_mode == "available":
+        assert set(capability_statuses) == {"available"}
         assert report["warnings"] == []
-    else:
+    elif controller_mode == "unavailable":
+        assert set(capability_statuses) == {"unavailable"}
         assert len(report["warnings"]) == 3
-        assert len([item for item in report["checks"] if item["status"] == "warn"]) == 3
+    else:
+        assert capability_statuses.count("available") == 3
+        assert capability_statuses.count("unavailable") == 3
+        assert len(report["warnings"]) == 3
+    assert len([item for item in report["checks"] if item["status"] == "warn"]) == len(report["warnings"])

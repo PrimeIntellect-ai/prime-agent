@@ -94,8 +94,23 @@ def test_graph_centrality_ranks_referenced_hub_above_isolated_symbol(tmp_path):
     result = repo_map.map_repository(root, token_budget=4000, scope="tracked")
     names = [item["name"] for item in result["selected_symbols"]]
     assert names.index("hub") < names.index("isolated")
-    assert result["stats"]["edges"] >= 4
+    assert result["stats"]["edges"] >= 2
+    assert result["stats"]["edges"] == result["stats"]["relationships"]
+    assert result["stats"]["edges"] == sum(result["stats"]["edge_kinds"].values())
+    assert result["stats"]["graph_directed_edges"] >= result["stats"]["edges"]
     assert result["stats"]["edge_kinds"]["reference"] >= 2
+
+
+def test_max_edges_and_stats_count_logical_relationships_not_reverse_edges(tmp_path):
+    root = make_repo(tmp_path / "repo", {
+        "a.py": "def alpha(): return 1\n",
+        "z.py": "from a import alpha\ndef wanted(): return alpha()\n",
+    })
+    result = repo_map.map_repository(root, token_budget=2000, scope="tracked", max_edges=1)
+    stats = result["stats"]
+    assert stats["edges"] == stats["relationships"] == 1
+    assert stats["edge_kinds"] == {"reference": 1}
+    assert stats["graph_directed_edges"] == 2
 
 
 def test_budget_covers_complete_default_callable_text_with_independent_byte_check(tmp_path):
@@ -183,7 +198,7 @@ def test_parse_failure_is_partial_not_pass(tmp_path):
 
 
 def test_hard_limits_fail_closed_instead_of_selecting_prefix(tmp_path):
-    root = make_repo(tmp_path / "repo", {"a.py": "def alpha(): return 1\n", "z.py": "from a import alpha\ndef wanted(): return alpha()\n"})
+    root = make_repo(tmp_path / "repo", {"a.py": "def alpha(): return 1\n", "z.py": "from a import alpha\ndef wanted(): return alpha()\ndef another(): return alpha()\n"})
     with pytest.raises(repo_map.RepositoryLimitError, match="file count"):
         repo_map.map_repository(root, query="wanted", token_budget=2000, max_files=1)
     with pytest.raises(repo_map.RepositoryLimitError, match="symbol count"):

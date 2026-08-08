@@ -694,7 +694,7 @@ def _build_graph(analyses: list[_FileAnalysis], max_edges: int) -> tuple[list[_S
                 parent = symbol.qualname.rsplit(".", 1)[0]
                 target = next((item for item in symbols if item.path == symbol.path and item.qualname == f"{parent}.{attribute}"), None)
                 if target: connect(symbol, target, "reference")
-    edge_count = sum(len(targets) for targets in edges.values())
+    edge_count = len(edge_kinds)
     if edge_count > max_edges:
         raise RepositoryLimitError(f"graph edge count {edge_count} exceeds max_edges={max_edges}")
     return symbols, edges, edge_kinds
@@ -859,7 +859,9 @@ def map_repository(
         "request": {"query_sha256": query_hash},
         "selected_symbols": selected,
         "stats": {"files_inventory": len(inventory), "files_parsed": len(analyses),
-                  "symbols": len(symbols), "edges": sum(len(targets) for targets in edges.values()),
+                  "symbols": len(symbols), "edges": len(edge_kinds),
+                  "relationships": len(edge_kinds),
+                  "graph_directed_edges": sum(len(targets) for targets in edges.values()),
                   "edge_kinds": kind_counts,
                   "parse_failures": sum(warning["code"] in {"PYTHON_PARSE_FAILED", "TSJS_NON_UTF8"} for warning in warnings),
                   "candidates_skipped_budget": skipped_budget},

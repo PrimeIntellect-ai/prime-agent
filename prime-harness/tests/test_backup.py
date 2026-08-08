@@ -110,6 +110,68 @@ def test_create_verify_and_restore_exact_roundtrip_with_live_sqlite(tmp_path):
     assert json.loads(cli.stdout)["manifest_sha256"] == verified["manifest_sha256"]
 
 
+def test_restore_sqlite_integrity_uses_percent_encoded_uri(tmp_path):
+    project, session, global_harness, connection = make_sources(tmp_path)
+    archive = tmp_path / "percent-path.zip"
+    try:
+        backup.create_backup(
+            project_root=project,
+            session_dir=session,
+            global_harness=global_harness,
+            output=archive,
+        )
+    finally:
+        connection.close()
+
+    destination = tmp_path / "restore-%41"
+    restored = backup.restore_backup(archive, destination)
+    assert restored["status"] == "pass"
+    database = destination / "project/artifacts/harness/evidence.db"
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        connection.close()
+
+
+def test_manifest_mtime_has_portable_upper_bound(tmp_path):
+    project, session, global_harness, connection = make_sources(tmp_path)
+    archive = tmp_path / "valid-mtime.zip"
+    try:
+        backup.create_backup(
+            project_root=project,
+            session_dir=session,
+            global_harness=global_harness,
+            output=archive,
+        )
+    finally:
+        connection.close()
+
+    for section in ("directories", "files"):
+        crafted = tmp_path / f"mtime-{section}.zip"
+
+        def raise_mtime(members, section=section):
+            manifest = json.loads(members[backup.MANIFEST_NAME])
+            manifest[section][0]["mtime_ns"] = 10**30
+            members[backup.MANIFEST_NAME] = backup._canonical_json(manifest)
+            return members
+
+        rewrite_zip(archive, crafted, raise_mtime)
+        kind = {"directories": "directory", "files": "file"}[section]
+        with pytest.raises(backup.BackupError, match=f"invalid {kind} metadata"):
+            backup.verify_backup(crafted)
+
+    cli = subprocess.run(
+        [sys.executable, "-S", str(BACKUP), "restore", str(crafted), "--destination", str(tmp_path / "overflow-restore")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert cli.returncode == 2
+    assert json.loads(cli.stderr)["status"] == "fail"
+    assert "Traceback" not in cli.stderr
+
+
 def test_missing_global_root_is_recorded_not_fabricated(tmp_path):
     project, session, global_harness, connection = make_sources(tmp_path)
     shutil.rmtree(global_harness)

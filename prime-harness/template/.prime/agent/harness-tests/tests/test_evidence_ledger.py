@@ -87,6 +87,16 @@ def test_ingest_maps_statuses_without_trusting_self_attestation(tmp_repo, tmp_pa
     laundered = ledger.get(ledger.ingest(artifact))
     assert laundered["status"] == "unverified"
     assert laundered["verifier"] is None
+    artifact.write_text(json.dumps({
+        "claim": "self-attested verified claim",
+        "status": "verified",
+        "verifier": "untrusted-child",
+    }), encoding="utf-8")
+    quarantined = ledger.get(ledger.ingest(artifact))
+    assert quarantined["status"] == "unverified"
+    assert quarantined["verifier"] is None
+    assert "self-attested verified remains unverified" in quarantined["notes"]
+
     with pytest.raises(ValueError, match="cannot create verified"):
         ledger.ingest(artifact, status_override="verified")
 

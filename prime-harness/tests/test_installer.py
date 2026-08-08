@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,7 +37,7 @@ def test_fresh_install_copies_everything(tmp_repo):
         "harness/model_routing.py",
         ".github/workflows/prime-harness.yml",
         ".prime/agent/harness-tests/BUNDLE.md",
-        ".prime/agent/harness-tests/README.md",
+        ".prime/agent/harness-tests/docs/alert-codes.md",
         ".prime/agent/harness-tests/tests/test_orchestrator.py",
         ".prime/agent/harness-tests/tests/fixtures/scorecard/session.jsonl",
         "harness/manifest.json",
@@ -109,10 +110,90 @@ def test_installer_ignores_python_cache_artifacts():
     assert not installer.is_ignored_template_artifact(Path("pkg/module.py"))
 
 
+def test_installed_orchestrator_docs_scope_upstream_only_live_e2e_path():
+    skill_doc = (
+        HARNESS_ROOT / "template/.prime/agent/skills/harness-orchestrator/SKILL.md"
+    ).read_text(encoding="utf-8")
+    bundle_doc = (
+        HARNESS_ROOT / "template/.prime/agent/harness-tests/BUNDLE.md"
+    ).read_text(encoding="utf-8")
+    assert "In the upstream prime-harness repo" in skill_doc
+    assert "it is not part of the installed bundle" in skill_doc
+    assert ".prime/agent/harness-tests/BUNDLE.md" in skill_doc
+    assert "tests/test_live_kernel_e2e.py" in bundle_doc
+    assert "upstream-only" in bundle_doc
+
+
+def test_readme_install_tree_documents_every_large_installed_component():
+    readme = (HARNESS_ROOT / "README.md").read_text(encoding="utf-8")
+    required = {
+        ".github/workflows/prime-harness.yml",
+        ".prime/agent/harness-tests/",
+        "harness/backup.py",
+        "harness/model_routing.py",
+        "harness/replay_adapters/",
+        "checks/evalset/model-routing-v1.json",
+        ".prime/agent/harness-tests/BUNDLE.md",
+    }
+    assert not (HARNESS_ROOT / "template/.prime/agent/harness-tests/.pytest_cache").exists()
+    assert required <= {entry for entry in required if entry in readme}
+
+
+def test_bundle_uses_context_safe_contract_docs_not_upstream_readme():
+    bundle_root = HARNESS_ROOT / "template/.prime/agent/harness-tests"
+    upstream_doc = HARNESS_ROOT / "docs/alert-codes.md"
+    bundled_doc = bundle_root / "docs/alert-codes.md"
+    assert upstream_doc.is_file()
+    assert bundled_doc.read_bytes() == upstream_doc.read_bytes()
+    assert not (bundle_root / "README.md").exists()
+    text = bundled_doc.read_text(encoding="utf-8")
+    assert "Scorecard alert codes" in text
+    assert "Panel finding closure" in text
+    assert "Measured 2026-08-08" not in text
+    assert "python install.py" not in text
+
+
+def test_installed_conftest_manages_template_link_without_shell_symlink(tmp_path, monkeypatch):
+    conftest_path = HARNESS_ROOT / "tests/conftest.py"
+    spec = importlib.util.spec_from_file_location("installed_conftest_contract", conftest_path)
+    assert spec and spec.loader
+    installed_conftest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installed_conftest)
+
+    consumer = tmp_path / "consumer"
+    bundle = consumer / ".prime/agent/harness-tests"
+    bundle.mkdir(parents=True)
+    (consumer / "sentinel.txt").write_text("consumer-root", encoding="utf-8")
+    monkeypatch.setattr(installed_conftest, "HARNESS_ROOT", bundle)
+    monkeypatch.setattr(installed_conftest, "_installed_repo_root", lambda: consumer)
+
+    installed_conftest.pytest_configure(None)
+    link = bundle / "template"
+    assert link.is_dir()
+    assert (link / "sentinel.txt").read_text(encoding="utf-8") == "consumer-root"
+    installed_conftest.pytest_unconfigure(None)
+    assert not os.path.lexists(link)
+
+
+def test_customizable_consumer_contracts_are_not_frozen_in_installed_selftests():
+    bundle_root = HARNESS_ROOT / "template/.prime/agent/harness-tests"
+    assert not (bundle_root / "tests/test_template_checks.py").exists()
+    assert not (bundle_root / "tests/test_workflow.py").exists()
+    bundle_doc = (bundle_root / "BUNDLE.md").read_text(encoding="utf-8").lower()
+    assert "custom" in bundle_doc
+    assert "test_template_checks.py" in bundle_doc and "test_workflow.py" in bundle_doc
+
+
 def test_installed_component_selftests_match_upstream_sources():
     source_root = HARNESS_ROOT / "tests"
     bundle_root = HARNESS_ROOT / "template" / ".prime" / "agent" / "harness-tests" / "tests"
-    excluded = {"test_api_reference.py", "test_installer.py", "test_live_kernel_e2e.py"}
+    excluded = {
+        "test_api_reference.py",
+        "test_installer.py",
+        "test_live_kernel_e2e.py",
+        "test_template_checks.py",
+        "test_workflow.py",
+    }
     source_files = {
         path.relative_to(source_root).as_posix(): path
         for path in source_root.rglob("*")
@@ -127,4 +208,7 @@ def test_installed_component_selftests_match_upstream_sources():
     assert set(bundle_files) == set(source_files)
     for relative, source in source_files.items():
         assert bundle_files[relative].read_bytes() == source.read_bytes(), relative
-    assert (bundle_root.parent / "README.md").read_bytes() == (HARNESS_ROOT / "README.md").read_bytes()
+    assert (bundle_root.parent / "docs/alert-codes.md").read_bytes() == (
+        HARNESS_ROOT / "docs/alert-codes.md"
+    ).read_bytes()
+    assert not (bundle_root.parent / "README.md").exists()

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -12,6 +14,14 @@ from pathlib import Path
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 SCORECARD = HARNESS_ROOT / "template" / "harness" / "scorecard.py"
 FIXTURE = HARNESS_ROOT / "tests" / "fixtures" / "scorecard"
+
+
+def load_scorecard_module():
+    spec = importlib.util.spec_from_file_location("prime_harness_scorecard_tested", SCORECARD)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def git(repo: Path, *args: str) -> str:
@@ -304,6 +314,67 @@ def test_vacuous_new_profile_cannot_mask_unrecovered_default_failure(tmp_repo: P
     assert "GATE_HISTORY_FAILURES" not in codes
 
 
+def test_small_live_append_clock_skew_is_excluded_without_future_warning(tmp_path: Path) -> None:
+    scorecard = load_scorecard_module()
+    end = scorecard.parse_time("2026-01-03T00:00:00Z")
+    assert end is not None
+    session = tmp_path / "session.jsonl"
+    registry = tmp_path / "registry.jsonl"
+    children = tmp_path / "children.json"
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+
+    session.write_text(json.dumps({
+        "type": "custom",
+        "customType": "thread_goal_state",
+        "timestamp": "2026-01-03T00:00:05Z",
+        "data": {"goalId": "too-new"},
+    }) + "\n", encoding="utf-8")
+    registry.write_text(json.dumps({
+        "childId": "too-new",
+        "createdAt": "2026-01-03T00:00:05Z",
+        "updatedAt": "2026-01-03T00:00:05Z",
+    }) + "\n", encoding="utf-8")
+    children.write_text(json.dumps({
+        "too-new": {"spawned_at": "2026-01-03T00:00:05Z"},
+    }), encoding="utf-8")
+    warnings: list[str] = []
+    assert scorecard.scan_session(session, None, end, warnings)["goal"] is None
+    assert scorecard.scan_registry(registry, None, end, 30, warnings)["children"] == []
+    assert scorecard.scan_children_state(children, artifacts, None, end, warnings)["records"] == {}
+    assert not any("future_entry" in warning for warning in warnings)
+
+    session.write_text(session.read_text(encoding="utf-8").replace("00:00:05Z", "00:00:11Z"), encoding="utf-8")
+    registry.write_text(registry.read_text(encoding="utf-8").replace("00:00:05Z", "00:00:11Z"), encoding="utf-8")
+    children.write_text(children.read_text(encoding="utf-8").replace("00:00:05Z", "00:00:11Z"), encoding="utf-8")
+    warnings = []
+    scorecard.scan_session(session, None, end, warnings)
+    scorecard.scan_registry(registry, None, end, 30, warnings)
+    scorecard.scan_children_state(children, artifacts, None, end, warnings)
+    assert {"session:future_entry", "registry:future_entry", "children_state:future_entry"} <= set(warnings)
+
+
+def test_discover_session_file_honors_override_and_relocated_layout(tmp_path: Path, monkeypatch) -> None:
+    scorecard = load_scorecard_module()
+    session_id = "session-123"
+    relocated_session_dir = tmp_path / "relocated-agent/session-artifacts" / session_id
+    relocated_session_dir.mkdir(parents=True)
+    sibling_sessions = relocated_session_dir.parent.parent / "sessions"
+    sibling_sessions.mkdir()
+    sibling_file = sibling_sessions / f"{session_id}.jsonl"
+    sibling_file.write_text("{}\n", encoding="utf-8")
+    monkeypatch.delenv("PRIME_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("PRIME_AGENT_CODING_AGENT_SESSION_DIR", raising=False)
+    assert scorecard.discover_session_file(relocated_session_dir, None) == sibling_file
+
+    override_sessions = tmp_path / "explicit-sessions"
+    override_sessions.mkdir()
+    override_file = override_sessions / f"{session_id}.jsonl"
+    override_file.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("PRIME_AGENT_SESSION_DIR", str(override_sessions))
+    assert scorecard.discover_session_file(relocated_session_dir, None) == override_file
+
+
 def test_now_is_inclusive_upper_bound_for_every_durable_stream(tmp_repo: Path) -> None:
     paths = prepare_recorded_fixture(tmp_repo)
     future_session = [
@@ -412,6 +483,8 @@ def test_markdown_escapes_untrusted_child_names(tmp_repo: Path) -> None:
     assert "&lt;script&gt;" in markdown
     assert "&#96;child&#96;" in markdown
     assert "\\|" in markdown
+    assert "â€”" not in markdown
+    assert "** -- " in markdown
 
 
 def test_incomplete_gate_archive_is_reported_not_counted_as_a_run(tmp_repo: Path) -> None:
@@ -426,6 +499,6 @@ def test_incomplete_gate_archive_is_reported_not_counted_as_a_run(tmp_repo: Path
 def test_readme_documents_every_emitted_alert_code() -> None:
     source = SCORECARD.read_text(encoding="utf-8")
     codes = set(re.findall(r'add_alert\(alerts, "([A-Z_]+)"', source))
-    readme = (HARNESS_ROOT / "README.md").read_text(encoding="utf-8")
+    contract_doc = (HARNESS_ROOT / "docs/alert-codes.md").read_text(encoding="utf-8")
     assert codes
-    assert all(f"`{code}`" in readme for code in codes)
+    assert all(f"`{code}`" in contract_doc for code in codes)

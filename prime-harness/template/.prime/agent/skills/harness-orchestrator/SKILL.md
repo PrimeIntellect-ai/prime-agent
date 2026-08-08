@@ -70,8 +70,10 @@ report = await harness_orchestrator.selfcheck()
 load-bearing RLM, goal, messaging, compaction, refinement, observation,
 heartbeat, harness-CRUD, depth, governance, and telemetry contracts. It
 returns a detailed passing report or raises `SelfcheckError` with every API
-drift found. Session-optional heartbeat, messaging, and observation controllers
-that are not provisioned are recorded under `capabilities` and `warnings`
-instead of being misreported as drift; malformed responses from a provisioned
-controller still fail. The opt-in `tests/test_live_kernel_e2e.py` runs this same
-check inside a live kernel and skips under ordinary offline pytest.
+drift found. Session-optional goal, compaction, refinement, heartbeat,
+messaging, and observation controllers that are not provisioned are recorded
+under `capabilities` and `warnings` instead of being misreported as drift;
+malformed responses from a provisioned controller still fail.
+In the upstream prime-harness repo, the opt-in `tests/test_live_kernel_e2e.py` runs this same
+check inside a live kernel; it is not part of the installed bundle (see
+`.prime/agent/harness-tests/BUNDLE.md`).

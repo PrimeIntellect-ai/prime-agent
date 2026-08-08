@@ -22,6 +22,8 @@ from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any
 
+from numeric_reference import decimal_expm1
+
 SCHEMA_VERSION = 1
 MAX_INPUT_BYTES = 4_000_000
 ALLOWED_FUNCS = {
@@ -147,6 +149,17 @@ def load_corpus(path: Path) -> tuple[dict[str, Any], str]:
         if category not in {"symbolic", "numeric", "convergence", "invariant"}:
             raise ReplayError(f"unknown category for {task_id}: {category!r}")
         categories.add(category)
+        if category == "numeric":
+            precisions = task.get("precisions_digits")
+            if (
+                not isinstance(precisions, list)
+                or not precisions
+                or any(type(digits) is not int or not 10 <= digits <= 500 for digits in precisions)
+            ):
+                raise ReplayError(
+                    f"task {task_id} precisions_digits must be a non-empty list "
+                    "of integers from 10 through 500"
+                )
         if not isinstance(task.get("prompt"), str) or not task["prompt"]:
             raise ReplayError(f"task {task_id} has no prompt")
     required = {"symbolic", "numeric", "convergence", "invariant"}
@@ -286,7 +299,7 @@ def _numeric_reference(spec: dict[str, Any], digits: int) -> Decimal:
         if algorithm == "sqrt":
             return Decimal(str(spec["value"])).sqrt(context)
         if algorithm == "expm1":
-            return Decimal(str(spec["value"])).exp(context) - Decimal(1)
+            return decimal_expm1(spec["value"], digits + 14)
         if algorithm == "log1p":
             return (Decimal(1) + Decimal(str(spec["value"]))).ln(context)
         if algorithm == "product_divide":
@@ -321,7 +334,7 @@ def verify_numeric(task: dict[str, Any], response: Any, _seed: int) -> tuple[boo
         threshold = tolerance * abs(reference) if reference != 0 else tolerance
         if error <= threshold:
             passed_count += 1
-    return passed_count == len(precisions), {
+    return bool(precisions) and passed_count == len(precisions), {
         "ladder_passed": passed_count,
         "ladder_total": len(precisions),
         "shape_ok": True,
@@ -396,11 +409,17 @@ def _challenge(task: dict[str, Any], corpus: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_executor(executor: Path, payload: dict[str, Any], timeout_seconds: float) -> tuple[Any | None, str | None]:
-    environment = dict(os.environ)
+    # Scrub all PYTHON* variables ourselves (what -E would do), then pin the
+    # hash seed.  -P retains that seed while keeping the script directory out
+    # of sys.path; unlike -I it does not imply -E.
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("PYTHON")
+    }
     environment["PYTHONHASHSEED"] = "0"
     try:
         process = subprocess.run(
-            [sys.executable, "-I", "-S", str(executor)],
+            [sys.executable, "-P", "-S", str(executor)],
             input=_canonical(payload),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

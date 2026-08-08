@@ -39,6 +39,9 @@ __all__ = [
     "available_critics", "run",
 ]
 
+PANEL_LEDGER_LOCK_TIMEOUT_SECONDS = 15.0
+PANEL_LEDGER_STALE_SECONDS = 60.0
+
 DEFAULT_QUESTION = (
     "Review this diff as an independent scientific software critic. Focus on: mathematical "
     "assumptions, numerical stability, incorrect boundary handling, missing convergence evidence, "
@@ -83,7 +86,7 @@ def available_critics() -> list[str]:
 
 
 def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
-    """Pull the first parseable JSON array out of possibly-noisy critic output."""
+    """Extract one unambiguous findings array from possibly-noisy output."""
     text = text.strip()
     try:
         parsed = json.loads(text)
@@ -104,13 +107,17 @@ def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
     end = text.rfind("]")
     if start != -1 and end > start:
         candidates.append(text[start : end + 1])
+    distinct: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
-            return parsed
+            canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            distinct.setdefault(canonical, parsed)
+    if len(distinct) == 1:
+        return next(iter(distinct.values()))
     return None
 
 
@@ -604,16 +611,81 @@ def read_panel_ledger(path: str | os.PathLike[str] | None = None) -> list[dict[s
     return records
 
 
+def _recover_stale_panel_lock(lock_path: Path) -> bool:
+    """Atomically quarantine a stale lock while serializing recovery attempts."""
+    recovery_path = lock_path.with_name(lock_path.name + ".recovery")
+    recovery_descriptor: int | None = None
+    try:
+        try:
+            recovery_descriptor = os.open(
+                recovery_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            try:
+                recovery_age = time.time() - recovery_path.stat().st_mtime
+            except FileNotFoundError:
+                return False
+            if recovery_age <= PANEL_LEDGER_STALE_SECONDS:
+                return False
+            recovery_stale = recovery_path.with_name(
+                recovery_path.name + ".stale-" + uuid.uuid4().hex
+            )
+            try:
+                os.replace(recovery_path, recovery_stale)
+            except FileNotFoundError:
+                return False
+            try:
+                recovery_stale.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                recovery_descriptor = os.open(
+                    recovery_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+            except FileExistsError:
+                return False
+
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+        except FileNotFoundError:
+            return True
+        if age <= PANEL_LEDGER_STALE_SECONDS:
+            return False
+        stale_path = lock_path.with_name(lock_path.name + ".stale-" + uuid.uuid4().hex)
+        try:
+            os.replace(lock_path, stale_path)
+        except FileNotFoundError:
+            return True
+        try:
+            stale_path.unlink()
+        except FileNotFoundError:
+            pass
+        return True
+    finally:
+        if recovery_descriptor is not None:
+            os.close(recovery_descriptor)
+            try:
+                recovery_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _append_panel_ledger(event: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:
     ledger = path or _ledger_path()
     ledger.parent.mkdir(parents=True, exist_ok=True)
     lock_path = ledger.with_name(ledger.name + ".lock")
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + PANEL_LEDGER_LOCK_TIMEOUT_SECONDS
     descriptor: int | None = None
     while descriptor is None:
         try:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
+            if _recover_stale_panel_lock(lock_path):
+                continue
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out acquiring panel ledger lock: {lock_path}")
             time.sleep(0.05)
@@ -665,8 +737,21 @@ def record_panel_verdict(
         raise ValueError("closed dispositions require rationale, verifier, and evidence_ids")
     if not all(isinstance(item, str) and item.strip() for item in evidence_ids):
         raise ValueError("evidence_ids must contain non-empty strings")
+    runs = [
+        record for record in read_panel_ledger()
+        if record.get("record_type") == "panel_run" and record.get("panel_id") == panel_id
+    ]
+    if not runs:
+        raise ValueError(f"unknown panel_id: {panel_id}")
+    panel_run = runs[-1]
+    if finding_id not in panel_run.get("finding_ids", []):
+        raise ValueError(f"finding_id {finding_id!r} does not belong to panel {panel_id!r}")
+
+    evidence_records: list[dict[str, Any]] = []
     database = harness_dir() / "evidence.db"
     if disposition != "open":
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("closed dispositions require distinct evidence IDs")
         if not database.is_file():
             raise ValueError("evidence ledger is unavailable")
         placeholders = ",".join("?" for _ in evidence_ids)
@@ -674,24 +759,53 @@ def record_panel_verdict(
         connection = sqlite3.connect(uri, uri=True)
         try:
             rows = connection.execute(
-                f"SELECT id, status, invalidated_at FROM evidence WHERE id IN ({placeholders})", evidence_ids
+                "SELECT id, status, invalidated_at, claim, notes, verifier, created_at, artifact_paths "
+                f"FROM evidence WHERE id IN ({placeholders})",
+                evidence_ids,
             ).fetchall()
         finally:
             connection.close()
-        live_verified = {row[0] for row in rows if row[1] == "verified" and row[2] is None}
+        by_id = {row[0]: row for row in rows}
+        live_verified = {
+            evidence_id for evidence_id, row in by_id.items()
+            if row[1] == "verified" and row[2] is None and isinstance(row[5], str) and row[5].strip()
+        }
         if live_verified != set(evidence_ids):
             raise ValueError("closed dispositions require existing live verified evidence IDs")
-    runs = [record for record in read_panel_ledger() if record.get("record_type") == "panel_run"
-            and record.get("panel_id") == panel_id]
-    if not runs:
-        raise ValueError(f"unknown panel_id: {panel_id}")
-    if finding_id not in runs[-1].get("finding_ids", []):
-        raise ValueError(f"finding_id {finding_id!r} does not belong to panel {panel_id!r}")
+        panel_created_at = panel_run.get("created_at")
+        if not isinstance(panel_created_at, str) or not panel_created_at:
+            raise ValueError("panel run has no valid created_at timestamp")
+        for evidence_id in evidence_ids:
+            row = by_id[evidence_id]
+            claim = row[3] or ""
+            notes = row[4] or ""
+            artifact_paths_raw = row[7] or "[]"
+            linkage_text = "\n".join((str(claim), str(notes), str(artifact_paths_raw)))
+            if finding_id not in linkage_text and panel_id not in linkage_text:
+                raise ValueError(
+                    f"evidence {evidence_id!r} must reference the finding_id or panel_id"
+                )
+            created_at = row[6]
+            if not isinstance(created_at, str) or created_at < panel_created_at:
+                raise ValueError(
+                    f"evidence {evidence_id!r} must be created at or after the panel run"
+                )
+            try:
+                artifact_paths = json.loads(artifact_paths_raw)
+            except (TypeError, json.JSONDecodeError):
+                artifact_paths = artifact_paths_raw
+            evidence_records.append({
+                "id": evidence_id,
+                "claim": claim,
+                "verifier": row[5],
+                "created_at": created_at,
+                "artifact_paths": artifact_paths,
+            })
     return _append_panel_ledger({
         "record_type": "finding_disposition", "panel_id": panel_id,
         "finding_id": finding_id, "disposition": disposition,
         "rationale": rationale.strip(), "evidence_ids": evidence_ids,
-        "verifier": verifier.strip(),
+        "evidence_records": evidence_records, "verifier": verifier.strip(),
     })
 
 

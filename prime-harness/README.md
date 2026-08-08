@@ -52,10 +52,12 @@ won't see them).
 
 ```
 your-repo/
+├── .github/workflows/prime-harness.yml  # pinned public doctor/default/holdout CI
 ├── .prime/agent/
 │   ├── APPEND_SYSTEM.md         # operating policy, appended to the system prompt
 │   ├── settings.json            # autoRefine OFF (refinement is governed, not automatic)
 │   ├── prompts/                 # /harness-task, /harness-audit, /harness-refine
+│   ├── harness-tests/           # installed component self-tests; see BUNDLE.md
 │   └── skills/                  # 5 Python-backed skills (auto-installed into the kernel)
 │       ├── harness-orchestrator/
 │       ├── sci-verify/
@@ -66,6 +68,10 @@ your-repo/
 │   ├── verify.py                # composite gate (stdlib-only; autonomous-gate safe)
 │   ├── scorecard.py             # privacy-safe durable telemetry (stdlib-only)
 │   ├── replay.py                # deterministic eval-snapshot scorer (stdlib-only)
+│   ├── replay_adapters/         # digest-bound replay executors
+│   ├── backup.py                # verified state backup/restore
+│   ├── model_routing.py         # measured role-routing scorer
+│   ├── numeric_reference.py     # shared Decimal cancellation reference
 │   ├── manifest.json            # gate profiles: quick / default / changed-files / holdout
 │   ├── roster.yaml              # retained-specialist roster
 │   ├── config.json              # caps, budget floor, critic config
@@ -74,7 +80,9 @@ your-repo/
 ├── checks/                      # NOT named "verification/" — Prime Agent's
 │   │                            # autonomous gate excludes that exact dir name
 │   │                            # from changed-workspace detection
-│   ├── evalset/                 # versioned 16-task corpus + baseline snapshot
+│   ├── evalset/
+│   │   ├── corpus.json          # versioned 16-task replay corpus + snapshots
+│   │   └── model-routing-v1.json # role weights and qualification floors
 │   ├── properties/              # Hypothesis property tests (example included)
 │   ├── invariants/              # conservation/symmetry suites
 │   ├── reference_cases/         # independent-oracle comparisons
@@ -82,6 +90,13 @@ your-repo/
 └── artifacts/harness/           # runtime state (gitignored): evidence.db, task
                                  # state, child results, gate logs, snapshots
 ```
+
+The installed self-test inventory and its deliberate consumer-safe exclusions
+are documented in `.prime/agent/harness-tests/BUNDLE.md`. Notable installed
+contracts include `.github/workflows/prime-harness.yml`, `harness/backup.py`,
+`harness/model_routing.py`, `harness/replay_adapters/`, and
+`checks/evalset/model-routing-v1.json`.
+
 
 ## The operating loop
 
@@ -188,35 +203,12 @@ applicable check or a failure), per-check, and per-profile rates remain separate
 a vacuous quick pass cannot recover another profile's substantive failure.
 `--now` is an inclusive upper bound for replay, not just a display timestamp.
 
-### Scorecard alert list
+### Scorecard alert codes
 
-| Code | Severity | Meaning / action |
-|---|---|---|
-| `NO_TASK_STATE` | critical | Task state is missing; restore or initialize it before trusting task-scoped metrics. |
-| `UNRESOLVED_CLAIMS` | critical | Resolve or explicitly disposition task claims before completion. |
-| `BRANCH_MISMATCH` | critical | Switch to the working branch recorded in task state. |
-| `GOAL_BUDGET_LOW` | critical | Remaining persistent-goal tokens are below the configured percentage. |
-| `GATE_FAILURE` | critical | The latest archived composite gate failed or errored; fix and rerun it. |
-| `GATE_PROFILE_UNRECOVERED` | critical | A profile's latest substantive run still fails even if another profile later passed vacuously. |
-| `TASK_ATTRIBUTION_GAP` | critical | Task state has no evidence IDs; do not guess ownership from timestamps. |
-| `EVIDENCE_ID_MISSING` | critical | A task evidence ID is absent from the readable ledger snapshot. |
-| `UNVERIFIED_VERIFIER_METADATA` | critical | A `verified` ledger row lacks a named verifier; repair its provenance. |
-| `DEAD_CHILD` | critical | A child has a failed/dead terminal registry state; reconcile and inspect its result. |
-| `TELEMETRY_MISSING` | critical | Root session JSONL is unavailable; provide the correct session path. |
-| `GOAL_MISSING` | warning | No durable `thread_goal_state` event was found. |
-| `GOAL_INACTIVE` | warning | The latest durable goal snapshot is not active. |
-| `NO_GATE_RUNS` | warning | No archived gate result exists inside the task window. |
-| `NO_APPLICABLE_GATE_CHECKS` | warning | Gate runs exist, but every run was vacuous. |
-| `GATE_VACUOUS_PASS` | warning | A passing archive executed zero applicable checks; exclude it from the substantive rate. |
-| `GATE_INCOMPLETE` | warning | An archived result had missing/unknown schema fields. |
-| `VERIFICATION_BEHIND_CHURN` | warning | Evidence activity is below the configurable churn heuristic; add focused verification or document why it is inapplicable. |
-| `STALE_CHILD` | warning | A running child has no recent durable event; inspect before declaring it dead. |
-| `ACTIVE_CHILD_MISMATCH` | warning | Task-state active names and latest registry running names disagree. |
-| `UNATTRIBUTED_CHILD_USAGE` | warning | Attribution is absent or ambiguous; retain it separately rather than guessing. |
-| `FUTURE_EVENT` | warning | An event later than the inclusive `--now` clock was excluded from replay. |
-| `INPUT_ANOMALY` | warning | At least one input line/file/schema was missing or malformed; inspect `warnings`. |
-| `GATE_HISTORY_FAILURES` | info | Earlier failures were recovered by a newer substantive pass in the same profile. |
-| `EVIDENCE_OUTSIDE_TASK` | info | Time-window ledger rows not named by task `evidence_ids` were excluded. |
+The canonical alert table and the evidence-linked panel-closure contract live
+in [`docs/alert-codes.md`](docs/alert-codes.md). The same context-safe file is
+installed at `.prime/agent/harness-tests/docs/alert-codes.md` for component
+contract tests; the upstream README is not copied into consumer repositories.
 
 ## Independent critic panels
 
@@ -360,11 +352,13 @@ Roster roles accept an optional exact `provider/model` selector from
 oracle-isolated tasks (symbolic, precision, convergence, invariant,
 adversarial audit, and provenance), and `harness/model_routing.py` scores
 captured, SHA-256-bound child result files without another model. Require at least three
-recognized tasks and a 0.75 overall score per candidate before emitting any route;
-this campaign ran all six for every discovered selector. The evalset digest is
-embedded in each report. The
-scorer/oracle was written after response capture, and candidate prompts forbade
-public corpus/baseline/reference and peer-result access.
+recognized tasks, a 0.75 overall score per candidate, and a 0.5 score on each
+specific role before emitting primaries or fallbacks; a role with no qualified
+candidate fails routing closed. Replay and routing remain separate response
+pipelines, but both import the cancellation-sensitive Decimal `expm1` oracle
+from `harness/numeric_reference.py`. The evalset digest is embedded in each
+report. The scorer/oracle was written after response capture, and candidate
+prompts forbade public corpus/baseline/reference and peer-result access.
 
 Measured 2026-08-08 snapshot (8 available Anthropic child selectors; accuracy
 first, exact-contract then selector as deterministic tie breaks):

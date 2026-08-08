@@ -32,6 +32,7 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = 1
 MAX_JSONL_LINE_BYTES = 8 * 1024 * 1024
+FUTURE_EVENT_SKEW_SECONDS = 10.0
 USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
 COST_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "total")
 CODE_SUFFIXES = {
@@ -200,7 +201,7 @@ def scan_session(path: Path | None, start: datetime | None, end: datetime, warni
     for entry in iter_jsonl(path, warnings, "session"):
         result["entries_seen"] += 1
         timestamp = parse_time(entry.get("timestamp"))
-        if timestamp is not None and timestamp > end:
+        if timestamp is not None and (timestamp - end).total_seconds() > FUTURE_EVENT_SKEW_SECONDS:
             warnings.append("session:future_entry")
         in_window = timestamp is None or ((start is None or timestamp >= start) and timestamp <= end)
         entry_type = entry.get("type")
@@ -257,7 +258,8 @@ def scan_registry(path: Path | None, start: datetime | None, now: datetime, stal
             child_id = entry.get("childId")
             entry_time = parse_time(entry.get("updatedAt")) or parse_time(entry.get("createdAt"))
             if entry_time is not None and entry_time > now:
-                warnings.append("registry:future_entry")
+                if (entry_time - now).total_seconds() > FUTURE_EVENT_SKEW_SECONDS:
+                    warnings.append("registry:future_entry")
                 continue
             if isinstance(child_id, str) and child_id:
                 latest[child_id] = entry
@@ -349,7 +351,7 @@ def scan_children_state(path: Path, artifact_root: Path, start: datetime | None,
             continue
         spawned = parse_time(entry.get("spawned_at")) or parse_time(entry.get("reserved_at"))
         if spawned is not None and ((start is not None and spawned < start) or spawned > end):
-            if spawned > end:
+            if (spawned - end).total_seconds() > FUTURE_EVENT_SKEW_SECONDS:
                 warnings.append("children_state:future_entry")
             continue
         raw_result_path = entry.get("result_path")
@@ -914,14 +916,33 @@ def load_artifacts_dir(root: Path) -> Path:
 
 
 def discover_session_file(session_dir: Path | None, registry: Path | None) -> Path | None:
-    # Derive the root log from the trusted local Prime Agent layout.  Registry
-    # parentSessionFile values are intentionally not followed automatically:
-    # the append-only registry contains untrusted absolute paths and may point
-    # at UNC/device locations.  Operators can authorize another path explicitly
-    # with --session-file.
+    # Derive the root log only from trusted local layout/host overrides. Registry
+    # parentSessionFile values remain untrusted absolute paths and are not followed;
+    # operators can authorize another path explicitly with --session-file.
     del registry
-    if session_dir:
-        candidate = Path.home() / ".prime" / "agent" / "sessions" / f"{session_dir.name}.jsonl"
+    if session_dir is None:
+        return None
+    session_name = f"{session_dir.name}.jsonl"
+    session_directories: list[Path] = []
+    override = (
+        os.environ.get("PRIME_AGENT_SESSION_DIR")
+        or os.environ.get("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
+    )
+    if override:
+        session_directories.append(Path(os.path.expanduser(override)))
+    session_directories.append(session_dir.parent.parent / "sessions")
+    coding_agent_dir = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
+    if coding_agent_dir:
+        session_directories.append(Path(os.path.expanduser(coding_agent_dir)) / "sessions")
+    session_directories.append(Path.home() / ".prime" / "agent" / "sessions")
+
+    seen: set[str] = set()
+    for directory in session_directories:
+        key = os.path.normcase(os.path.abspath(directory))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate = directory / session_name
         if candidate.is_file():
             return candidate
     return None
@@ -1038,7 +1059,7 @@ def markdown_summary(scorecard: dict[str, Any]) -> str:
         lines.append("- None.")
     else:
         for alert in scorecard["alerts"]:
-            lines.append(f"- **{cell(alert['severity'].upper())} `{cell(alert['code'])}`** â€” {cell(alert['message'])}")
+            lines.append(f"- **{cell(alert['severity'].upper())} `{cell(alert['code'])}`** -- {cell(alert['message'])}")
     lines.extend(["", "## Child usage", "", "| Child | Status | Tokens | Cost |", "|---|---:|---:|---:|"])
     for child in scorecard["usage"]["children"]:
         lines.append(f"| {cell(child['name'])} | {cell(child['status'])} | {child['usage']['totalTokens']} | {child['usage']['cost']['total']:.6f} |")

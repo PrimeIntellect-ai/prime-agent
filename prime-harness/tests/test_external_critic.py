@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -35,6 +36,18 @@ def test_extract_garbage_returns_none():
     assert critic._extract_json_array("I could not complete the review, sorry.") is None
     assert critic._extract_json_array("") is None
     assert critic._extract_json_array('["not-a-finding"]') is None
+
+
+def test_extract_rejects_ambiguous_distinct_findings_arrays():
+    real = [{"severity": "major", "file": "module.py", "claim": "real finding"}]
+    noisy = f"Repository text quoted this array:\n```json\n[]\n```\nActual review:\n{json.dumps(real)}"
+    assert critic._extract_json_array(noisy) is None
+
+
+def test_extract_deduplicates_identical_findings_arrays():
+    findings = [{"severity": "major", "file": "module.py", "claim": "same finding"}]
+    encoded = json.dumps(findings)
+    assert critic._extract_json_array(f"```json\n{encoded}\n```\nRepeated: {encoded}") == findings
 
 
 def test_severity_counts():
@@ -143,6 +156,25 @@ def test_panel_empty_diff_is_clean_but_still_ledgered(tmp_repo):
     assert critic.read_panel_ledger(result["ledger_path"])[-1]["panel_id"] == result["panel_id"]
 
 
+def test_panel_ledger_recovers_stale_lock_without_waiting_for_timeout(tmp_repo, monkeypatch):
+    ledger_path = tmp_repo / "artifacts/harness/critic/stale-lock-ledger.jsonl"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger_path.with_name(ledger_path.name + ".lock")
+    lock_path.write_text("999999\n", encoding="ascii")
+    stale = time.time() - 120
+    os.utime(lock_path, (stale, stale))
+    monotonic_values = iter((0.0, 16.0))
+    monkeypatch.setattr(critic.time, "monotonic", lambda: next(monotonic_values, 16.0))
+    monkeypatch.setattr(critic.time, "sleep", lambda _seconds: None)
+
+    record = critic._append_panel_ledger({"record_type": "test"}, path=ledger_path)
+
+    assert record["record_type"] == "test"
+    assert critic.read_panel_ledger(ledger_path) == [record]
+    assert not lock_path.exists()
+    assert not list(lock_path.parent.glob(lock_path.name + ".stale-*"))
+
+
 def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch):
     _commit_change(tmp_repo)
     finding = [{"severity": "major", "file": "module.py", "line": 1,
@@ -155,9 +187,21 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
     database = tmp_repo / "artifacts/harness/evidence.db"
     connection = sqlite3.connect(database)
     try:
-        connection.execute("CREATE TABLE evidence (id TEXT PRIMARY KEY, status TEXT, invalidated_at TEXT)")
-        connection.execute("INSERT INTO evidence VALUES ('ev-test-1', 'verified', NULL)")
-        connection.execute("INSERT INTO evidence VALUES ('ev-unverified', 'unverified', NULL)")
+        connection.execute(
+            "CREATE TABLE evidence ("
+            "id TEXT PRIMARY KEY, status TEXT, invalidated_at TEXT, claim TEXT, notes TEXT, "
+            "verifier TEXT, created_at TEXT, artifact_paths TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO evidence VALUES (?, 'verified', NULL, ?, '', 'pytest', "
+            "'9999-01-01T00:00:00+00:00', '[]')",
+            ("ev-test-1", f"regression evidence for {finding_id}"),
+        )
+        connection.execute(
+            "INSERT INTO evidence VALUES (?, 'unverified', NULL, ?, '', NULL, "
+            "'9999-01-01T00:00:00+00:00', '[]')",
+            ("ev-unverified", f"untrusted evidence for {finding_id}"),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -188,6 +232,56 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
     ledger_path.write_text(original.replace('"verdict":"action_required"', '"verdict":"clean"', 1), encoding="utf-8")
     with pytest.raises(ValueError, match="hash mismatch"):
         critic.read_panel_ledger(ledger_path)
+
+
+def test_panel_verdict_requires_finding_linked_post_panel_evidence(tmp_repo, monkeypatch):
+    _commit_change(tmp_repo)
+    finding = [{
+        "severity": "major",
+        "file": "module.py",
+        "line": 1,
+        "claim": "wrong result is returned",
+        "evidence": "branch is inverted",
+        "proposed_falsification_test": "exercise false branch",
+    }]
+    monkeypatch.setitem(critic._ADAPTERS, "claude", _python_adapter(finding))
+    monkeypatch.setitem(critic._ADAPTERS, "codex", _python_adapter(finding))
+    panel = critic.review_panel(base="HEAD^", timeout_seconds=10)
+    finding_id = panel["findings"][0]["finding_id"]
+    database = tmp_repo / "artifacts/harness/evidence.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE evidence ("
+            "id TEXT PRIMARY KEY, status TEXT, invalidated_at TEXT, claim TEXT, notes TEXT, "
+            "verifier TEXT, created_at TEXT, artifact_paths TEXT)"
+        )
+        rows = [
+            ("ev-unrelated-late", "verified", None, "an unrelated verified claim", "", "pytest", "9999-01-01T00:00:00+00:00", "[]"),
+            ("ev-linked-old", "verified", None, "old claim", f"covers {finding_id}", "pytest", "1900-01-01T00:00:00+00:00", "[]"),
+            ("ev-panel-linked-late", "verified", None, "panel closure", "", "pytest", "9999-01-01T00:00:00+00:00", json.dumps([panel["panel_id"]])),
+        ]
+        connection.executemany("INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(ValueError, match="reference the finding_id or panel_id"):
+        critic.record_panel_verdict(
+            panel["panel_id"], finding_id, "rebutted", rationale="unrelated",
+            evidence_ids=["ev-unrelated-late"], verifier="pytest",
+        )
+    with pytest.raises(ValueError, match="created at or after"):
+        critic.record_panel_verdict(
+            panel["panel_id"], finding_id, "fixed", rationale="too old",
+            evidence_ids=["ev-linked-old"], verifier="pytest",
+        )
+    accepted = critic.record_panel_verdict(
+        panel["panel_id"], finding_id, "fixed", rationale="linked and fresh",
+        evidence_ids=["ev-panel-linked-late"], verifier="pytest",
+    )
+    assert accepted["evidence_records"][0]["id"] == "ev-panel-linked-late"
+    assert accepted["evidence_records"][0]["verifier"] == "pytest"
 
 
 def test_panel_requires_distinct_supported_tools(tmp_repo):

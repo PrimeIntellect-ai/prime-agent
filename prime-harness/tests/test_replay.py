@@ -4,6 +4,7 @@ import ast
 import copy
 import hashlib
 import json
+import os
 import types
 import shutil
 import subprocess
@@ -26,6 +27,8 @@ def canonical_digest(value):
 
 
 def load_replay_module(name="prime_harness_replay"):
+    if str(REPLAY.parent) not in sys.path:
+        sys.path.insert(0, str(REPLAY.parent))
     module = types.ModuleType(name)
     module.__file__ = str(REPLAY)
     exec(compile(REPLAY.read_text(encoding="utf-8"), str(REPLAY), "exec"), module.__dict__)
@@ -53,6 +56,7 @@ def replay_repo(tmp_path):
     (root / "harness" / "replay_adapters").mkdir(parents=True)
     (root / "checks").mkdir()
     shutil.copy2(REPLAY, root / "harness" / "replay.py")
+    shutil.copy2(REPLAY.parent / "numeric_reference.py", root / "harness" / "numeric_reference.py")
     shutil.copytree(EVALSET, root / "checks" / "evalset")
     source = r'''#!/usr/bin/env python3
 import json
@@ -159,13 +163,68 @@ def test_corpus_is_versioned_covered_and_has_thresholds():
     assert "responses" not in baseline
 
 
+def test_numeric_precision_ladder_cannot_be_empty_or_malformed(tmp_path):
+    replay = load_replay_module("prime_harness_replay_precision_validation")
+    corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
+    numeric_task = next(task for task in corpus["tasks"] if task["category"] == "numeric")
+
+    for invalid in ([], [True], [9], [501], ["36"]):
+        candidate = copy.deepcopy(corpus)
+        next(task for task in candidate["tasks"] if task["id"] == numeric_task["id"])["precisions_digits"] = invalid
+        path = write_json(tmp_path / f"corpus-{len(invalid)}-{repr(invalid)}.json", candidate)
+        with pytest.raises(replay.ReplayError, match="precisions_digits"):
+            replay.load_corpus(path)
+
+    task = copy.deepcopy(numeric_task)
+    task["precisions_digits"] = []
+    passed, details = replay.verify_numeric(task, {"values": {}}, 0)
+    assert not passed
+    assert details == {"ladder_passed": 0, "ladder_total": 0, "shape_ok": True}
+
+
+def test_executor_honors_pinned_hash_seed_and_scrubs_python_environment(tmp_path, monkeypatch):
+    replay = load_replay_module("prime_harness_replay_hash_seed")
+    executor = tmp_path / "hash_adapter.py"
+    executor.write_text(
+        "import json, os, sys\n"
+        "json.dump({\"hash\": hash(\"prime-harness\"), "
+        "\"order\": list({\"alpha\", \"beta\", \"gamma\", \"delta\"}), "
+        "\"pythonpath\": os.environ.get(\"PYTHONPATH\"), "
+        "\"seed\": os.environ.get(\"PYTHONHASHSEED\")}, sys.stdout, sort_keys=True)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", "untrusted-import-root")
+
+    observed = [replay._run_executor(executor, {}, 10.0) for _ in range(4)]
+    expected_environment = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("PYTHON")
+    }
+    expected_environment["PYTHONHASHSEED"] = "0"
+    expected_process = subprocess.run(
+        [sys.executable, "-P", "-S", str(executor)],
+        input=b"{}",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        env=expected_environment,
+        check=True,
+    )
+    expected = json.loads(expected_process.stdout)
+
+    assert all(error is None for _, error in observed)
+    assert all(value == expected for value, _ in observed)
+    assert expected["seed"] == "0"
+    assert expected["pythonpath"] is None
+
+
 def test_replay_imports_only_stdlib():
     tree = ast.parse(REPLAY.read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import): imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module: imported.add(node.module.split(".")[0])
-    assert imported <= {"argparse", "ast", "decimal", "hashlib", "json", "math", "os", "pathlib", "random", "subprocess", "sys", "tempfile", "typing", "__future__"}
+    assert imported <= {"argparse", "ast", "decimal", "hashlib", "json", "math", "numeric_reference", "os", "pathlib", "random", "subprocess", "sys", "tempfile", "typing", "__future__"}
 
 
 def test_checked_baseline_executes_adapter_and_is_byte_stable_twice(replay_repo):

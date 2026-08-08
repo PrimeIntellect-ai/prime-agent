@@ -659,14 +659,18 @@ async def selfcheck() -> dict[str, Any]:
         )
 
     def record_optional_controller_absence(
-        capability: str, request_type: str, exc: Exception
+        capability: str,
+        request_type: str,
+        exc: Exception,
+        *,
+        allow_not_in_kernel: bool = False,
     ) -> bool:
         message = str(exc)
         unavailable = re.fullmatch(
             rf"host request type [\"']{re.escape(request_type)}[\"'] is not available in this session",
             message,
         )
-        if unavailable is None:
+        if unavailable is None and not (allow_not_in_kernel and isinstance(exc, NotInKernel)):
             return False
         observed = f"{type(exc).__name__}: {message}"
         report["capabilities"][capability] = {
@@ -751,7 +755,10 @@ async def selfcheck() -> dict[str, Any]:
                 type(remaining).__name__,
             )
     except Exception as exc:
-        check("goal.get live round-trip", False, f"{type(exc).__name__}: {exc}")
+        if not record_optional_controller_absence(
+            "goal", "goal.get", exc, allow_not_in_kernel=True
+        ):
+            check("goal.get live round-trip", False, f"{type(exc).__name__}: {exc}")
 
     # Messaging signatures are load-bearing: v0.7.1 has no `mode` kwarg.
     try:
@@ -798,7 +805,13 @@ async def selfcheck() -> dict[str, Any]:
                 sorted(status) if isinstance(status, dict) else type(status).__name__,
             )
         except Exception as exc:
-            check(f"{module_name}.status live round-trip", False, f"{type(exc).__name__}: {exc}")
+            if not record_optional_controller_absence(
+                module_name,
+                f"{module_name}.status",
+                exc,
+                allow_not_in_kernel=True,
+            ):
+                check(f"{module_name}.status live round-trip", False, f"{type(exc).__name__}: {exc}")
 
     # These read-only family/scheduler surfaces are used for recovery diagnostics.
     try:

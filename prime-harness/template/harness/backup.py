@@ -34,6 +34,7 @@ FORMAT_VERSION = 1
 MANIFEST_NAME = "MANIFEST.json"
 BUFFER_SIZE = 1024 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_MTIME_NS = 4_102_444_800 * 1_000_000_000  # 2100-01-01 UTC
 ROOT_PREFIXES = {
     "session": "session",
     "project": "project/artifacts/harness",
@@ -408,7 +409,7 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
         if path in paths or path_key in portable_paths:
             raise BackupError(f"duplicate or non-portable manifest path collision: {path}")
         portable_paths[path_key] = path
-        if type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0:
+        if type(item["mtime_ns"]) is not int or not 0 <= item["mtime_ns"] <= MAX_MTIME_NS:
             raise BackupError(f"invalid directory metadata: {path}")
         _safe_mode(item["mode"], path)
         paths.add(path)
@@ -422,7 +423,13 @@ def _validate_manifest(manifest: Any) -> tuple[list[dict[str, Any]], list[dict[s
         portable_paths[path_key] = path
         if not isinstance(item["sha256"], str) or len(item["sha256"]) != 64 or any(ch not in "0123456789abcdef" for ch in item["sha256"]):
             raise BackupError(f"invalid SHA-256 in manifest: {path}")
-        if type(item["size"]) is not int or item["size"] < 0 or type(item["mtime_ns"]) is not int or item["mtime_ns"] < 0 or type(item["sqlite_snapshot"]) is not bool:
+        if (
+            type(item["size"]) is not int
+            or item["size"] < 0
+            or type(item["mtime_ns"]) is not int
+            or not 0 <= item["mtime_ns"] <= MAX_MTIME_NS
+            or type(item["sqlite_snapshot"]) is not bool
+        ):
             raise BackupError(f"invalid file metadata: {path}")
         _safe_mode(item["mode"], path)
         expected_sqlite_snapshot = PurePosixPath(path).name.casefold() == "evidence.db"
@@ -515,7 +522,7 @@ def _inspect_archive(archive_path: Path, *, extract_to: Path | None = None) -> d
                 for sqlite_path, path in sqlite_temp:
                     connection = None
                     try:
-                        connection = sqlite3.connect(f"file:{sqlite_path.as_posix()}?mode=ro", uri=True)
+                        connection = sqlite3.connect(sqlite_path.resolve().as_uri() + "?mode=ro", uri=True)
                         row = connection.execute("PRAGMA integrity_check").fetchone()
                     except sqlite3.Error as exc:
                         raise BackupError(f"restored SQLite database cannot be opened: {path}") from exc
@@ -529,7 +536,7 @@ def _inspect_archive(archive_path: Path, *, extract_to: Path | None = None) -> d
                     destination_path = extract_to / Path(*PurePosixPath(item["path"]).parts)
                     os.chmod(destination_path, item["mode"])
                     os.utime(destination_path, ns=(item["mtime_ns"], item["mtime_ns"]))
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, OverflowError) as exc:
         if isinstance(exc, BackupError):
             raise
         raise BackupError(f"cannot read backup archive: {archive_path}") from exc

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import types
@@ -17,6 +18,47 @@ for package in ("harness-orchestrator", "sci-verify", "evidence-ledger", "extern
     src = SKILLS_DIR / package / "src"
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
+
+_CREATED_TEMPLATE_LINK: Path | None = None
+
+
+def _installed_repo_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def pytest_configure(config) -> None:
+    """Link installed bundle tests to the consumer root without shell tools."""
+    global _CREATED_TEMPLATE_LINK
+    template = HARNESS_ROOT / "template"
+    if template.exists():
+        return
+    if os.path.lexists(template):
+        raise RuntimeError(f"installed harness template link is broken: {template}")
+    consumer_root = _installed_repo_root().resolve()
+    try:
+        os.symlink(consumer_root, template, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            raise
+        import _winapi
+
+        _winapi.CreateJunction(str(consumer_root), str(template))
+    _CREATED_TEMPLATE_LINK = template
+
+
+def pytest_unconfigure(config) -> None:
+    """Remove only the template link created by :func:`pytest_configure`."""
+    global _CREATED_TEMPLATE_LINK
+    template = _CREATED_TEMPLATE_LINK
+    if template is None:
+        return
+    try:
+        if os.path.islink(template):
+            template.unlink()
+        elif os.path.lexists(template):
+            os.rmdir(template)
+    finally:
+        _CREATED_TEMPLATE_LINK = None
 
 
 def _git(repo: Path, *args: str) -> None:

@@ -255,7 +255,7 @@ def ingest(path: str | os.PathLike[str], *, status_override: str | None = None) 
         raise ValueError(f"{artifact} is not a JSON object")
     claim = data.get("claim") or data.get("task") or data.get("summary") or artifact.stem
     raw_status = str(data.get("status") or "unverified").lower()
-    mapping = {"pass": "unverified", "done": "unverified", "fail": "refuted",
+    mapping = {"pass": "unverified", "verified": "unverified", "done": "unverified", "fail": "refuted",
                "counterexample_found": "refuted", "error": "inconclusive"}
     status = mapping.get(raw_status, raw_status if raw_status in STATUSES else "unverified")
     if status_override is not None:
@@ -274,8 +274,8 @@ def ingest(path: str | os.PathLike[str], *, status_override: str | None = None) 
     }
     if isinstance(reported_verifier, str) and reported_verifier.strip():
         note_fields["reported_verifier"] = reported_verifier.strip()
-    if raw_status == "pass":
-        note_fields["ingest_policy"] = "self-attested pass remains unverified"
+    if raw_status in ("pass", "verified"):
+        note_fields["ingest_policy"] = f"self-attested {raw_status} remains unverified"
     return record(
         str(claim)[:2000],
         status=status,

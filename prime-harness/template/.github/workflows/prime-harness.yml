@@ -69,11 +69,7 @@ jobs:
             python -m pip install -e .
           fi
       - name: Run installed harness component self-tests
-        run: |
-          test ! -e .prime/agent/harness-tests/template
-          ln -s "$GITHUB_WORKSPACE" .prime/agent/harness-tests/template
-          trap 'rm -f .prime/agent/harness-tests/template' EXIT
-          python -m pytest -q .prime/agent/harness-tests/tests
+        run: python -m pytest -q .prime/agent/harness-tests/tests
       - name: Doctor preflight
         run: python harness/doctor.py
       - name: Run existing ${{ matrix.profile }} profile

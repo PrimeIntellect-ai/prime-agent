@@ -1,0 +1,9 @@
+# Python/test artifacts must never be stamped into consumer repositories.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+
+# Local development environments and reports.
+.venv/
+artifacts/

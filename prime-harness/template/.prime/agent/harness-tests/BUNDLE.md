@@ -2,16 +2,21 @@
 
 These source-shaped tests are copied from the upstream `prime-harness/tests`
 suite and run by the pinned public workflow before doctor/default/holdout gates.
-The workflow temporarily links `template/` to the installed repository so the
-same tests exercise the files consumers actually received, then removes the
-link. `README.md` mirrors the upstream harness README because the scorecard
-contract test verifies that every emitted alert code is documented. The bundle
-covers backup, replay, model routing, scorecard, repo-map,
+The shared `tests/conftest.py` creates `template/` as a directory symlink or,
+on Windows without symlink rights, a junction to the installed repository root;
+pytest removes only that link during unconfigure. No shell `ln` or elevated
+Windows privilege is required. `docs/alert-codes.md` mirrors the small upstream runtime-contract doc so
+alert and panel-verdict assertions stay valid without shipping environment-
+specific upstream installation and routing content. The bundle covers backup,
+replay, model routing, scorecard, repo-map,
 child lifecycle/selfcheck, evidence provenance, critic panel/ledger behavior,
-scientific verification, the gate runner, template checks, and workflow policy.
+scientific verification, and the gate runner.
 
-`test_installer.py`, `test_live_kernel_e2e.py`, and Phase 1 source-document
-checks remain upstream-only because an installed consumer checkout lacks the
-installer source, a live kernel is opt-in, and build-history documentation is
-not part of the installed runtime. Upstream tests enforce byte-for-byte sync
-for every bundled test and fixture.
+`test_installer.py`, `tests/test_live_kernel_e2e.py`, `test_template_checks.py`,
+`test_workflow.py`, and Phase 1 source-document checks remain upstream-only.
+The template-check and workflow tests intentionally are not installed because
+those files are consumer customization contracts; freezing upstream defaults
+would make legitimate customization fail the mandatory self-test step. The
+other exclusions need installer source, a live kernel, or upstream build-history
+documentation. Upstream tests enforce byte-for-byte sync for every bundled test
+and fixture that remains consumer-safe.

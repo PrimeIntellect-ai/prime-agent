@@ -37,8 +37,9 @@ def test_public_workflow_uses_existing_profiles_doctor_first_and_pinned_actions(
     assert 'git cat-file -e "$base^{commit}"' in resolve_command
     assert "printf 'base=%s\\n' \"$base\" >> \"$GITHUB_OUTPUT\"" in resolve_command
     selftest_command = steps[selftests]["run"]
-    assert "python -m pytest -q .prime/agent/harness-tests/tests" in selftest_command
-    assert "trap 'rm -f .prime/agent/harness-tests/template' EXIT" in selftest_command
+    assert selftest_command == "python -m pytest -q .prime/agent/harness-tests/tests"
+    assert "ln -s" not in text
+    assert "harness-tests/template" not in selftest_command
     assert steps[gate]["run"] == (
         'python harness/verify.py --profile "${{ matrix.profile }}" '
         '--base "${{ steps.diff-base.outputs.base }}" --json'
