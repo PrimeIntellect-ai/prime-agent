@@ -142,11 +142,20 @@ prime-agent --provider ollama --model <id> --no-session -p "hi"  # round-trip th
   "api": "openai-completions",
   "apiKey": "mlx",
   "compat": { "supportsDeveloperRole": false, "supportsReasoningEffort": false },
-  "models": [{ "id": "mlx-community/Qwen3-14B-4bit", "contextWindow": 32768 }]
+  "models": [{ "id": "mlx-community/Qwen3-14B-4bit", "contextWindow": 40960 }]
 }
 ```
 
-Unlike Ollama, MLX applies no artificial context cap — it serves the model's own `max_position_embeddings`, so read that from the model's `config.json` in the HuggingFace cache rather than probing the server, which does not advertise a window over `/v1/models`.
+Unlike Ollama, MLX applies no artificial context cap — it serves the model's own `max_position_embeddings`, so declare exactly that value. Read it from the model's `config.json` in the HuggingFace cache rather than probing the server, which does not advertise a window over `/v1/models`:
+
+```bash
+find ~/.cache/huggingface/hub -path "*<model>*/config.json" -exec \
+  python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['max_position_embeddings'])" {} \;
+```
+
+Declaring less than the ceiling only wastes context; the truncation risk that applies to Ollama does not exist here. KV cache is allocated as the conversation grows rather than reserved up front, so a larger window costs nothing while sessions stay short.
+
+`models.json` is read at session start, so a changed `contextWindow` needs a restart — `/context` in a running session keeps reporting the old figure until then.
 
 On throughput, measured on an M4 / 24 GB with Qwen3-14B at 4 bits on both backends:
 
