@@ -2823,6 +2823,10 @@ export class DaemonSupervisor {
 	private async recoverUncertainWorkerOperations(worker: ResidentWorker, killWorkerProcess = true): Promise<void> {
 		await this.assertRecoveryAllowed();
 		if (killWorkerProcess) {
+			// Recovery needs the catalog to record interrupted work. Do not terminate a
+			// still-recoverable worker until that dependency is ready.
+			await this.catalog.start();
+			await this.assertRecoveryAllowed();
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 		}
 		const orphanProcessJournalPath = worker.descriptor.orphanProcessJournalPath;
