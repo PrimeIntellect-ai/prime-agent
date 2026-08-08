@@ -60,6 +60,15 @@ def _is_linklike(path: Path) -> bool:
     return bool(is_junction and is_junction())
 
 
+def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
+    try:
+        if not path.is_file() or _is_linklike(path) or path.stat().st_size > limit:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
 def tailor_manifest(target: Path) -> dict[str, object]:
     """Build a deterministic gate draft from bounded top-level project markers."""
     target = target.resolve()
@@ -67,8 +76,12 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     detected: list[str] = []
 
     python_roots: list[str] = []
-    if (target / "src").is_dir():
+    if (target / "src").is_dir() and not _is_linklike(target / "src"):
         python_roots.append("src")
+    for simulation_dir in ("sim", "simulation", "simulations"):
+        candidate = target / simulation_dir
+        if candidate.is_dir() and not _is_linklike(candidate):
+            python_roots.append(simulation_dir)
     # Source-layout-free packages are detected only one level deep; never walk
     # an untrusted or very large repository during installation.
     try:
@@ -89,12 +102,21 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         checks.append(_check("compile", f"python -m compileall -q {joined}", python_roots[0], 120))
         detected.extend(f"python-package:{item}" for item in python_roots)
 
-    test_dirs = [item for item in ("tests", "test") if (target / item).is_dir()]
+    test_dirs = [
+        item for item in ("tests", "test", "checks/properties", "checks/invariants", "checks/reference_cases")
+        if (target / item).is_dir() and not _is_linklike(target / item)
+    ]
+    pyproject_text = _bounded_text(target / "pyproject.toml")
+    if pyproject_text is not None:
+        detected.append("pyproject.toml")
     if test_dirs:
         joined = " ".join(test_dirs)
         checks.append(_check("unit", f"python -m pytest -q {joined}", test_dirs[0], 900))
         detected.extend(f"python-tests:{item}" for item in test_dirs)
-    elif (target / "tox.ini").is_file():
+    elif pyproject_text is not None and "[tool.pytest" in pyproject_text:
+        checks.append(_check("unit", "python -m pytest -q", "pyproject.toml", 900))
+        detected.append("pyproject.toml:pytest")
+    elif (target / "tox.ini").is_file() and not _is_linklike(target / "tox.ini"):
         checks.append(_check("tox", "python -m tox -q", "tox.ini", 900))
         detected.append("tox.ini")
 
@@ -104,10 +126,11 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         detected.append(lake_marker)
 
     package_json = target / "package.json"
-    if package_json.is_file() and not _is_linklike(package_json) and package_json.stat().st_size <= 1_048_576:
+    package_text = _bounded_text(package_json)
+    if package_text is not None:
         try:
-            package = json.loads(package_json.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            package = json.loads(package_text)
+        except json.JSONDecodeError:
             package = None
         script = package.get("scripts", {}).get("test") if isinstance(package, dict) and isinstance(package.get("scripts"), dict) else None
         if isinstance(script, str) and script.strip() and "no test specified" not in script.casefold():

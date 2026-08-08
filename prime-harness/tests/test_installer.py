@@ -138,6 +138,41 @@ def test_tailor_generates_nonvacuous_manifest_from_repo_layout(tmp_repo):
     assert {entry["name"] for entry in manifest["profiles"]["default"]["required"]} >= {"compile", "unit"}
 
 
+def test_tailor_uses_simulation_and_pyproject_pytest_markers(tmp_repo):
+    (tmp_repo / "simulation").mkdir()
+    (tmp_repo / "simulation/model.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_repo / "pyproject.toml").write_text(
+        "[project]\nname='sim'\nversion='0'\n[tool.pytest.ini_options]\ntestpaths=['custom']\n",
+        encoding="utf-8",
+    )
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    entries = {entry["name"]: entry for entry in manifest["profiles"]["default"]["required"]}
+    assert entries["compile"]["skip_if_missing"] == "simulation"
+    assert entries["unit"]["skip_if_missing"] == "pyproject.toml"
+    assert "pyproject.toml:pytest" in manifest["_detected"]
+
+
+def test_tailor_fails_closed_when_top_level_scan_bound_is_exceeded(tmp_repo):
+    for index in range(520):
+        (tmp_repo / f"marker-{index:03d}").write_text("x", encoding="utf-8")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "512-entry tailoring scan limit" in (proc.stdout + proc.stderr)
+    assert not (tmp_repo / ".prime/agent/APPEND_SYSTEM.md").exists()
+
+
+def test_tailor_dry_run_does_not_write_manifest_or_template(tmp_repo):
+    (tmp_repo / "src/pkg").mkdir(parents=True)
+    (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    proc = run_install(tmp_repo, "--tailor", "--dry-run")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "[dry-run] tailored manifest" in proc.stdout
+    assert not (tmp_repo / "harness/manifest.json").exists()
+    assert not (tmp_repo / ".prime/agent/APPEND_SYSTEM.md").exists()
+
+
 def test_tailor_detects_tox_lean_and_nonplaceholder_node_tests(tmp_repo):
     (tmp_repo / "tox.ini").write_text("[tox]\nenvlist=py\n", encoding="utf-8")
     (tmp_repo / "lakefile.lean").write_text("package sample\n", encoding="utf-8")
