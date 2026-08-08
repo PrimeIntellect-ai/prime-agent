@@ -1,0 +1,13 @@
+[project]
+name = "evidence-ledger"
+version = "0.1.0"
+description = "Prime harness: provenance-bearing evidence ledger (SQLite + FTS5)"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evidence_ledger"]
