@@ -145,6 +145,18 @@
       ],
       "conditional": [],
       "min_applicable_checks": 1
+    },
+    "final": {
+      "conditional": [],
+      "min_applicable_checks": 1,
+      "required": [
+        {
+          "command": "python -S harness/scorecard.py --completion --fail-on critical --output artifacts/harness/completion-scorecard.json",
+          "name": "verification-coverage-completion",
+          "skip_if_missing": "harness/scorecard.py",
+          "timeout_seconds": 180
+        }
+      ]
     }
   }
 }
