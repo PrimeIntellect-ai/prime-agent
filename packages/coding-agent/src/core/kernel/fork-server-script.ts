@@ -121,7 +121,11 @@ def _serve(control_path):
             continue
 
         if pid == 0:
-            # Child: shed every inherited fd tied to the control channel, then run.
+            # Child: become a session/process-group leader before ipykernel starts.
+            # ipykernel then safely forwards interrupt_request to this kernel and
+            # every subprocess it owns without touching the forkserver or siblings.
+            os.setsid()
+            # Shed every inherited fd tied to the control channel, then run.
             try:
                 sock.close()
                 f.close()

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed interrupted IPython cells leaving child processes running and the kernel busy by isolating each Unix kernel process group and signaling the full tree.
 - Fixed slow daemon startup dropping resident sessions by waiting for the catalog and revalidating supervisors before replacement ([#911](https://github.com/PrimeIntellect-ai/prime-agent/pull/911) by [@traditio](https://github.com/traditio)).
 - Fixed long or concurrent daemon shutdown checks aborting cleanup when their lease refresh was delayed or self-contended.
 - Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).

@@ -45,6 +45,18 @@ const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
 	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
 
+function killIsolatedKernelProcessGroup(pid: number, signal: NodeJS.Signals): void {
+	try {
+		// Negative pid addresses the Unix process group created for this kernel.
+		process.kill(-pid, signal);
+	} catch (error) {
+		// A forked child can briefly be visible before setsid(). Fall back to the
+		// leader so startup-abandon cleanup is still effective in that race.
+		if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+		process.kill(pid, signal);
+	}
+}
+
 export class KernelBusyAfterInterruptError extends Error {
 	constructor() {
 		super(KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE);
@@ -648,6 +660,10 @@ export class KernelManager {
 				cwd: this.options.cwd,
 				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
 				stdio: ["ignore", "pipe", "pipe"],
+				// ipykernel only forwards interrupt_request to descendants when it is
+				// the process-group leader. Isolate each Unix kernel so subprocesses
+				// receive Ctrl+C without signaling Prime Agent or sibling kernels.
+				detached: process.platform !== "win32",
 			});
 			this.kernel = kernel;
 
@@ -1302,11 +1318,20 @@ export class KernelManager {
 		this.iopubPumpPromise = undefined;
 		try {
 			if (this.kernel) {
-				this.kernel.kill(killSignal);
+				const pid = this.kernel.pid;
+				if (process.platform !== "win32" && pid !== undefined) {
+					killIsolatedKernelProcessGroup(pid, killSignal);
+				} else {
+					this.kernel.kill(killSignal);
+				}
 			} else if (this.kernelPid !== undefined && !this.forkedKernelDied()) {
 				// Only signal a forked kernel confirmed still alive: a dead pid may have
 				// been recycled by the OS, and a kill would then hit an unrelated process.
-				process.kill(this.kernelPid, killSignal);
+				if (process.platform !== "win32") {
+					killIsolatedKernelProcessGroup(this.kernelPid, killSignal);
+				} else {
+					process.kill(this.kernelPid, killSignal);
+				}
 			}
 		} catch {
 			// Kernel already exited.
