@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed live daemon supervisors, workers, and session leases being treated as stale when upgrading across process-start identity token formats.
 - Fixed interrupted IPython cells leaving child processes running and the kernel busy by isolating each Unix kernel process group and signaling the full tree.
 - Fixed slow daemon startup dropping resident sessions by waiting for the catalog and revalidating supervisors before replacement ([#911](https://github.com/PrimeIntellect-ai/prime-agent/pull/911) by [@traditio](https://github.com/traditio)).
 - Fixed long or concurrent daemon shutdown checks aborting cleanup when their lease refresh was delayed or self-contended.
