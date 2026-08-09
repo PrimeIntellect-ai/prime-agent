@@ -578,4 +578,57 @@ describe("SettingsManager", () => {
 			expect(manager.getTelemetryEnabled()).toBe(false);
 		});
 	});
+
+	describe("rlm token budget", () => {
+		it("round-trips a token budget through the global settings file", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getRlmTokenBudget()).toBeUndefined();
+
+			manager.setRlmTokenBudget({ totalTokens: 1_000_000, schedule: "split", factor: 0.5, fanout: 3 });
+			await manager.flush();
+
+			const reloaded = SettingsManager.create(projectDir, agentDir);
+			expect(reloaded.getRlmTokenBudget()).toEqual({
+				totalTokens: 1_000_000,
+				schedule: "split",
+				factor: 0.5,
+				fanout: 3,
+			});
+		});
+
+		it("persists range bounds", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setRlmTokenBudget({
+				totalTokens: 600_000,
+				schedule: "geometric",
+				factor: 0.25,
+				fanout: 2,
+				minTokens: 50_000,
+				maxTokens: 600_000,
+			});
+			await manager.flush();
+
+			expect(SettingsManager.create(projectDir, agentDir).getRlmTokenBudget()).toMatchObject({
+				minTokens: 50_000,
+				maxTokens: 600_000,
+			});
+		});
+
+		it("clears the budget when set to undefined", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setRlmTokenBudget({ totalTokens: 1000, schedule: "flat", factor: 0.5, fanout: 3 });
+			await manager.flush();
+
+			manager.setRlmTokenBudget(undefined);
+			await manager.flush();
+
+			expect(SettingsManager.create(projectDir, agentDir).getRlmTokenBudget()).toBeUndefined();
+		});
+
+		it("ignores a malformed persisted budget", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ rlmTokenBudget: { totalTokens: -1 } }));
+
+			expect(SettingsManager.create(projectDir, agentDir).getRlmTokenBudget()).toBeUndefined();
+		});
+	});
 });

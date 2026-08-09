@@ -2215,6 +2215,66 @@ describe("AgentSession rlm recursion", () => {
 		expect(env.RLM_TOKEN_SUBTREE_POOL).toBeUndefined();
 	});
 
+	it("rolls back token-budget state when chat persistence fails", async () => {
+		const root = createSession();
+		const originalPrompt = root.systemPrompt;
+		const flush = vi.spyOn(root.sessionManager, "flushNow").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+
+		await expect(
+			root.setRlmTokenBudget({ totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 }),
+		).rejects.toThrow("disk full");
+		expect(root.getRlmTokenBudgetStatus()).toMatchObject({ config: null, source: "default", allowanceTokens: null });
+		expect(root.systemPrompt).toBe(originalPrompt);
+		expect(
+			root.sessionManager
+				.getBranch()
+				.some((entry) => entry.type === "custom" && entry.customType === "rlm_token_budget_state"),
+		).toBe(false);
+
+		flush.mockRestore();
+		root.sessionManager.flushNow();
+		expect(readFileSync(root.sessionFile!, "utf8")).not.toContain('"customType":"rlm_token_budget_state"');
+	});
+
+	it("reapplies the resolved budget when navigating off a chat override", async () => {
+		const original = createSession();
+		await original.prompt("baseline branch");
+		await original.agent.waitForIdle();
+		const baselineLeafId = original.sessionManager.getLeafId();
+		if (!baselineLeafId) throw new Error("Missing baseline branch leaf");
+		await original.setRlmTokenBudget({ totalTokens: 1000, schedule: "flat", factor: 0.5, fanout: 2 });
+		const sessionFile = original.sessionFile;
+		if (!sessionFile) throw new Error("Missing persisted session file");
+		original.dispose();
+
+		const resumed = createSession({
+			sessionManager: SessionManager.open(sessionFile, join(tempDir, "sessions")),
+			settingsManager: SettingsManager.inMemory({
+				rlmTokenBudget: { totalTokens: 400, schedule: "flat", factor: 0.5, fanout: 2 },
+			}),
+		});
+		expect(resumed.getRlmTokenBudgetStatus()).toMatchObject({ source: "chat", allowanceTokens: 1000 });
+
+		await expect(resumed.navigateTree(baselineLeafId, { summarize: false })).resolves.toMatchObject({
+			cancelled: false,
+		});
+
+		// The chat override is no longer on this branch, so the global default applies again.
+		expect(resumed.getRlmTokenBudgetStatus()).toMatchObject({ source: "global", allowanceTokens: 400 });
+	});
+
+	it("ignores a malformed global token budget instead of failing startup", () => {
+		const root = createSession({
+			settingsManager: SettingsManager.inMemory({
+				rlmTokenBudget: { totalTokens: -5, schedule: "nope", factor: 9 } as never,
+			}),
+		});
+
+		expect(root.getRlmTokenBudgetStatus()).toMatchObject({ config: null, source: "default", allowanceTokens: null });
+	});
+
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {
 		let releaseTurn!: () => void;
 		const release = new Promise<void>((resolve) => {
