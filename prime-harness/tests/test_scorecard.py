@@ -56,6 +56,7 @@ def prepare_recorded_fixture(repo: Path) -> dict[str, Path]:
 
     task = json.loads((FIXTURE / "task-state.json").read_text(encoding="utf-8"))
     task["base_commit"] = base
+    task.setdefault("assumptions", {})["highest_observed_head"] = base
     task_state = artifacts / "task-state.json"
     task_state.write_text(json.dumps(task), encoding="utf-8")
     shutil.copytree(FIXTURE / "gate-logs", artifacts / "gate-logs")
@@ -548,6 +549,7 @@ def _prepare_completion_coverage_fixture(repo: Path) -> tuple[dict[str, Path], s
     task_state.write_text(json.dumps({
         "task_id": "coverage-task", "objective": "coverage", "base_commit": base,
         "working_branch": git(repo, "branch", "--show-current"),
+        "assumptions": {"highest_observed_head": change},
         "unresolved_claims": [], "active_child_names": [],
         "quality_gate_status": {}, "created_at": "2026-01-01T00:00:00Z",
         "evidence_ids": ["ev-commit", "ev-src"],
@@ -793,3 +795,106 @@ def test_coverage_policy_config_read_is_bounded(tmp_repo: Path) -> None:
     assert proc.returncode == 2
     assert payload == {}
     assert "stable bounded regular file" in proc.stderr
+
+
+
+def test_completion_rejects_divergent_task_base_and_regressed_high_water_head(tmp_repo: Path) -> None:
+    paths, base, change = _prepare_completion_coverage_fixture(tmp_repo)
+    git(tmp_repo, "checkout", "-q", "--detach", base)
+    alternate = tmp_repo / "alternate.py"
+    alternate.write_text("alternate = True\n", encoding="utf-8")
+    git(tmp_repo, "add", "alternate.py")
+    git(tmp_repo, "commit", "-qm", "divergent completion head")
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    task["base_commit"] = change
+    task["assumptions"]["highest_observed_head"] = change
+    paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    codes = {item["code"] for item in payload["alerts"]}
+    assert "VERIFICATION_CHURN_RANGE_INVALID" in codes
+    assert "VERIFICATION_HEAD_REGRESSION" in codes
+
+
+def test_completion_detects_hard_reset_before_highest_observed_work(tmp_repo: Path) -> None:
+    paths, _base, change = _prepare_completion_coverage_fixture(tmp_repo)
+    marker = tmp_repo / "src/verified_work.py"
+    marker.write_text("verified = True\n", encoding="utf-8")
+    git(tmp_repo, "add", "src/verified_work.py")
+    git(tmp_repo, "commit", "-qm", "verified high water")
+    high_water = git(tmp_repo, "rev-parse", "HEAD")
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    task["assumptions"]["highest_observed_head"] = high_water
+    paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+    git(tmp_repo, "reset", "--hard", change)
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    assert "VERIFICATION_HEAD_REGRESSION" in {item["code"] for item in payload["alerts"]}
+
+
+def test_verification_metadata_cannot_credit_directory_untouched_by_evidence_commit(tmp_repo: Path) -> None:
+    paths, base, _change = _prepare_completion_coverage_fixture(tmp_repo)
+    source = tmp_repo / "src/only.py"
+    source.write_text("only_src = True\n", encoding="utf-8")
+    git(tmp_repo, "add", "src/only.py")
+    git(tmp_repo, "commit", "-qm", "src-only evidence commit")
+    src_only_commit = git(tmp_repo, "rev-parse", "HEAD")
+    connection = sqlite3.connect(paths["evidence"])
+    try:
+        connection.execute("UPDATE evidence SET status='refuted' WHERE id='ev-commit'")
+        connection.execute(
+            "UPDATE evidence SET assumptions=?, commit_sha=? WHERE id='ev-src'",
+            (json.dumps({"verification_coverage": {
+                "kind": "verification", "directories": ["lib"], "base_commit": base,
+            }}), src_only_commit),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    task["assumptions"]["highest_observed_head"] = src_only_commit
+    paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    row = next(item for item in payload["verification"]["directory_coverage"]["directories"] if item["directory"] == "lib")
+    assert row["verification_records"] == 0
+    assert row["status"] == "behind"
+
+
+def test_each_binary_code_file_receives_full_conservative_churn_charge(tmp_repo: Path) -> None:
+    paths, _base, _change = _prepare_completion_coverage_fixture(tmp_repo)
+    for index in range(3):
+        path = tmp_repo / f"binary/payload_{index}.py"
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"\x00compiled")
+    git(tmp_repo, "add", "binary")
+    git(tmp_repo, "commit", "-qm", "three binary code files")
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    row = next(item for item in payload["verification"]["directory_coverage"]["directories"] if item["directory"] == "binary")
+    assert row["unmeasured_binary_files"] == 3
+    assert row["code_lines_changed"] == 300
+    assert row["records_per_100_lines"] == 0.0
+    assert row["status"] == "behind"
+
+
+def test_policy_and_artifact_paths_derive_from_one_stable_config_snapshot(tmp_repo: Path, monkeypatch) -> None:
+    module = load_scorecard_module()
+    config = tmp_repo / "harness/config.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({
+        "artifacts_dir": "artifacts/custom",
+        "verification_coverage": {"min_evidence_per_100_lines": 2.0},
+    }), encoding="utf-8")
+    calls = {"count": 0}
+    original = module._stable_bounded_config
+    def counted(path):
+        calls["count"] += 1
+        return original(path)
+    monkeypatch.setattr(module, "_stable_bounded_config", counted)
+    document = module.load_harness_config(tmp_repo)
+    policy = module.load_coverage_policy(tmp_repo, document)
+    artifacts = module.load_artifacts_dir(tmp_repo, document)
+    assert calls["count"] == 1
+    assert policy["min_evidence_per_100_lines"] == 2.0
+    assert artifacts == tmp_repo / "artifacts/custom"

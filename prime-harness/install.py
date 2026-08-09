@@ -557,14 +557,18 @@ def load_install_state(path: Path) -> dict[str, object] | None:
         state = json.loads(text)
     except json.JSONDecodeError as exc:
         raise TailorError("install state is not valid JSON") from exc
-    if not isinstance(state, dict) or set(state) != {"schema_version", "installed_version", "template_sha256"}:
+    allowed_keys = {"schema_version", "installed_version", "template_sha256", "pending_sidecar_sha256"}
+    if not isinstance(state, dict) or set(state) - allowed_keys or not {"schema_version", "installed_version", "template_sha256"}.issubset(state):
         raise TailorError("install state schema is invalid")
     version = state.get("installed_version")
     hashes = state.get("template_sha256")
+    pending = state.get("pending_sidecar_sha256", {})
     if state.get("schema_version") != INSTALL_STATE_SCHEMA_VERSION or not isinstance(version, str) or re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version) is None:
         raise TailorError("install state version is invalid")
     if not isinstance(hashes, dict) or len(hashes) > MAX_INSTALL_STATE_FILES:
         raise TailorError("install state template hash map is invalid")
+    if not isinstance(pending, dict) or len(pending) > MAX_INSTALL_STATE_FILES:
+        raise TailorError("install state pending sidecar map is invalid")
     normalized: dict[str, str] = {}
     for relative, digest in hashes.items():
         if not isinstance(relative, str) or not _valid_state_relative(relative):
@@ -572,10 +576,18 @@ def load_install_state(path: Path) -> dict[str, object] | None:
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise TailorError("install state contains an invalid template digest")
         normalized[relative] = digest
+    normalized_pending: dict[str, str] = {}
+    for relative, digest in pending.items():
+        if not isinstance(relative, str) or not _valid_state_relative(relative):
+            raise TailorError("install state contains an unsafe pending sidecar path")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise TailorError("install state contains an invalid pending sidecar digest")
+        normalized_pending[relative] = digest
     return {
         "schema_version": INSTALL_STATE_SCHEMA_VERSION,
         "installed_version": version,
         "template_sha256": normalized,
+        "pending_sidecar_sha256": normalized_pending,
     }
 
 
@@ -684,25 +696,25 @@ def _directory_identity(path: Path) -> tuple[int, int, int] | None:
     return (info.st_dev, info.st_ino, info.st_mode)
 
 
+def _unused_temporary_path(parent: Path, prefix: str) -> Path:
+    descriptor, name = tempfile.mkstemp(prefix=prefix, suffix=".hold", dir=str(parent))
+    os.close(descriptor)
+    path = Path(name)
+    path.unlink()
+    return path
+
+
 def atomic_bytes(path: Path, value: bytes, mode: int = 0o644,
                  expected_parent_identity: tuple[int, int, int] | None = None,
                  expected_digest: str | None = None, require_absent: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if expected_parent_identity is not None and _directory_identity(path.parent) != expected_parent_identity:
         raise TailorError(f"destination parent changed before atomic write: {path}")
-    def expected_content() -> bool:
-        if require_absent:
-            return not os.path.lexists(path)
-        if expected_digest is None:
-            return True
-        current = _stable_regular_bytes(path)
-        return current is not None and hashlib.sha256(current).hexdigest() == expected_digest
-    if not expected_content():
-        raise TailorError(f"destination content changed before atomic write: {path}")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )
     temporary = Path(temporary_name)
+    held: Path | None = None
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(value)
@@ -711,20 +723,79 @@ def atomic_bytes(path: Path, value: bytes, mode: int = 0o644,
         os.chmod(temporary, mode)
         if expected_parent_identity is not None and _directory_identity(path.parent) != expected_parent_identity:
             raise TailorError(f"destination parent changed during atomic write: {path}")
-        if not expected_content():
-            raise TailorError(f"destination content changed during atomic write: {path}")
-        os.replace(temporary, path)
-    except BaseException:
+        if require_absent:
+            # Hard-link creation is an atomic create-if-absent operation. It
+            # cannot overwrite a file that appeared after preflight.
+            os.link(temporary, path)
+            temporary.unlink()
+            return
+        if expected_digest is None:
+            os.replace(temporary, path)
+            return
+        # Capture the compared object under an unguessable hold name before
+        # validating it. A later writer to the original pathname can no longer
+        # change the captured bytes that authorize replacement.
+        held = _unused_temporary_path(path.parent, f".{path.name}.")
+        os.replace(path, held)
+        captured = _stable_regular_bytes(held)
+        if captured is None or hashlib.sha256(captured).hexdigest() != expected_digest:
+            if not os.path.lexists(path):
+                os.replace(held, path)
+                held = None
+            raise TailorError(f"destination content changed during atomic capture: {path}")
+        if expected_parent_identity is not None and _directory_identity(path.parent) != expected_parent_identity:
+            if not os.path.lexists(path):
+                os.replace(held, path)
+                held = None
+            raise TailorError(f"destination parent changed during atomic capture: {path}")
+        try:
+            os.link(temporary, path)
+        except BaseException:
+            if not os.path.lexists(path):
+                os.replace(held, path)
+                held = None
+            raise
+        temporary.unlink()
+        held.unlink()
+        held = None
+    finally:
         try:
             os.close(descriptor)
         except OSError:
             pass
-        raise
-    finally:
         try:
             temporary.unlink()
         except FileNotFoundError:
             pass
+        # If a concurrent creator occupied the destination, retain the captured
+        # original beside it rather than destroying either party's bytes.
+        if held is not None and held.exists() and not os.path.lexists(path):
+            try:
+                os.replace(held, path)
+            except OSError:
+                pass
+
+
+def _atomic_remove_expected(path: Path, expected_digest: str,
+                            expected_parent_identity: tuple[int, int, int] | None) -> None:
+    if expected_parent_identity is not None and _directory_identity(path.parent) != expected_parent_identity:
+        raise TailorError(f"destination parent changed before atomic removal: {path}")
+    held = _unused_temporary_path(path.parent, f".{path.name}.")
+    os.replace(path, held)
+    try:
+        captured = _stable_regular_bytes(held)
+        if captured is None or hashlib.sha256(captured).hexdigest() != expected_digest:
+            if not os.path.lexists(path):
+                os.replace(held, path)
+            raise TailorError(f"destination content changed during atomic removal: {path}")
+        held.unlink()
+    except BaseException:
+        if held.exists() and not os.path.lexists(path):
+            try:
+                os.replace(held, path)
+            except OSError:
+                pass
+        raise
 
 
 def _run_upgrade(target: Path, *, version: str,
@@ -732,27 +803,30 @@ def _run_upgrade(target: Path, *, version: str,
     state_path = target / INSTALL_STATE_RELATIVE
     try:
         assert_safe_destination(target, state_path)
+        state_original = _stable_regular_bytes(state_path)
         state = load_install_state(state_path)
     except TailorError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2, {}
-    if state is None:
+    if state is None or state_original is None:
         print("error: install state is missing; --upgrade requires a versioned prior installation", file=sys.stderr)
         return 2, {}
     old_hashes = state["template_sha256"]
-    assert isinstance(old_hashes, dict)
+    pending_hashes = state.get("pending_sidecar_sha256", {})
+    assert isinstance(old_hashes, dict) and isinstance(pending_hashes, dict)
     decisions: list[dict[str, object]] = []
-    counts = {"updated": 0, "new": 0, "unchanged": 0, "conflicts": 0, "obsolete": 0}
+    conflict_payload_hashes: dict[str, str] = {}
+    counts = {
+        "updated": 0, "new": 0, "unchanged": 0, "conflicts": 0,
+        "obsolete_removed": 0, "obsolete_kept": 0,
+    }
     config_conflict = False
 
     def decision(action: str, path: Path, payload: bytes, mode: int,
-                 original: bytes | None) -> None:
+                 original: bytes | None, key: str | None = None) -> None:
         decisions.append({
-            "action": action,
-            "path": path,
-            "payload": payload,
-            "mode": mode,
-            "original": original,
+            "action": action, "path": path, "payload": payload, "mode": mode,
+            "original": original, "key": key,
             "original_mode": (
                 stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
                 if original is not None else None
@@ -760,6 +834,24 @@ def _run_upgrade(target: Path, *, version: str,
             "expected_digest": hashlib.sha256(original).hexdigest() if original is not None else None,
             "parent_identity": _directory_identity(path.parent),
         })
+
+    def handle_conflict(key: str, sidecar: Path, payload: bytes, mode: int,
+                        old_digest: object) -> None:
+        current_digest = hashlib.sha256(payload).hexdigest()
+        conflict_payload_hashes[key] = current_digest
+        if os.path.lexists(sidecar):
+            sidecar_payload = _stable_regular_bytes(sidecar)
+            if sidecar_payload is None:
+                raise TailorError(f"upgrade sidecar is not a stable bounded regular file: {key}.new")
+            sidecar_digest = hashlib.sha256(sidecar_payload).hexdigest()
+            if sidecar_digest == current_digest:
+                return
+            authorized = {digest for digest in (old_digest, pending_hashes.get(key)) if isinstance(digest, str)}
+            if sidecar_digest not in authorized:
+                raise TailorError(f"edited upgrade sidecar would be overwritten: {key}.new")
+            decision("conflict", sidecar, payload, mode, sidecar_payload, key)
+        else:
+            decision("conflict", sidecar, payload, mode, None, key)
 
     try:
         for key, (_source, payload, mode) in sorted(inventory.items()):
@@ -778,52 +870,104 @@ def _run_upgrade(target: Path, *, version: str,
                     counts["unchanged"] += 1
                     continue
                 if isinstance(old_digest, str) and user_digest == old_digest:
-                    decision("updated", destination, payload, mode, user_payload)
+                    decision("updated", destination, payload, mode, user_payload, key)
                     counts["updated"] += 1
                     continue
                 counts["conflicts"] += 1
                 config_conflict = config_conflict or key == "harness/config.json"
-                if os.path.lexists(sidecar):
-                    sidecar_payload = _stable_regular_bytes(sidecar)
-                    if sidecar_payload is None:
-                        raise TailorError(f"upgrade sidecar is not a stable bounded regular file: {key}.new")
-                    sidecar_digest = hashlib.sha256(sidecar_payload).hexdigest()
-                    if sidecar_digest == current_digest:
-                        continue
-                    if isinstance(old_digest, str) and sidecar_digest == old_digest:
-                        decision("conflict", sidecar, payload, mode, sidecar_payload)
-                    else:
-                        raise TailorError(f"edited upgrade sidecar would be overwritten: {key}.new")
-                else:
-                    decision("conflict", sidecar, payload, mode, None)
+                handle_conflict(key, sidecar, payload, mode, old_digest)
             elif isinstance(old_digest, str):
                 # Deletion of a previously managed file is a local customization.
                 counts["conflicts"] += 1
-                if os.path.lexists(sidecar):
-                    sidecar_payload = _stable_regular_bytes(sidecar)
-                    if sidecar_payload is None:
-                        raise TailorError(f"upgrade sidecar is not a stable bounded regular file: {key}.new")
-                    sidecar_digest = hashlib.sha256(sidecar_payload).hexdigest()
-                    if sidecar_digest == current_digest:
-                        continue
-                    if sidecar_digest == old_digest:
-                        decision("conflict", sidecar, payload, mode, sidecar_payload)
-                    else:
-                        raise TailorError(f"edited upgrade sidecar would be overwritten: {key}.new")
-                else:
-                    decision("conflict", sidecar, payload, mode, None)
+                config_conflict = config_conflict or key == "harness/config.json"
+                handle_conflict(key, sidecar, payload, mode, old_digest)
             else:
-                decision("new", destination, payload, mode, None)
+                decision("new", destination, payload, mode, None, key)
                 counts["new"] += 1
-        counts["obsolete"] = len(set(old_hashes) - set(inventory))
+
+        for key in sorted(set(old_hashes) - set(inventory)):
+            destination = target / Path(*PurePosixPath(key).parts)
+            assert_safe_destination(target, destination)
+            if not os.path.lexists(destination):
+                continue
+            original = _stable_regular_bytes(destination)
+            if original is None:
+                raise TailorError(f"obsolete managed destination is not a stable bounded regular file: {key}")
+            if hashlib.sha256(original).hexdigest() == old_hashes[key]:
+                decision("remove", destination, b"", 0, original, key)
+                counts["obsolete_removed"] += 1
+            else:
+                counts["obsolete_kept"] += 1
+
+        if not config_conflict:
+            # Append-only .gitignore merge is part of the same transaction.
+            gitignore = target / ".gitignore"
+            assert_safe_destination(target, gitignore)
+            if os.path.lexists(gitignore):
+                gitignore_text = _bounded_text(gitignore)
+                if gitignore_text is None:
+                    raise TailorError(".gitignore is not a stable bounded UTF-8 regular file")
+                gitignore_original = gitignore_text.encode("utf-8")
+                gitignore_mode = stat.S_IMODE(gitignore.stat(follow_symlinks=False).st_mode)
+            else:
+                gitignore_text, gitignore_original, gitignore_mode = "", None, 0o644
+            missing = [line for line in GITIGNORE_BLOCK if line not in gitignore_text.splitlines()]
+            if any(not line.startswith("#") for line in missing):
+                separator = "" if not gitignore_text or gitignore_text.endswith("\n") else "\n"
+                desired = (gitignore_text + separator + "\n".join(missing) + "\n").encode("utf-8")
+                decision("metadata", gitignore, desired, gitignore_mode, gitignore_original)
+
+            # Compute installed-example provenance for the post-upgrade tree.
+            example_hashes = _load_installed_example_hashes(target)
+            for stale in list(example_hashes):
+                if stale not in inventory:
+                    example_hashes.pop(stale, None)
+            for key, (_source, payload, _mode) in inventory.items():
+                if not any(key == prefix or key.startswith(prefix + "/") for prefix in EXAMPLE_SUBTREES):
+                    continue
+                destination = target / Path(*PurePosixPath(key).parts)
+                existing = _stable_regular_bytes(destination) if os.path.lexists(destination) else None
+                existing_digest = hashlib.sha256(existing).hexdigest() if existing is not None else None
+                if existing_digest == hashlib.sha256(payload).hexdigest() or existing_digest == old_hashes.get(key) or (existing is None and key not in old_hashes):
+                    example_hashes[key] = hashlib.sha256(payload).hexdigest()
+            examples_path = target / INSTALLED_EXAMPLES_RELATIVE
+            assert_safe_destination(target, examples_path)
+            examples_original = _stable_regular_bytes(examples_path) if os.path.lexists(examples_path) else None
+            if os.path.lexists(examples_path) and examples_original is None:
+                raise TailorError("installed example provenance is not a stable bounded regular file")
+            examples_payload = (
+                json.dumps({"schema_version": 1, "files": example_hashes}, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            if examples_original != examples_payload:
+                decision("metadata", examples_path, examples_payload, 0o644, examples_original)
+
+        state_document: dict[str, object]
+        if config_conflict:
+            state_document = {
+                "installed_version": state["installed_version"],
+                "schema_version": INSTALL_STATE_SCHEMA_VERSION,
+                "template_sha256": old_hashes,
+                "pending_sidecar_sha256": conflict_payload_hashes,
+            }
+        else:
+            state_document = {
+                "installed_version": version,
+                "schema_version": INSTALL_STATE_SCHEMA_VERSION,
+                "template_sha256": _inventory_hashes(inventory),
+            }
+        state_payload = (json.dumps(state_document, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+        if state_payload != state_original:
+            decision(
+                "state", state_path, state_payload,
+                stat.S_IMODE(state_path.stat(follow_symlinks=False).st_mode),
+                state_original,
+            )
     except (OSError, TailorError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2, {}
 
-    # A customized active config must be reconciled before advancing the
-    # canonical installed version. Sidecars are still emitted transactionally.
     write_decisions = (
-        [item for item in decisions if item["action"] == "conflict"]
+        [item for item in decisions if item["action"] in {"conflict", "state"}]
         if config_conflict else decisions
     )
     applied: list[dict[str, object]] = []
@@ -843,17 +987,27 @@ def _run_upgrade(target: Path, *, version: str,
             path = item["path"]
             payload = item["payload"]
             original = item["original"]
+            action = item["action"]
             assert isinstance(path, Path) and isinstance(payload, bytes)
             try:
-                current = _stable_regular_bytes(path)
-                if current is None or current != payload:
-                    raise TailorError(f"rollback target changed concurrently: {path}")
-                if original is None:
-                    path.unlink()
+                original_mode = item["original_mode"]
+                if action == "remove":
+                    if os.path.lexists(path) or not isinstance(original, bytes) or not isinstance(original_mode, int):
+                        raise TailorError(f"rollback removal target changed concurrently: {path}")
+                    atomic_bytes(path, original, original_mode, _directory_identity(path.parent), None, True)
                 else:
-                    original_mode = item["original_mode"]
-                    assert isinstance(original, bytes) and isinstance(original_mode, int)
-                    atomic_bytes(path, original, original_mode)
+                    current = _stable_regular_bytes(path)
+                    if current is None or current != payload:
+                        raise TailorError(f"rollback target changed concurrently: {path}")
+                    if original is None:
+                        path.unlink()
+                    else:
+                        if not isinstance(original_mode, int):
+                            raise TailorError(f"rollback mode unavailable: {path}")
+                        atomic_bytes(
+                            path, original, original_mode, _directory_identity(path.parent),
+                            hashlib.sha256(payload).hexdigest(), False,
+                        )
             except (OSError, TailorError) as exc:
                 failures.append(f"{path}: {type(exc).__name__}: {exc}")
         return failures
@@ -870,40 +1024,21 @@ def _run_upgrade(target: Path, *, version: str,
                     raise TailorError(f"upgrade destination changed after comparison: {path.relative_to(target)}")
                 expected_parent = item["parent_identity"]
                 expected_digest = item["expected_digest"]
-                atomic_bytes(
-                    path, payload, mode,
-                    expected_parent if isinstance(expected_parent, tuple) else None,
-                    expected_digest if isinstance(expected_digest, str) else None,
-                    expected_digest is None,
-                )
+                if item["action"] == "remove":
+                    if not isinstance(expected_digest, str):
+                        raise TailorError(f"obsolete removal lacks expected digest: {path}")
+                    _atomic_remove_expected(
+                        path, expected_digest,
+                        expected_parent if isinstance(expected_parent, tuple) else None,
+                    )
+                else:
+                    atomic_bytes(
+                        path, payload, mode,
+                        expected_parent if isinstance(expected_parent, tuple) else None,
+                        expected_digest if isinstance(expected_digest, str) else None,
+                        expected_digest is None,
+                    )
                 applied.append(item)
-            if not config_conflict:
-                state_original = _stable_regular_bytes(state_path)
-                if state_original is None:
-                    raise TailorError("install state changed or became unreadable before commit")
-                state_payload = (
-                    json.dumps({
-                        "installed_version": version,
-                        "schema_version": INSTALL_STATE_SCHEMA_VERSION,
-                        "template_sha256": _inventory_hashes(inventory),
-                    }, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-                ).encode("utf-8")
-                state_item = {
-                    "action": "state", "path": state_path, "payload": state_payload,
-                    "mode": stat.S_IMODE(state_path.stat(follow_symlinks=False).st_mode),
-                    "original": state_original,
-                    "original_mode": stat.S_IMODE(state_path.stat(follow_symlinks=False).st_mode),
-                    "expected_digest": hashlib.sha256(state_original).hexdigest(),
-                    "parent_identity": _directory_identity(state_path.parent),
-                }
-                if not unchanged_since_decision(state_item):
-                    raise TailorError("install state changed before commit")
-                atomic_bytes(
-                    state_path, state_payload, int(state_item["mode"]),
-                    state_item["parent_identity"] if isinstance(state_item["parent_identity"], tuple) else None,
-                    str(state_item["expected_digest"]), False,
-                )
-                applied.append(state_item)
         except (OSError, TailorError) as exc:
             rollback_failures = rollback()
             detail = f"; rollback failures: {rollback_failures}" if rollback_failures else ""
@@ -911,14 +1046,15 @@ def _run_upgrade(target: Path, *, version: str,
             return 2, {}
     prefix = "[dry-run] " if dry_run else ""
     if config_conflict:
-        print(f"{prefix}upgrade blocked: harness/config.json is customized; merge its .new sidecar and rerun", file=sys.stderr)
+        print(f"{prefix}upgrade blocked: harness/config.json is customized or deleted; merge its .new sidecar and rerun", file=sys.stderr)
         return 1, counts
     print(f"{prefix}upgraded Prime Harness {state['installed_version']} -> {version}")
     print(f"  updated managed: {counts['updated']}")
     print(f"  new managed:     {counts['new']}")
     print(f"  unchanged:       {counts['unchanged']}")
     print(f"  upgrade conflicts: {counts['conflicts']} (.new sidecars; local files preserved)")
-    print(f"  obsolete kept:   {counts['obsolete']}")
+    print(f"  obsolete removed: {counts['obsolete_removed']}")
+    print(f"  obsolete kept:    {counts['obsolete_kept']}")
     return 0, counts
 
 def json_matches(path: Path, value: object) -> bool:
@@ -1005,13 +1141,6 @@ def main() -> int:
         code, _counts = _run_upgrade(target, version=version, inventory=inventory, dry_run=args.dry_run)
         if code != 0:
             return code
-        try:
-            _merge_gitignore(target, dry_run=args.dry_run)
-            if not args.dry_run:
-                _record_installed_example_hashes(target, [entry[0] for entry in inventory.values()])
-        except (OSError, TailorError) as exc:
-            print(f"error: upgrade metadata refresh failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return 2
         if args.check and not args.dry_run:
             result = subprocess.run([sys.executable, str(target / "harness" / "doctor.py")], cwd=str(target))
             print(NEXT_STEPS.format(target=target))

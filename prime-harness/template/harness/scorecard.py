@@ -126,7 +126,7 @@ def _stable_bounded_config(path: Path) -> bytes | None:
     return value if identity(before) == identity(after) else None
 
 
-def load_coverage_policy(root: Path) -> dict[str, Any]:
+def load_harness_config(root: Path) -> dict[str, Any]:
     path = root / "harness" / "config.json"
     try:
         if os.path.lexists(path):
@@ -137,9 +137,14 @@ def load_coverage_policy(root: Path) -> dict[str, Any]:
         else:
             document = {}
     except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("harness/config.json is not readable UTF-8 JSON") from exc
+        raise ValueError("harness/config.json is not readable strict UTF-8 JSON") from exc
     if not isinstance(document, dict):
         raise ValueError("harness/config.json must be an object")
+    return document
+
+
+def load_coverage_policy(root: Path, document: dict[str, Any] | None = None) -> dict[str, Any]:
+    document = load_harness_config(root) if document is None else document
     raw = document.get("verification_coverage", {})
     if not isinstance(raw, dict):
         raise ValueError("verification_coverage must be an object")
@@ -884,13 +889,35 @@ def count_file_lines(path: Path) -> tuple[int | None, bool]:
         return None, True
 
 
+def _is_ancestor(root: Path, ancestor: str, descendant: str, warnings: list[str], label: str) -> bool | None:
+    try:
+        proc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=root, capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        warnings.append(f"git:{label}:{type(exc).__name__}")
+        return None
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    warnings.append(f"git:{label}:exit_{proc.returncode}")
+    return None
+
+
 def scan_churn(root: Path, base: str | None, warnings: list[str],
-               exempt_globs: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+               exempt_globs: list[str] | tuple[str, ...] = (),
+               binary_charge_lines: int = 100,
+               highest_observed_head: str | None = None) -> dict[str, Any]:
     branch_proc = run_git(root, ["branch", "--show-current"], warnings, "branch")
     branch = branch_proc.stdout.decode("utf-8", errors="replace").strip() if branch_proc else None
     head_proc = run_git(root, ["rev-parse", "--verify", "HEAD"], warnings, "head")
     head = head_proc.stdout.decode("ascii", errors="replace").strip() if head_proc else None
     resolved_base = None
+    base_ancestor_head: bool | None = None
+    observed_head_resolved: str | None = None
+    observed_head_ancestor: bool | None = None
     rows: list[tuple[int | None, int | None, str]] = []
     if base and not base.startswith("-"):
         resolved = run_git(root, ["rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}"], warnings, "base")
@@ -900,7 +927,16 @@ def scan_churn(root: Path, base: str | None, warnings: list[str],
         warnings.append("git:base:unsafe")
     else:
         warnings.append("git:base:missing")
-    if resolved_base:
+    if resolved_base and head:
+        base_ancestor_head = _is_ancestor(root, resolved_base, head, warnings, "base_ancestor_head")
+    if isinstance(highest_observed_head, str) and re.fullmatch(r"[0-9a-fA-F]{40,64}", highest_observed_head):
+        observed = run_git(root, ["rev-parse", "--verify", "--end-of-options", f"{highest_observed_head}^{{commit}}"], warnings, "observed_head")
+        if observed and head:
+            observed_head_resolved = observed.stdout.decode("ascii", errors="replace").strip()
+            observed_head_ancestor = _is_ancestor(root, observed_head_resolved, head, warnings, "observed_head_ancestor")
+    elif highest_observed_head is not None:
+        warnings.append("git:observed_head:unsafe")
+    if resolved_base and base_ancestor_head is True:
         diff = run_git(root, ["diff", "--numstat", "-z", "--no-renames", resolved_base, "--"], warnings, "diff")
         if diff:
             for raw in diff.stdout.split(b"\0"):
@@ -939,6 +975,7 @@ def scan_churn(root: Path, base: str | None, warnings: list[str],
                 else:
                     directory = _coverage_directory(relative)
                     directory_binary_files[directory] += 1
+                    directory_lines[directory] += max(binary_charge_lines, 1)
                     directory_files[directory].add(relative)
             continue
         total_added += added
@@ -957,7 +994,10 @@ def scan_churn(root: Path, base: str | None, warnings: list[str],
     return {
         "base": resolved_base or base,
         "base_resolved": resolved_base is not None,
+        "base_ancestor_head": base_ancestor_head,
         "base_equals_head": bool(resolved_base and head and resolved_base == head),
+        "highest_observed_head": observed_head_resolved or highest_observed_head,
+        "highest_observed_head_ancestor": observed_head_ancestor,
         "head": head,
         "working_branch": branch,
         "files_changed": len(changed_paths),
@@ -1054,7 +1094,7 @@ def build_directory_coverage(*, root: Path, base: str | None, churn: dict[str, A
         if status != "verified":
             continue
         if kind == "verification":
-            automatic = explicit_directories if automatic else set()
+            automatic = automatic.intersection(explicit_directories)
         for directory in automatic.intersection(rows):
             verification_ids[directory].add(evidence_id)
     enforce = (
@@ -1128,7 +1168,7 @@ def task_summary(data: dict[str, Any] | None) -> dict[str, Any]:
             "task_id": None, "created_at": None, "updated_at": None, "base_commit": None,
             "working_branch": None, "quality_gate_status": {}, "phases_passed": 0,
             "phases_total": 0, "phase_progress_rate": None, "unresolved_claims_count": 0,
-            "active_child_names": [], "evidence_ids_count": 0,
+            "active_child_names": [], "evidence_ids_count": 0, "highest_observed_head": None,
         }
     gates = data.get("quality_gate_status") if isinstance(data.get("quality_gate_status"), dict) else {}
     phases_total = len(gates)
@@ -1136,12 +1176,14 @@ def task_summary(data: dict[str, Any] | None) -> dict[str, Any]:
     unresolved = data.get("unresolved_claims") if isinstance(data.get("unresolved_claims"), list) else []
     active = data.get("active_child_names") if isinstance(data.get("active_child_names"), list) else []
     evidence_ids = data.get("evidence_ids") if isinstance(data.get("evidence_ids"), list) else []
+    assumptions = data.get("assumptions") if isinstance(data.get("assumptions"), dict) else {}
     return {
         "task_id": data.get("task_id") if isinstance(data.get("task_id"), str) else None,
         "evidence_ids_count": len([item for item in evidence_ids if isinstance(item, str)]),
         "created_at": data.get("created_at") if isinstance(data.get("created_at"), str) else None,
         "updated_at": data.get("updated_at") if isinstance(data.get("updated_at"), str) else None,
         "base_commit": data.get("base_commit") if isinstance(data.get("base_commit"), str) else None,
+        "highest_observed_head": assumptions.get("highest_observed_head") if isinstance(assumptions.get("highest_observed_head"), str) else None,
         "working_branch": data.get("working_branch") if isinstance(data.get("working_branch"), str) else None,
         "quality_gate_status": gates,
         "phases_passed": phases_passed,
@@ -1211,11 +1253,26 @@ def derive_alerts(scorecard: dict[str, Any], *, min_evidence_per_100_lines: floa
             "Completion requires a resolvable task base and repository HEAD.",
             base=churn.get("base"), head=churn.get("head"),
         )
+    elif completion and churn.get("base_ancestor_head") is not True:
+        add_alert(
+            alerts, "VERIFICATION_CHURN_RANGE_INVALID", "critical",
+            "Completion requires the task base to be an ancestor of repository HEAD.",
+            base=churn.get("base"), head=churn.get("head"),
+        )
     elif completion and churn.get("base_equals_head"):
         add_alert(
             alerts, "VERIFICATION_CHURN_INTERVAL_EMPTY", "critical",
             "Completion refuses an empty/reset task churn interval.",
             base=churn.get("base"), head=churn.get("head"),
+        )
+    if completion and (
+        not churn.get("highest_observed_head")
+        or churn.get("highest_observed_head_ancestor") is not True
+    ):
+        add_alert(
+            alerts, "VERIFICATION_HEAD_REGRESSION", "critical",
+            "Completion requires the task's highest observed HEAD to resolve and remain an ancestor of current HEAD.",
+            highest_observed_head=churn.get("highest_observed_head"), head=churn.get("head"),
         )
     if isinstance(coverage, dict) and coverage.get("available"):
         behind = [row for row in coverage.get("directories", []) if row.get("status") == "behind"]
@@ -1260,16 +1317,15 @@ def derive_alerts(scorecard: dict[str, Any], *, min_evidence_per_100_lines: floa
     alerts.sort(key=lambda item: (SEVERITY_ORDER.get(item["severity"], 99), item["code"]))
     return alerts
 
-def load_artifacts_dir(root: Path) -> Path:
-    config = root / "harness" / "config.json"
-    try:
-        data = json.loads(config.read_text(encoding="utf-8-sig"))
-        value = data.get("artifacts_dir") if isinstance(data, dict) else None
-        if isinstance(value, str) and value.strip():
-            return root / value
-    except (OSError, json.JSONDecodeError, UnicodeError):
-        pass
-    return root / "artifacts" / "harness"
+def load_artifacts_dir(root: Path, document: dict[str, Any] | None = None) -> Path:
+    data = load_harness_config(root) if document is None else document
+    value = data.get("artifacts_dir", "artifacts/harness")
+    if (
+        not isinstance(value, str) or not value or len(value) > 256 or "\\" in value
+        or "\0" in value or Path(value).is_absolute() or ".." in Path(value).parts
+    ):
+        raise ValueError("artifacts_dir must be a bounded repository-relative forward-slash path")
+    return root / value
 
 
 def discover_session_file(session_dir: Path | None, registry: Path | None) -> Path | None:
@@ -1353,6 +1409,8 @@ def build_scorecard(*, root: Path, task_state_path: Path, session_file: Path | N
     churn = scan_churn(
         root, base_override or task.get("base_commit"), warnings,
         exempt_globs=configured_exempt_globs,
+        binary_charge_lines=churn_alert_min_lines,
+        highest_observed_head=task.get("highest_observed_head"),
     )
     evidence["directory_coverage"] = build_directory_coverage(
         root=root,
@@ -1506,7 +1564,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     root = repo_root(args.repo)
     try:
-        policy = load_coverage_policy(root)
+        config_document = load_harness_config(root)
+        policy = load_coverage_policy(root, config_document)
+        artifacts = load_artifacts_dir(root, config_document)
     except ValueError as exc:
         print(f"scorecard: {exc}", file=sys.stderr)
         return 2
@@ -1534,7 +1594,6 @@ def main(argv: list[str] | None = None) -> int:
     if now is None:
         print("scorecard: --now must be ISO-8601 or an epoch timestamp", file=sys.stderr)
         return 2
-    artifacts = load_artifacts_dir(root)
     session_dir = args.session_dir or (Path(os.environ["RLM_SESSION_DIR"]) if os.environ.get("RLM_SESSION_DIR") else None)
     registry = args.registry or (session_dir / "rlm-subagents.jsonl" if session_dir else None)
     session_file = args.session_file or discover_session_file(session_dir, registry)

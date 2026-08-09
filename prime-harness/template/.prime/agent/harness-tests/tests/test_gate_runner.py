@@ -462,7 +462,8 @@ def test_final_profile_is_nonvacuous_fails_behind_churn_then_passes_with_coverag
 
     task = {
         "task_id": "final-gate", "objective": "prove red and green", "base_commit": base,
-        "working_branch": "main", "unresolved_claims": [], "active_child_names": [],
+        "working_branch": "main", "assumptions": {"highest_observed_head": change},
+        "unresolved_claims": [], "active_child_names": [],
         "quality_gate_status": {}, "created_at": "2026-01-01T00:00:00Z",
         "evidence_ids": ["ev-one"],
     }

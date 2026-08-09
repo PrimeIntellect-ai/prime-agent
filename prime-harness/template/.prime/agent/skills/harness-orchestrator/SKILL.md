@@ -83,14 +83,15 @@ check inside a live kernel; it is not part of the installed bundle (see
 Immediately before `goal.complete()`, after clearing `unresolved_claims`, run:
 
 ```python
-report = harness_orchestrator.completion_check()
+report = harness_orchestrator.completion_check()  # 240s outer timeout; final check is 180s
 assert report["status"] == "pass"
 ```
 
 This executes the non-vacuous `final` gate profile, whose required check runs
 the outside-kernel scorecard in `--completion --fail-on critical` mode. It
-requires a resolvable non-empty task churn interval and the full evidence-ledger
-coverage schema, and enforces non-weakening configurable
+requires a resolvable ancestor-based non-empty task churn interval, a monotonic
+highest-observed-HEAD high-water mark, and the full evidence-ledger coverage
+schema, and enforces non-weakening configurable
 per-top-level-directory churn coverage, rejects critical alerts and HEAD races,
 and checkpoints `quality_gate_status.completion_coverage`. There is no boolean
 coverage bypass.

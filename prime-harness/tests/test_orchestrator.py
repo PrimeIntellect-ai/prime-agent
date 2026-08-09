@@ -415,7 +415,7 @@ def test_completion_check_runs_final_profile_and_persists_pass(tmp_repo):
         "payload = {'schema_version': 1, 'completion_mode': True, 'alerts': [], "
         "'code_churn': {'head': 'HEAD'}, 'verification': {'directory_coverage': {'available': True, 'directories': []}}}\n"
         "out.write_text(json.dumps(payload), encoding='utf-8')\n"
-        "print('GATE_RESULT ' + json.dumps({'status': 'pass', 'profile': 'final', 'vacuous': False, 'applicable_checks': 1}))\n",
+        "print('GATE_RESULT ' + json.dumps({'status': 'pass', 'profile': 'final', 'passed': ['verification-coverage-completion'], 'failed': [], 'skipped': [], 'log_dir': 'logs/final', 'applicable_checks': 1, 'min_applicable_checks': 1, 'vacuous': False, 'vacuous_allowed': False}))\n",
         encoding="utf-8",
     )
     original_commit = orch.current_commit
@@ -440,7 +440,7 @@ def test_completion_check_rejects_absent_git_head_even_when_scorecard_agrees(tmp
         "out = pathlib.Path.cwd() / 'artifacts/harness/completion-scorecard.json'\n"
         "out.parent.mkdir(parents=True, exist_ok=True)\n"
         "out.write_text(json.dumps({'schema_version': 1, 'completion_mode': True, 'alerts': [], 'code_churn': {'head': None}, 'verification': {'directory_coverage': {'available': True}}}), encoding='utf-8')\n"
-        "print('GATE_RESULT ' + json.dumps({'status': 'pass', 'profile': 'final', 'vacuous': False, 'applicable_checks': 1}))\n",
+        "print('GATE_RESULT ' + json.dumps({'status': 'pass', 'profile': 'final', 'passed': ['verification-coverage-completion'], 'failed': [], 'skipped': [], 'log_dir': 'logs/final', 'applicable_checks': 1, 'min_applicable_checks': 1, 'vacuous': False, 'vacuous_allowed': False}))\n",
         encoding="utf-8",
     )
     original_commit = orch.current_commit
@@ -476,3 +476,63 @@ def test_coverage_disposition_builder_is_task_scoped_and_path_bounded(tmp_repo):
             orch.coverage_disposition_assumptions(
                 bad, "This reason is deliberately long enough for validation."
             )
+
+
+
+def test_completion_output_is_fixed_and_gate_verdict_schema_is_closed(tmp_repo):
+    (tmp_repo / "harness/config.json").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_repo / "harness/config.json").write_text(
+        json.dumps({"artifacts_dir": "artifacts/custom"}), encoding="utf-8"
+    )
+    orch.new_task("completion-fixed-output", "x")
+    verify = tmp_repo / "harness/verify.py"
+    verify.write_text(
+        "import json, pathlib\n"
+        "out = pathlib.Path.cwd() / 'artifacts/harness/completion-scorecard.json'\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_text(json.dumps({'schema_version': 1, 'completion_mode': True, 'alerts': [], 'code_churn': {'head': 'HEAD'}, 'verification': {'directory_coverage': {'available': True}}}), encoding='utf-8')\n"
+        "print('GATE_RESULT ' + json.dumps({'status': 'pass', 'profile': 'final', 'passed': [], 'failed': [], 'skipped': [], 'log_dir': 'logs/final', 'applicable_checks': 1, 'min_applicable_checks': 1, 'vacuous': False, 'vacuous_allowed': False, 'unknown': True}))\n",
+        encoding="utf-8",
+    )
+    original_commit = orch.current_commit
+    orch.current_commit = lambda: "HEAD"
+    try:
+        report = orch.completion_check(timeout_seconds=30)
+    finally:
+        orch.current_commit = original_commit
+    assert report["status"] == "fail"
+    assert report["scorecard_path"] == str(tmp_repo / "artifacts/harness/completion-scorecard.json")
+    assert any("closed substantive" in reason for reason in report["reasons"])
+
+
+def test_completion_stable_reader_rejects_link_backed_output(tmp_repo):
+    target = tmp_repo / "real-scorecard.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_repo / "scorecard-link.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError):
+        orch._stable_completion_json(link)
+
+
+def test_task_state_high_water_head_survives_repository_rewind(tmp_repo):
+    state = orch.new_task("high-water", "x")
+    first = orch.current_commit()
+    marker = tmp_repo / "work.py"
+    marker.write_text("work = True\n", encoding="utf-8")
+    import subprocess
+    subprocess.run(["git", "add", "work.py"], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "work"], cwd=tmp_repo, check=True)
+    high = orch.current_commit()
+    orch.save_task_state(state)
+    assert state.assumptions["highest_observed_head"] == high
+    subprocess.run(["git", "reset", "--hard", first], cwd=tmp_repo, check=True, capture_output=True)
+    orch.save_task_state(state)
+    assert state.assumptions["highest_observed_head"] == high
+
+
+def test_completion_default_timeout_leaves_margin_over_final_inner_timeout():
+    import inspect
+    assert inspect.signature(orch.completion_check).parameters["timeout_seconds"].default == 240

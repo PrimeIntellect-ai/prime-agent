@@ -27,6 +27,7 @@ def test_standalone_self_ci_is_pinned_cross_platform_cross_shell_and_full_suite(
     assert any(step.get("run") == "python -m pytest -q tests" for step in steps)
     lock = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
     assert "pip==25.1.1" in lock and "--hash=sha256:" in lock
+    assert "--universal" in lock and "colorama==0.4.6 ; sys_platform == 'win32'" in lock
     assert "secrets." not in text
 
 

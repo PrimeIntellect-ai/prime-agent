@@ -1,4 +1,4 @@
-"""harness-orchestrator — disciplined delegation for Prime Agent.
+"""harness-orchestrator â€” disciplined delegation for Prime Agent.
 
 Wraps `rlm.run(...)` with the reliability policy this project mandates:
 typed task state that survives kernel loss, an explicit admission rule for
@@ -11,7 +11,7 @@ Verified against Prime Agent v0.7.0 behavior:
   returns an admission handle, never the child's answer.
 - Child results come back only via files the child writes or agent messages.
 - Depth is host-enforced (default max depth 1); RLM_DEPTH env is advisory.
-- `goal.get()` exposes `remaining_tokens` — the only budget signal readable
+- `goal.get()` exposes `remaining_tokens` â€” the only budget signal readable
   from the kernel.
 """
 
@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -100,8 +101,30 @@ def load_task_state() -> TaskState | None:
     return TaskState(**{k: v for k, v in data.items() if k in known})
 
 
+def _commit_is_ancestor(ancestor: str, descendant: str) -> bool:
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", ancestor) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", descendant):
+        return False
+    try:
+        process = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=repo_root(), capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return process.returncode == 0
+
+
 def save_task_state(state: TaskState) -> Path:
     state.updated_at = utc_now_iso()
+    live_head = current_commit()
+    observed = state.assumptions.get("highest_observed_head")
+    if isinstance(live_head, str) and live_head:
+        if not isinstance(observed, str) or not observed:
+            state.assumptions["highest_observed_head"] = live_head
+        elif _commit_is_ancestor(observed, live_head):
+            state.assumptions["highest_observed_head"] = live_head
+        # A rewind/divergence deliberately leaves the prior high-water mark in
+        # place so completion scoring can detect the regression.
     path = _state_path()
     atomic_write_json(path, asdict(state))
     return path
@@ -269,18 +292,18 @@ async def admit(
     """Decide whether spawning a child is justified.
 
     Encodes the project recursion policy: children are for independent,
-    verifiable work of real size — never for trivial edits or work whose
+    verifiable work of real size â€” never for trivial edits or work whose
     every branch depends on the same unresolved premise.
     """
     config = load_config()
     reasons: list[str] = []
 
     if not independent_subproblem:
-        reasons.append("not an independent subproblem — do it inline")
+        reasons.append("not an independent subproblem â€” do it inline")
     if not objective_verifier_available:
-        reasons.append("no objective verifier — inline work plus sci_verify is safer")
+        reasons.append("no objective verifier â€” inline work plus sci_verify is safer")
     if expected_minutes < 5:
-        reasons.append(f"expected_minutes={expected_minutes} < 5 — delegation overhead exceeds the task")
+        reasons.append(f"expected_minutes={expected_minutes} < 5 â€” delegation overhead exceeds the task")
 
     depth = os.environ.get("RLM_DEPTH", "0")
     max_depth = os.environ.get("RLM_MAX_DEPTH")
@@ -301,7 +324,7 @@ async def admit(
         result_path = Path(entry["result_path"])
         if not result_path.exists():
             reasons.append(
-                f"duplicate of child {name!r} (still pending) — follow up with "
+                f"duplicate of child {name!r} (still pending) â€” follow up with "
                 f"followup({name!r}, ...) or forget({name!r}) instead of respawning"
             )
             continue
@@ -310,27 +333,27 @@ async def admit(
             status = result.get("status")
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             reasons.append(
-                f"duplicate of child {name!r} whose result file violates the contract — "
+                f"duplicate of child {name!r} whose result file violates the contract â€” "
                 f"collect({name!r}) surfaces the error; followup({name!r}, ...) to have it rewritten"
             )
             continue
         if status != "error":
             reasons.append(
-                f"duplicate of child {name!r} (status={status!r}) — "
+                f"duplicate of child {name!r} (status={status!r}) â€” "
                 f"collect({name!r}) or followup({name!r}, ...) instead of respawning"
             )
 
     active = [n for n, e in registry.items() if _is_active(e)]
     max_active = int(config.get("max_active_children", 6))
     if len(active) >= max_active:
-        reasons.append(f"{len(active)} children already active (cap {max_active}) — collect results, "
+        reasons.append(f"{len(active)} children already active (cap {max_active}) â€” collect results, "
                        f"or reconcile()/forget() dead ones")
 
     budget = await budget_status()
     remaining = budget.get("remaining_tokens")
     floor = int(config.get("min_goal_tokens_to_spawn", 20000))
     if budget.get("budget_authority_available") is not True:
-        reasons.append("goal budget authority unavailable — delegation fails closed")
+        reasons.append("goal budget authority unavailable â€” delegation fails closed")
     elif isinstance(remaining, (int, float)) and remaining < floor:
         reasons.append(f"goal budget remaining {remaining} < spawn floor {floor}")
 
@@ -343,7 +366,7 @@ async def admit(
 
 
 def roster() -> dict[str, dict[str, Any]]:
-    """Load harness/roster.yaml → {role: spec}. Empty dict when absent."""
+    """Load harness/roster.yaml â†’ {role: spec}. Empty dict when absent."""
     path = repo_root() / "harness" / "roster.yaml"
     if not path.is_file():
         return {}
@@ -438,7 +461,7 @@ async def spawn(
         header_lines.append(str(spec["instructions"]).strip())
     if state:
         header_lines.append(
-            f"Parent task: {state.task_id} — {state.objective} "
+            f"Parent task: {state.task_id} â€” {state.objective} "
             f"(base commit {state.base_commit}, branch {state.working_branch})"
         )
     if commit:
@@ -462,7 +485,7 @@ async def spawn(
         rlm = require_kernel_module("rlm")
         handle = await maybe_await(rlm.run(prompt, **kwargs))
     except BaseException:
-        # release the reservation; reload first — others may have written
+        # release the reservation; reload first â€” others may have written
         registry = _load_registry()
         registry.pop(child_name, None)
         _save_registry(registry)
@@ -512,7 +535,7 @@ def collect(name: str) -> dict[str, Any]:
     path = Path(entry["result_path"])
     if not path.exists():
         raise FileNotFoundError(
-            f"child {name!r} has not written {path} yet — check rlm.list_subagents() status, "
+            f"child {name!r} has not written {path} yet â€” check rlm.list_subagents() status, "
             f"or follow up with followup({name!r}, 'status?')"
         )
     try:
@@ -538,7 +561,7 @@ def collect(name: str) -> dict[str, Any]:
 
 def pending() -> dict[str, Any]:
     """Children spawned through this skill whose result files do not exist yet
-    (excluding ones marked dead — run `await reconcile()` to refresh)."""
+    (excluding ones marked dead â€” run `await reconcile()` to refresh)."""
     registry = _load_registry()
     return {
         name: {"role": entry.get("role"), "spawned_at": entry.get("spawned_at")}
@@ -573,7 +596,7 @@ def harness_snapshot(label: str = "manual") -> dict[str, Any]:
     """Copy the current local+global harness state into the snapshot archive.
 
     Take one BEFORE every refinement; harness_diff() then shows exactly what
-    changed. Note the refinement id from the diff and record it — rolling back
+    changed. Note the refinement id from the diff and record it â€” rolling back
     is a HUMAN action (`/refine rollback <id>` on a user surface; the kernel
     refine skill has no rollback parameter), so surface the id to the operator.
     """
@@ -600,7 +623,7 @@ def harness_diff() -> str:
     snap_root = harness_dir() / "harness-snapshots"
     snapshots = sorted(snap_root.iterdir()) if snap_root.is_dir() else []
     if not snapshots:
-        return "no snapshots yet — call harness_snapshot() before refining"
+        return "no snapshots yet â€” call harness_snapshot() before refining"
     latest = snapshots[-1]
     chunks: list[str] = []
     for scope, path in _harness_state_paths().items():
@@ -664,8 +687,55 @@ def _persist_completion_status(state: TaskState, status: str, reasons: list[str]
     save_task_state(state)
 
 
-def completion_check(*, timeout_seconds: int = 180) -> dict[str, Any]:
-    """Run the fail-closed completion scorecard immediately before goal.complete()."""
+def _completion_path_is_safe(root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+        current = root
+        for part in relative.parts[:-1]:
+            current = current / part
+            if not os.path.lexists(current):
+                continue
+            info = current.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(info.st_mode) or current.is_symlink()
+                or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+            ):
+                return False
+        if os.path.lexists(path):
+            info = path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(info.st_mode) or path.is_symlink()
+                or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+            ):
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _stable_completion_json(path: Path) -> dict[str, Any]:
+    before = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(before.st_mode) or path.is_symlink()
+        or bool(getattr(before, "st_file_attributes", 0) & 0x400)
+        or before.st_size > 8 * 1024 * 1024
+    ):
+        raise ValueError("missing, linked, or oversized output")
+    with path.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        raw = handle.read(8 * 1024 * 1024 + 1)
+    after = path.stat(follow_symlinks=False)
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_mode, item.st_size, item.st_mtime_ns)
+    if len(raw) > 8 * 1024 * 1024 or identity(before) != identity(opened) or identity(opened) != identity(after):
+        raise ValueError("completion output changed during bounded read")
+    value = json.loads(raw.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("output is not an object")
+    return value
+
+
+def completion_check(*, timeout_seconds: int = 240) -> dict[str, Any]:
+    """Run the fail-closed final profile immediately before goal.complete()."""
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 600:
         raise ValueError("timeout_seconds must be an integer from 1 through 600")
     state = load_task_state()
@@ -677,25 +747,31 @@ def completion_check(*, timeout_seconds: int = 180) -> dict[str, Any]:
         return {"status": "fail", "reasons": reasons, "scorecard": None}
     root = repo_root()
     script = root / "harness" / "verify.py"
-    output = harness_dir() / "completion-scorecard.json"
+    # The protected final profile owns this repository-relative output path;
+    # configurable telemetry directories cannot redirect the completion proof.
+    output = root / "artifacts" / "harness" / "completion-scorecard.json"
     reasons: list[str] = []
+    initial_head = current_commit()
+    if not isinstance(initial_head, str) or not initial_head:
+        reasons.append("repository HEAD is unavailable before completion scoring")
     if script.is_symlink() or not script.is_file():
         reasons.append("harness/verify.py is missing or link-backed")
-    if output.is_symlink():
-        reasons.append("completion scorecard output is link-backed")
+    if not _completion_path_is_safe(root, output):
+        reasons.append("completion scorecard path is missing, non-regular, or link-backed")
     if reasons:
         _persist_completion_status(state, "fail", reasons, output)
         return {"status": "fail", "reasons": reasons, "scorecard": None}
     try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if not _completion_path_is_safe(root, output):
+            raise OSError("completion output parent became unsafe during creation")
         output.unlink(missing_ok=True)
+        parent_before = output.parent.stat(follow_symlinks=False)
     except OSError as exc:
         reasons.append(f"stale completion scorecard cannot be removed: {type(exc).__name__}")
         _persist_completion_status(state, "fail", reasons, output)
         return {"status": "fail", "reasons": reasons, "scorecard": None}
-    command = [
-        sys.executable, "-S", str(script),
-        "--profile", "final", "--json",
-    ]
+    command = [sys.executable, "-S", str(script), "--profile", "final", "--json"]
     try:
         process = subprocess.run(
             command, cwd=root, capture_output=True, text=True,
@@ -715,23 +791,30 @@ def completion_check(*, timeout_seconds: int = 180) -> dict[str, Any]:
             except json.JSONDecodeError:
                 pass
             break
+    expected_gate_keys = {
+        "status", "profile", "passed", "failed", "skipped", "log_dir",
+        "applicable_checks", "min_applicable_checks", "vacuous", "vacuous_allowed",
+    }
     if (
-        gate_verdict is None
+        gate_verdict is None or set(gate_verdict) != expected_gate_keys
         or gate_verdict.get("status") != "pass"
         or gate_verdict.get("profile") != "final"
         or gate_verdict.get("vacuous") is not False
-        or not isinstance(gate_verdict.get("applicable_checks"), int)
-        or gate_verdict.get("applicable_checks", 0) < 1
+        or gate_verdict.get("vacuous_allowed") is not False
+        or gate_verdict.get("applicable_checks") != 1
+        or gate_verdict.get("min_applicable_checks") != 1
+        or gate_verdict.get("passed") != ["verification-coverage-completion"]
+        or gate_verdict.get("failed") != [] or gate_verdict.get("skipped") != []
+        or not isinstance(gate_verdict.get("log_dir"), str) or not gate_verdict.get("log_dir")
     ):
-        reasons.append("final profile did not emit a substantive passing GATE_RESULT")
+        reasons.append("final profile did not emit the closed substantive passing GATE_RESULT schema")
     payload: dict[str, Any] | None = None
     try:
-        if not output.is_file() or output.stat().st_size > 8 * 1024 * 1024:
-            raise ValueError("missing or oversized output")
-        candidate = json.loads(output.read_text(encoding="utf-8"))
-        if not isinstance(candidate, dict):
-            raise ValueError("output is not an object")
-        payload = candidate
+        parent_after = output.parent.stat(follow_symlinks=False)
+        parent_identity = lambda item: (item.st_dev, item.st_ino, item.st_mode)
+        if parent_identity(parent_before) != parent_identity(parent_after) or not _completion_path_is_safe(root, output):
+            raise ValueError("completion output path changed during gate execution")
+        payload = _stable_completion_json(output)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         reasons.append(f"completion scorecard output is invalid: {type(exc).__name__}")
     if payload is not None:
@@ -748,21 +831,20 @@ def completion_check(*, timeout_seconds: int = 180) -> dict[str, Any]:
             reasons.append("critical scorecard alerts remain: " + ", ".join(str(item) for item in critical))
         scorecard_head = payload.get("code_churn", {}).get("head") if isinstance(payload.get("code_churn"), dict) else None
         live_head = current_commit()
-        if not isinstance(scorecard_head, str) or not scorecard_head or not isinstance(live_head, str) or not live_head or scorecard_head != live_head:
+        if (
+            not isinstance(initial_head, str) or not isinstance(scorecard_head, str)
+            or not isinstance(live_head, str) or not live_head
+            or initial_head != scorecard_head or scorecard_head != live_head
+        ):
             reasons.append("repository HEAD changed during or was absent from completion scoring")
     if process.returncode != 0:
         reasons.append(f"completion scorecard exited {process.returncode}")
     status = "fail" if reasons else "pass"
     _persist_completion_status(state, status, reasons, output)
     return {
-        "status": status,
-        "reasons": reasons,
-        "command": command,
-        "returncode": process.returncode,
-        "stderr_tail": (process.stderr or "")[-2000:],
-        "scorecard_path": str(output),
-        "gate_verdict": gate_verdict,
-        "scorecard": payload,
+        "status": status, "reasons": reasons, "command": command,
+        "returncode": process.returncode, "stderr_tail": (process.stderr or "")[-2000:],
+        "scorecard_path": str(output), "gate_verdict": gate_verdict, "scorecard": payload,
     }
 
 

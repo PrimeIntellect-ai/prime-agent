@@ -1127,11 +1127,14 @@ def test_upgrade_blocks_custom_config_without_advancing_canonical_version(tmp_re
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     before_config = config_path.read_bytes()
     state_path = tmp_repo / INSTALL_STATE
-    before_state = state_path.read_bytes()
+    before_state = json.loads(state_path.read_text(encoding="utf-8"))
     proc = run_install(tmp_repo, "--upgrade")
     assert proc.returncode == 1
     assert config_path.read_bytes() == before_config
-    assert state_path.read_bytes() == before_state
+    after_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert after_state["installed_version"] == before_state["installed_version"]
+    assert after_state["template_sha256"] == before_state["template_sha256"]
+    assert after_state["pending_sidecar_sha256"]["harness/config.json"]
     assert json.loads(before_config)["prime_harness_version"] == old_version
     new_config = json.loads((tmp_repo / "harness/config.json.new").read_text(encoding="utf-8"))
     assert new_config["prime_harness_version"] == (HARNESS_ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -1277,3 +1280,113 @@ def test_upgrade_refreshes_gitignore_and_installed_example_provenance(tmp_repo):
     payload = json.loads(examples.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 1
     assert payload["files"]
+
+
+
+def test_atomic_capture_does_not_clobber_edit_created_after_comparison(tmp_repo, monkeypatch):
+    _prepare_old_version_install(tmp_repo)
+    installer = _load_installer_module("prime_harness_installer_atomic_capture_race")
+    inventory = installer._template_inventory(installer.read_harness_version())
+    managed = tmp_repo / "harness/backup.py"
+    concurrent = b"# edit after comparison and capture\n"
+    original_link = installer.os.link
+    injected = {"done": False}
+    def race_link(source, destination, *args, **kwargs):
+        if Path(destination) == managed and not injected["done"]:
+            injected["done"] = True
+            managed.write_bytes(concurrent)
+        return original_link(source, destination, *args, **kwargs)
+    monkeypatch.setattr(installer.os, "link", race_link)
+    code, _ = installer._run_upgrade(
+        tmp_repo, version=installer.read_harness_version(), inventory=inventory, dry_run=False
+    )
+    assert code == 2
+    assert managed.read_bytes() == concurrent
+    held = list(managed.parent.glob(".backup.py.*.hold"))
+    assert len(held) == 1
+    assert held[0].read_bytes() == b"# old pristine managed file\n"
+
+
+@pytest.mark.parametrize("modified", [False, True])
+def test_upgrade_removes_only_pristine_obsolete_template_files(tmp_repo, modified):
+    _prepare_old_version_install(tmp_repo)
+    installer = _load_installer_module(f"prime_harness_installer_obsolete_{modified}")
+    inventory = installer._template_inventory("0.2.0")
+    inventory.pop("harness/backup.py")
+    managed = tmp_repo / "harness/backup.py"
+    if modified:
+        managed.write_bytes(managed.read_bytes() + b"# local obsolete customization\n")
+    code, counts = installer._run_upgrade(tmp_repo, version="0.2.0", inventory=inventory, dry_run=False)
+    assert code == 0
+    if modified:
+        assert managed.exists()
+        assert counts["obsolete_kept"] == 1
+    else:
+        assert not managed.exists()
+        assert counts["obsolete_removed"] == 1
+
+
+def test_upgrade_rolls_back_metadata_if_install_state_commit_fails(tmp_repo, monkeypatch):
+    _prepare_old_version_install(tmp_repo)
+    installer = _load_installer_module("prime_harness_installer_metadata_transaction")
+    inventory = installer._template_inventory(installer.read_harness_version())
+    gitignore = tmp_repo / ".gitignore"
+    gitignore.write_text(gitignore.read_text(encoding="utf-8").replace(
+        ".prime/agent/harness-tests/template\n", ""
+    ), encoding="utf-8")
+    examples = tmp_repo / "artifacts/harness/installed-examples.json"
+    examples.unlink()
+    before = {
+        path.relative_to(tmp_repo).as_posix(): path.read_bytes()
+        for path in tmp_repo.rglob("*") if path.is_file()
+    }
+    original = installer.atomic_bytes
+    def fail_state(path, value, mode=0o644, *args, **kwargs):
+        if Path(path) == tmp_repo / INSTALL_STATE:
+            raise OSError("injected state commit failure")
+        return original(path, value, mode, *args, **kwargs)
+    monkeypatch.setattr(installer, "atomic_bytes", fail_state)
+    code, _ = installer._run_upgrade(
+        tmp_repo, version=installer.read_harness_version(), inventory=inventory, dry_run=False
+    )
+    assert code == 2
+    after = {
+        path.relative_to(tmp_repo).as_posix(): path.read_bytes()
+        for path in tmp_repo.rglob("*") if path.is_file()
+    }
+    assert after == before
+
+
+def test_deleted_config_blocks_version_advance_and_emits_owned_sidecar(tmp_repo):
+    old_version, _ = _prepare_old_version_install(tmp_repo)
+    config = tmp_repo / "harness/config.json"
+    config.unlink()
+    proc = run_install(tmp_repo, "--upgrade")
+    assert proc.returncode == 1
+    assert not config.exists()
+    assert (tmp_repo / "harness/config.json.new").exists()
+    state = json.loads((tmp_repo / INSTALL_STATE).read_text(encoding="utf-8"))
+    assert state["installed_version"] == old_version
+    assert state["pending_sidecar_sha256"]["harness/config.json"]
+
+
+def test_config_blocked_upgrade_refreshes_cryptographically_owned_sidecar_across_versions(tmp_repo):
+    _prepare_old_version_install(tmp_repo)
+    config = tmp_repo / "harness/config.json"
+    value = json.loads(config.read_text(encoding="utf-8"))
+    value["verification_coverage"] = {"min_evidence_per_100_lines": 2.0}
+    config.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    first = run_install(tmp_repo, "--upgrade")
+    assert first.returncode == 1
+    sidecar = tmp_repo / "harness/config.json.new"
+    first_digest = _sha256_bytes(sidecar.read_bytes())
+
+    installer = _load_installer_module("prime_harness_installer_pending_sidecar")
+    inventory = installer._template_inventory("0.2.0")
+    code, _ = installer._run_upgrade(tmp_repo, version="0.2.0", inventory=inventory, dry_run=False)
+    assert code == 1
+    assert _sha256_bytes(sidecar.read_bytes()) != first_digest
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["prime_harness_version"] == "0.2.0"
+    state = json.loads((tmp_repo / INSTALL_STATE).read_text(encoding="utf-8"))
+    assert state["installed_version"] == "0.0.0"
+    assert state["pending_sidecar_sha256"]["harness/config.json"] == _sha256_bytes(sidecar.read_bytes())

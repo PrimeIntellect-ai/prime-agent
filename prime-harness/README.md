@@ -47,10 +47,13 @@ hashes from the installed version, the new template, and each user file.
 Unmodified managed files advance atomically. Modified files remain byte-for-byte
 untouched and receive the current template as a `.new` sidecar; deleted managed
 files are treated as customizations, not silently restored. Unedited stale
-sidecars advance safely, while edited sidecars fail closed. Upgrade writes are
-content- and parent-identity revalidated and rolled back on later failure. A
-customized active `harness/config.json` emits a sidecar and blocks canonical
-version advancement until reconciled. Malformed/missing state, links, unstable
+sidecars advance safely via installer-owned pending hashes, while edited
+sidecars fail closed. Pristine files removed by a newer template are removed;
+modified obsolete files remain. Upgrade writes, metadata, and install-state
+commit form one rollback-capable transaction, with compared files atomically
+captured before replacement. A customized or deleted active
+`harness/config.json` emits a sidecar and blocks canonical version advancement
+until reconciled. Malformed/missing state, links, unstable
 reads, and ambiguous paths fail before advancement. `--dry-run` exercises the same preflight without writes;
 `--upgrade` cannot be combined with `--force` or `--tailor`.
 
@@ -75,7 +78,7 @@ won't see them).
 
 ### Standalone development and self-CI
 
-Prime Harness is versioned as a standalone repository. Its action-pinned and Python hash-locked
+Prime Harness is versioned as a standalone repository. Its action-pinned and universally resolved, transitive Python hash-locked
 `.github/workflows/ci.yml` runs the complete `tests/` suite across
 `ubuntu-latest` and `windows-latest` under both Bash (Git Bash on Windows) and
 PowerShell. The repository `.gitignore` excludes bytecode, pytest/Hypothesis
@@ -274,9 +277,11 @@ a named verifier. Documentation and generated paths may be excluded through
 churn floor are configured in the same closed section. There is deliberately no
 boolean `--allow` bypass. Run `harness_orchestrator.completion_check()` immediately
 before `goal.complete()`; it invokes the substantive `final` gate profile (which
-runs `scorecard.py --completion --fail-on critical`), rejects missing/reset churn
-bases, unavailable Git/schema state and HEAD races, and persists the result in
-task state.
+runs `scorecard.py --completion --fail-on critical`), rejects missing,
+divergent, empty, or rewound churn ranges, unavailable Git/schema state,
+redirected/link-swapped output and HEAD races, and persists the result in task
+state. Task-state saves maintain a monotonic `highest_observed_head` high-water
+mark so a hard reset cannot silently discard already-observed work.
 A policy section has this shape (unknown keys, unsafe globs, non-finite values,
 and path traversal fail closed):
 
@@ -292,7 +297,9 @@ Configuration may only make the default policy stricter: the evidence threshold
 cannot drop below 1.0, the churn floor cannot exceed 100, and exemptions can
 only remove entries from the shipped docs/generated set. Other inapplicability
 requires a task-scoped signed ledger disposition tied to a live task-range
-commit that touches the named directory.
+commit that touches the named directory. Ordinary verification rows are held
+to the same commit/directory intersection rule. Each binary code file is
+charged the full conservative churn floor in the coverage denominator.
 
 Gate metrics explicitly say *archived* because early gate
 errors may exit before creating an archive. Raw, substantive (at least one

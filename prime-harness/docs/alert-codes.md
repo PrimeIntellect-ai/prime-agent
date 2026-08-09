@@ -29,6 +29,8 @@ installation, development-environment, and measured model-selector content.
 | `VERIFICATION_COVERAGE_UNAVAILABLE` | critical in completion mode | The evidence schema cannot prove per-directory coverage; repair the ledger/schema rather than bypassing completion. |
 | `VERIFICATION_CHURN_BASE_UNAVAILABLE` | critical in completion mode | Task base or repository HEAD cannot be resolved; restore the pinned Git interval. |
 | `VERIFICATION_CHURN_INTERVAL_EMPTY` | critical in completion mode | Task base equals HEAD, which could hide a reset completion interval; create/restore a task pinned before the work. |
+| `VERIFICATION_CHURN_RANGE_INVALID` | critical in completion mode | The task base does not resolve as an ancestor of HEAD; restore the pinned branch/range. |
+| `VERIFICATION_HEAD_REGRESSION` | critical in completion mode | The task's highest observed HEAD is missing or no longer an ancestor of current HEAD; restore the observed work rather than completing from a reset. |
 | `STALE_CHILD` | warning | A running child has no recent durable event; inspect before declaring it dead. |
 | `ACTIVE_CHILD_MISMATCH` | warning | Task-state active names and latest registry running names disagree. |
 | `UNATTRIBUTED_CHILD_USAGE` | warning | Attribution is absent or ambiguous; retain it separately rather than guessing. |
