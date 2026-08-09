@@ -424,4 +424,32 @@ describe("ENG-4649 subagent model selection", () => {
 			harness.cleanup();
 		}
 	});
+	it("sends only the release version to model discovery", async () => {
+		// Discovery answers HTTP 400 when client_version carries semver build
+		// metadata, and the failure path drops every Codex model. A local build
+		// calling itself 0.7.1+fork.1 would therefore lose all Codex models.
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({
+			provider: codexProvider,
+			models: [{ id: "parent-model" }],
+		});
+		const fetchModels = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ models: [{ slug: "parent-model" }] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		vi.stubGlobal("fetch", fetchModels);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+			await harness.session.findRlmModels("", 20);
+			const [requestedUrl] = fetchModels.mock.calls[0] as [string];
+			const clientVersion = new URL(requestedUrl).searchParams.get("client_version");
+			expect(clientVersion).not.toContain("+");
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
 });

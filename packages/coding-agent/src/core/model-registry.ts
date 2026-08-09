@@ -383,7 +383,12 @@ function openAICodexModelsUrl(baseUrl: string): string {
 		path = `${normalized}/codex/models`;
 	}
 	const url = new URL(path);
-	url.searchParams.set("client_version", VERSION);
+	// Send the release version only. Discovery rejects semver build metadata with
+	// HTTP 400, so a local build calling itself `0.7.1+fork.1` fails discovery
+	// outright — and the failure path below drops every Codex model, which is the
+	// exact breakage this file already works around. Verified 2026-08-09:
+	// client_version=0.7.1 -> 200, client_version=0.7.1+luna.1 -> 400.
+	url.searchParams.set("client_version", VERSION.split("+")[0] ?? VERSION);
 	return url.toString();
 }
 
