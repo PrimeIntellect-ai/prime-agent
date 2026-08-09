@@ -972,6 +972,12 @@ interface PersistedRlmTokenBudgetState {
 	config: RlmTokenBudgetConfig | null;
 }
 
+/** Spend carried across resume so a reopened session cannot recover a fresh allowance. */
+interface PersistedRlmTokenBudgetSpend {
+	tokensUsed: number;
+	subtreeGranted: number;
+}
+
 type AutonomousRuntimeSnapshot = Pick<
 	AutonomousRuntimeState,
 	"continuationsUsed" | "gateAttempts" | "lastGateFailure" | "lastGateFailureSnapshot"
@@ -1013,6 +1019,7 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 const RLM_TOKEN_BUDGET_STATE_CUSTOM_TYPE = "rlm_token_budget_state";
+const RLM_TOKEN_BUDGET_SPEND_CUSTOM_TYPE = "rlm_token_budget_spend";
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1047,6 +1054,12 @@ function isPersistedRlmMaxDepthState(value: unknown): value is PersistedRlmMaxDe
 	return (
 		typeof value === "object" && value !== null && isNonNegativeInteger((value as PersistedRlmMaxDepthState).maxDepth)
 	);
+}
+
+function isPersistedRlmTokenBudgetSpend(value: unknown): value is PersistedRlmTokenBudgetSpend {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as PersistedRlmTokenBudgetSpend;
+	return isNonNegativeInteger(candidate.tokensUsed) && isNonNegativeInteger(candidate.subtreeGranted);
 }
 
 function isPersistedRlmTokenBudgetState(value: unknown): value is PersistedRlmTokenBudgetState {
@@ -1392,6 +1405,11 @@ export class AgentSession {
 		const resolvedRlmTokenBudget = this._resolveRlmTokenBudget();
 		this._rlmTokenBudget = resolvedRlmTokenBudget.config;
 		this._rlmTokenBudgetSource = resolvedRlmTokenBudget.source;
+		const persistedSpend = this._loadPersistedRlmTokenBudgetSpend();
+		if (persistedSpend) {
+			this._rlmTokensUsed = persistedSpend.tokensUsed;
+			this._rlmSubtreeGranted = persistedSpend.subtreeGranted;
+		}
 		this._applyRlmTokenBudgetAllowance();
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 		this._autoRefineReviewer = config.autoRefineReviewer;
@@ -1685,35 +1703,61 @@ export class AgentSession {
 				`RLM token budget exhausted (used ${this._rlmTokensUsed} of ${this._rlmTokenAllowance} tokens); cannot spawn a subagent`,
 			);
 		}
+		const childDepth = this._rlmDepth + 1;
+		// The floor is a promise about what a child may actually spend, so it is compared against the
+		// allowance a grant yields after that child reserves its own descendant pool, not the grant.
+		const spendable = (grant: number): number => ownAllowance(config, childDepth, grant);
+		// Two distinct floors: the model's request bounds the GRANT it will accept, while the
+		// configured floor is a policy about what the funded child may actually spend.
+		const requestFloor = requested?.minTokens ?? 0;
+		const spendFloor = config.minTokens ?? 0;
+
 		if (config.schedule !== "split") {
-			const fundable = childAllowance(config, this._rlmDepth + 1, null);
+			const fundable = childAllowance(config, childDepth, null);
 			if (requested === undefined) return fundable;
-			if (requested.minTokens > fundable) {
+			if (requestFloor > fundable) {
 				throw new Error(
-					`rlm.run token_budget floor ${requested.minTokens} exceeds the ${fundable} tokens the "${config.schedule}" schedule funds at depth ${this._rlmDepth + 1}`,
+					`rlm.run token_budget floor ${requested.minTokens} exceeds the ${fundable} tokens the "${config.schedule}" schedule funds at depth ${childDepth}`,
 				);
 			}
-			// Grant as much of the requested range as the schedule funds.
 			return Math.min(requested.maxTokens, fundable);
 		}
+
 		const remaining = this._rlmSubtreePool ?? 0;
 		const share = this._rlmChildAllowanceShare ?? 0;
-		// A range draws from the same reservation, so the subtree stays bounded either way.
-		const floor = requested?.minTokens ?? config.minTokens ?? 0;
-		const desired = requested === undefined ? Math.max(share, floor) : requested.maxTokens;
-		const granted = Math.min(desired, remaining);
-		// Without an explicit request a child must receive its whole share. Flooring the share
-		// leaves a remainder smaller than one child, and funding a subagent from that sliver
-		// would spawn one that cannot finish a single turn.
-		const minimum = requested === undefined ? desired : Math.max(floor, 1);
-		if (granted <= 0 || granted < minimum) {
-			throw new Error(
-				`RLM token budget subtree pool exhausted (schedule="split", fanout=${config.fanout}, ${remaining} tokens left); cannot fund a subagent with at least ${minimum} tokens`,
-			);
+		// An explicit request may deliberately take more than an equal share: allocating unevenly is
+		// the point of `rlm.run(token_budget=...)`. The pool, not the share, is the bound that holds.
+		const ceiling = config.maxTokens ?? Number.MAX_SAFE_INTEGER;
+		const desired = requested === undefined ? share : requested.maxTokens;
+		const granted = Math.min(desired, remaining, ceiling);
+		// Without an explicit request a child must receive its whole share: flooring the share leaves
+		// a remainder smaller than one child, and a subagent funded from that sliver cannot finish a turn.
+		const minimum = requested === undefined ? Math.min(desired, ceiling) : Math.max(requestFloor, 1);
+		if (granted <= 0 || granted < minimum || spendable(granted) < spendFloor) {
+			throw new Error(this._describeUnfundableChild(config, remaining, granted, minimum, spendFloor));
 		}
 		this._rlmSubtreePool = remaining - granted;
 		this._rlmSubtreeGranted += granted;
+		this._persistRlmTokenBudgetSpend();
 		return granted;
+	}
+
+	/** Explain why a `split` reservation cannot fund a child, distinguishing the three causes. */
+	private _describeUnfundableChild(
+		config: RlmTokenBudgetConfig,
+		poolRemaining: number,
+		granted: number,
+		minimum: number,
+		floor: number,
+	): string {
+		const where = `depth ${this._rlmDepth + 1}`;
+		if ((this._rlmChildAllowanceShare ?? 0) <= 0) {
+			return `RLM token budget cannot fund a subagent at ${where}: fanout ${config.fanout} divides the ${poolRemaining}-token pool into nothing. Lower --fanout or raise the budget.`;
+		}
+		if (granted > 0 && floor > 0 && ownAllowance(config, this._rlmDepth + 1, granted) < floor) {
+			return `RLM token budget cannot fund a subagent at ${where}: a ${granted}-token grant leaves it ${ownAllowance(config, this._rlmDepth + 1, granted)} spendable tokens, below the ${floor}-token floor.`;
+		}
+		return `RLM token budget subtree pool exhausted at ${where}: ${poolRemaining} tokens left, ${minimum} needed. Raise the budget with /rlm-token-budget or disable it with /rlm-token-budget off.`;
 	}
 
 	private _emitRlmTokenBudgetExhausted(): void {
@@ -1750,6 +1794,12 @@ export class AgentSession {
 		}
 		if (this._configuredRlmTokenBudget !== undefined) {
 			return { config: this._configuredRlmTokenBudget, source: "inherited" };
+		}
+		// A subagent is funded entirely by its parent. Falling through to the global default here
+		// would re-seed every child with a full root-sized budget, so a parent that opted out would
+		// multiply spend by fanout^depth instead of disabling it.
+		if (this._rlmDepth > 0) {
+			return { config: undefined, source: "inherited" };
 		}
 		const global = this.settingsManager.getRlmTokenBudget();
 		if (global !== undefined) {
@@ -1795,10 +1845,9 @@ export class AgentSession {
 		// /rlm-token-budget call and on branch navigation, and refilling it there would let a
 		// parent fund unlimited children by re-issuing the command.
 		this._rlmSubtreePool = pool === undefined ? undefined : Math.max(0, pool - this._rlmSubtreeGranted);
-		this._rlmChildAllowanceShare =
-			this._rlmSubtreePool === undefined
-				? undefined
-				: childAllowance(config, this._rlmDepth + 1, this._rlmSubtreePool);
+		// The share is derived from the pool before any grants, so siblings receive equal
+		// allowances no matter when they are spawned or how often the budget is re-applied.
+		this._rlmChildAllowanceShare = pool === undefined ? undefined : childAllowance(config, this._rlmDepth + 1, pool);
 	}
 
 	/** True once this session has generated at least its allowance. */
@@ -1817,6 +1866,7 @@ export class AgentSession {
 		const wasExhausted = this._rlmTokenBudgetExhausted();
 		this._rlmTokenBudgetAccountedMessages.add(message);
 		this._rlmTokensUsed += rlmTokenDeltaForUsage(message.usage);
+		this._persistRlmTokenBudgetSpend();
 		return !wasExhausted && this._rlmTokenBudgetExhausted();
 	}
 
@@ -1845,6 +1895,11 @@ export class AgentSession {
 		this._rlmTokenBudget = validated;
 		this._rlmTokenBudgetSource = "chat";
 		this._applyRlmTokenBudgetAllowance();
+		// The prompt states the allowance, so it must be refreshed here. Use the extension-aware
+		// path so extension prompt modifications survive the rebuild.
+		const oldBase = this._baseSystemPrompt;
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._refreshExtensionSystemPrompt(this.agent.state.systemPrompt, oldBase);
 
 		let globalError: string | undefined;
 		if (options.global === true) {
@@ -1929,7 +1984,38 @@ export class AgentSession {
 		const resolved = this._resolveRlmTokenBudget();
 		this._rlmTokenBudget = resolved.config;
 		this._rlmTokenBudgetSource = resolved.source;
+		const spend = this._loadPersistedRlmTokenBudgetSpend();
+		this._rlmTokensUsed = spend?.tokensUsed ?? 0;
+		this._rlmSubtreeGranted = spend?.subtreeGranted ?? 0;
 		this._applyRlmTokenBudgetAllowance();
+	}
+
+	/**
+	 * Persist tokens already spent and granted. Without this a resumed session, or a subagent
+	 * rehydrated after a daemon restart, recovers a full allowance and a full pool while its
+	 * earlier spend and its live children's grants are forgotten.
+	 */
+	private _persistRlmTokenBudgetSpend(): void {
+		if (this._rlmTokenBudget === undefined) return;
+		this.sessionManager.appendCustomEntry(RLM_TOKEN_BUDGET_SPEND_CUSTOM_TYPE, {
+			tokensUsed: this._rlmTokensUsed,
+			subtreeGranted: this._rlmSubtreeGranted,
+		});
+	}
+
+	private _loadPersistedRlmTokenBudgetSpend(): PersistedRlmTokenBudgetSpend | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (
+				entry.type === "custom" &&
+				entry.customType === RLM_TOKEN_BUDGET_SPEND_CUSTOM_TYPE &&
+				isPersistedRlmTokenBudgetSpend(entry.data)
+			) {
+				return entry.data;
+			}
+		}
+		return undefined;
 	}
 
 	private _persistGoalState(goal: GoalState): void {
@@ -2439,6 +2525,13 @@ export class AgentSession {
 	}
 
 	private _shouldStopBeforeTurn(): boolean {
+		// A spent allowance must also block the NEXT prompt. Without this the cap is really a cap
+		// plus one fully charged turn for every later user message, and the run dies mid-thought
+		// each time. Re-signalling keeps the notice attached to the prompt that was refused.
+		if (this._rlmTokenBudgetExhausted()) {
+			this._emitRlmTokenBudgetExhausted();
+			return true;
+		}
 		return this._steeringStopPending;
 	}
 
@@ -4595,6 +4688,13 @@ export class AgentSession {
 			toolSnippets,
 			promptGuidelines,
 			allowRecursion: this._rlmDepth < this._rlmMaxDepth,
+			rlmTokenBudget:
+				this._rlmTokenAllowance === undefined
+					? undefined
+					: {
+							allowanceTokens: this._rlmTokenAllowance,
+							subtreePoolTokens: this._rlmSubtreePool ?? null,
+						},
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
@@ -4883,6 +4983,13 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		// The agent loop always runs at least one turn per prompt (shouldStopBeforeTurn is gated on
+		// !firstTurn), so an exhausted budget has to refuse admission here. Otherwise every later
+		// message would burn another fully charged turn and then die mid-thought.
+		if (this._rlmTokenBudgetExhausted()) {
+			this._emitRlmTokenBudgetExhausted();
+			return;
+		}
 		if (!this.isStreaming) {
 			this._sessionInputPumpSuspended = false;
 			this._assertSessionActionAdmissionAvailable();

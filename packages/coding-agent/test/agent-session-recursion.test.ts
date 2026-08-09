@@ -2123,7 +2123,7 @@ describe("AgentSession rlm recursion", () => {
 
 		// Nothing left, so a floor of 100 can no longer be met.
 		await expect(root.runRlmChild("third", { token_budget: [100, 400] })).rejects.toThrow(
-			/cannot fund a subagent with at least 100 tokens/,
+			/subtree pool exhausted at depth 1: 0 tokens left, 100 needed/,
 		);
 	});
 
@@ -2296,7 +2296,7 @@ describe("AgentSession rlm recursion", () => {
 		expect(captured).toEqual([166_666, 166_666, 166_666]);
 
 		// The 2-token remainder must not fund a fourth subagent.
-		await expect(root.runRlmChild("fourth")).rejects.toThrow(/cannot fund a subagent with at least 166666 tokens/);
+		await expect(root.runRlmChild("fourth")).rejects.toThrow(/166666 needed/);
 	});
 
 	it("does not refill the subtree pool when the budget is re-applied", async () => {
@@ -2338,6 +2338,130 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("typo", { model: "typo/typo" })).rejects.toThrow();
 
 		expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(500);
+	});
+
+	it("does not re-seed a child from the global default when the chat opted out", async () => {
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		settingsManager.setRlmTokenBudget({ totalTokens: 900, schedule: "split", factor: 0.5, fanout: 2 });
+		// A subagent whose parent passed nothing down must not inherit the global budget.
+		const child = createSession({ settingsManager, depth: 1, maxDepth: 3 });
+
+		expect(child.getRlmTokenBudgetStatus()).toMatchObject({
+			config: null,
+			source: "inherited",
+			allowanceTokens: null,
+		});
+	});
+
+	it("carries spend across a resume instead of restoring a full allowance", async () => {
+		const original = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 400, schedule: "flat", factor: 0.5, fanout: 2 },
+			tokenAllowance: 400,
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("spend", usage(60, 60)) }),
+				);
+				return stream;
+			},
+		});
+		await original.prompt("burn some budget");
+		await original.agent.waitForIdle();
+		const spent = original.getRlmTokenBudgetStatus().tokensUsed;
+		expect(spent).toBeGreaterThan(0);
+		const sessionFile = original.sessionFile;
+		if (!sessionFile) throw new Error("missing session file");
+		original.sessionManager.flushNow();
+		original.dispose();
+
+		const resumed = createSession({
+			sessionManager: SessionManager.open(sessionFile, join(tempDir, "sessions")),
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 400, schedule: "flat", factor: 0.5, fanout: 2 },
+			tokenAllowance: 400,
+		});
+
+		expect(resumed.getRlmTokenBudgetStatus().tokensUsed).toBe(spent);
+	});
+
+	it("stops before running another turn once the allowance is spent", async () => {
+		let turns = 0;
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 50, schedule: "flat", factor: 0.5, fanout: 2 },
+			tokenAllowance: 50,
+			streamFn: () => {
+				turns++;
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: assistantMessage(`turn ${turns}`, usage(80, 80)) }),
+				);
+				return stream;
+			},
+		});
+
+		await root.prompt("first");
+		await root.agent.waitForIdle();
+		const turnsAfterFirst = turns;
+		expect(root.getRlmTokenBudgetStatus().exhausted).toBe(true);
+
+		// A later prompt must not burn another fully charged turn.
+		await root.prompt("second");
+		await root.agent.waitForIdle();
+
+		expect(turns).toBe(turnsAfterFirst);
+	});
+
+	it("re-signals exhaustion so a refused prompt is never silent", async () => {
+		const events: Array<{ tokensUsed: number; allowanceTokens: number }> = [];
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 50, schedule: "flat", factor: 0.5, fanout: 2 },
+			tokenAllowance: 50,
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("spend", usage(80, 80)) }),
+				);
+				return stream;
+			},
+		});
+		root.subscribe((event) => {
+			if (event.type === "rlm_token_budget_exhausted") {
+				events.push({ tokensUsed: event.tokensUsed, allowanceTokens: event.allowanceTokens });
+			}
+		});
+
+		await root.prompt("first");
+		await root.agent.waitForIdle();
+		expect(events).toHaveLength(1);
+
+		await root.prompt("second");
+		await root.agent.waitForIdle();
+
+		expect(events.length).toBeGreaterThanOrEqual(2);
+		expect(events.at(-1)?.allowanceTokens).toBe(50);
+	});
+
+	it("tells the model its allowance in the system prompt", () => {
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+		});
+
+		expect(root.systemPrompt).toContain("An RLM token budget is active");
+		expect(root.systemPrompt).toContain("500");
+	});
+
+	it("rejects a floor no child could actually spend, at configuration time", async () => {
+		const root = createSession({ maxDepth: 3 });
+
+		// grant 250 -> the funded child keeps only 125, below a 200 floor.
+		await expect(
+			root.setRlmTokenBudget({ totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2, minTokens: 200 }),
+		).rejects.toThrow(/worth 125 spendable tokens/);
 	});
 
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {

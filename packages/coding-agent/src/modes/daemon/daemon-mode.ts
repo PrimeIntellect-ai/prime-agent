@@ -101,6 +101,7 @@ import {
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
+import { isRlmTokenBudgetConfig, type RlmTokenBudgetConfig } from "../../core/rlm-token-budget.js";
 import {
 	canPassivateSession,
 	type IdleEvictionMinutes,
@@ -387,6 +388,9 @@ interface PersistedRlmSubagentRegistryEntry {
 	parentSessionFile?: string;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
+	/** Budget config and grant, so a rehydrated subagent is not silently unbudgeted. */
+	rlmTokenBudget?: RlmTokenBudgetConfig;
+	rlmTokenAllowance?: number;
 	rlmParentNodeId?: string;
 	prompt?: string;
 	spawnCode?: string;
@@ -925,6 +929,8 @@ export class AgentDaemon {
 			sessionFile: string;
 			rlmDepth: number;
 			rlmMaxDepth: number;
+			rlmTokenBudget?: RlmTokenBudgetConfig;
+			rlmTokenAllowance?: number;
 			rlmParentNodeId?: string;
 			prompt?: string;
 			spawnCode?: string;
@@ -944,6 +950,8 @@ export class AgentDaemon {
 			...(parentSession.sessionFile ? { parentSessionFile: parentSession.sessionFile } : {}),
 			rlmDepth: input.rlmDepth,
 			rlmMaxDepth: input.rlmMaxDepth,
+			...(input.rlmTokenBudget ? { rlmTokenBudget: input.rlmTokenBudget } : {}),
+			...(input.rlmTokenAllowance !== undefined ? { rlmTokenAllowance: input.rlmTokenAllowance } : {}),
 			...(input.rlmParentNodeId ? { rlmParentNodeId: input.rlmParentNodeId } : {}),
 			...(input.prompt ? { prompt: input.prompt } : {}),
 			...(input.spawnCode ? { spawnCode: input.spawnCode } : {}),
@@ -1018,7 +1026,11 @@ export class AgentDaemon {
 					typeof entry.sessionFile !== "string" ||
 					(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
 					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
-					(entry.rlmMaxDepth !== undefined && (!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0))
+					(entry.rlmMaxDepth !== undefined &&
+						(!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0)) ||
+					(entry.rlmTokenBudget !== undefined && !isRlmTokenBudgetConfig(entry.rlmTokenBudget)) ||
+					(entry.rlmTokenAllowance !== undefined &&
+						(!Number.isSafeInteger(entry.rlmTokenAllowance) || entry.rlmTokenAllowance <= 0))
 				) {
 					continue;
 				}
@@ -2225,6 +2237,7 @@ export class AgentDaemon {
 				if (state.runtime.metadata.rehydratedCompleted) return true;
 				const metadata = state.runtime.metadata;
 				const model = session.model;
+				const budget = session.getRlmTokenBudgetStatus();
 				return this.recordRlmSubagentRegistryEntry(parentState, {
 					childId,
 					sessionName: session.sessionName ?? childId,
@@ -2232,6 +2245,8 @@ export class AgentDaemon {
 					sessionFile: state.runtime.session.sessionFile,
 					rlmDepth: session.rlmDepth,
 					rlmMaxDepth: session.rlmMaxDepth,
+					rlmTokenBudget: budget.config ?? undefined,
+					rlmTokenAllowance: budget.allowanceTokens ?? undefined,
 					rlmParentNodeId: metadata.rlmParentNodeId,
 					prompt: metadata.prompt && metadata.prompt.length <= 4096 ? metadata.prompt : undefined,
 					spawnCode: metadata.spawnCode,
@@ -2399,6 +2414,8 @@ export class AgentDaemon {
 						sessionFile: runtime.session.sessionFile,
 						rlmDepth: options.rlmDepth,
 						rlmMaxDepth: options.rlmMaxDepth,
+						rlmTokenBudget: options.rlmTokenBudget,
+						rlmTokenAllowance: options.rlmTokenAllowance,
 						rlmParentNodeId: options.rlmParentNodeId,
 						prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
 						spawnCode: options.spawnCode,
@@ -2759,6 +2776,8 @@ export class AgentDaemon {
 								? resolveSessionRlmDepth(sessionManager.getHeader() ?? {}, entry.sessionFile)
 								: 1),
 						rlmMaxDepth: entry.rlmMaxDepth,
+						rlmTokenBudget: entry.rlmTokenBudget,
+						rlmTokenAllowance: entry.rlmTokenAllowance,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
 					},
 					runtimeMetadata: {

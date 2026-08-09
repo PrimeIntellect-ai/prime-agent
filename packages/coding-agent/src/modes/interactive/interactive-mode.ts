@@ -117,6 +117,7 @@ import { parseCommandArgs } from "../../core/prompt-templates.js";
 import {
 	parseRlmTokenBudgetCommand,
 	type RlmTokenBudgetCommand,
+	type RlmTokenBudgetConfig,
 	type RlmTokenBudgetStatus,
 } from "../../core/rlm-token-budget.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
@@ -817,6 +818,24 @@ export interface InteractiveModeRunResult {
 export function formatAgentDepthLabel(depth: number | undefined, hasChildren: boolean): string | undefined {
 	if (depth === undefined || (depth === 0 && !hasChildren)) return undefined;
 	return `depth ${depth}`;
+}
+
+/** Reports only the bounds the user actually configured, so an unbounded budget never reads as bounded. */
+function formatRlmTokenBudgetBounds(config: RlmTokenBudgetConfig): string[] {
+	return [
+		...(config.minTokens === undefined ? [] : [`floor=${config.minTokens}`]),
+		...(config.maxTokens === undefined ? [] : [`ceiling=${config.maxTokens}`]),
+	];
+}
+
+/** The depth-local half of a budget report: what this session may spend, and what it has spent. */
+function formatRlmTokenBudgetSession(status: RlmTokenBudgetStatus): string {
+	const allowance =
+		status.allowanceTokens === null
+			? "unbounded"
+			: `${status.tokensUsed}/${status.allowanceTokens} used at depth ${status.depth}`;
+	const pool = status.subtreePoolTokens === null ? "" : `; subtree pool ${status.subtreePoolTokens}`;
+	return `this session: ${allowance}${pool}${status.exhausted ? " (exhausted)" : ""}`;
 }
 
 export class InteractiveMode {
@@ -5721,6 +5740,10 @@ export class InteractiveMode {
 				this.handleGoalUpdate(event.goal);
 				break;
 
+			case "rlm_token_budget_exhausted":
+				this.showRlmTokenBudgetExhausted(event);
+				break;
+
 			case "refine_failed":
 				this.showError(`Refinement failed: ${event.error}`);
 				break;
@@ -9132,29 +9155,38 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * The loop ends at a turn boundary once the allowance is spent, which is otherwise
+	 * indistinguishable from the model deciding it is done.
+	 */
+	private showRlmTokenBudgetExhausted(
+		event: Extract<AgentConnectionSessionEvent, { type: "rlm_token_budget_exhausted" }>,
+	): void {
+		const where = event.depth > 0 ? ` at depth ${event.depth}` : "";
+		const notice = [
+			`RLM token budget spent${where}: ${event.tokensUsed} of ${event.allowanceTokens} tokens used.`,
+			"This run stopped at the end of the turn; later turns stop the same way until the budget changes.",
+			"Raise it with /rlm-token-budget <tokens> or turn it off with /rlm-token-budget off.",
+		].join("\n");
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("dim", notice), 1, 0));
+		this.ui.requestRender();
+	}
+
 	private formatRlmTokenBudgetStatus(status: RlmTokenBudgetStatus): string {
 		if (!status.config) {
 			return `RLM token budget: off (${status.source})`;
 		}
-		const { totalTokens, schedule, factor, fanout, minTokens, maxTokens } = status.config;
-		const range =
-			minTokens === undefined && maxTokens === undefined
-				? undefined
-				: `range=${minTokens ?? 0}-${maxTokens ?? totalTokens}`;
+		const { totalTokens, schedule, factor, fanout } = status.config;
 		const parts = [
 			`RLM token budget: ${totalTokens} tokens`,
 			`schedule=${schedule}`,
 			`factor=${factor}`,
 			`fanout=${fanout}`,
-			...(range ? [range] : []),
+			...formatRlmTokenBudgetBounds(status.config),
 			`(${status.source})`,
 		];
-		const allowance =
-			status.allowanceTokens === null
-				? "unbounded"
-				: `${status.tokensUsed}/${status.allowanceTokens} used at depth ${status.depth}`;
-		const pool = status.subtreePoolTokens === null ? "" : `; subtree pool ${status.subtreePoolTokens}`;
-		return `${parts.join(" ")}\n  this session: ${allowance}${pool}${status.exhausted ? " (exhausted)" : ""}`;
+		return `${parts.join(" ")}\n  ${formatRlmTokenBudgetSession(status)}`;
 	}
 
 	private async handleRlmTokenBudgetCommand(args: string): Promise<void> {
@@ -9182,11 +9214,22 @@ export class InteractiveMode {
 		try {
 			const result = await this.agentConnection.setRlmTokenBudget(config, { global: command.global });
 			const summary = config
-				? `RLM token budget set: ${config.totalTokens} tokens, schedule=${config.schedule}, factor=${config.factor}, fanout=${config.fanout}`
+				? [
+						`RLM token budget set: ${config.totalTokens} tokens`,
+						`schedule=${config.schedule}`,
+						`factor=${config.factor}`,
+						`fanout=${config.fanout}`,
+						...formatRlmTokenBudgetBounds(config),
+					].join(", ")
 				: "RLM token budget disabled";
+			const applied = config ? `\n  ${formatRlmTokenBudgetSession(result)}` : "";
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(
-				new Text(theme.fg("dim", `${summary}${result.globalSaved ? " and saved as global default" : ""}`), 1, 0),
+				new Text(
+					theme.fg("dim", `${summary}${result.globalSaved ? " and saved as global default" : ""}${applied}`),
+					1,
+					0,
+				),
 			);
 			this.ui.requestRender();
 			if (result.globalError) {

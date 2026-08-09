@@ -7,6 +7,8 @@ export interface RlmPromptOptions {
 	messagesPath: string;
 	allowRecursion?: boolean;
 	depth?: number;
+	/** Tokens this session may still generate before its RLM budget stops the run. */
+	tokenBudget?: { allowanceTokens: number; subtreePoolTokens: number | null };
 	parentAgent?: string;
 	activeTools?: string[];
 }
@@ -120,6 +122,21 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	if (hasAgentObserve) {
 		parts.push(
 			"Agent observation is restricted to your parent, siblings, and direct children; roots are siblings, and deeper inspection relays through the intermediate child.",
+		);
+	}
+
+	const tokenBudget = options.tokenBudget;
+	if (tokenBudget) {
+		// Deliberately no live counter: the prompt is a per-build snapshot, and a stale "used" number
+		// would be worse than none. The allowance and the stopping rule are what the model must plan against.
+		const pool =
+			tokenBudget.subtreePoolTokens === null
+				? ""
+				: ` A further ${tokenBudget.subtreePoolTokens} tokens are reserved for subagents you spawn.`;
+		parts.push(
+			"",
+			`An RLM token budget is active: you may generate about ${tokenBudget.allowanceTokens} tokens in this session.${pool}`,
+			"When it is spent the host stops your run at the next turn boundary, so prefer finishing and reporting partial results over starting new work as you approach it.",
 		);
 	}
 

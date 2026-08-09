@@ -270,7 +270,7 @@ describe("rlm token budget misconfiguration guards", () => {
 				fanout: 3,
 				minTokens: 200_000,
 			}),
-		).toThrow(/the "split" schedule gives each of 3 children 100000 tokens/);
+		).toThrow(/gives each of 3 children a 100000-token grant worth 50000 spendable tokens/);
 	});
 
 	test("accepts a split floor the schedule can fund", () => {
@@ -296,5 +296,90 @@ describe("rlm token budget misconfiguration guards", () => {
 	test("refuses to silently discard --floor/--ceiling when a range is also given", () => {
 		expect(() => parseRlmTokenBudgetCommand("1m-2m --floor 50k")).toThrow(/Cannot combine the range/);
 		expect(() => parseRlmTokenBudgetCommand("1m-2m --ceiling 400k")).toThrow(/Cannot combine the range/);
+	});
+});
+
+describe("rlm token budget factor bounds", () => {
+	test("rejects --factor 1 under split, which would leave every session one token", () => {
+		expect(() => parseRlmTokenBudgetCommand("1m --factor 1")).toThrow(
+			/factor must be less than 1 for the "split" schedule/,
+		);
+		expect(() => validateRlmTokenBudgetConfig({ ...config(), factor: 1 })).toThrow(/Lower --factor/);
+		expect(isRlmTokenBudgetConfig({ ...config(), factor: 1 })).toBe(false);
+	});
+
+	test("keeps --factor 1 legal for the depth-indexed schedules", () => {
+		expect(parseRlmTokenBudgetCommand("1m --schedule geometric --factor 1")).toEqual({
+			kind: "set",
+			global: false,
+			config: { totalTokens: 1_000_000, schedule: "geometric", factor: 1, fanout: 3 },
+		});
+		expect(parseRlmTokenBudgetCommand("1m --schedule flat --factor 1")).toMatchObject({
+			kind: "set",
+			config: { schedule: "flat", factor: 1 },
+		});
+		expect(isRlmTokenBudgetConfig({ ...config(), schedule: "geometric", factor: 1 })).toBe(true);
+	});
+});
+
+describe("rlm token budget guard and validator agreement", () => {
+	const rejected: Array<[string, unknown]> = [
+		["non-object", null],
+		["zero total", { ...config(), totalTokens: 0 }],
+		["unknown schedule", { ...config(), schedule: "nope" }],
+		["factor above 1", { ...config(), factor: 1.5 }],
+		["split factor of 1", { ...config(), factor: 1 }],
+		["zero fanout", { ...config(), fanout: 0 }],
+		["fractional floor", { ...config(), minTokens: 1.5 }],
+		["inverted range", { ...config(), minTokens: 10, maxTokens: 5 }],
+		[
+			"unfundable split floor",
+			{ totalTokens: 600_000, schedule: "split", factor: 0.5, fanout: 3, minTokens: 200_000 },
+		],
+	];
+
+	test.each(rejected)("the type guard rejects the %s config the validator rejects", (_label, candidate) => {
+		expect(() => validateRlmTokenBudgetConfig(candidate as RlmTokenBudgetConfig)).toThrow();
+		expect(isRlmTokenBudgetConfig(candidate)).toBe(false);
+	});
+
+	test("a config the guard accepts also survives validation", () => {
+		const persisted = { ...config(), minTokens: 50_000, maxTokens: 400_000 };
+
+		expect(isRlmTokenBudgetConfig(persisted)).toBe(true);
+		expect(validateRlmTokenBudgetConfig(persisted)).toEqual(persisted);
+	});
+});
+
+describe("rlm token budget parser ordering", () => {
+	test("off disables budgeting before any schedule flag is validated", () => {
+		expect(parseRlmTokenBudgetCommand("off --schedule bogus")).toEqual({ kind: "off", global: false });
+		expect(parseRlmTokenBudgetCommand("off --factor abc --global")).toEqual({ kind: "off", global: true });
+		expect(() => parseRlmTokenBudgetCommand("off --globl")).toThrow(/Unexpected argument "--globl"/);
+	});
+
+	test("a leading flag reports the missing token count instead of a value error", () => {
+		expect(() => parseRlmTokenBudgetCommand("--schedule flat")).toThrow(/Missing token count before "--schedule"/);
+		expect(() => parseRlmTokenBudgetCommand("--global")).toThrow(/Missing token count before "--global"/);
+	});
+});
+
+describe("rlm token budget flag value errors", () => {
+	test("quotes an invalid --factor value", () => {
+		expect(() => parseRlmTokenBudgetCommand("1m --factor abc")).toThrow(/Invalid factor "abc"/);
+		expect(() => parseRlmTokenBudgetCommand("1m --factor=0")).toThrow(/Invalid factor "0"/);
+	});
+
+	test("quotes an invalid --fanout value", () => {
+		expect(() => parseRlmTokenBudgetCommand("1m --fanout abc")).toThrow(/Invalid fanout "abc"/);
+		expect(() => parseRlmTokenBudgetCommand("1m --fanout=2.5")).toThrow(/Invalid fanout "2.5"/);
+	});
+});
+
+describe("rlm token count separators", () => {
+	test("rejects a trailing underscore that made a malformed range parse", () => {
+		expect(parseRlmTokenBudgetTokens("1_000")).toBe(1_000);
+		expect(() => parseRlmTokenBudgetTokens("1_000_")).toThrow(/Invalid token count "1_000_"/);
+		expect(() => parseRlmTokenBudgetCommand("1_000_-1m")).toThrow(/Invalid token count "1_000_"/);
 	});
 });

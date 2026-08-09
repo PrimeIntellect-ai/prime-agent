@@ -29,6 +29,8 @@ export interface BuildSystemPromptOptions {
 	allowRecursion?: boolean;
 	/** Fixed recursive-agent depth for this session. */
 	rlmDepth?: number;
+	/** Active RLM token budget for this session, so the model can pace itself against it. */
+	rlmTokenBudget?: { allowanceTokens: number; subtreePoolTokens: number | null };
 	/** Human-readable parent name or id for child communication doctrine. */
 	rlmParentAgent?: string;
 	/** Global harness state to inject as compact persistent context. */
@@ -121,6 +123,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		allowRecursion,
 		depth: options.rlmDepth,
 		parentAgent: options.rlmParentAgent,
+		tokenBudget: options.rlmTokenBudget,
 	});
 
 	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
