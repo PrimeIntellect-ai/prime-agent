@@ -182,7 +182,7 @@ class DaemonSupervisorOwnership {
 class DaemonShutdownAdmission {
 	private released = false;
 	private lost = false;
-	private refreshPromise?: Promise<void>;
+	private renewalPromise?: Promise<void>;
 	private readonly refreshTimer: ReturnType<typeof setInterval>;
 
 	constructor(
@@ -190,11 +190,7 @@ class DaemonShutdownAdmission {
 		private readonly registryDir: string,
 	) {
 		this.refreshTimer = setInterval(() => {
-			this.refreshPromise ??= this.assertOrRenew()
-				.catch(() => undefined)
-				.finally(() => {
-					this.refreshPromise = undefined;
-				});
+			void this.assertOrRenew().catch(() => undefined);
 		}, SHUTDOWN_ADMISSION_REFRESH_MS);
 		this.refreshTimer.unref();
 	}
@@ -203,6 +199,37 @@ class DaemonShutdownAdmission {
 		if (this.released || this.lost) {
 			throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
 		}
+		if (this.renewalPromise) {
+			return this.renewalPromise;
+		}
+		const renewal = this.renewOnce();
+		this.renewalPromise = renewal;
+		const clearRenewal = (): void => {
+			if (this.renewalPromise === renewal) {
+				this.renewalPromise = undefined;
+			}
+		};
+		void renewal.then(clearRenewal, clearRenewal);
+		return renewal;
+	}
+
+	async release(): Promise<void> {
+		if (this.released) {
+			return;
+		}
+		this.released = true;
+		clearInterval(this.refreshTimer);
+		await this.renewalPromise?.catch(() => undefined);
+		await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
+			const path = shutdownAdmissionPath(this.registryDir);
+			const current = readShutdownAdmission(path);
+			if (current?.token === this.record.token) {
+				rmSync(path, { force: true });
+			}
+		});
+	}
+
+	private async renewOnce(): Promise<void> {
 		try {
 			await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
 				const path = shutdownAdmissionPath(this.registryDir);
@@ -212,7 +239,6 @@ class DaemonShutdownAdmission {
 					current.token !== this.record.token ||
 					current.pid !== this.record.pid ||
 					current.processStartId !== this.record.processStartId ||
-					Date.parse(current.expiresAt) <= Date.now() ||
 					!matchesExactProcessIdentity(this.record)
 				) {
 					throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
@@ -227,22 +253,6 @@ class DaemonShutdownAdmission {
 			clearInterval(this.refreshTimer);
 			throw error;
 		}
-	}
-
-	async release(): Promise<void> {
-		if (this.released) {
-			return;
-		}
-		this.released = true;
-		clearInterval(this.refreshTimer);
-		await this.refreshPromise;
-		await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
-			const path = shutdownAdmissionPath(this.registryDir);
-			const current = readShutdownAdmission(path);
-			if (current?.token === this.record.token) {
-				rmSync(path, { force: true });
-			}
-		});
 	}
 }
 
