@@ -1116,3 +1116,164 @@ def test_upgrade_rejects_unsafe_state_paths_and_digests_without_writes(tmp_repo,
     assert proc.returncode == 2
     after = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
     assert after == before
+
+
+
+def test_upgrade_blocks_custom_config_without_advancing_canonical_version(tmp_repo):
+    old_version, _ = _prepare_old_version_install(tmp_repo)
+    config_path = tmp_repo / "harness/config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["verification_coverage"] = {"min_evidence_per_100_lines": 2.0}
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before_config = config_path.read_bytes()
+    state_path = tmp_repo / INSTALL_STATE
+    before_state = state_path.read_bytes()
+    proc = run_install(tmp_repo, "--upgrade")
+    assert proc.returncode == 1
+    assert config_path.read_bytes() == before_config
+    assert state_path.read_bytes() == before_state
+    assert json.loads(before_config)["prime_harness_version"] == old_version
+    new_config = json.loads((tmp_repo / "harness/config.json.new").read_text(encoding="utf-8"))
+    assert new_config["prime_harness_version"] == (HARNESS_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert "merge its .new sidecar" in proc.stderr
+
+
+def test_upgrade_rolls_back_prior_writes_when_a_later_write_fails(tmp_repo, monkeypatch):
+    _prepare_old_version_install(tmp_repo)
+    installer = _load_installer_module("prime_harness_installer_upgrade_rollback")
+    inventory = installer._template_inventory(installer.read_harness_version())
+    before = {
+        path.relative_to(tmp_repo).as_posix(): path.read_bytes()
+        for path in tmp_repo.rglob("*") if path.is_file()
+    }
+    original = installer.atomic_bytes
+    calls = {"forward": 0}
+
+    def fail_second(path, value, mode=0o644, *args, **kwargs):
+        if not str(path).endswith("harness-install-state.json") and calls["forward"] < 2:
+            calls["forward"] += 1
+            if calls["forward"] == 2:
+                raise OSError("injected later write failure")
+        return original(path, value, mode, *args, **kwargs)
+
+    monkeypatch.setattr(installer, "atomic_bytes", fail_second)
+    code, _ = installer._run_upgrade(
+        tmp_repo, version=installer.read_harness_version(), inventory=inventory, dry_run=False
+    )
+    assert code == 2
+    after = {
+        path.relative_to(tmp_repo).as_posix(): path.read_bytes()
+        for path in tmp_repo.rglob("*") if path.is_file()
+    }
+    assert after == before
+
+
+def test_upgrade_rechecks_content_at_atomic_write_and_preserves_concurrent_edit(tmp_repo, monkeypatch):
+    _prepare_old_version_install(tmp_repo)
+    installer = _load_installer_module("prime_harness_installer_upgrade_race")
+    inventory = installer._template_inventory(installer.read_harness_version())
+    managed = tmp_repo / "harness/backup.py"
+    original = installer.atomic_bytes
+    injected = b"# concurrent edit\n"
+    raced = {"done": False}
+
+    def race(path, value, mode=0o644, *args, **kwargs):
+        if path == managed and not raced["done"]:
+            raced["done"] = True
+            path.write_bytes(path.read_bytes() + injected)
+        return original(path, value, mode, *args, **kwargs)
+
+    monkeypatch.setattr(installer, "atomic_bytes", race)
+    code, _ = installer._run_upgrade(
+        tmp_repo, version=installer.read_harness_version(), inventory=inventory, dry_run=False
+    )
+    assert code == 2
+    assert managed.read_bytes().endswith(injected)
+
+
+def test_upgrade_treats_deletion_as_customization_and_refreshes_unedited_stale_sidecar(tmp_repo):
+    _prepare_old_version_install(tmp_repo)
+    deleted = tmp_repo / "harness/backup.py"
+    deleted.unlink()
+    first = run_install(tmp_repo, "--upgrade")
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert not deleted.exists()
+    assert (tmp_repo / "harness/backup.py.new").read_bytes() == (
+        HARNESS_ROOT / "template/harness/backup.py"
+    ).read_bytes()
+
+    modified = tmp_repo / "harness/scorecard.py"
+    modified.write_bytes(modified.read_bytes() + b"# local edit\n")
+    second = run_install(tmp_repo, "--upgrade")
+    assert second.returncode == 0, second.stdout + second.stderr
+    sidecar = tmp_repo / "harness/scorecard.py.new"
+    old_sidecar = sidecar.read_bytes()
+
+    installer = _load_installer_module("prime_harness_installer_stale_sidecar")
+    inventory = installer._template_inventory("0.2.0")
+    source, payload, mode = inventory["harness/scorecard.py"]
+    inventory["harness/scorecard.py"] = (source, payload + b"# next template\n", mode)
+    code, _ = installer._run_upgrade(tmp_repo, version="0.2.0", inventory=inventory, dry_run=False)
+    assert code == 0
+    assert sidecar.read_bytes() != old_sidecar
+    assert sidecar.read_bytes().endswith(b"# next template\n")
+
+
+def test_legacy_bootstrap_state_excludes_preserved_local_files(tmp_repo):
+    local = tmp_repo / "harness/backup.py"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"# legacy customization\n")
+    proc = run_install(tmp_repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    state = json.loads((tmp_repo / INSTALL_STATE).read_text(encoding="utf-8"))
+    assert "harness/backup.py" not in state["template_sha256"]
+    assert local.read_bytes() == b"# legacy customization\n"
+    assert "baseline excludes" in proc.stdout
+
+
+
+def test_upgrade_rejects_parent_directory_replacement_after_preflight(tmp_repo, monkeypatch):
+    _prepare_old_version_install(tmp_repo)
+    installer = _load_installer_module("prime_harness_installer_parent_race")
+    inventory = installer._template_inventory(installer.read_harness_version())
+    harness = tmp_repo / "harness"
+    parked = tmp_repo / "harness-parked"
+    original = installer.atomic_bytes
+    raced = {"done": False}
+
+    def race(path, value, mode=0o644, *args, **kwargs):
+        if path == harness / "backup.py" and not raced["done"]:
+            raced["done"] = True
+            harness.rename(parked)
+            harness.mkdir()
+        return original(path, value, mode, *args, **kwargs)
+
+    monkeypatch.setattr(installer, "atomic_bytes", race)
+    try:
+        code, _ = installer._run_upgrade(
+            tmp_repo, version=installer.read_harness_version(), inventory=inventory, dry_run=False
+        )
+        assert code == 2
+        assert not (harness / "backup.py").exists()
+    finally:
+        if harness.exists():
+            shutil.rmtree(harness)
+        if parked.exists():
+            parked.rename(harness)
+
+
+
+def test_upgrade_refreshes_gitignore_and_installed_example_provenance(tmp_repo):
+    _prepare_old_version_install(tmp_repo)
+    gitignore = tmp_repo / ".gitignore"
+    text = gitignore.read_text(encoding="utf-8")
+    text = text.replace(".prime/agent/harness-tests/template\n", "")
+    gitignore.write_text(text, encoding="utf-8")
+    examples = tmp_repo / "artifacts/harness/installed-examples.json"
+    examples.unlink()
+    proc = run_install(tmp_repo, "--upgrade")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert ".prime/agent/harness-tests/template" in gitignore.read_text(encoding="utf-8").splitlines()
+    payload = json.loads(examples.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["files"]

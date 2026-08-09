@@ -673,11 +673,14 @@ def test_completion_rejects_malformed_or_unsigned_coverage_dispositions(tmp_repo
 @pytest.mark.parametrize("policy", [
     {"unknown": 1},
     {"min_evidence_per_100_lines": True},
+    {"min_evidence_per_100_lines": 0},
     {"min_evidence_per_100_lines": float("inf")},
     {"churn_alert_min_lines": -1},
+    {"churn_alert_min_lines": 101},
     {"exempt_globs": "docs/**"},
     {"exempt_globs": ["../generated/**"]},
     {"exempt_globs": ["**"]},
+    {"exempt_globs": ["src/**"]},
     {"exempt_globs": ["C:\\outside\\**"]},
 ])
 def test_coverage_policy_rejects_ambiguous_or_unsafe_config(tmp_repo: Path, policy: dict) -> None:
@@ -697,3 +700,96 @@ def test_completion_fails_closed_when_evidence_schema_cannot_prove_coverage(tmp_
     assert proc.returncode == 1
     alert = next(item for item in payload["alerts"] if item["code"] == "VERIFICATION_COVERAGE_UNAVAILABLE")
     assert alert["severity"] == "critical"
+
+
+
+def test_completion_fails_closed_for_missing_unresolvable_or_empty_churn_base(tmp_repo: Path) -> None:
+    paths, _base, change = _prepare_completion_coverage_fixture(tmp_repo)
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    for index, bad_base in enumerate((None, "0" * 40, change)):
+        if bad_base is None:
+            task.pop("base_commit", None)
+        else:
+            task["base_commit"] = bad_base
+        paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+        proc, payload = run_scorecard(
+            tmp_repo, paths, "--completion", "--fail-on", "critical",
+            output_name=f"bad-base-{index}.json",
+        )
+        assert proc.returncode == 1
+        codes = {item["code"] for item in payload["alerts"] if item["severity"] == "critical"}
+        assert codes.intersection({"VERIFICATION_CHURN_BASE_UNAVAILABLE", "VERIFICATION_CHURN_INTERVAL_EMPTY"})
+
+
+def test_dispositions_require_live_task_range_commit_and_malformed_rows_never_get_automatic_credit(tmp_repo: Path) -> None:
+    paths, base, change = _prepare_completion_coverage_fixture(tmp_repo)
+    connection = sqlite3.connect(paths["evidence"])
+    try:
+        for evidence_id, assumptions, commit_sha in (
+            ("ev-forged", {"verification_coverage": {
+                "kind": "disposition", "directories": ["lib"], "base_commit": base,
+                "reason": "This purported disposition has no live repository commit.",
+            }}, "0" * 40),
+            ("ev-malformed-signed", {"verification_coverage": {
+                "kind": "disposition", "directories": ["../lib"], "base_commit": base,
+                "reason": "This malformed disposition must never earn ordinary verification credit.",
+            }}, change),
+        ):
+            connection.execute(
+                "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (evidence_id, "verified", "named but unauthenticated text",
+                 "2026-01-02T01:00:00Z", "verification-coverage-disposition",
+                 json.dumps(assumptions), commit_sha, None),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    task["evidence_ids"].extend(["ev-forged", "ev-malformed-signed"])
+    paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    lib = next(row for row in payload["verification"]["directory_coverage"]["directories"] if row["directory"] == "lib")
+    assert lib["status"] == "behind"
+    assert "ev-forged" not in lib["disposition_evidence_ids"]
+    assert "ev-malformed-signed" not in lib["verification_evidence_ids"]
+
+
+def test_refuted_and_inconclusive_rows_do_not_satisfy_completion_coverage(tmp_repo: Path) -> None:
+    paths, _base, _change = _prepare_completion_coverage_fixture(tmp_repo)
+    connection = sqlite3.connect(paths["evidence"])
+    try:
+        connection.execute("UPDATE evidence SET status='refuted' WHERE id='ev-commit'")
+        connection.execute("UPDATE evidence SET status='inconclusive' WHERE id='ev-src'")
+        connection.commit()
+    finally:
+        connection.close()
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    rows = payload["verification"]["directory_coverage"]["directories"]
+    assert all(row["verification_records"] == 0 for row in rows)
+    assert any(row["status"] == "behind" for row in rows)
+
+
+def test_binary_code_churn_cannot_evade_completion_coverage(tmp_repo: Path) -> None:
+    paths, _base, _change = _prepare_completion_coverage_fixture(tmp_repo)
+    binary = tmp_repo / "binary/payload.py"
+    binary.parent.mkdir()
+    binary.write_bytes(b"\x00\x01compiled payload")
+    git(tmp_repo, "add", "binary/payload.py")
+    git(tmp_repo, "commit", "-qm", "binary code")
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    row = next(item for item in payload["verification"]["directory_coverage"]["directories"] if item["directory"] == "binary")
+    assert row["unmeasured_binary_files"] == 1
+    assert row["status"] == "behind"
+
+
+
+def test_coverage_policy_config_read_is_bounded(tmp_repo: Path) -> None:
+    paths, _base, _change = _prepare_completion_coverage_fixture(tmp_repo)
+    (tmp_repo / "harness/config.json").write_bytes(b" " * (1024 * 1024 + 1))
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 2
+    assert payload == {}
+    assert "stable bounded regular file" in proc.stderr

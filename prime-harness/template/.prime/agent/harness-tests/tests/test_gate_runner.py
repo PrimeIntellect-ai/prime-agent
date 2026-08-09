@@ -395,7 +395,7 @@ def test_final_profile_is_nonvacuous_fails_behind_churn_then_passes_with_coverag
         "verification_coverage": {
             "min_evidence_per_100_lines": 1.0,
             "churn_alert_min_lines": 100,
-            "exempt_globs": ["harness/**"],
+            "exempt_globs": ["docs/**", "generated/**"],
         }
     }), encoding="utf-8")
     write_manifest(tmp_repo, {"final": {
@@ -409,7 +409,7 @@ def test_final_profile_is_nonvacuous_fails_behind_churn_then_passes_with_coverag
         }],
     }})
     (tmp_repo / ".gitignore").write_text("artifacts/harness/\n", encoding="utf-8")
-    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "add", ".gitignore", "harness"], cwd=tmp_repo, check=True)
     subprocess.run(["git", "commit", "-qm", "coverage base"], cwd=tmp_repo, check=True)
     base = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=tmp_repo, check=True,

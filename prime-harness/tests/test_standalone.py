@@ -20,7 +20,13 @@ def test_standalone_self_ci_is_pinned_cross_platform_cross_shell_and_full_suite(
     steps = job["steps"]
     action_steps = [step for step in steps if "uses" in step]
     assert all(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}", step["uses"]) for step in action_steps)
+    assert job["timeout-minutes"] == 45
+    assert any("--require-hashes -r requirements-ci.txt" in str(step.get("run", "")) for step in steps)
+    assert any("bash -n template/harness/burst.sh" == step.get("run") for step in steps)
+    assert any("scriptblock" in str(step.get("run", "")).lower() and "burst.ps1" in str(step.get("run", "")) for step in steps)
     assert any(step.get("run") == "python -m pytest -q tests" for step in steps)
+    lock = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+    assert "pip==25.1.1" in lock and "--hash=sha256:" in lock
     assert "secrets." not in text
 
 

@@ -404,16 +404,18 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, contro
 
 
 
-def test_completion_check_runs_completion_scorecard_and_persists_pass(tmp_repo):
+def test_completion_check_runs_final_profile_and_persists_pass(tmp_repo):
     state = orch.new_task("completion-pass", "x", working_branch="main")
-    scorecard = tmp_repo / "harness/scorecard.py"
-    scorecard.parent.mkdir(parents=True, exist_ok=True)
-    scorecard.write_text(
-        "import json, pathlib, sys\n"
-        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+    verify = tmp_repo / "harness/verify.py"
+    verify.parent.mkdir(parents=True, exist_ok=True)
+    verify.write_text(
+        "import json, pathlib\n"
+        "out = pathlib.Path.cwd() / 'artifacts/harness/completion-scorecard.json'\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
         "payload = {'schema_version': 1, 'completion_mode': True, 'alerts': [], "
         "'code_churn': {'head': 'HEAD'}, 'verification': {'directory_coverage': {'available': True, 'directories': []}}}\n"
-        "out.write_text(json.dumps(payload), encoding='utf-8')\n",
+        "out.write_text(json.dumps(payload), encoding='utf-8')\n"
+        "print('GATE_RESULT ' + json.dumps({'status': 'pass', 'profile': 'final', 'vacuous': False, 'applicable_checks': 1}))\n",
         encoding="utf-8",
     )
     original_commit = orch.current_commit
@@ -423,10 +425,32 @@ def test_completion_check_runs_completion_scorecard_and_persists_pass(tmp_repo):
     finally:
         orch.current_commit = original_commit
     assert report["status"] == "pass"
-    assert "--completion" in report["command"]
+    assert report["command"][-3:] == ["--profile", "final", "--json"]
+    assert report["gate_verdict"]["profile"] == "final"
     assert report["scorecard"]["verification"]["directory_coverage"]["available"] is True
     assert orch.load_task_state().quality_gate_status["completion_coverage"]["status"] == "pass"
 
+
+def test_completion_check_rejects_absent_git_head_even_when_scorecard_agrees(tmp_repo):
+    orch.new_task("completion-no-head", "x")
+    verify = tmp_repo / "harness/verify.py"
+    verify.parent.mkdir(parents=True, exist_ok=True)
+    verify.write_text(
+        "import json, pathlib\n"
+        "out = pathlib.Path.cwd() / 'artifacts/harness/completion-scorecard.json'\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_text(json.dumps({'schema_version': 1, 'completion_mode': True, 'alerts': [], 'code_churn': {'head': None}, 'verification': {'directory_coverage': {'available': True}}}), encoding='utf-8')\n"
+        "print('GATE_RESULT ' + json.dumps({'status': 'pass', 'profile': 'final', 'vacuous': False, 'applicable_checks': 1}))\n",
+        encoding="utf-8",
+    )
+    original_commit = orch.current_commit
+    orch.current_commit = lambda: None
+    try:
+        report = orch.completion_check(timeout_seconds=30)
+    finally:
+        orch.current_commit = original_commit
+    assert report["status"] == "fail"
+    assert any("HEAD" in reason for reason in report["reasons"])
 
 def test_completion_check_fails_closed_before_scorecard_with_unresolved_claims(tmp_repo):
     state = orch.new_task("completion-fail", "x")

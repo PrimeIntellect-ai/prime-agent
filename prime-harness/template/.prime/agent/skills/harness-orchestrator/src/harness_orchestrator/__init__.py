@@ -664,7 +664,7 @@ def _persist_completion_status(state: TaskState, status: str, reasons: list[str]
     save_task_state(state)
 
 
-def completion_check(*, timeout_seconds: int = 120) -> dict[str, Any]:
+def completion_check(*, timeout_seconds: int = 180) -> dict[str, Any]:
     """Run the fail-closed completion scorecard immediately before goal.complete()."""
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 600:
         raise ValueError("timeout_seconds must be an integer from 1 through 600")
@@ -676,22 +676,25 @@ def completion_check(*, timeout_seconds: int = 120) -> dict[str, Any]:
         _persist_completion_status(state, "fail", reasons, None)
         return {"status": "fail", "reasons": reasons, "scorecard": None}
     root = repo_root()
-    script = root / "harness" / "scorecard.py"
+    script = root / "harness" / "verify.py"
     output = harness_dir() / "completion-scorecard.json"
     reasons: list[str] = []
     if script.is_symlink() or not script.is_file():
-        reasons.append("harness/scorecard.py is missing or link-backed")
+        reasons.append("harness/verify.py is missing or link-backed")
     if output.is_symlink():
         reasons.append("completion scorecard output is link-backed")
     if reasons:
         _persist_completion_status(state, "fail", reasons, output)
         return {"status": "fail", "reasons": reasons, "scorecard": None}
+    try:
+        output.unlink(missing_ok=True)
+    except OSError as exc:
+        reasons.append(f"stale completion scorecard cannot be removed: {type(exc).__name__}")
+        _persist_completion_status(state, "fail", reasons, output)
+        return {"status": "fail", "reasons": reasons, "scorecard": None}
     command = [
         sys.executable, "-S", str(script),
-        "--repo", str(root),
-        "--task-state", str(_state_path()),
-        "--output", str(output),
-        "--completion", "--fail-on", "critical",
+        "--profile", "final", "--json",
     ]
     try:
         process = subprocess.run(
@@ -702,6 +705,25 @@ def completion_check(*, timeout_seconds: int = 120) -> dict[str, Any]:
         reasons.append(f"completion scorecard execution failed: {type(exc).__name__}")
         _persist_completion_status(state, "fail", reasons, output)
         return {"status": "fail", "reasons": reasons, "command": command, "scorecard": None}
+    gate_verdict: dict[str, Any] | None = None
+    for line in reversed((process.stdout or "").splitlines()):
+        if line.startswith("GATE_RESULT "):
+            try:
+                candidate_verdict = json.loads(line[len("GATE_RESULT "):])
+                if isinstance(candidate_verdict, dict):
+                    gate_verdict = candidate_verdict
+            except json.JSONDecodeError:
+                pass
+            break
+    if (
+        gate_verdict is None
+        or gate_verdict.get("status") != "pass"
+        or gate_verdict.get("profile") != "final"
+        or gate_verdict.get("vacuous") is not False
+        or not isinstance(gate_verdict.get("applicable_checks"), int)
+        or gate_verdict.get("applicable_checks", 0) < 1
+    ):
+        reasons.append("final profile did not emit a substantive passing GATE_RESULT")
     payload: dict[str, Any] | None = None
     try:
         if not output.is_file() or output.stat().st_size > 8 * 1024 * 1024:
@@ -725,7 +747,8 @@ def completion_check(*, timeout_seconds: int = 120) -> dict[str, Any]:
         if critical:
             reasons.append("critical scorecard alerts remain: " + ", ".join(str(item) for item in critical))
         scorecard_head = payload.get("code_churn", {}).get("head") if isinstance(payload.get("code_churn"), dict) else None
-        if scorecard_head != current_commit():
+        live_head = current_commit()
+        if not isinstance(scorecard_head, str) or not scorecard_head or not isinstance(live_head, str) or not live_head or scorecard_head != live_head:
             reasons.append("repository HEAD changed during or was absent from completion scoring")
     if process.returncode != 0:
         reasons.append(f"completion scorecard exited {process.returncode}")
@@ -738,6 +761,7 @@ def completion_check(*, timeout_seconds: int = 120) -> dict[str, Any]:
         "returncode": process.returncode,
         "stderr_tail": (process.stderr or "")[-2000:],
         "scorecard_path": str(output),
+        "gate_verdict": gate_verdict,
         "scorecard": payload,
     }
 

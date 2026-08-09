@@ -52,6 +52,8 @@ DEFAULT_COVERAGE_POLICY = {
 }
 MAX_COVERAGE_GLOBS = 128
 MAX_COVERAGE_GLOB_CHARS = 256
+MAX_CONFIG_BYTES = 1024 * 1024
+WINDOWS_REPARSE_ATTRIBUTE = 0x400
 
 
 def utc_now() -> datetime:
@@ -106,13 +108,35 @@ def read_json(path: Path, warnings: list[str], label: str) -> dict[str, Any] | N
     return value
 
 
+def _stable_bounded_config(path: Path) -> bytes | None:
+    try:
+        before = path.stat(follow_symlinks=False)
+        if path.is_symlink() or bool(getattr(before, "st_file_attributes", 0) & WINDOWS_REPARSE_ATTRIBUTE):
+            return None
+        if not path.is_file() or before.st_size > MAX_CONFIG_BYTES:
+            return None
+        with path.open("rb") as handle:
+            value = handle.read(MAX_CONFIG_BYTES + 1)
+        after = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if len(value) > MAX_CONFIG_BYTES:
+        return None
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns)
+    return value if identity(before) == identity(after) else None
+
+
 def load_coverage_policy(root: Path) -> dict[str, Any]:
     path = root / "harness" / "config.json"
-    if path.is_symlink():
-        raise ValueError("harness/config.json must not be link-backed")
     try:
-        document = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        if os.path.lexists(path):
+            raw = _stable_bounded_config(path)
+            if raw is None:
+                raise ValueError("harness/config.json is not a stable bounded regular file")
+            document = json.loads(raw.decode("utf-8"))
+        else:
+            document = {}
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("harness/config.json is not readable UTF-8 JSON") from exc
     if not isinstance(document, dict):
         raise ValueError("harness/config.json must be an object")
@@ -126,10 +150,10 @@ def load_coverage_policy(root: Path) -> dict[str, Any]:
     threshold = raw.get("min_evidence_per_100_lines", DEFAULT_COVERAGE_POLICY["min_evidence_per_100_lines"])
     minimum = raw.get("churn_alert_min_lines", DEFAULT_COVERAGE_POLICY["churn_alert_min_lines"])
     globs = raw.get("exempt_globs", DEFAULT_COVERAGE_POLICY["exempt_globs"])
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(float(threshold)) or float(threshold) < 0:
-        raise ValueError("verification_coverage.min_evidence_per_100_lines must be finite and non-negative")
-    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
-        raise ValueError("verification_coverage.churn_alert_min_lines must be a non-negative integer")
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(float(threshold)) or float(threshold) < float(DEFAULT_COVERAGE_POLICY["min_evidence_per_100_lines"]):
+        raise ValueError("verification_coverage.min_evidence_per_100_lines cannot weaken the default")
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or not 0 <= minimum <= int(DEFAULT_COVERAGE_POLICY["churn_alert_min_lines"]):
+        raise ValueError("verification_coverage.churn_alert_min_lines cannot weaken the default")
     if not isinstance(globs, list) or len(globs) > MAX_COVERAGE_GLOBS:
         raise ValueError(f"verification_coverage.exempt_globs must be a list of at most {MAX_COVERAGE_GLOBS} strings")
     normalized: list[str] = []
@@ -140,6 +164,8 @@ def load_coverage_policy(root: Path) -> dict[str, Any]:
             or re.fullmatch(r"[A-Za-z0-9._-]+/\*\*", pattern) is None
         ):
             raise ValueError("verification_coverage.exempt_globs must contain only bounded top-level directory/** patterns")
+        if pattern not in DEFAULT_COVERAGE_POLICY["exempt_globs"]:
+            raise ValueError("verification_coverage.exempt_globs cannot expand the default exemption set")
         normalized.append(pattern)
     return {
         "min_evidence_per_100_lines": float(threshold),
@@ -900,12 +926,20 @@ def scan_churn(root: Path, base: str | None, warnings: list[str],
     exempt_code_lines = 0
     changed_paths: set[str] = set()
     directory_lines: Counter[str] = Counter()
+    directory_binary_files: Counter[str] = Counter()
     directory_files: defaultdict[str, set[str]] = defaultdict(set)
     exempt_paths: set[str] = set()
     for added, deleted, relative in rows:
         changed_paths.add(relative)
         if added is None or deleted is None:
             binary_files += 1
+            if is_code_path(relative):
+                if _coverage_exempt(relative, exempt_globs):
+                    exempt_paths.add(relative)
+                else:
+                    directory = _coverage_directory(relative)
+                    directory_binary_files[directory] += 1
+                    directory_files[directory].add(relative)
             continue
         total_added += added
         total_deleted += deleted
@@ -922,6 +956,8 @@ def scan_churn(root: Path, base: str | None, warnings: list[str],
                 directory_files[directory].add(relative)
     return {
         "base": resolved_base or base,
+        "base_resolved": resolved_base is not None,
+        "base_equals_head": bool(resolved_base and head and resolved_base == head),
         "head": head,
         "working_branch": branch,
         "files_changed": len(changed_paths),
@@ -934,12 +970,14 @@ def scan_churn(root: Path, base: str | None, warnings: list[str],
         "code_lines_deleted": code_deleted,
         "code_lines_changed": code_added + code_deleted,
         "coverage_code_lines_changed": sum(directory_lines.values()),
+        "coverage_unmeasured_binary_files": sum(directory_binary_files.values()),
         "coverage_exempt_code_lines": exempt_code_lines,
         "coverage_exempt_files": len(exempt_paths),
         "coverage_directories": [
             {"directory": directory, "code_lines_changed": directory_lines[directory],
+             "unmeasured_binary_files": directory_binary_files[directory],
              "files_changed": len(directory_files[directory])}
-            for directory in sorted(directory_lines)
+            for directory in sorted(set(directory_lines).union(directory_binary_files))
         ],
     }
 
@@ -997,37 +1035,46 @@ def build_directory_coverage(*, root: Path, base: str | None, churn: dict[str, A
                 warnings.append(f"evidence:coverage_base_mismatch:{evidence_id}")
             else:
                 explicit_directories = set(coverage.get("directories", []))
-        if (
-            kind == "disposition" and status == "verified"
-            and record.get("claim_type") == "verification-coverage-disposition"
-            and explicit_directories
-        ):
-            for directory in explicit_directories.intersection(rows):
-                disposition_ids[directory].add(evidence_id)
-            continue
-        if status not in {"verified", "refuted", "inconclusive"}:
-            continue
         commit_sha = record.get("commit_sha")
         automatic: set[str] = set()
         if isinstance(commit_sha, str):
             if commit_sha not in commit_cache:
                 commit_cache[commit_sha] = _commit_code_directories(root, commit_sha, resolved_base, exempt_globs, warnings)
             automatic = commit_cache[commit_sha]
+        if record.get("claim_type") == "verification-coverage-disposition":
+            if (
+                kind == "disposition" and status == "verified" and explicit_directories
+                and explicit_directories.intersection(automatic)
+            ):
+                for directory in explicit_directories.intersection(automatic).intersection(rows):
+                    disposition_ids[directory].add(evidence_id)
+            else:
+                warnings.append(f"evidence:rejected_coverage_disposition:{evidence_id}")
+            continue
+        if status != "verified":
+            continue
         if kind == "verification":
-            automatic = explicit_directories
+            automatic = explicit_directories if automatic else set()
         for directory in automatic.intersection(rows):
             verification_ids[directory].add(evidence_id)
-    enforce = churn["coverage_code_lines_changed"] >= churn_alert_min_lines
+    enforce = (
+        churn["coverage_code_lines_changed"] >= churn_alert_min_lines
+        or churn.get("coverage_unmeasured_binary_files", 0) > 0
+    )
     directory_results: list[dict[str, Any]] = []
     for directory in sorted(rows):
         lines = rows[directory]["code_lines_changed"]
+        binary_files = rows[directory].get("unmeasured_binary_files", 0)
         ids = sorted(verification_ids[directory])
         dispositions = sorted(disposition_ids[directory])
-        rate = len(ids) * 100.0 / lines if lines else 0.0
+        denominator = max(lines, 1 if binary_files else 0)
+        rate = len(ids) * 100.0 / denominator if denominator else 0.0
         if not enforce:
             status = "below-minimum"
         elif dispositions:
             status = "disposition"
+        elif binary_files and not ids:
+            status = "behind"
         elif rate >= min_evidence_per_100_lines:
             status = "pass"
         else:
@@ -1035,6 +1082,7 @@ def build_directory_coverage(*, root: Path, base: str | None, churn: dict[str, A
         directory_results.append({
             "directory": directory,
             "code_lines_changed": lines,
+            "unmeasured_binary_files": binary_files,
             "files_changed": rows[directory]["files_changed"],
             "verification_records": len(ids),
             "verification_evidence_ids": ids,
@@ -1157,6 +1205,18 @@ def derive_alerts(scorecard: dict[str, Any], *, min_evidence_per_100_lines: floa
     if evidence["outside_task_records"]:
         add_alert(alerts, "EVIDENCE_OUTSIDE_TASK", "info", "Time-window ledger rows not named by task evidence_ids were excluded.", count=evidence["outside_task_records"])
     coverage = evidence.get("directory_coverage")
+    if completion and (not churn.get("base_resolved") or not churn.get("head")):
+        add_alert(
+            alerts, "VERIFICATION_CHURN_BASE_UNAVAILABLE", "critical",
+            "Completion requires a resolvable task base and repository HEAD.",
+            base=churn.get("base"), head=churn.get("head"),
+        )
+    elif completion and churn.get("base_equals_head"):
+        add_alert(
+            alerts, "VERIFICATION_CHURN_INTERVAL_EMPTY", "critical",
+            "Completion refuses an empty/reset task churn interval.",
+            base=churn.get("base"), head=churn.get("head"),
+        )
     if isinstance(coverage, dict) and coverage.get("available"):
         behind = [row for row in coverage.get("directories", []) if row.get("status") == "behind"]
         if behind:
@@ -1464,8 +1524,8 @@ def main(argv: list[str] | None = None) -> int:
         args.stale_minutes < 0
         or isinstance(min_evidence, bool)
         or not math.isfinite(min_evidence)
-        or min_evidence < 0
-        or churn_minimum < 0
+        or min_evidence < float(DEFAULT_COVERAGE_POLICY["min_evidence_per_100_lines"])
+        or not 0 <= churn_minimum <= int(DEFAULT_COVERAGE_POLICY["churn_alert_min_lines"])
         or not 0 <= args.goal_low_percent <= 100
     ):
         print("scorecard: invalid non-negative threshold", file=sys.stderr)

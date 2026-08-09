@@ -27,6 +27,8 @@ installation, development-environment, and measured model-selector content.
 | `GATE_INCOMPLETE` | warning | An archived result had missing/unknown schema fields. |
 | `VERIFICATION_BEHIND_CHURN` | warning; critical in completion mode | Per-directory evidence activity is below the configured churn threshold; add focused verification or a signed task-scoped ledger disposition. |
 | `VERIFICATION_COVERAGE_UNAVAILABLE` | critical in completion mode | The evidence schema cannot prove per-directory coverage; repair the ledger/schema rather than bypassing completion. |
+| `VERIFICATION_CHURN_BASE_UNAVAILABLE` | critical in completion mode | Task base or repository HEAD cannot be resolved; restore the pinned Git interval. |
+| `VERIFICATION_CHURN_INTERVAL_EMPTY` | critical in completion mode | Task base equals HEAD, which could hide a reset completion interval; create/restore a task pinned before the work. |
 | `STALE_CHILD` | warning | A running child has no recent durable event; inspect before declaring it dead. |
 | `ACTIVE_CHILD_MISMATCH` | warning | Task-state active names and latest registry running names disagree. |
 | `UNATTRIBUTED_CHILD_USAGE` | warning | Attribution is absent or ambiguous; retain it separately rather than guessing. |
