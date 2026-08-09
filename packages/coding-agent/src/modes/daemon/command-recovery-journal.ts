@@ -206,7 +206,7 @@ export class CommandRecoveryJournal {
 		for (let index = 0; index < completeLines.length; index++) {
 			const line = completeLines[index];
 			if (!line) continue;
-			this.applyParsedRecord(JSON.parse(line) as unknown, index + 1);
+			this.applyParsedRecord(this.parseCompleteLine(line, index + 1), index + 1);
 		}
 
 		if (hasTrailingNewline) {
@@ -229,6 +229,14 @@ export class CommandRecoveryJournal {
 		// Apply it and restore the append boundary before accepting new writes.
 		this.applyParsedRecord(parsedTail, finalLineNumber);
 		this.appendMissingLineFeed();
+	}
+
+	private parseCompleteLine(line: string, lineNumber: number): unknown {
+		try {
+			return JSON.parse(line) as unknown;
+		} catch {
+			throw journalCorruption(lineNumber, "malformed JSON outside the final partial append");
+		}
 	}
 
 	private applyParsedRecord(parsedValue: unknown, lineNumber: number): void {
