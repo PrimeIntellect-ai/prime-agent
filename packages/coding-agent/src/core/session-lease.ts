@@ -116,6 +116,11 @@ function runProcessQuery(command: string, args: string[]): string {
 	return execFileSync(command, args, {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
+		// The portable start-time listing renders a local-time timestamp:
+		// without pinning the timezone and locale, the SAME process yields a
+		// different identity when the supervisor restarts under a different
+		// TZ/locale, and the mismatch is then read as PID reuse.
+		env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
 	});
 }
 
@@ -157,7 +162,10 @@ export function getProcessStartId(pid: number): string | undefined {
 	}
 	try {
 		const startTime = runProcessQuery("ps", ["-p", String(pid), "-o", "lstart="]).trim();
-		return startTime ? `ps:${startTime}` : undefined;
+		// ps2: marks the timezone/locale-pinned rendering. Comparisons across
+		// formats (a legacy ps: token recorded by an older build) cannot prove
+		// PID reuse and must degrade to unverifiable instead of mismatch.
+		return startTime ? `ps2:${startTime}` : undefined;
 	} catch {
 		return undefined;
 	}
