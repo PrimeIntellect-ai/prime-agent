@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { transformMessages } from "../src/providers/transform-messages.js";
-import type { AssistantMessage, Message, Model, ToolCall } from "../src/types.js";
+import type { AssistantMessage, Message, Model, ToolCall, ToolResultMessage } from "../src/types.js";
 
 // Normalize function matching what anthropic.ts uses
 function anthropicNormalizeToolCallId(
@@ -43,6 +43,17 @@ function makeAssistantMessage(content: AssistantMessage["content"]): AssistantMe
 		},
 		stopReason: "toolUse",
 		timestamp: Date.now(),
+	};
+}
+
+function makeToolResult(toolCallId: string, text: string): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId,
+		toolName: "read",
+		content: [{ type: "text", text }],
+		isError: text === "Request was aborted",
+		timestamp: 2,
 	};
 }
 
@@ -187,5 +198,118 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "No result provided" }],
 		});
+	});
+
+	it("hoists a real abort result across an interposed update-restart user message", () => {
+		const model = makeCopilotClaudeModel();
+		const messages: Message[] = [
+			makeAssistantMessage([
+				{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: { path: "README.md" } },
+			]),
+			{ role: "user", content: "<prime_agent_update_interrupted>", timestamp: 1 },
+			makeToolResult("call_1|fc_1", "Request was aborted"),
+		];
+
+		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
+
+		expect(result.map((message) => message.role)).toEqual(["assistant", "toolResult", "user"]);
+		expect(result[1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "call_1_fc_1",
+			content: [{ type: "text", text: "Request was aborted" }],
+		});
+		expect(result).not.toContainEqual(
+			expect.objectContaining({ role: "toolResult", content: [{ type: "text", text: "No result provided" }] }),
+		);
+	});
+
+	it("uses real results from both sides of a user boundary in a parallel tool batch", () => {
+		const model = makeCopilotClaudeModel();
+		const messages: Message[] = [
+			makeAssistantMessage([
+				{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: { path: "one" } },
+				{ type: "toolCall", id: "call_2|fc_2", name: "read", arguments: { path: "two" } },
+				{ type: "toolCall", id: "call_3|fc_3", name: "read", arguments: { path: "three" } },
+			]),
+			makeToolResult("call_1|fc_1", "one"),
+			{ role: "user", content: "restart", timestamp: 1 },
+			makeToolResult("call_2|fc_2", "two"),
+		];
+
+		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
+		const results = result.filter((message): message is ToolResultMessage => message.role === "toolResult");
+
+		expect(result.map((message) => message.role)).toEqual([
+			"assistant",
+			"toolResult",
+			"toolResult",
+			"toolResult",
+			"user",
+		]);
+		expect(results.map((message) => [message.toolCallId, message.content[0]])).toEqual([
+			["call_1_fc_1", { type: "text", text: "one" }],
+			["call_2_fc_2", { type: "text", text: "two" }],
+			["call_3_fc_3", { type: "text", text: "No result provided" }],
+		]);
+	});
+
+	it("still synthesizes a missing result at a user boundary", () => {
+		const model = makeCopilotClaudeModel();
+		const messages: Message[] = [
+			makeAssistantMessage([{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: {} }]),
+			{ role: "user", content: "continue", timestamp: 1 },
+		];
+
+		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
+
+		expect(result.map((message) => message.role)).toEqual(["assistant", "toolResult", "user"]);
+		expect(result[1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "call_1_fc_1",
+			content: [{ type: "text", text: "No result provided" }],
+		});
+	});
+
+	it("drops truly orphaned and duplicate late tool results", () => {
+		const model = makeCopilotClaudeModel();
+		const messages: Message[] = [
+			makeToolResult("orphan", "orphan"),
+			makeAssistantMessage([{ type: "toolCall", id: "call_1", name: "read", arguments: {} }]),
+			makeToolResult("call_1", "real"),
+			{ role: "user", content: "continue", timestamp: 1 },
+			makeToolResult("call_1", "duplicate"),
+		];
+
+		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
+
+		expect(result.map((message) => message.role)).toEqual(["assistant", "toolResult", "user"]);
+		expect(result[1]).toMatchObject({ content: [{ type: "text", text: "real" }] });
+	});
+
+	it("leaves a well-formed tool turn in source order", () => {
+		const model = makeCopilotClaudeModel();
+		const messages: Message[] = [
+			makeAssistantMessage([{ type: "toolCall", id: "call_1", name: "read", arguments: {} }]),
+			makeToolResult("call_1", "real"),
+			{ role: "user", content: "continue", timestamp: 1 },
+		];
+
+		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
+
+		expect(result).toEqual(messages);
+	});
+
+	it("is idempotent after repairing a broken tool turn", () => {
+		const model = makeCopilotClaudeModel();
+		const messages: Message[] = [
+			makeAssistantMessage([
+				{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: { path: "README.md" } },
+			]),
+			{ role: "user", content: "restart", timestamp: 1 },
+			makeToolResult("call_1|fc_1", "Request was aborted"),
+		];
+		const repaired = transformMessages(messages, model, anthropicNormalizeToolCallId);
+
+		expect(transformMessages(repaired, model, anthropicNormalizeToolCallId)).toEqual(repaired);
 	});
 });
