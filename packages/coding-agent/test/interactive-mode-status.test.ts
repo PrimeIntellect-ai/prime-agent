@@ -115,6 +115,127 @@ function createConnectionState(overrides: Partial<AgentConnectionState> = {}): A
 	};
 }
 
+describe("InteractiveMode refinement status", () => {
+	test("shows elapsed progress for an active /refine command", () => {
+		const previousKeybindings = getKeybindings();
+		setKeybindings(new KeybindingsManager());
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-08-09T01:32:48.000Z"));
+		try {
+			const fakeThis = {
+				connectionState: createConnectionState({
+					sessionActions: {
+						queuedCount: 0,
+						steering: [],
+						followUps: [],
+						active: { kind: "session_command", phase: "running", label: "/refine --global" },
+					},
+				}),
+				workingStartedAt: Date.now() - 86_000,
+				workingMessage: undefined,
+				workingVisible: true,
+				activityTracker: new AgentActivityTracker(),
+			} as unknown as InteractiveMode;
+			Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+			const prototype = InteractiveMode.prototype as unknown as {
+				getWorkingLoaderMessage(this: InteractiveMode): string;
+				shouldShowWorkingLoader(this: InteractiveMode): boolean;
+			};
+
+			expect(prototype.getWorkingLoaderMessage.call(fakeThis)).toBe("Refining · 1m 26s (Ctrl+C to cancel)");
+			expect(prototype.shouldShowWorkingLoader.call(fakeThis)).toBe(true);
+
+			(fakeThis as unknown as { connectionState: AgentConnectionState }).connectionState.sessionActions.active = {
+				kind: "session_command",
+				phase: "running",
+				label: "/compact",
+			};
+			expect(prototype.getWorkingLoaderMessage.call(fakeThis)).toBe("");
+			expect(prototype.shouldShowWorkingLoader.call(fakeThis)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+			setKeybindings(previousKeybindings);
+		}
+	});
+
+	test("restarts a mounted streaming loader when a resync observes /refine", () => {
+		const mountedLoader = {};
+		const startWorkingLoader = vi.fn();
+		const fakeThis = {
+			connectionState: createConnectionState({
+				sessionActions: {
+					queuedCount: 0,
+					steering: [],
+					followUps: [],
+					active: { kind: "session_command", phase: "running", label: "/refine" },
+				},
+			}),
+			workingVisible: true,
+			workingLoaderKind: "streaming",
+			loadingAnimation: mountedLoader,
+			statusContainer: { children: [mountedLoader] },
+			autoCompactionLoader: undefined,
+			retryLoader: undefined,
+			startWorkingLoader,
+			stopWorkingLoader: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+
+		Reflect.get(InteractiveMode.prototype, "syncWorkingLoader").call(fakeThis);
+
+		expect(startWorkingLoader).toHaveBeenCalledOnce();
+	});
+
+	test("reconciles the loader when active session command state changes", async () => {
+		const syncWorkingLoader = vi.fn();
+		const actions = {
+			queuedCount: 0,
+			steering: [],
+			followUps: [],
+			active: { kind: "session_command", phase: "running", label: "/refine" },
+		} as const;
+		const fakeThis = {
+			isInitialized: true,
+			connectionState: createConnectionState(),
+			workingVisible: true,
+			footer: { invalidate: vi.fn() },
+			updateWorkingPulse: vi.fn(),
+			activityTracker: new AgentActivityTracker(),
+			updateWorkingLoaderMessage: vi.fn(),
+			updatePendingMessagesDisplay: vi.fn(),
+			syncWorkingLoader,
+			ui: { requestRender: vi.fn() },
+		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+
+		await (
+			InteractiveMode.prototype as unknown as {
+				handleEvent(this: InteractiveMode, event: AgentConnectionSessionEvent): Promise<void>;
+			}
+		).handleEvent.call(fakeThis, { type: "session_action_update", actions });
+
+		expect((fakeThis as unknown as { connectionState: AgentConnectionState }).connectionState.sessionActions).toBe(
+			actions,
+		);
+		expect(syncWorkingLoader).toHaveBeenCalledOnce();
+
+		await (
+			InteractiveMode.prototype as unknown as {
+				handleEvent(this: InteractiveMode, event: AgentConnectionSessionEvent): Promise<void>;
+			}
+		).handleEvent.call(fakeThis, {
+			type: "session_action_update",
+			actions: { queuedCount: 0, steering: [], followUps: [] },
+		});
+
+		expect(syncWorkingLoader).toHaveBeenCalledTimes(2);
+		expect(
+			(fakeThis as unknown as { connectionState: AgentConnectionState }).connectionState.sessionActions.active,
+		).toBeUndefined();
+	});
+});
+
 describe("InteractiveMode update notifications", () => {
 	beforeAll(() => {
 		initTheme("dark");
@@ -1253,6 +1374,7 @@ describe("InteractiveMode connection events", () => {
 			seedSubagentSummary: vi.fn(),
 			setSessionHasMessages: vi.fn(),
 			applyConnectionStateSnapshot: vi.fn(),
+			syncWorkingLoader: vi.fn(),
 			renderSessionContext: renderSessionContextMock,
 			restoreStreamingMessageFromSnapshot,
 			showStatus: vi.fn(),
@@ -1281,6 +1403,13 @@ describe("InteractiveMode connection events", () => {
 		});
 		expect(restoreStreamingMessageFromSnapshot).toHaveBeenNthCalledWith(1, undefined);
 		expect(restoreStreamingMessageFromSnapshot).toHaveBeenNthCalledWith(2, streamingMessage);
+		const applySnapshot = (fakeThis as unknown as { applyConnectionStateSnapshot: ReturnType<typeof vi.fn> })
+			.applyConnectionStateSnapshot;
+		const syncWorkingLoader = (fakeThis as unknown as { syncWorkingLoader: ReturnType<typeof vi.fn> })
+			.syncWorkingLoader;
+		expect(syncWorkingLoader).toHaveBeenCalledTimes(2);
+		expect(applySnapshot.mock.invocationCallOrder[0]).toBeLessThan(syncWorkingLoader.mock.invocationCallOrder[0]);
+		expect(applySnapshot.mock.invocationCallOrder[1]).toBeLessThan(syncWorkingLoader.mock.invocationCallOrder[1]);
 	});
 
 	test("clears extension UI when a connection-backed session is replaced", async () => {

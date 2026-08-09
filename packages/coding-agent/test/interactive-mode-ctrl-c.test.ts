@@ -24,7 +24,12 @@ type FakeInteractiveMode = {
 		isCompacting: boolean;
 		isBashRunning: boolean;
 		retryAttempt: number;
-		sessionActions: { queuedCount: number; steering: readonly string[]; followUps: readonly string[] };
+		sessionActions: {
+			queuedCount: number;
+			steering: readonly string[];
+			followUps: readonly string[];
+			active?: { kind: "turn" | "session_command"; phase: "preparing" | "committing" | "running"; label?: string };
+		};
 	};
 	connectionQueue: { steering: string[]; followUp: string[] };
 	agentConnection: {
@@ -150,6 +155,34 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		expect(mode.agentConnection.abortBash).toHaveBeenCalledTimes(1);
 		expect(mode.restoreQueuedMessagesToEditor).toHaveBeenCalledWith({ abort: true });
 		expect(mode.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("cancels an active /refine command and restores queued prompts to the editor", () => {
+		const mode = createInteractiveFake({ editorText: "draft" });
+		mode.connectionState.sessionActions = {
+			queuedCount: 1,
+			steering: [],
+			followUps: ["queued prompt"],
+			active: { kind: "session_command", phase: "running", label: "/refine --global" },
+		};
+
+		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
+
+		expect(mode.agentConnection.abort).toHaveBeenCalledOnce();
+		expect(mode.restoreQueuedMessagesToEditor).toHaveBeenCalledWith({ abort: true });
+	});
+
+	it("does not use the full-session abort for other active commands", () => {
+		const mode = createInteractiveFake({});
+		mode.connectionState.sessionActions.active = {
+			kind: "session_command",
+			phase: "running",
+			label: "/goal ship it",
+		};
+
+		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
+
+		expect(mode.agentConnection.abort).not.toHaveBeenCalled();
 	});
 
 	it.each([
