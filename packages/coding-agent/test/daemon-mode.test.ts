@@ -46,6 +46,19 @@ import {
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 
+/** Session doubles must project an RLM budget the way AgentSession does; none of these carry one. */
+function idleRlmTokenBudgetStatus(): RlmTokenBudgetStatus {
+	return {
+		config: null,
+		source: "default",
+		depth: 0,
+		allowanceTokens: null,
+		tokensUsed: 0,
+		subtreePoolTokens: null,
+		exhausted: false,
+	};
+}
+
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
@@ -459,6 +472,7 @@ describe("daemon mode helpers", () => {
 				isStreaming: false,
 				unfinishedActionCount: 0,
 				hasRunningRlmChildren: () => false,
+				getRlmTokenBudgetStatus: idleRlmTokenBudgetStatus,
 			},
 		} as never;
 		const internals = daemon as unknown as {
@@ -514,6 +528,7 @@ describe("daemon mode helpers", () => {
 					isSessionActive: false,
 					unfinishedActionCount: 0,
 					hasRunningRlmChildren: () => false,
+					getRlmTokenBudgetStatus: idleRlmTokenBudgetStatus,
 				},
 			} as never;
 			const child = {
@@ -772,6 +787,7 @@ describe("daemon mode helpers", () => {
 				state: { pendingToolCalls: new Set(), streamingMessage: undefined },
 				thinkingLevel: "off",
 				hasRunningRlmChildren: () => false,
+				getRlmTokenBudgetStatus: idleRlmTokenBudgetStatus,
 				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			});
 			const childRuntime = await internals.createRlmSubagentRuntime(parentState, {
@@ -2449,6 +2465,7 @@ describe("daemon mode helpers", () => {
 				messages: [],
 				state: { pendingToolCalls: new Set(), streamingMessage: undefined },
 				hasRunningRlmChildren: () => false,
+				getRlmTokenBudgetStatus: idleRlmTokenBudgetStatus,
 			},
 		} as never;
 		const internals = daemon as unknown as {
@@ -2684,6 +2701,7 @@ describe("daemon mode helpers", () => {
 					messages: [],
 					state: { pendingToolCalls: new Set(), streamingMessage: undefined },
 					hasRunningRlmChildren: () => false,
+					getRlmTokenBudgetStatus: idleRlmTokenBudgetStatus,
 					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 				},
 			} as never;
@@ -9860,6 +9878,7 @@ function makePersistedRlmDaemonFixture(
 			unfinishedActionCount: 0,
 			state: { pendingToolCalls: new Set() },
 			hasRunningRlmChildren: () => false,
+			getRlmTokenBudgetStatus: idleRlmTokenBudgetStatus,
 			getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 			acceptAgentMessagePrompt,
@@ -9912,15 +9931,6 @@ function makeRuntimeSession(
 		},
 		setSubagentRuntimeHost: vi.fn(),
 		getRlmChildRunStatus: vi.fn(() => "running"),
-		getRlmTokenBudgetStatus: vi.fn(() => ({
-			config: null,
-			source: "default" as const,
-			depth: 0,
-			allowanceTokens: null,
-			tokensUsed: 0,
-			subtreePoolTokens: null,
-			exhausted: false,
-		})),
 		registerRlmChildSession: vi.fn(() => true),
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
 		subscribe: vi.fn(() => vi.fn()),
@@ -9978,6 +9988,7 @@ function makeAgentFamilyState(
 				getHeader: () => ({ created: new Date(0).toISOString() }),
 			},
 			hasRunningRlmChildren: () => false,
+			getRlmTokenBudgetStatus: idleRlmTokenBudgetStatus,
 			getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			acceptAgentMessagePrompt,
 		},

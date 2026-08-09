@@ -6,7 +6,6 @@ import { compactRlmText, rlmChildLabel } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
-import type { RlmTokenBudgetStatus } from "../../core/rlm-token-budget.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
@@ -278,16 +277,13 @@ export function summaryForActiveSession(
 	};
 }
 
-/**
- * RLM budget is optional display metadata, so a session that cannot report one must
- * still list and attach normally rather than failing the whole summary.
- */
-function readRlmTokenBudget(session: { getRlmTokenBudgetStatus?: () => RlmTokenBudgetStatus }): {
+/** Project a session's RLM budget onto the optional summary fields shown in the agents view. */
+function readRlmTokenBudget(session: ActiveSessionState["runtime"]["session"]): {
 	allowanceTokens?: number;
 	tokensUsed?: number;
 } {
-	const status = session.getRlmTokenBudgetStatus?.();
-	if (!status || status.allowanceTokens === null) return {};
+	const status = session.getRlmTokenBudgetStatus();
+	if (status.allowanceTokens === null) return {};
 	return { allowanceTokens: status.allowanceTokens, tokensUsed: status.tokensUsed };
 }
 
