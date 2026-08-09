@@ -1,4 +1,14 @@
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import {
+	chmodSync,
+	closeSync,
+	fsyncSync,
+	ftruncateSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
@@ -41,6 +51,7 @@ export type CommandJournalBeginResult =
 	| { status: "complete"; response: DaemonResponse };
 
 const COMPACT_AFTER_RECORDS = 4096;
+const LINE_FEED = 0x0a;
 
 export function createCommandIdempotencyKey(clientId: DaemonClientId, commandId: DaemonCommandId): string {
 	return JSON.stringify([clientId, commandId]);
@@ -157,8 +168,12 @@ export class CommandRecoveryJournal {
 
 	acknowledge(clientId: DaemonClientId, commandId: DaemonCommandId): void {
 		const key = createCommandIdempotencyKey(clientId, commandId);
-		if (!this.entries.has(key)) {
+		const entry = this.entries.get(key);
+		if (!entry) {
 			return;
+		}
+		if (!entry.response) {
+			throw new Error(`Cannot acknowledge daemon command ${key} before its result is durable`);
 		}
 		this.append({
 			version: 1,
@@ -173,9 +188,9 @@ export class CommandRecoveryJournal {
 	}
 
 	private load(): void {
-		let contents: string;
+		let contents: Buffer;
 		try {
-			contents = readFileSync(this.path, "utf8");
+			contents = readFileSync(this.path);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 				return;
@@ -183,82 +198,133 @@ export class CommandRecoveryJournal {
 			throw error;
 		}
 
-		const lines = contents.split("\n");
-		const partialTailIndex = contents.endsWith("\n") ? -1 : lines.length - 1;
-		for (let index = 0; index < lines.length; index++) {
-			const line = lines[index];
+		const hasTrailingNewline = contents.length === 0 || contents[contents.length - 1] === LINE_FEED;
+		const lastNewlineIndex = hasTrailingNewline ? contents.length - 1 : contents.lastIndexOf(LINE_FEED);
+		const completeByteLength = hasTrailingNewline ? contents.length : lastNewlineIndex + 1;
+		const completeLines = contents.subarray(0, completeByteLength).toString("utf8").split("\n");
+
+		for (let index = 0; index < completeLines.length; index++) {
+			const line = completeLines[index];
 			if (!line) continue;
-
-			let parsedValue: unknown;
-			try {
-				parsedValue = JSON.parse(line);
-			} catch {
-				// A crash may leave exactly one unterminated final append. Corruption in
-				// any earlier record is ambiguous and must stop recovery rather than be
-				// skipped while later effects are replayed.
-				if (index === partialTailIndex) continue;
-				throw journalCorruption(index + 1, "malformed JSON outside the final partial append");
-			}
-
-			if (typeof parsedValue !== "object" || parsedValue === null || Array.isArray(parsedValue)) {
-				throw journalCorruption(index + 1, "record must be a JSON object");
-			}
-			const parsed = parsedValue as Record<string, unknown>;
-			if (parsed.version !== 1 || typeof parsed.type !== "string" || typeof parsed.key !== "string") {
-				throw journalCorruption(index + 1, "unsupported version or missing type/key");
-			}
-			if (parsed.type !== "received" && parsed.type !== "result" && parsed.type !== "acknowledged") {
-				throw journalCorruption(index + 1, `unknown record type ${JSON.stringify(parsed.type)}`);
-			}
-
-			const record = parsed as unknown as JournalRecord;
-			this.recordCount++;
-			if (record.type === "received") {
-				if (
-					typeof record.clientId !== "string" ||
-					typeof record.commandId !== "string" ||
-					typeof record.commandType !== "string"
-				) {
-					throw journalCorruption(index + 1, "received record is missing clientId, commandId, or commandType");
-				}
-				const expectedKey = createCommandIdempotencyKey(record.clientId, record.commandId);
-				if (record.key !== expectedKey) {
-					throw journalCorruption(index + 1, `non-canonical key ${record.key}; expected ${expectedKey}`);
-				}
-				const existing = this.entries.get(record.key);
-				if (existing) {
-					try {
-						assertCommandTypeMatches(existing, record.key, record.commandType);
-					} catch (error) {
-						throw journalCorruption(index + 1, (error as Error).message);
-					}
-					continue;
-				}
-				this.entries.set(record.key, { received: record });
-				continue;
-			}
-
-			const entry = this.entries.get(record.key);
-			if (!entry) {
-				throw journalCorruption(index + 1, `${record.type} record has no preceding received record`);
-			}
-			if (record.type === "acknowledged") {
-				this.entries.delete(record.key);
-				continue;
-			}
-			if (!record.response || record.response.type !== "response") {
-				throw journalCorruption(index + 1, "result record is missing a daemon response");
-			}
-			try {
-				assertResponseMatchesReceipt(entry, record.key, record.response);
-			} catch (error) {
-				throw journalCorruption(index + 1, (error as Error).message);
-			}
-			if (entry.response && !responsesEqual(entry.response, record.response)) {
-				throw journalCorruption(index + 1, "conflicting durable results for one idempotency key");
-			}
-			entry.response = record.response;
+			this.applyParsedRecord(this.parseCompleteLine(line, index + 1), index + 1);
 		}
+
+		if (hasTrailingNewline) {
+			return;
+		}
+
+		const finalLineNumber = completeLines.length;
+		const tail = contents.subarray(completeByteLength).toString("utf8");
+		let parsedTail: unknown;
+		try {
+			parsedTail = JSON.parse(tail) as unknown;
+		} catch {
+			// A crash may leave one incomplete final append. Remove it now so a
+			// subsequent append cannot concatenate a valid record onto corrupt bytes.
+			this.truncateTo(completeByteLength);
+			return;
+		}
+
+		// A complete final record whose line feed was not persisted remains valid.
+		// Apply it and restore the append boundary before accepting new writes.
+		this.applyParsedRecord(parsedTail, finalLineNumber);
+		this.appendMissingLineFeed();
+	}
+
+	private parseCompleteLine(line: string, lineNumber: number): unknown {
+		try {
+			return JSON.parse(line) as unknown;
+		} catch {
+			throw journalCorruption(lineNumber, "malformed JSON outside the final partial append");
+		}
+	}
+
+	private applyParsedRecord(parsedValue: unknown, lineNumber: number): void {
+		if (typeof parsedValue !== "object" || parsedValue === null || Array.isArray(parsedValue)) {
+			throw journalCorruption(lineNumber, "record must be a JSON object");
+		}
+		const parsed = parsedValue as Record<string, unknown>;
+		if (parsed.version !== 1 || typeof parsed.type !== "string" || typeof parsed.key !== "string") {
+			throw journalCorruption(lineNumber, "unsupported version or missing type/key");
+		}
+		if (parsed.type !== "received" && parsed.type !== "result" && parsed.type !== "acknowledged") {
+			throw journalCorruption(lineNumber, `unknown record type ${JSON.stringify(parsed.type)}`);
+		}
+
+		const record = parsed as unknown as JournalRecord;
+		this.recordCount++;
+		if (record.type === "received") {
+			if (
+				typeof record.clientId !== "string" ||
+				typeof record.commandId !== "string" ||
+				typeof record.commandType !== "string"
+			) {
+				throw journalCorruption(lineNumber, "received record is missing clientId, commandId, or commandType");
+			}
+			const expectedKey = createCommandIdempotencyKey(record.clientId, record.commandId);
+			if (record.key !== expectedKey) {
+				throw journalCorruption(lineNumber, `non-canonical key ${record.key}; expected ${expectedKey}`);
+			}
+			const existing = this.entries.get(record.key);
+			if (existing) {
+				try {
+					assertCommandTypeMatches(existing, record.key, record.commandType);
+				} catch (error) {
+					throw journalCorruption(lineNumber, (error as Error).message);
+				}
+				return;
+			}
+			this.entries.set(record.key, { received: record });
+			return;
+		}
+
+		const entry = this.entries.get(record.key);
+		if (!entry) {
+			throw journalCorruption(lineNumber, `${record.type} record has no preceding received record`);
+		}
+		if (record.type === "acknowledged") {
+			if (!entry.response) {
+				throw journalCorruption(lineNumber, "acknowledged record has no preceding durable result");
+			}
+			this.entries.delete(record.key);
+			return;
+		}
+		if (!record.response || record.response.type !== "response") {
+			throw journalCorruption(lineNumber, "result record is missing a daemon response");
+		}
+		try {
+			assertResponseMatchesReceipt(entry, record.key, record.response);
+		} catch (error) {
+			throw journalCorruption(lineNumber, (error as Error).message);
+		}
+		if (entry.response && !responsesEqual(entry.response, record.response)) {
+			throw journalCorruption(lineNumber, "conflicting durable results for one idempotency key");
+		}
+		entry.response = record.response;
+	}
+
+	private truncateTo(byteLength: number): void {
+		const descriptor = openSync(this.path, "r+");
+		try {
+			ftruncateSync(descriptor, byteLength);
+			fsyncSync(descriptor);
+		} finally {
+			closeSync(descriptor);
+		}
+	}
+
+	private appendMissingLineFeed(): void {
+		const descriptor = openSync(this.path, "a", 0o600);
+		try {
+			const written = writeSync(descriptor, "\n");
+			if (written !== 1) {
+				throw new Error(`Could not restore command journal line boundary: wrote ${written} bytes`);
+			}
+			fsyncSync(descriptor);
+		} finally {
+			closeSync(descriptor);
+		}
+		chmodSync(this.path, 0o600);
 	}
 
 	private append(record: JournalRecord): void {
