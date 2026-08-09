@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -125,7 +125,7 @@ describe("CommandRecoveryJournal", () => {
 		).toThrow(/conflicting response/);
 	});
 
-	it("ignores a truncated final append", () => {
+	it("repairs a truncated final append before accepting later records", () => {
 		const path = createPath();
 		const journal = new CommandRecoveryJournal(path);
 		journal.begin("client-a", "command-a", "prompt");
@@ -133,6 +133,50 @@ describe("CommandRecoveryJournal", () => {
 
 		const restored = new CommandRecoveryJournal(path);
 		expect(restored.begin("client-a", "command-a", "prompt")).toEqual({ status: "pending" });
+		restored.recordResult("client-a", "command-a", {
+			id: "command-a",
+			type: "response",
+			command: "prompt",
+			success: true,
+		});
+
+		expect(new CommandRecoveryJournal(path).begin("client-a", "command-a", "prompt")).toEqual({
+			status: "complete",
+			response: {
+				id: "command-a",
+				type: "response",
+				command: "prompt",
+				success: true,
+			},
+		});
+	});
+
+	it("restores the missing line feed after a complete final record", () => {
+		const path = createPath();
+		writeFileSync(
+			path,
+			JSON.stringify({
+				version: 1,
+				type: "received",
+				key: createCommandIdempotencyKey("client-a", "command-a"),
+				clientId: "client-a",
+				commandId: "command-a",
+				commandType: "prompt",
+				recordedAt: new Date().toISOString(),
+			}),
+		);
+
+		const restored = new CommandRecoveryJournal(path);
+		expect(restored.lookup("client-a", "command-a", "prompt")).toEqual({ status: "pending" });
+		expect(readFileSync(path, "utf8").endsWith("\n")).toBe(true);
+
+		restored.recordResult("client-a", "command-a", {
+			id: "command-a",
+			type: "response",
+			command: "prompt",
+			success: true,
+		});
+		expect(new CommandRecoveryJournal(path).lookup("client-a", "command-a", "prompt")?.status).toBe("complete");
 	});
 
 	it("fails closed on malformed journal data before the final partial append", () => {
@@ -181,6 +225,38 @@ describe("CommandRecoveryJournal", () => {
 		);
 
 		expect(() => new CommandRecoveryJournal(path)).toThrow(/no preceding received record/);
+	});
+
+	it("rejects acknowledging an uncertain command", () => {
+		const journal = new CommandRecoveryJournal(createPath());
+		journal.begin("client-a", "command-a", "prompt");
+
+		expect(() => journal.acknowledge("client-a", "command-a")).toThrow(/before its result is durable/);
+		expect(journal.lookup("client-a", "command-a", "prompt")).toEqual({ status: "pending" });
+	});
+
+	it("fails closed when recovery finds an acknowledgement without a durable result", () => {
+		const path = createPath();
+		const key = createCommandIdempotencyKey("client-a", "command-a");
+		writeFileSync(
+			path,
+			`${JSON.stringify({
+				version: 1,
+				type: "received",
+				key,
+				clientId: "client-a",
+				commandId: "command-a",
+				commandType: "prompt",
+				recordedAt: new Date().toISOString(),
+			})}\n${JSON.stringify({
+				version: 1,
+				type: "acknowledged",
+				key,
+				recordedAt: new Date().toISOString(),
+			})}\n`,
+		);
+
+		expect(() => new CommandRecoveryJournal(path)).toThrow(/acknowledged record has no preceding durable result/);
 	});
 
 	it("durably removes acknowledged results", () => {
