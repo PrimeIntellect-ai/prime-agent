@@ -34,8 +34,8 @@ foreach ($candidate in @("prime-agent", "pi")) {
 }
 if (-not $Bin) { Write-Error "neither 'prime-agent' nor 'pi' on PATH"; exit 127 }
 
-# Freeze the gate definition at launch (byte-for-byte copies; the agent
-# cannot edit these mid-burst).
+# Freeze the gate definition so ordinary workspace edits cannot change gate retries.
+# This is not isolation from malicious same-account temp-directory tampering.
 $GateDir = Join-Path $env:TEMP ("prime-gate-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $GateDir | Out-Null
 Copy-Item "harness\verify.py" -Destination $GateDir

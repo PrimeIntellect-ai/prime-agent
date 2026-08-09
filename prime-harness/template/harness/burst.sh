@@ -36,8 +36,8 @@ if command -v prime-agent >/dev/null 2>&1; then BIN=prime-agent
 elif command -v pi >/dev/null 2>&1; then BIN=pi
 else echo "error: neither 'prime-agent' nor 'pi' on PATH" >&2; exit 127; fi
 
-# Freeze the gate definition at launch (byte-for-byte copies of the files the
-# human just reviewed; the agent cannot edit these mid-burst).
+# Freeze the gate definition so ordinary workspace edits cannot change gate retries.
+# This is not isolation from malicious same-account temp-directory tampering.
 GATE_DIR="$(mktemp -d)"
 trap 'rm -rf "$GATE_DIR"' EXIT
 cp harness/verify.py harness/manifest.json harness/manifest_policy.py "$GATE_DIR/"
