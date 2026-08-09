@@ -2172,6 +2172,49 @@ describe("AgentSession rlm recursion", () => {
 		expect(child.getRlmTokenBudgetStatus().allowanceTokens).toBe(25_000);
 	});
 
+	it("is completely inert when no token budget is configured", async () => {
+		let turns = 0;
+		const root = createSession({
+			maxDepth: 3,
+			streamFn: (_model, context) => {
+				turns++;
+				const toolResults = context.messages.filter((message) => message.role === "toolResult").length;
+				return streamAnswer(`turn ${turns} after ${toolResults} tool results`);
+			},
+		});
+
+		const status = root.getRlmTokenBudgetStatus();
+		expect(status).toMatchObject({
+			config: null,
+			source: "default",
+			allowanceTokens: null,
+			subtreePoolTokens: null,
+			exhausted: false,
+			tokensUsed: 0,
+		});
+
+		// Spawning is unaffected and no allowance is attached to the child.
+		const handle = await root.runRlmChild("unbudgeted child");
+		expect(handle.rlm_child_id).toBeTruthy();
+
+		// The agent loop runs normally and usage accrues nowhere.
+		await root.prompt("do some work");
+		await root.agent.waitForIdle();
+		expect(root.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(root.getRlmTokenBudgetStatus().tokensUsed).toBe(0);
+		expect(root.getRlmTokenBudgetStatus().exhausted).toBe(false);
+	});
+
+	it("keeps the kernel env free of budget variables when budgeting is off", () => {
+		const root = createSession({ maxDepth: 3, rlmSessionDir: tempDir });
+
+		const env = (root as unknown as { _rlmKernelEnv(): Record<string, string> })._rlmKernelEnv();
+
+		expect(env.RLM_MAX_DEPTH).toBe("3");
+		expect(env.RLM_TOKEN_ALLOWANCE).toBeUndefined();
+		expect(env.RLM_TOKEN_SUBTREE_POOL).toBeUndefined();
+	});
+
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {
 		let releaseTurn!: () => void;
 		const release = new Promise<void>((resolve) => {
