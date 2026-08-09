@@ -121,49 +121,333 @@ def _finite_float(value: Any, label: str) -> float:
     return result
 
 
+MAX_CORPUS_TASKS = 256
+MAX_TEXT_CHARS = 10_000
+MAX_EXPRESSION_CHARS = 4_096
+MAX_ASSUMPTIONS = 64
+MAX_VARIABLES = 64
+MAX_SAMPLES = 1_000
+MAX_NUMERIC_LADDER = 64
+MAX_CONVERGENCE_POINTS = 1_000
+MAX_INVARIANT_POINTS = 10_000
+MAX_FINITE_MAGNITUDE = 1e100
+SYMBOLIC_VERDICTS = frozenset({
+    "universally_equivalent", "equivalent_under_assumptions", "not_equivalent",
+})
+EXPECTED_RESPONSE_CONTRACTS = {
+    "convergence": {"observed_order": "finite number"},
+    "invariant": {"conserved": "boolean", "relative_drift": "finite number"},
+    "numeric": {"values": {"<precision_digits>": "finite decimal string for every requested ladder rung"}},
+    "symbolic": {
+        "assumptions": ["exact condition strings in the prompt/task; [] if none"],
+        "counterexample": {"variable": "finite number; required only for not_equivalent"},
+        "verdict": "universally_equivalent | equivalent_under_assumptions | not_equivalent",
+    },
+}
+ROOT_FIELDS = frozenset({
+    "schema_version", "corpus_version", "default_seed", "promotion_policy",
+    "reference_executor_sha256", "response_contracts", "tasks",
+})
+COMMON_TASK_FIELDS = frozenset({"id", "category", "prompt"})
+CATEGORY_TASK_FIELDS = {
+    "symbolic": frozenset({
+        "expected_verdict", "lhs", "random_samples", "required_assumptions", "rhs",
+        "sample_domain", "trap_samples", "valid_samples",
+    }),
+    "numeric": frozenset({"max_tolerance_digits", "precisions_digits", "reference"}),
+    "convergence": frozenset({"errors", "expected_order", "order_tolerance", "resolutions"}),
+    "invariant": frozenset({"report_tolerance", "rtol", "scale_floor", "series"}),
+}
+
+
+def _closed_object(value: Any, label: str, fields: frozenset[str]) -> dict[str, Any]:
+    obj = _require_dict(value, label)
+    unknown = sorted(set(obj) - fields)
+    missing = sorted(fields - set(obj))
+    if unknown:
+        raise ReplayError(f"{label} has unknown fields: {unknown}")
+    if missing:
+        raise ReplayError(f"{label} is missing required fields: {missing}")
+    return obj
+
+
+def _bounded_text(value: Any, label: str, maximum: int, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value) or len(value) > maximum or "\x00" in value:
+        qualifier = "possibly empty" if allow_empty else "non-empty"
+        raise ReplayError(f"{label} must be a {qualifier} string of at most {maximum} characters without NUL")
+    return value
+
+
+def _bounded_identifier(value: Any, label: str, maximum: int) -> str:
+    text = _bounded_text(value, label, maximum)
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+    if any(ch not in allowed for ch in text):
+        raise ReplayError(f"{label} contains unsupported characters")
+    return text
+
+
+def _variable_name(value: Any, label: str) -> str:
+    text = _bounded_text(value, label, 64)
+    if not (text[0].isalpha() or text[0] == "_") or any(not (ch.isalnum() or ch == "_") for ch in text):
+        raise ReplayError(f"{label} must be an identifier-like variable name")
+    if not text.isascii():
+        raise ReplayError(f"{label} must use ASCII variable characters")
+    return text
+
+
+def _json_number(value: Any, label: str, *, positive: bool = False) -> float:
+    if type(value) not in {int, float}:
+        raise ReplayError(f"{label} must be a JSON number")
+    result = float(value)
+    if not math.isfinite(result) or abs(result) > MAX_FINITE_MAGNITUDE:
+        raise ReplayError(f"{label} must be finite with magnitude at most {MAX_FINITE_MAGNITUDE:g}")
+    if positive and result <= 0:
+        raise ReplayError(f"{label} must be positive")
+    return result
+
+
+def _bounded_number(
+    value: Any, label: str, *, lower: float, upper: float,
+    lower_inclusive: bool = True, upper_inclusive: bool = True,
+) -> float:
+    result = _json_number(value, label)
+    lower_ok = result >= lower if lower_inclusive else result > lower
+    upper_ok = result <= upper if upper_inclusive else result < upper
+    if not lower_ok or not upper_ok:
+        left = "[" if lower_inclusive else "("
+        right = "]" if upper_inclusive else ")"
+        raise ReplayError(f"{label} must be in {left}{lower}, {upper}{right}")
+    return result
+
+
+def _bounded_int(value: Any, label: str, lower: int, upper: int) -> int:
+    if type(value) is not int or not lower <= value <= upper:
+        raise ReplayError(f"{label} must be an integer from {lower} through {upper}")
+    return value
+
+
+def _decimal_string(value: Any, label: str, *, nonzero: bool = False) -> Decimal:
+    text = _bounded_text(value, label, 256)
+    try:
+        number = Decimal(text)
+    except InvalidOperation as exc:
+        raise ReplayError(f"{label} must be a finite decimal string") from exc
+    if not number.is_finite() or abs(number) > Decimal("1e100") or (nonzero and number == 0):
+        suffix = " nonzero" if nonzero else ""
+        raise ReplayError(f"{label} must be a finite{suffix} decimal string with magnitude at most 1e100")
+    return number
+
+
+def _max_tolerance_digits(value: Any, label: str) -> int:
+    return _bounded_int(value, label, 6, 500)
+
+
+def _order_tolerance(value: Any, label: str) -> float:
+    return _bounded_number(value, label, lower=0.0, upper=0.5, lower_inclusive=False)
+
+
+def _relative_tolerance(value: Any, label: str) -> float:
+    return _bounded_number(value, label, lower=0.0, upper=1.0, lower_inclusive=False, upper_inclusive=False)
+
+
+def _scale_floor(value: Any, label: str) -> float:
+    return _bounded_number(value, label, lower=0.0, upper=1.0, lower_inclusive=False)
+
+
+def _report_tolerance(value: Any, rtol: float, label: str) -> float:
+    return _bounded_number(value, label, lower=0.0, upper=rtol, lower_inclusive=False)
+
+
+def _string_list(value: Any, label: str, maximum_items: int, maximum_chars: int) -> list[str]:
+    items = _require_list(value, label)
+    if len(items) > maximum_items:
+        raise ReplayError(f"{label} may contain at most {maximum_items} items")
+    result = [_bounded_text(item, f"{label}[{index}]", maximum_chars) for index, item in enumerate(items)]
+    if len(set(result)) != len(result):
+        raise ReplayError(f"{label} must not contain duplicates")
+    return result
+
+
+def _sample_point(value: Any, label: str) -> dict[str, float]:
+    point = _require_dict(value, label)
+    if not 1 <= len(point) <= MAX_VARIABLES:
+        raise ReplayError(f"{label} must contain from 1 through {MAX_VARIABLES} variables")
+    result: dict[str, float] = {}
+    for key, coordinate in point.items():
+        name = _variable_name(key, f"{label} variable")
+        result[name] = _json_number(coordinate, f"{label}.{name}")
+    return result
+
+
+def _sample_list(value: Any, label: str, *, require_nonempty: bool) -> list[dict[str, float]]:
+    samples = _require_list(value, label)
+    minimum = 1 if require_nonempty else 0
+    if not minimum <= len(samples) <= MAX_SAMPLES:
+        raise ReplayError(f"{label} must contain from {minimum} through {MAX_SAMPLES} sample points")
+    return [_sample_point(point, f"{label}[{index}]") for index, point in enumerate(samples)]
+
+
+def _validate_symbolic_task(task: dict[str, Any], label: str) -> None:
+    _bounded_text(task["lhs"], f"{label}.lhs", MAX_EXPRESSION_CHARS)
+    _bounded_text(task["rhs"], f"{label}.rhs", MAX_EXPRESSION_CHARS)
+    expected = task["expected_verdict"]
+    if expected not in SYMBOLIC_VERDICTS:
+        raise ReplayError(f"{label}.expected_verdict must be one of {sorted(SYMBOLIC_VERDICTS)}")
+    random_samples = _bounded_int(task["random_samples"], f"{label}.random_samples", 0, MAX_SAMPLES)
+    assumptions = _string_list(
+        task["required_assumptions"], f"{label}.required_assumptions", MAX_ASSUMPTIONS, 256,
+    )
+    if expected == "universally_equivalent" and assumptions:
+        raise ReplayError(f"{label}.required_assumptions must be empty for universally_equivalent")
+    if expected == "equivalent_under_assumptions" and not assumptions:
+        raise ReplayError(f"{label}.required_assumptions must be non-empty for equivalent_under_assumptions")
+
+    domain = _require_dict(task["sample_domain"], f"{label}.sample_domain")
+    if len(domain) > MAX_VARIABLES:
+        raise ReplayError(f"{label}.sample_domain may contain at most {MAX_VARIABLES} variables")
+    domain_names: set[str] = set()
+    for raw_name, raw_bounds in domain.items():
+        name = _variable_name(raw_name, f"{label}.sample_domain variable")
+        bounds = _require_list(raw_bounds, f"{label}.sample_domain.{name}")
+        if len(bounds) != 2:
+            raise ReplayError(f"{label}.sample_domain.{name} requires exactly two bounds")
+        low = _json_number(bounds[0], f"{label}.sample_domain.{name}[0]")
+        high = _json_number(bounds[1], f"{label}.sample_domain.{name}[1]")
+        if not low < high:
+            raise ReplayError(f"{label}.sample_domain.{name} lower bound must be below its upper bound")
+        domain_names.add(name)
+    if random_samples and not domain_names:
+        raise ReplayError(f"{label}.sample_domain must be non-empty when random_samples is positive")
+
+    valid = _sample_list(task["valid_samples"], f"{label}.valid_samples", require_nonempty=True)
+    traps = _sample_list(task["trap_samples"], f"{label}.trap_samples", require_nonempty=False)
+    if expected in {"not_equivalent", "equivalent_under_assumptions"} and not traps:
+        raise ReplayError(f"{label}.trap_samples must be non-empty for {expected}")
+    sample_names = set(valid[0])
+    for index, point in enumerate([*valid, *traps]):
+        if set(point) != sample_names:
+            raise ReplayError(f"{label} sample point {index} does not use the common variable set")
+    if not domain_names.issubset(sample_names):
+        raise ReplayError(f"{label}.sample_domain contains variables absent from sample points")
+    if random_samples and domain_names != sample_names:
+        raise ReplayError(f"{label}.sample_domain must cover every sample variable when random_samples is positive")
+
+
+def _validate_numeric_reference(value: Any, label: str) -> None:
+    reference = _require_dict(value, label)
+    algorithm = reference.get("algorithm")
+    if algorithm in {"sqrt", "expm1", "log1p"}:
+        reference = _closed_object(reference, label, frozenset({"algorithm", "value"}))
+        number = _decimal_string(reference["value"], f"{label}.value")
+        if algorithm == "sqrt" and number < 0:
+            raise ReplayError(f"{label}.value must be non-negative for sqrt")
+        if algorithm == "log1p" and number <= -1:
+            raise ReplayError(f"{label}.value must be greater than -1 for log1p")
+        return
+    if algorithm == "product_divide":
+        reference = _closed_object(reference, label, frozenset({"algorithm", "factors", "divisor"}))
+        factors = _require_list(reference["factors"], f"{label}.factors")
+        if not 1 <= len(factors) <= 32:
+            raise ReplayError(f"{label}.factors must contain from 1 through 32 decimal strings")
+        for index, factor in enumerate(factors):
+            _decimal_string(factor, f"{label}.factors[{index}]")
+        _decimal_string(reference["divisor"], f"{label}.divisor", nonzero=True)
+        return
+    raise ReplayError(f"{label}.algorithm is unsupported: {algorithm!r}")
+
+
+def _validate_numeric_task(task: dict[str, Any], label: str) -> None:
+    precisions = _require_list(task["precisions_digits"], f"{label}.precisions_digits")
+    if not 3 <= len(precisions) <= MAX_NUMERIC_LADDER:
+        raise ReplayError(f"{label}.precisions_digits must contain from 3 through {MAX_NUMERIC_LADDER} rungs")
+    checked = [_bounded_int(value, f"{label}.precisions_digits[{index}]", 10, 500) for index, value in enumerate(precisions)]
+    if any(before >= after for before, after in zip(checked, checked[1:])):
+        raise ReplayError(f"{label}.precisions_digits must be strictly increasing")
+    _max_tolerance_digits(task["max_tolerance_digits"], f"{label}.max_tolerance_digits")
+    _validate_numeric_reference(task["reference"], f"{label}.reference")
+
+
+def _number_series(value: Any, label: str, minimum: int, maximum: int, *, positive: bool) -> list[float]:
+    items = _require_list(value, label)
+    if not minimum <= len(items) <= maximum:
+        raise ReplayError(f"{label} must contain from {minimum} through {maximum} numbers")
+    return [_json_number(item, f"{label}[{index}]", positive=positive) for index, item in enumerate(items)]
+
+
+def _validate_convergence_task(task: dict[str, Any], label: str) -> None:
+    resolutions = _number_series(
+        task["resolutions"], f"{label}.resolutions", 3, MAX_CONVERGENCE_POINTS, positive=True,
+    )
+    errors = _number_series(task["errors"], f"{label}.errors", 3, MAX_CONVERGENCE_POINTS, positive=True)
+    if len(resolutions) != len(errors):
+        raise ReplayError(f"{label}.resolutions and {label}.errors must have equal length")
+    if any(before >= after for before, after in zip(resolutions, resolutions[1:])):
+        raise ReplayError(f"{label}.resolutions must be strictly increasing")
+    if any(before <= after for before, after in zip(errors, errors[1:])):
+        raise ReplayError(f"{label}.errors must be strictly decreasing")
+    expected = _bounded_number(task["expected_order"], f"{label}.expected_order", lower=0.0, upper=100.0, lower_inclusive=False)
+    tolerance = _order_tolerance(task["order_tolerance"], f"{label}.order_tolerance")
+    observed = sum(_observed_orders(resolutions, errors)) / (len(errors) - 1)
+    if not math.isfinite(observed) or abs(observed - expected) > tolerance:
+        raise ReplayError(f"{label}.expected_order is inconsistent with the supplied series and tolerance")
+
+
+def _validate_invariant_task(task: dict[str, Any], label: str) -> None:
+    _number_series(task["series"], f"{label}.series", 3, MAX_INVARIANT_POINTS, positive=False)
+    rtol = _relative_tolerance(task["rtol"], f"{label}.rtol")
+    _report_tolerance(task["report_tolerance"], rtol, f"{label}.report_tolerance")
+    _scale_floor(task["scale_floor"], f"{label}.scale_floor")
+
+
 def load_corpus(path: Path) -> tuple[dict[str, Any], str]:
-    corpus = _require_dict(_read_json(path), "corpus")
-    if corpus.get("schema_version") != SCHEMA_VERSION:
-        raise ReplayError(f"unsupported corpus schema: {corpus.get('schema_version')!r}")
-    if not isinstance(corpus.get("corpus_version"), str) or not corpus["corpus_version"]:
-        raise ReplayError("corpus_version must be a non-empty string")
-    seed = corpus.get("default_seed")
-    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
-        raise ReplayError("default_seed must be a non-negative integer")
-    reference_digest = corpus.get("reference_executor_sha256")
-    if not isinstance(reference_digest, str) or len(reference_digest) != 64 or any(ch not in "0123456789abcdef" for ch in reference_digest):
-        raise ReplayError("reference_executor_sha256 must be lowercase SHA-256")
-    tasks = _require_list(corpus.get("tasks"), "corpus.tasks")
-    if len(tasks) < 12:
-        raise ReplayError("corpus must contain at least 12 tasks")
+    corpus = _closed_object(_read_json(path), "corpus", ROOT_FIELDS)
+    if type(corpus["schema_version"]) is not int or corpus["schema_version"] != SCHEMA_VERSION:
+        raise ReplayError(f"unsupported corpus schema: {corpus['schema_version']!r}")
+    _bounded_text(corpus["corpus_version"], "corpus.corpus_version", 64)
+    _bounded_int(corpus["default_seed"], "corpus.default_seed", 0, 2**63 - 1)
+    reference_digest = corpus["reference_executor_sha256"]
+    if type(reference_digest) is not str or len(reference_digest) != 64 or any(ch not in "0123456789abcdef" for ch in reference_digest):
+        raise ReplayError("corpus.reference_executor_sha256 must be lowercase SHA-256")
+
+    policy = _closed_object(
+        corpus["promotion_policy"], "corpus.promotion_policy",
+        frozenset({"minimum_category_rate", "minimum_score_rate", "repetitions"}),
+    )
+    _bounded_number(policy["minimum_category_rate"], "corpus.promotion_policy.minimum_category_rate", lower=0.0, upper=1.0)
+    _bounded_number(policy["minimum_score_rate"], "corpus.promotion_policy.minimum_score_rate", lower=0.0, upper=1.0)
+    _bounded_int(policy["repetitions"], "corpus.promotion_policy.repetitions", 2, 5)
+
+    contracts = _require_dict(corpus["response_contracts"], "corpus.response_contracts")
+    if contracts != EXPECTED_RESPONSE_CONTRACTS:
+        raise ReplayError("corpus.response_contracts must exactly match the closed response-contract schema")
+
+    tasks = _require_list(corpus["tasks"], "corpus.tasks")
+    if not 12 <= len(tasks) <= MAX_CORPUS_TASKS:
+        raise ReplayError(f"corpus.tasks must contain from 12 through {MAX_CORPUS_TASKS} tasks")
     seen: set[str] = set()
     categories: set[str] = set()
     for index, raw in enumerate(tasks):
-        task = _require_dict(raw, f"tasks[{index}]")
-        task_id = task.get("id")
-        if not isinstance(task_id, str) or not task_id:
-            raise ReplayError(f"tasks[{index}].id must be non-empty")
+        task = _require_dict(raw, f"corpus.tasks[{index}]")
+        task_id = _bounded_identifier(task.get("id"), f"corpus.tasks[{index}].id", 128)
         if task_id in seen:
             raise ReplayError(f"duplicate task id: {task_id}")
         seen.add(task_id)
         category = task.get("category")
-        if category not in {"symbolic", "numeric", "convergence", "invariant"}:
+        if category not in CATEGORY_TASK_FIELDS:
             raise ReplayError(f"unknown category for {task_id}: {category!r}")
+        label = f"corpus.tasks[{index}] ({task_id})"
+        _closed_object(task, label, COMMON_TASK_FIELDS | CATEGORY_TASK_FIELDS[category])
+        _bounded_text(task["prompt"], f"{label}.prompt", MAX_TEXT_CHARS)
         categories.add(category)
-        if category == "numeric":
-            precisions = task.get("precisions_digits")
-            if (
-                not isinstance(precisions, list)
-                or not precisions
-                or any(type(digits) is not int or not 10 <= digits <= 500 for digits in precisions)
-            ):
-                raise ReplayError(
-                    f"task {task_id} precisions_digits must be a non-empty list "
-                    "of integers from 10 through 500"
-                )
-        if not isinstance(task.get("prompt"), str) or not task["prompt"]:
-            raise ReplayError(f"task {task_id} has no prompt")
-    required = {"symbolic", "numeric", "convergence", "invariant"}
+        if category == "symbolic":
+            _validate_symbolic_task(task, label)
+        elif category == "numeric":
+            _validate_numeric_task(task, label)
+        elif category == "convergence":
+            _validate_convergence_task(task, label)
+        else:
+            _validate_invariant_task(task, label)
+    required = set(CATEGORY_TASK_FIELDS)
     if categories != required:
         raise ReplayError(f"corpus categories must be exactly {sorted(required)}")
     return corpus, _digest(corpus)
@@ -268,12 +552,17 @@ def verify_symbolic(task: dict[str, Any], response: Any, seed: int) -> tuple[boo
     answer = _require_dict(response, f"response {task['id']}")
     verdict = answer.get("verdict")
     expected = task.get("expected_verdict")
+    if expected not in SYMBOLIC_VERDICTS:
+        raise ReplayError(f"task {task['id']} expected_verdict must be one of {sorted(SYMBOLIC_VERDICTS)}")
     assumptions = answer.get("assumptions")
-    required = task.get("required_assumptions", [])
+    required = _string_list(task.get("required_assumptions", []), "required_assumptions", MAX_ASSUMPTIONS, 256)
+    task_traps = _require_list(task.get("trap_samples", []), "trap_samples")
+    if expected in {"not_equivalent", "equivalent_under_assumptions"} and not task_traps:
+        raise ReplayError(f"task {task['id']} trap_samples must be non-empty for {expected}")
     contract_ok = verdict == expected and assumptions == required
     valid = _symbolic_samples(task, seed)
     valid_ok = bool(valid) and all(_equivalent_at(task, p) for p in valid)
-    traps = _require_list(task.get("trap_samples", []), "trap_samples")
+    traps = task_traps
     trap_detected = any(not _equivalent_at(task, p) for p in traps)
     oracle_ok = valid_ok
     if expected in {"not_equivalent", "equivalent_under_assumptions"}:
@@ -318,6 +607,9 @@ def verify_numeric(task: dict[str, Any], response: Any, _seed: int) -> tuple[boo
     expected_keys = {str(p) for p in precisions}
     if set(values) != expected_keys:
         return False, {"ladder_passed": 0, "ladder_total": len(precisions), "shape_ok": False}
+    max_tolerance_digits = _max_tolerance_digits(
+        task.get("max_tolerance_digits", 60), f"task {task['id']} max_tolerance_digits",
+    )
     passed_count = 0
     for raw_digits in precisions:
         if not isinstance(raw_digits, int) or raw_digits < 10 or raw_digits > 500:
@@ -329,7 +621,7 @@ def verify_numeric(task: dict[str, Any], response: Any, _seed: int) -> tuple[boo
             raise ReplayError(f"invalid decimal response for {task['id']}") from exc
         if not candidate.is_finite():
             continue
-        tolerance_digits = min(raw_digits - 4, int(task.get("max_tolerance_digits", 60)))
+        tolerance_digits = min(raw_digits - 4, max_tolerance_digits)
         tolerance = Decimal(10) ** Decimal(-tolerance_digits)
         error = abs(candidate - reference)
         threshold = tolerance * abs(reference) if reference != 0 else tolerance
@@ -359,7 +651,7 @@ def verify_convergence(task: dict[str, Any], response: Any, _seed: int) -> tuple
         raise ReplayError(f"resolutions must increase for {task['id']}")
     observed = sum(_observed_orders(resolutions, errors)) / (len(errors) - 1)
     expected = _finite_float(task.get("expected_order"), "expected_order")
-    tolerance = _finite_float(task.get("order_tolerance", 0.05), "order_tolerance")
+    tolerance = _order_tolerance(task.get("order_tolerance", 0.05), "order_tolerance")
     reported = _finite_float(answer.get("observed_order"), "response.observed_order")
     oracle_ok = abs(observed - expected) <= tolerance
     passed = oracle_ok and abs(reported - observed) <= tolerance
@@ -371,13 +663,16 @@ def verify_invariant(task: dict[str, Any], response: Any, _seed: int) -> tuple[b
     series = [_finite_float(x, "series") for x in _require_list(task.get("series"), "series")]
     if len(series) < 3:
         raise ReplayError(f"invariant series too short for {task['id']}")
-    scale = max(abs(series[0]), float(task.get("scale_floor", 1e-30)))
+    scale_floor = _scale_floor(task.get("scale_floor", 1e-30), "scale_floor")
+    scale = max(abs(series[0]), scale_floor)
     drift = max(abs(value - series[0]) for value in series) / scale
-    rtol = _finite_float(task.get("rtol"), "rtol")
+    rtol = _relative_tolerance(task.get("rtol"), "rtol")
     conserved = drift <= rtol
     reported_conserved = answer.get("conserved")
     reported_drift = _finite_float(answer.get("relative_drift"), "response.relative_drift")
-    report_tolerance = _finite_float(task.get("report_tolerance", max(rtol * 0.05, 1e-15)), "report_tolerance")
+    report_tolerance = _report_tolerance(
+        task.get("report_tolerance", max(rtol * 0.05, 1e-15)), rtol, "report_tolerance",
+    )
     passed = type(reported_conserved) is bool and reported_conserved == conserved and abs(reported_drift - drift) <= report_tolerance
     return passed, {"conserved": conserved, "relative_drift": round(drift, 15)}
 

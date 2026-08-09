@@ -532,3 +532,212 @@ def test_refinement_step_five_requires_behavior_replay_before_verification():
     for required in ('status="unverified"', "--baseline <before.json> --candidate <after.json>", "parent_snapshot_sha256", "regression", "held-out/gate-passing", "/refine rollback <refinement-id>"):
         assert required in step_five
     assert step_five.index('status="unverified"') < step_five.index("--baseline")
+
+
+# Closed-schema falsification matrix: every corpus field is either exact or
+# has an explicit type/size/range contract.  Each mutation must fail at load
+# time with ReplayError, before any weakened task reaches a verifier.
+def _corpus_task(corpus: dict, category: str) -> dict:
+    return next(task for task in corpus["tasks"] if task["category"] == category)
+
+
+def _set_task(corpus: dict, category: str, key: str, value) -> None:
+    _corpus_task(corpus, category)[key] = value
+
+
+def _drop_task(corpus: dict, category: str, key: str) -> None:
+    _corpus_task(corpus, category).pop(key)
+
+
+def _set_reference(corpus: dict, key: str, value) -> None:
+    _corpus_task(corpus, "numeric")["reference"][key] = value
+
+
+def _product_task(corpus: dict) -> dict:
+    return next(task for task in corpus["tasks"] if task.get("reference", {}).get("algorithm") == "product_divide")
+
+
+CORPUS_SCHEMA_MUTATIONS = [
+    # Root object and bounded policy/provenance fields.
+    ("root-unknown", lambda c: c.__setitem__("unexpected", True)),
+    ("root-missing-tasks", lambda c: c.pop("tasks")),
+    ("schema-version-bool", lambda c: c.__setitem__("schema_version", True)),
+    ("schema-version-wrong", lambda c: c.__setitem__("schema_version", 2)),
+    ("corpus-version-type", lambda c: c.__setitem__("corpus_version", 1)),
+    ("corpus-version-empty", lambda c: c.__setitem__("corpus_version", "")),
+    ("corpus-version-long", lambda c: c.__setitem__("corpus_version", "v" * 65)),
+    ("seed-bool", lambda c: c.__setitem__("default_seed", True)),
+    ("seed-negative", lambda c: c.__setitem__("default_seed", -1)),
+    ("seed-too-large", lambda c: c.__setitem__("default_seed", 2**63)),
+    ("digest-type", lambda c: c.__setitem__("reference_executor_sha256", 7)),
+    ("digest-shape", lambda c: c.__setitem__("reference_executor_sha256", "A" * 64)),
+    ("policy-unknown", lambda c: c["promotion_policy"].__setitem__("extra", 1)),
+    ("policy-category-bool", lambda c: c["promotion_policy"].__setitem__("minimum_category_rate", True)),
+    ("policy-category-low", lambda c: c["promotion_policy"].__setitem__("minimum_category_rate", -0.001)),
+    ("policy-category-high", lambda c: c["promotion_policy"].__setitem__("minimum_category_rate", 1.001)),
+    ("policy-score-bool", lambda c: c["promotion_policy"].__setitem__("minimum_score_rate", True)),
+    ("policy-score-low", lambda c: c["promotion_policy"].__setitem__("minimum_score_rate", -0.001)),
+    ("policy-score-high", lambda c: c["promotion_policy"].__setitem__("minimum_score_rate", 1.001)),
+    ("policy-repetitions-bool", lambda c: c["promotion_policy"].__setitem__("repetitions", True)),
+    ("policy-repetitions-low", lambda c: c["promotion_policy"].__setitem__("repetitions", 1)),
+    ("policy-repetitions-high", lambda c: c["promotion_policy"].__setitem__("repetitions", 6)),
+    ("contracts-extra-category", lambda c: c["response_contracts"].__setitem__("other", {})),
+    ("contracts-extra-field", lambda c: c["response_contracts"]["convergence"].__setitem__("extra", "x")),
+    ("contracts-weakened", lambda c: c["response_contracts"]["symbolic"].__setitem__("verdict", "anything")),
+    ("tasks-type", lambda c: c.__setitem__("tasks", {})),
+    ("tasks-too-few", lambda c: c.__setitem__("tasks", c["tasks"][:11])),
+    ("tasks-too-many", lambda c: c.__setitem__("tasks", [dict(c["tasks"][0], id=f"task-{i}") for i in range(257)])),
+    # Common task envelope.
+    ("task-unknown", lambda c: _set_task(c, "symbolic", "unexpected", 1)),
+    ("task-id-type", lambda c: _set_task(c, "symbolic", "id", 1)),
+    ("task-id-empty", lambda c: _set_task(c, "symbolic", "id", "")),
+    ("task-id-long", lambda c: _set_task(c, "symbolic", "id", "a" * 129)),
+    ("task-id-chars", lambda c: _set_task(c, "symbolic", "id", "bad id")),
+    ("task-category", lambda c: _set_task(c, "symbolic", "category", "other")),
+    ("task-prompt-type", lambda c: _set_task(c, "symbolic", "prompt", 1)),
+    ("task-prompt-empty", lambda c: _set_task(c, "symbolic", "prompt", "")),
+    ("task-prompt-long", lambda c: _set_task(c, "symbolic", "prompt", "p" * 10001)),
+    # Symbolic task oracle and sampling fields.
+    ("symbolic-lhs-type", lambda c: _set_task(c, "symbolic", "lhs", 1)),
+    ("symbolic-lhs-empty", lambda c: _set_task(c, "symbolic", "lhs", "")),
+    ("symbolic-lhs-long", lambda c: _set_task(c, "symbolic", "lhs", "x" * 4097)),
+    ("symbolic-rhs-empty", lambda c: _set_task(c, "symbolic", "rhs", "")),
+    ("symbolic-verdict", lambda c: _set_task(c, "symbolic", "expected_verdict", "colluding")),
+    ("symbolic-random-bool", lambda c: _set_task(c, "symbolic", "random_samples", True)),
+    ("symbolic-random-low", lambda c: _set_task(c, "symbolic", "random_samples", -1)),
+    ("symbolic-random-high", lambda c: _set_task(c, "symbolic", "random_samples", 1001)),
+    ("symbolic-assumptions-type", lambda c: _set_task(c, "symbolic", "required_assumptions", "none")),
+    ("symbolic-assumption-empty", lambda c: _set_task(c, "symbolic", "required_assumptions", [""])),
+    ("symbolic-assumption-long", lambda c: _set_task(c, "symbolic", "required_assumptions", ["a" * 257])),
+    ("symbolic-assumptions-many", lambda c: _set_task(c, "symbolic", "required_assumptions", [f"a{i}" for i in range(65)])),
+    ("symbolic-domain-type", lambda c: _set_task(c, "symbolic", "sample_domain", [])),
+    ("symbolic-domain-key", lambda c: _set_task(c, "symbolic", "sample_domain", {"bad key": [0, 1]})),
+    ("symbolic-domain-many", lambda c: _set_task(c, "symbolic", "sample_domain", {f"x{i}": [0, 1] for i in range(65)})),
+    ("symbolic-domain-bounds-type", lambda c: _set_task(c, "symbolic", "sample_domain", {"x": "0,1"})),
+    ("symbolic-domain-bounds-shape", lambda c: _set_task(c, "symbolic", "sample_domain", {"x": [0]})),
+    ("symbolic-domain-bounds-order", lambda c: _set_task(c, "symbolic", "sample_domain", {"x": [1, 1]})),
+    ("symbolic-domain-bounds-magnitude", lambda c: _set_task(c, "symbolic", "sample_domain", {"x": [0, 1e101]})),
+    ("symbolic-valid-type", lambda c: _set_task(c, "symbolic", "valid_samples", {})),
+    ("symbolic-valid-empty", lambda c: _set_task(c, "symbolic", "valid_samples", [])),
+    ("symbolic-valid-many", lambda c: _set_task(c, "symbolic", "valid_samples", [{"x": 0}] * 1001)),
+    ("symbolic-valid-point-type", lambda c: _set_task(c, "symbolic", "valid_samples", [1])),
+    ("symbolic-valid-point-key", lambda c: _set_task(c, "symbolic", "valid_samples", [{"bad key": 0}])),
+    ("symbolic-valid-point-value", lambda c: _set_task(c, "symbolic", "valid_samples", [{"x": "zero"}])),
+    ("symbolic-valid-point-magnitude", lambda c: _set_task(c, "symbolic", "valid_samples", [{"x": 1e101}])),
+    ("symbolic-traps-type", lambda c: _set_task(c, "symbolic", "trap_samples", {})),
+    ("symbolic-traps-many", lambda c: _set_task(c, "symbolic", "trap_samples", [{"x": 0}] * 1001)),
+    ("symbolic-required-trap", lambda c: _set_task(c, "symbolic", "expected_verdict", "not_equivalent")),
+    # Numeric ladder and reference union.
+    ("numeric-precisions-type", lambda c: _set_task(c, "numeric", "precisions_digits", "18")),
+    ("numeric-precisions-short", lambda c: _set_task(c, "numeric", "precisions_digits", [18, 36])),
+    ("numeric-precisions-many", lambda c: _set_task(c, "numeric", "precisions_digits", list(range(10, 75)))),
+    ("numeric-precisions-bool", lambda c: _set_task(c, "numeric", "precisions_digits", [True, 36, 72])),
+    ("numeric-precisions-low", lambda c: _set_task(c, "numeric", "precisions_digits", [9, 36, 72])),
+    ("numeric-precisions-high", lambda c: _set_task(c, "numeric", "precisions_digits", [18, 36, 501])),
+    ("numeric-precisions-order", lambda c: _set_task(c, "numeric", "precisions_digits", [18, 18, 72])),
+    ("numeric-mtd-bool", lambda c: _set_task(c, "numeric", "max_tolerance_digits", True)),
+    ("numeric-mtd-type", lambda c: _set_task(c, "numeric", "max_tolerance_digits", "60")),
+    ("numeric-mtd-low", lambda c: _set_task(c, "numeric", "max_tolerance_digits", 5)),
+    ("numeric-mtd-high", lambda c: _set_task(c, "numeric", "max_tolerance_digits", 501)),
+    ("numeric-reference-type", lambda c: _set_task(c, "numeric", "reference", [])),
+    ("numeric-reference-unknown", lambda c: _set_reference(c, "extra", 1)),
+    ("numeric-algorithm", lambda c: _set_reference(c, "algorithm", "eval")),
+    ("numeric-value-type", lambda c: _set_reference(c, "value", 2)),
+    ("numeric-value-empty", lambda c: _set_reference(c, "value", "")),
+    ("numeric-value-long", lambda c: _set_reference(c, "value", "1" * 257)),
+    ("numeric-value-nonfinite", lambda c: _set_reference(c, "value", "NaN")),
+    ("numeric-value-magnitude", lambda c: _set_reference(c, "value", "1e101")),
+    ("numeric-product-factors-empty", lambda c: _product_task(c)["reference"].__setitem__("factors", [])),
+    ("numeric-product-factors-many", lambda c: _product_task(c)["reference"].__setitem__("factors", ["1"] * 33)),
+    ("numeric-product-factor-type", lambda c: _product_task(c)["reference"].__setitem__("factors", [1])),
+    ("numeric-product-divisor-zero", lambda c: _product_task(c)["reference"].__setitem__("divisor", "0")),
+    # Convergence sequence and oracle bounds.
+    ("convergence-errors-type", lambda c: _set_task(c, "convergence", "errors", "bad")),
+    ("convergence-errors-short", lambda c: _set_task(c, "convergence", "errors", [1, 0.5])),
+    ("convergence-errors-many", lambda c: _set_task(c, "convergence", "errors", [1 / (i + 1) for i in range(1001)])),
+    ("convergence-errors-bool", lambda c: _set_task(c, "convergence", "errors", [1, True, 0.25])),
+    ("convergence-errors-zero", lambda c: _set_task(c, "convergence", "errors", [1, 0.5, 0])),
+    ("convergence-errors-magnitude", lambda c: _set_task(c, "convergence", "errors", [1e101, 1e100, 1e99])),
+    ("convergence-errors-order", lambda c: _set_task(c, "convergence", "errors", [1, 2, 1])),
+    ("convergence-resolutions-type", lambda c: _set_task(c, "convergence", "resolutions", "bad")),
+    ("convergence-resolutions-short", lambda c: _set_task(c, "convergence", "resolutions", [1, 2])),
+    ("convergence-resolutions-bool", lambda c: _set_task(c, "convergence", "resolutions", [1, True, 4])),
+    ("convergence-resolutions-order", lambda c: _set_task(c, "convergence", "resolutions", [1, 1, 2, 3])),
+    ("convergence-length-mismatch", lambda c: _set_task(c, "convergence", "resolutions", [1, 2, 4])),
+    ("convergence-order-bool", lambda c: _set_task(c, "convergence", "expected_order", True)),
+    ("convergence-order-low", lambda c: _set_task(c, "convergence", "expected_order", 0)),
+    ("convergence-order-high", lambda c: _set_task(c, "convergence", "expected_order", 101)),
+    ("convergence-tolerance-bool", lambda c: _set_task(c, "convergence", "order_tolerance", True)),
+    ("convergence-tolerance-low", lambda c: _set_task(c, "convergence", "order_tolerance", 0)),
+    ("convergence-tolerance-high", lambda c: _set_task(c, "convergence", "order_tolerance", 0.5001)),
+    # Invariant sequence and all three tolerance/scale bounds.
+    ("invariant-series-type", lambda c: _set_task(c, "invariant", "series", "bad")),
+    ("invariant-series-short", lambda c: _set_task(c, "invariant", "series", [1, 1])),
+    ("invariant-series-many", lambda c: _set_task(c, "invariant", "series", [1] * 10001)),
+    ("invariant-series-bool", lambda c: _set_task(c, "invariant", "series", [1, True, 1])),
+    ("invariant-series-magnitude", lambda c: _set_task(c, "invariant", "series", [1e101, 1, 1])),
+    ("invariant-rtol-missing", lambda c: _drop_task(c, "invariant", "rtol")),
+    ("invariant-rtol-bool", lambda c: _set_task(c, "invariant", "rtol", True)),
+    ("invariant-rtol-low", lambda c: _set_task(c, "invariant", "rtol", 0)),
+    ("invariant-rtol-high", lambda c: _set_task(c, "invariant", "rtol", 1)),
+    ("invariant-report-missing", lambda c: _drop_task(c, "invariant", "report_tolerance")),
+    ("invariant-report-bool", lambda c: _set_task(c, "invariant", "report_tolerance", True)),
+    ("invariant-report-low", lambda c: _set_task(c, "invariant", "report_tolerance", 0)),
+    ("invariant-report-high", lambda c: _set_task(c, "invariant", "report_tolerance", 1)),
+    ("invariant-floor-missing", lambda c: _drop_task(c, "invariant", "scale_floor")),
+    ("invariant-floor-bool", lambda c: _set_task(c, "invariant", "scale_floor", True)),
+    ("invariant-floor-low", lambda c: _set_task(c, "invariant", "scale_floor", 0)),
+    ("invariant-floor-high", lambda c: _set_task(c, "invariant", "scale_floor", 1.0001)),
+]
+
+
+@pytest.mark.parametrize(
+    "label,mutate", CORPUS_SCHEMA_MUTATIONS, ids=[case[0] for case in CORPUS_SCHEMA_MUTATIONS],
+)
+def test_entire_corpus_has_closed_bounded_schema(tmp_path, label, mutate):
+    replay = load_replay_module(f"prime_harness_replay_schema_{label.replace('-', '_')}")
+    corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
+    mutate(corpus)
+    path = write_json(tmp_path / f"{label}.json", corpus)
+    with pytest.raises(replay.ReplayError):
+        replay.load_corpus(path)
+
+
+def test_oracle_bounds_are_defended_again_inside_category_verifiers():
+    replay = load_replay_module("prime_harness_replay_dual_schema_guards")
+    corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
+
+    numeric = copy.deepcopy(_corpus_task(corpus, "numeric"))
+    numeric["max_tolerance_digits"] = "60"
+    with pytest.raises(replay.ReplayError, match="max_tolerance_digits"):
+        replay.verify_numeric(numeric, {"values": {"18": "0", "36": "0", "72": "0"}}, 0)
+
+    convergence = copy.deepcopy(_corpus_task(corpus, "convergence"))
+    convergence["order_tolerance"] = 1
+    with pytest.raises(replay.ReplayError, match="order_tolerance"):
+        replay.verify_convergence(convergence, {"observed_order": 1}, 0)
+
+    invariant = copy.deepcopy(_corpus_task(corpus, "invariant"))
+    invariant["rtol"] = 1
+    with pytest.raises(replay.ReplayError, match="rtol"):
+        replay.verify_invariant(invariant, {"conserved": True, "relative_drift": 0}, 0)
+
+    symbolic = copy.deepcopy(_corpus_task(corpus, "symbolic"))
+    symbolic["expected_verdict"] = "colluding"
+    with pytest.raises(replay.ReplayError, match="expected_verdict"):
+        replay.verify_symbolic(symbolic, {"verdict": "colluding", "assumptions": []}, 0)
+
+
+def test_invalid_corpus_contract_uses_exit_two_and_removes_stale_output(replay_repo):
+    root, _, before, _ = replay_repo
+    corpus_path = root / "checks/evalset/corpus.json"
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    _corpus_task(corpus, "numeric")["max_tolerance_digits"] = "abc"
+    write_json(corpus_path, corpus)
+    stale = root / "artifacts/harness/replay/stale-corpus.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('{"status":"pass"}\n', encoding="utf-8")
+    proc = run(root, "--snapshot", str(before), "--output", str(stale))
+    assert proc.returncode == 2
+    assert "max_tolerance_digits" in proc.stderr
+    assert not stale.exists()
