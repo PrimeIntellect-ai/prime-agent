@@ -963,6 +963,7 @@ async function createDaemonClientConnection(options: {
 				supportsExtensionUi: options.supportsExtensionUi,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
 				telemetryDisabled: options.config.telemetryDisabled,
+				reviveConfig: options.config,
 			});
 			return { connection, summary };
 		};

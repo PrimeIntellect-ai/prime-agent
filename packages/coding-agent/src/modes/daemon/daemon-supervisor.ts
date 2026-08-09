@@ -3402,6 +3402,11 @@ export class DaemonSupervisor {
 				...result,
 				state: result.state ? publicSummary : undefined,
 				snapshot: { ...result.snapshot, summary: publicSummary },
+				// Whether this attach created the socket's attachment entry: a
+				// client sharing the socket between connections needs this to
+				// know whether a cleanup detach would remove its own
+				// registration or a sibling's.
+				wasAttached,
 				client: { id: client.id, capabilities: [...client.capabilities] },
 			};
 			if (publicResult.state && publicResult.messages) {

@@ -57,8 +57,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 12 publishes idle-residency metadata on session summary rows.
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
-export const DAEMON_SCHEMA_REVISION = 14;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-14-816309b1cd50";
+// Revision 15 reports attach ownership (wasAttached) on attach results so shared-client
+// cleanup can tell its own attachment from a sibling connection's.
+export const DAEMON_SCHEMA_REVISION = 15;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-15-816309b1cd50";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -96,7 +98,12 @@ export type DaemonServerCapability =
 	// identity). Clients must check before sending.
 	| "transient_bash"
 	| "session_input_admission"
-	| "prompt_admission_cancellation";
+	| "prompt_admission_cancellation"
+	// Attach results report wasAttached (whether the attach created the
+	// socket's attachment entry). Clients must check before relying on the
+	// field for cleanup decisions; without it they fall back to the legacy
+	// unconditional detach.
+	| "attach_ownership";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -134,6 +141,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"transient_bash",
 	"session_input_admission",
 	"prompt_admission_cancellation",
+	"attach_ownership",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -293,6 +301,14 @@ export interface DaemonAttachResult {
 		messageCount: number;
 		targetChunkBytes: number;
 	};
+	/**
+	 * False when this attach created the socket's attachment entry for the
+	 * session, true when the socket was already attached (a sibling
+	 * connection on the shared client). Lets a failed transition decide
+	 * whether a cleanup detach would remove its own registration or a
+	 * sibling's. Absent on older daemons.
+	 */
+	wasAttached?: boolean;
 	client: {
 		id: DaemonClientId;
 		capabilities: DaemonClientCapability[];

@@ -8,7 +8,9 @@ import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connect
 import {
 	AgentsViewMode,
 	type AgentsViewPersistentState,
+	agentsViewSessionRuntimeConfig,
 	combineAgentsViewStartupNotices,
+	createAgentsViewResumeConfig,
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
@@ -675,6 +677,25 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 
 		expect(runs).toBe(2);
+	});
+});
+
+describe("agents view revive config", () => {
+	it("matches the resume config for both attach paths, including the cwd fallback", () => {
+		const config = { cwd: process.cwd(), model: "test-provider/test-model" } as never;
+		// The revive config a chat connection carries must be byte-identical to
+		// what resumeSavedAgentsViewSession would send: the connection's
+		// revival fallback recreates the session through the same create.
+		const intactCwdSummary = summary({ cwd: process.cwd() });
+		expect(agentsViewSessionRuntimeConfig(config, intactCwdSummary)).toEqual(
+			createAgentsViewResumeConfig(config, undefined),
+		);
+		const missingCwdSummary = summary({
+			cwd: "/definitely/not/a/real/dir/for/this/test",
+		});
+		expect(agentsViewSessionRuntimeConfig(config, missingCwdSummary)).toEqual(
+			createAgentsViewResumeConfig(config, process.cwd()),
+		);
 	});
 });
 

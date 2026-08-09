@@ -319,6 +319,21 @@ export function resolveAgentsViewOpenCwd(
 	};
 }
 
+/**
+ * The runtime config an agents-view chat uses to (re)create the session from
+ * its saved file — the same computation resumeSavedAgentsViewSession performs,
+ * shared so the connection's revival fallback recreates with the identical
+ * launch context instead of daemon defaults.
+ * @internal Exported to pin the revive-config parity without a live daemon.
+ */
+export function agentsViewSessionRuntimeConfig(
+	config: AgentSessionRuntimeConfig,
+	summary: SessionSummary,
+): AgentSessionRuntimeConfig {
+	const { overrideCwd } = resolveAgentsViewOpenCwd(summary, config.cwd);
+	return createAgentsViewResumeConfig(config, overrideCwd);
+}
+
 async function openAgentsViewSession(
 	options: AgentsViewModeOptions,
 	summary: SessionSummary,
@@ -333,6 +348,7 @@ async function openAgentsViewSession(
 				recoverDaemon: options.recoverDaemon,
 				reconnectTimeoutMs: options.reconnectTimeoutMs,
 				telemetryDisabled: options.config.telemetryDisabled,
+				reviveConfig: agentsViewSessionRuntimeConfig(options.config, summary),
 			});
 			return { connection, summary };
 		} catch (error) {
@@ -356,6 +372,7 @@ async function openAgentsViewSession(
 			recoverDaemon: options.recoverDaemon,
 			reconnectTimeoutMs: options.reconnectTimeoutMs,
 			telemetryDisabled: options.config.telemetryDisabled,
+			reviveConfig: resumed.reviveConfig,
 		});
 		return { connection, summary: resumed.summary, cwdFallbackNotice: resumed.cwdFallbackNotice };
 	} catch (error) {
@@ -373,14 +390,20 @@ async function resumeSavedAgentsViewSession(
 	client: DaemonClient,
 	config: AgentSessionRuntimeConfig,
 	summary: SessionSummary,
-): Promise<{ summary: SessionSummary; activeSessionId: string; cwdFallbackNotice?: string }> {
+): Promise<{
+	summary: SessionSummary;
+	activeSessionId: string;
+	cwdFallbackNotice?: string;
+	reviveConfig: AgentSessionRuntimeConfig;
+}> {
 	if (!summary.sessionFile) {
 		throw new Error("Cannot resume a session without a saved session file");
 	}
-	const { overrideCwd, notice } = resolveAgentsViewOpenCwd(summary, config.cwd);
+	const { notice } = resolveAgentsViewOpenCwd(summary, config.cwd);
+	const resumeConfig = agentsViewSessionRuntimeConfig(config, summary);
 	const response = await client.request({
 		type: "create",
-		config: createAgentsViewResumeConfig(config, overrideCwd),
+		config: resumeConfig,
 		sessionPath: summary.sessionFile,
 	});
 	const createdSummary = expectSessionSummary(requireDaemonData(response));
@@ -388,6 +411,9 @@ async function resumeSavedAgentsViewSession(
 		summary: createdSummary,
 		activeSessionId: getRequiredActiveSessionId(createdSummary),
 		cwdFallbackNotice: notice,
+		// The connection's revival fallback recreates with the same launch
+		// context this resume used.
+		reviveConfig: resumeConfig,
 	};
 }
 
@@ -1719,6 +1745,7 @@ export class AgentsViewMode implements Component, Focusable {
 		let activeSessionId = currentSummary.activeSessionId;
 		let liveSummary = activeSessionId ? currentSummary : undefined;
 		let cwdFallbackNotice: string | undefined;
+		let resumedReviveConfig: AgentSessionRuntimeConfig | undefined;
 		let didResume = false;
 		try {
 			if (!activeSessionId) {
@@ -1736,6 +1763,10 @@ export class AgentsViewMode implements Component, Focusable {
 				// streaming state for scheduling the prompt.
 				liveSummary = resumed.summary;
 				cwdFallbackNotice = resumed.cwdFallbackNotice;
+				// The config the resume just created with (including any fallback
+				// cwd for a missing recorded directory) also governs a revival of
+				// the delivery connection.
+				resumedReviveConfig = resumed.reviveConfig;
 				this.inactiveAgentIdentities.delete(getSummaryIdentity(target.summary));
 				// The resume and delivery still belong to this submission, but selection
 				// belongs to the current composer. Do not steal it after cancellation.
@@ -1743,7 +1774,7 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 			const behavior = delivery === "followUp" ? "followUp" : liveSummary?.isStreaming ? "steer" : undefined;
 			this.setStatusMessage("Sending reply...");
-			await this.sendPrompt(activeSessionId, text, behavior);
+			await this.sendPrompt(activeSessionId, text, behavior, liveSummary ?? target.summary, resumedReviveConfig);
 			// The fallback-directory notice must outlive the transient send statuses.
 			if (cwdFallbackNotice) this.setStatusMessage(cwdFallbackNotice, { sticky: true });
 			else this.setStatusMessage("Reply sent");
@@ -2092,15 +2123,26 @@ export class AgentsViewMode implements Component, Focusable {
 		activeSessionId: string,
 		message: string,
 		streamingBehavior?: "steer" | "followUp",
+		targetSummary?: SessionSummary,
+		reviveConfig?: AgentSessionRuntimeConfig,
 	): Promise<void> {
 		if (this.options.config.telemetryDisabled) {
 			const client = await this.connectDedicatedClient();
+			// The reply's revival fallback must recreate with the agents-view
+			// launch context, not daemon defaults. A config carried from the
+			// resume that just ran wins: recomputing from the now-live summary
+			// would strip a fallback cwd the resume was opened with (its
+			// recorded directory is missing), and revival would fail on it.
+			const revivalConfig =
+				reviveConfig ??
+				(targetSummary ? agentsViewSessionRuntimeConfig(this.options.config, targetSummary) : undefined);
 			const connection = await DaemonAgentConnection.attach(client, activeSessionId, {
 				closeClientOnDispose: true,
 				supportsExtensionUi: false,
 				recoverDaemon: this.options.recoverDaemon,
 				reconnectTimeoutMs: this.options.reconnectTimeoutMs,
 				telemetryDisabled: true,
+				...(revivalConfig ? { reviveConfig: revivalConfig } : {}),
 			});
 			try {
 				await connection.prompt(message, streamingBehavior === undefined ? undefined : { streamingBehavior });
