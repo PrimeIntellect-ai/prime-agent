@@ -525,25 +525,48 @@ function isProcessAlive(pid: number): boolean {
  * process (which may answer `EPERM`), and signalling or waiting on that
  * imposter marks a genuinely stopped worker as "failed" forever.
  */
-function workerDescriptorProcessIdentityMatches(
+type ProcessIdentityResult = "match" | "mismatch" | "unverifiable";
+
+function workerDescriptorProcessIdentityCheck(
 	descriptor: Pick<DaemonWorkerDescriptor, "pid" | "processStartId">,
-): boolean {
+): ProcessIdentityResult {
 	// Old workers without recorded start ID - trust the pid for backward compat
 	if (!descriptor.processStartId) {
-		return true;
+		return "match";
 	}
 	// Process is dead - signal will fail with ESRCH, harmless to proceed
 	if (!isProcessAlive(descriptor.pid)) {
-		return true;
+		return "match";
 	}
 	// We have a recorded ID - verify it matches the running process
 	const observedProcessStartId = getProcessStartId(descriptor.pid);
-	// If we can't observe the ID (platform limitation), refuse to signal
-	// since we have an expected ID and can't verify it
+	// If we can't observe the ID (platform limitation), it's unverifiable
 	if (observedProcessStartId === undefined) {
-		return false;
+		return "unverifiable";
 	}
-	return observedProcessStartId === descriptor.processStartId;
+	return observedProcessStartId === descriptor.processStartId ? "match" : "mismatch";
+}
+
+/**
+ * Check if the process at the descriptor's pid belongs to the worker.
+ * For signaling: returns true for "match", false for "mismatch" or "unverifiable"
+ * (refuse to signal when we can't verify - safe default).
+ */
+function workerDescriptorProcessIdentityMatches(
+	descriptor: Pick<DaemonWorkerDescriptor, "pid" | "processStartId">,
+): boolean {
+	return workerDescriptorProcessIdentityCheck(descriptor) === "match";
+}
+
+/**
+ * Check if the process might still be alive. For cleanup decisions: returns true
+ * for "match" or "unverifiable" (don't delete if we can't confirm dead),
+ * false only for verified "mismatch" (recycled pid, safe to cleanup).
+ */
+function workerDescriptorProcessMightBeAlive(
+	descriptor: Pick<DaemonWorkerDescriptor, "pid" | "processStartId">,
+): boolean {
+	return workerDescriptorProcessIdentityCheck(descriptor) !== "mismatch";
 }
 
 function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
@@ -4588,10 +4611,16 @@ export class DaemonSupervisor {
 		worker.transcriptCaches.clear();
 		worker.snapshotCache.clear();
 		worker.snapshotGenerations?.clear();
-		const isWorkerProcessAlive = () =>
+		// For signaling: only signal if identity is verified (avoid killing wrong process)
+		const canSignalWorker = () =>
 			directChild
 				? directChild.child.exitCode === null && directChild.child.signalCode === null
 				: workerDescriptorProcessIdentityMatches(worker.descriptor) && isProcessAlive(worker.descriptor.pid);
+		// For cleanup: process might still be alive if identity is unverifiable
+		const workerMightBeAlive = () =>
+			directChild
+				? directChild.child.exitCode === null && directChild.child.signalCode === null
+				: workerDescriptorProcessMightBeAlive(worker.descriptor) && isProcessAlive(worker.descriptor.pid);
 		if (worker.client) {
 			if (archiveSession) {
 				await worker.client
@@ -4604,25 +4633,25 @@ export class DaemonSupervisor {
 			worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
-		} else if (isWorkerProcessAlive()) {
+		} else if (canSignalWorker()) {
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGTERM");
 		}
 		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
-		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
+		while (workerMightBeAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
 		}
-		if (force && isWorkerProcessAlive()) {
+		if (force && canSignalWorker()) {
 			if (directChild) {
 				directChild.child.kill("SIGKILL");
 			} else {
 				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 			}
 			const forceDeadline = Date.now() + 1000;
-			while (isWorkerProcessAlive() && Date.now() < forceDeadline) {
+			while (workerMightBeAlive() && Date.now() < forceDeadline) {
 				await delay(25);
 			}
 		}
-		if (isWorkerProcessAlive()) {
+		if (workerMightBeAlive()) {
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
 			throw new Error(`Session worker ${worker.descriptor.workerId} did not stop${force ? " after SIGKILL" : ""}`);
 		}
