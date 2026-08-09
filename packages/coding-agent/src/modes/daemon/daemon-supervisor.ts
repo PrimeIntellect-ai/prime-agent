@@ -544,7 +544,16 @@ function workerDescriptorProcessIdentityCheck(
 	if (observedProcessStartId === undefined) {
 		return "unverifiable";
 	}
-	return observedProcessStartId === descriptor.processStartId ? "match" : "mismatch";
+	if (observedProcessStartId === descriptor.processStartId) {
+		return "match";
+	}
+	// Tokens from different renderings are not comparable: a legacy ps: token
+	// was recorded under the supervisor's then-ambient timezone/locale, so an
+	// inequality against today's pinned ps2: rendering proves nothing about
+	// PID reuse. Only same-format inequality is a mismatch.
+	const observedFormat = observedProcessStartId.slice(0, observedProcessStartId.indexOf(":"));
+	const recordedFormat = descriptor.processStartId.slice(0, descriptor.processStartId.indexOf(":"));
+	return observedFormat === recordedFormat ? "mismatch" : "unverifiable";
 }
 
 /**

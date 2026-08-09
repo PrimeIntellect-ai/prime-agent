@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getProcessStartId } from "../../../src/core/session-lease.js";
 import type { DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
 import { type DaemonCommand, type DaemonResponse, success } from "../../../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js";
@@ -18,6 +19,7 @@ import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js
 interface IdentityHarness {
 	stopWorker(worker: object, removeDescriptor: boolean, force?: boolean): Promise<void>;
 	adoptOrRecoverWorker(worker: object): Promise<void>;
+	deleteWorkerDescriptor: ReturnType<typeof vi.fn>;
 }
 
 interface SupervisorHarness {
@@ -48,7 +50,12 @@ async function spawnBystander(): Promise<ChildProcess> {
 
 // An unrelated live process stands in for a recycled pid: each descriptor
 // records the worker's original process start id, which no longer matches.
+// The forged token uses the SAME format the platform observes - a mismatch is
+// only trusted within one rendering format; cross-format inequality degrades
+// to unverifiable by design.
 function reusedPidWorker(bystander: ChildProcess, descriptorOverrides: object = {}) {
+	const observed = getProcessStartId(bystander.pid ?? process.pid);
+	const format = observed?.slice(0, observed.indexOf(":")) ?? "ps2";
 	return {
 		stopRevision: 0,
 		transcriptCaches: new Map(),
@@ -56,7 +63,7 @@ function reusedPidWorker(bystander: ChildProcess, descriptorOverrides: object = 
 		descriptor: {
 			workerId: "reused-pid-worker",
 			pid: bystander.pid,
-			processStartId: "ps:not-the-worker-start-time",
+			processStartId: `${format}:not-the-worker-start-time`,
 			lifecycle: "failed",
 			createCommand: { type: "create", config: {} },
 			...descriptorOverrides,
@@ -141,6 +148,52 @@ describe("issue #1045 failed worker poisons heartbeats_list", () => {
 
 				expect(worker.descriptor.lifecycle).not.toBe("failed");
 				expect(workers.size).toBe(0);
+				await expectUntouched(bystander);
+			} finally {
+				try {
+					bystander.kill("SIGKILL");
+				} catch {
+					// Already gone.
+				}
+			}
+		});
+	});
+
+	describe("process identity portability", () => {
+		it("renders the same portable start id regardless of the ambient timezone", () => {
+			const original = process.env.TZ;
+			try {
+				process.env.TZ = "UTC";
+				const underUtc = getProcessStartId(process.pid);
+				process.env.TZ = "America/Los_Angeles";
+				const underLa = getProcessStartId(process.pid);
+				expect(underUtc).toBeDefined();
+				expect(underLa).toBe(underUtc);
+			} finally {
+				if (original === undefined) delete process.env.TZ;
+				else process.env.TZ = original;
+			}
+		});
+
+		it("keeps a worker with a legacy-format start id tracked instead of reaping it", async () => {
+			const bystander = await spawnBystander();
+			try {
+				// A descriptor recorded by an older build under an unknown ambient
+				// timezone: inequality against today's pinned rendering proves
+				// nothing about PID reuse, so the worker must stay tracked (and
+				// must not be signalled either).
+				const worker = reusedPidWorker(bystander, {
+					workerId: "legacy-format-worker",
+					processStartId: "ps:Sun Aug  9 08:38:24 2026",
+				});
+				const workers = new Map<string, object>([[worker.descriptor.workerId, worker]]);
+				const supervisor = identityHarness(workers);
+
+				await supervisor.stopWorker(worker, true, true).catch(() => undefined);
+
+				// Unverifiable identity: the descriptor survives for a later sweep
+				// with better evidence, and the bystander is untouched.
+				expect(supervisor.deleteWorkerDescriptor).not.toHaveBeenCalled();
 				await expectUntouched(bystander);
 			} finally {
 				try {
