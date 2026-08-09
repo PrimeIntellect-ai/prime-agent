@@ -1,30 +1,54 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { ImageContent, Usage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.js";
 import type { ContextTreeNode } from "./context-tree.js";
 import { createExtensionRuntime } from "./extensions/loader.js";
 import type { HostRequestChannel } from "./kernel/index.js";
 import type { ResourceLoader } from "./resource-loader.js";
+import type { SessionEntry } from "./session-manager.js";
 import { addAssistantUsage, emptyUsage } from "./usage.js";
 
 const ACT_TOOL_NAME = "shared_ipython";
+const ACT_BRANCH_RESET_ENTRY = "prime-agent.act-branch-reset";
 
-export const ACT_SYSTEM_PROMPT = `You are the retained low-level Act actor working inside the directing model's live IPython world.
+const ACT_SYSTEM_PROMPT_BASE = `You are a trusted colleague handling one bounded action inside the calling engineer's live IPython kernel.
 
-Use the shared_ipython tool for every inspection and action. Each call runs one complete IPython cell in the directing session's existing namespace. Calls are serialized. Variables, files, processes, and root-authorized host tools are the real shared world, not a copy. Treat named variables as the handoff between you and the directing model: reuse objects already in the namespace, and leave useful intermediate state or results in clear variable names so the director can inspect and continue them after you return.
+Complete the assigned outcome and acceptance criteria through the simplest complete action. Write in ordinary engineering words. Do not invent process jargon. Use a focused check that can expose an error in the result. Report a missing premise, failed check, conflicting evidence, uncertainty, or untested limit when it affects the caller's decision.
 
-Finish the assigned task only by executing rlm.done(value) in a shared_ipython cell. The value remains in the root kernel and returns to Sol with exact Python identity. A normal text response does not complete the Act. Do not call rlm.done from a detached task. Do not spawn another actor or ask for user input.`;
+The current run prompt is your sole active assignment. Prior unfinished work and attached caller-history frames are context only: never resume an earlier assignment unless the current prompt asks for it.
+
+Use the shared_ipython tool for every inspection and action. Each call runs one complete IPython cell in the calling session's existing namespace, and calls are serialized. The cell sees the same Python variables, files, processes, and root-authorized host tools as the calling session. Reuse named objects already in the namespace, and leave useful intermediate state or results in clear variable names for the caller to inspect after you return.
+
+Confirm the supplied source scope before inspecting. Combine already-known reads, searches, parsing, and comparisons in one shared_ipython cell when they answer one bounded question. When the source location is unknown, perform one bounded discovery step and inspect its result before continuing. Keep complete results in named variables, emit only the counts or excerpts needed for the decision, and verify each reported path and symbol from source.
+
+Complete the assigned action only by executing rlm.done(value) in a shared_ipython cell. The value remains in the root kernel and returns to the caller with exact Python identity. A normal text response does not complete Act. Do not call rlm.done from a detached task. Do not spawn ordinary RLM children or ask the user for input.`;
+
+function actSystemPrompt(depth: number, maxDepth: number): string {
+	if (depth < maxDepth) {
+		return `${ACT_SYSTEM_PROMPT_BASE}
+
+One configured Act depth remains. You may delegate one bounded next-depth action with \`nested = await rlm.act(prompt, model=...)\` in a shared_ipython cell. Omit \`model\` only when that depth has a configured default. Reuse named objects already in the namespace, identify those bindings in the action, and ask the nested Act worker to leave later-use state in named variables. After it returns, inspect the returned object and shared state before continuing or calling your own rlm.done(value).`;
+	}
+	return `${ACT_SYSTEM_PROMPT_BASE}
+
+You are at the maximum configured Act depth. Complete the action through shared_ipython and rlm.done(value). Another nested Act call is unavailable.`;
+}
+
+export const ACT_SYSTEM_PROMPT = actSystemPrompt(1, 1);
 
 export interface ActLaneResult {
 	outcome: "done" | "text" | "cancelled";
 	text?: string;
 }
 
-type CreateActSession = (tool: AgentTool, model: string | undefined) => Promise<AgentSession>;
-type SelectActSession = (session: AgentSession, model: string | undefined) => Promise<void>;
+export interface ActLaneTarget {
+	sessionKey: string;
+	createSession(tool: AgentTool): Promise<AgentSession>;
+}
 
 type BeforeActPrompt = (state: {
+	sessionKey: string;
 	usage: Usage;
 	model?: { provider: string; id: string; name?: string };
 	thinkingLevel: string;
@@ -164,16 +188,17 @@ function usageFromSession(session: AgentSession): Usage {
 
 function formatCellResult(result: ActCellResult): string {
 	const sections: string[] = [];
-	if (result.stdout) sections.push(result.stdout);
-	if (result.stderr) sections.push(result.stderr);
-	if (result.result) sections.push(result.result);
-	if (result.error) sections.push(result.error);
-	return sections.join("\n").trim() || "Cell completed without output.";
+	if (result.stdout) sections.push(`[stdout]\n${result.stdout}`);
+	if (result.stderr) sections.push(`[stderr]\n${result.stderr}`);
+	if (result.result) sections.push(`[result]\n${result.result}`);
+	if (result.error) sections.push(`[error]\n${result.error}`);
+	return sections.join("\n\n") || "Cell completed without output.";
 }
 
-/** ActLane retains one private model session and serializes its root-world tasks. */
+/** ActLane retains one private session per resolved model and serializes its root-world tasks. */
 export class ActLane {
 	private session: AgentSession | undefined;
+	private readonly sessions = new Map<string, AgentSession>();
 	private creating: Promise<AgentSession> | undefined;
 	private active: ActiveAct | undefined;
 	private readonly idleWaiters = new Set<() => void>();
@@ -181,18 +206,14 @@ export class ActLane {
 	private disposedModel: { provider: string; id: string } | undefined;
 	private disposed = false;
 
-	constructor(
-		private readonly createSession: CreateActSession,
-		private readonly selectSession: SelectActSession,
-	) {}
-
 	async run(
 		prompt: string,
 		channel: HostRequestChannel,
-		model: string | undefined,
+		target: ActLaneTarget,
 		beforePrompt?: BeforeActPrompt,
 		onAdmitted?: () => void,
 		onProgress?: ActProgressHandler,
+		historyImages: readonly ImageContent[] = [],
 	): Promise<ActLaneResult> {
 		if (this.disposed) throw new Error("Act lane has been disposed");
 		if (this.active) throw new Error("Another Act is already active in this session");
@@ -219,6 +240,8 @@ export class ActLane {
 			abort,
 		};
 		this.active = active;
+		let activeSession: AgentSession | undefined;
+		let previousLeafId: string | null | undefined;
 		onAdmitted?.();
 		const abortFromChannel = () => abort();
 		const interruptFromExecution = () => abort(true);
@@ -228,9 +251,12 @@ export class ActLane {
 		if (channel.interruptSignal?.aborted) interruptFromExecution();
 		try {
 			if (controller.signal.aborted) return { outcome: "cancelled" };
-			const session = await this.getSession(model);
+			const session = await this.getSession(target);
+			activeSession = session;
+			previousLeafId = session.sessionManager.getLeafId();
 			if (controller.signal.aborted) return { outcome: "cancelled" };
 			beforePrompt?.({
+				sessionKey: target.sessionKey,
 				usage: usageFromSession(session),
 				model: session.model
 					? { provider: session.model.provider, id: session.model.id, name: session.model.name }
@@ -247,7 +273,13 @@ export class ActLane {
 					)
 				: () => {};
 			try {
-				await session.prompt(prompt, {
+				const contextNote = historyImages.length
+					? `
+
+${historyImages.length} attached bitmap frame(s) contain the caller's message delta since the previous Act at this depth. Use them only as context for the current assignment.`
+					: "";
+				await session.prompt(`${prompt}${contextNote}`, {
+					images: historyImages.length > 0 ? [...historyImages] : undefined,
 					expandPromptTemplates: false,
 					internalPrompt: true,
 					suppressAutonomousContinuation: true,
@@ -273,6 +305,12 @@ export class ActLane {
 			if (controller.signal.aborted) return { outcome: "cancelled" };
 			throw error;
 		} finally {
+			if (!active.completed && activeSession && previousLeafId !== undefined) {
+				if (previousLeafId === null) activeSession.sessionManager.resetLeaf();
+				else activeSession.sessionManager.branch(previousLeafId);
+				activeSession.sessionManager.appendCustomEntry(ACT_BRANCH_RESET_ENTRY);
+				activeSession.agent.state.messages = activeSession.buildSessionContext().messages;
+			}
 			channel.signal.removeEventListener("abort", abortFromChannel);
 			channel.interruptSignal?.removeEventListener("abort", interruptFromExecution);
 			if (this.active === active) {
@@ -298,17 +336,30 @@ export class ActLane {
 		return this.session ? usageFromSession(this.session) : this.disposedUsage;
 	}
 
-	get model(): { provider: string; id: string } | undefined {
+	get model(): { provider: string; id: string; name?: string } | undefined {
 		const model = this.session?.model;
-		return model ? { provider: model.provider, id: model.id } : this.disposedModel;
+		return model ? { provider: model.provider, id: model.id, name: model.name } : this.disposedModel;
+	}
+
+	get thinkingLevel(): string | undefined {
+		return this.session?.thinkingLevel;
 	}
 
 	get contextTree(): ContextTreeNode | undefined {
 		return this.session?.getContextTree();
 	}
 
+	/** callerHistoryEntries returns the active branch that invoked a nested Act. */
+	get callerHistoryEntries(): SessionEntry[] {
+		return this.session?.sessionManager.getBranch() ?? [];
+	}
+
 	get running(): boolean {
 		return this.active !== undefined;
+	}
+
+	get cellRunning(): boolean {
+		return this.active?.cellActive ?? false;
 	}
 
 	dispose(): void {
@@ -319,26 +370,30 @@ export class ActLane {
 			this.disposedUsage = usageFromSession(this.session);
 			const model = this.session.model;
 			this.disposedModel = model ? { provider: model.provider, id: model.id } : undefined;
-			if (!cancelledActive) this.session.requestAbort();
-			this.session.dispose();
 		}
+		for (const session of this.sessions.values()) {
+			if (!cancelledActive || session !== this.session) session.requestAbort();
+			session.dispose();
+		}
+		this.sessions.clear();
 		this.session = undefined;
 	}
 
-	private async getSession(model: string | undefined): Promise<AgentSession> {
-		if (this.session) {
-			const session = this.session;
-			await this.selectSession(session, model);
-			if (this.disposed || this.session !== session) throw new Error("Act lane has been disposed");
-			return session;
+	private async getSession(target: ActLaneTarget): Promise<AgentSession> {
+		const retained = this.sessions.get(target.sessionKey);
+		if (retained) {
+			this.session = retained;
+			return retained;
 		}
-		this.creating ??= this.createSession(this.createTool(), model);
+		this.session = undefined;
+		this.creating ??= target.createSession(this.createTool());
 		try {
 			const session = await this.creating;
 			if (this.disposed) {
 				session.dispose();
 				throw new Error("Act lane has been disposed");
 			}
+			this.sessions.set(target.sessionKey, session);
 			this.session = session;
 			return session;
 		} finally {
@@ -386,15 +441,18 @@ export class ActLane {
 	}
 }
 
-export function createActResourceLoader(): ResourceLoader {
+export function createActResourceLoader(
+	options: { depth: number; maxDepth: number } = { depth: 1, maxDepth: 1 },
+): ResourceLoader {
 	const extensions = { extensions: [], errors: [], runtime: createExtensionRuntime() };
+	const systemPrompt = actSystemPrompt(options.depth, options.maxDepth);
 	return {
 		getExtensions: () => extensions,
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => ACT_SYSTEM_PROMPT,
+		getSystemPrompt: () => systemPrompt,
 		getAppendSystemPrompt: () => [],
 		extendResources: () => {},
 		reload: async () => {},

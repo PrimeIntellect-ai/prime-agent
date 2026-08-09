@@ -1,14 +1,14 @@
 ---
 name: goal
-description: Manage the persistent thread goal from IPython. Use to read goal status and budget usage, to start a goal when the user explicitly asks for one, or to mark the active goal complete once its objective is fully achieved.
+description: Manage Prime Agent's persistent thread goal from IPython. Use to inspect goal status and budget use, create a goal when the user or higher-priority instructions explicitly request one, pause for a purely external dependency, resume after that dependency clears, or record actual completion.
 ---
 
 # Goal
 
-The thread goal is a persistent objective the harness keeps re-prompting you to
-pursue across turns until it is complete. Goal state (status, token budget,
-usage accounting) lives in the host; this skill is the kernel-side interface to
-it. Call it directly from IPython:
+A thread goal is a persistent objective that Prime Agent continues across turns
+until it is completed, paused, budget-limited, or otherwise ended by the host.
+The host stores its status, token budget, and usage accounting. This skill is the
+IPython interface to that state.
 
 ```python
 await goal.get()
@@ -20,33 +20,34 @@ await goal.complete()
 
 ## API
 
-- `await goal.get()` — current goal as a dict: `goal` (or `None` when no goal
-  is set), `remaining_tokens`, and `completion_budget_report`. The `goal` dict
-  carries `objective`, `status`, `token_budget`, `tokens_used`,
+- `await goal.get()` returns a dict containing `goal`, `remaining_tokens`, and
+  `completion_budget_report`. `goal` is `None` when no goal exists. Otherwise it
+  contains `objective`, `status`, `token_budget`, `tokens_used`,
   `time_used_seconds`, and timestamps.
-- `await goal.create(objective, token_budget=None)` — start a new active goal.
-  Fails while a goal is still pending (active, paused, or budget-limited); a
-  completed or errored goal is replaced by the new one. Only create a goal when
-  the user or system/developer instructions explicitly ask for a persistent
-  long-running goal; do not infer goals from ordinary tasks. Set `token_budget`
-  only when an explicit token budget is requested.
-- `await goal.pause(reason)` — pause autonomous continuation when no concrete
-  action is possible because progress depends only on an external actor or
-  event. Give the exact blocker; do not keep emitting holding updates.
-- `await goal.resume()` — reactivate a paused goal after new input resolves the
-  blocker.
-- `await goal.complete()` — mark the existing goal achieved. Use only when the
-  objective has actually been achieved and no required work remains; do not
-  call it merely because the budget is nearly exhausted or because you are
-  stopping work. When the result includes a `completion_budget_report`, report
-  that final usage to the user.
+- `await goal.create(objective, token_budget=None)` creates a new active goal. It
+  fails while a goal remains pending in the active, paused, or budget-limited
+  state. A completed or errored goal is replaced by the new goal. Create a
+  thread goal only when the user or system or developer instructions explicitly
+  request a persistent long-running objective. Do not infer one from an ordinary
+  task. Set `token_budget` only when an explicit token budget is requested.
+- `await goal.pause(reason)` pauses autonomous continuation when progress depends
+  only on an external actor or event and no concrete action remains. State the
+  exact dependency.
+- `await goal.resume()` reactivates a paused goal after new input or an external
+  event makes concrete progress possible.
+- `await goal.complete()` records that the objective has been achieved. Call it
+  only after every required result exists and no required work remains. When the
+  result includes `completion_budget_report`, report that final usage to the
+  user.
 
 ## Rules
 
-- Pause an incomplete goal instead of repeatedly reporting an unchanged
-  external blocker. Resume it only after new input makes concrete progress
-  possible. Clear and budget-limit transitions remain controlled by the user
-  and host.
-- When an active goal is actually complete, call `await goal.complete()`; do
-  not merely say it is done — the harness keeps continuing the goal until the
-  completion call arrives.
+- Use the objective to identify the required work. Verify its assumptions
+  against current observations, apply later user constraints, and follow the
+  governing instruction and authority boundaries.
+- Pause an incomplete goal when only an external dependency remains. Do not emit
+  repeated updates that report the same unchanged blocker. Resume only after the
+  dependency clears.
+- Budget exhaustion and the end of a turn do not establish completion.
+- When the objective is complete, call `await goal.complete()`. This call records
+  completion in host state and stops goal continuation.

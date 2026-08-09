@@ -205,6 +205,10 @@ describe("Claude Code runtime", () => {
 			tools: ["Read", "Edit"],
 			disallowedTools: ["Agent", "Task", "SendMessage"],
 		});
+		expect(CLAUDE_CODE_COORDINATION_PROMPT).toContain("simplest complete approach");
+		expect(CLAUDE_CODE_COORDINATION_PROMPT).toContain(
+			"Report material failed checks, conflicting evidence, uncertainty",
+		);
 		await expect(harness.input().next()).resolves.toEqual({ done: false, value: "initial task" });
 		harness.events.push({
 			kind: "init",

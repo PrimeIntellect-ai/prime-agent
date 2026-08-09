@@ -1,42 +1,80 @@
 ---
 name: skill-creator
-description: Create, validate, and install Prime Agent skills - both markdown skills and Python-backed skills callable from the IPython kernel. Use when the user asks to create a skill, turn a workflow, script, or prompt into a reusable skill, add a Python skill the agent can call, or asks how to write a SKILL.md and where skills live.
+description: Create, validate, and install Prime Agent Agent Skills, including Markdown instruction skills and Python-backed skills callable from the persistent IPython kernel. Use when the user asks to create a skill, package a reusable workflow or capability, add a Python skill, or explain SKILL.md structure and skill locations.
 ---
 
 # Skill Creator
 
-A skill is a directory with a `SKILL.md` file (YAML frontmatter + markdown instructions). At startup Prime Agent reads only each skill's name and description into the system prompt; the full file loads on demand when a task matches. Prime Agent follows the [Agent Skills standard](https://agentskills.io/specification) and extends it with Python-backed skills.
+An Agent Skill is a directory whose `SKILL.md` file contains YAML frontmatter
+and Markdown instructions. Prime Agent reads each visible skill's name and
+description at startup, then loads the full file when the task matches. Prime
+Agent implements the [Agent Skills specification](https://agentskills.io/specification)
+and adds Python-backed skills that install a package into the persistent
+IPython kernel.
 
-| Kind | What it is | When to use |
+| Kind | What it contains | Use it when |
 |---|---|---|
-| markdown | `SKILL.md` plus optional scripts, references, and assets | Workflows, CLI recipes, domain knowledge, multi-step instructions |
-| python | A markdown skill that also ships a Python package installed into the agent's persistent IPython kernel | Capabilities that are naturally one Python call: API wrappers, fetchers, converters, computations |
+| Markdown | `SKILL.md` plus optional scripts, references, and assets | The reusable capability is chiefly instructions, a decision flow, a CLI recipe, or domain reference material. |
+| Python-backed | A Markdown skill plus `pyproject.toml` and an importable Python package | The agent should invoke reusable executable functionality from IPython through a documented call. |
 
-Before writing a Python-backed skill, read [references/python-skills.md](references/python-skills.md) for the package contract.
+A Continual Harness `skill` entry stores metadata for a Python call that an
+installed package already provides. Use this skill creator for new executable
+functionality or a new on-disk Agent Skill. Use refinement to save the call
+contract for an existing capability.
 
-## Creating a Skill
+Before creating a Python-backed skill, read
+[references/python-skills.md](references/python-skills.md) for the package,
+callable, optional CLI, dependency, and verification contract.
 
-1. **Pick the kind.** Default to markdown. Go Python only when the agent should *call* the capability (`await my_skill(...)`) instead of following instructions.
-2. **Pick the location.** Ask the user when it is not obvious from context:
-   - Project skill, shared via the repo: `.prime/agent/skills/<name>/`
-   - Personal global skill: `~/.prime/agent/skills/<name>/`
-   - Shipped with an npm package: a `skills/` directory in the package, or `pi.skills` paths in its `package.json`
-3. **Scaffold and write** the directory using the layout and frontmatter rules below.
-4. **Verify** the skill loads (see Verification).
+## Creation Threshold
 
-On a name collision the first skill found wins. Precedence: explicit `--skill` paths and `skills` settings entries, then project, then global, then package, then built-in skills.
+Create a skill when the user explicitly requests one or when at least two
+concrete uses reveal the same missing reusable capability. Identify the behavior
+that must remain consistent, the existing command, library, prompt, or skill
+that does not provide it, and the boundary that requires reuse across tasks. If
+an existing mechanism satisfies the need, use it instead.
+
+Choose the smallest complete shape. Add a script, reference, asset,
+configuration file, schema, dependency, or Python package only when the skill's
+actual interface needs it. Remove unused scaffold before delivery.
+
+## Create the Skill
+
+1. Choose Markdown or Python-backed form from the intended interface. A
+   Python-backed skill must expose the documented Python call the agent needs;
+   a shell command is optional and exists only when the package declares one.
+2. Choose the location from task scope and repository policy:
+   - Prime Agent project skill: `.prime/agent/skills/<name>/`
+   - Cross-agent project skill: `.agents/skills/<name>/`
+   - Prime Agent personal skill: `~/.prime/agent/skills/<name>/`
+   - Cross-agent personal skill: `~/.agents/skills/<name>/`
+   - Package-provided skill: a `skills/` directory in the package, or a path in
+     the package's `pi.skills` setting
+3. Write `SKILL.md` and only the supporting files its interface requires.
+4. Validate the metadata, discovery, and actual invocation described below.
+
+When several skills share a name, the first discovered skill wins. Prime Agent
+applies explicit `--skill` paths first. Configured project paths precede
+auto-discovered project skills, followed by configured user paths,
+auto-discovered user skills, package skills, and built-in skills.
 
 ## Layout
 
-```
+```text
 my-skill/
-├── SKILL.md              # Required: frontmatter + instructions
-├── scripts/              # Optional helper scripts the instructions reference
-├── references/           # Optional detailed docs, loaded only when needed
-└── assets/               # Optional templates and data files
+├── SKILL.md
+├── scripts/
+├── references/
+└── assets/
 ```
 
-Everything except `SKILL.md` is freeform. Reference files with paths relative to the skill directory; the agent resolves them against the directory containing `SKILL.md`.
+Only `SKILL.md` is required. Supporting directories are optional. Refer to
+supporting files with paths relative to the directory that contains
+`SKILL.md`.
+
+A Python-backed skill also follows the package layout in
+[references/python-skills.md](references/python-skills.md), including
+`pyproject.toml` and `src/<import_name>/__init__.py`.
 
 ## Frontmatter
 
@@ -49,33 +87,59 @@ description: What this skill does and when to use it. Be specific.
 
 | Field | Required | Rules |
 |---|---|---|
-| `name` | Yes | Max 64 chars. Lowercase a-z, 0-9, hyphens. No leading/trailing/consecutive hyphens. Must match the parent directory name. |
-| `description` | Yes | Max 1024 chars. A skill with a missing or empty description is **silently not loaded**. |
-| `disable-model-invocation` | No | `true` hides the skill from the system prompt; only explicit `/skill:<name>` invokes it. |
-| `license` | No | License name or reference to a bundled file. |
-| `compatibility` | No | Max 500 chars. Environment requirements. |
+| `name` | Yes | 1 through 64 characters. Lowercase `a-z`, digits, and hyphens only. No leading, trailing, or consecutive hyphens. Must match the parent directory name. |
+| `description` | Yes | At most 1024 characters. State both the capability and the task conditions that should load it. A missing or empty description prevents model routing. |
+| `disable-model-invocation` | No | `true` hides the skill from the startup skill list. The user can still invoke it with `/skill:<name>`. |
+| `license` | No | License name or a reference to a bundled license file. |
+| `compatibility` | No | At most 500 characters describing environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
-| `allowed-tools` | No | Space-delimited pre-approved tools (experimental). |
+| `allowed-tools` | No | Space-delimited tool list from the Agent Skills specification. Prime Agent currently retains this experimental field as metadata. |
 
-Unknown fields are ignored. Name violations produce warnings but the skill still loads.
+Prime Agent ignores unknown fields. Name and length violations produce warnings;
+the runtime remains intentionally lenient where the Agent Skills integration
+permits it.
 
-### Write the description for routing
+### Description for routing
 
-The description is the only thing the model sees before deciding to load the skill. State what the skill does *and* the trigger conditions ("Use when ..."), naming the concrete tasks, tools, and phrases a request would contain.
+The description is the only prose the model sees before deciding whether to
+load the complete skill. Name what the skill does and the concrete requests,
+formats, services, or tools that should trigger it.
 
-Good: `Extracts text and tables from PDF files, fills PDF forms, and merges PDFs. Use when working with PDF documents.`
-Poor: `Helps with PDFs.`
+Good:
 
-### Write the body for progressive disclosure
+```yaml
+description: Extracts text and tables from PDF files, fills PDF forms, and merges PDFs. Use when working with PDF documents.
+```
 
-Keep `SKILL.md` short: the decision flow, the common commands, the contract. Push exhaustive detail (API schemas, full option lists, long examples) into `references/*.md` and link them, so they only enter context when actually needed. State setup steps (installs, env vars, credentials) explicitly and early.
+Too vague:
+
+```yaml
+description: Helps with PDFs.
+```
+
+### Body for progressive disclosure
+
+Keep `SKILL.md` focused on the decision path, common commands, setup, interface,
+and limits needed for normal use. Put long API schemas, exhaustive option lists,
+and uncommon examples in `references/*.md` and link them at the point of use.
+State required credentials, installation, or environment setup before the first
+operation that needs them.
 
 ## Verification
 
 After writing the skill:
 
-1. Re-read the frontmatter and check every rule in the table above, especially that `name` matches the directory name and the description is non-empty.
-2. In an interactive session, `/reload` picks up new skills without a restart; other sessions pick them up on start. Loading problems (bad name, missing description, name collisions) surface as warnings — ask the user to check, or check diagnostics yourself if you can.
-3. A loaded skill is also invocable as `/skill:<name>`, which the user can try directly.
-
-For Python-backed skills, also run the checks in [references/python-skills.md](references/python-skills.md).
+1. Check the frontmatter against every rule above. Confirm that `name` matches
+   the directory and that `description` is non-empty and specific enough for
+   routing.
+2. Run `/reload` in an interactive session to rediscover new or edited skill
+   metadata. Check runtime warnings for invalid names, missing descriptions, or
+   collisions.
+3. Load the skill through a matching task or `/skill:<name>` and verify that its
+   common path follows the documented instructions.
+4. For a Python-backed skill, run the checks in
+   [references/python-skills.md](references/python-skills.md), start a fresh
+   Prime Agent session so kernel setup can install and import the package, and
+   execute the documented Python call with a small real input. Verify its result
+   and failure behavior. Verify a shell command only when `pyproject.toml`
+   declares that console script.

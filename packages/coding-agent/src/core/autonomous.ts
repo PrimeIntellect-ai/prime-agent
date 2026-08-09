@@ -43,7 +43,7 @@ export interface AgentAutonomousStatus {
 }
 
 export const DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT =
-	"No human input is available in autonomous mode. Continue working until the host evaluator, verifier, or configured autonomous limits stop the run. If you were asking the user a question, make a reasonable assumption and verify it. If you believe you are blocked, prove it with host-observable evidence, preserve that evidence, and keep looking for safe progress while budget remains. Do not end the session yourself; the verifier/evaluator decides completion when configured gates pass.";
+	"No human input is available in autonomous mode. Continue until the host evaluator, verifier, or configured autonomous limits stop the run. When progress would normally require a user answer, choose a reasonable reversible assumption, state it in the current work, and check it against available evidence. Treat a blocker as established only when host-observable evidence shows that no safe concrete action remains. Preserve that evidence and continue other safe work while budget remains. Do not end the session yourself; the configured verifier or evaluator decides completion when its gates pass.";
 
 export const DEFAULT_AUTONOMOUS_LIMITS: Required<
 	Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates">

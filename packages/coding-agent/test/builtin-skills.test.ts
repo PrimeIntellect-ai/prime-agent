@@ -223,7 +223,7 @@ describe("builtin skills", () => {
 
 			expect(diagnostics).toEqual([]);
 			expect(skills.length).toBeGreaterThan(0);
-			expect(skills.map((s) => s.name)).toContain("prime-intellect");
+			expect(skills.map((s) => s.name)).not.toContain("prime-intellect");
 			expect(skills.map((s) => s.name)).toContain("skill-creator");
 		});
 

@@ -1,34 +1,35 @@
 ---
 name: attach-image
-description: Load an on-disk image (PNG, JPEG, GIF, WebP) into the model's context as a viewable attachment so the model can directly SEE it — for screenshots, diagrams, charts, photos, or scanned pages. Use this when you need to perceive an image's visual contents. Requires a vision-capable model; errors clearly otherwise.
+description: Add on-disk PNG, JPEG, GIF, or WebP images to the model context for visual inspection. Use for screenshots, diagrams, charts, photos, and scanned pages when the model must see their contents. Requires a vision-capable model.
 ---
 
 # Attach Image
 
-Load on-disk images into the model's context as multimodal attachments. The
-image is sent to the model the same way a pasted image is, so the model can
-actually look at it.
+Add an on-disk image to the model context as a multimodal attachment. The model
+receives it like an image pasted into the conversation and can inspect its
+visual contents.
 
-## When to use this
+## Use this skill when
 
-- The user points at an image file and wants you to look at it.
-- You need to read text, a chart, a diagram, or a layout from an image.
-- A screenshot needs visual interpretation.
+- the user identifies an image file and asks what it shows;
+- text, a chart, a diagram, a screenshot, or a page layout requires visual
+  interpretation; or
+- visual appearance, rather than file bytes alone, determines the answer.
 
-## When NOT to use this
+## Use a Python image library instead when
 
-For *programmatic* work on an image — measuring pixels, cropping, resizing,
-computing a hash, comparing files byte-by-byte — open it in the kernel with a
-library instead:
+The task is programmatic, such as measuring pixels, cropping, resizing,
+computing a hash, or comparing files byte for byte:
 
 ```python
 from PIL import Image
+
 img = Image.open("diagram.png")
 print(img.size)
 ```
 
-That path does not put the image in the model's context; it only lets you
-compute over it. Use `attach_image` when you need to *see* the image.
+A Python image library exposes pixels and metadata to Python. Use `attach_image`
+to place the image in model context for visual inspection.
 
 ## Usage
 
@@ -39,11 +40,11 @@ print(await attach_image("diagram.png"))
 print(await attach_image("a.png", "b.jpg"))
 ```
 
-The skill automatically resizes and compresses large images before loading them
-into context. Animated images that need compression are flattened to their first
-frame. Transparent images that need compression are composited onto a neutral
-gray background. Extremely large images are rejected by pixel count before full
-processing. The original file is left untouched.
+The skill resizes and compresses large images before attaching them. An animated
+image that requires compression is flattened to its first frame. A transparent
+image that requires compression is composited onto a neutral gray background.
+An image above the pixel-count limit is rejected before full processing. The
+original file is not modified.
 
-Supported formats: PNG, JPEG, GIF, WebP. The skill errors if a file is not a
-supported image, or if the current model is not vision-capable.
+Supported formats are PNG, JPEG, GIF, and WebP. The skill returns an error for
+an unsupported file or a model without vision support.

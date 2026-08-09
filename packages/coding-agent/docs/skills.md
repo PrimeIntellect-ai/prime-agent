@@ -48,7 +48,6 @@ Disable discovery with `--no-skills` (explicit `--skill` paths still load).
 
 Prime Agent ships with built-in skills that load by default:
 
-- `prime-intellect` - Prime Intellect products and workflows via the prime CLI: verifiers environments and the Environments Hub, evaluations (local and hosted), Hosted Training and prime-rl, sandboxes, tunnels, Prime Inference, GPU compute, and storage. Reference docs for each area load on demand from the skill's `references/` directory.
 - `skill-creator` - teaches the agent to create new skills: markdown skill layout, frontmatter rules, placement and precedence, and the full Python-backed skill contract (package layout, `run()` convention, optional CLI, kernel venv behavior) with a working template in `references/python-skills.md`.
 - `websearch` - a Python-backed Google search skill using the [Serper](https://serper.dev) API.
 
@@ -102,7 +101,7 @@ To disable all built-in skills, set `enableBuiltinSkills` to `false` in `setting
 
 ```json
 {
-  "skills": ["-prime-intellect/SKILL.md"]
+  "skills": ["-skill-creator/SKILL.md"]
 }
 ```
 

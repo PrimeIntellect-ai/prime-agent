@@ -1,49 +1,48 @@
 ---
 name: notion
-description: Search Notion and read/create/update pages and databases via Notion's official hosted MCP server. Tools are auto-discovered from the server at runtime.
+description: Search Notion and read, create, or update pages and databases through Notion's official hosted MCP server. Use for Notion work after discovering the server's current tool names and input schemas.
 ---
 
 # Notion
 
-Talk to Notion through its official hosted MCP server from the IPython kernel.
+Use Notion through its official hosted Model Context Protocol server from the
+IPython kernel. The server defines the available tools and their JSON Schema
+inputs at runtime.
 
 ## Setup
 
-Connect via `/login` → **Services** tab → **Notion** (OAuth in the browser).
-`/mcp login notion` does the same. Once connected, this skill is enabled
-automatically. If a call raises `NotEnabled`, the user isn't logged in — walk
-them through `/login`; don't ask them to set environment variables.
+Run `/login`, open the **Services** tab, and select **Notion** to authorize with
+OAuth in the browser. `/mcp login notion` performs the same connection flow.
+Once connected, the skill is enabled automatically. When a call raises
+`NotEnabled`, explain how to complete `/login`. Do not ask the user to set an
+environment variable for this connection.
 
 ## Usage
 
-The tool set is defined by the server, not by this skill, so **discover before
-you call** — don't assume tool names or argument names:
-
-Notion's tools are named with hyphens (e.g. `notion-search`, `notion-fetch`),
-which are **not** valid Python identifiers — so call them via `call_tool`:
+Discover the server's current tools before relying on a tool name or argument.
+Notion tool names commonly contain hyphens, such as `notion-search` and
+`notion-fetch`, so call them through `call_tool`:
 
 ```python
 import notion
 
-# 1. Discover available tools (returns names + schemas)
 for tool in await notion.list_tools():
     print(tool["name"], "-", tool["description"])
 
-# 2. Call by exact name; the second arg matches the tool's input schema
 result = await notion.call_tool("notion-search", {"query": "roadmap"})
 print(result)
 ```
 
-Tools whose names *are* valid identifiers can also be called as
-`await notion.<tool>(**args)`, and `help(notion.<tool>)` shows their schema once
-`list_tools()` has run.
+A tool whose exact name is a valid Python identifier can also be called as
+`await notion.<tool>(**args)`. After `list_tools()` has populated the schemas,
+`help(notion.<tool>)` shows that tool's input contract.
 
-Notes:
-- Every call is `async` — always `await`.
-- Results are already-parsed Python (a `dict` for structured output, otherwise a
-  string). No need to `json.loads` them.
-- Run `list_tools()` before relying on `help()` or assuming a tool exists — the
-  server's schema is the source of truth for names and arguments.
-- The kernel import name is `notion`. On a custom `PRIME_AGENT_KERNEL_PYTHON` that
-  already has the unrelated PyPI `notion` client installed, `import notion` may
-  resolve to that instead; use the default managed kernel venv to avoid the clash.
+- Every tool call is asynchronous and must be awaited.
+- Structured results arrive as parsed Python values, usually a `dict`.
+  Unstructured results arrive as strings. Do not call `json.loads` on a parsed
+  result.
+- The connected server is authoritative for current tool names and arguments.
+- The kernel import name is `notion`. In a custom `PRIME_AGENT_KERNEL_PYTHON`
+  environment that already contains the unrelated PyPI `notion` client,
+  `import notion` may resolve to that package. Use the default managed kernel
+  environment to avoid the import collision.

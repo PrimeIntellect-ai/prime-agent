@@ -180,6 +180,33 @@ describe("AgentSession compaction characterization", () => {
 		});
 	});
 
+	it("routes custom summary preferences through local compaction", async () => {
+		const nativeCompact = vi.fn(async () => ({
+			provider: "faux",
+			replacementHistory: [{ type: "compaction", encrypted_content: "unused" }],
+			compactionItem: { type: "compaction" as const, encrypted_content: "unused" },
+		}));
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			nativeCompact,
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("one response"),
+			fauxAssistantMessage("two response"),
+			fauxAssistantMessage("local summary"),
+			fauxAssistantMessage("local turn summary"),
+		]);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+
+		const result = await harness.session.compact("focus on the failed migration check");
+
+		expect(nativeCompact).not.toHaveBeenCalled();
+		expect(result.providerNativeCompaction).toBeUndefined();
+		expect(result.summary).toContain("local summary");
+	});
+
 	it("re-expands native history immediately when setModel changes providers", async () => {
 		let releaseQueuedEvent = () => {};
 		const queuedEventGate = new Promise<void>((resolve) => {

@@ -177,29 +177,33 @@ function extractText(messages: AgentMessage[]): string {
 // ============================================================================
 
 describe("buildSummarizationPrompt", () => {
-	it("omits user instructions block when no instructions given", () => {
+	it("keeps fixed summary policy and the kernel note in the system prompt", () => {
 		const prompt = buildSummarizationPrompt();
-		expect(prompt).not.toContain("<user-instructions>");
 		expect(prompt).toContain("## Goal");
-		// The kernel keeps running across compaction — the note must not claim a wipe.
 		expect(prompt).toContain("IPython kernel keeps running");
+		expect(prompt).toContain("Preserve how each material statement is known");
+		expect(prompt).toContain("expectation that existed before the check and the observed result");
+		expect(prompt).toContain(
+			"Do not turn a plan, hypothesis, assistant claim, or requested action into a completed fact",
+		);
 		expect(prompt).not.toMatch(/wiped|restarted/);
 	});
 
-	it("includes user instructions in a delimited block before the kernel note", () => {
-		const prompt = buildSummarizationPrompt("focus on the auth refactor, remember the migration command");
-		expect(prompt).toContain("<user-instructions>");
-		expect(prompt).toContain("focus on the auth refactor, remember the migration command");
-		expect(prompt).toContain("</user-instructions>");
-		expect(prompt.indexOf("</user-instructions>")).toBeLessThan(prompt.indexOf("IPython kernel"));
+	it("keeps custom summary text out of the system prompt", () => {
+		const preference = "focus on the auth refactor, remember the migration command";
+		const prompt = buildSummarizationPrompt(preference);
+		expect(prompt).toContain("<summary-preferences-json-string>");
+		expect(prompt).not.toContain(preference);
+		expect(prompt).not.toContain("<user-instructions>");
 	});
 
 	it("uses the update template when a previous summary exists", () => {
 		const initial = buildSummarizationPrompt("focus on xyz");
 		const update = buildSummarizationPrompt("focus on xyz", "## Goal\nprevious summary");
-		expect(initial).not.toContain("existing summary provided in <previous-summary> tags");
-		expect(update).toContain("existing summary provided in <previous-summary> tags");
-		expect(update).toContain("<user-instructions>");
+		expect(initial).toContain("Create a structured context checkpoint");
+		expect(initial).not.toContain("Merge the new conversation data");
+		expect(update).toContain("Merge the new conversation data");
+		expect(update).toContain("A later message that adds work does not cancel earlier unfinished work");
 	});
 });
 

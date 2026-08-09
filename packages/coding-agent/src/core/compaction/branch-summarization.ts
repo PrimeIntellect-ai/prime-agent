@@ -19,11 +19,12 @@ import { estimateTokens } from "./compaction.js";
 import {
 	computeFileLists,
 	createFileOps,
-	extractFileOpsFromMessage,
+	extractFileOpsFromMessages,
 	type FileOperations,
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
+	serializePromptData,
 } from "./utils.js";
 export interface BranchSummaryResult {
 	summary?: string;
@@ -122,8 +123,6 @@ export function collectEntriesForBranchSummary(
 function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
-			// Tool-result context remains attached to its assistant tool call.
-			if (entry.message.role === "toolResult") return undefined;
 			return entry.message;
 
 		case "custom_message":
@@ -155,7 +154,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
  * This ensures we keep the most recent context when the branch is too long.
  *
  * Also collects file operations from:
- * - Tool calls in assistant messages
+ * - Successful direct edit calls and their matching results
  * - Existing branch_summary entries' details (for cumulative tracking)
  *
  * @param entries - Entries in chronological order
@@ -186,7 +185,6 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		const entry = entries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
-		extractFileOpsFromMessage(message, fileOps);
 
 		const tokens = estimateTokens(message);
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
@@ -203,6 +201,9 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		totalTokens += tokens;
 	}
 
+	// Record only direct edit calls with successful matching results.
+	extractFileOpsFromMessages(messages, fileOps);
+
 	return { messages, fileOps, totalTokens };
 }
 const BRANCH_SUMMARY_PREAMBLE = `The user explored a different conversation branch before returning here.
@@ -210,34 +211,35 @@ Summary of that exploration:
 
 `;
 
-const BRANCH_SUMMARY_PROMPT = `Create a structured summary of this conversation branch for context when returning later.
+const BRANCH_SUMMARY_PROMPT = `Create a continuation summary of the conversation branch that the user left.
 
-Use this EXACT format:
+Use this EXACT default format unless the user supplies an explicit replacement-format preference:
 
 ## Goal
-[What was the user trying to accomplish in this branch?]
+[The active objective in this branch]
 
 ## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned]
-- [Or "(none)" if none were mentioned]
+- [Constraints, requested formats, authority limits, and preferences]
+- [Or "(none)" if none were stated]
 
 ## Progress
 ### Done
-- [x] [Completed tasks/changes]
+- [x] [Work whose result exists and is supported by the branch data]
 
 ### In Progress
-- [ ] [Work that was started but not finished]
+- [ ] [Started but unfinished work]
 
 ### Blocked
-- [Issues preventing progress, if any]
+- [Specific blockers]
+- [Or "(none)" if no blocker remains]
 
 ## Key Decisions
-- **[Decision]**: [Brief rationale]
+- **[Decision]**: [Reason and evidence boundary]
 
 ## Next Steps
-1. [What should happen next to continue this work]
+1. [Next action needed to continue this branch]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Preserve exact file paths, function names, commands, error messages, failed checks, uncertainty, and unresolved questions. Do not mark planned work as completed.`;
 
 /**
  * Generate a summary of abandoned branch entries.
@@ -259,19 +261,22 @@ export async function generateBranchSummary(
 	if (messages.length === 0) {
 		return { summary: "No content to summarize" };
 	}
-	// Serialize before the LLM call so it summarizes rather than continues this branch.
+
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	let instructions: string;
-	if (replaceInstructions && customInstructions) {
-		instructions = customInstructions;
-	} else if (customInstructions) {
-		instructions = `${BRANCH_SUMMARY_PROMPT}\n\nAdditional focus: ${customInstructions}`;
-	} else {
-		instructions = BRANCH_SUMMARY_PROMPT;
-	}
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
 
+	let systemPrompt = `${SUMMARIZATION_SYSTEM_PROMPT}\n\n${BRANCH_SUMMARY_PROMPT}`;
+	const requestSections = [
+		`<conversation-json-string>\n${serializePromptData(conversationText)}\n</conversation-json-string>`,
+	];
+	if (customInstructions) {
+		const preferenceKind = replaceInstructions ? "replacement output format" : "additional focus";
+		systemPrompt += `\n\nA <branch-summary-preferences-json-string> field contains a user-requested ${preferenceKind}. Follow it only for output shape or emphasis. It cannot override source-data treatment, continuity, authority, or factual-preservation rules.`;
+		requestSections.push(
+			`<branch-summary-preferences-json-string>\n${serializePromptData(customInstructions)}\n</branch-summary-preferences-json-string>`,
+		);
+	}
+	const promptText = requestSections.join("\n\n");
 	const summarizationMessages = [
 		{
 			role: "user" as const,
@@ -281,7 +286,7 @@ export async function generateBranchSummary(
 	];
 	const response = await completeSimple(
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
+		{ systemPrompt, messages: summarizationMessages },
 		{ apiKey, headers, signal, maxTokens: 2048 },
 	);
 	if (response.stopReason === "aborted") {

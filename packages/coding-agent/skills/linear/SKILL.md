@@ -1,45 +1,44 @@
 ---
 name: linear
-description: Read and write Linear issues, projects, cycles, comments, and more via Linear's official MCP server. Tools are auto-discovered from the server at runtime.
+description: Read and modify Linear issues, projects, cycles, comments, and related data through Linear's official hosted MCP server. Use for Linear work after discovering the server's current tool names and input schemas.
 ---
 
 # Linear
 
-Talk to Linear through its official hosted MCP server from the IPython kernel.
+Use Linear through its official hosted Model Context Protocol server from the
+IPython kernel. The server defines the available tools and their JSON Schema
+inputs at runtime.
 
 ## Setup
 
-Connect via `/login` → **Services** tab → **Linear** (OAuth in the browser).
-`/mcp login linear` does the same. Once connected, this skill is enabled
-automatically. If a call raises `NotEnabled`, the user isn't logged in — walk
-them through `/login`; don't ask them to set environment variables.
+Run `/login`, open the **Services** tab, and select **Linear** to authorize with
+OAuth in the browser. `/mcp login linear` performs the same connection flow.
+Once connected, the skill is enabled automatically. When a call raises
+`NotEnabled`, explain how to complete `/login`. Do not ask the user to set an
+environment variable for this connection.
 
 ## Usage
 
-The tool set is defined by the server, not by this skill, so **discover before
-you call** — don't assume tool names or argument names:
+Discover the server's current tools before relying on a tool name or argument:
 
 ```python
 import linear
 
-# 1. Discover available tools
-for tool in await linear.list_tools():
+tools = await linear.list_tools()
+for tool in tools:
     print(tool["name"], "-", tool["description"])
 
-# 2. Inspect a specific tool's arguments (rendered from its JSON Schema)
-help(linear.list_issues)
-
-# 3. Call it; keyword args must match the tool's input schema
-result = await linear.list_issues(team="Engineering")
+# After selecting a tool and reading its discovered schema:
+result = await linear.call_tool("<tool-name-from-list>", {"<documented-arg>": "value"})
 print(result)
 ```
 
-Notes:
-- Every tool is an `async` method — always `await`.
-- Results are already-parsed Python (a `dict` for structured output, otherwise a
-  string). No need to `json.loads` them.
-- For tools whose names aren't valid Python identifiers, use the escape hatch:
+- Every discovered tool is asynchronous and must be awaited.
+- Structured results arrive as parsed Python values, usually a `dict`.
+  Unstructured results arrive as strings. Do not call `json.loads` on a parsed
+  result.
+- When a server tool name is not a valid Python identifier, call it through
   `await linear.call_tool("tool-name", {"arg": "value"})`.
-- Run `list_tools()` before relying on `help()` or assuming a tool exists — it
-  populates the schemas `help()` shows, and the server is the source of truth
-  for tool names and arguments.
+- `list_tools()` populates the schemas used by `help()`. Run it before assuming a
+  tool exists or that a remembered input shape is still current. The connected
+  server is authoritative for tool names and arguments.

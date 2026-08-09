@@ -31,7 +31,7 @@ export interface BuildSystemPromptOptions {
 	rlmDepth?: number;
 	/** Human-readable parent name or id for child communication doctrine. */
 	rlmParentAgent?: string;
-	/** Global harness state to inject as compact persistent context. */
+	/** Local and global Continual Harness state to inject as compact persistent context. */
 	harnessState?: HarnessState;
 	/** Enabled user-configured servers available through the generic kernel MCP API. */
 	genericMcpServers?: string[];
@@ -78,7 +78,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		// Append project context files
 		if (contextFiles.length > 0) {
 			prompt += "\n\n# Project Context\n\n";
-			prompt += "Project-specific instructions and guidelines:\n\n";
+			prompt += "Project-specific instructions and reference material:\n\n";
 			for (const { path: filePath, content } of contextFiles) {
 				prompt += `## ${filePath}\n\n${content}\n\n`;
 			}
@@ -130,9 +130,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		parentAgent: options.rlmParentAgent,
 	});
 
-	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
-	// menu, so the model reads when/why to delegate and then sees the concrete subagent
-	// specs it can match against — the same ordering as Claude Code's Agent tool.
+	// Append delegation guidance after the base prompt. The base block defines
+	// `rlm(...)` admission and handle mechanics; this block explains when delegation
+	// helps. The rendered subagent-spec roster follows in the harness-state block.
 	if ((allowRecursion ?? true) && hasIpython) {
 		const visiblePythonSkillNames = new Set(
 			getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName),
@@ -160,7 +160,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// Append project context files
 	if (contextFiles.length > 0) {
 		prompt += "\n\n# Project Context\n\n";
-		prompt += "Project-specific instructions and guidelines:\n\n";
+		prompt += "Project-specific instructions and reference material:\n\n";
 		for (const { path: filePath, content } of contextFiles) {
 			prompt += `## ${filePath}\n\n${content}\n\n`;
 		}

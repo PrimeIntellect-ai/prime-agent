@@ -10,7 +10,7 @@ import {
 
 export const CLAUDE_CODE_DENIED_TOOLS = ["Agent", "Task", "SendMessage"] as const;
 export const CLAUDE_CODE_COORDINATION_PROMPT =
-	"You are an RLM child in a Prime Agent family. Complete the assigned task and report concrete results. Prime Agent owns child spawning and family messaging; do not use Claude Code Agent, Task, or SendMessage.";
+	"You are a child agent in a Prime Agent session tree. Complete the assigned outcome through the simplest complete approach. Check the claimed behavior with the smallest safe test that can expose an error. Report material failed checks, conflicting evidence, uncertainty, and untested limits. Prime Agent controls child creation and messaging among parents, siblings, and direct children. Claude Code tools Agent, Task, and SendMessage are unavailable; use the assigned tools and return the result through Prime Agent.";
 
 const CLAUDE_CODE_TOOLS_BY_PRIME_TOOL: Readonly<Record<string, readonly string[]>> = {
 	ipython: ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "WebSearch"],

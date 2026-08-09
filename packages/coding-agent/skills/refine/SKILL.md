@@ -1,42 +1,57 @@
 ---
 name: refine
-description: Trigger continual harness refinement from IPython. Use when you notice a repeated failure, reusable tactic, delegation role, or behavior policy that should be persisted as a harness entry. Returns immediately; refinement runs when the current turn ends.
+description: Schedule a local or global Continual Harness refinement from IPython. Use after concrete trajectory evidence shows that a prompt note, memory, saved Python-call description, or subagent specification should be created, corrected, consolidated, or removed. Refinement runs after the current turn.
 ---
 
 # Refine
 
-Refinement analyzes the conversation trajectory and applies small, evidence-backed
-updates to the continual harness (prompts, memories, skills, subagent specs).
-The implementation lives in the host (the same one behind the user's `/refine`
-command); this skill is the kernel-side interface to it. Call it directly from
-IPython:
+Refinement reviews the current trajectory and applies small create, update, or
+delete edits to Continual Harness state. Continual Harness is Prime Agent's
+persisted editable set of prompt notes, memories, saved descriptions of Python
+calls, subagent specifications, and refinement history. A saved skill entry
+describes a callable that already exists in an installed Python package.
+
+The host implements the same operation as the user's `/refine` command. This
+skill schedules it from the IPython kernel:
 
 ```python
 await refine.status()
 await refine.run()
-await refine.run("create a memory about always checking git status before committing")
-await refine.run("promote the error-handling pattern to a global skill", global_=True)
+await refine.run("record the repeated repository-status failure as a local memory")
+await refine.run("promote the verified error-handling rule to global state", global_=True)
 ```
 
 ## API
 
-- `await refine.status()` — current refine state as a dict: `pending` (whether a
-  requested refine is already queued for this turn) and `in_flight` (whether a
-  refine is currently planning or applying).
-- `await refine.run(instructions=None, global_=False)` — schedule refinement.
-  Returns `{"scheduled": True}` immediately, or `{"scheduled": False, "reason": ...}`
-  when refinement cannot start. Optional `instructions` focus the refinement on a
-  specific observation. Set `global_=True` to target the global harness store
-  (cross-session); omit for local (session-scoped) refinement.
+- `await refine.status()` returns `pending`, which reports whether a refinement
+  is queued for this turn, and `in_flight`, which reports whether refinement is
+  currently being planned or applied.
+- `await refine.run(instructions=None, global_=False)` schedules refinement. It
+  returns `{"scheduled": True}` immediately, or
+  `{"scheduled": False, "reason": ...}` when refinement cannot start. Optional
+  `instructions` identify the observation or entry to review. The default
+  target is the current session's local store. `global_=True` targets the
+  cross-session global store.
 
 ## Rules
 
-- Refinement never runs mid-cell. A scheduled refinement runs when the current
-  turn ends; the harness applies changes and rebuilds the system prompt, then
-  resumes you automatically. Continue working normally after calling it.
-- One request per turn is enough; calling `run` again before the turn ends only
-  updates the instructions.
-- Use refinement after observing a repeated failure, a reusable tactic, a
-  repeated delegation role, or a behavior policy worth persisting. Do not
-  rewrite the whole harness when a focused memory, skill, prompt note, or
-  subagent spec is enough.
+- A scheduled refinement runs after the current turn, applies accepted edits,
+  rebuilds the prompt, and resumes the agent. Continue the current work after
+  scheduling it.
+- One request per turn is enough. A later `run` call in the same turn only
+  replaces the optional instructions.
+- Create or update state only when concrete trajectory evidence shows that it
+  can change a future decision or action. Preserve the source, uncertainty,
+  failed checks, and conflicting evidence that limit the entry.
+- An explicit user request or correction may justify a narrow entry. An
+  autonomously created reusable procedure should have at least two concrete
+  uses that expose the same missing capability and should not duplicate a
+  simpler existing mechanism.
+- Prefer correcting, consolidating, or deleting stale entries to adding another
+  overlapping layer. Change the smallest component that carries the reusable
+  fact or behavior.
+- Use local refinement for current-session progress, temporary blockers, and
+  project facts that should not affect unrelated sessions. Use global
+  refinement only for stable cross-session state, durable user preferences,
+  reusable call descriptions or delegation roles, and explicitly
+  project-qualified facts likely to recur.

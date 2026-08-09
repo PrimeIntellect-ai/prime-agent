@@ -1,22 +1,28 @@
 ---
 name: edit
-description: Replace an exact, unique string in an existing file. Use for targeted single-occurrence edits to files from the IPython kernel instead of rewriting the whole file.
+description: Replace one exact, unique string in an existing file. Use for a targeted single-occurrence edit from IPython when rewriting the whole file would be less precise.
 ---
 
 # Edit
 
-Make a targeted edit to an existing file by replacing one exact, unique
-occurrence of a string. `old_str` must appear exactly once in the file.
+Replace one exact, unique occurrence of `old_str` in an existing file.
+`old_str` must occur exactly once.
 
-Call directly from the kernel:
+Call the prepared async function from the IPython kernel:
 
-    await edit(path="pkg/file.py", old_str=old, new_str=new)
+```python
+await edit(path="pkg/file.py", old_str=old, new_str=new)
+```
 
-Use exact old/new strings. If the text contains triple double quotes, use
-triple single-quoted variables (`old = '''...'''`) or build `old`/`new` from
-inspected file slices. Returns a short confirmation; raises if `old_str` is
-missing or matches more than once (widen the snippet to make it unique).
+Use exact old and new strings. When the text contains triple double quotes, use
+triple single-quoted variables such as `old = '''...'''`, or construct `old`
+and `new` from file slices already inspected. The call returns a short
+confirmation. It raises an error when `old_str` is missing or matches more than
+once. Widen the inspected snippet until it is unique.
 
-Or from a shell cell:
+When the skill's shell command is available, run it in a shell cell:
 
-    !edit --path pkg/file.py --old-str "..." --new-str "..."
+```python
+%%bash
+edit --path pkg/file.py --old-str "..." --new-str "..."
+```
