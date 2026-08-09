@@ -221,6 +221,9 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
     panel = critic.review_panel(base="HEAD^", timeout_seconds=10)
     finding_id = panel["findings"][0]["finding_id"]
     database = tmp_repo / "artifacts/harness/evidence.db"
+    closure_artifact = tmp_repo / "artifacts/harness/verify/panel-regression.log"
+    closure_artifact.parent.mkdir(parents=True, exist_ok=True)
+    closure_artifact.write_text("verified regression\n", encoding="utf-8")
     connection = sqlite3.connect(database)
     try:
         connection.execute(
@@ -230,8 +233,8 @@ def test_panel_verdict_ledger_is_append_only_hash_chained(tmp_repo, monkeypatch)
         )
         connection.execute(
             "INSERT INTO evidence VALUES (?, 'verified', NULL, ?, '', 'pytest', "
-            "'9999-01-01T00:00:00+00:00', '[]')",
-            ("ev-test-1", f"regression evidence for {finding_id}"),
+            "'9999-01-01T00:00:00+00:00', ?)",
+            ("ev-test-1", f"regression evidence for {finding_id}", json.dumps([str(closure_artifact)])),
         )
         connection.execute(
             "INSERT INTO evidence VALUES (?, 'unverified', NULL, ?, '', NULL, "
@@ -285,6 +288,9 @@ def test_panel_verdict_requires_finding_linked_post_panel_evidence(tmp_repo, mon
     panel = critic.review_panel(base="HEAD^", timeout_seconds=10)
     finding_id = panel["findings"][0]["finding_id"]
     database = tmp_repo / "artifacts/harness/evidence.db"
+    closure_artifact = tmp_repo / "artifacts/harness/verify/panel-regression.log"
+    closure_artifact.parent.mkdir(parents=True, exist_ok=True)
+    closure_artifact.write_text("verified regression\n", encoding="utf-8")
     connection = sqlite3.connect(database)
     try:
         connection.execute(
@@ -296,7 +302,9 @@ def test_panel_verdict_requires_finding_linked_post_panel_evidence(tmp_repo, mon
             ("ev-unrelated-late", "verified", None, "an unrelated verified claim", "", "pytest", "9999-01-01T00:00:00+00:00", "[]"),
             ("ev-linked-old", "verified", None, "old claim", f"covers {finding_id}", "pytest", "1900-01-01T00:00:00+00:00", "[]"),
             ("ev-panel-linked-late", "verified", None, "generic panel administration", "", "pytest", "9999-01-01T00:00:00+00:00", json.dumps([panel["panel_id"]])),
-            ("ev-finding-linked-late", "verified", None, "finding closure", f"covers {finding_id}", "pytest", "9999-01-01T00:00:00+00:00", "[]"),
+            ("ev-finding-linked-late", "verified", None, "finding closure", f"covers {finding_id}", "pytest", "9999-01-01T00:00:00+00:00", json.dumps([str(closure_artifact)])),
+            ("ev-empty-artifacts", "verified", None, "finding closure", f"covers {finding_id}", "pytest", "9999-01-01T00:00:00+00:00", "[]"),
+            ("ev-missing-artifact", "verified", None, "finding closure", f"covers {finding_id}", "pytest", "9999-01-01T00:00:00+00:00", json.dumps([str(tmp_repo / "missing.log")])),
         ]
         connection.executemany("INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
         connection.commit()
@@ -318,6 +326,17 @@ def test_panel_verdict_requires_finding_linked_post_panel_evidence(tmp_repo, mon
             panel["panel_id"], finding_id, "fixed", rationale="generic panel row",
             evidence_ids=["ev-panel-linked-late"], verifier="pytest",
         )
+    with pytest.raises(ValueError, match="existing artifact files"):
+        critic.record_panel_verdict(
+            panel["panel_id"], finding_id, "fixed", rationale="no artifacts",
+            evidence_ids=["ev-empty-artifacts"], verifier="pytest",
+        )
+    with pytest.raises(ValueError, match="existing artifact files"):
+        critic.record_panel_verdict(
+            panel["panel_id"], finding_id, "fixed", rationale="missing artifact",
+            evidence_ids=["ev-missing-artifact"], verifier="pytest",
+        )
+
     accepted = critic.record_panel_verdict(
         panel["panel_id"], finding_id, "fixed", rationale="linked and fresh",
         evidence_ids=["ev-finding-linked-late"], verifier="pytest",
@@ -410,3 +429,27 @@ def test_same_second_single_empty_reviews_use_distinct_artifacts(tmp_repo):
     first = critic.review(tool="claude", base="HEAD", head="HEAD")
     second = critic.review(tool="claude", base="HEAD", head="HEAD")
     assert first["findings_path"] != second["findings_path"]
+
+
+
+def test_panel_ledger_hard_stale_escape_recovers_live_or_unknown_pid(tmp_repo, monkeypatch):
+    ledger_path = tmp_repo / "artifacts/harness/critic/hard-stale-ledger.jsonl"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger_path.with_name(ledger_path.name + ".lock")
+    for owner_state in (True, None):
+        lock_path.write_text(f"{os.getpid()}\n", encoding="ascii")
+        stale = time.time() - critic.PANEL_LEDGER_HARD_STALE_SECONDS - 1
+        os.utime(lock_path, (stale, stale))
+        monkeypatch.setattr(critic, "_panel_lock_owner_alive", lambda _path, state=owner_state: state)
+        assert critic._recover_stale_panel_lock(lock_path) is True
+        assert not lock_path.exists()
+
+
+def test_extract_rejects_truncated_or_quoted_fallback_candidates():
+    real = json.dumps([{
+        "severity": "major", "file": "module.py", "claim": "real",
+        "evidence": "e", "proposed_falsification_test": "t",
+    }])
+    assert critic._extract_json_array(f"repository quoted []\nactual review: {real[:-1]}") is None
+    assert critic._extract_json_array("repository documentation contains []") is None
+    assert critic._extract_json_array(f"repository quoted {real}\ncritic did not finish") is None

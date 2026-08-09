@@ -42,6 +42,7 @@ __all__ = [
 
 PANEL_LEDGER_LOCK_TIMEOUT_SECONDS = 15.0
 PANEL_LEDGER_STALE_SECONDS = 60.0
+PANEL_LEDGER_HARD_STALE_SECONDS = 900.0
 
 DEFAULT_QUESTION = (
     "Review this diff as an independent scientific software critic. Focus on: mathematical "
@@ -106,6 +107,7 @@ def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
     # extraction mistakes examples such as "input [{}]" inside a finding for a
     # second response and turns a valid workstream into an availability failure.
     candidates: list[str] = []
+    candidate_ends: list[int] = []
     for fence_body in re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL):
         candidates.append(fence_body.strip())
 
@@ -139,8 +141,11 @@ def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
             depth -= 1
             if depth == 0 and start is not None:
                 candidates.append(text[start : index + 1])
+                candidate_ends.append(index)
                 start = None
 
+    if depth > 0:
+        return None
     distinct: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
         try:
@@ -150,9 +155,18 @@ def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
         if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
             canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             distinct.setdefault(canonical, parsed)
-    if len(distinct) == 1:
-        return next(iter(distinct.values()))
-    return None
+    if len(distinct) != 1 or not candidate_ends:
+        return None
+    result = next(iter(distinct.values()))
+    last_end = max(candidate_ends)
+    trailing = text[last_end + 1 :].strip()
+    if trailing.startswith("```"):
+        trailing = trailing[3:].strip()
+    if trailing.casefold() not in {"", "done", "done."}:
+        return None
+    if not result and not re.search(r"\b(?:no issues|no findings|nothing to report)\b", text[:last_end], re.IGNORECASE):
+        return None
+    return result
 
 
 def _validate_findings(findings: list[dict[str, Any]]) -> str | None:
@@ -731,7 +745,8 @@ def _recover_stale_panel_lock(lock_path: Path) -> bool:
             return True
         if age <= PANEL_LEDGER_STALE_SECONDS:
             return False
-        if _panel_lock_owner_alive(lock_path) is not False:
+        owner_alive = _panel_lock_owner_alive(lock_path)
+        if owner_alive is not False and age <= PANEL_LEDGER_HARD_STALE_SECONDS:
             return False
         stale_path = lock_path.with_name(lock_path.name + ".stale-" + uuid.uuid4().hex)
         try:
@@ -892,8 +907,24 @@ def record_panel_verdict(
                 )
             try:
                 artifact_paths = json.loads(artifact_paths_raw)
-            except (TypeError, json.JSONDecodeError):
-                artifact_paths = artifact_paths_raw
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"evidence {evidence_id!r} must cite existing artifact files") from exc
+            if not isinstance(artifact_paths, list) or not artifact_paths or not all(
+                isinstance(item, str) and item for item in artifact_paths
+            ):
+                raise ValueError(f"evidence {evidence_id!r} must cite existing artifact files")
+            repository = repo_root().resolve()
+            for item in artifact_paths:
+                candidate = Path(item)
+                if not candidate.is_absolute():
+                    candidate = repository / candidate
+                try:
+                    resolved = candidate.resolve(strict=True)
+                    resolved.relative_to(repository)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise ValueError(f"evidence {evidence_id!r} must cite existing artifact files") from exc
+                if not resolved.is_file():
+                    raise ValueError(f"evidence {evidence_id!r} must cite existing artifact files")
             evidence_records.append({
                 "id": evidence_id,
                 "claim": claim,
