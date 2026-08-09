@@ -7,10 +7,10 @@ import {
 	openSync,
 	readFileSync,
 	renameSync,
-	writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { writeAllSync } from "../../utils/write-all-sync.js";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
 
 interface ReceivedRecord {
@@ -83,6 +83,10 @@ function assertResponseMatchesReceipt(entry: JournalEntry, key: string, response
 
 function responsesEqual(left: DaemonResponse, right: DaemonResponse): boolean {
 	return isDeepStrictEqual(left, right);
+}
+
+function encodeJournalRecord(record: JournalRecord): Buffer {
+	return Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
 }
 
 /**
@@ -316,10 +320,7 @@ export class CommandRecoveryJournal {
 	private appendMissingLineFeed(): void {
 		const descriptor = openSync(this.path, "a", 0o600);
 		try {
-			const written = writeSync(descriptor, "\n");
-			if (written !== 1) {
-				throw new Error(`Could not restore command journal line boundary: wrote ${written} bytes`);
-			}
+			writeAllSync(descriptor, Buffer.from([LINE_FEED]));
 			fsyncSync(descriptor);
 		} finally {
 			closeSync(descriptor);
@@ -330,7 +331,7 @@ export class CommandRecoveryJournal {
 	private append(record: JournalRecord): void {
 		const descriptor = openSync(this.path, "a", 0o600);
 		try {
-			writeSync(descriptor, `${JSON.stringify(record)}\n`);
+			writeAllSync(descriptor, encodeJournalRecord(record));
 			fsyncSync(descriptor);
 		} finally {
 			closeSync(descriptor);
@@ -356,7 +357,8 @@ export class CommandRecoveryJournal {
 		}
 		const descriptor = openSync(tempPath, "w", 0o600);
 		try {
-			writeSync(descriptor, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+			const encodedRecords = Buffer.from(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+			writeAllSync(descriptor, encodedRecords);
 			fsyncSync(descriptor);
 		} finally {
 			closeSync(descriptor);
