@@ -31,6 +31,7 @@ export const IPYTHON_STATE_RESTORED_CUSTOM_TYPE = "ipython_state_restored";
 export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
+export const POST_COMPACTION_CONTINUATION_FAILURE_CUSTOM_TYPE = "post_compaction_continuation_failure";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 
@@ -71,6 +72,10 @@ export interface CompactionOutcomeMessage extends CustomMessage<CompactionOutcom
 	customType: typeof COMPACTION_OUTCOME_CUSTOM_TYPE;
 	content: string;
 	details: CompactionOutcomeDetails;
+}
+
+export interface PostCompactionContinuationFailureDetails {
+	error: string;
 }
 
 export interface RlmChildFailureDetails {
@@ -320,6 +325,20 @@ export function createCompactionOutcomeMessage(
 		customType: COMPACTION_OUTCOME_CUSTOM_TYPE,
 		content,
 		display,
+		details: { ...details },
+		timestamp,
+	};
+}
+
+export function createPostCompactionContinuationFailureMessage(
+	details: PostCompactionContinuationFailureDetails,
+	timestamp = Date.now(),
+): CustomMessage<PostCompactionContinuationFailureDetails> {
+	return {
+		role: "custom",
+		customType: POST_COMPACTION_CONTINUATION_FAILURE_CUSTOM_TYPE,
+		content: `Post-compaction continuation failed: ${details.error}`,
+		display: true,
 		details: { ...details },
 		timestamp,
 	};
