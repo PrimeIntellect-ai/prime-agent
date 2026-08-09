@@ -1269,8 +1269,10 @@ export class AgentSession {
 	private _rlmTokensUsed = 0;
 	/** Tokens still grantable to descendants under the `split` schedule. */
 	private _rlmSubtreePool: number | undefined;
-	/** Equal per-child share of the initial `split` pool; funds exactly `fanout` children. */
+	/** Equal per-child share of the initial `split` pool. */
 	private _rlmChildAllowanceShare: number | undefined;
+	/** Tokens already handed to descendants, so a recomputed pool cannot refund live grants. */
+	private _rlmSubtreeGranted = 0;
 	private _rlmTokenBudgetAccountedMessages = new WeakSet<AssistantMessage>();
 	private _rlmSessionDir?: string;
 	private _rlmParentNodeId?: string;
@@ -1700,12 +1702,17 @@ export class AgentSession {
 		const floor = requested?.minTokens ?? config.minTokens ?? 0;
 		const desired = requested === undefined ? Math.max(share, floor) : requested.maxTokens;
 		const granted = Math.min(desired, remaining);
-		if (granted <= 0 || granted < floor) {
+		// Without an explicit request a child must receive its whole share. Flooring the share
+		// leaves a remainder smaller than one child, and funding a subagent from that sliver
+		// would spawn one that cannot finish a single turn.
+		const minimum = requested === undefined ? desired : Math.max(floor, 1);
+		if (granted <= 0 || granted < minimum) {
 			throw new Error(
-				`RLM token budget subtree pool exhausted (schedule="split", fanout=${config.fanout}, ${remaining} tokens left); cannot fund a subagent with at least ${Math.max(floor, 1)} tokens`,
+				`RLM token budget subtree pool exhausted (schedule="split", fanout=${config.fanout}, ${remaining} tokens left); cannot fund a subagent with at least ${minimum} tokens`,
 			);
 		}
 		this._rlmSubtreePool = remaining - granted;
+		this._rlmSubtreeGranted += granted;
 		return granted;
 	}
 
@@ -1784,8 +1791,10 @@ export class AgentSession {
 			this._configuredRlmTokenAllowance === undefined
 				? allowance
 				: Math.min(allowance, this._configuredRlmTokenAllowance);
-		// The pool is always a fraction of the grant, so it needs no separate clamp.
-		this._rlmSubtreePool = pool;
+		// Grants already handed out stay spent. Recomputing the pool happens on every
+		// /rlm-token-budget call and on branch navigation, and refilling it there would let a
+		// parent fund unlimited children by re-issuing the command.
+		this._rlmSubtreePool = pool === undefined ? undefined : Math.max(0, pool - this._rlmSubtreeGranted);
 		this._rlmChildAllowanceShare =
 			this._rlmSubtreePool === undefined
 				? undefined
@@ -1836,9 +1845,6 @@ export class AgentSession {
 		this._rlmTokenBudget = validated;
 		this._rlmTokenBudgetSource = "chat";
 		this._applyRlmTokenBudgetAllowance();
-		const oldBase = this._baseSystemPrompt;
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._refreshExtensionSystemPrompt(this.agent.state.systemPrompt, oldBase);
 
 		let globalError: string | undefined;
 		if (options.global === true) {
@@ -1920,15 +1926,10 @@ export class AgentSession {
 	}
 
 	private _reloadRlmTokenBudgetFromBranch(): void {
-		const previousAllowance = this._rlmTokenAllowance;
 		const resolved = this._resolveRlmTokenBudget();
 		this._rlmTokenBudget = resolved.config;
 		this._rlmTokenBudgetSource = resolved.source;
 		this._applyRlmTokenBudgetAllowance();
-		if (this._rlmTokenAllowance !== previousAllowance) {
-			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-			this.agent.state.systemPrompt = this._baseSystemPrompt;
-		}
 	}
 
 	private _persistGoalState(goal: GoalState): void {

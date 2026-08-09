@@ -2275,6 +2275,57 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.getRlmTokenBudgetStatus()).toMatchObject({ config: null, source: "default", allowanceTokens: null });
 	});
 
+	it("refuses a split child the pool cannot fund at a full share", async () => {
+		const captured: Array<number | undefined> = [];
+		const root = createSession({
+			maxDepth: 3,
+			// The documented default: 1m split 0.5 fanout 3 leaves a 2-token remainder.
+			tokenBudget: { totalTokens: 1_000_000, schedule: "split", factor: 0.5, fanout: 3 },
+			tokenAllowance: 1_000_000,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					captured.push(options.rlmTokenAllowance);
+					throw new Error("stop after capturing the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		for (let i = 0; i < 3; i++) await root.runRlmChild(`child ${i}`);
+		await vi.waitFor(() => expect(captured).toHaveLength(3));
+		expect(captured).toEqual([166_666, 166_666, 166_666]);
+
+		// The 2-token remainder must not fund a fourth subagent.
+		await expect(root.runRlmChild("fourth")).rejects.toThrow(/cannot fund a subagent with at least 166666 tokens/);
+	});
+
+	it("does not refill the subtree pool when the budget is re-applied", async () => {
+		const captured: Array<number | undefined> = [];
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					captured.push(options.rlmTokenAllowance);
+					throw new Error("stop after capturing the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		await root.runRlmChild("first");
+		await root.runRlmChild("second");
+		await vi.waitFor(() => expect(captured).toHaveLength(2));
+		expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(0);
+
+		// Re-issuing the same budget must not hand the parent a fresh pool.
+		await root.setRlmTokenBudget({ totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 });
+
+		expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(0);
+		await expect(root.runRlmChild("third")).rejects.toThrow(/subtree pool exhausted/);
+	});
+
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {
 		let releaseTurn!: () => void;
 		const release = new Promise<void>((resolve) => {
