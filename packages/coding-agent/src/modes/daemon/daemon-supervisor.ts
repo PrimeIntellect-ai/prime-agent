@@ -2397,8 +2397,11 @@ export class DaemonSupervisor {
 		if (worker.descriptor.stopRequestedAt) {
 			try {
 				// A tombstoned worker must not run long enough to elect another
-				// supervisor while its intentional stop is being adopted.
-				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
+				// supervisor while its intentional stop is being adopted. Skip the
+				// pre-kill when the pid is held by an unrelated process.
+				if (workerDescriptorProcessIdentityMatches(worker.descriptor)) {
+					signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
+				}
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Completed intentional stop for worker ${worker.descriptor.workerId} during supervisor adoption`);
 			} catch (error) {
@@ -4574,8 +4577,10 @@ export class DaemonSupervisor {
 		worker.transcriptCaches.clear();
 		worker.snapshotCache.clear();
 		worker.snapshotGenerations?.clear();
-		const workerProcessIdentityVerified =
-			directChild !== undefined || workerDescriptorProcessIdentityMatches(worker.descriptor);
+		const isWorkerProcessAlive = () =>
+			directChild
+				? directChild.child.exitCode === null && directChild.child.signalCode === null
+				: workerDescriptorProcessIdentityMatches(worker.descriptor) && isProcessAlive(worker.descriptor.pid);
 		if (worker.client) {
 			if (archiveSession) {
 				await worker.client
@@ -4588,13 +4593,9 @@ export class DaemonSupervisor {
 			worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
-		} else if (workerProcessIdentityVerified && isProcessAlive(worker.descriptor.pid)) {
+		} else if (isWorkerProcessAlive()) {
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGTERM");
 		}
-		const isWorkerProcessAlive = () =>
-			directChild
-				? directChild.child.exitCode === null && directChild.child.signalCode === null
-				: workerProcessIdentityVerified && isProcessAlive(worker.descriptor.pid);
 		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
