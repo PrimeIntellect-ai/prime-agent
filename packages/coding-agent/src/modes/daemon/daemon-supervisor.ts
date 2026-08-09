@@ -518,6 +518,23 @@ function isProcessAlive(pid: number): boolean {
 	}
 }
 
+/**
+ * Whether the process currently holding the descriptor's pid is still the
+ * worker that the descriptor was written for. `isProcessAlive` alone cannot
+ * answer this: after the worker exits its pid can be reused by an unrelated
+ * process (which may answer `EPERM`), and signalling or waiting on that
+ * imposter marks a genuinely stopped worker as "failed" forever.
+ */
+function workerDescriptorProcessIdentityMatches(
+	descriptor: Pick<DaemonWorkerDescriptor, "pid" | "processStartId">,
+): boolean {
+	if (!descriptor.processStartId || !isProcessAlive(descriptor.pid)) {
+		return true;
+	}
+	const observedProcessStartId = getProcessStartId(descriptor.pid);
+	return observedProcessStartId === undefined || observedProcessStartId === descriptor.processStartId;
+}
+
 function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
 	return (
 		eventType === "message_end" ||
@@ -1630,7 +1647,9 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter((worker) => this.isVisibleWorker(worker));
+				const workers = [...this.workers.values()].filter(
+					(worker) => this.isVisibleWorker(worker) && worker.descriptor.lifecycle !== "failed",
+				);
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
 					await Promise.all(
@@ -4555,6 +4574,8 @@ export class DaemonSupervisor {
 		worker.transcriptCaches.clear();
 		worker.snapshotCache.clear();
 		worker.snapshotGenerations?.clear();
+		const workerProcessIdentityVerified =
+			directChild !== undefined || workerDescriptorProcessIdentityMatches(worker.descriptor);
 		if (worker.client) {
 			if (archiveSession) {
 				await worker.client
@@ -4567,13 +4588,13 @@ export class DaemonSupervisor {
 			worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
-		} else if (isProcessAlive(worker.descriptor.pid)) {
+		} else if (workerProcessIdentityVerified && isProcessAlive(worker.descriptor.pid)) {
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGTERM");
 		}
 		const isWorkerProcessAlive = () =>
 			directChild
 				? directChild.child.exitCode === null && directChild.child.signalCode === null
-				: isProcessAlive(worker.descriptor.pid);
+				: workerProcessIdentityVerified && isProcessAlive(worker.descriptor.pid);
 		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
