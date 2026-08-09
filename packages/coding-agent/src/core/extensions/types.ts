@@ -547,6 +547,8 @@ export interface SessionCompactEvent {
 	type: "session_compact";
 	compactionEntry: CompactionEntry;
 	fromExtension: boolean;
+	/** Aborted when post-commit maintenance exceeds its bounded deadline. */
+	signal: AbortSignal;
 }
 
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
