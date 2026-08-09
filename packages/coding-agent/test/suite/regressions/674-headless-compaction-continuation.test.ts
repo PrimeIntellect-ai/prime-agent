@@ -39,10 +39,7 @@ describe("issue #674 headless completion must not race the post-compaction conti
 		internals._cancelPostCompactionContinue();
 
 		await expect(
-			Promise.race([
-				idle.then(() => "idle"),
-				new Promise((resolve) => setTimeout(() => resolve("timeout"), 2_000)),
-			]),
+			Promise.race([idle.then(() => "idle"), new Promise((resolve) => setTimeout(() => resolve("timeout"), 2_000))]),
 		).resolves.toBe("idle");
 	});
 });

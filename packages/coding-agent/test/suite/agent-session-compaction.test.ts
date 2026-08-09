@@ -128,11 +128,19 @@ describe("AgentSession compaction characterization", () => {
 		expect(internals._sessionInputPumpSuspended).toBe(false);
 		await harness.session.compact();
 		expect(internals._sessionInputPumpSuspended).toBe(false);
+
+		await harness.session.prompt("three");
+		await harness.session.prompt("four");
+		harness.session.requestAbort();
+		expect(internals._sessionInputPumpSuspended).toBe(true);
+		await harness.session.compact();
+		expect(internals._sessionInputPumpSuspended).toBe(true);
+		harness.session.resumeQueuedWork();
 	});
 
-	it("bounds a stuck post-commit extension hook and preserves the committed compaction", async () => {
+	it("bounds and aborts a stuck post-commit extension hook while preserving the committed compaction", async () => {
 		const maintenanceStarted = vi.fn();
-		const neverSettles = new Promise<void>(() => {});
+		const maintenanceAborted = vi.fn();
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
 			persistSession: true,
@@ -146,9 +154,16 @@ describe("AgentSession compaction characterization", () => {
 							details: {},
 						},
 					}));
-					pi.on("session_compact", async () => {
+					pi.on("session_compact", async (event) => {
 						maintenanceStarted();
-						await neverSettles;
+						await new Promise<void>((resolve) => {
+							const onAbort = () => {
+								maintenanceAborted();
+								resolve();
+							};
+							if (event.signal.aborted) onAbort();
+							else event.signal.addEventListener("abort", onAbort, { once: true });
+						});
 					});
 				},
 			],
@@ -163,6 +178,7 @@ describe("AgentSession compaction characterization", () => {
 		await vi.advanceTimersByTimeAsync(6000);
 		const result = await compacting;
 
+		expect(maintenanceAborted).toHaveBeenCalledOnce();
 		expect(result.summary).toBe("bounded maintenance summary");
 		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
 			reason: "manual",
@@ -1079,6 +1095,14 @@ describe("AgentSession compaction characterization", () => {
 		await internals._checkCompaction(assistant);
 		expect(runCompactionSpy).toHaveBeenCalledTimes(1);
 
+		const reconstructedAssistant = {
+			...assistant,
+			content: assistant.content.map((content) => ({ ...content })),
+			usage: { ...assistant.usage, cost: { ...assistant.usage.cost } },
+		} as AssistantMessage;
+		await internals._checkCompaction(reconstructedAssistant);
+		expect(runCompactionSpy).toHaveBeenCalledTimes(1);
+
 		const nextAssistant = createAssistant(harness, {
 			stopReason: "stop",
 			totalTokens: 200_000,
@@ -1114,20 +1138,21 @@ describe("AgentSession compaction characterization", () => {
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 		expect(sessionInternals._postCompactionContinuationScheduled).toBe(false);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
+		expect(sessionInternals._postCompactionContinuationMessages).toEqual([]);
+		expect(harness.session.agent.hasQueuedMessages()).toBe(false);
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "custom",
 			customType: "post_compaction_continuation_failure",
 			display: true,
 			content: expect.stringContaining("provider disconnected"),
-			details: { error: "provider disconnected" },
+			details: { error: "provider disconnected", droppedContinuationCount: 1 },
 		});
 		expect(harness.sessionManager.getEntries().at(-1)).toMatchObject({
 			type: "custom_message",
 			customType: "post_compaction_continuation_failure",
 			display: true,
 			content: expect.stringContaining("provider disconnected"),
-			details: { error: "provider disconnected" },
+			details: { error: "provider disconnected", droppedContinuationCount: 1 },
 		});
 	});
 
