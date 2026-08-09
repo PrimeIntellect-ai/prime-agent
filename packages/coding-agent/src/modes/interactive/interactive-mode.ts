@@ -6626,6 +6626,11 @@ export class InteractiveMode {
 			void this.shutdown();
 			return;
 		}
+		// If the editor has content and nothing is running, clear it.
+		if (this.editor.getText().length > 0 && !this.hasInterruptibleWork()) {
+			this.clearInputBar();
+			return;
+		}
 		this.handleInterruptKey();
 	}
 
@@ -9534,7 +9539,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 |-----|--------|
 | \`${tab}\` | Path completion / accept autocomplete |
 | \`${clearInput}\` | Clear input / cancel autocomplete |
-| \`${clear}\` | Interrupt current operation (first) / exit (second) |
+| \`${clear}\` | Clear prompt (if text) / interrupt / exit (twice) |
 ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shortcutsKey ? `| \`${shortcutsKey}\` | Show quick shortcuts |\n` : ""}| \`${exit}\` | Exit (when editor is empty) |
 | \`${selectModel}\` | Open model selector |
 | \`${expandTools}\` | Toggle tool output expansion |
