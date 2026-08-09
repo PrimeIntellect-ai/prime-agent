@@ -115,16 +115,42 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: ${{ matrix.command }}
 
+  python-runtime:
+    name: Python runtime (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.14"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install runtime
+        run: python -m pip install -e ./prime-agent-runtime
+
+      - name: Test Python runtime
+        working-directory: prime-agent-runtime
+        run: python -m unittest discover -s test -p "test_*.py"
+
   build-check-test:
     name: build-check-test
     if: always()
-    needs: [build-check, test]
+    needs: [build-check, test, python-runtime]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          PYTHON_RUNTIME_RESULT: ${{ needs.python-runtime.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success
+          test "$PYTHON_RUNTIME_RESULT" = success
