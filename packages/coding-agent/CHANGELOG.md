@@ -4,6 +4,7 @@
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 - Fixed IPython host bridge requests hanging indefinitely when a request, handler, or response is lost, with a configurable 120-second deadline and safe cleanup ([#848](https://github.com/PrimeIntellect-ai/prime-agent/issues/848)).
+- Fixed completed IPython cells blocking the serial execution queue when Jupyter drops the matching IOPub idle event ([#848](https://github.com/PrimeIntellect-ai/prime-agent/issues/848)).
 
 ## [0.7.2] - 2026-08-11
 

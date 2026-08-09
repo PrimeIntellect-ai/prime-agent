@@ -45,6 +45,9 @@ const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
+// Shell execute_reply normally precedes IOPub idle by milliseconds. Preserve a
+// short window for trailing output before treating a missing idle as lost.
+const EXECUTE_REPLY_IDLE_GRACE_MS = 2000;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
 	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
@@ -409,6 +412,8 @@ interface ActiveExecution {
 	error?: ExecuteResult["error"];
 	status: ExecuteResult["status"];
 	settled: boolean;
+	executeReplyReceived: boolean;
+	idleGraceTimer?: ReturnType<typeof globalThis.setTimeout>;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
 }
@@ -706,6 +711,7 @@ export class KernelManager {
 	private iopub?: Subscriber;
 	private control?: Dealer;
 	private iopubPumpPromise?: Promise<void>;
+	private shellPumpPromise?: Promise<void>;
 	private connection?: ConnectionInfo;
 	private tempDir?: string;
 	private kernelStderr = "";
@@ -889,6 +895,9 @@ export class KernelManager {
 			throw e;
 		}
 
+		// probeReady owns shell.receive() until it returns; only then may the
+		// long-lived pump consume execute_reply messages.
+		this.startShellPump();
 		this.state = "running";
 		this.startForkedLivenessMonitor();
 	}
@@ -1066,6 +1075,7 @@ export class KernelManager {
 			sentAgentMessages: [],
 			status: "ok",
 			settled: false,
+			executeReplyReceived: false,
 			resolve: result.resolve,
 			reject: result.reject,
 		};
@@ -1084,6 +1094,7 @@ export class KernelManager {
 			this.resolveExecution(execution, { clearActive: false });
 		};
 		const onAbort = () => {
+			this.clearExecuteReplyIdleGrace(execution);
 			void this.interrupt().catch(() => undefined);
 			clearAbortTimer();
 			abortTimer = globalThis.setTimeout(forceAbort, KERNEL_ABORT_GRACE_MS);
@@ -1119,6 +1130,93 @@ export class KernelManager {
 			clearAbortTimer();
 			opts.signal?.removeEventListener("abort", onAbort);
 		}
+	}
+
+	private startShellPump(): void {
+		if (this.shellPumpPromise) {
+			return;
+		}
+		this.shellPumpPromise = this.runShellPump();
+	}
+
+	private async runShellPump(): Promise<void> {
+		const shell = this.shell;
+		if (!shell) {
+			return;
+		}
+
+		try {
+			for await (const frames of shell) {
+				const incoming = decode(frames);
+				if (incoming) this.handleShellMessage(incoming);
+			}
+		} catch (error) {
+			// IOPub remains the normal completion channel. A shell pump failure
+			// disables only the lost-idle fallback.
+			if ((this.state as string) !== "shutdown") {
+				this.appendKernelDiagnostic(`shell pump failed: ${errorMessage(error)}`);
+			}
+		} finally {
+			if (this.shell === shell) {
+				this.shellPumpPromise = undefined;
+			}
+		}
+	}
+
+	private handleShellMessage(incoming: JupyterMessage): void {
+		if (incoming.header.msg_type !== "execute_reply") {
+			return;
+		}
+		const execution = this.activeExecution;
+		const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+		if (
+			!execution ||
+			parentMessageId !== execution.requestMsgId ||
+			execution.executeReplyReceived ||
+			execution.settled ||
+			execution.opts.signal?.aborted
+		) {
+			return;
+		}
+
+		execution.executeReplyReceived = true;
+		const content = incoming.content as {
+			status?: string;
+			ename?: string;
+			evalue?: string;
+			traceback?: string[];
+		};
+		if ((content.status === "abort" || content.status === "aborted") && execution.status === "ok") {
+			execution.status = "aborted";
+		} else if (content.status === "error" && execution.status === "ok") {
+			execution.status = "error";
+			if (!execution.error && content.ename) {
+				execution.error = {
+					ename: content.ename,
+					evalue: content.evalue ?? "",
+					traceback: content.traceback ?? [],
+				};
+			}
+		}
+
+		const timer = globalThis.setTimeout(() => {
+			if (
+				this.activeExecution !== execution ||
+				execution.requestMsgId !== parentMessageId ||
+				execution.idleGraceTimer !== timer
+			) {
+				return;
+			}
+			execution.idleGraceTimer = undefined;
+			this.appendKernelDiagnostic(
+				`execute_reply for ${execution.requestMsgId} got no IOPub idle within ${EXECUTE_REPLY_IDLE_GRACE_MS}ms; finishing via shell fallback`,
+			);
+			this.finishActiveExecution(execution);
+		}, EXECUTE_REPLY_IDLE_GRACE_MS);
+		if (timer && typeof timer === "object" && "unref" in timer) {
+			timer.unref();
+		}
+		execution.idleGraceTimer = timer;
 	}
 
 	private startIopubPump(): void {
@@ -1230,7 +1328,15 @@ export class KernelManager {
 		this.resolveExecution(execution, { clearActive: true });
 	}
 
+	private clearExecuteReplyIdleGrace(execution: ActiveExecution): void {
+		if (execution.idleGraceTimer) {
+			globalThis.clearTimeout(execution.idleGraceTimer);
+			execution.idleGraceTimer = undefined;
+		}
+	}
+
 	private resolveExecution(execution: ActiveExecution, options: { clearActive: boolean }): void {
+		this.clearExecuteReplyIdleGrace(execution);
 		const didClearActive = options.clearActive && this.activeExecution === execution;
 		if (options.clearActive && this.activeExecution === execution) {
 			this.activeExecution = undefined;
@@ -1304,6 +1410,7 @@ export class KernelManager {
 		if (!execution) {
 			return;
 		}
+		this.clearExecuteReplyIdleGrace(execution);
 		this.activeExecution = undefined;
 		execution.reject(error);
 		this.notifyActiveExecutionIdle();
@@ -1575,6 +1682,7 @@ export class KernelManager {
 		this.iopub = undefined;
 		this.control = undefined;
 		this.iopubPumpPromise = undefined;
+		this.shellPumpPromise = undefined;
 		try {
 			if (this.kernel) {
 				this.kernel.kill(killSignal);
@@ -1621,6 +1729,9 @@ export class KernelManager {
 	}
 
 	async shutdown(opts: { snapshot?: boolean } = {}): Promise<void> {
+		if (this.activeExecution) {
+			this.clearExecuteReplyIdleGrace(this.activeExecution);
+		}
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			this.cleanupResources();
@@ -1774,6 +1885,9 @@ export class KernelManager {
 	/** Graceful cleanup. Waits briefly for in-flight host request handlers before closing sockets. */
 	dispose(): Promise<void> {
 		return (async () => {
+			if (this.activeExecution) {
+				this.clearExecuteReplyIdleGrace(this.activeExecution);
+			}
 			// Final namespace flush while the kernel is still live (session end / reload).
 			await this.flushSnapshotForDispose();
 			this.state = "shutdown";
