@@ -11,7 +11,7 @@
 # Gate timeouts dominate the manifest: each profile's gate budget exceeds the
 # sum of its manifest per-check timeouts (see manifest _readme invariant).
 #
-# The gate DEFINITION (verify.py + manifest.json) is frozen to a temp copy at
+# The gate DEFINITION (verify.py + manifest.json + manifest_policy.py) is frozen to a temp copy at
 # launch: mid-burst edits to harness/ cannot change what the gate checks.
 # Review any pre-burst edits to harness/ before launching.
 #
@@ -40,7 +40,7 @@ else echo "error: neither 'prime-agent' nor 'pi' on PATH" >&2; exit 127; fi
 # human just reviewed; the agent cannot edit these mid-burst).
 GATE_DIR="$(mktemp -d)"
 trap 'rm -rf "$GATE_DIR"' EXIT
-cp harness/verify.py harness/manifest.json "$GATE_DIR/"
+cp harness/verify.py harness/manifest.json harness/manifest_policy.py "$GATE_DIR/"
 # cmd.exe runs the gate on native Windows: give it a Windows-style path
 if command -v cygpath >/dev/null 2>&1; then
   GATE_DIR_SHELL="$(cygpath -m "$GATE_DIR")"

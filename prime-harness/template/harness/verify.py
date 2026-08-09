@@ -13,7 +13,7 @@ Contract with the autonomous gate (verified against Prime Agent v0.7.0):
 
 Usage:
   python harness/verify.py [--profile NAME] [--manifest PATH] [--base REF]
-                           [--json] [--list]
+                           [--json] [--list] [--allow-vacuous]
 """
 
 from __future__ import annotations
@@ -30,6 +30,14 @@ import time
 import typing  # noqa: F401 - NoReturn hint in gate_error
 from datetime import datetime, timezone
 from pathlib import Path
+
+from manifest_policy import (
+    ManifestPolicyError,
+    coverage_fields,
+    load_manifest_object,
+    marker_status,
+    validate_profiles,
+)
 
 STDOUT_BUDGET = 4000          # keep well under the 6000-char autonomous gate cap
 FAIL_EXCERPT_CHARS = 700
@@ -57,14 +65,10 @@ def gate_error(reason: str, **extra: object) -> "typing.NoReturn":  # noqa: F821
 
 def load_manifest(path: Path) -> dict:
     try:
-        # utf-8-sig: tolerate a BOM from Windows editors/PowerShell redirects
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        gate_error(f"manifest not found: {path}")
-    except json.JSONDecodeError as exc:
-        gate_error(f"manifest invalid JSON: {exc}")
-    if "profiles" not in data or not isinstance(data["profiles"], dict):
-        gate_error("manifest missing profiles object")
+        data = load_manifest_object(path)
+        validate_profiles(data.get("profiles"))
+    except ManifestPolicyError as exc:
+        gate_error(str(exc))
     return data
 
 
@@ -242,6 +246,10 @@ def main() -> int:
     parser.add_argument("--base", default=None, help="base ref for changed-file detection")
     parser.add_argument("--json", action="store_true", help="suppress per-check lines; GATE_RESULT only")
     parser.add_argument("--list", action="store_true", help="list profiles and checks, then exit 0")
+    parser.add_argument(
+        "--allow-vacuous", action="store_true",
+        help="bootstrap escape: allow fewer applicable checks than the profile minimum",
+    )
     args = parser.parse_args()
 
     root = repo_root()
@@ -250,7 +258,8 @@ def main() -> int:
 
     if args.list:
         for name, profile in profiles.items():
-            print(f"profile {name}:")
+            minimum = validate_profiles({name: profile})[name]
+            print(f"profile {name} (min_applicable_checks={minimum}):")
             for check in profile.get("required", []):
                 print(f"  required    {check.get('name')}: {check.get('command')}")
             for check in profile.get("conditional", []):
@@ -262,6 +271,7 @@ def main() -> int:
         return 1
 
     profile = profiles[args.profile]
+    minimum = validate_profiles({args.profile: profile})[args.profile]
     changed, diff_base = changed_files(root, args.base)
     artifacts_dir = load_artifacts_dir(root)
     log_dir = artifacts_dir / "gate-logs" / f"{utc_stamp()}-{args.profile}"
@@ -297,10 +307,17 @@ def main() -> int:
             emit(f"FAIL {name} (manifest entry has no command)")
             continue
         skip_marker = check.get("skip_if_missing")
-        if skip_marker and not (root / skip_marker).exists():
-            results.append({"name": name, "status": "skipped", "reason": f"missing {skip_marker}"})
-            emit(f"SKIP {name} (missing {skip_marker})")
-            continue
+        if skip_marker:
+            try:
+                present, reason = marker_status(root, skip_marker)
+            except ManifestPolicyError as exc:
+                results.append({"name": name, "status": "error", "reason": str(exc)})
+                emit(f"FAIL {name} ({exc})")
+                continue
+            if not present:
+                results.append({"name": name, "status": "skipped", "reason": reason})
+                emit(f"SKIP {name} ({reason})")
+                continue
         timeout = int(check.get("timeout_seconds", DEFAULT_CHECK_TIMEOUT))
         # A leading bare `python` inherits the interpreter that runs this gate
         # (python3-only systems, Windows Store-stub PATHs); the manifest stays
@@ -321,8 +338,15 @@ def main() -> int:
     failed = [r["name"] for r in results if r["status"] in ("fail", "timeout", "error")]
     passed = [r["name"] for r in results if r["status"] == "pass"]
     skipped = [r["name"] for r in results if r["status"] == "skipped"]
+    try:
+        coverage = coverage_fields(results, minimum, allow_vacuous=args.allow_vacuous)
+    except ManifestPolicyError as exc:
+        gate_error(str(exc), profile=args.profile)
+    status = "fail" if failed else (
+        "pass" if coverage["coverage_satisfied"] else "vacuous"
+    )
     verdict = {
-        "status": "pass" if not failed else "fail",
+        "status": status,
         "profile": args.profile,
         "passed": passed,
         "failed": failed,
@@ -331,12 +355,19 @@ def main() -> int:
         "diff_base": diff_base,
         "log_dir": str(log_dir),
         "results": results,
+        **coverage,
     }
     atomic_write_json(artifacts_dir / "gate-last.json", verdict)
     atomic_write_json(log_dir / "gate-result.json", verdict)
-    compact = {k: verdict[k] for k in ("status", "profile", "passed", "failed", "skipped", "log_dir")}
+    compact = {
+        key: verdict[key]
+        for key in (
+            "status", "profile", "passed", "failed", "skipped", "log_dir",
+            "applicable_checks", "min_applicable_checks", "vacuous", "vacuous_allowed",
+        )
+    }
     print("GATE_RESULT " + json.dumps(compact))
-    return 0 if not failed else 1
+    return 0 if status == "pass" else 1
 
 
 if __name__ == "__main__":

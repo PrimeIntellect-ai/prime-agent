@@ -8,7 +8,7 @@
 #   simulate   20 / 140k / 4h  / 5 / changed-files gate (90m gate budget)
 #
 # Gate timeouts dominate the manifest (see manifest _readme invariant). The
-# gate definition (verify.py + manifest.json) is frozen to a temp copy at
+# gate definition (verify.py + manifest.json + manifest_policy.py) is frozen to a temp copy at
 # launch so mid-burst edits to harness/ cannot change what the gate checks.
 #
 # All values are passed as SEPARATE arguments (Prime Agent does not parse
@@ -40,6 +40,7 @@ $GateDir = Join-Path $env:TEMP ("prime-gate-" + [guid]::NewGuid().ToString("N").
 New-Item -ItemType Directory -Path $GateDir | Out-Null
 Copy-Item "harness\verify.py" -Destination $GateDir
 Copy-Item "harness\manifest.json" -Destination $GateDir
+Copy-Item "harness\manifest_policy.py" -Destination $GateDir
 $GateDirFwd = $GateDir -replace "\\", "/"
 
 Write-Host "burst: profile=$Profile bin=$Bin turns=$Turns tokens=$Tokens timeout_ms=$TimeoutMs gate=$GateProfile gate_ms=$GateMs"
