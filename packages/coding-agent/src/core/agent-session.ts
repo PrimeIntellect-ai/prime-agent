@@ -1784,10 +1784,8 @@ export class AgentSession {
 			this._configuredRlmTokenAllowance === undefined
 				? allowance
 				: Math.min(allowance, this._configuredRlmTokenAllowance);
-		this._rlmSubtreePool =
-			pool === undefined || this._configuredRlmTokenAllowance === undefined
-				? pool
-				: Math.min(pool, this._configuredRlmTokenAllowance);
+		// The pool is always a fraction of the grant, so it needs no separate clamp.
+		this._rlmSubtreePool = pool;
 		this._rlmChildAllowanceShare =
 			this._rlmSubtreePool === undefined
 				? undefined

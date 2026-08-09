@@ -201,7 +201,7 @@ describe("rlm token budget ranges", () => {
 	});
 
 	test("parses the <floor>-<ceiling> command form", () => {
-		expect(parseRlmTokenBudgetCommand("200k-600k")).toEqual({
+		expect(parseRlmTokenBudgetCommand("50k-600k")).toEqual({
 			kind: "set",
 			global: false,
 			config: {
@@ -209,7 +209,7 @@ describe("rlm token budget ranges", () => {
 				schedule: "split",
 				factor: 0.5,
 				fanout: 3,
-				minTokens: 200_000,
+				minTokens: 50_000,
 				maxTokens: 600_000,
 			},
 		});
@@ -255,5 +255,46 @@ describe("rlm token budget request normalization", () => {
 		expect(() => normalizeRlmTokenBudgetRequest([600, 200])).toThrow(/floor 600 exceeds its ceiling 200/);
 		expect(() => normalizeRlmTokenBudgetRequest([1, 2, 3])).toThrow(/floor, ceiling/);
 		expect(() => normalizeRlmTokenBudgetRequest("lots")).toThrow(/floor, ceiling/);
+	});
+});
+
+describe("rlm token budget misconfiguration guards", () => {
+	test("rejects a split floor no child could ever be funded at", () => {
+		// 600k total, split/0.5, fanout 3 -> pool 300k -> 100k per child, below a 200k floor.
+		expect(() => parseRlmTokenBudgetCommand("200k-600k")).toThrow(/cannot be funded/);
+		expect(() =>
+			validateRlmTokenBudgetConfig({
+				totalTokens: 600_000,
+				schedule: "split",
+				factor: 0.5,
+				fanout: 3,
+				minTokens: 200_000,
+			}),
+		).toThrow(/the "split" schedule gives each of 3 children 100000 tokens/);
+	});
+
+	test("accepts a split floor the schedule can fund", () => {
+		expect(parseRlmTokenBudgetCommand("50k-1m")).toMatchObject({
+			kind: "set",
+			config: { totalTokens: 1_000_000, minTokens: 50_000, maxTokens: 1_000_000 },
+		});
+	});
+
+	test("does not apply the split feasibility check to depth-indexed schedules", () => {
+		// geometric raises a starved depth to the floor instead of refusing spawns.
+		expect(() =>
+			validateRlmTokenBudgetConfig({
+				totalTokens: 600_000,
+				schedule: "geometric",
+				factor: 0.5,
+				fanout: 3,
+				minTokens: 200_000,
+			}),
+		).not.toThrow();
+	});
+
+	test("refuses to silently discard --floor/--ceiling when a range is also given", () => {
+		expect(() => parseRlmTokenBudgetCommand("1m-2m --floor 50k")).toThrow(/Cannot combine the range/);
+		expect(() => parseRlmTokenBudgetCommand("1m-2m --ceiling 400k")).toThrow(/Cannot combine the range/);
 	});
 });

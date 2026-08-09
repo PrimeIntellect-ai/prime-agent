@@ -12,7 +12,7 @@ export type RlmTokenBudgetSource = "default" | "env" | "global" | "inherited" | 
  */
 export type RlmTokenBudgetSchedule = "flat" | "geometric" | "split";
 
-export const RLM_TOKEN_BUDGET_SCHEDULES: readonly RlmTokenBudgetSchedule[] = ["flat", "geometric", "split"];
+const RLM_TOKEN_BUDGET_SCHEDULES: readonly RlmTokenBudgetSchedule[] = ["flat", "geometric", "split"];
 
 export const DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE: RlmTokenBudgetSchedule = "split";
 export const DEFAULT_RLM_TOKEN_BUDGET_FACTOR = 0.5;
@@ -73,7 +73,7 @@ export function rlmTokenDeltaForUsage(
 	return Math.max(0, usage.input) + Math.max(0, usage.output) + Math.max(0, usage.cacheWrite);
 }
 
-export function isRlmTokenBudgetSchedule(value: unknown): value is RlmTokenBudgetSchedule {
+function isRlmTokenBudgetSchedule(value: unknown): value is RlmTokenBudgetSchedule {
 	return typeof value === "string" && RLM_TOKEN_BUDGET_SCHEDULES.includes(value as RlmTokenBudgetSchedule);
 }
 
@@ -155,11 +155,22 @@ export function validateRlmTokenBudgetConfig(config: RlmTokenBudgetConfig): RlmT
 	if (config.minTokens !== undefined && config.maxTokens !== undefined && config.minTokens > config.maxTokens) {
 		throw new Error(`RLM token budget floor ${config.minTokens} exceeds its ceiling ${config.maxTokens}.`);
 	}
+	// `split` refuses children it cannot fund at the floor, so a floor above the per-child share would
+	// reject every spawn. Reject the configuration instead of silently disabling delegation.
+	if (config.schedule === "split" && config.minTokens !== undefined) {
+		const share = childAllowanceFromPool(config, subtreePool(config, config.totalTokens) ?? 0);
+		if (share < config.minTokens) {
+			throw new Error(
+				`RLM token budget floor ${config.minTokens} cannot be funded: the "split" schedule gives each of ${config.fanout} children ${share} tokens. ` +
+					"Lower the floor, raise the total, reduce --fanout, or raise --factor.",
+			);
+		}
+	}
 	return { ...config };
 }
 
 /** Clamp a scheduled allowance into the configured [floor, ceiling] range. */
-export function clampToBudgetRange(config: RlmTokenBudgetConfig, tokens: number): number {
+function clampToBudgetRange(config: RlmTokenBudgetConfig, tokens: number): number {
 	let clamped = tokens;
 	if (config.maxTokens !== undefined) clamped = Math.min(clamped, config.maxTokens);
 	if (config.minTokens !== undefined) clamped = Math.max(clamped, config.minTokens);
@@ -198,7 +209,7 @@ export function subtreePool(config: RlmTokenBudgetConfig, allowance: number): nu
  * The share is derived from the pool the parent started with, so siblings receive identical
  * allowances and the parent can fund exactly `fanout` children before spawns are refused.
  */
-export function childAllowanceFromPool(config: RlmTokenBudgetConfig, initialPool: number): number {
+function childAllowanceFromPool(config: RlmTokenBudgetConfig, initialPool: number): number {
 	return Math.max(0, Math.floor(initialPool / config.fanout));
 }
 
@@ -305,6 +316,9 @@ export function parseRlmTokenBudgetCommand(args: string): RlmTokenBudgetCommand 
 	// `<floor>-<ceiling>` is the range form; a bare value is a single ceiling.
 	const rangeMatch = /^([\d_]+[km]?)-([\d_]+[km]?)$/i.exec(tokens[0]);
 	if (rangeMatch) {
+		if (minTokens !== undefined || maxTokens !== undefined) {
+			throw new Error(`Cannot combine the range "${tokens[0]}" with --floor/--ceiling. Use one form or the other.`);
+		}
 		minTokens = parseRlmTokenBudgetTokens(rangeMatch[1]);
 		maxTokens = parseRlmTokenBudgetTokens(rangeMatch[2]);
 	}
