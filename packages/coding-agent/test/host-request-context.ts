@@ -13,6 +13,8 @@ export function createSyntheticHostRequestContext(): HostRequestContext {
 	return {
 		requestId: `test-host-request-${requestNumber}`,
 		generation: requestNumber,
+		requestType: "test.host_request",
+		timeoutMs: 120_000,
 		signal: controller.signal,
 		isCurrent: () => !controller.signal.aborted,
 	};

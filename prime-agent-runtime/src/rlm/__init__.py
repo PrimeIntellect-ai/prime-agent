@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 from dataclasses import dataclass
@@ -22,6 +23,52 @@ except Exception:  # pragma: no cover - only available in kernels
     get_ipython = None  # type: ignore[assignment]
 
 HOST_COMM_TARGET = "host.request"
+HOST_REQUEST_TIMEOUT_ENV = "PRIME_AGENT_HOST_REQUEST_TIMEOUT_MS"
+DEFAULT_HOST_REQUEST_TIMEOUT_MS = 120_000
+MAX_HOST_REQUEST_TIMEOUT_MS = 3_600_000
+_HOST_REQUEST_TIMEOUT_FIELD = "_prime_agent_timeout_ms"
+_HOST_REQUEST_EXECUTION_OWNED_FIELD = "_prime_agent_execution_owned"
+_host_request_execution_task: asyncio.Task[Any] | None = None
+_host_request_task_tracking_installed = False
+
+
+def _set_host_request_execution_task(*_args: Any) -> None:
+    global _host_request_execution_task
+    _host_request_execution_task = asyncio.current_task()
+
+
+def _clear_host_request_execution_task(*_args: Any) -> None:
+    global _host_request_execution_task
+    _host_request_execution_task = None
+
+
+def _install_host_request_task_tracking() -> None:
+    """Track the task that owns a top-level IPython execution."""
+    global _host_request_task_tracking_installed
+    if _host_request_task_tracking_installed or get_ipython is None:
+        return
+    shell = get_ipython()
+    if shell is None:
+        return
+    try:
+        shell.events.register("pre_run_cell", _set_host_request_execution_task)
+        try:
+            shell.events.register("post_run_cell", _clear_host_request_execution_task)
+        except Exception:
+            shell.events.unregister("pre_run_cell", _set_host_request_execution_task)
+            raise
+    except Exception:
+        return
+    _host_request_task_tracking_installed = True
+
+
+def _host_request_is_execution_owned() -> bool:
+    if not _host_request_task_tracking_installed:
+        return True
+    return asyncio.current_task() is _host_request_execution_task
+
+
+_install_host_request_task_tracking()
 
 
 @dataclass(frozen=True)
@@ -81,18 +128,49 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
     )
 
 
-async def host_request(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _resolve_host_request_timeout_ms(timeout_ms: int | None) -> int:
+    value: object = os.environ.get(HOST_REQUEST_TIMEOUT_ENV) if timeout_ms is None else timeout_ms
+    if value is None:
+        return DEFAULT_HOST_REQUEST_TIMEOUT_MS
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except ValueError as error:
+            raise ValueError(
+                f"{HOST_REQUEST_TIMEOUT_ENV} must be an integer from 1 to {MAX_HOST_REQUEST_TIMEOUT_MS}"
+            ) from error
+    if isinstance(value, bool) or not isinstance(value, int):
+        name = "timeout_ms" if timeout_ms is not None else HOST_REQUEST_TIMEOUT_ENV
+        raise TypeError(f"{name} must be an int")
+    if value < 1 or value > MAX_HOST_REQUEST_TIMEOUT_MS:
+        name = "timeout_ms" if timeout_ms is not None else HOST_REQUEST_TIMEOUT_ENV
+        raise ValueError(f"{name} must be from 1 to {MAX_HOST_REQUEST_TIMEOUT_MS}")
+    return value
+
+
+async def host_request(
+    request_type: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
     """Send a typed request to the Prime Agent host and await its reply.
 
     This is the kernel side of the generic host bridge: Python skills call
     ``await host_request("<type>", {...})`` and the TypeScript host dispatches
-    on the type. Raises RuntimeError when the host reports an error or when no
-    handler for the type is registered in this session.
+    on the type. Requests time out after 120 seconds by default. Override the
+    deadline per call with ``timeout_ms`` or for the kernel with
+    ``PRIME_AGENT_HOST_REQUEST_TIMEOUT_MS`` (1..3,600,000 ms).
+
+    Raises RuntimeError when the host reports an error or no handler for the
+    type is registered, and TimeoutError when the request, handler, or reply
+    does not complete before the deadline.
     """
     if not isinstance(request_type, str) or not request_type:
         raise TypeError("request_type must be a non-empty str")
     if payload is not None and not isinstance(payload, dict):
         raise TypeError(f"payload must be a dict or None, got {type(payload).__name__}")
+    resolved_timeout_ms = _resolve_host_request_timeout_ms(timeout_ms)
     if Comm is None:
         raise RuntimeError("Jupyter comm support is unavailable in this kernel")
     _install_control_comm_handlers()
@@ -100,6 +178,15 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
     comm = Comm(target_name=HOST_COMM_TARGET, primary=False)
+
+    def _schedule(callback: Any) -> None:
+        if future.done():
+            return
+        try:
+            loop.call_soon_threadsafe(callback)
+        except RuntimeError:
+            # The loop can close while a late comm reply is being dispatched.
+            return
 
     def _on_msg(msg: dict[str, Any]) -> None:
         content = msg.get("content", {})
@@ -109,35 +196,63 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
 
         status = reply.get("status")
         if status == "ok":
+
             def _resolve_result() -> None:
                 if not future.done():
                     future.set_result({k: v for k, v in reply.items() if k != "status"})
-                    comm.close()
 
-            loop.call_soon_threadsafe(_resolve_result)
+            _schedule(_resolve_result)
             return
         if status == "error":
             message = reply.get("error") or f"host request {request_type} failed"
+            error_type = TimeoutError if reply.get("error_type") == "timeout" else RuntimeError
+
             def _resolve_error() -> None:
                 if not future.done():
-                    future.set_exception(RuntimeError(str(message)))
-                    comm.close()
+                    future.set_exception(error_type(str(message)))
 
-            loop.call_soon_threadsafe(_resolve_error)
+            _schedule(_resolve_error)
             return
 
         unexpected = f"host request {request_type} returned unexpected status: {status!r}"
+
         def _resolve_unexpected() -> None:
             if not future.done():
                 future.set_exception(RuntimeError(unexpected))
-                comm.close()
 
-        loop.call_soon_threadsafe(_resolve_unexpected)
+        _schedule(_resolve_unexpected)
 
     comm.on_msg(_on_msg)
-    # request_type goes last so a payload "type" key cannot reroute the request.
-    comm.open(data={**(payload or {}), "type": request_type})
-    return await future
+    try:
+        # Reserved bridge metadata and request_type go last so payload keys
+        # cannot change the deadline or reroute the request.
+        comm.open(
+            data={
+                **(payload or {}),
+                _HOST_REQUEST_TIMEOUT_FIELD: resolved_timeout_ms,
+                _HOST_REQUEST_EXECUTION_OWNED_FIELD: _host_request_is_execution_owned(),
+                "type": request_type,
+            }
+        )
+        try:
+            return await asyncio.wait_for(future, resolved_timeout_ms / 1000)
+        except asyncio.TimeoutError as error:
+            raise TimeoutError(
+                f'host request "{request_type}" timed out after {resolved_timeout_ms}ms; '
+                "its outcome is unknown because the request, handler, or reply may have stalled; "
+                "inspect host state before retrying"
+            ) from error
+    finally:
+        if not future.done():
+            future.cancel()
+        try:
+            comm.on_msg(None)
+        except Exception:
+            pass
+        try:
+            comm.close()
+        except Exception:
+            pass
 
 
 async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:

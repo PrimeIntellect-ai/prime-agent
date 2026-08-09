@@ -30,6 +30,10 @@ const READY_TIMEOUT_MS = 5000;
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
+const DEFAULT_HOST_REQUEST_TIMEOUT_MS = 120_000;
+const MAX_HOST_REQUEST_TIMEOUT_MS = 3_600_000;
+const HOST_REQUEST_TIMEOUT_FIELD = "_prime_agent_timeout_ms";
+const HOST_REQUEST_EXECUTION_OWNED_FIELD = "_prime_agent_execution_owned";
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 // How often to poll a forked kernel's pid for unexpected death.
 const FORKED_LIVENESS_POLL_MS = 1000;
@@ -56,25 +60,31 @@ export class KernelBusyAfterInterruptError extends Error {
 export const HOST_COMM_TARGET = "host.request";
 
 /**
- * Handles one typed request from Python code running in the kernel.
- * The returned record is sent back verbatim as the comm reply payload.
- *
- * This legacy unary compatibility alias remains the dispatcher and registration
- * contract while context-aware handlers are staged separately below.
- */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
-
-/**
- * Per-call authority supplied by the host-request dispatcher.
+ * Per-call authority and lifecycle metadata supplied by the host-request dispatcher.
  * `requestId` is an opaque host-minted correlation token and `isCurrent()`
  * lets an implementation reject work after its authority is revoked.
  */
 export interface HostRequestContext {
 	readonly requestId: string;
 	readonly generation: number;
+	readonly requestType: string;
+	readonly timeoutMs: number;
+	/** Aborted with the source execution, when the deadline expires, or when the Comm closes. */
 	readonly signal: AbortSignal;
 	isCurrent(): boolean;
 }
+
+/**
+ * Handles one typed request from Python code running in the kernel.
+ * The returned record is sent back verbatim as the comm reply payload.
+ *
+ * The context remains optional so existing unary handlers stay source-compatible;
+ * the host dispatcher always supplies it.
+ */
+export type HostRequestHandler = (
+	payload: Record<string, unknown>,
+	context?: HostRequestContext,
+) => Promise<Record<string, unknown>>;
 
 const hostRequestHandlerBrand = Symbol("hostRequestHandler");
 
@@ -97,6 +107,11 @@ function assertGenuineHostRequestContext(context: unknown): asserts context is H
 		typeof (context as HostRequestContext).requestId !== "string" ||
 		!(context as HostRequestContext).requestId ||
 		!Number.isSafeInteger((context as HostRequestContext).generation) ||
+		typeof (context as HostRequestContext).requestType !== "string" ||
+		!(context as HostRequestContext).requestType ||
+		!Number.isSafeInteger((context as HostRequestContext).timeoutMs) ||
+		(context as HostRequestContext).timeoutMs < 1 ||
+		(context as HostRequestContext).timeoutMs > MAX_HOST_REQUEST_TIMEOUT_MS ||
 		typeof (context as HostRequestContext).isCurrent !== "function" ||
 		typeof (context as HostRequestContext).signal !== "object" ||
 		(context as HostRequestContext).signal === null ||
@@ -404,12 +419,100 @@ interface Deferred<T> {
 	reject: (error: Error) => void;
 }
 
+interface HostRequestEnvelope {
+	requestType: string;
+	timeoutMs: number;
+	executionOwned: boolean;
+	payload: Record<string, unknown>;
+}
+
+interface InFlightHostRequest {
+	requestType: string;
+	controller: AbortController;
+	closed: boolean;
+	executionSignal?: AbortSignal;
+	onExecutionAbort?: () => void;
+	timeout?: ReturnType<typeof globalThis.setTimeout>;
+}
+
+class HostRequestTimeoutError extends Error {
+	constructor(requestType: string, timeoutMs: number) {
+		super(`host request "${requestType}" timed out after ${timeoutMs}ms`);
+		this.name = "HostRequestTimeoutError";
+	}
+}
+
+class HostRequestClosedError extends Error {
+	constructor(requestType: string) {
+		super(`host request "${requestType}" was aborted because its Comm closed`);
+		this.name = "HostRequestClosedError";
+	}
+}
+
+class HostRequestExecutionAbortedError extends Error {
+	constructor(requestType: string) {
+		super(`host request "${requestType}" was aborted with its IPython execution`);
+		this.name = "HostRequestExecutionAbortedError";
+	}
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function parseHostRequestEnvelope(data: unknown): HostRequestEnvelope {
+	if (!isRecord(data)) {
+		throw new Error("host request payload must be an object");
+	}
+	if (typeof data.type !== "string" || data.type.length === 0) {
+		throw new Error("host request payload must have a string type");
+	}
+	const rawTimeoutMs = data[HOST_REQUEST_TIMEOUT_FIELD];
+	const timeoutMs = rawTimeoutMs === undefined ? DEFAULT_HOST_REQUEST_TIMEOUT_MS : rawTimeoutMs;
+	if (
+		typeof timeoutMs !== "number" ||
+		!Number.isInteger(timeoutMs) ||
+		timeoutMs < 1 ||
+		timeoutMs > MAX_HOST_REQUEST_TIMEOUT_MS
+	) {
+		throw new Error(`${HOST_REQUEST_TIMEOUT_FIELD} must be an integer from 1 to ${MAX_HOST_REQUEST_TIMEOUT_MS}`);
+	}
+	const rawExecutionOwned = data[HOST_REQUEST_EXECUTION_OWNED_FIELD];
+	if (rawExecutionOwned !== undefined && typeof rawExecutionOwned !== "boolean") {
+		throw new Error(`${HOST_REQUEST_EXECUTION_OWNED_FIELD} must be a boolean`);
+	}
+	const executionOwned = rawExecutionOwned ?? true;
+	const payload = { ...data };
+	delete payload[HOST_REQUEST_TIMEOUT_FIELD];
+	delete payload[HOST_REQUEST_EXECUTION_OWNED_FIELD];
+	return { requestType: data.type, timeoutMs, executionOwned, payload };
+}
+
+function raceHostRequestWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) {
+		return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("host request aborted"));
+	}
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			callback();
+		};
+		const onAbort = () =>
+			finish(() => reject(signal.reason instanceof Error ? signal.reason : new Error("host request aborted")));
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => finish(() => resolve(value)),
+			(error: unknown) => finish(() => reject(error instanceof Error ? error : new Error(String(error)))),
+		);
+	});
 }
 
 function createDeferred<T>(): Deferred<T> {
@@ -616,6 +719,8 @@ export class KernelManager {
 	// attribute their spawning program.
 	private lastCellCode?: string;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	private readonly hostRequestsByCommId = new Map<string, InFlightHostRequest>();
+	private hostRequestGeneration = 0;
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Memoized so concurrent callers all await the same in-flight startup. */
 	private startPromise?: Promise<void>;
@@ -1273,6 +1378,13 @@ export class KernelManager {
 		if (msgType === "comm_close") {
 			this.commTargets.delete(commId);
 			this.handledHostRequestCommIds.delete(commId);
+			const request = this.hostRequestsByCommId.get(commId);
+			if (request) {
+				request.closed = true;
+				if (!request.controller.signal.aborted) {
+					request.controller.abort(new HostRequestClosedError(request.requestType));
+				}
+			}
 			return;
 		}
 
@@ -1283,67 +1395,138 @@ export class KernelManager {
 			}
 			this.commTargets.set(commId, targetName);
 			if (targetName === HOST_COMM_TARGET) {
-				this.startHostRequestFromComm(commId, content.data);
+				const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+				this.startHostRequestFromComm(commId, content.data, parentMessageId);
 			}
 			return;
 		}
 
 		const targetName = this.commTargets.get(commId);
 		if (msgType === "comm_msg" && targetName === HOST_COMM_TARGET) {
-			this.startHostRequestFromComm(commId, content.data);
+			const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+			this.startHostRequestFromComm(commId, content.data, parentMessageId);
 		}
 	}
 
-	private startHostRequestFromComm(commId: string, data: unknown): void {
+	private startHostRequestFromComm(commId: string, data: unknown, parentMessageId?: string): void {
 		if (this.handledHostRequestCommIds.has(commId)) {
 			return;
 		}
 		this.handledHostRequestCommIds.add(commId);
 
-		const task = (async () => {
-			try {
-				const result = await this.handleHostRequest(data);
-				try {
-					await this.sendCommMessage(commId, { status: "ok", ...result });
-				} catch (replyError) {
-					this.appendKernelDiagnostic(
-						`failed to send host request ok reply for comm ${commId}: ${errorMessage(replyError)}`,
-					);
-				}
-			} catch (error) {
-				this.appendKernelDiagnostic(`host request failed for comm ${commId}: ${errorMessage(error)}`);
-				try {
-					await this.sendCommMessage(commId, { status: "error", error: errorMessage(error) });
-				} catch (replyError) {
-					this.appendKernelDiagnostic(
-						`failed to send host request error reply for comm ${commId}: ${errorMessage(replyError)}`,
-					);
-				}
-			}
-		})();
+		const task = this.runHostRequestFromComm(commId, data, parentMessageId);
 		this.inFlightHostRequests.add(task);
 		void task.finally(() => {
 			this.inFlightHostRequests.delete(task);
+			this.commTargets.delete(commId);
+			this.handledHostRequestCommIds.delete(commId);
 		});
 	}
 
-	private async handleHostRequest(data: unknown): Promise<Record<string, unknown>> {
-		if (!isRecord(data)) {
-			throw new Error("host request payload must be an object");
-		}
-		if (typeof data.type !== "string" || data.type.length === 0) {
-			throw new Error("host request payload must have a string type");
-		}
+	private async runHostRequestFromComm(commId: string, data: unknown, parentMessageId?: string): Promise<void> {
+		let request: InFlightHostRequest | undefined;
+		try {
+			const envelope = parseHostRequestEnvelope(data);
+			const controller = new AbortController();
+			request = {
+				requestType: envelope.requestType,
+				controller,
+				closed: false,
+			};
+			this.hostRequestsByCommId.set(commId, request);
+			const sourceExecution =
+				envelope.executionOwned && parentMessageId !== undefined ? this.activeExecution : undefined;
+			const executionSignal =
+				sourceExecution && sourceExecution.requestMsgId === parentMessageId
+					? sourceExecution.opts.signal
+					: undefined;
+			if (executionSignal) {
+				request.executionSignal = executionSignal;
+				request.onExecutionAbort = () => {
+					if (!controller.signal.aborted) {
+						controller.abort(new HostRequestExecutionAbortedError(envelope.requestType));
+					}
+				};
+				executionSignal.addEventListener("abort", request.onExecutionAbort, { once: true });
+				if (executionSignal.aborted) request.onExecutionAbort();
+			}
+			request.timeout = globalThis.setTimeout(() => {
+				if (!controller.signal.aborted) {
+					controller.abort(new HostRequestTimeoutError(envelope.requestType, envelope.timeoutMs));
+				}
+			}, envelope.timeoutMs);
+			if (request.timeout && typeof request.timeout === "object" && "unref" in request.timeout) {
+				request.timeout.unref();
+			}
 
-		const handler = this.options.hostHandlers?.[data.type];
-		if (!handler) {
-			throw new Error(`host request type "${data.type}" is not available in this session`);
+			const context: HostRequestContext = Object.freeze({
+				requestId: uuid(),
+				generation: ++this.hostRequestGeneration,
+				requestType: envelope.requestType,
+				timeoutMs: envelope.timeoutMs,
+				signal: controller.signal,
+				isCurrent: () =>
+					request !== undefined &&
+					this.hostRequestsByCommId.get(commId) === request &&
+					!request.closed &&
+					!controller.signal.aborted,
+			});
+			const result = await this.handleHostRequest(envelope, context);
+			if (request.closed) return;
+			try {
+				await this.sendCommMessage(commId, { status: "ok", ...result });
+			} catch (replyError) {
+				this.appendKernelDiagnostic(
+					`failed to send host request ok reply for comm ${commId}: ${errorMessage(replyError)}`,
+				);
+			}
+		} catch (error) {
+			if (request?.closed) return;
+			this.appendKernelDiagnostic(`host request failed for comm ${commId}: ${errorMessage(error)}`);
+			const errorType =
+				error instanceof HostRequestTimeoutError
+					? { error_type: "timeout" }
+					: error instanceof HostRequestExecutionAbortedError
+						? { error_type: "aborted" }
+						: {};
+			try {
+				await this.sendCommMessage(commId, {
+					status: "error",
+					...errorType,
+					error: errorMessage(error),
+				});
+			} catch (replyError) {
+				this.appendKernelDiagnostic(
+					`failed to send host request error reply for comm ${commId}: ${errorMessage(replyError)}`,
+				);
+			}
+		} finally {
+			if (request?.executionSignal && request.onExecutionAbort) {
+				request.executionSignal.removeEventListener("abort", request.onExecutionAbort);
+				request.executionSignal = undefined;
+				request.onExecutionAbort = undefined;
+			}
+			if (request?.timeout) {
+				globalThis.clearTimeout(request.timeout);
+				request.timeout = undefined;
+			}
+			this.hostRequestsByCommId.delete(commId);
 		}
-		// Tag the request with the cell that triggered it. A blocking call is still
-		// the in-flight execution; detached spawns (asyncio.create_task) fire after
-		// the scheduling cell goes idle, so fall back to that last cell's source.
+	}
+
+	private async handleHostRequest(
+		envelope: HostRequestEnvelope,
+		context: HostRequestContext,
+	): Promise<Record<string, unknown>> {
+		const handler = this.options.hostHandlers?.[envelope.requestType];
+		if (!handler) {
+			throw new Error(`host request type "${envelope.requestType}" is not available in this session`);
+		}
+		// Tag the request with the active cell when present. Detached tasks can
+		// publish before or after that cell goes idle, so fall back to its last source.
 		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-		return handler({ ...data, cellSourceCode });
+		const handlerPromise = handler({ ...envelope.payload, cellSourceCode }, context);
+		return raceHostRequestWithAbort(handlerPromise, context.signal);
 	}
 
 	private async sendCommMessage(commId: string, data: Record<string, unknown>): Promise<void> {
@@ -1364,6 +1547,22 @@ export class KernelManager {
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
+		for (const request of this.hostRequestsByCommId.values()) {
+			request.closed = true;
+			if (request.executionSignal && request.onExecutionAbort) {
+				request.executionSignal.removeEventListener("abort", request.onExecutionAbort);
+				request.executionSignal = undefined;
+				request.onExecutionAbort = undefined;
+			}
+			if (request.timeout) {
+				globalThis.clearTimeout(request.timeout);
+				request.timeout = undefined;
+			}
+			if (!request.controller.signal.aborted) {
+				request.controller.abort(new HostRequestClosedError(request.requestType));
+			}
+		}
+		this.hostRequestsByCommId.clear();
 		if (this.forkedLivenessTimer) {
 			globalThis.clearInterval(this.forkedLivenessTimer);
 			this.forkedLivenessTimer = undefined;

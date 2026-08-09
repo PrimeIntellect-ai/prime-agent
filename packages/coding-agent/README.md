@@ -685,6 +685,7 @@ prime-agent --thinking high "Solve this complex problem"
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `ipykernel` instead of auto-bootstrapping `~/.prime/agent/kernel-venv` |
+| `PRIME_AGENT_HOST_REQUEST_TIMEOUT_MS` | Set the IPython kernel↔host request deadline in milliseconds (default: `120000`; range: `1`–`3600000`) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
 The remaining `PI_*` variables in this table are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.prime/agent` configuration path.

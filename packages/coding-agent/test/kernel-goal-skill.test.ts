@@ -1,10 +1,19 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+
+async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() >= deadline) throw new Error(`condition did not become true within ${timeoutMs}ms`);
+		await sleep(1);
+	}
+}
 
 function bundledGoalSkill(): PythonSkillRuntimeInfo {
 	const packagePath = join(getBundledSkillsDir(), "goal");
@@ -80,6 +89,112 @@ print(_completed["goal"]["status"], _completed["completion_budget_report"])
 
 		expect(requests.map((request) => request.type)).toEqual(["goal.create", "goal.complete"]);
 		expect(requests[0].payload).toMatchObject({ type: "goal.create", objective: "ship it", token_budget: 10 });
+	});
+
+	it("bounds a stalled goal request and keeps the live kernel reusable", async () => {
+		let handlerStarted = false;
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			env: { PRIME_AGENT_HOST_REQUEST_TIMEOUT_MS: "250" },
+			pythonSkills: [bundledGoalSkill()],
+			hostHandlers: {
+				"goal.complete": async () => {
+					handlerStarted = true;
+					return new Promise<Record<string, unknown>>(() => {});
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const startedAt = Date.now();
+		const timedOut = await manager.execute(`
+_preserved_after_timeout = 42
+try:
+    await goal.complete()
+except TimeoutError as error:
+    print(f"TimeoutError: {error}")
+`);
+		expect(handlerStarted).toBe(true);
+		expect(Date.now() - startedAt).toBeLessThan(2_000);
+		expect(timedOut.status).toBe("ok");
+		expect(timedOut.stdout).toContain('TimeoutError: host request "goal.complete" timed out after 250ms');
+
+		const followUp = await manager.execute("print(_preserved_after_timeout)");
+		expect(followUp.status).toBe("ok");
+		expect(followUp.stdout.trim()).toBe("42");
+	});
+
+	it("does not abort a detached request started by the active cell", async () => {
+		let handlerStarted = false;
+		let handlerSignal: AbortSignal | undefined;
+		let release: () => void = () => {};
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			env: { PRIME_AGENT_HOST_REQUEST_TIMEOUT_MS: "1000" },
+			pythonSkills: [bundledGoalSkill()],
+			hostHandlers: {
+				"goal.complete": async (_payload, context) => {
+					handlerStarted = true;
+					handlerSignal = context?.signal;
+					await new Promise<void>((resolve) => {
+						release = resolve;
+					});
+					return {};
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const controller = new AbortController();
+		try {
+			const scheduled = await manager.execute(
+				`background_completion = asyncio.create_task(goal.complete())
+await asyncio.sleep(0.05)
+print("scheduled")`,
+				{ signal: controller.signal },
+			);
+			expect(scheduled.status).toBe("ok");
+			expect(scheduled.stdout.trim()).toBe("scheduled");
+			expect(handlerStarted).toBe(true);
+
+			controller.abort();
+			await sleep(20);
+			expect(handlerSignal?.aborted).toBe(false);
+		} finally {
+			release();
+		}
+
+		const followUp = await manager.execute("print('detached healthy')");
+		expect(followUp.status).toBe("ok");
+		expect(followUp.stdout.trim()).toBe("detached healthy");
+	});
+
+	it("aborts the matching host request and frees the live kernel", async () => {
+		let handlerStarted = false;
+		let handlerSignal: AbortSignal | undefined;
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			env: { PRIME_AGENT_HOST_REQUEST_TIMEOUT_MS: "1000" },
+			pythonSkills: [bundledGoalSkill()],
+			hostHandlers: {
+				"goal.complete": async (_payload, context) => {
+					handlerStarted = true;
+					handlerSignal = context?.signal;
+					return new Promise<Record<string, unknown>>(() => {});
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const controller = new AbortController();
+		const execution = manager.execute("await goal.complete()", { signal: controller.signal });
+		execution.catch(() => undefined);
+		await waitFor(() => handlerStarted);
+		controller.abort();
+		await waitFor(() => handlerSignal?.aborted === true, 300);
+
+		const aborted = await execution;
+		expect(aborted.status).toBe("aborted");
+		const followUp = await manager.execute("print('still healthy')");
+		expect(followUp.status).toBe("ok");
+		expect(followUp.stdout.trim()).toBe("still healthy");
 	});
 
 	it("surfaces host errors and missing handlers as Python exceptions", async () => {
