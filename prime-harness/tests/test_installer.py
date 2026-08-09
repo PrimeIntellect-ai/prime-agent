@@ -325,7 +325,7 @@ def test_tailor_rejects_linked_lean_marker(tmp_repo):
         pytest.skip("file symlink creation unavailable")
     proc = run_install(tmp_repo, "--tailor")
     assert proc.returncode != 0
-    assert "no executable project checks detected" in (proc.stdout + proc.stderr)
+    assert "link/reparse layout marker forbidden" in (proc.stdout + proc.stderr)
     assert not (tmp_repo / "harness/manifest.json").exists()
 
 
@@ -719,3 +719,88 @@ def test_installed_component_selftests_match_upstream_sources():
         HARNESS_ROOT / "docs/alert-codes.md"
     ).read_bytes()
     assert not (bundle_root.parent / "README.md").exists()
+
+
+
+def test_tailor_preserves_actual_case_for_every_fixed_layout_marker(tmp_repo):
+    (tmp_repo / "Src/Pkg").mkdir(parents=True)
+    (tmp_repo / "Src/Pkg/module.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_repo / "Tests").mkdir()
+    (tmp_repo / "Tests/test_ok.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    (tmp_repo / "PyProject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (tmp_repo / "Tox.ini").write_text("[tox]\n", encoding="utf-8")
+    (tmp_repo / "Lakefile.lean").write_text("package Test\n", encoding="utf-8")
+    (tmp_repo / "Package.json").write_text(
+        json.dumps({"scripts": {"test": "node --test"}}), encoding="utf-8",
+    )
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    checks = manifest["profiles"]["default"]["required"]
+    by_name = {entry["name"]: entry for entry in checks}
+    assert by_name["compile"]["skip_if_missing"] == "Src"
+    assert "compileall -q Src" in by_name["compile"]["command"]
+    assert by_name["unit"]["skip_if_missing"] == "Tests"
+    assert "pytest -q Tests" in by_name["unit"]["command"]
+    assert by_name["lean-build"]["skip_if_missing"] == "Lakefile.lean"
+    assert by_name["node-test"]["skip_if_missing"] == "Package.json"
+
+
+def test_tailor_preserves_actual_case_for_nested_check_paths(tmp_repo):
+    (tmp_repo / "Checks/Properties").mkdir(parents=True)
+    (tmp_repo / "Checks/Properties/test_project.py").write_text(
+        "def test_project(): assert True\n", encoding="utf-8",
+    )
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    unit = next(entry for entry in manifest["profiles"]["default"]["required"] if entry["name"] == "unit")
+    assert unit["skip_if_missing"] == "Checks/Properties"
+    assert "pytest -q Checks/Properties" in unit["command"]
+
+
+
+@pytest.mark.parametrize(
+    "marker,content,check_name",
+    [
+        ("PyProject.toml", "[tool.pytest.ini_options]\n", "unit"),
+        ("Tox.ini", "[tox]\n", "tox"),
+    ],
+)
+def test_tailor_preserves_actual_case_for_single_file_python_markers(tmp_repo, marker, content, check_name):
+    (tmp_repo / marker).write_text(content, encoding="utf-8")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    check = next(entry for entry in manifest["profiles"]["default"]["required"] if entry["name"] == check_name)
+    assert check["skip_if_missing"] == marker
+
+
+def test_tailor_preserves_actual_case_for_holdout_marker(tmp_repo):
+    (tmp_repo / "Tests").mkdir()
+    (tmp_repo / "Tests/test_ok.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    (tmp_repo / "Checks/Hidden_Holdout").mkdir(parents=True)
+    (tmp_repo / "Checks/Hidden_Holdout/test_hidden.py").write_text(
+        "def test_hidden(): assert True\n", encoding="utf-8",
+    )
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    holdout = manifest["profiles"]["holdout"]["required"][0]
+    assert holdout["skip_if_missing"] == "Checks/Hidden_Holdout"
+    assert holdout["command"].endswith("Checks/Hidden_Holdout")
+
+
+def test_tailor_rejects_casefold_ambiguous_layout_markers(tmp_repo):
+    lower = tmp_repo / "src"
+    upper = tmp_repo / "Src"
+    lower.mkdir()
+    try:
+        upper.mkdir()
+    except FileExistsError:
+        pytest.skip("filesystem is case-insensitive")
+    (lower / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (upper / "b.py").write_text("b = 1\n", encoding="utf-8")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode != 0
+    assert "ambiguous under case folding" in (proc.stdout + proc.stderr)

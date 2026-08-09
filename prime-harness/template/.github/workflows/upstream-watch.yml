@@ -22,4 +22,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Fail when upstream PR 825 requires local patch retirement
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -S harness/upstream_check.py --check-pr-only --json

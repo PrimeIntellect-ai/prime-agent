@@ -128,4 +128,57 @@ def test_scheduled_pr_watch_is_read_only_pinned_and_calls_bounded_probe():
     steps = document["jobs"]["pr-825"]["steps"]
     uses = [step["uses"] for step in steps if "uses" in step]
     assert all(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}", value) for value in uses)
-    assert any("upstream_check.py --check-pr-only" in str(step.get("run", "")) for step in steps)
+    probe_step = next(step for step in steps if "upstream_check.py --check-pr-only" in str(step.get("run", "")))
+    assert probe_step["env"] == {"GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
+
+
+
+def test_query_pr_825_uses_optional_github_token(monkeypatch):
+    captured = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"state":"open","merged_at":null}'
+
+    def opener(request, timeout):
+        captured.append((request, timeout))
+        return Response()
+
+    monkeypatch.setenv("GITHUB_TOKEN", "bounded-test-token")
+    assert watch.query_pr_825(opener) is False
+    assert captured[-1][0].get_header("Authorization") == "Bearer bounded-test-token"
+    monkeypatch.delenv("GITHUB_TOKEN")
+    assert watch.query_pr_825(opener) is False
+    assert captured[-1][0].get_header("Authorization") is None
+
+
+def test_patch_signature_drift_is_baseline_relative_and_source_aware(tmp_path):
+    binary = tmp_path / "prime-agent"
+    binary.write_bytes(b"launcher-v1")
+    source = make_source(tmp_path / "source-tree")
+    patched = watch.capture_current(
+        ROOT / "template", prime_binary=binary, source_root=source, version_override="0.7.1",
+    )
+    never_patched = copy.deepcopy(patched)
+    never_patched["patch_state"] = {"venv_python_path": False, "windows_hide": False}
+    assert watch.compare_snapshots(never_patched, never_patched, pr_825_merged=False) == {
+        "status": "stable", "reasons": [],
+    }
+
+    regressed = watch.compare_snapshots(patched, never_patched, pr_825_merged=False)
+    assert regressed["status"] == "drift"
+    assert any("venvPythonPath" in reason for reason in regressed["reasons"])
+    assert any("windowsHide" in reason for reason in regressed["reasons"])
+
+    distribution = copy.deepcopy(never_patched)
+    distribution["prime_agent"]["source_root"] = None
+    distribution["source_file_sha256"] = {}
+    assert watch.compare_snapshots(distribution, distribution, pr_825_merged=False) == {
+        "status": "stable", "reasons": [],
+    }

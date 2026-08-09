@@ -83,6 +83,28 @@ def _bounded_entries(directory: Path, limit: int) -> list[Path] | None:
     return sorted(entries, key=lambda path: path.name.casefold())
 
 
+def _resolve_actual_layout_path(
+    root: Path, canonical: str, *, root_entries: list[Path] | None = None,
+) -> tuple[Path, str] | None:
+    """Resolve fixed marker spelling from directory entries without following links."""
+    current = root
+    actual_parts: list[str] = []
+    for index, expected in enumerate(canonical.split("/")):
+        entries = root_entries if index == 0 and root_entries is not None else _bounded_entries(current, 512)
+        if entries is None:
+            raise TailorError(f"layout directory for {canonical!r} is unreadable or exceeds 512 entries")
+        matches = [entry for entry in entries if entry.name.casefold() == expected.casefold()]
+        if len(matches) > 1:
+            raise TailorError(f"layout marker {canonical!r} is ambiguous under case folding")
+        if not matches:
+            return None
+        current = matches[0]
+        if _is_linklike(current):
+            raise TailorError(f"link/reparse layout marker forbidden: {canonical!r}")
+        actual_parts.append(current.name)
+    return current, "/".join(actual_parts)
+
+
 def _bounded_inventory(base: Path) -> dict[str, Path] | None:
     """Inventory a small regular tree without following link/reparse entries."""
     files: dict[str, Path] = {}
@@ -150,9 +172,9 @@ def _contains_python_source(base: Path) -> bool:
     )
 
 
-def _template_only_subtree(target: Path, relative: str) -> bool:
+def _template_only_subtree(target: Path, relative: str, destination_relative: str | None = None) -> bool:
     source = TEMPLATE / relative
-    destination = target / relative
+    destination = target / (destination_relative or relative)
     if not source.is_dir() or not destination.is_dir():
         return False
     source_files = _bounded_inventory(source)
@@ -243,20 +265,23 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     target = target.resolve()
     checks: list[dict[str, object]] = []
     detected: list[str] = []
-
-    python_roots: list[str] = []
-    for source_dir in ("src", "sim", "simulation", "simulations"):
-        candidate = target / source_dir
-        if candidate.is_dir() and not _is_linklike(candidate) and _contains_python_source(candidate):
-            python_roots.append(source_dir)
-    # Source-layout-free packages are detected only one level deep; never walk
-    # an untrusted or very large repository during installation.
     top_level = _bounded_entries(target, 512)
     if top_level is None:
         raise TailorError("target root exceeds the 512-entry tailoring scan limit or is unreadable")
+
+    python_roots: list[str] = []
+    for source_dir in ("src", "sim", "simulation", "simulations"):
+        resolved = _resolve_actual_layout_path(target, source_dir, root_entries=top_level)
+        if resolved is None:
+            continue
+        candidate, actual_source = resolved
+        if candidate.is_dir() and _contains_python_source(candidate):
+            python_roots.append(actual_source)
+    # Source-layout-free packages are detected only one level deep; never walk
+    # an untrusted or very large repository during installation.
     excluded = {".git", ".prime", ".github", "artifacts", "checks", "harness", "tests", "test", "node_modules"}
     for path in top_level:
-        if path.name in excluded or path.name.startswith(".") or not path.is_dir() or _is_linklike(path):
+        if path.name.casefold() in excluded or path.name.startswith(".") or not path.is_dir() or _is_linklike(path):
             continue
         package_init = path / "__init__.py"
         if (
@@ -266,7 +291,7 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         ):
             _contains_python_source(path)  # validates every descendant before recursive compileall
             python_roots.append(path.name)
-    python_roots = sorted(set(python_roots))
+    python_roots = sorted(set(python_roots), key=lambda value: (value.casefold(), value))
     if python_roots:
         joined = " ".join(python_roots)
         checks.append(_check("compile", f"python -m compileall -q {joined}", python_roots[0], 120))
@@ -274,39 +299,47 @@ def tailor_manifest(target: Path) -> dict[str, object]:
 
     test_dirs: list[str] = []
     for item in ("tests", "test", "checks/properties", "checks/invariants", "checks/reference_cases"):
-        candidate = target / item
-        if not candidate.is_dir() or _is_linklike(candidate):
+        resolved = _resolve_actual_layout_path(target, item, root_entries=top_level)
+        if resolved is None:
             continue
-        _validated_regular_tree_files(candidate, f"test directory {item}")
-        if not _template_only_subtree(target, item):
-            test_dirs.append(item)
-    pyproject_text = _bounded_text(target / "pyproject.toml")
+        candidate, actual_item = resolved
+        if not candidate.is_dir():
+            continue
+        _validated_regular_tree_files(candidate, f"test directory {actual_item}")
+        if not _template_only_subtree(target, item, actual_item):
+            test_dirs.append(actual_item)
+    pyproject_resolved = _resolve_actual_layout_path(target, "pyproject.toml", root_entries=top_level)
+    pyproject_path = pyproject_resolved[0] if pyproject_resolved else target / "__missing_pyproject__"
+    pyproject_name = pyproject_resolved[1] if pyproject_resolved else "pyproject.toml"
+    pyproject_text = _bounded_text(pyproject_path)
     if pyproject_text is not None:
-        detected.append("pyproject.toml")
+        detected.append(pyproject_name)
     if test_dirs:
         joined = " ".join(test_dirs)
         checks.append(_check("unit", f"python -m pytest -q {joined}", test_dirs[0], 900))
         detected.extend(f"python-tests:{item}" for item in test_dirs)
     elif pyproject_text is not None and "[tool.pytest" in pyproject_text:
-        checks.append(_check("unit", "python -m pytest -q", "pyproject.toml", 900))
-        detected.append("pyproject.toml:pytest")
-    elif (target / "tox.ini").is_file() and not _is_linklike(target / "tox.ini"):
-        checks.append(_check("tox", "python -m tox -q", "tox.ini", 900))
-        detected.append("tox.ini")
+        checks.append(_check("unit", "python -m pytest -q", pyproject_name, 900))
+        detected.append(f"{pyproject_name}:pytest")
+    else:
+        tox_resolved = _resolve_actual_layout_path(target, "tox.ini", root_entries=top_level)
+        if tox_resolved and tox_resolved[0].is_file():
+            checks.append(_check("tox", "python -m tox -q", tox_resolved[1], 900))
+            detected.append(tox_resolved[1])
 
-    lake_marker = next(
-        (
-            item for item in ("lakefile.lean", "lakefile.toml")
-            if (target / item).is_file() and not _is_linklike(target / item)
-        ),
-        None,
-    )
+    lake_marker: str | None = None
+    for item in ("lakefile.lean", "lakefile.toml"):
+        resolved = _resolve_actual_layout_path(target, item, root_entries=top_level)
+        if resolved and resolved[0].is_file():
+            lake_marker = resolved[1]
+            break
     if lake_marker:
         checks.append(_check("lean-build", "lake build", lake_marker, 900))
         detected.append(lake_marker)
 
-    package_json = target / "package.json"
-    package_text = _bounded_text(package_json)
+    package_resolved = _resolve_actual_layout_path(target, "package.json", root_entries=top_level)
+    package_path = package_resolved[0] if package_resolved else target / "__missing_package__"
+    package_text = _bounded_text(package_path)
     if package_text is not None:
         try:
             package = json.loads(package_text)
@@ -314,8 +347,9 @@ def tailor_manifest(target: Path) -> dict[str, object]:
             package = None
         script = package.get("scripts", {}).get("test") if isinstance(package, dict) and isinstance(package.get("scripts"), dict) else None
         if isinstance(script, str) and _credible_node_test_script(script):
-            checks.append(_check("node-test", "npm test", "package.json", 900))
-            detected.append("package.json:test")
+            assert package_resolved is not None
+            checks.append(_check("node-test", "npm test", package_resolved[1], 900))
+            detected.append(f"{package_resolved[1]}:test")
 
     if not checks:
         raise TailorError(
@@ -337,14 +371,17 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         "default": {"min_applicable_checks": 1, "required": default, "conditional": []},
         "changed-files": {"min_applicable_checks": 1, "required": changed, "conditional": []},
     }
-    holdout = target / "checks/hidden_holdout"
-    if holdout.is_dir() and not _is_linklike(holdout) and not _template_only_subtree(target, "checks/hidden_holdout"):
+    holdout_resolved = _resolve_actual_layout_path(target, "checks/hidden_holdout", root_entries=top_level)
+    if holdout_resolved and holdout_resolved[0].is_dir() and not _template_only_subtree(
+        target, "checks/hidden_holdout", holdout_resolved[1],
+    ):
+        holdout_name = holdout_resolved[1]
         profiles["holdout"] = {
             "min_applicable_checks": 1,
-            "required": [_check("hidden-holdout", "python -m pytest -q checks/hidden_holdout", "checks/hidden_holdout", 1800)],
+            "required": [_check("hidden-holdout", f"python -m pytest -q {holdout_name}", holdout_name, 1800)],
             "conditional": [],
         }
-        detected.append("checks/hidden_holdout")
+        detected.append(holdout_name)
     return {
         "_generated_by": "prime-harness install.py --tailor",
         "_detected": sorted(detected),

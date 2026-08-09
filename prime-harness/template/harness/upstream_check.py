@@ -194,11 +194,13 @@ def compare_snapshots(
         reasons.append("Prime Agent selfcheck-critical source hashes changed")
     if baseline.get("archived_patch_sha256") != current.get("archived_patch_sha256"):
         reasons.append("archived re-application patch hashes changed")
+    base_patch_state = baseline.get("patch_state") if isinstance(baseline.get("patch_state"), dict) else {}
     patch_state = current.get("patch_state") if isinstance(current.get("patch_state"), dict) else {}
-    if not patch_state.get("venv_python_path"):
-        reasons.append("Windows venvPythonPath patch signature is absent")
-    if not patch_state.get("windows_hide"):
-        reasons.append("Windows windowsHide patch signatures are absent")
+    source_is_available = bool(now_prime.get("source_root"))
+    if source_is_available and base_patch_state.get("venv_python_path") is True and patch_state.get("venv_python_path") is not True:
+        reasons.append("Windows venvPythonPath patch signature regressed from the install-time baseline")
+    if source_is_available and base_patch_state.get("windows_hide") is True and patch_state.get("windows_hide") is not True:
+        reasons.append("Windows windowsHide patch signatures regressed from the install-time baseline")
     if pr_825_merged:
         return {
             "status": "retirement_required",
@@ -236,10 +238,16 @@ def parse_pr_825_payload(raw: bytes) -> bool:
 
 
 def query_pr_825(opener: Callable[..., Any] = urllib.request.urlopen) -> bool:
-    request = urllib.request.Request(
-        PR_825_URL,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "prime-harness-upstream-watch/1"},
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "prime-harness-upstream-watch/1",
+    }
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        if len(token) > 4096 or "\r" in token or "\n" in token:
+            raise RuntimeError("GITHUB_TOKEN is malformed or exceeds 4096 characters")
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(PR_825_URL, headers=headers)
     try:
         with opener(request, timeout=20) as response:
             raw = response.read(MAX_PR_RESPONSE_BYTES + 1)
