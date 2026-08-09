@@ -25,7 +25,8 @@ installation, development-environment, and measured model-selector content.
 | `NO_APPLICABLE_GATE_CHECKS` | warning | Gate runs exist, but every run was vacuous. |
 | `GATE_VACUOUS_PASS` | warning | A passing archive executed zero applicable checks; exclude it from the substantive rate. |
 | `GATE_INCOMPLETE` | warning | An archived result had missing/unknown schema fields. |
-| `VERIFICATION_BEHIND_CHURN` | warning | Evidence activity is below the configurable churn heuristic; add focused verification or document why it is inapplicable. |
+| `VERIFICATION_BEHIND_CHURN` | warning; critical in completion mode | Per-directory evidence activity is below the configured churn threshold; add focused verification or a signed task-scoped ledger disposition. |
+| `VERIFICATION_COVERAGE_UNAVAILABLE` | critical in completion mode | The evidence schema cannot prove per-directory coverage; repair the ledger/schema rather than bypassing completion. |
 | `STALE_CHILD` | warning | A running child has no recent durable event; inspect before declaring it dead. |
 | `ACTIVE_CHILD_MISMATCH` | warning | Task-state active names and latest registry running names disagree. |
 | `UNATTRIBUTED_CHILD_USAGE` | warning | Attribution is absent or ambiguous; retain it separately rather than guessing. |

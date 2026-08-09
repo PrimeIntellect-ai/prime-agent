@@ -77,3 +77,28 @@ malformed responses from a provisioned controller still fail.
 In the upstream prime-harness repo, the opt-in `tests/test_live_kernel_e2e.py` runs this same
 check inside a live kernel; it is not part of the installed bundle (see
 `.prime/agent/harness-tests/BUNDLE.md`).
+
+## Goal-completion coverage check
+
+Immediately before `goal.complete()`, after clearing `unresolved_claims`, run:
+
+```python
+report = harness_orchestrator.completion_check()
+assert report["status"] == "pass"
+```
+
+This executes the outside-kernel scorecard in `--completion --fail-on critical`
+mode, requires the full evidence-ledger coverage schema, enforces configurable
+per-top-level-directory churn coverage, rejects critical alerts and HEAD races,
+and checkpoints `quality_gate_status.completion_coverage`. There is no boolean
+coverage bypass.
+
+When churn is genuinely inapplicable, construct the only accepted explicit
+disposition metadata with
+`coverage_disposition_assumptions(["directory"], "specific reason...")`, then
+record it with `evidence_ledger.record(status="verified",
+claim_type="verification-coverage-disposition", verifier="named independent
+verifier", assumptions=metadata, artifacts=[...])` and add the returned ID to
+task state. Invalidated, unsigned, stale-base, malformed, or out-of-task rows do
+not waive coverage.
+

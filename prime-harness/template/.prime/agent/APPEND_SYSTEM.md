@@ -12,7 +12,9 @@ Treat correctness as an **evidence problem, not a confidence problem**.
    `sci_verify` check** whose status is `pass`. `inconclusive` is not a pass
    and must be reported as unresolved.
 3. **Complete the persistent goal only when** the composite gate passes
-   (`sci_verify.run_suite(...)` → status `pass`), every critical/major
+   (`sci_verify.run_suite(...)` → status `pass`),
+   `harness_orchestrator.completion_check()` returns `status="pass"` immediately
+   before completion, every critical/major
    external-critic finding is falsified-and-fixed or rebutted in the ledger,
    and no unresolved claims remain in the task state.
 4. **Work only on the task's working branch/worktree** recorded in the task

@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import html
 import json
@@ -44,6 +45,13 @@ CODE_SUFFIXES = {
 DEAD_STATUSES = {"dead", "error", "failed", "killed", "timed_out", "timeout"}
 RUNNING_STATUSES = {"running", "active", "spawned"}
 SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
+DEFAULT_COVERAGE_POLICY = {
+    "min_evidence_per_100_lines": 1.0,
+    "churn_alert_min_lines": 100,
+    "exempt_globs": ["docs/**", "generated/**"],
+}
+MAX_COVERAGE_GLOBS = 128
+MAX_COVERAGE_GLOB_CHARS = 256
 
 
 def utc_now() -> datetime:
@@ -96,6 +104,93 @@ def read_json(path: Path, warnings: list[str], label: str) -> dict[str, Any] | N
         warnings.append(f"{label}:not_object")
         return None
     return value
+
+
+def load_coverage_policy(root: Path) -> dict[str, Any]:
+    path = root / "harness" / "config.json"
+    if path.is_symlink():
+        raise ValueError("harness/config.json must not be link-backed")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("harness/config.json is not readable UTF-8 JSON") from exc
+    if not isinstance(document, dict):
+        raise ValueError("harness/config.json must be an object")
+    raw = document.get("verification_coverage", {})
+    if not isinstance(raw, dict):
+        raise ValueError("verification_coverage must be an object")
+    allowed = set(DEFAULT_COVERAGE_POLICY)
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"verification_coverage has unknown keys: {sorted(unknown)}")
+    threshold = raw.get("min_evidence_per_100_lines", DEFAULT_COVERAGE_POLICY["min_evidence_per_100_lines"])
+    minimum = raw.get("churn_alert_min_lines", DEFAULT_COVERAGE_POLICY["churn_alert_min_lines"])
+    globs = raw.get("exempt_globs", DEFAULT_COVERAGE_POLICY["exempt_globs"])
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(float(threshold)) or float(threshold) < 0:
+        raise ValueError("verification_coverage.min_evidence_per_100_lines must be finite and non-negative")
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+        raise ValueError("verification_coverage.churn_alert_min_lines must be a non-negative integer")
+    if not isinstance(globs, list) or len(globs) > MAX_COVERAGE_GLOBS:
+        raise ValueError(f"verification_coverage.exempt_globs must be a list of at most {MAX_COVERAGE_GLOBS} strings")
+    normalized: list[str] = []
+    for pattern in globs:
+        if (
+            not isinstance(pattern, str) or not pattern or len(pattern) > MAX_COVERAGE_GLOB_CHARS
+            or "\0" in pattern or "\\" in pattern or pattern.startswith("/")
+            or re.fullmatch(r"[A-Za-z0-9._-]+/\*\*", pattern) is None
+        ):
+            raise ValueError("verification_coverage.exempt_globs must contain only bounded top-level directory/** patterns")
+        normalized.append(pattern)
+    return {
+        "min_evidence_per_100_lines": float(threshold),
+        "churn_alert_min_lines": minimum,
+        "exempt_globs": normalized,
+    }
+
+
+def _coverage_directory(relative: str) -> str:
+    normalized = relative.replace("\\", "/").strip("/")
+    return normalized.split("/", 1)[0] if "/" in normalized else "."
+
+
+def _coverage_exempt(relative: str, patterns: list[str] | tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns)
+
+
+def _parse_coverage_metadata(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, str) and len(raw) > 1024 * 1024:
+        return None
+    try:
+        assumptions = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(assumptions, dict) or "verification_coverage" not in assumptions:
+        return {}
+    coverage = assumptions["verification_coverage"]
+    if not isinstance(coverage, dict) or set(coverage) - {"kind", "directories", "base_commit", "reason"}:
+        return None
+    kind = coverage.get("kind")
+    directories = coverage.get("directories")
+    base_commit = coverage.get("base_commit")
+    reason = coverage.get("reason")
+    if kind not in {"verification", "disposition"} or not isinstance(directories, list) or not directories or len(directories) > 128:
+        return None
+    if not isinstance(base_commit, str) or re.fullmatch(r"[0-9a-fA-F]{40,64}", base_commit) is None:
+        return None
+    normalized: list[str] = []
+    for directory in directories:
+        if (
+            not isinstance(directory, str) or not directory or len(directory) > 128
+            or directory not in {"."} and re.fullmatch(r"[A-Za-z0-9._-]+", directory) is None
+        ):
+            return None
+        if directory not in normalized:
+            normalized.append(directory)
+    if kind == "disposition" and (not isinstance(reason, str) or len(reason.strip()) < 20):
+        return None
+    if kind == "verification" and reason is not None:
+        return None
+    return {"kind": kind, "directories": normalized, "base_commit": base_commit.lower(), "reason": reason.strip() if isinstance(reason, str) else None}
 
 
 def iter_jsonl(path: Path, warnings: list[str], label: str) -> Iterable[dict[str, Any]]:
@@ -627,6 +722,8 @@ def scan_evidence(path: Path, start: datetime | None, end: datetime,
         "activity_records": 0,
         "records_with_verifier": 0,
         "verified_without_verifier": 0,
+        "coverage_schema_available": False,
+        "_coverage_records": [],
     }
     if not path.is_file():
         warnings.append("evidence:missing")
@@ -643,8 +740,14 @@ def scan_evidence(path: Path, start: datetime | None, end: datetime,
             warnings.append("evidence:schema_missing_columns")
             result["missing_task_evidence_ids"] = len(task_evidence_ids)
             return result
+        coverage_columns = {"claim_type", "assumptions", "commit_sha", "invalidated_at"}
+        coverage_schema = coverage_columns.issubset(columns)
+        result["coverage_schema_available"] = coverage_schema
+        selected_columns = ["id", "status", "verifier", "created_at"]
+        if coverage_schema:
+            selected_columns.extend(["claim_type", "assumptions", "commit_sha", "invalidated_at"])
         rows = connection.execute(
-            "SELECT id, status, verifier, created_at FROM evidence ORDER BY rowid LIMIT 100001"
+            f"SELECT {', '.join(selected_columns)} FROM evidence ORDER BY rowid LIMIT 100001"
         ).fetchall()
         if len(rows) > 100000:
             warnings.append("evidence:row_limit_exceeded")
@@ -659,8 +762,9 @@ def scan_evidence(path: Path, start: datetime | None, end: datetime,
     wanted = set(task_evidence_ids)
     matched: set[str] = set()
     outside = 0
-    selected: list[tuple[Any, Any, Any, Any]] = []
-    for evidence_id, status, verifier, created_at in rows:
+    selected: list[tuple[Any, ...]] = []
+    for row in rows:
+        evidence_id, status, verifier, created_at = row[:4]
         created = parse_time(created_at)
         if created is not None and created > end:
             warnings.append("evidence:future_record")
@@ -668,14 +772,16 @@ def scan_evidence(path: Path, start: datetime | None, end: datetime,
         in_window = start is None or created is None or created >= start
         if isinstance(evidence_id, str) and evidence_id in wanted:
             matched.add(evidence_id)
-            selected.append((evidence_id, status, verifier, created_at))
+            selected.append(row)
         elif in_window:
             outside += 1
     statuses = Counter()
     activity = 0
     with_verifier = 0
     verified_without = 0
-    for _evidence_id, status, verifier, _created_at in selected:
+    coverage_records: list[dict[str, Any]] = []
+    for row in selected:
+        evidence_id, status, verifier, created_at = row[:4]
         status_text = status if isinstance(status, str) else "unknown"
         statuses[status_text] += 1
         has_verifier = isinstance(verifier, str) and bool(verifier.strip())
@@ -685,6 +791,21 @@ def scan_evidence(path: Path, start: datetime | None, end: datetime,
             verified_without += 1
         if status_text in {"verified", "refuted", "inconclusive"}:
             activity += 1
+        if result["coverage_schema_available"]:
+            claim_type, assumptions, commit_sha, invalidated_at = row[4:8]
+            metadata = _parse_coverage_metadata(assumptions)
+            if metadata is None:
+                warnings.append(f"evidence:invalid_coverage_metadata:{evidence_id}")
+                metadata = {}
+            coverage_records.append({
+                "id": evidence_id,
+                "status": status_text,
+                "has_verifier": has_verifier,
+                "claim_type": claim_type if isinstance(claim_type, str) else None,
+                "commit_sha": commit_sha if isinstance(commit_sha, str) else None,
+                "invalidated": invalidated_at is not None,
+                "coverage": metadata,
+            })
     result.update({
         "matched_task_evidence_ids": len(matched),
         "missing_task_evidence_ids": len(wanted - matched),
@@ -694,6 +815,7 @@ def scan_evidence(path: Path, start: datetime | None, end: datetime,
         "activity_records": activity,
         "records_with_verifier": with_verifier,
         "verified_without_verifier": verified_without,
+        "_coverage_records": coverage_records,
     })
     return result
 
@@ -736,9 +858,12 @@ def count_file_lines(path: Path) -> tuple[int | None, bool]:
         return None, True
 
 
-def scan_churn(root: Path, base: str | None, warnings: list[str]) -> dict[str, Any]:
+def scan_churn(root: Path, base: str | None, warnings: list[str],
+               exempt_globs: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
     branch_proc = run_git(root, ["branch", "--show-current"], warnings, "branch")
     branch = branch_proc.stdout.decode("utf-8", errors="replace").strip() if branch_proc else None
+    head_proc = run_git(root, ["rev-parse", "--verify", "HEAD"], warnings, "head")
+    head = head_proc.stdout.decode("ascii", errors="replace").strip() if head_proc else None
     resolved_base = None
     rows: list[tuple[int | None, int | None, str]] = []
     if base and not base.startswith("-"):
@@ -772,7 +897,11 @@ def scan_churn(root: Path, base: str | None, warnings: list[str]) -> dict[str, A
         line_count, binary = count_file_lines(root / relative)
         rows.append((None if binary else line_count, 0 if not binary else None, relative))
     total_added = total_deleted = code_added = code_deleted = binary_files = 0
+    exempt_code_lines = 0
     changed_paths: set[str] = set()
+    directory_lines: Counter[str] = Counter()
+    directory_files: defaultdict[str, set[str]] = defaultdict(set)
+    exempt_paths: set[str] = set()
     for added, deleted, relative in rows:
         changed_paths.add(relative)
         if added is None or deleted is None:
@@ -781,10 +910,19 @@ def scan_churn(root: Path, base: str | None, warnings: list[str]) -> dict[str, A
         total_added += added
         total_deleted += deleted
         if is_code_path(relative):
+            changed = added + deleted
             code_added += added
             code_deleted += deleted
+            if _coverage_exempt(relative, exempt_globs):
+                exempt_code_lines += changed
+                exempt_paths.add(relative)
+            else:
+                directory = _coverage_directory(relative)
+                directory_lines[directory] += changed
+                directory_files[directory].add(relative)
     return {
         "base": resolved_base or base,
+        "head": head,
         "working_branch": branch,
         "files_changed": len(changed_paths),
         "untracked_files": len(untracked),
@@ -795,8 +933,125 @@ def scan_churn(root: Path, base: str | None, warnings: list[str]) -> dict[str, A
         "code_lines_added": code_added,
         "code_lines_deleted": code_deleted,
         "code_lines_changed": code_added + code_deleted,
+        "coverage_code_lines_changed": sum(directory_lines.values()),
+        "coverage_exempt_code_lines": exempt_code_lines,
+        "coverage_exempt_files": len(exempt_paths),
+        "coverage_directories": [
+            {"directory": directory, "code_lines_changed": directory_lines[directory],
+             "files_changed": len(directory_files[directory])}
+            for directory in sorted(directory_lines)
+        ],
     }
 
+
+def _commit_code_directories(root: Path, commit: str | None, base: str | None,
+                             exempt_globs: list[str], warnings: list[str]) -> set[str]:
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-fA-F]{40,64}", commit) is None or not base:
+        return set()
+    resolved_commit = run_git(root, ["rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}"], warnings, "evidence_commit")
+    if not resolved_commit:
+        return set()
+    commit_sha = resolved_commit.stdout.decode("ascii", errors="replace").strip()
+    if commit_sha == base:
+        return set()
+    for ancestor, descendant, label in ((base, commit_sha, "evidence_after_base"), (commit_sha, "HEAD", "evidence_before_head")):
+        try:
+            proc = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=root, capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            warnings.append(f"git:{label}:{type(exc).__name__}")
+            return set()
+        if proc.returncode != 0:
+            return set()
+    changed = run_git(root, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-z", "-r", commit_sha, "--"], warnings, "evidence_diff")
+    if not changed:
+        return set()
+    directories: set[str] = set()
+    for raw in changed.stdout.split(b"\0"):
+        if not raw:
+            continue
+        relative = raw.decode("utf-8", errors="replace")
+        if is_code_path(relative) and not _coverage_exempt(relative, exempt_globs):
+            directories.add(_coverage_directory(relative))
+    return directories
+
+
+def build_directory_coverage(*, root: Path, base: str | None, churn: dict[str, Any],
+                             coverage_records: list[dict[str, Any]], schema_available: bool,
+                             min_evidence_per_100_lines: float, churn_alert_min_lines: int,
+                             exempt_globs: list[str], warnings: list[str]) -> dict[str, Any]:
+    rows = {item["directory"]: item for item in churn["coverage_directories"]}
+    verification_ids: defaultdict[str, set[str]] = defaultdict(set)
+    disposition_ids: defaultdict[str, set[str]] = defaultdict(set)
+    commit_cache: dict[str, set[str]] = {}
+    resolved_base = churn.get("base") if isinstance(churn.get("base"), str) else base
+    for record in coverage_records:
+        evidence_id = record.get("id")
+        if not isinstance(evidence_id, str) or record.get("invalidated") or not record.get("has_verifier"):
+            continue
+        status = record.get("status")
+        coverage = record.get("coverage") if isinstance(record.get("coverage"), dict) else {}
+        kind = coverage.get("kind")
+        explicit_directories: set[str] = set()
+        if kind:
+            if coverage.get("base_commit") != resolved_base:
+                warnings.append(f"evidence:coverage_base_mismatch:{evidence_id}")
+            else:
+                explicit_directories = set(coverage.get("directories", []))
+        if (
+            kind == "disposition" and status == "verified"
+            and record.get("claim_type") == "verification-coverage-disposition"
+            and explicit_directories
+        ):
+            for directory in explicit_directories.intersection(rows):
+                disposition_ids[directory].add(evidence_id)
+            continue
+        if status not in {"verified", "refuted", "inconclusive"}:
+            continue
+        commit_sha = record.get("commit_sha")
+        automatic: set[str] = set()
+        if isinstance(commit_sha, str):
+            if commit_sha not in commit_cache:
+                commit_cache[commit_sha] = _commit_code_directories(root, commit_sha, resolved_base, exempt_globs, warnings)
+            automatic = commit_cache[commit_sha]
+        if kind == "verification":
+            automatic = explicit_directories
+        for directory in automatic.intersection(rows):
+            verification_ids[directory].add(evidence_id)
+    enforce = churn["coverage_code_lines_changed"] >= churn_alert_min_lines
+    directory_results: list[dict[str, Any]] = []
+    for directory in sorted(rows):
+        lines = rows[directory]["code_lines_changed"]
+        ids = sorted(verification_ids[directory])
+        dispositions = sorted(disposition_ids[directory])
+        rate = len(ids) * 100.0 / lines if lines else 0.0
+        if not enforce:
+            status = "below-minimum"
+        elif dispositions:
+            status = "disposition"
+        elif rate >= min_evidence_per_100_lines:
+            status = "pass"
+        else:
+            status = "behind"
+        directory_results.append({
+            "directory": directory,
+            "code_lines_changed": lines,
+            "files_changed": rows[directory]["files_changed"],
+            "verification_records": len(ids),
+            "verification_evidence_ids": ids,
+            "records_per_100_lines": round(rate, 6),
+            "disposition_evidence_ids": dispositions,
+            "status": status,
+        })
+    return {
+        "available": schema_available,
+        "policy": {
+            "min_evidence_per_100_lines": min_evidence_per_100_lines,
+            "churn_alert_min_lines": churn_alert_min_lines,
+            "exempt_globs": exempt_globs,
+        },
+        "enforced": enforce,
+        "directories": directory_results,
+    }
 
 def goal_summary(data: Any) -> dict[str, Any] | None:
     if not isinstance(data, dict):
@@ -854,7 +1109,8 @@ def add_alert(alerts: list[dict[str, Any]], code: str, severity: str, message: s
 
 
 def derive_alerts(scorecard: dict[str, Any], *, min_evidence_per_100_lines: float,
-                  churn_alert_min_lines: int, goal_low_percent: float) -> list[dict[str, Any]]:
+                  churn_alert_min_lines: int, goal_low_percent: float,
+                  completion: bool = False) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
     task = scorecard["task"]
     goal = scorecard["goal"]
@@ -900,12 +1156,29 @@ def derive_alerts(scorecard: dict[str, Any], *, min_evidence_per_100_lines: floa
         add_alert(alerts, "EVIDENCE_ID_MISSING", "critical", "Task state references evidence IDs absent from the readable ledger snapshot.", count=evidence["missing_task_evidence_ids"])
     if evidence["outside_task_records"]:
         add_alert(alerts, "EVIDENCE_OUTSIDE_TASK", "info", "Time-window ledger rows not named by task evidence_ids were excluded.", count=evidence["outside_task_records"])
-    code_lines = churn["code_lines_changed"]
-    activity = evidence["activity_records"]
-    if code_lines >= churn_alert_min_lines:
-        rate = activity * 100.0 / code_lines if code_lines else 0.0
-        if rate < min_evidence_per_100_lines:
-            add_alert(alerts, "VERIFICATION_BEHIND_CHURN", "warning", "Verification-ledger activity is low relative to code churn (heuristic, not a correctness verdict).", activity_records=activity, code_lines_changed=code_lines, records_per_100_lines=round(rate, 6), threshold=min_evidence_per_100_lines)
+    coverage = evidence.get("directory_coverage")
+    if isinstance(coverage, dict) and coverage.get("available"):
+        behind = [row for row in coverage.get("directories", []) if row.get("status") == "behind"]
+        if behind:
+            add_alert(
+                alerts, "VERIFICATION_BEHIND_CHURN", "critical" if completion else "warning",
+                "Verification-ledger activity is below the configured threshold in one or more changed code directories.",
+                directories=[row["directory"] for row in behind],
+                directory_metrics=behind,
+                threshold=min_evidence_per_100_lines,
+            )
+    elif completion:
+        add_alert(
+            alerts, "VERIFICATION_COVERAGE_UNAVAILABLE", "critical",
+            "Completion coverage cannot be established from the evidence ledger schema.",
+        )
+    else:
+        code_lines = churn["code_lines_changed"]
+        activity = evidence["activity_records"]
+        if code_lines >= churn_alert_min_lines:
+            rate = activity * 100.0 / code_lines if code_lines else 0.0
+            if rate < min_evidence_per_100_lines:
+                add_alert(alerts, "VERIFICATION_BEHIND_CHURN", "warning", "Verification-ledger activity is low relative to code churn (heuristic, not a correctness verdict).", activity_records=activity, code_lines_changed=code_lines, records_per_100_lines=round(rate, 6), threshold=min_evidence_per_100_lines)
     if evidence["verified_without_verifier"]:
         add_alert(alerts, "UNVERIFIED_VERIFIER_METADATA", "critical", "Verified evidence rows are missing verifier metadata.", count=evidence["verified_without_verifier"])
     stale = [child["name"] for child in children["records"] if child["possibly_stale"]]
@@ -978,7 +1251,8 @@ def build_scorecard(*, root: Path, task_state_path: Path, session_file: Path | N
                     evidence_db: Path, gate_logs: Path, now: datetime,
                     stale_minutes: float, base_override: str | None,
                     min_evidence_per_100_lines: float, churn_alert_min_lines: int,
-                    goal_low_percent: float,
+                    goal_low_percent: float, exempt_globs: list[str] | None = None,
+                    completion: bool = False,
                     future_skew_seconds: float = FUTURE_EVENT_SKEW_SECONDS) -> dict[str, Any]:
     warnings: list[str] = []
     task_data = read_json(task_state_path, warnings, "task_state")
@@ -1014,7 +1288,23 @@ def build_scorecard(*, root: Path, task_state_path: Path, session_file: Path | N
         if isinstance(item, str) and item
     ]
     evidence = scan_evidence(evidence_db, start, now, task_evidence_ids, warnings)
-    churn = scan_churn(root, base_override or task.get("base_commit"), warnings)
+    coverage_records = evidence.pop("_coverage_records", [])
+    configured_exempt_globs = list(exempt_globs or [])
+    churn = scan_churn(
+        root, base_override or task.get("base_commit"), warnings,
+        exempt_globs=configured_exempt_globs,
+    )
+    evidence["directory_coverage"] = build_directory_coverage(
+        root=root,
+        base=base_override or task.get("base_commit"),
+        churn=churn,
+        coverage_records=coverage_records,
+        schema_available=bool(evidence.get("coverage_schema_available")),
+        min_evidence_per_100_lines=min_evidence_per_100_lines,
+        churn_alert_min_lines=churn_alert_min_lines,
+        exempt_globs=configured_exempt_globs,
+        warnings=warnings,
+    )
     code_lines = churn["code_lines_changed"]
     evidence["records_per_100_code_lines"] = round(evidence["activity_records"] * 100.0 / code_lines, 6) if code_lines else None
     evidence["gate_runs_per_100_code_lines"] = round(gates["substantive_runs"] * 100.0 / code_lines, 6) if code_lines else None
@@ -1068,6 +1358,7 @@ def build_scorecard(*, root: Path, task_state_path: Path, session_file: Path | N
         min_evidence_per_100_lines=min_evidence_per_100_lines,
         churn_alert_min_lines=churn_alert_min_lines,
         goal_low_percent=goal_low_percent,
+        completion=completion,
     )
     return scorecard
 
@@ -1141,25 +1432,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base", help="override task-state base commit")
     parser.add_argument("--now", help="deterministic ISO-8601 clock (tests/replay)")
     parser.add_argument("--stale-minutes", type=float, default=30.0)
-    parser.add_argument("--min-evidence-per-100-lines", type=float, default=1.0)
-    parser.add_argument("--churn-alert-min-lines", type=int, default=100)
+    parser.add_argument("--min-evidence-per-100-lines", type=float, help="override config verification-coverage threshold")
+    parser.add_argument("--churn-alert-min-lines", type=int, help="override config verification-coverage churn floor")
     parser.add_argument("--goal-low-percent", type=float, default=5.0)
     parser.add_argument("--output", type=Path, help="atomically write JSON (stdout when omitted)")
     parser.add_argument("--markdown", type=Path, help="atomically write a Markdown summary")
     parser.add_argument("--fail-on", choices=("never", "warning", "critical"), default="never")
+    parser.add_argument("--completion", action="store_true", help="make unresolved directory coverage completion-fatal")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.stale_minutes < 0 or args.min_evidence_per_100_lines < 0 or args.churn_alert_min_lines < 0 or not 0 <= args.goal_low_percent <= 100:
+    root = repo_root(args.repo)
+    try:
+        policy = load_coverage_policy(root)
+    except ValueError as exc:
+        print(f"scorecard: {exc}", file=sys.stderr)
+        return 2
+    min_evidence = (
+        args.min_evidence_per_100_lines
+        if args.min_evidence_per_100_lines is not None
+        else policy["min_evidence_per_100_lines"]
+    )
+    churn_minimum = (
+        args.churn_alert_min_lines
+        if args.churn_alert_min_lines is not None
+        else policy["churn_alert_min_lines"]
+    )
+    if (
+        args.stale_minutes < 0
+        or isinstance(min_evidence, bool)
+        or not math.isfinite(min_evidence)
+        or min_evidence < 0
+        or churn_minimum < 0
+        or not 0 <= args.goal_low_percent <= 100
+    ):
         print("scorecard: invalid non-negative threshold", file=sys.stderr)
         return 2
     now = parse_time(args.now) if args.now else utc_now()
     if now is None:
         print("scorecard: --now must be ISO-8601 or an epoch timestamp", file=sys.stderr)
         return 2
-    root = repo_root(args.repo)
     artifacts = load_artifacts_dir(root)
     session_dir = args.session_dir or (Path(os.environ["RLM_SESSION_DIR"]) if os.environ.get("RLM_SESSION_DIR") else None)
     registry = args.registry or (session_dir / "rlm-subagents.jsonl" if session_dir else None)
@@ -1175,11 +1489,14 @@ def main(argv: list[str] | None = None) -> int:
         now=now,
         stale_minutes=args.stale_minutes,
         base_override=args.base,
-        min_evidence_per_100_lines=args.min_evidence_per_100_lines,
-        churn_alert_min_lines=args.churn_alert_min_lines,
+        min_evidence_per_100_lines=float(min_evidence),
+        churn_alert_min_lines=churn_minimum,
         goal_low_percent=args.goal_low_percent,
+        exempt_globs=policy["exempt_globs"],
+        completion=args.completion,
         future_skew_seconds=(0.0 if args.now else FUTURE_EVENT_SKEW_SECONDS),
     )
+    scorecard["completion_mode"] = args.completion
     payload = json.dumps(scorecard, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
     if args.output:
         atomic_write(args.output, payload)

@@ -236,9 +236,28 @@ outside an environment that exports `RLM_SESSION_DIR`. `--now` makes replay
 deterministic, and `--fail-on critical` turns actionable alerts into a monitor
 exit code without changing the default best-effort exit 0.
 
-The verification-to-churn rate is a triage heuristic, **not** a correctness
-score: it counts task-attributed verified/refuted/inconclusive activity per 100
-changed source lines. Gate metrics explicitly say *archived* because early gate
+The normal verification-to-churn alert is a triage heuristic, **not** a correctness
+score. In `--completion` mode it becomes a fail-closed per-top-level-directory
+completion contract: changed code must meet the configured task-evidence rate or
+carry a live, task-base-scoped `verification-coverage-disposition` row signed by
+a named verifier. Documentation and generated paths may be excluded through
+`verification_coverage.exempt_globs` in `harness/config.json`; the threshold and
+churn floor are configured in the same closed section. There is deliberately no
+boolean `--allow` bypass. Run `harness_orchestrator.completion_check()` immediately
+before `goal.complete()`; it invokes `scorecard.py --completion --fail-on critical`,
+rejects unavailable schemas and HEAD races, and persists the result in task state.
+A policy section has this shape (unknown keys, unsafe globs, non-finite values,
+and path traversal fail closed):
+
+```json
+"verification_coverage": {
+  "min_evidence_per_100_lines": 1.0,
+  "churn_alert_min_lines": 100,
+  "exempt_globs": ["docs/**", "generated/**"]
+}
+```
+
+Gate metrics explicitly say *archived* because early gate
 errors may exit before creating an archive. Raw, substantive (at least one
 applicable check or a failure), per-check, and per-profile rates remain separate;
 a vacuous quick pass cannot recover another profile's substantive failure.

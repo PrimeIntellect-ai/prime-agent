@@ -401,3 +401,54 @@ def test_live_selfcheck_contract_with_kernel_stubs(tmp_repo, monkeypatch, contro
         assert capability_statuses.count("unavailable") == 3
         assert len(report["warnings"]) == 3
     assert len([item for item in report["checks"] if item["status"] == "warn"]) == len(report["warnings"])
+
+
+
+def test_completion_check_runs_completion_scorecard_and_persists_pass(tmp_repo):
+    state = orch.new_task("completion-pass", "x", working_branch="main")
+    scorecard = tmp_repo / "harness/scorecard.py"
+    scorecard.parent.mkdir(parents=True, exist_ok=True)
+    scorecard.write_text(
+        "import json, pathlib, sys\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "payload = {'schema_version': 1, 'completion_mode': True, 'alerts': [], "
+        "'code_churn': {'head': 'HEAD'}, 'verification': {'directory_coverage': {'available': True, 'directories': []}}}\n"
+        "out.write_text(json.dumps(payload), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    original_commit = orch.current_commit
+    orch.current_commit = lambda: "HEAD"
+    try:
+        report = orch.completion_check(timeout_seconds=30)
+    finally:
+        orch.current_commit = original_commit
+    assert report["status"] == "pass"
+    assert "--completion" in report["command"]
+    assert report["scorecard"]["verification"]["directory_coverage"]["available"] is True
+    assert orch.load_task_state().quality_gate_status["completion_coverage"]["status"] == "pass"
+
+
+def test_completion_check_fails_closed_before_scorecard_with_unresolved_claims(tmp_repo):
+    state = orch.new_task("completion-fail", "x")
+    state.unresolved_claims = ["unproved claim"]
+    orch.save_task_state(state)
+    report = orch.completion_check()
+    assert report["status"] == "fail"
+    assert "unresolved claims" in report["reasons"][0]
+
+
+def test_coverage_disposition_builder_is_task_scoped_and_path_bounded(tmp_repo):
+    state = orch.new_task("coverage-disposition", "x")
+    result = orch.coverage_disposition_assumptions(
+        ["src", "src"], "The generated binding is verified by the signed integration oracle."
+    )
+    assert result == {"verification_coverage": {
+        "kind": "disposition", "directories": ["src"],
+        "base_commit": state.base_commit,
+        "reason": "The generated binding is verified by the signed integration oracle.",
+    }}
+    for bad in (["../src"], ["src/subdir"], []):
+        with pytest.raises(ValueError):
+            orch.coverage_disposition_assumptions(
+                bad, "This reason is deliberately long enough for validation."
+            )

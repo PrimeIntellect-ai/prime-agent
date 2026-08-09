@@ -9,6 +9,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+
+import pytest
 from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
@@ -524,3 +526,174 @@ def test_readme_documents_every_emitted_alert_code() -> None:
     contract_doc = (HARNESS_ROOT / "docs/alert-codes.md").read_text(encoding="utf-8")
     assert codes
     assert all(f"`{code}`" in contract_doc for code in codes)
+
+
+
+def _prepare_completion_coverage_fixture(repo: Path) -> tuple[dict[str, Path], str, str]:
+    (repo / ".gitignore").write_text("artifacts/harness/\n", encoding="utf-8")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-qm", "coverage base")
+    base = git(repo, "rev-parse", "HEAD")
+    for relative in ("src/model.py", "lib/solver.py", "docs/generated.py"):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(f"value_{index} = {index}" for index in range(200)) + "\n", encoding="utf-8")
+    git(repo, "add", "src/model.py", "lib/solver.py", "docs/generated.py")
+    git(repo, "commit", "-qm", "code churn")
+    change = git(repo, "rev-parse", "HEAD")
+
+    artifacts = repo / "artifacts/harness"
+    artifacts.mkdir(parents=True)
+    task_state = artifacts / "task-state.json"
+    task_state.write_text(json.dumps({
+        "task_id": "coverage-task", "objective": "coverage", "base_commit": base,
+        "working_branch": git(repo, "branch", "--show-current"),
+        "unresolved_claims": [], "active_child_names": [],
+        "quality_gate_status": {}, "created_at": "2026-01-01T00:00:00Z",
+        "evidence_ids": ["ev-commit", "ev-src"],
+    }), encoding="utf-8")
+    children = artifacts / "children.json"
+    children.write_text("{}\n", encoding="utf-8")
+    session = artifacts / "session.jsonl"
+    session.write_text(
+        json.dumps({"type": "session", "id": "coverage-session", "timestamp": "2026-01-01T00:00:00Z"}) + "\n" +
+        json.dumps({"type": "custom", "customType": "thread_goal_state", "id": "goal", "timestamp": "2026-01-02T00:00:00Z", "data": {"active": True, "status": "active", "goalId": "coverage-goal", "tokenBudget": 1000, "tokensUsed": 100, "updatedAt": 1767312000000}}) + "\n",
+        encoding="utf-8",
+    )
+    registry = artifacts / "registry.jsonl"
+    registry.write_text("", encoding="utf-8")
+    gate_logs = artifacts / "gate-logs"
+    gate_logs.mkdir()
+    evidence = artifacts / "evidence.db"
+    connection = sqlite3.connect(evidence)
+    try:
+        connection.execute("""CREATE TABLE evidence (
+            id TEXT, status TEXT, verifier TEXT, created_at TEXT, claim_type TEXT,
+            assumptions TEXT, commit_sha TEXT, invalidated_at TEXT
+        )""")
+        common = ("verified", "pytest", "2026-01-02T00:00:00Z", "test", None)
+        connection.execute(
+            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("ev-commit", *common[:4], "{}", change, common[4]),
+        )
+        connection.execute(
+            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("ev-src", *common[:4], json.dumps({"verification_coverage": {
+                "kind": "verification", "directories": ["src"], "base_commit": base,
+            }}), change, common[4]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    config = repo / "harness/config.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"verification_coverage": {
+        "min_evidence_per_100_lines": 1.0,
+        "churn_alert_min_lines": 100,
+        "exempt_globs": ["docs/**"],
+    }}), encoding="utf-8")
+    return {
+        "artifacts": artifacts, "task_state": task_state,
+        "session": session,
+        "registry": registry,
+        "children_state": children, "evidence": evidence, "gate_logs": gate_logs,
+    }, base, change
+
+
+def test_completion_coverage_is_per_directory_configurable_and_requires_signed_disposition(tmp_repo: Path) -> None:
+    paths, base, change = _prepare_completion_coverage_fixture(tmp_repo)
+    failed, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert failed.returncode == 1
+    coverage = payload["verification"]["directory_coverage"]
+    assert coverage["policy"]["exempt_globs"] == ["docs/**"]
+    rows = {row["directory"]: row for row in coverage["directories"]}
+    assert rows["src"]["status"] == "pass"
+    assert rows["src"]["records_per_100_lines"] == 1.0
+    assert rows["lib"]["status"] == "behind"
+    assert "docs" not in rows
+    alert = next(item for item in payload["alerts"] if item["code"] == "VERIFICATION_BEHIND_CHURN")
+    assert alert["severity"] == "critical"
+    assert alert["metrics"]["directories"] == ["lib"]
+
+    disposition = {
+        "verification_coverage": {
+            "kind": "disposition", "directories": ["lib"], "base_commit": base,
+            "reason": "Generated adapter churn is covered by the signed integration oracle.",
+        }
+    }
+    connection = sqlite3.connect(paths["evidence"])
+    try:
+        connection.execute(
+            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("ev-lib-disposition", "verified", "independent coverage auditor",
+             "2026-01-02T01:00:00Z", "verification-coverage-disposition",
+             json.dumps(disposition), change, None),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    task["evidence_ids"].append("ev-lib-disposition")
+    paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+    passed, payload = run_scorecard(
+        tmp_repo, paths, "--completion", "--fail-on", "critical", output_name="covered.json"
+    )
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    rows = {row["directory"]: row for row in payload["verification"]["directory_coverage"]["directories"]}
+    assert rows["lib"]["status"] == "disposition"
+    assert rows["lib"]["disposition_evidence_ids"] == ["ev-lib-disposition"]
+    assert not any(item["code"] == "VERIFICATION_BEHIND_CHURN" for item in payload["alerts"])
+
+
+def test_completion_rejects_malformed_or_unsigned_coverage_dispositions(tmp_repo: Path) -> None:
+    paths, base, change = _prepare_completion_coverage_fixture(tmp_repo)
+    connection = sqlite3.connect(paths["evidence"])
+    try:
+        connection.execute(
+            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("ev-bad", "verified", "", "2026-01-02T01:00:00Z",
+             "verification-coverage-disposition", json.dumps({"verification_coverage": {
+                 "kind": "disposition", "directories": ["../lib"], "base_commit": base,
+                 "reason": "This text is long enough but the path and signer are invalid.",
+             }}), change, None),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    task = json.loads(paths["task_state"].read_text(encoding="utf-8"))
+    task["evidence_ids"].append("ev-bad")
+    paths["task_state"].write_text(json.dumps(task), encoding="utf-8")
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    assert any(item["code"] == "VERIFICATION_BEHIND_CHURN" for item in payload["alerts"])
+    assert "evidence:invalid_coverage_metadata:ev-bad" in payload["warnings"]
+
+
+
+@pytest.mark.parametrize("policy", [
+    {"unknown": 1},
+    {"min_evidence_per_100_lines": True},
+    {"min_evidence_per_100_lines": float("inf")},
+    {"churn_alert_min_lines": -1},
+    {"exempt_globs": "docs/**"},
+    {"exempt_globs": ["../generated/**"]},
+    {"exempt_globs": ["**"]},
+    {"exempt_globs": ["C:\\outside\\**"]},
+])
+def test_coverage_policy_rejects_ambiguous_or_unsafe_config(tmp_repo: Path, policy: dict) -> None:
+    paths, _base, _change = _prepare_completion_coverage_fixture(tmp_repo)
+    (tmp_repo / "harness/config.json").write_text(
+        json.dumps({"verification_coverage": policy}), encoding="utf-8"
+    )
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 2
+    assert payload == {}
+    assert "scorecard:" in proc.stderr
+
+
+def test_completion_fails_closed_when_evidence_schema_cannot_prove_coverage(tmp_repo: Path) -> None:
+    paths = prepare_recorded_fixture(tmp_repo)
+    proc, payload = run_scorecard(tmp_repo, paths, "--completion", "--fail-on", "critical")
+    assert proc.returncode == 1
+    alert = next(item for item in payload["alerts"] if item["code"] == "VERIFICATION_COVERAGE_UNAVAILABLE")
+    assert alert["severity"] == "critical"

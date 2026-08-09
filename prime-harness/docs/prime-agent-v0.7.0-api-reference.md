@@ -88,7 +88,7 @@ Skill name constants: `agent-message`, `agent-observe`, `orchestration-heartbeat
 
 **`agent_observe`**: `list_agents()` → `agent_observe.list`; `get_agent(target)` (active id, session id/name, or suffix); `recent_messages(target, limit=8, max_chars=800)` — host validates limit 1–50, max_chars 80–2000.
 
-**`goal`**: `get()` → `{goal: SerializedGoal|None, remaining_tokens, completion_budget_report}`; `create(objective, token_budget=None)` — fails while a goal is pending (active/paused/budget_limited), replaces completed/errored; `complete()` — the only success signal.
+**`goal`**: `get()` → `{goal: SerializedGoal|None, remaining_tokens, completion_budget_report}`; `create(objective, token_budget=None)` — fails while a goal is pending (active/paused/budget_limited), replaces completed/errored; `complete()` — the only success signal. Prime Agent does not know repository verification state, so Prime Harness policy additionally requires a passing `harness_orchestrator.completion_check()` immediately before this call; no wrapper can make an out-of-policy direct call impossible at the product API boundary.
 
 **`rlm_heartbeat`**: `list(include_inactive=False)`; `create(instruction, interval=None, label=None, delivery_mode: "steer"|"follow_up"|None=None)` — default interval every 5 minutes, example `"5m"`; `update(id, instruction=None, interval=None, label=None, status: "pause"|"resume"|None=None, delivery_mode=None)`; `delete(id)`. Agent-internal; separate from user `/heartbeat`; cannot replace/clear the user heartbeat.
 

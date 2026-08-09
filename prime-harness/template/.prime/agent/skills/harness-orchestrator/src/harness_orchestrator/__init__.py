@@ -21,6 +21,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,8 @@ __all__ = [
     "roster",
     "harness_snapshot",
     "harness_diff",
+    "coverage_disposition_assumptions",
+    "completion_check",
     "SelfcheckError",
     "selfcheck",
     "run",
@@ -615,6 +619,127 @@ def harness_diff() -> str:
 # ---------------------------------------------------------------------------
 # Live kernel compatibility self-check
 # ---------------------------------------------------------------------------
+
+
+def coverage_disposition_assumptions(directories: list[str], reason: str) -> dict[str, Any]:
+    """Build the only accepted task-scoped coverage override metadata.
+
+    The caller must record the returned assumptions through evidence_ledger.record
+    with status="verified", claim_type="verification-coverage-disposition", and a
+    non-empty independent verifier. This helper deliberately does not write or
+    silently approve a disposition.
+    """
+    state = load_task_state()
+    if state is None or not isinstance(state.base_commit, str) or not state.base_commit:
+        raise RuntimeError("coverage disposition requires task state with a pinned base commit")
+    if not isinstance(directories, list) or not directories or len(directories) > 128:
+        raise ValueError("directories must be a non-empty list of at most 128 top-level names")
+    normalized: list[str] = []
+    for directory in directories:
+        if (
+            not isinstance(directory, str) or not directory or len(directory) > 128
+            or directory not in {"."} and re.fullmatch(r"[A-Za-z0-9._-]+", directory) is None
+        ):
+            raise ValueError("coverage directory must be '.' or a bounded top-level repository name")
+        if directory not in normalized:
+            normalized.append(directory)
+    if not isinstance(reason, str) or len(reason.strip()) < 20:
+        raise ValueError("coverage disposition reason must contain at least 20 characters")
+    return {"verification_coverage": {
+        "kind": "disposition",
+        "directories": normalized,
+        "base_commit": state.base_commit,
+        "reason": reason.strip(),
+    }}
+
+
+def _persist_completion_status(state: TaskState, status: str, reasons: list[str], output: Path | None) -> None:
+    state.quality_gate_status["completion_coverage"] = {
+        "status": status,
+        "reasons": reasons,
+        "scorecard": str(output) if output else None,
+        "checked_at": utc_now_iso(),
+        "head": current_commit(),
+    }
+    save_task_state(state)
+
+
+def completion_check(*, timeout_seconds: int = 120) -> dict[str, Any]:
+    """Run the fail-closed completion scorecard immediately before goal.complete()."""
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 600:
+        raise ValueError("timeout_seconds must be an integer from 1 through 600")
+    state = load_task_state()
+    if state is None:
+        return {"status": "fail", "reasons": ["task state is unavailable"], "scorecard": None}
+    if state.unresolved_claims:
+        reasons = [f"task state has {len(state.unresolved_claims)} unresolved claims"]
+        _persist_completion_status(state, "fail", reasons, None)
+        return {"status": "fail", "reasons": reasons, "scorecard": None}
+    root = repo_root()
+    script = root / "harness" / "scorecard.py"
+    output = harness_dir() / "completion-scorecard.json"
+    reasons: list[str] = []
+    if script.is_symlink() or not script.is_file():
+        reasons.append("harness/scorecard.py is missing or link-backed")
+    if output.is_symlink():
+        reasons.append("completion scorecard output is link-backed")
+    if reasons:
+        _persist_completion_status(state, "fail", reasons, output)
+        return {"status": "fail", "reasons": reasons, "scorecard": None}
+    command = [
+        sys.executable, "-S", str(script),
+        "--repo", str(root),
+        "--task-state", str(_state_path()),
+        "--output", str(output),
+        "--completion", "--fail-on", "critical",
+    ]
+    try:
+        process = subprocess.run(
+            command, cwd=root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        reasons.append(f"completion scorecard execution failed: {type(exc).__name__}")
+        _persist_completion_status(state, "fail", reasons, output)
+        return {"status": "fail", "reasons": reasons, "command": command, "scorecard": None}
+    payload: dict[str, Any] | None = None
+    try:
+        if not output.is_file() or output.stat().st_size > 8 * 1024 * 1024:
+            raise ValueError("missing or oversized output")
+        candidate = json.loads(output.read_text(encoding="utf-8"))
+        if not isinstance(candidate, dict):
+            raise ValueError("output is not an object")
+        payload = candidate
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        reasons.append(f"completion scorecard output is invalid: {type(exc).__name__}")
+    if payload is not None:
+        coverage = payload.get("verification", {}).get("directory_coverage", {}) if isinstance(payload.get("verification"), dict) else {}
+        critical = [
+            alert.get("code") for alert in payload.get("alerts", [])
+            if isinstance(alert, dict) and alert.get("severity") == "critical"
+        ] if isinstance(payload.get("alerts"), list) else ["INVALID_ALERTS"]
+        if payload.get("schema_version") != 1 or payload.get("completion_mode") is not True:
+            reasons.append("scorecard did not attest completion mode schema v1")
+        if not isinstance(coverage, dict) or coverage.get("available") is not True:
+            reasons.append("verification coverage is unavailable")
+        if critical:
+            reasons.append("critical scorecard alerts remain: " + ", ".join(str(item) for item in critical))
+        scorecard_head = payload.get("code_churn", {}).get("head") if isinstance(payload.get("code_churn"), dict) else None
+        if scorecard_head != current_commit():
+            reasons.append("repository HEAD changed during or was absent from completion scoring")
+    if process.returncode != 0:
+        reasons.append(f"completion scorecard exited {process.returncode}")
+    status = "fail" if reasons else "pass"
+    _persist_completion_status(state, status, reasons, output)
+    return {
+        "status": status,
+        "reasons": reasons,
+        "command": command,
+        "returncode": process.returncode,
+        "stderr_tail": (process.stderr or "")[-2000:],
+        "scorecard_path": str(output),
+        "scorecard": payload,
+    }
 
 
 class SelfcheckError(RuntimeError):
