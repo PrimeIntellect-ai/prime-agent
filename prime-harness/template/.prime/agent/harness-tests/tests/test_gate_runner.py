@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 import shutil
+import sqlite3
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -382,3 +384,110 @@ def test_posix_burst_invocation_uses_frozen_dependency_set(tmp_repo, tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert 'FROZEN_FILES ["manifest.json", "manifest_policy.py", "verify.py"]' in proc.stdout
     assert gate_result(proc.stdout)["status"] == "pass"
+
+
+
+def test_final_profile_is_nonvacuous_fails_behind_churn_then_passes_with_coverage(tmp_repo, monkeypatch):
+    harness = tmp_repo / "harness"
+    harness.mkdir(exist_ok=True)
+    shutil.copy2(GATE_TEMPLATE / "scorecard.py", harness / "scorecard.py")
+    (harness / "config.json").write_text(json.dumps({
+        "verification_coverage": {
+            "min_evidence_per_100_lines": 1.0,
+            "churn_alert_min_lines": 100,
+            "exempt_globs": ["harness/**"],
+        }
+    }), encoding="utf-8")
+    write_manifest(tmp_repo, {"final": {
+        "conditional": [],
+        "min_applicable_checks": 1,
+        "required": [{
+            "command": "python -S harness/scorecard.py --completion --fail-on critical --output artifacts/harness/completion-scorecard.json",
+            "name": "verification-coverage-completion",
+            "skip_if_missing": "harness/scorecard.py",
+            "timeout_seconds": 180,
+        }],
+    }})
+    (tmp_repo / ".gitignore").write_text("artifacts/harness/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "coverage base"], cwd=tmp_repo, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    source = tmp_repo / "src/model.py"
+    source.parent.mkdir()
+    source.write_text("\n".join(f"value_{index} = {index}" for index in range(200)) + "\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/model.py"], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "code churn"], cwd=tmp_repo, check=True)
+    change = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+    artifacts = tmp_repo / "artifacts/harness"
+    artifacts.mkdir(parents=True)
+    session_dir = artifacts / "rlm/task-session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "rlm-subagents.jsonl").write_text("", encoding="utf-8")
+    sessions = artifacts / "sessions"
+    sessions.mkdir()
+    now_ms = int(time.time() * 1000)
+    (sessions / "task-session.jsonl").write_text(
+        json.dumps({"type": "session", "id": "final-gate", "timestamp": "2026-01-01T00:00:00Z"}) + "\n" +
+        json.dumps({"type": "custom", "customType": "thread_goal_state", "id": "goal", "timestamp": "2026-01-01T00:00:01Z", "data": {"active": True, "status": "active", "goalId": "final-gate", "tokenBudget": 1000, "tokensUsed": 1, "updatedAt": now_ms}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RLM_SESSION_DIR", str(session_dir))
+    (artifacts / "children.json").write_text("{}\n", encoding="utf-8")
+    evidence = artifacts / "evidence.db"
+    connection = sqlite3.connect(evidence)
+    try:
+        connection.execute("""CREATE TABLE evidence (
+            id TEXT, status TEXT, verifier TEXT, created_at TEXT, claim_type TEXT,
+            assumptions TEXT, commit_sha TEXT, invalidated_at TEXT
+        )""")
+        for evidence_id in ("ev-one", "ev-two"):
+            assumptions = json.dumps({"verification_coverage": {
+                "kind": "verification", "directories": ["src"], "base_commit": base,
+            }})
+            connection.execute(
+                "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (evidence_id, "verified", "independent property suite",
+                 "2026-01-01T00:01:00Z", "test", assumptions, change, None),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    task = {
+        "task_id": "final-gate", "objective": "prove red and green", "base_commit": base,
+        "working_branch": "main", "unresolved_claims": [], "active_child_names": [],
+        "quality_gate_status": {}, "created_at": "2026-01-01T00:00:00Z",
+        "evidence_ids": ["ev-one"],
+    }
+    task_path = artifacts / "task-state.json"
+    task_path.write_text(json.dumps(task), encoding="utf-8")
+
+    red = run_gate(tmp_repo, "--profile", "final", "--json")
+    red_verdict = gate_result(red.stdout)
+    assert red.returncode == 1
+    assert red_verdict["status"] == "fail"
+    assert red_verdict["applicable_checks"] == 1
+    assert red_verdict["vacuous"] is False
+    red_scorecard = json.loads((artifacts / "completion-scorecard.json").read_text(encoding="utf-8"))
+    red_alert = next(item for item in red_scorecard["alerts"] if item["code"] == "VERIFICATION_BEHIND_CHURN")
+    assert red_alert["severity"] == "critical"
+    assert red_alert["metrics"]["directories"] == ["src"]
+
+    shutil.rmtree(artifacts / "gate-logs")
+    (artifacts / "gate-last.json").unlink()
+    task["evidence_ids"].append("ev-two")
+    task_path.write_text(json.dumps(task), encoding="utf-8")
+    green = run_gate(tmp_repo, "--profile", "final", "--json")
+    green_verdict = gate_result(green.stdout)
+    assert green.returncode == 0, green.stdout + green.stderr
+    assert green_verdict["status"] == "pass"
+    assert green_verdict["passed"] == ["verification-coverage-completion"]
+    assert green_verdict["applicable_checks"] == 1
+    assert green_verdict["vacuous"] is False
