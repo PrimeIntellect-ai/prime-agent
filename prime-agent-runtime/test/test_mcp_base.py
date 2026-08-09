@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -192,30 +194,92 @@ class McpIntegrationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Bad()
 
-    def _run_open_session_with_transport(self, transport):
-        """Drive the real _open_session against a fake transport callable.
+    def _fake_sdk_modules(self, calls, *, allow_httpx):
+        """Return strict fake SDK modules for the real lazy-import path.
 
-        `transport` must declare its real parameters (headers= or http_client=)
-        so the signature inspection in _open_session is exercised faithfully.
+        The fakes intentionally reject unexpected constructor arguments so an
+        SDK call-shape regression cannot be hidden by MagicMock.
         """
+        test_case = self
+
+        class _StrictClientSession:
+            def __init__(self, read, write):
+                test_case.assertEqual((read, write), ("read", "write"))
+                calls["session_args"] = (read, write)
+
+            async def __aenter__(self):
+                calls["session_enter"] = calls.get("session_enter", 0) + 1
+                return self
+
+            async def __aexit__(self, *args):
+                calls["session_exit"] = calls.get("session_exit", 0) + 1
+                return False
+
+            async def initialize(self):
+                calls["initialize"] = calls.get("initialize", 0) + 1
+
+            async def call_tool(self, name, arguments):
+                calls.setdefault("tool_calls", []).append((name, arguments))
+                return type("R", (), {"content": [], "structuredContent": None})()
+
+        mcp_module = types.ModuleType("mcp")
+        mcp_module.ClientSession = _StrictClientSession
+        modules = {"mcp": mcp_module}
+
+        if allow_httpx:
+            class _StrictAsyncClient:
+                def __init__(self, *, headers):
+                    self.headers = headers
+                    calls["http_headers"] = headers
+                    calls["http_client"] = self
+
+                async def __aenter__(self):
+                    calls["http_enter"] = calls.get("http_enter", 0) + 1
+                    return self
+
+                async def __aexit__(self, *args):
+                    calls["http_exit"] = calls.get("http_exit", 0) + 1
+                    return False
+
+            httpx_module = types.ModuleType("httpx")
+            httpx_module.AsyncClient = _StrictAsyncClient
+            modules["httpx"] = httpx_module
+        else:
+            # `None` makes an accidental `import httpx` fail even if the CI
+            # environment happens to have the optional package installed.
+            modules["httpx"] = None
+
+        return modules
+
+    def _run_open_session_with_transport(self, transport, *, allow_httpx, config=None):
+        """Drive the real _open_session against strict in-memory SDK modules."""
         self._write_auth(
             {"type": "oauth", "access": "tok-xyz", "refresh": "r", "expires": (time.time() + 3600) * 1000}
         )
+        calls = {}
 
         async def fake_host_request(req_type, payload):
-            return {}  # no host URL override; _resolve_url falls back to self.url
+            self.assertEqual(req_type, "mcp.config")
+            self.assertEqual(payload, {"server": "demo"})
+            return config or {}
 
+        modules = self._fake_sdk_modules(calls, allow_httpx=allow_httpx)
         with mock.patch.object(mcp_base, "host_request", fake_host_request), \
              mock.patch.object(mcp_base, "_resolve_streamable_http", lambda: transport), \
-             mock.patch("mcp.ClientSession") as session_cls:
-            session = mock.MagicMock()
-            session.initialize = mock.AsyncMock()
-            session.call_tool = mock.AsyncMock(
-                return_value=type("R", (), {"content": [], "structuredContent": None})()
-            )
-            session_cls.return_value.__aenter__ = mock.AsyncMock(return_value=session)
-            session_cls.return_value.__aexit__ = mock.AsyncMock(return_value=False)
+             mock.patch.dict(sys.modules, modules):
             _run(_Integration().call_tool("noop", {}))
+
+        self.assertEqual(calls.get("session_args"), ("read", "write"))
+        self.assertEqual(calls.get("session_enter"), 1)
+        self.assertEqual(calls.get("initialize"), 1)
+        self.assertEqual(calls.get("tool_calls"), [("noop", {})])
+        self.assertEqual(calls.get("session_exit"), 1)
+        if allow_httpx:
+            self.assertEqual(calls.get("http_enter"), 1)
+            self.assertEqual(calls.get("http_exit"), 1)
+        else:
+            self.assertNotIn("http_enter", calls)
+        return calls
 
     def test_open_session_uses_headers_signature(self):
         # streamablehttp_client(url, headers=...)
@@ -229,11 +293,14 @@ class McpIntegrationTest(unittest.TestCase):
                 return False
 
         def transport(url, headers=None):
+            captured["url"] = url
             captured["headers"] = headers
             return _CM()
 
-        self._run_open_session_with_transport(transport)
+        calls = self._run_open_session_with_transport(transport, allow_httpx=False)
+        self.assertEqual(captured["url"], _Integration.url)
         self.assertEqual(captured["headers"], {"Authorization": "Bearer tok-xyz"})
+        self.assertNotIn("http_headers", calls)
 
     def test_open_session_uses_http_client_signature(self):
         # streamable_http_client(url, *, http_client=...) — must NOT pass headers=
@@ -247,11 +314,90 @@ class McpIntegrationTest(unittest.TestCase):
                 return False
 
         def transport(url, *, http_client=None):
+            captured["url"] = url
             captured["http_client"] = http_client
             return _CM()
 
-        self._run_open_session_with_transport(transport)
+        calls = self._run_open_session_with_transport(transport, allow_httpx=True)
+        self.assertEqual(captured["url"], _Integration.url)
         self.assertIsNotNone(captured["http_client"])
+        self.assertIs(captured["http_client"], calls.get("http_client"))
+        self.assertEqual(calls["http_headers"], {"Authorization": "Bearer tok-xyz"})
+
+    def test_open_session_prefers_headers_when_transport_exposes_both(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return ("read", "write", None)
+
+            async def __aexit__(self_inner, *args):
+                return False
+
+        def transport(url, headers=None, *, http_client=None):
+            captured.update(url=url, headers=headers, http_client=http_client)
+            return _CM()
+
+        self._run_open_session_with_transport(transport, allow_httpx=False)
+        self.assertEqual(captured["headers"], {"Authorization": "Bearer tok-xyz"})
+        self.assertIsNone(captured["http_client"])
+
+    def test_authorization_header_overrides_host_configuration(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return ("read", "write", None)
+
+            async def __aexit__(self_inner, *args):
+                return False
+
+        def transport(url, headers=None):
+            captured["headers"] = headers
+            return _CM()
+
+        self._run_open_session_with_transport(
+            transport,
+            allow_httpx=False,
+            config={"headers": {"Authorization": "Basic stale", "X-Extra": "1"}},
+        )
+        self.assertEqual(
+            captured["headers"],
+            {"Authorization": "Bearer tok-xyz", "X-Extra": "1"},
+        )
+
+    def test_open_session_rejects_unsupported_transport_signature(self):
+        self._write_auth(
+            {"type": "oauth", "access": "tok-xyz", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        calls = {}
+
+        async def fake_host_request(req_type, payload):
+            return {}
+
+        def transport(url):
+            raise AssertionError("unsupported transport must not be called")
+
+        modules = self._fake_sdk_modules(calls, allow_httpx=False)
+        with mock.patch.object(mcp_base, "host_request", fake_host_request), \
+             mock.patch.object(mcp_base, "_resolve_streamable_http", lambda: transport), \
+             mock.patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(RuntimeError, "unsupported mcp streamable-HTTP client signature"):
+                _run(_Integration().call_tool("noop", {}))
+        self.assertNotIn("session_args", calls)
+
+    def test_optional_sdk_absence_is_deferred_until_session_open(self):
+        # Construction and config resolution remain available without optional
+        # SDKs; the first network session open is the lazy-import boundary.
+        integration = _Integration()
+        async def fake_host_request(req_type, payload):
+            return {}
+
+        with mock.patch.object(mcp_base, "host_request", fake_host_request), \
+             mock.patch.dict(sys.modules, {"mcp": None, "httpx": None}):
+            self.assertEqual(_run(integration._resolve_config()), (_Integration.url, {}))
+            with self.assertRaises(ModuleNotFoundError):
+                _run(integration.call_tool("noop", {}))
 
     def test_resolve_config_prefers_host_override_and_headers(self):
         async def host_with_override(req_type, payload):
