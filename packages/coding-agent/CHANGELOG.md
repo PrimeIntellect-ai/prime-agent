@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed live daemon supervisors, workers, and session leases being treated as stale when upgrading across process-start identity token formats.
 - Changed `rlm.list_subagents()` to distinguish process-local queued children from running ones and include bounded failure details while the parent tracks the run.
 - Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).
 - Fixed explicit `/refine` commands appearing frozen by showing elapsed progress and supporting cancellation ([#1035](https://github.com/PrimeIntellect-ai/prime-agent/pull/1035) by [@junhoyeo](https://github.com/junhoyeo)).

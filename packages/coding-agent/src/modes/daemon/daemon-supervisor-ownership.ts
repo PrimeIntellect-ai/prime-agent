@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
-import { getProcessStartId } from "../../core/session-lease.js";
+import { compareProcessStartIds, getProcessStartId } from "../../core/session-lease.js";
 import { defaultDaemonSocketDir } from "./daemon-socket.js";
 
 const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
@@ -462,7 +462,7 @@ export async function persistDaemonStartupFenceFromOwner(
 			throw new Error(`Daemon supervisor hello does not match its durable owner for ${socketPath}`);
 		}
 		const observedProcessStartId = getProcessStartId(owner.pid);
-		if (observedProcessStartId !== owner.processStartId) {
+		if (compareProcessStartIds(owner.processStartId, observedProcessStartId) === "mismatch") {
 			throw new Error(`Daemon supervisor process identity changed for ${socketPath}`);
 		}
 		const record: DaemonStartupFenceRecord = {
@@ -526,14 +526,17 @@ function isProcessIdentityAlive(identity: ProcessIdentity): boolean {
 		return true;
 	}
 	const observed = getProcessStartId(identity.pid);
-	return observed === undefined || observed === identity.processStartId;
+	return compareProcessStartIds(identity.processStartId, observed) !== "mismatch";
 }
 
 function matchesExactProcessIdentity(identity: ProcessIdentity): boolean {
 	if (!isProcessAlive(identity.pid)) {
 		return false;
 	}
-	return identity.processStartId === undefined || getProcessStartId(identity.pid) === identity.processStartId;
+	return (
+		identity.processStartId === undefined ||
+		compareProcessStartIds(identity.processStartId, getProcessStartId(identity.pid)) === "match"
+	);
 }
 
 function isProcessAlive(pid: number): boolean {

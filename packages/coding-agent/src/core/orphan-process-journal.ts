@@ -1,5 +1,5 @@
 import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { getProcessStartId } from "./session-lease.js";
+import { compareProcessStartIds, getProcessStartId } from "./session-lease.js";
 
 export const ORPHAN_PROCESS_JOURNAL_ENV = "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL";
 
@@ -84,7 +84,7 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 }
 
 export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boolean {
-	return getProcessStartId(orphan.pid) === orphan.processStartId;
+	return compareProcessStartIds(orphan.processStartId, getProcessStartId(orphan.pid)) === "match";
 }
 
 export function clearOrphanProcessJournal(path: string): void {

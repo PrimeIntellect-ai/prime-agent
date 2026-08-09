@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
 import { isOrphanProcessIdentityCurrent, readActiveOrphanProcesses } from "../core/orphan-process-journal.js";
-import { getProcessStartId } from "../core/session-lease.js";
+import { compareProcessStartIds, getProcessStartId } from "../core/session-lease.js";
 import { DaemonClient } from "../modes/daemon/daemon-client.js";
 import {
 	DAEMON_PROTOCOL_VERSION,
@@ -334,7 +334,7 @@ export function verifyHelloSupervisorPid(
 	}
 	if (expectedProcessStartId) {
 		const observedStartId = getProcessStartId(pid);
-		if (observedStartId !== expectedProcessStartId) {
+		if (compareProcessStartIds(expectedProcessStartId, observedStartId) === "mismatch") {
 			return undefined;
 		}
 	}
@@ -1048,11 +1048,11 @@ async function stopTrackedProcess(
 	if (!isProcessAlive(pid)) {
 		return true;
 	}
-	if (!expectedStartId || getProcessStartId(pid) !== expectedStartId) {
+	if (!expectedStartId || compareProcessStartIds(expectedStartId, getProcessStartId(pid)) !== "match") {
 		return false;
 	}
 	await assertAdmission();
-	if (getProcessStartId(pid) !== expectedStartId) {
+	if (compareProcessStartIds(expectedStartId, getProcessStartId(pid)) !== "match") {
 		return false;
 	}
 	signalProcessGroupOrProcess(pid, "SIGTERM");
@@ -1064,7 +1064,7 @@ async function stopTrackedProcess(
 		return true;
 	}
 	await assertAdmission();
-	if (getProcessStartId(pid) !== expectedStartId) {
+	if (compareProcessStartIds(expectedStartId, getProcessStartId(pid)) !== "match") {
 		return false;
 	}
 	signalProcessGroupOrProcess(pid, "SIGKILL");

@@ -142,6 +142,27 @@ export function getWindowsProcessStartId(pid: number, query: ProcessQuery = runP
 	}
 }
 
+export type ProcessStartIdComparison = "match" | "mismatch" | "unverifiable";
+
+/** Compare durable process-start tokens without treating format migrations as PID reuse. */
+export function compareProcessStartIds(
+	recorded: string | undefined,
+	observed: string | undefined,
+): ProcessStartIdComparison {
+	if (recorded === undefined || observed === undefined) {
+		return "unverifiable";
+	}
+	if (recorded === observed) {
+		return "match";
+	}
+	const recordedSeparator = recorded.indexOf(":");
+	const observedSeparator = observed.indexOf(":");
+	if (recordedSeparator <= 0 || observedSeparator <= 0) {
+		return "mismatch";
+	}
+	return recorded.slice(0, recordedSeparator) === observed.slice(0, observedSeparator) ? "mismatch" : "unverifiable";
+}
+
 export function getProcessStartId(pid: number): string | undefined {
 	if (!Number.isInteger(pid) || pid <= 0) {
 		return undefined;
@@ -190,7 +211,7 @@ function isLeaseOwnerAlive(owner: SessionLeaseOwner): boolean {
 		return true;
 	}
 	const currentStartId = getProcessStartId(owner.pid);
-	return currentStartId === undefined || currentStartId === owner.processStartId;
+	return compareProcessStartIds(owner.processStartId, currentStartId) !== "mismatch";
 }
 
 function withLeaseGuard<T>(directory: string, action: () => T): T {

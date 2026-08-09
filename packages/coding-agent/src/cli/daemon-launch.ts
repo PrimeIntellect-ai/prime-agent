@@ -10,7 +10,12 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { appendRotatingLog, expandTildePath, getClientErrorLogPath, getDaemonLogPath, VERSION } from "../config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
-import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
+import {
+	compareProcessStartIds,
+	getProcessStartId,
+	SESSION_LEASE_OWNER_ID_ENV,
+	SESSION_LEASES_ENABLED_ENV,
+} from "../core/session-lease.js";
 import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
@@ -188,7 +193,7 @@ function hasProcessIdentityExited(identity: DaemonProcessIdentity | undefined, v
 		return false;
 	}
 	const currentStartId = getProcessStartId(identity.pid);
-	return currentStartId !== undefined && currentStartId !== identity.processStartId;
+	return compareProcessStartIds(identity.processStartId, currentStartId) === "mismatch";
 }
 
 async function waitForDaemonGone(
