@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -828,3 +829,127 @@ def test_post_install_baseline_launch_failures_degrade_to_warning(tmp_repo, monk
     output = capsys.readouterr()
     assert "warning: could not record upstream baseline" in output.out
     assert (tmp_repo / "harness/upstream_check.py").is_file()
+
+
+
+def test_tailor_preserves_user_edited_review_sidecar_without_force(tmp_repo):
+    package = tmp_repo / "src"
+    package.mkdir()
+    (package / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert run_install(tmp_repo).returncode == 0
+    created = run_install(tmp_repo, "--tailor")
+    assert created.returncode == 0, created.stdout + created.stderr
+    sidecar = tmp_repo / "harness/manifest.tailored.json"
+    draft = json.loads(sidecar.read_text(encoding="utf-8"))
+    draft["operator_note"] = "reviewed locally"
+    sidecar.write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
+    before = sidecar.read_bytes()
+    rerun = run_install(tmp_repo, "--tailor")
+    assert rerun.returncode == 0, rerun.stdout + rerun.stderr
+    assert sidecar.read_bytes() == before
+    assert "sidecar differs from new draft; use --force" in rerun.stdout
+    forced = run_install(tmp_repo, "--tailor", "--force")
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert "operator_note" not in json.loads(sidecar.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("script", [
+    "true || jest",
+    "exit 0 || jest",
+    "jest || true",
+    "vitest run || echo ignored",
+])
+def test_node_or_chains_are_never_credible_test_scripts(script):
+    installer = _load_installer_module("prime_harness_installer_node_or")
+    assert installer._credible_node_test_script(script) is False
+
+
+def test_atomic_writers_replace_final_symlinks_instead_of_following_them(tmp_path):
+    installer = _load_installer_module("prime_harness_installer_atomic_write")
+    source = tmp_path / "source.txt"
+    source.write_text("template\n", encoding="utf-8")
+    outside_copy = tmp_path / "outside-copy.txt"
+    outside_copy.write_text("outside-copy\n", encoding="utf-8")
+    copy_destination = tmp_path / "copy-destination.txt"
+    outside_text = tmp_path / "outside-text.txt"
+    outside_text.write_text("outside-text\n", encoding="utf-8")
+    text_destination = tmp_path / "text-destination.txt"
+    try:
+        copy_destination.symlink_to(outside_copy)
+        text_destination.symlink_to(outside_text)
+    except OSError:
+        pytest.skip("file symlink creation unavailable")
+    installer.atomic_copy(source, copy_destination)
+    installer.atomic_text(text_destination, "merged\n")
+    assert not copy_destination.is_symlink()
+    assert not text_destination.is_symlink()
+    assert copy_destination.read_text(encoding="utf-8") == "template\n"
+    assert text_destination.read_text(encoding="utf-8") == "merged\n"
+    assert outside_copy.read_text(encoding="utf-8") == "outside-copy\n"
+    assert outside_text.read_text(encoding="utf-8") == "outside-text\n"
+
+
+def test_installed_example_ownership_survives_template_upgrade_and_deletion(tmp_repo, tmp_path):
+    source = tmp_repo / "src"
+    source.mkdir()
+    (source / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    first = run_install(tmp_repo)
+    assert first.returncode == 0, first.stdout + first.stderr
+    ownership_path = tmp_repo / "artifacts/harness/installed-examples.json"
+    ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+    relative = "checks/properties/test_example_properties.py"
+    assert ownership["schema_version"] == 1
+    assert relative in ownership["files"]
+    ownership_before = (ownership_path.read_bytes(), ownership_path.stat().st_mtime_ns)
+    second = run_install(tmp_repo)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert (ownership_path.read_bytes(), ownership_path.stat().st_mtime_ns) == ownership_before
+
+    installer = _load_installer_module("prime_harness_installer_owned_examples")
+    upgraded_template = tmp_path / "upgraded-template"
+    shutil.copytree(installer.TEMPLATE, upgraded_template)
+    (upgraded_template / relative).write_text("def test_new_placeholder():\n    assert True\n", encoding="utf-8")
+    installer.TEMPLATE = upgraded_template
+    before_delete = installer.tailor_manifest(tmp_repo)
+    assert "python-tests:checks/properties" not in before_delete["_detected"]
+
+    (tmp_repo / relative).unlink()
+    after_delete = installer.tailor_manifest(tmp_repo)
+    assert "python-tests:checks/properties" not in after_delete["_detected"]
+
+
+
+def test_main_atomic_writes_resist_final_component_swap_after_validation(tmp_repo, tmp_path, monkeypatch):
+    installer = _load_installer_module("prime_harness_installer_atomic_main")
+    outside_copy = tmp_path / "outside-template.txt"
+    outside_copy.write_text("outside-template\n", encoding="utf-8")
+    outside_ignore = tmp_path / "outside-ignore.txt"
+    outside_ignore.write_text("outside-ignore\n", encoding="utf-8")
+    original_copy = installer.atomic_copy
+    original_text = installer.atomic_text
+    raced = {"copy": None, "ignore": False}
+
+    def race_copy(source, destination):
+        if raced["copy"] is None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                destination.symlink_to(outside_copy)
+            except OSError:
+                pytest.skip("file symlink creation unavailable")
+            raced["copy"] = destination
+        original_copy(source, destination)
+
+    def race_text(destination, value):
+        if destination.name == ".gitignore":
+            destination.symlink_to(outside_ignore)
+            raced["ignore"] = True
+        original_text(destination, value)
+
+    monkeypatch.setattr(installer, "atomic_copy", race_copy)
+    monkeypatch.setattr(installer, "atomic_text", race_text)
+    monkeypatch.setattr(sys, "argv", [str(INSTALL), str(tmp_repo)])
+    assert installer.main() == 0
+    assert raced["copy"] is not None and not raced["copy"].is_symlink()
+    assert raced["ignore"] is True and not (tmp_repo / ".gitignore").is_symlink()
+    assert outside_copy.read_text(encoding="utf-8") == "outside-template\n"
+    assert outside_ignore.read_text(encoding="utf-8") == "outside-ignore\n"

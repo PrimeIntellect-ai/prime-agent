@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import hashlib
 import json
 import os
 import re
@@ -37,6 +38,8 @@ GITIGNORE_BLOCK = [
 
 IGNORED_TEMPLATE_DIRS = {"__pycache__"}
 IGNORED_TEMPLATE_SUFFIXES = {".pyc", ".pyo"}
+INSTALLED_EXAMPLES_RELATIVE = Path("artifacts/harness/installed-examples.json")
+EXAMPLE_SUBTREES = ("checks/properties", "checks/invariants", "checks/reference_cases")
 
 
 def is_ignored_template_artifact(path: Path) -> bool:
@@ -179,12 +182,21 @@ def _template_only_subtree(target: Path, relative: str, destination_relative: st
         return False
     source_files = _bounded_inventory(source)
     destination_files = _bounded_inventory(destination)
-    if source_files is None or destination_files is None or set(source_files) != set(destination_files):
-        return False
-    return all(
-        filecmp.cmp(str(source_files[name]), str(destination_files[name]), shallow=False)
-        for name in source_files
-    )
+    if source_files is None or destination_files is None:
+        raise TailorError(f"installer-owned subtree {relative!r} is unreadable or exceeds limits")
+    known: dict[str, set[str]] = {
+        name: {digest} for name, digest in _load_installed_example_hashes(target).items()
+    }
+    for name, path in source_files.items():
+        digest = _stable_text_sha256(path)
+        if digest is None:
+            raise TailorError(f"installer template example is not stable UTF-8: {relative}/{name}")
+        known.setdefault(f"{relative}/{name}", set()).add(digest)
+    for name, path in destination_files.items():
+        digest = _stable_text_sha256(path)
+        if digest is None or digest not in known.get(f"{relative}/{name}", set()):
+            return False
+    return True
 
 
 def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
@@ -244,8 +256,64 @@ def _bounded_text(path: Path, limit: int = 1_048_576) -> str | None:
                 pass
 
 
+def _stable_text_sha256(path: Path) -> str | None:
+    text = _bounded_text(path)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None
+
+
+def _load_installed_example_hashes(target: Path) -> dict[str, str]:
+    path = target / INSTALLED_EXAMPLES_RELATIVE
+    if not os.path.lexists(path):
+        return {}
+    text = _bounded_text(path)
+    if text is None:
+        raise TailorError(f"installer-owned example manifest is unreadable: {INSTALLED_EXAMPLES_RELATIVE}")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise TailorError(f"installer-owned example manifest is invalid JSON: {exc}") from exc
+    if not isinstance(value, dict) or set(value) != {"schema_version", "files"} or value.get("schema_version") != 1:
+        raise TailorError("installer-owned example manifest has an invalid schema")
+    files = value.get("files")
+    if not isinstance(files, dict) or len(files) > 256:
+        raise TailorError("installer-owned example manifest files must be an object with at most 256 entries")
+    result: dict[str, str] = {}
+    for relative, digest in files.items():
+        if (
+            not isinstance(relative, str)
+            or not isinstance(digest, str)
+            or "\\" in relative
+            or relative.startswith("/")
+            or any(part in {"", ".", ".."} for part in relative.split("/"))
+            or not any(relative == prefix or relative.startswith(prefix + "/") for prefix in EXAMPLE_SUBTREES)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise TailorError("installer-owned example manifest contains an invalid path or SHA-256")
+        result[relative] = digest
+    return result
+
+
+def _record_installed_example_hashes(target: Path, template_sources: list[Path]) -> None:
+    hashes = _load_installed_example_hashes(target)
+    for source in template_sources:
+        relative = source.relative_to(TEMPLATE).as_posix()
+        if not any(relative == prefix or relative.startswith(prefix + "/") for prefix in EXAMPLE_SUBTREES):
+            continue
+        source_digest = _stable_text_sha256(source)
+        destination_digest = _stable_text_sha256(target / relative)
+        if source_digest is not None and destination_digest == source_digest:
+            hashes[relative] = source_digest
+    path = target / INSTALLED_EXAMPLES_RELATIVE
+    value = {"schema_version": 1, "files": hashes}
+    if not json_matches(path, value):
+        atomic_json(path, value)
+
+
 def _credible_node_test_script(script: str) -> bool:
-    """Accept only a test runner appearing as a command, never as an argument."""
+    """Accept only an unmasked test runner appearing as a command."""
+    normalized = " ".join(script.casefold().split())
+    if "||" in normalized:
+        return False
     prefix = r"(?:(?:cross-env(?:-shell)?\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*)"
     runner = re.compile(
         r"^" + prefix
@@ -254,7 +322,7 @@ def _credible_node_test_script(script: str) -> bool:
         + r"cypress(?:\s+run)?\b|playwright\s+test\b|"
         + r"(?:npm|pnpm|yarn)\s+run\s+test(?::[a-z0-9_.-]+)?\b)"
     )
-    for segment in re.split(r"&&|\|\||;", script.casefold()):
+    for segment in re.split(r"&&|;", normalized):
         if runner.match(" ".join(segment.strip().split())):
             return True
     return False
@@ -407,6 +475,57 @@ def assert_safe_destination(root: Path, destination: Path) -> None:
             raise TailorError(f"non-directory destination parent forbidden: {relative.as_posix()}")
 
 
+def atomic_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_copy(source: Path, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with source.open("rb") as source_handle, os.fdopen(descriptor, "wb") as destination_handle:
+            shutil.copyfileobj(source_handle, destination_handle, length=1024 * 1024)
+            destination_handle.flush()
+            os.fsync(destination_handle.fileno())
+        os.chmod(temporary, stat.S_IMODE(source.stat(follow_symlinks=False).st_mode))
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def atomic_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -507,6 +626,7 @@ def main() -> int:
             target / ".gitignore",
             target / "harness/manifest.tailored.json",
             target / "artifacts/harness/upstream-watch/baseline.json",
+            target / INSTALLED_EXAMPLES_RELATIVE,
         ):
             assert_safe_destination(target, extra)
     except TailorError as exc:
@@ -530,12 +650,12 @@ def main() -> int:
                 continue
             if not args.dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(source), str(dest))
+                atomic_copy(source, dest)
             overwritten.append(rel)
         else:
             if not args.dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(source), str(dest))
+                atomic_copy(source, dest)
             copied.append(rel)
 
     prefix = "[dry-run] " if args.dry_run else ""
@@ -547,15 +667,26 @@ def main() -> int:
     except TailorError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+    if os.path.lexists(gitignore):
+        existing = _bounded_text(gitignore)
+        if existing is None:
+            print("error: .gitignore is not a stable bounded UTF-8 regular file", file=sys.stderr)
+            return 2
+    else:
+        existing = ""
     missing_lines = [line for line in GITIGNORE_BLOCK if line not in existing.splitlines()]
     if any(not line.startswith("#") for line in missing_lines):
         if not args.dry_run:
-            with gitignore.open("a", encoding="utf-8", newline="\n") as handle:
-                if existing and not existing.endswith("\n"):
-                    handle.write("\n")
-                handle.write("\n".join(missing_lines) + "\n")
+            separator = "" if not existing or existing.endswith("\n") else "\n"
+            atomic_text(gitignore, existing + separator + "\n".join(missing_lines) + "\n")
         print(f"{prefix}updated .gitignore (+{sum(1 for l in missing_lines if not l.startswith('#'))} entries)")
+    if not args.dry_run:
+        try:
+            _record_installed_example_hashes(target, template_sources)
+        except TailorError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     print(f"{prefix}installed to {target}")
     print(f"  new files:        {len(copied)}")
     print(f"  unchanged:        {len(skipped_same)}")
@@ -582,11 +713,25 @@ def main() -> int:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
             unchanged = json_matches(destination, tailored)
-            if not args.dry_run and not unchanged:
-                atomic_json(destination, tailored)
-            action = "unchanged " if unchanged else ""
-            print(f"{prefix}tailored manifest: {action}{destination.relative_to(target)}"
-                  + (" (review sidecar; existing manifest preserved)" if destination.name.endswith(".tailored.json") else ""))
+            preserve_sidecar = False
+            if destination.name.endswith(".tailored.json") and os.path.lexists(destination) and not unchanged:
+                installed_text = _bounded_text(installed_manifest)
+                try:
+                    installed_value = json.loads(installed_text) if installed_text is not None else None
+                except json.JSONDecodeError:
+                    installed_value = None
+                preserve_sidecar = installed_value is None or not json_matches(destination, installed_value)
+            if preserve_sidecar:
+                print(f"{prefix}tailored manifest: sidecar differs from new draft; use --force to regenerate tailored output")
+            else:
+                if not args.dry_run and not unchanged:
+                    atomic_json(destination, tailored)
+                sidecar = target / "harness/manifest.tailored.json"
+                if args.force and sidecar != destination and os.path.lexists(sidecar) and not args.dry_run:
+                    atomic_json(sidecar, tailored)
+                action = "unchanged " if unchanged else ""
+                print(f"{prefix}tailored manifest: {action}{destination.relative_to(target)}"
+                      + (" (review sidecar; existing manifest preserved)" if destination.name.endswith(".tailored.json") else ""))
 
     if not args.dry_run:
         upstream_watch = target / "harness" / "upstream_check.py"
