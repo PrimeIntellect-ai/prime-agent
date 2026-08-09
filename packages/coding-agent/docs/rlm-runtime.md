@@ -197,11 +197,11 @@ Grants are deducted from the reservation permanently: re-issuing `/rlm-token-bud
 A budget may be a range instead of a single ceiling, which keeps every depth inside a band rather than letting a schedule starve deep levels:
 
 ```
-/rlm-token-budget 200k-600k
+/rlm-token-budget 50k-600k
 /rlm-token-budget 1m --floor 50k --ceiling 400k
 ```
 
-A scheduled allowance is clamped into `[floor, ceiling]`. Under `flat` and `geometric` both bounds apply directly. Under `split` only the ceiling is applied to a session's own allowance, because raising an allowance to a floor would break the subtree bound; an under-funded child is refused at spawn instead, which preserves the bound and still guarantees no child runs below the floor.
+A scheduled allowance is clamped into `[floor, ceiling]`. Under `flat` and `geometric` both bounds apply directly. Under `split` the floor is compared against the grant a child receives, not against what that child may itself spend after reserving its own descendant pool, so a funded child can still run below the floor. The floor bounds funding decisions, not per-session spend.
 
 Because `split` refuses children it cannot fund at the floor, a floor above the per-child share would reject every spawn. That combination is rejected when the budget is set rather than silently disabling delegation, and the error reports the share the schedule actually provides. The positional range and the `--floor`/`--ceiling` flags are alternative spellings of the same bounds, so supplying both is an error rather than one silently overriding the other.
 

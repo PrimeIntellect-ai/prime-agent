@@ -2326,6 +2326,20 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("third")).rejects.toThrow(/subtree pool exhausted/);
 	});
 
+	it("does not debit the subtree pool when a spawn fails before admission", async () => {
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+		});
+		expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(500);
+
+		// An unknown model selector aborts the spawn after the reservation point used to run.
+		await expect(root.runRlmChild("typo", { model: "typo/typo" })).rejects.toThrow();
+
+		expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(500);
+	});
+
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {
 		let releaseTurn!: () => void;
 		const release = new Promise<void>((resolve) => {

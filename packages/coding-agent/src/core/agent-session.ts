@@ -9997,19 +9997,9 @@ export class AgentSession {
 				`RLM recursion depth limit reached (RLM_DEPTH=${this._rlmDepth}, RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
 			);
 		}
-		const childTokenAllowance = this._reserveRlmChildAllowance(normalizeRlmTokenBudgetRequest(rawTokenBudget));
-		// With no active budget, a model-supplied allowance still needs a config so the
-		// child (and its own descendants) are governed by a schedule.
-		const childTokenBudget =
-			this._rlmTokenBudget ??
-			(childTokenAllowance === undefined
-				? undefined
-				: {
-						totalTokens: childTokenAllowance,
-						schedule: DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE,
-						factor: DEFAULT_RLM_TOKEN_BUDGET_FACTOR,
-						fanout: DEFAULT_RLM_TOKEN_BUDGET_FANOUT,
-					});
+		// Validated here so an unfundable request fails before any session state is created,
+		// but the pool is only debited once the spawn can no longer fail (see below).
+		const requestedTokenBudget = normalizeRlmTokenBudgetRequest(rawTokenBudget);
 		if (requestedSessionName) {
 			if (this._pendingRlmSubagentSessionNames.has(requestedSessionName)) {
 				throw new Error(formatAgentSessionNameUnavailable(requestedSessionName, this._rlmDepth + 1));
@@ -10024,6 +10014,23 @@ export class AgentSession {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
+
+		// Debit the reservation only after every failure path above has been cleared. Reserving
+		// earlier leaked the grant permanently whenever a name clash, an unknown model selector or
+		// a failed auth preflight aborted the spawn.
+		const childTokenAllowance = this._reserveRlmChildAllowance(requestedTokenBudget);
+		// With no active budget, a model-supplied allowance still needs a config so the
+		// child (and its own descendants) are governed by a schedule.
+		const childTokenBudget =
+			this._rlmTokenBudget ??
+			(childTokenAllowance === undefined
+				? undefined
+				: {
+						totalTokens: childTokenAllowance,
+						schedule: DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE,
+						factor: DEFAULT_RLM_TOKEN_BUDGET_FACTOR,
+						fanout: DEFAULT_RLM_TOKEN_BUDGET_FANOUT,
+					});
 
 		const childSessionDir = this._createChildRlmSessionDir();
 		const childNodeId = basename(childSessionDir);
