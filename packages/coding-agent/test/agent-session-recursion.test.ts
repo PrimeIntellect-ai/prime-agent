@@ -1168,7 +1168,11 @@ describe("AgentSession rlm recursion", () => {
 		const spawned = await root.runRlmChild("start failing child", { name: "failing-worker" });
 		await vi.waitFor(async () => {
 			expect((await root.listRlmSubagents()).subagents).toContainEqual(
-				expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "error" }),
+				expect.objectContaining({
+					rlm_child_id: spawned.rlm_child_id,
+					status: "error",
+					error: "kernel startup failed",
+				}),
 			);
 		});
 		await vi.waitFor(() => {
@@ -1181,6 +1185,45 @@ describe("AgentSession rlm recursion", () => {
 			);
 			expect(root.messages).toContainEqual(
 				expect.objectContaining({ content: expect.stringContaining("kernel startup failed") }),
+			);
+		});
+	});
+
+	it("normalizes and bounds startup failures in the subagent registry", async () => {
+		let attempt = 0;
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					throw new Error(attempt++ === 0 ? "" : "x".repeat(1_000));
+				},
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		await root.runRlmChild("start empty-error child", { name: "empty-error-worker" });
+		await root.runRlmChild("start long-error child", { name: "long-error-worker" });
+		await vi.waitFor(async () => {
+			const subagents = (await root.listRlmSubagents()).subagents;
+			expect(subagents).toContainEqual(
+				expect.objectContaining({
+					status: "error",
+					error: "Subagent failed without an error message",
+				}),
+			);
+			expect(subagents).toContainEqual(
+				expect.objectContaining({
+					session_name: "long-error-worker",
+					status: "error",
+					error: `${"x".repeat(509)}...`,
+				}),
+			);
+		});
+		await vi.waitFor(() => {
+			expect(root.messages).toContainEqual(
+				expect.objectContaining({
+					customType: "rlm_child_failure",
+					content: expect.stringContaining("x".repeat(1_000)),
+				}),
 			);
 		});
 	});
@@ -2679,7 +2722,7 @@ describe("AgentSession rlm recursion", () => {
 		await root.runRlmChild("blocked before runtime creation", { name: "queued-worker" });
 		await waitFor(() => runtimeCreationStarted);
 		const queued = (await root.listRlmSubagents()).subagents[0];
-		expect(queued).toBeDefined();
+		expect(queued).toMatchObject({ session_name: "queued-worker", status: "queued" });
 
 		await expect(root.deleteRlmSubagent("queued-worker")).resolves.toEqual({ subagent: queued });
 		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.size).toBe(1);

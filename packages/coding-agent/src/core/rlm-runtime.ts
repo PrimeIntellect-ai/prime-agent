@@ -18,7 +18,7 @@ export interface RlmSpawnHandle {
 	model: string;
 }
 
-export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
+export type RlmSubagentRegistryStatus = "queued" | "running" | "completed" | "error";
 
 export interface RlmSubagentRegistryEntry {
 	rlm_child_id: string;
@@ -27,6 +27,8 @@ export interface RlmSubagentRegistryEntry {
 	session_name: string;
 	session_dir: string;
 	status: RlmSubagentRegistryStatus;
+	/** Failure reason for an errored child, when the current parent still tracks it. */
+	error?: string;
 }
 
 export interface RlmListSubagentsResult {

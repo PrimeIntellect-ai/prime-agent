@@ -1019,6 +1019,10 @@ export function compactRlmText(text: string, maxLength = 160): string {
 	return `${compact.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
 }
 
+function normalizeRlmChildError(error: string): string {
+	return compactRlmText(error, 512) || "Subagent failed without an error message";
+}
+
 // Child-agent label: collapse to one line but keep the full prompt — the TUI
 // truncates to the visible width and elides shared prefixes, so capping here
 // would only hide the divergence between near-identical sibling prompts.
@@ -9113,7 +9117,15 @@ export class AgentSession {
 				session_id: daemonChild?.sessionId ?? run.session?.sessionId ?? null,
 				session_name: daemonChild?.sessionName ?? run.session?.sessionName ?? run.sessionName,
 				session_dir: run.sessionDir,
-				status: run.status === "done" ? "completed" : run.status === "error" ? "error" : "running",
+				status:
+					run.status === "queued"
+						? "queued"
+						: run.status === "done"
+							? "completed"
+							: run.status === "error"
+								? "error"
+								: "running",
+				...(run.error !== undefined ? { error: normalizeRlmChildError(run.error) } : {}),
 			});
 			recorded.add(run.id);
 		}

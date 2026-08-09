@@ -184,9 +184,9 @@ End the turn instead of waiting for completion. Children send requested answers 
 
 ## Parent-Scoped Sub-Agent Registry
 
-The TypeScript parent maintains the authoritative direct-child registry. `await rlm.list_subagents()` returns stable child IDs, active-session IDs when daemon-backed, session IDs, names, directories, and running/completed status.
+The TypeScript parent maintains the authoritative direct-child registry. `await rlm.list_subagents()` returns stable child IDs, active-session IDs when daemon-backed, session IDs, names, directories, and queued/running/completed/error status. While the current parent process still tracks a run, errored entries also include a bounded error message.
 
-This registry survives kernel restart, compaction, and parent restore. Successfully completed daemon-backed children are rehydrated from the parent artifact registry. Inline children remain inspectable in the current process but have no active-session ID.
+This registry survives kernel restart, compaction, and parent restore, but queue placement and detailed startup errors are process-local. Successfully completed daemon-backed children are rehydrated from the parent artifact registry. Legacy interrupted daemon rows remain visible as errors without a detailed message. Inline children remain inspectable in the current process but have no active-session ID.
 
 The parent can continue a retained daemon child with `await agent_message.send(..., receiver_role="child", receiver_name=child.session_name)`. `rlm.delete_subagent()` accepts an exact child ID, active-session ID, session ID, or unique name. Deletion cancels or closes the runtime, writes a durable tombstone, and removes the child from messaging and observation. It does not erase the transcript or artifacts on disk.
 
