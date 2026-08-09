@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Changed
+
+- Changed the Google Gemini and Vertex providers to share one stream consumer and one request builder, so the duplicated stream state machine and payload assembly no longer have to be kept in sync by hand ([#956](https://github.com/PrimeIntellect-ai/prime-agent/issues/956)).
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07

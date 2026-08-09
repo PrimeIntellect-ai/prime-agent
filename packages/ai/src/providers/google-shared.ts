@@ -2,8 +2,30 @@
  * Shared utilities for Google Generative AI and Google Vertex providers.
  */
 
-import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.js";
+import {
+	type Content,
+	FinishReason,
+	FunctionCallingConfigMode,
+	type GenerateContentConfig,
+	type GenerateContentParameters,
+	type GenerateContentResponse,
+	type Part,
+	type ThinkingConfig,
+} from "@google/genai";
+import { calculateCost } from "../models.js";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Model,
+	StopReason,
+	TextContent,
+	ThinkingBudgets,
+	ThinkingContent,
+	Tool,
+	ToolCall,
+} from "../types.js";
+import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -373,4 +395,275 @@ export function mapStopReasonString(reason: string): StopReason {
 		default:
 			return "error";
 	}
+}
+
+// =============================================================================
+// Stream processing
+// =============================================================================
+
+// Counter for generating unique tool call IDs. Shared across both adapters so a
+// Gemini and a Vertex stream running concurrently cannot mint the same id.
+let toolCallCounter = 0;
+
+/**
+ * Consume a Gemini/Vertex `generateContentStream` and push normalized events.
+ *
+ * Both Google adapters speak the same wire format via `@google/genai`, so the
+ * block state machine, tool-call handling, finish-reason mapping and usage
+ * accounting live here; the adapters own only client construction, auth, and the
+ * API-specific `thinkingConfig` shape.
+ *
+ * Mutates `output` in place and pushes to `stream`. It does not push `done`,
+ * `error`, or `start`, and does not inspect the abort signal -- the adapter owns
+ * the stream lifecycle so it can attach its own request metadata to failures.
+ */
+export async function processGoogleStream(
+	googleStream: AsyncIterable<GenerateContentResponse>,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	model: Model<GoogleApiType>,
+): Promise<void> {
+	let currentBlock: TextContent | ThinkingContent | null = null;
+	const blocks = output.content;
+	const blockIndex = () => blocks.length - 1;
+
+	const endCurrentBlock = () => {
+		if (!currentBlock) return;
+		if (currentBlock.type === "text") {
+			stream.push({
+				type: "text_end",
+				contentIndex: blockIndex(),
+				content: currentBlock.text,
+				partial: output,
+			});
+		} else {
+			stream.push({
+				type: "thinking_end",
+				contentIndex: blockIndex(),
+				content: currentBlock.thinking,
+				partial: output,
+			});
+		}
+	};
+
+	for await (const chunk of googleStream) {
+		// @google/genai documents GenerateContentResponse.responseId as an output-only
+		// field used to identify each response. Keep the first non-empty one.
+		output.responseId ||= chunk.responseId;
+		const candidate = chunk.candidates?.[0];
+		if (candidate?.content?.parts) {
+			for (const part of candidate.content.parts) {
+				if (part.text !== undefined) {
+					const isThinking = isThinkingPart(part);
+					if (
+						!currentBlock ||
+						(isThinking && currentBlock.type !== "thinking") ||
+						(!isThinking && currentBlock.type !== "text")
+					) {
+						endCurrentBlock();
+						if (isThinking) {
+							currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
+							output.content.push(currentBlock);
+							stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+						} else {
+							currentBlock = { type: "text", text: "" };
+							output.content.push(currentBlock);
+							stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+						}
+					}
+					if (currentBlock.type === "thinking") {
+						currentBlock.thinking += part.text;
+						currentBlock.thinkingSignature = retainThoughtSignature(
+							currentBlock.thinkingSignature,
+							part.thoughtSignature,
+						);
+						stream.push({
+							type: "thinking_delta",
+							contentIndex: blockIndex(),
+							delta: part.text,
+							partial: output,
+						});
+					} else {
+						currentBlock.text += part.text;
+						currentBlock.textSignature = retainThoughtSignature(
+							currentBlock.textSignature,
+							part.thoughtSignature,
+						);
+						stream.push({
+							type: "text_delta",
+							contentIndex: blockIndex(),
+							delta: part.text,
+							partial: output,
+						});
+					}
+				}
+
+				if (part.functionCall) {
+					if (currentBlock) {
+						endCurrentBlock();
+						currentBlock = null;
+					}
+
+					// Generate unique ID if not provided or if it's a duplicate
+					const providedId = part.functionCall.id;
+					const needsNewId =
+						!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
+					const toolCallId = needsNewId
+						? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
+						: providedId;
+
+					const toolCall: ToolCall = {
+						type: "toolCall",
+						id: toolCallId,
+						name: part.functionCall.name || "",
+						arguments: (part.functionCall.args as Record<string, any>) ?? {},
+						...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+					};
+
+					output.content.push(toolCall);
+					stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: blockIndex(),
+						delta: JSON.stringify(toolCall.arguments),
+						partial: output,
+					});
+					stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
+				}
+			}
+		}
+
+		if (candidate?.finishReason) {
+			output.stopReason = mapStopReason(candidate.finishReason);
+			if (output.content.some((b) => b.type === "toolCall")) {
+				output.stopReason = "toolUse";
+			}
+			if (output.stopReason === "error") {
+				output.stopReasonRaw = candidate.finishReason;
+			}
+		}
+
+		if (chunk.usageMetadata) {
+			output.usage = {
+				input: (chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
+				output: (chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
+				cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
+				cacheWrite: 0,
+				totalTokens: chunk.usageMetadata.totalTokenCount || 0,
+				cost: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					total: 0,
+				},
+			};
+			calculateCost(model, output.usage);
+		}
+	}
+
+	endCurrentBlock();
+}
+
+// =============================================================================
+// Request configuration
+// =============================================================================
+
+export interface GoogleThinkingOptions {
+	enabled: boolean;
+	budgetTokens?: number; // -1 for dynamic, 0 to disable
+	level?: GoogleThinkingLevel;
+}
+
+export interface BuildGoogleParamsOptions {
+	temperature?: number;
+	maxTokens?: number;
+	toolChoice?: "auto" | "none" | "any";
+	thinking?: GoogleThinkingOptions;
+	signal?: AbortSignal;
+}
+
+export interface GoogleThinkingConfigBuilder {
+	/**
+	 * Build the `thinkingConfig` for a model whose thinking is enabled. Gemini and
+	 * Vertex take the same levels but different value types: the Gemini API accepts
+	 * the raw string, Vertex requires the SDK's `ThinkingLevel` enum member.
+	 */
+	enabled: (thinking: GoogleThinkingOptions) => ThinkingConfig;
+	/** Build the `thinkingConfig` that suppresses thinking for this model. */
+	disabled: (modelId: string) => ThinkingConfig;
+}
+
+/**
+ * Build `GenerateContentParameters` for either Google API.
+ *
+ * Everything except `thinkingConfig` is identical between the two; the caller
+ * supplies that via `thinkingConfigBuilder`.
+ */
+export function buildGoogleParams(
+	model: Model<GoogleApiType>,
+	context: Context,
+	options: BuildGoogleParamsOptions,
+	thinkingConfigBuilder: GoogleThinkingConfigBuilder,
+): GenerateContentParameters {
+	const contents = convertMessages(model, context);
+
+	const generationConfig: GenerateContentConfig = {};
+	if (options.temperature !== undefined) {
+		generationConfig.temperature = options.temperature;
+	}
+	if (options.maxTokens !== undefined) {
+		generationConfig.maxOutputTokens = options.maxTokens;
+	}
+
+	const config: GenerateContentConfig = {
+		...(Object.keys(generationConfig).length > 0 && generationConfig),
+		...(context.systemPrompt && { systemInstruction: sanitizeSurrogates(context.systemPrompt) }),
+		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
+	};
+
+	if (context.tools && context.tools.length > 0 && options.toolChoice) {
+		config.toolConfig = {
+			functionCallingConfig: {
+				mode: mapToolChoice(options.toolChoice),
+			},
+		};
+	} else {
+		config.toolConfig = undefined;
+	}
+
+	if (options.thinking?.enabled && model.reasoning) {
+		config.thinkingConfig = thinkingConfigBuilder.enabled(options.thinking);
+	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
+		config.thinkingConfig = thinkingConfigBuilder.disabled(model.id);
+	}
+
+	if (options.signal) {
+		if (options.signal.aborted) {
+			throw new Error("Request aborted");
+		}
+		config.abortSignal = options.signal;
+	}
+
+	return {
+		model: model.id,
+		contents,
+		config,
+	};
+}
+
+// =============================================================================
+// Model family detection
+// =============================================================================
+
+export function isGemma4Model(modelId: string): boolean {
+	return /gemma-?4/.test(modelId.toLowerCase());
+}
+
+export function isGemini3ProModel(modelId: string): boolean {
+	return /gemini-3(?:\.\d+)?-pro/.test(modelId.toLowerCase());
+}
+
+export function isGemini3FlashModel(modelId: string): boolean {
+	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
 }

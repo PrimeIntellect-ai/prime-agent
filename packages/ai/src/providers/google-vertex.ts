@@ -1,5 +1,4 @@
 import {
-	type GenerateContentConfig,
 	type GenerateContentParameters,
 	GoogleGenAI,
 	type HttpOptions,
@@ -7,7 +6,7 @@ import {
 	type ThinkingConfig,
 	ThinkingLevel,
 } from "@google/genai";
-import { calculateCost, clampThinkingLevel } from "../models.js";
+import { clampThinkingLevel } from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -17,36 +16,26 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
-	TextContent,
-	ThinkingContent,
-	ToolCall,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
 	streamFailureFromStopReason,
 } from "../utils/stream-failure.js";
-import type { GoogleThinkingLevel } from "./google-shared.js";
+import type { GoogleThinkingLevel, GoogleThinkingOptions } from "./google-shared.js";
 import {
-	convertMessages,
-	convertTools,
+	buildGoogleParams,
 	getGoogleThinkingBudget,
-	isThinkingPart,
-	mapStopReason,
-	mapToolChoice,
-	retainThoughtSignature,
+	isGemini3FlashModel,
+	isGemini3ProModel,
+	processGoogleStream,
 } from "./google-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 export interface GoogleVertexOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
-	thinking?: {
-		enabled: boolean;
-		budgetTokens?: number; // -1 for dynamic, 0 to disable
-		level?: GoogleThinkingLevel;
-	};
+	thinking?: GoogleThinkingOptions;
 	project?: string;
 	location?: string;
 }
@@ -61,9 +50,6 @@ const THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, ThinkingLevel> = {
 	MEDIUM: ThinkingLevel.MEDIUM,
 	HIGH: ThinkingLevel.HIGH,
 };
-
-// Counter for generating unique tool call IDs
-let toolCallCounter = 0;
 
 export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOptions> = (
 	model: Model<"google-vertex">,
@@ -105,173 +91,8 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			const googleStream = await client.models.generateContentStream(params);
 
 			stream.push({ type: "start", partial: output });
-			let currentBlock: TextContent | ThinkingContent | null = null;
-			const blocks = output.content;
-			const blockIndex = () => blocks.length - 1;
-			for await (const chunk of googleStream) {
-				// Vertex uses the same @google/genai GenerateContentResponse type as Gemini.
-				// responseId is documented there as an output-only identifier for each response.
-				output.responseId ||= chunk.responseId;
-				const candidate = chunk.candidates?.[0];
-				if (candidate?.content?.parts) {
-					for (const part of candidate.content.parts) {
-						if (part.text !== undefined) {
-							const isThinking = isThinkingPart(part);
-							if (
-								!currentBlock ||
-								(isThinking && currentBlock.type !== "thinking") ||
-								(!isThinking && currentBlock.type !== "text")
-							) {
-								if (currentBlock) {
-									if (currentBlock.type === "text") {
-										stream.push({
-											type: "text_end",
-											contentIndex: blocks.length - 1,
-											content: currentBlock.text,
-											partial: output,
-										});
-									} else {
-										stream.push({
-											type: "thinking_end",
-											contentIndex: blockIndex(),
-											content: currentBlock.thinking,
-											partial: output,
-										});
-									}
-								}
-								if (isThinking) {
-									currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
-									output.content.push(currentBlock);
-									stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-								} else {
-									currentBlock = { type: "text", text: "" };
-									output.content.push(currentBlock);
-									stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-								}
-							}
-							if (currentBlock.type === "thinking") {
-								currentBlock.thinking += part.text;
-								currentBlock.thinkingSignature = retainThoughtSignature(
-									currentBlock.thinkingSignature,
-									part.thoughtSignature,
-								);
-								stream.push({
-									type: "thinking_delta",
-									contentIndex: blockIndex(),
-									delta: part.text,
-									partial: output,
-								});
-							} else {
-								currentBlock.text += part.text;
-								currentBlock.textSignature = retainThoughtSignature(
-									currentBlock.textSignature,
-									part.thoughtSignature,
-								);
-								stream.push({
-									type: "text_delta",
-									contentIndex: blockIndex(),
-									delta: part.text,
-									partial: output,
-								});
-							}
-						}
 
-						if (part.functionCall) {
-							if (currentBlock) {
-								if (currentBlock.type === "text") {
-									stream.push({
-										type: "text_end",
-										contentIndex: blockIndex(),
-										content: currentBlock.text,
-										partial: output,
-									});
-								} else {
-									stream.push({
-										type: "thinking_end",
-										contentIndex: blockIndex(),
-										content: currentBlock.thinking,
-										partial: output,
-									});
-								}
-								currentBlock = null;
-							}
-
-							const providedId = part.functionCall.id;
-							const needsNewId =
-								!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
-							const toolCallId = needsNewId
-								? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
-								: providedId;
-
-							const toolCall: ToolCall = {
-								type: "toolCall",
-								id: toolCallId,
-								name: part.functionCall.name || "",
-								arguments: (part.functionCall.args as Record<string, any>) ?? {},
-								...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
-							};
-
-							output.content.push(toolCall);
-							stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-							stream.push({
-								type: "toolcall_delta",
-								contentIndex: blockIndex(),
-								delta: JSON.stringify(toolCall.arguments),
-								partial: output,
-							});
-							stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
-						}
-					}
-				}
-
-				if (candidate?.finishReason) {
-					output.stopReason = mapStopReason(candidate.finishReason);
-					if (output.content.some((b) => b.type === "toolCall")) {
-						output.stopReason = "toolUse";
-					}
-					if (output.stopReason === "error") {
-						output.stopReasonRaw = candidate.finishReason;
-					}
-				}
-
-				if (chunk.usageMetadata) {
-					output.usage = {
-						input:
-							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-						output:
-							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
-						cacheWrite: 0,
-						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
-					calculateCost(model, output.usage);
-				}
-			}
-
-			if (currentBlock) {
-				if (currentBlock.type === "text") {
-					stream.push({
-						type: "text_end",
-						contentIndex: blockIndex(),
-						content: currentBlock.text,
-						partial: output,
-					});
-				} else {
-					stream.push({
-						type: "thinking_end",
-						contentIndex: blockIndex(),
-						content: currentBlock.thinking,
-						partial: output,
-					});
-				}
-			}
+			await processGoogleStream(googleStream, output, stream, model);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -316,14 +137,13 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
 	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
-	const geminiModel = model as unknown as Model<"google-generative-ai">;
 
-	if (isGemini3ProModel(geminiModel) || isGemini3FlashModel(geminiModel)) {
+	if (isGemini3ProModel(model.id) || isGemini3FlashModel(model.id)) {
 		return streamGoogleVertex(model, context, {
 			...base,
 			thinking: {
 				enabled: true,
-				level: getGemini3ThinkingLevel(effort, geminiModel),
+				level: getGemini3ThinkingLevel(effort, model.id),
 			},
 		} satisfies GoogleVertexOptions);
 	}
@@ -332,7 +152,7 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 		...base,
 		thinking: {
 			enabled: true,
-			budgetTokens: getGoogleThinkingBudget(geminiModel.id, effort, options.thinkingBudgets),
+			budgetTokens: getGoogleThinkingBudget(model.id, effort, options.thinkingBudgets),
 		},
 	} satisfies GoogleVertexOptions);
 };
@@ -438,79 +258,30 @@ function buildParams(
 	context: Context,
 	options: GoogleVertexOptions = {},
 ): GenerateContentParameters {
-	const contents = convertMessages(model, context);
-
-	const generationConfig: GenerateContentConfig = {};
-	if (options.temperature !== undefined) {
-		generationConfig.temperature = options.temperature;
-	}
-	if (options.maxTokens !== undefined) {
-		generationConfig.maxOutputTokens = options.maxTokens;
-	}
-
-	const config: GenerateContentConfig = {
-		...(Object.keys(generationConfig).length > 0 && generationConfig),
-		...(context.systemPrompt && { systemInstruction: sanitizeSurrogates(context.systemPrompt) }),
-		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
-	};
-
-	if (context.tools && context.tools.length > 0 && options.toolChoice) {
-		config.toolConfig = {
-			functionCallingConfig: {
-				mode: mapToolChoice(options.toolChoice),
-			},
-		};
-	} else {
-		config.toolConfig = undefined;
-	}
-
-	if (options.thinking?.enabled && model.reasoning) {
-		const thinkingConfig: ThinkingConfig = { includeThoughts: true };
-		if (options.thinking.level !== undefined) {
-			thinkingConfig.thinkingLevel = THINKING_LEVEL_MAP[options.thinking.level];
-		} else if (options.thinking.budgetTokens !== undefined) {
-			thinkingConfig.thinkingBudget = options.thinking.budgetTokens;
-		}
-		config.thinkingConfig = thinkingConfig;
-	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
-		config.thinkingConfig = getDisabledThinkingConfig(model);
-	}
-
-	if (options.signal) {
-		if (options.signal.aborted) {
-			throw new Error("Request aborted");
-		}
-		config.abortSignal = options.signal;
-	}
-
-	const params: GenerateContentParameters = {
-		model: model.id,
-		contents,
-		config,
-	};
-
-	return params;
+	return buildGoogleParams(model, context, options, {
+		enabled: (thinking) => {
+			const thinkingConfig: ThinkingConfig = { includeThoughts: true };
+			if (thinking.level !== undefined) {
+				thinkingConfig.thinkingLevel = THINKING_LEVEL_MAP[thinking.level];
+			} else if (thinking.budgetTokens !== undefined) {
+				thinkingConfig.thinkingBudget = thinking.budgetTokens;
+			}
+			return thinkingConfig;
+		},
+		disabled: getDisabledThinkingConfig,
+	});
 }
 
 type ClampedThinkingLevel = Exclude<PiThinkingLevel, "xhigh" | "max">;
 
-function isGemini3ProModel(model: Model<"google-generative-ai">): boolean {
-	return /gemini-3(?:\.\d+)?-pro/.test(model.id.toLowerCase());
-}
-
-function isGemini3FlashModel(model: Model<"google-generative-ai">): boolean {
-	return /gemini-3(?:\.\d+)?-flash/.test(model.id.toLowerCase());
-}
-
-function getDisabledThinkingConfig(model: Model<"google-vertex">): ThinkingConfig {
+function getDisabledThinkingConfig(modelId: string): ThinkingConfig {
 	// Google docs: Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite
 	// do not support full thinking-off either. For Gemini 3 models, use the lowest supported
 	// thinkingLevel without includeThoughts so hidden thinking remains invisible to pi.
-	const geminiModel = model as unknown as Model<"google-generative-ai">;
-	if (isGemini3ProModel(geminiModel)) {
+	if (isGemini3ProModel(modelId)) {
 		return { thinkingLevel: ThinkingLevel.LOW };
 	}
-	if (isGemini3FlashModel(geminiModel)) {
+	if (isGemini3FlashModel(modelId)) {
 		return { thinkingLevel: ThinkingLevel.MINIMAL };
 	}
 
@@ -518,11 +289,8 @@ function getDisabledThinkingConfig(model: Model<"google-vertex">): ThinkingConfi
 	return { thinkingBudget: 0 };
 }
 
-function getGemini3ThinkingLevel(
-	effort: ClampedThinkingLevel,
-	model: Model<"google-generative-ai">,
-): GoogleThinkingLevel {
-	if (isGemini3ProModel(model)) {
+function getGemini3ThinkingLevel(effort: ClampedThinkingLevel, modelId: string): GoogleThinkingLevel {
+	if (isGemini3ProModel(modelId)) {
 		switch (effort) {
 			case "minimal":
 			case "low":
