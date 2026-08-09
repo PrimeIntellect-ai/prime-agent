@@ -98,6 +98,23 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
 	});
 
+	it("schema-gates the RLM token budget commands at their introducing revision", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_token_budget_status).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 16,
+		});
+		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_token_budget).toEqual({ minProtocol: 7, minSchemaRevision: 16 });
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
+	});
+
+	it("keeps the RLM token budget getter read-only and its setter mutating", () => {
+		expect(isDaemonMutatingCommand({ type: "get_rlm_token_budget_status" })).toBe(false);
+		expect(isDaemonMutatingCommand({ type: "set_rlm_token_budget" })).toBe(true);
+		expect(
+			getDaemonCommandCompatibilities({ type: "get_rlm_token_budget_status", activeSessionId: "active-1" }),
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 16 }]);
+	});
+
 	it("schema-gates session commands that carry the telemetry policy", () => {
 		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual([
 			{ minProtocol: 7 },

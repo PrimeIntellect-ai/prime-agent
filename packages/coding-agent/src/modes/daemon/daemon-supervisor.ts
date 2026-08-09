@@ -228,6 +228,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"set_session_name",
 	"get_rlm_max_depth_status",
 	"set_rlm_max_depth",
+	"get_rlm_token_budget_status",
+	"set_rlm_token_budget",
 	"rename_saved_session",
 	"delete_saved_session",
 	"get_session_context",

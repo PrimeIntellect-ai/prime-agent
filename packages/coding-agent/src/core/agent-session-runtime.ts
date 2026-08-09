@@ -359,6 +359,8 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 					includeCompactSkill: options.includeCompactSkill,
 					rlmDepth: options.rlmDepth,
 					rlmMaxDepth: options.rlmMaxDepth,
+					rlmTokenBudget: options.rlmTokenBudget,
+					rlmTokenAllowance: options.rlmTokenAllowance,
 					rlmSessionDir: options.sessionDir,
 					rlmParentNodeId: options.rlmParentNodeId,
 					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,

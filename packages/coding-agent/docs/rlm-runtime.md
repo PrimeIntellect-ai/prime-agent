@@ -160,15 +160,37 @@ Unknown options fail instead of being ignored. Model search is bounded to active
 `AgentSession.runRlmChild()` performs the following sequence:
 
 1. Check `RLM_DEPTH < RLM_MAX_DEPTH`.
-2. Resolve the requested model or inherit the parent model.
-3. Create a `sub-xxxxxxxx` child directory under the parent artifact directory.
-4. Admit the task into the parent registry and return its `RLMSpawnHandle`.
-5. In detached work, create a child `SessionManager`, `Agent`, and `AgentSession`.
-6. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and thinking configuration.
-7. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
-8. Attribute child usage to the parent assistant turn and persist the attribution.
+2. Reserve the child's token allowance from the active budget schedule, refusing the spawn when the schedule cannot fund it.
+3. Resolve the requested model or inherit the parent model.
+4. Create a `sub-xxxxxxxx` child directory under the parent artifact directory.
+5. Admit the task into the parent registry and return its `RLMSpawnHandle`.
+6. In detached work, create a child `SessionManager`, `Agent`, and `AgentSession`.
+7. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and thinking configuration.
+8. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
+9. Attribute child usage to the parent assistant turn and persist the attribution.
 
 Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their own `RLM_SESSION_DIR`. The default maximum depth is 1, so root sessions may create children and those children may not create grandchildren unless the limit is configured higher.
+
+## Token Budgets
+
+`/rlm-token-budget` bounds token spend across a recursion tree. A budget is resolved per session with the same precedence as max depth (chat > inherited > global > env > default off) and is enforced in two places:
+
+- Between turns: once a session has generated its allowance, `shouldStopAfterTurn` ends the agent loop. The turn that crossed the allowance is preserved; the loop simply does not start another. Aborting is deliberately not used, because an aborted turn reports `stopReason: "aborted"` and would not be charged.
+- At spawn time: `runRlmChild` reserves the child's allowance before creating any session state, and throws when the schedule cannot fund another child.
+
+Three schedules distribute a total allowance across depths:
+
+| Schedule | Per-agent allowance at depth `d` | Total tree spend |
+| --- | --- | --- |
+| `flat` | `total` | unbounded in fan-out |
+| `geometric` | `total * factor^d` | unbounded in fan-out |
+| `split` | parent keeps `1 - factor`, reserving `factor` to divide equally between `fanout` children | bounded by `total` |
+
+Only `split` bounds the whole tree: node count grows as `fanout^depth`, so a fixed per-depth allowance still lets total spend grow without limit. Under `split` a parent funds exactly `fanout` children and every descendant is paid for out of the root grant, so the tree total never exceeds it regardless of depth or fan-out.
+
+Budget state flows downward as a value snapshot taken at spawn time. A running child never re-reads its parent, so changing a budget mid-run affects only sessions spawned afterwards. A child that persists its own per-chat override can lower its allowance but never raise it above the grant it was spawned with.
+
+Kernel env exposes `RLM_TOKEN_ALLOWANCE` and `RLM_TOKEN_SUBTREE_POOL` at provisioning time; as with `RLM_MAX_DEPTH`, the TypeScript-side check is authoritative.
 
 ## Independent Delegation
 

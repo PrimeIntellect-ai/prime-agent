@@ -15,6 +15,7 @@ import type {
 } from "../../core/cron-jobs.js";
 import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
+import type { RlmTokenBudgetConfig } from "../../core/rlm-token-budget.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
@@ -539,6 +540,14 @@ export class InProcessAgentConnection implements AgentConnection {
 
 	async setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }) {
 		return this.session.setRlmMaxDepth(maxDepth, options);
+	}
+
+	async getRlmTokenBudgetStatus() {
+		return this.session.getRlmTokenBudgetStatus();
+	}
+
+	async setRlmTokenBudget(config: RlmTokenBudgetConfig | undefined, options?: { global?: boolean }) {
+		return this.session.setRlmTokenBudget(config, options);
 	}
 
 	async renameSavedSession(sessionPath: string, name: string): Promise<void> {

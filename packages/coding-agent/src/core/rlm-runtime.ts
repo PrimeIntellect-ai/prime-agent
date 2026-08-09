@@ -3,6 +3,7 @@ import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
+import type { RlmTokenBudgetConfig } from "./rlm-token-budget.js";
 
 export interface RlmRunRequest {
 	prompt: string;
@@ -219,6 +220,10 @@ export interface CreateRlmSubagentRuntimeOptions {
 	includeCompactSkill: boolean;
 	rlmDepth: number;
 	rlmMaxDepth: number;
+	/** RLM token budget config inherited by the child, when budgeting is enabled. */
+	rlmTokenBudget?: RlmTokenBudgetConfig;
+	/** Token allowance the parent reserved for this child under the active schedule. */
+	rlmTokenAllowance?: number;
 	rlmParentNodeId: string;
 	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;

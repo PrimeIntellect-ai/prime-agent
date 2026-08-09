@@ -233,6 +233,21 @@ import {
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import {
+	childAllowance,
+	DEFAULT_RLM_TOKEN_BUDGET_FACTOR,
+	DEFAULT_RLM_TOKEN_BUDGET_FANOUT,
+	DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE,
+	isRlmTokenBudgetConfig,
+	ownAllowance,
+	type RlmTokenBudgetConfig,
+	type RlmTokenBudgetSource,
+	type RlmTokenBudgetStatus,
+	rlmTokenDeltaForUsage,
+	type SetRlmTokenBudgetResult,
+	subtreePool,
+	validateRlmTokenBudgetConfig,
+} from "./rlm-token-budget.js";
+import {
 	ActionStore,
 	type ActionTicket,
 	canSelectSessionAction,
@@ -365,6 +380,12 @@ export type AgentSessionEvent =
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
 	| {
+			type: "rlm_token_budget_exhausted";
+			depth: number;
+			tokensUsed: number;
+			allowanceTokens: number;
+	  }
+	| {
 			type: "bash_start";
 			command: string;
 			excludeFromContext: boolean;
@@ -467,6 +488,10 @@ export interface AgentSessionConfig {
 	rlmDepth?: number;
 	/** Maximum RLM recursion depth. Defaults to RLM_MAX_DEPTH or 1. */
 	rlmMaxDepth?: number;
+	/** RLM token budget inherited from a parent session. Unset falls through to the global setting. */
+	rlmTokenBudget?: RlmTokenBudgetConfig;
+	/** Token allowance granted to this session by its parent under the active schedule. */
+	rlmTokenAllowance?: number;
 	/** Directory exposed to the kernel as RLM_SESSION_DIR. */
 	rlmSessionDir?: string;
 	/** Node id for this session when it is itself an RLM child. */
@@ -924,8 +949,21 @@ import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from 
 
 export type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
+export type {
+	RlmTokenBudgetConfig,
+	RlmTokenBudgetSchedule,
+	RlmTokenBudgetSource,
+	RlmTokenBudgetStatus,
+	SetRlmTokenBudgetResult,
+} from "./rlm-token-budget.js";
+
 interface PersistedRlmMaxDepthState {
 	maxDepth: number;
+}
+
+/** Null config records an explicit per-chat opt-out that must win over the global default. */
+interface PersistedRlmTokenBudgetState {
+	config: RlmTokenBudgetConfig | null;
 }
 
 type AutonomousRuntimeSnapshot = Pick<
@@ -968,6 +1006,7 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 /** Cap on the post-compaction kernel namespace probe so a wedged kernel can't stall recovery. */
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
+const RLM_TOKEN_BUDGET_STATE_CUSTOM_TYPE = "rlm_token_budget_state";
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1002,6 +1041,12 @@ function isPersistedRlmMaxDepthState(value: unknown): value is PersistedRlmMaxDe
 	return (
 		typeof value === "object" && value !== null && isNonNegativeInteger((value as PersistedRlmMaxDepthState).maxDepth)
 	);
+}
+
+function isPersistedRlmTokenBudgetState(value: unknown): value is PersistedRlmTokenBudgetState {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as PersistedRlmTokenBudgetState;
+	return candidate.config === null || isRlmTokenBudgetConfig(candidate.config);
 }
 
 function parseGoalBudgetValue(value: string): number {
@@ -1209,6 +1254,18 @@ export class AgentSession {
 	private readonly _configuredRlmMaxDepth: number | undefined;
 	private _rlmMaxDepth: number;
 	private _rlmMaxDepthSource: RlmMaxDepthSource;
+	private readonly _configuredRlmTokenBudget: RlmTokenBudgetConfig | undefined;
+	private readonly _configuredRlmTokenAllowance: number | undefined;
+	private _rlmTokenBudget: RlmTokenBudgetConfig | undefined;
+	private _rlmTokenBudgetSource: RlmTokenBudgetSource;
+	/** Tokens this session may generate before the budget hard-stops its agent loop. */
+	private _rlmTokenAllowance: number | undefined;
+	private _rlmTokensUsed = 0;
+	/** Tokens still grantable to descendants under the `split` schedule. */
+	private _rlmSubtreePool: number | undefined;
+	/** Equal per-child share of the initial `split` pool; funds exactly `fanout` children. */
+	private _rlmChildAllowanceShare: number | undefined;
+	private _rlmTokenBudgetAccountedMessages = new WeakSet<AssistantMessage>();
 	private _rlmSessionDir?: string;
 	private _rlmParentNodeId?: string;
 	private _rlmParentAgent?: string;
@@ -1319,6 +1376,15 @@ export class AgentSession {
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
+		this._configuredRlmTokenBudget = config.rlmTokenBudget;
+		if (this._configuredRlmTokenBudget !== undefined) {
+			validateRlmTokenBudgetConfig(this._configuredRlmTokenBudget);
+		}
+		this._configuredRlmTokenAllowance = config.rlmTokenAllowance;
+		const resolvedRlmTokenBudget = this._resolveRlmTokenBudget();
+		this._rlmTokenBudget = resolvedRlmTokenBudget.config;
+		this._rlmTokenBudgetSource = resolvedRlmTokenBudget.source;
+		this._applyRlmTokenBudgetAllowance();
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
@@ -1596,6 +1662,184 @@ export class AgentSession {
 		return { maxDepth: 1, source: "default" };
 	}
 
+	/**
+	 * Draw a child's allowance from this session's budget, refusing the spawn when the
+	 * schedule cannot fund another child. Returns undefined when budgeting is disabled.
+	 */
+	private _reserveRlmChildAllowance(): number | undefined {
+		const config = this._rlmTokenBudget;
+		if (!config) return undefined;
+		if (this._rlmTokenBudgetExhausted()) {
+			throw new Error(
+				`RLM token budget exhausted (used ${this._rlmTokensUsed} of ${this._rlmTokenAllowance} tokens); cannot spawn a subagent`,
+			);
+		}
+		if (config.schedule !== "split") {
+			return childAllowance(config, this._rlmDepth + 1, null);
+		}
+		const granted = this._rlmChildAllowanceShare ?? 0;
+		const remaining = this._rlmSubtreePool ?? 0;
+		if (granted <= 0 || remaining < granted) {
+			throw new Error(
+				`RLM token budget subtree pool exhausted (schedule="split", fanout=${config.fanout}); cannot fund another subagent`,
+			);
+		}
+		this._rlmSubtreePool = remaining - granted;
+		return granted;
+	}
+
+	private _emitRlmTokenBudgetExhausted(): void {
+		this._emit({
+			type: "rlm_token_budget_exhausted",
+			depth: this._rlmDepth,
+			tokensUsed: this._rlmTokensUsed,
+			allowanceTokens: this._rlmTokenAllowance ?? 0,
+		});
+	}
+
+	private _loadPersistedRlmTokenBudgetState(): PersistedRlmTokenBudgetState | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (
+				entry.type === "custom" &&
+				entry.customType === RLM_TOKEN_BUDGET_STATE_CUSTOM_TYPE &&
+				isPersistedRlmTokenBudgetState(entry.data)
+			) {
+				return entry.data;
+			}
+		}
+		return undefined;
+	}
+
+	private _resolveRlmTokenBudget(): {
+		config: RlmTokenBudgetConfig | undefined;
+		source: RlmTokenBudgetSource;
+	} {
+		const persisted = this._loadPersistedRlmTokenBudgetState();
+		if (persisted) {
+			return { config: persisted.config ?? undefined, source: "chat" };
+		}
+		if (this._configuredRlmTokenBudget !== undefined) {
+			return { config: this._configuredRlmTokenBudget, source: "inherited" };
+		}
+		const global = this.settingsManager.getRlmTokenBudget();
+		if (global !== undefined) {
+			return { config: global, source: "global" };
+		}
+		const env = process.env.RLM_TOKEN_BUDGET;
+		if (env !== undefined && env !== "") {
+			const totalTokens = Number(env);
+			if (Number.isSafeInteger(totalTokens) && totalTokens > 0) {
+				return {
+					config: {
+						totalTokens,
+						schedule: DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE,
+						factor: DEFAULT_RLM_TOKEN_BUDGET_FACTOR,
+						fanout: DEFAULT_RLM_TOKEN_BUDGET_FANOUT,
+					},
+					source: "env",
+				};
+			}
+		}
+		return { config: undefined, source: "default" };
+	}
+
+	/** Recompute this session's own allowance and descendant pool from the active config. */
+	private _applyRlmTokenBudgetAllowance(): void {
+		const config = this._rlmTokenBudget;
+		if (!config) {
+			this._rlmTokenAllowance = undefined;
+			this._rlmSubtreePool = undefined;
+			return;
+		}
+		// A child is funded by its parent; a root derives its allowance from the total.
+		const grantedAllowance = this._configuredRlmTokenAllowance ?? config.totalTokens;
+		const allowance = ownAllowance(config, this._rlmDepth, grantedAllowance);
+		const pool = subtreePool(config, grantedAllowance) ?? undefined;
+		// A per-chat override must never let a funded child raise its own ceiling above the
+		// grant it was spawned with, which would break the subtree bound its parent reserved.
+		this._rlmTokenAllowance =
+			this._configuredRlmTokenAllowance === undefined
+				? allowance
+				: Math.min(allowance, this._configuredRlmTokenAllowance);
+		this._rlmSubtreePool =
+			pool === undefined || this._configuredRlmTokenAllowance === undefined
+				? pool
+				: Math.min(pool, this._configuredRlmTokenAllowance);
+		this._rlmChildAllowanceShare =
+			this._rlmSubtreePool === undefined
+				? undefined
+				: childAllowance(config, this._rlmDepth + 1, this._rlmSubtreePool);
+	}
+
+	/** True once this session has generated at least its allowance. */
+	private _rlmTokenBudgetExhausted(): boolean {
+		return this._rlmTokenAllowance !== undefined && this._rlmTokensUsed >= this._rlmTokenAllowance;
+	}
+
+	/**
+	 * Fold an assistant turn's usage into the session allowance.
+	 * Returns true on the transition into an exhausted budget so the caller can stop the loop once.
+	 */
+	private _accountRlmTokenBudgetForAssistantMessage(message: AssistantMessage): boolean {
+		if (this._rlmTokenAllowance === undefined) return false;
+		if (message.stopReason === "error" || message.stopReason === "aborted") return false;
+		if (this._rlmTokenBudgetAccountedMessages.has(message)) return false;
+		const wasExhausted = this._rlmTokenBudgetExhausted();
+		this._rlmTokenBudgetAccountedMessages.add(message);
+		this._rlmTokensUsed += rlmTokenDeltaForUsage(message.usage);
+		return !wasExhausted && this._rlmTokenBudgetExhausted();
+	}
+
+	/** Current RLM token budget state and the source that supplied it. */
+	getRlmTokenBudgetStatus(): RlmTokenBudgetStatus {
+		return {
+			config: this._rlmTokenBudget ?? null,
+			source: this._rlmTokenBudgetSource,
+			depth: this._rlmDepth,
+			allowanceTokens: this._rlmTokenAllowance ?? null,
+			tokensUsed: this._rlmTokensUsed,
+			subtreePoolTokens: this._rlmSubtreePool ?? null,
+			exhausted: this._rlmTokenBudgetExhausted(),
+		};
+	}
+
+	/** Persist and immediately apply a per-chat RLM token budget override. */
+	async setRlmTokenBudget(
+		config: RlmTokenBudgetConfig | undefined,
+		options: { global?: boolean } = {},
+	): Promise<SetRlmTokenBudgetResult> {
+		const validated = config === undefined ? undefined : validateRlmTokenBudgetConfig(config);
+		this.sessionManager.appendCustomEntryWithRollback(RLM_TOKEN_BUDGET_STATE_CUSTOM_TYPE, {
+			config: validated ?? null,
+		});
+		this._rlmTokenBudget = validated;
+		this._rlmTokenBudgetSource = "chat";
+		this._applyRlmTokenBudgetAllowance();
+		const oldBase = this._baseSystemPrompt;
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._refreshExtensionSystemPrompt(this.agent.state.systemPrompt, oldBase);
+
+		let globalError: string | undefined;
+		if (options.global === true) {
+			await this.settingsManager.flush();
+			const staleErrors = this.settingsManager.drainErrors("global");
+			for (const { error } of staleErrors) {
+				console.warn(`Warning: Earlier global settings write failed: ${error.message}`);
+			}
+			this.settingsManager.setRlmTokenBudget(validated);
+			await this.settingsManager.flush();
+			const errors = this.settingsManager.drainErrors("global");
+			globalError = errors.map(({ error }) => error.message).join("; ") || undefined;
+		}
+		return {
+			...this.getRlmTokenBudgetStatus(),
+			globalSaved: options.global === true && globalError === undefined,
+			...(globalError ? { globalError } : {}),
+		};
+	}
+
 	private _loadPersistedGoalState(): GoalState {
 		const branch = this.sessionManager.getBranch();
 		for (let i = branch.length - 1; i >= 0; i--) {
@@ -1651,6 +1895,18 @@ export class AgentSession {
 		this._rlmMaxDepth = resolved.maxDepth;
 		this._rlmMaxDepthSource = resolved.source;
 		if (resolved.maxDepth !== previousMaxDepth) {
+			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+			this.agent.state.systemPrompt = this._baseSystemPrompt;
+		}
+	}
+
+	private _reloadRlmTokenBudgetFromBranch(): void {
+		const previousAllowance = this._rlmTokenAllowance;
+		const resolved = this._resolveRlmTokenBudget();
+		this._rlmTokenBudget = resolved.config;
+		this._rlmTokenBudgetSource = resolved.source;
+		this._applyRlmTokenBudgetAllowance();
+		if (this._rlmTokenAllowance !== previousAllowance) {
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
 		}
@@ -2193,6 +2449,18 @@ export class AgentSession {
 			// background plan kickoff) has completed before the checkpoint.
 			await this._agentEventQueue;
 			await this._runSerializedRefineCheckpoint();
+		}
+		// The RLM token budget is a hard stop: unlike the advisory goal budget it ends the
+		// agent loop at this turn boundary instead of asking the model to wrap up. It is
+		// evaluated after the mandatory serialized-refine checkpoint so stopping never
+		// skips work the loop guarantees, and it never aborts: an aborted turn reports
+		// stopReason "aborted", which accounting refuses to charge.
+		if (this._accountRlmTokenBudgetForAssistantMessage(context.message)) {
+			this._emitRlmTokenBudgetExhausted();
+			return true;
+		}
+		if (this._rlmTokenBudgetExhausted()) {
+			return true;
 		}
 		if (await this._shouldStopForThresholdCompaction(context)) {
 			return true;
@@ -8904,6 +9172,12 @@ export class AgentSession {
 			RLM_MAX_DEPTH: String(this._rlmMaxDepth),
 			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
 		};
+		if (this._rlmTokenAllowance !== undefined) {
+			env.RLM_TOKEN_ALLOWANCE = String(this._rlmTokenAllowance);
+		}
+		if (this._rlmSubtreePool !== undefined) {
+			env.RLM_TOKEN_SUBTREE_POOL = String(this._rlmSubtreePool);
+		}
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {
 			env.RLM_SESSION_DIR = rlmSessionDir;
@@ -9013,6 +9287,7 @@ export class AgentSession {
 		spawnCode?: string;
 		sessionDir: string;
 		model: Model<any>;
+		tokenAllowance?: number;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9033,6 +9308,8 @@ export class AgentSession {
 			includeCompactSkill: this._includeCompactSkill,
 			rlmDepth: this._rlmDepth + 1,
 			rlmMaxDepth: this._rlmMaxDepth,
+			rlmTokenBudget: this._rlmTokenBudget,
+			rlmTokenAllowance: options.tokenAllowance,
 			rlmParentNodeId: options.id,
 		};
 	}
@@ -9699,6 +9976,7 @@ export class AgentSession {
 				`RLM recursion depth limit reached (RLM_DEPTH=${this._rlmDepth}, RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
 			);
 		}
+		const childTokenAllowance = this._reserveRlmChildAllowance();
 		if (requestedSessionName) {
 			if (this._pendingRlmSubagentSessionNames.has(requestedSessionName)) {
 				throw new Error(formatAgentSessionNameUnavailable(requestedSessionName, this._rlmDepth + 1));
@@ -9782,6 +10060,7 @@ export class AgentSession {
 				spawnCode,
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
+				tokenAllowance: childTokenAllowance,
 			}),
 			onSessionPublished: publishChildSession,
 		};
@@ -10944,6 +11223,7 @@ export class AgentSession {
 			this._restoreLateIpythonSentAgentMessages();
 			this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();
+			this._reloadRlmTokenBudgetFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
 			// Emit session_tree event

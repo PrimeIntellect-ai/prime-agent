@@ -114,6 +114,11 @@ import { parseNewSessionCommand } from "../../core/new-session-command.js";
 import { resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
 import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-inference-model-selection.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
+import {
+	parseRlmTokenBudgetCommand,
+	type RlmTokenBudgetCommand,
+	type RlmTokenBudgetStatus,
+} from "../../core/rlm-token-budget.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
 import { parseSkillBlock } from "../../core/skill-blocks.js";
@@ -4730,6 +4735,11 @@ export class InteractiveMode {
 					await this.handleRlmMaxDepthCommand(commandArgs);
 					return;
 				}
+				if (commandName === "rlm-token-budget") {
+					this.editor.setText("");
+					await this.handleRlmTokenBudgetCommand(commandArgs);
+					return;
+				}
 				if (commandName === "session" && !commandArgs) {
 					this.echoLocalCommand(text);
 					await this.handleSessionCommand();
@@ -9115,6 +9125,68 @@ export class InteractiveMode {
 			if (result.globalError) {
 				this.showError(
 					`RLM max depth set for this chat, but the global default was not saved: ${result.globalError}`,
+				);
+			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private formatRlmTokenBudgetStatus(status: RlmTokenBudgetStatus): string {
+		if (!status.config) {
+			return `RLM token budget: off (${status.source})`;
+		}
+		const { totalTokens, schedule, factor, fanout } = status.config;
+		const parts = [
+			`RLM token budget: ${totalTokens} tokens`,
+			`schedule=${schedule}`,
+			`factor=${factor}`,
+			`fanout=${fanout}`,
+			`(${status.source})`,
+		];
+		const allowance =
+			status.allowanceTokens === null
+				? "unbounded"
+				: `${status.tokensUsed}/${status.allowanceTokens} used at depth ${status.depth}`;
+		const pool = status.subtreePoolTokens === null ? "" : `; subtree pool ${status.subtreePoolTokens}`;
+		return `${parts.join(" ")}\n  this session: ${allowance}${pool}${status.exhausted ? " (exhausted)" : ""}`;
+	}
+
+	private async handleRlmTokenBudgetCommand(args: string): Promise<void> {
+		let command: RlmTokenBudgetCommand;
+		try {
+			command = parseRlmTokenBudgetCommand(args);
+		} catch (error) {
+			this.showWarning(error instanceof Error ? error.message : String(error));
+			return;
+		}
+
+		if (command.kind === "status") {
+			try {
+				const status = await this.agentConnection.getRlmTokenBudgetStatus();
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(theme.fg("dim", this.formatRlmTokenBudgetStatus(status)), 1, 0));
+				this.ui.requestRender();
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		const config = command.kind === "off" ? undefined : command.config;
+		try {
+			const result = await this.agentConnection.setRlmTokenBudget(config, { global: command.global });
+			const summary = config
+				? `RLM token budget set: ${config.totalTokens} tokens, schedule=${config.schedule}, factor=${config.factor}, fanout=${config.fanout}`
+				: "RLM token budget disabled";
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(
+				new Text(theme.fg("dim", `${summary}${result.globalSaved ? " and saved as global default" : ""}`), 1, 0),
+			);
+			this.ui.requestRender();
+			if (result.globalError) {
+				this.showError(
+					`RLM token budget set for this chat, but the global default was not saved: ${result.globalError}`,
 				);
 			}
 		} catch (error) {

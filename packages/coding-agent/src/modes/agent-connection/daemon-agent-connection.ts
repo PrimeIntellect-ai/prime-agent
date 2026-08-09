@@ -15,6 +15,11 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
+import type {
+	RlmTokenBudgetConfig,
+	RlmTokenBudgetStatus,
+	SetRlmTokenBudgetResult,
+} from "../../core/rlm-token-budget.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
@@ -1279,6 +1284,22 @@ export class DaemonAgentConnection implements AgentConnection {
 			type: "set_rlm_max_depth",
 			activeSessionId: this.activeSessionId,
 			maxDepth,
+			global: options?.global,
+		});
+	}
+
+	async getRlmTokenBudgetStatus() {
+		return this.requestData<RlmTokenBudgetStatus>({
+			type: "get_rlm_token_budget_status",
+			activeSessionId: this.activeSessionId,
+		});
+	}
+
+	async setRlmTokenBudget(config: RlmTokenBudgetConfig | undefined, options?: { global?: boolean }) {
+		return this.requestData<SetRlmTokenBudgetResult>({
+			type: "set_rlm_token_budget",
+			activeSessionId: this.activeSessionId,
+			config: config ?? null,
 			global: options?.global,
 		});
 	}

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
+import type { RlmTokenBudgetConfig } from "../src/core/rlm-token-budget.js";
+import {
+	DaemonCapabilityUnavailableError,
+	DaemonClient,
+	getDaemonSocketCloseReason,
+} from "../src/modes/daemon/daemon-client.js";
 import {
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_PROTOCOL_VERSION,
@@ -316,6 +321,72 @@ describe("DaemonClient", () => {
 		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
 		client.close();
 		await expect(request).rejects.toThrow("closed before the operation completed");
+	});
+
+	it("never writes RLM token budget commands to a daemon predating their schema revision", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		const compatibility = DAEMON_COMMAND_COMPATIBILITY.set_rlm_token_budget;
+		// The revision below the introducing one is the last daemon build without these commands.
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["session_input_admission"], compatibility.minSchemaRevision - 1);
+
+		const status = client.request({ type: "get_rlm_token_budget_status", activeSessionId: "active-1" });
+		await expect(status).rejects.toBeInstanceOf(DaemonCapabilityUnavailableError);
+		await expect(status).rejects.toThrow("does not support get_rlm_token_budget_status");
+
+		const update = client.request({
+			type: "set_rlm_token_budget",
+			activeSessionId: "active-1",
+			config: { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 },
+		});
+		await expect(update).rejects.toBeInstanceOf(DaemonCapabilityUnavailableError);
+		await expect(update).rejects.toThrow("does not support set_rlm_token_budget");
+
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it("sends RLM token budget commands to a daemon at their introducing schema revision", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		const compatibility = DAEMON_COMMAND_COMPATIBILITY.set_rlm_token_budget;
+		emitHello(socket, compatibility.minProtocol, ["session_input_admission"], compatibility.minSchemaRevision);
+
+		const config: RlmTokenBudgetConfig = { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 };
+		const status = client.request({ type: "get_rlm_token_budget_status", activeSessionId: "active-1" });
+		const update = client.request({
+			type: "set_rlm_token_budget",
+			activeSessionId: "active-1",
+			config,
+			global: true,
+		});
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(2));
+
+		const envelopes = socket.writes.map(
+			(write) =>
+				JSON.parse(write.trim()) as {
+					type?: string;
+					command?: { type?: string; activeSessionId?: string; config?: RlmTokenBudgetConfig | null };
+				},
+		);
+		expect(envelopes[0]).toMatchObject({
+			type: "command",
+			command: { type: "get_rlm_token_budget_status", activeSessionId: "active-1" },
+		});
+		expect(envelopes[1]).toMatchObject({
+			type: "command",
+			command: { type: "set_rlm_token_budget", activeSessionId: "active-1", config },
+		});
+
+		client.close();
+		await expect(status).rejects.toThrow("closed before the operation completed");
+		await expect(update).rejects.toThrow("closed before the operation completed");
 	});
 
 	it("isolates a message consumer failure from the rest of the client", async () => {

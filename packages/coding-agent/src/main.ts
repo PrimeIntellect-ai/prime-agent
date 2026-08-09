@@ -709,6 +709,8 @@ export function resolveRuntimeSessionOptions(
 				: mergeAutonomousConfig(sessionOptions.autonomous, runtimeSessionOptions?.autonomous),
 		rlmDepth: runtimeSessionOptions?.rlmDepth,
 		rlmMaxDepth: runtimeSessionOptions?.rlmMaxDepth,
+		rlmTokenBudget: runtimeSessionOptions?.rlmTokenBudget,
+		rlmTokenAllowance: runtimeSessionOptions?.rlmTokenAllowance,
 		rlmSessionDir: runtimeSessionOptions?.rlmSessionDir,
 		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
 		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,

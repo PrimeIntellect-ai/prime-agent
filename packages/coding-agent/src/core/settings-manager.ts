@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { isRlmTokenBudgetConfig, type RlmTokenBudgetConfig } from "./rlm-token-budget.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -128,6 +129,7 @@ export interface Settings {
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 1
+	rlmTokenBudget?: RlmTokenBudgetConfig; // default for new sessions; unset disables RLM token budgeting
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
@@ -775,6 +777,17 @@ export class SettingsManager {
 	setRlmMaxDepth(maxDepth: number): void {
 		this.globalSettings.rlmMaxDepth = maxDepth;
 		this.markModified("rlmMaxDepth");
+		this.save();
+	}
+
+	getRlmTokenBudget(): RlmTokenBudgetConfig | undefined {
+		const value: unknown = this.globalSettings.rlmTokenBudget;
+		return isRlmTokenBudgetConfig(value) ? value : undefined;
+	}
+
+	setRlmTokenBudget(config: RlmTokenBudgetConfig | undefined): void {
+		this.globalSettings.rlmTokenBudget = config;
+		this.markModified("rlmTokenBudget");
 		this.save();
 	}
 

@@ -15,6 +15,7 @@ import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
 import type { SubagentRuntimeHost } from "./rlm-runtime.js";
+import type { RlmTokenBudgetConfig } from "./rlm-token-budget.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
@@ -75,6 +76,8 @@ export interface AgentSessionCreationOptions {
 	agentObserveController?: AgentObserveController;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
+	rlmTokenBudget?: RlmTokenBudgetConfig;
+	rlmTokenAllowance?: number;
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
@@ -292,6 +295,8 @@ export async function createAgentSessionFromServices(
 		agentObserveController: options.agentObserveController,
 		rlmDepth: options.rlmDepth,
 		rlmMaxDepth: options.rlmMaxDepth,
+		rlmTokenBudget: options.rlmTokenBudget,
+		rlmTokenAllowance: options.rlmTokenAllowance,
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,

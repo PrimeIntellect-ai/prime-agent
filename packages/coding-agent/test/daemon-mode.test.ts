@@ -19,6 +19,7 @@ import {
 	createDefaultRlmSubagentSessionName,
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
+import type { RlmTokenBudgetConfig, RlmTokenBudgetStatus } from "../src/core/rlm-token-budget.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
@@ -8366,6 +8367,69 @@ describe("daemon mode helpers", () => {
 			}),
 		).resolves.toMatchObject({ success: true, data: { maxDepth: 3, globalSaved: true } });
 		expect(setRlmMaxDepth).toHaveBeenCalledWith(3, { global: true });
+	});
+
+	it("gets and sets the RLM token budget directly on the active session", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const config: RlmTokenBudgetConfig = { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 };
+		const status: RlmTokenBudgetStatus = {
+			config,
+			source: "chat",
+			depth: 0,
+			allowanceTokens: 250_000,
+			tokensUsed: 1_000,
+			subtreePoolTokens: 250_000,
+			exhausted: false,
+		};
+		const getRlmTokenBudgetStatus = vi.fn(() => status);
+		const setRlmTokenBudget = vi.fn(
+			async (next: RlmTokenBudgetConfig | undefined, options?: { global?: boolean }) => ({
+				...status,
+				config: next ?? null,
+				globalSaved: options?.global === true,
+			}),
+		);
+		const state = makeState("active-1") as ActiveSessionState;
+		(state.runtime as { session: unknown }).session = { getRlmTokenBudgetStatus, setRlmTokenBudget };
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		const client = makeClient("client-1", state.activeSessionId);
+
+		await expect(
+			internals.handleCommand(client, {
+				type: "get_rlm_token_budget_status",
+				activeSessionId: state.activeSessionId,
+			}),
+		).resolves.toMatchObject({ success: true, data: { config, source: "chat", allowanceTokens: 250_000 } });
+		expect(getRlmTokenBudgetStatus).toHaveBeenCalledTimes(1);
+
+		await expect(
+			internals.handleCommand(client, {
+				type: "set_rlm_token_budget",
+				activeSessionId: state.activeSessionId,
+				config,
+				global: true,
+			}),
+		).resolves.toMatchObject({ success: true, data: { config, globalSaved: true } });
+		expect(setRlmTokenBudget).toHaveBeenCalledWith(config, { global: true });
+
+		// A null config on the wire disables budgeting for the chat.
+		await expect(
+			internals.handleCommand(client, {
+				type: "set_rlm_token_budget",
+				activeSessionId: state.activeSessionId,
+				config: null,
+			}),
+		).resolves.toMatchObject({ success: true, data: { config: null, globalSaved: false } });
+		expect(setRlmTokenBudget).toHaveBeenLastCalledWith(undefined, { global: undefined });
 	});
 
 	it.each([

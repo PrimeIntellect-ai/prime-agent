@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import type { RlmTokenBudgetConfig, RlmTokenBudgetStatus } from "../src/core/rlm-token-budget.js";
 import { MissingSessionCwdError } from "../src/core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../src/core/session-import-errors.js";
 import {
@@ -55,6 +56,15 @@ class FakeDaemonClient {
 	cancelPromptAdmissionStatus: "cancelled" | "owned" | "unknown" = "owned";
 	serverCapabilities = new Set<string>();
 	updateRestartSessions: Array<Record<string, unknown>> = [];
+	rlmTokenBudgetStatus: RlmTokenBudgetStatus = {
+		config: null,
+		source: "default",
+		depth: 0,
+		allowanceTokens: null,
+		tokensUsed: 0,
+		subtreePoolTokens: null,
+		exhausted: false,
+	};
 	hello: DaemonHello | undefined = {
 		type: "daemon_hello",
 		socketPath: "/tmp/fake.sock",
@@ -410,6 +420,24 @@ class FakeDaemonClient {
 						expectedOutcome: "Refine request completes",
 						appliedEdits: [],
 						harnessStatePath: "/tmp/harness_state.json",
+					},
+				};
+			case "get_rlm_token_budget_status":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: this.rlmTokenBudgetStatus,
+				};
+			case "set_rlm_token_budget":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						...this.rlmTokenBudgetStatus,
+						config: command.config,
+						globalSaved: command.global === true,
 					},
 				};
 			case "cron_add":
@@ -2280,6 +2308,46 @@ describe("DaemonAgentConnection", () => {
 		await expect(connection.cancelRlmChild("stale-daemon")).rejects.toThrow(
 			"the daemon is running an older build; restart the daemon and try again",
 		);
+	});
+
+	it("round-trips RLM token budget commands through the daemon protocol", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.attach();
+
+		await expect(connection.getRlmTokenBudgetStatus()).resolves.toEqual({
+			config: null,
+			source: "default",
+			depth: 0,
+			allowanceTokens: null,
+			tokensUsed: 0,
+			subtreePoolTokens: null,
+			exhausted: false,
+		});
+
+		const config: RlmTokenBudgetConfig = { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 };
+		await expect(connection.setRlmTokenBudget(config, { global: true })).resolves.toMatchObject({
+			config,
+			globalSaved: true,
+		});
+		await expect(connection.setRlmTokenBudget(undefined)).resolves.toMatchObject({
+			config: null,
+			globalSaved: false,
+		});
+
+		expect(fakeClient.requests[1]).toMatchObject({
+			type: "get_rlm_token_budget_status",
+			activeSessionId: "active-1",
+		});
+		const updates = fakeClient.requests.filter(
+			(request): request is Extract<DaemonCommand, { type: "set_rlm_token_budget" }> =>
+				request.type === "set_rlm_token_budget",
+		);
+		expect(updates).toHaveLength(2);
+		expect(updates[0]).toEqual({ type: "set_rlm_token_budget", activeSessionId: "active-1", config, global: true });
+		// Disabling has to reach the daemon as an explicit null instead of an omitted field.
+		expect(updates[1]?.config).toBeNull();
+		expect(updates[1]?.global).toBeUndefined();
 	});
 
 	it("sends bash commands through the daemon protocol", async () => {

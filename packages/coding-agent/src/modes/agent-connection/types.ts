@@ -19,6 +19,11 @@ import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
 import type {
+	RlmTokenBudgetConfig,
+	RlmTokenBudgetStatus,
+	SetRlmTokenBudgetResult,
+} from "../../core/rlm-token-budget.js";
+import type {
 	QueuedMessageLane,
 	QueuedMessageMutation,
 	QueuedMessageMutationStatus,
@@ -599,6 +604,7 @@ export type AgentConnectionSessionEvent =
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
+	| { type: "rlm_token_budget_exhausted"; depth: number; tokensUsed: number; allowanceTokens: number }
 	| { type: "bash_start"; command: string; excludeFromContext: boolean; transient?: boolean; runId?: string }
 	| { type: "bash_output"; chunk: string }
 	| {
@@ -743,6 +749,11 @@ export interface AgentConnection {
 	setSessionName(name: string): Promise<void>;
 	getRlmMaxDepthStatus(): Promise<RlmMaxDepthStatus>;
 	setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }): Promise<SetRlmMaxDepthResult>;
+	getRlmTokenBudgetStatus(): Promise<RlmTokenBudgetStatus>;
+	setRlmTokenBudget(
+		config: RlmTokenBudgetConfig | undefined,
+		options?: { global?: boolean },
+	): Promise<SetRlmTokenBudgetResult>;
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;
 	deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult>;
 

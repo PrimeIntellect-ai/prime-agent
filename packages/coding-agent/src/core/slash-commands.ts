@@ -179,6 +179,13 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		takesArgument: true,
 	},
 	{
+		name: "rlm-token-budget",
+		description:
+			"Set/view the per-chat persistent RLM token budget and depth schedule; never interrupts or queues the running turn",
+		argumentHint: "[off|<tokens> [--schedule flat|geometric|split] [--factor <0-1>] [--fanout <int>] [--global]]",
+		takesArgument: true,
+	},
+	{
 		name: "heartbeat",
 		description:
 			"Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear",

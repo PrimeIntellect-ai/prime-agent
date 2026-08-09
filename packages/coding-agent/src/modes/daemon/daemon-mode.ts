@@ -318,6 +318,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"set_session_name",
 	"get_rlm_max_depth_status",
 	"set_rlm_max_depth",
+	"get_rlm_token_budget_status",
+	"set_rlm_token_budget",
 	"rename_saved_session",
 	"delete_saved_session",
 	"get_session_context",
@@ -4469,6 +4471,19 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				const result = await state.runtime.session.setRlmMaxDepth(command.maxDepth, { global: command.global });
 				return success(command.id, "set_rlm_max_depth", result);
+			}
+
+			case "get_rlm_token_budget_status": {
+				const state = this.getSessionState(command.activeSessionId);
+				return success(command.id, "get_rlm_token_budget_status", state.runtime.session.getRlmTokenBudgetStatus());
+			}
+
+			case "set_rlm_token_budget": {
+				const state = this.getSessionState(command.activeSessionId);
+				const result = await state.runtime.session.setRlmTokenBudget(command.config ?? undefined, {
+					global: command.global,
+				});
+				return success(command.id, "set_rlm_token_budget", result);
 			}
 
 			case "get_session_context": {
