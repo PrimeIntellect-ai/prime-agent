@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
+import { createAgentMessageHostHandlers } from "../src/core/agent-messages.js";
 import { KernelManager, type KernelSentAgentMessage } from "../src/core/kernel/index.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
@@ -263,6 +264,41 @@ background_send = asyncio.create_task(send_later())`,
 			receiverRole: "sibling",
 			target: { activeSessionId: "beta", sessionId: "session-beta", sessionName: "Beta" },
 		});
+	});
+
+	it("does not send after abort while waiting for child publication", async () => {
+		let publishChild: (sessionId: string | undefined) => void = () => {};
+		let sendCount = 0;
+		const handlers = createAgentMessageHostHandlers({
+			roster: async () => ({
+				current: { name: "parent", id: "parent-id", depth: 0 },
+				entries: [{ relationship: "child", name: "worker", id: "child-id", depth: 1, status: "idle" }],
+			}),
+			awaitPendingChildPublication: async () =>
+				new Promise<string | undefined>((resolve) => {
+					publishChild = resolve;
+				}),
+			sendAgentMessage: async () => {
+				sendCount += 1;
+				throw new Error("should not send after abort");
+			},
+		});
+		const controller = new AbortController();
+		const request = handlers["agent_message.send"]!(
+			{
+				type: "agent_message.send",
+				message: "hello",
+				receiver_role: "child",
+				receiver_name: "worker",
+			},
+			{ requestType: "agent_message.send", timeoutMs: 100, signal: controller.signal },
+		);
+		await Promise.resolve();
+		controller.abort(new Error("host request timed out"));
+		publishChild("child-id");
+
+		await expect(request).rejects.toThrow("host request timed out");
+		expect(sendCount).toBe(0);
 	});
 
 	it("bounds retained handlers for late sent messages", async () => {

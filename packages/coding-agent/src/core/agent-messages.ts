@@ -157,7 +157,7 @@ export interface AgentSessionMessageSendInput {
 export interface AgentSessionMessageController {
 	listAgents(): AgentSessionMessageListResult | Promise<AgentSessionMessageListResult>;
 	roster?(): AgentFamilyRosterResult | Promise<AgentFamilyRosterResult>;
-	awaitPendingChildPublication?(selector: string): Promise<string | undefined>;
+	awaitPendingChildPublication?(selector: string, signal?: AbortSignal): Promise<string | undefined>;
 	assertSessionNameAvailable?(input: AgentSessionNameAvailabilityInput): void | Promise<void>;
 	setSessionName?(name: string): void | Promise<void>;
 	sendAgentMessage(input: AgentSessionMessageSendInput): Promise<AgentSessionMessageReceipt>;
@@ -522,15 +522,26 @@ export class AgentSessionMessageRateLimiter {
 	}
 }
 
+function throwIfHostRequestAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error ? signal.reason : new Error("host request aborted");
+}
+
 export function createAgentMessageHostHandlers(
 	controller: Pick<AgentSessionMessageController, "roster" | "sendAgentMessage" | "awaitPendingChildPublication">,
 ): Record<string, HostRequestHandler> {
 	return {
-		"agent_message.list_agents": async () => {
+		"agent_message.list_agents": async (_payload, context) => {
+			const signal = context?.signal;
+			throwIfHostRequestAborted(signal);
 			if (!controller.roster) throw new Error("agent family roster is not available in this session");
-			return (await controller.roster()) as unknown as Record<string, unknown>;
+			const roster = await controller.roster();
+			throwIfHostRequestAborted(signal);
+			return roster as unknown as Record<string, unknown>;
 		},
-		"agent_message.send": async (payload) => {
+		"agent_message.send": async (payload, context) => {
+			const signal = context?.signal;
+			throwIfHostRequestAborted(signal);
 			if (typeof payload.message !== "string") {
 				throw new Error("agent_message.send message must be a string");
 			}
@@ -546,6 +557,7 @@ export function createAgentMessageHostHandlers(
 				}
 				if (!controller.roster) throw new Error("agent family roster is not available in this session");
 				const roster = await controller.roster();
+				throwIfHostRequestAborted(signal);
 				const results = await Promise.allSettled(
 					roster.entries.map((entry) =>
 						controller.sendAgentMessage({
@@ -555,6 +567,7 @@ export function createAgentMessageHostHandlers(
 						}),
 					),
 				);
+				throwIfHostRequestAborted(signal);
 				const receipts = results.map((result, index) =>
 					result.status === "fulfilled"
 						? result.value
@@ -580,9 +593,11 @@ export function createAgentMessageHostHandlers(
 				const selector = typeof receiverName === "string" ? receiverName.trim() : undefined;
 				const publishedId =
 					role === "child" && selector && controller.awaitPendingChildPublication
-						? await controller.awaitPendingChildPublication(selector)
+						? await controller.awaitPendingChildPublication(selector, signal)
 						: undefined;
+				throwIfHostRequestAborted(signal);
 				const roster = await controller.roster();
+				throwIfHostRequestAborted(signal);
 				const matches = roster.entries.filter(
 					(entry) =>
 						entry.relationship === role &&
@@ -597,11 +612,14 @@ export function createAgentMessageHostHandlers(
 				}
 				target = matches[0]!.id;
 			}
-			return (await controller.sendAgentMessage({
+			throwIfHostRequestAborted(signal);
+			const receipt = await controller.sendAgentMessage({
 				target,
 				message: payload.message,
 				receiverRole: payload.receiver_role as AgentFamilyRelationship,
-			})) as unknown as Record<string, unknown>;
+			});
+			throwIfHostRequestAborted(signal);
+			return receipt as unknown as Record<string, unknown>;
 		},
 	};
 }

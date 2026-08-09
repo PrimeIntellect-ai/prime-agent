@@ -9,7 +9,13 @@ import {
 } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type { AuthStorage } from "../auth-storage.js";
+import type { HostRequestHandlers } from "../kernel/index.js";
 import type { McpServerConfig } from "../settings-manager.js";
+
+function throwIfHostRequestAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error ? signal.reason : new Error("host request aborted");
+}
 
 export interface McpManagerOptions {
 	authStorage: AuthStorage;
@@ -153,21 +159,25 @@ export class McpManager {
 	}
 
 	/** Host-request handlers exposed to the kernel. */
-	hostHandlers(): Record<string, (payload: Record<string, unknown>) => Promise<Record<string, unknown>>> {
-		const handlers: Record<string, (payload: Record<string, unknown>) => Promise<Record<string, unknown>>> = {
-			"mcp.refresh": async (payload) => {
+	hostHandlers(): HostRequestHandlers {
+		const handlers: HostRequestHandlers = {
+			"mcp.refresh": async (payload, context) => {
+				const signal = context?.signal;
+				throwIfHostRequestAborted(signal);
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.refresh requires a server");
 				// getApiKey refreshes + rewrites auth.json under lock; Python re-reads.
 				// Surface failure (throw) instead of a false success so the kernel can
 				// report a refresh error rather than a misleading "not enabled".
 				const key = await this.authStorage.getApiKey(this.providerId(server));
+				throwIfHostRequestAborted(signal);
 				if (!key) throw new Error(`Could not refresh credentials for ${server}`);
 				return {};
 			},
 			// Resolved config so the kernel skill connects to the same URL the host
 			// registered/authenticated (honors a user's mcpServers `url` override).
-			"mcp.config": async (payload) => {
+			"mcp.config": async (payload, context) => {
+				throwIfHostRequestAborted(context?.signal);
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.config requires a server");
 				const integration = this.integrations.get(server);
@@ -183,10 +193,13 @@ export class McpManager {
 		// kernel doesn't get a handler whose only behavior is to throw.
 		const beginLogin = this.beginLogin;
 		if (beginLogin) {
-			handlers["mcp.begin_login"] = async (payload) => {
+			handlers["mcp.begin_login"] = async (payload, context) => {
+				const signal = context?.signal;
+				throwIfHostRequestAborted(signal);
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.begin_login requires a server");
 				await beginLogin(server);
+				throwIfHostRequestAborted(signal);
 				return {};
 			};
 		}

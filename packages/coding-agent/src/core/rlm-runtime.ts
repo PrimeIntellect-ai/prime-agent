@@ -49,7 +49,7 @@ export interface RlmFindModelsResult {
 	models: RlmModelMatch[];
 }
 
-export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
+export type RlmRunHandler = (request: RlmRunRequest, signal?: AbortSignal) => Promise<Record<string, unknown>>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -148,26 +148,39 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 		}));
 }
 
+function throwIfHostRequestAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error ? signal.reason : new Error("host request aborted");
+}
+
 /** Adapt an RlmRunHandler into the typed "rlm.run" handler for the kernel host bridge. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
-	return async (payload) => {
+	return async (payload, context) => {
+		const signal = context?.signal;
+		throwIfHostRequestAborted(signal);
 		if (typeof payload.prompt !== "string") {
 			throw new Error("rlm.run prompt must be a string");
 		}
 		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
 		const cellSourceCode = typeof payload.cellSourceCode === "string" ? payload.cellSourceCode : undefined;
-		const result = await handler({
-			prompt: payload.prompt,
-			kwargs,
-			cellSourceCode,
-		});
+		const result = await handler(
+			{
+				prompt: payload.prompt,
+				kwargs,
+				cellSourceCode,
+			},
+			signal,
+		);
+		throwIfHostRequestAborted(signal);
 		return result as unknown as Record<string, unknown>;
 	};
 }
 
 /** Search a bounded authenticated model catalog without adding it to the system prompt. */
 export function createRlmFindModelsHostHandler(handler: RlmFindModelsHandler): HostRequestHandler {
-	return async (payload) => {
+	return async (payload, context) => {
+		const signal = context?.signal;
+		throwIfHostRequestAborted(signal);
 		if (typeof payload.query !== "string") {
 			throw new Error("rlm.find_models query must be a string");
 		}
@@ -175,25 +188,33 @@ export function createRlmFindModelsHostHandler(handler: RlmFindModelsHandler): H
 		if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > MAX_RLM_MODEL_SEARCH_LIMIT) {
 			throw new Error(`rlm.find_models limit must be an integer from 1 to ${MAX_RLM_MODEL_SEARCH_LIMIT}`);
 		}
-		return { models: (await handler(payload.query, limit as number)).models };
+		const models = (await handler(payload.query, limit as number)).models;
+		throwIfHostRequestAborted(signal);
+		return { models };
 	};
 }
 
 /** Expose the current parent session's RLM child registry to its kernel. */
 export function createRlmListSubagentsHostHandler(handler: RlmListSubagentsHandler): HostRequestHandler {
-	return async () => {
+	return async (_payload, context) => {
+		const signal = context?.signal;
+		throwIfHostRequestAborted(signal);
 		const { subagents } = await handler();
+		throwIfHostRequestAborted(signal);
 		return { subagents };
 	};
 }
 
 /** Delete one direct child selected from the current parent session's registry. */
 export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHandler): HostRequestHandler {
-	return async (payload) => {
+	return async (payload, context) => {
+		const signal = context?.signal;
+		throwIfHostRequestAborted(signal);
 		if (typeof payload.target !== "string" || !payload.target.trim()) {
 			throw new Error("rlm.delete_subagent target must be a non-empty string");
 		}
 		const { subagent, outcome } = await handler(payload.target.trim());
+		throwIfHostRequestAborted(signal);
 		return outcome === undefined ? { subagent } : { subagent, outcome };
 	};
 }
