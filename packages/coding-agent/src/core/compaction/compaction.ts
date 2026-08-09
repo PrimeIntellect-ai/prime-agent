@@ -237,67 +237,109 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 // ============================================================================
 
 /**
- * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
+ * Fallback token estimate for text when a provider tokenizer is unavailable.
+ *
+ * Preserve the historical chars/4 estimate for ASCII words and whitespace,
+ * charge punctuation more heavily for code/JSON, and use two tokens per
+ * non-ASCII code point. The latter intentionally avoids the severe
+ * undercount that chars/4 produces for Korean and other multibyte scripts.
  */
+export function estimateTextTokens(text: string): number {
+	let plainAscii = 0;
+	let structuralAscii = 0;
+	let nonAscii = 0;
+
+	for (const char of text) {
+		const codePoint = char.codePointAt(0) ?? 0;
+		if (codePoint > 0x7f) {
+			nonAscii++;
+		} else if (
+			(codePoint >= 0x30 && codePoint <= 0x39) ||
+			(codePoint >= 0x41 && codePoint <= 0x5a) ||
+			(codePoint >= 0x61 && codePoint <= 0x7a) ||
+			codePoint === 0x5f ||
+			codePoint <= 0x20
+		) {
+			plainAscii++;
+		} else {
+			structuralAscii++;
+		}
+	}
+
+	return Math.ceil(plainAscii / 4 + structuralAscii / 2 + nonAscii * 2);
+}
+
+/** Estimate one model-visible message, including fixed-cost image blocks. */
 export function estimateTokens(message: AgentMessage): number {
-	let chars = 0;
+	const textParts: string[] = [];
+	let imageTokens = 0;
 
 	switch (message.role) {
 		case "user": {
-			const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
+			const content = (
+				message as {
+					content: string | Array<{ type: string; text?: string }>;
+				}
+			).content;
 			if (typeof content === "string") {
-				chars = content.length;
+				textParts.push(content);
 			} else if (Array.isArray(content)) {
 				for (const block of content) {
 					if (block.type === "text" && block.text) {
-						chars += block.text.length;
+						textParts.push(block.text);
+					} else if (block.type === "image") {
+						imageTokens += 1200;
 					}
 				}
 			}
-			return Math.ceil(chars / 4);
+			break;
 		}
 		case "assistant": {
 			const assistant = message as AssistantMessage;
 			for (const block of assistant.content) {
 				if (block.type === "text") {
-					chars += block.text.length;
+					textParts.push(block.text);
 				} else if (block.type === "thinking") {
-					chars += block.thinking.length;
+					textParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
-					chars += block.name.length + JSON.stringify(block.arguments).length;
+					textParts.push(block.name, JSON.stringify(block.arguments));
 				}
 			}
-			return Math.ceil(chars / 4);
+			break;
 		}
 		case "custom":
 		case "toolResult": {
 			if (typeof message.content === "string") {
-				chars = message.content.length;
+				textParts.push(message.content);
 			} else {
 				for (const block of message.content) {
 					if (block.type === "text" && block.text) {
-						chars += block.text.length;
-					}
-					if (block.type === "image") {
-						chars += 4800; // Estimate images as 4000 chars, or 1200 tokens
+						textParts.push(block.text);
+					} else if (block.type === "image") {
+						imageTokens += 1200;
 					}
 				}
 			}
-			return Math.ceil(chars / 4);
+			break;
 		}
 		case "bashExecution": {
-			chars = message.command.length + message.output.length;
-			return Math.ceil(chars / 4);
+			textParts.push(message.command, message.output);
+			break;
 		}
 		case "branchSummary":
 		case "compactionSummary": {
-			chars = message.summary.length;
-			return Math.ceil(chars / 4);
+			textParts.push(message.summary);
+			break;
 		}
 	}
 
-	return 0;
+	return estimateTextTokens(textParts.join("")) + imageTokens;
+}
+
+/** Estimate a session entry only when it contributes to compacted LLM context. */
+export function estimateEntryTokens(entry: SessionEntry): number {
+	const message = getMessageFromEntryForCompaction(entry);
+	return message ? estimateTokens(message) : 0;
 }
 
 /**
@@ -411,12 +453,11 @@ export function findCutPoint(
 	let cutIndex = cutPoints[0]; // Default: keep from first message (not header)
 
 	for (let i = endIndex - 1; i >= startIndex; i--) {
-		const entry = entries[i];
-		if (entry.type !== "message") continue;
+		const entryTokens = estimateEntryTokens(entries[i]);
+		if (entryTokens === 0) continue;
 
-		// Estimate this message's size
-		const messageTokens = estimateTokens(entry.message);
-		accumulatedTokens += messageTokens;
+		// Include every entry that is rebuilt into LLM context, not only raw messages.
+		accumulatedTokens += entryTokens;
 
 		// Check if we've exceeded the budget
 		if (accumulatedTokens >= keepRecentTokens) {

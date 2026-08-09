@@ -102,6 +102,97 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
 	});
 
+	it("restores only the scheduler suspension owned by public manual compaction", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "scheduler restore summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		const internals = harness.session as unknown as {
+			_sessionInputPumpSuspended: boolean;
+		};
+
+		expect(internals._sessionInputPumpSuspended).toBe(false);
+		await harness.session.compact();
+		expect(internals._sessionInputPumpSuspended).toBe(false);
+	});
+
+	it("bounds a stuck post-commit extension hook and preserves the committed compaction", async () => {
+		const maintenanceStarted = vi.fn();
+		const neverSettles = new Promise<void>(() => {});
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			persistSession: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "bounded maintenance summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+					pi.on("session_compact", async () => {
+						maintenanceStarted();
+						await neverSettles;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		vi.useFakeTimers();
+
+		const compacting = harness.session.compact();
+		await vi.waitFor(() => expect(maintenanceStarted).toHaveBeenCalledOnce());
+		await vi.advanceTimersByTimeAsync(6000);
+		const result = await compacting;
+
+		expect(result.summary).toBe("bounded maintenance summary");
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "manual",
+			aborted: false,
+			willRetry: false,
+		});
+		const compactionEntry = harness.sessionManager.getEntries().find((entry) => entry.type === "compaction");
+		expect(compactionEntry).toBeDefined();
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "custom",
+			customType: "post_compaction_maintenance_warning",
+			display: true,
+			content: expect.stringContaining("session_compact_hook timed out after 6000 ms"),
+			details: {
+				compactionEntryId: compactionEntry?.id,
+				issues: [
+					{
+						task: "session_compact_hook",
+						timedOut: true,
+						error: "session_compact_hook timed out after 6000 ms",
+					},
+				],
+			},
+		});
+		expect(harness.sessionManager.getEntries().at(-1)).toMatchObject({
+			type: "custom_message",
+			customType: "post_compaction_maintenance_warning",
+		});
+	});
+
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
@@ -931,6 +1022,144 @@ describe("AgentSession compaction characterization", () => {
 		expect(sessionInternals._postCompactionContinuationScheduled).toBe(true);
 	});
 
+	it("uses the canonical admission gate before post-compaction continuation", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+			_cancelPostCompactionContinue(): void;
+			_postCompactionContinuationScheduled: boolean;
+			_userBashRunning: boolean;
+		};
+		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue(undefined as never);
+
+		try {
+			internals._userBashRunning = true;
+			internals._schedulePostCompactionContinue();
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(continueSpy).not.toHaveBeenCalled();
+			expect(internals._postCompactionContinuationScheduled).toBe(true);
+
+			internals._userBashRunning = false;
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(continueSpy).toHaveBeenCalledTimes(1);
+			expect(internals._postCompactionContinuationScheduled).toBe(false);
+		} finally {
+			internals._userBashRunning = false;
+			internals._cancelPostCompactionContinue();
+		}
+	});
+
+	it("does not repeat a skipped threshold compaction for the same assistant result", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		const assistant = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: 200_000,
+			timestamp: Date.now(),
+		});
+		harness.session.agent.state.messages = [assistant];
+		const runCompactionSpy = vi.spyOn(internals, "_runAutoCompaction");
+
+		await internals._checkCompaction(assistant);
+		expect(runCompactionSpy).toHaveBeenCalledTimes(1);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "threshold",
+			errorSeverity: "warning",
+			errorMessage: expect.stringContaining("Session is too short to compact"),
+		});
+
+		await internals._checkCompaction(assistant);
+		expect(runCompactionSpy).toHaveBeenCalledTimes(1);
+
+		const nextAssistant = createAssistant(harness, {
+			stopReason: "stop",
+			totalTokens: 200_000,
+			timestamp: assistant.timestamp + 1,
+		});
+		await internals._checkCompaction(nextAssistant);
+		expect(runCompactionSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("records terminal post-compaction continuation failures instead of swallowing them", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+			_postCompactionContinuationMessages: AgentMessage[];
+			_postCompactionContinuationScheduled: boolean;
+		};
+		const queuedMessage = {
+			role: "user",
+			content: [{ type: "text", text: "continue queued work" }],
+			timestamp: Date.now(),
+		} satisfies AgentMessage;
+		sessionInternals._postCompactionContinuationMessages = [queuedMessage];
+		harness.session.agent.followUp(queuedMessage);
+		const continueSpy = vi
+			.spyOn(harness.session.agent, "continue")
+			.mockRejectedValueOnce(new Error("provider disconnected"));
+
+		sessionInternals._schedulePostCompactionContinue();
+		await vi.advanceTimersByTimeAsync(100);
+		await harness.session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(sessionInternals._postCompactionContinuationScheduled).toBe(false);
+		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "custom",
+			customType: "post_compaction_continuation_failure",
+			display: true,
+			content: expect.stringContaining("provider disconnected"),
+			details: { error: "provider disconnected" },
+		});
+		expect(harness.sessionManager.getEntries().at(-1)).toMatchObject({
+			type: "custom_message",
+			customType: "post_compaction_continuation_failure",
+			display: true,
+			content: expect.stringContaining("provider disconnected"),
+			details: { error: "provider disconnected" },
+		});
+	});
+
+	it("resumes interrupted threshold work when compaction is skipped", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals & {
+			_continueAfterThresholdCompaction: boolean;
+			_schedulePostCompactionContinue(): void;
+			_cancelPostCompactionContinue(): void;
+			_postCompactionContinuationScheduled: boolean;
+		};
+		const scheduleSpy = vi.spyOn(sessionInternals, "_schedulePostCompactionContinue");
+
+		try {
+			sessionInternals._continueAfterThresholdCompaction = true;
+			const compacted = await sessionInternals._runAutoCompaction("threshold", false);
+
+			expect(compacted).toBe(false);
+			expect(scheduleSpy).toHaveBeenCalledTimes(1);
+			expect(sessionInternals._postCompactionContinuationScheduled).toBe(true);
+			expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+				reason: "threshold",
+				errorSeverity: "warning",
+				errorMessage: expect.stringContaining("Session is too short to compact"),
+			});
+		} finally {
+			sessionInternals._cancelPostCompactionContinue();
+		}
+	});
+
 	it("clears queued autonomous threshold continuations when autonomous mode is disabled", async () => {
 		vi.useFakeTimers();
 		const harness = await createHarness({
@@ -1003,6 +1232,8 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.getFollowUpMessages()).toHaveLength(1);
 
 		await harness.session.prompt("/autonomous off");
+		// waitForIdle now owns the timer-scheduled post-compaction continuation.
+		await vi.advanceTimersByTimeAsync(100);
 		await harness.session.waitForIdle();
 		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
 		expect(harness.session.getFollowUpMessages()).toEqual([]);
