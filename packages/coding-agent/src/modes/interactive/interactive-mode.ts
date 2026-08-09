@@ -5965,9 +5965,10 @@ export class InteractiveMode {
 		const modelLabel = this.getModelTrayLabel();
 		const hasChildren = this.options.sessionHasChildren === true || (this.subagentSnapshots?.size ?? 0) > 0;
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
+		const cwdLabel = truncatePathMiddle(formatSplashCwd(this.getCurrentCwd()), 30);
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
+		return [agentsHint, depthLabel, modelLabel, cwdLabel, shortcutsHint]
 			.filter((label): label is string => label !== undefined)
 			.join("  ");
 	}
