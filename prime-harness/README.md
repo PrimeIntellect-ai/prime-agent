@@ -32,7 +32,23 @@ python install.py C:/path/to/your/physics-repo --check
 ```
 
 `--check` runs the preflight doctor. The installer is idempotent and never
-overwrites your local edits without `--force`.
+overwrites your local edits without `--force`. Fresh installs stamp the
+standalone `VERSION` into `harness/config.json` and record bounded pristine
+template hashes in `.prime/agent/harness-install-state.json`.
+
+Upgrade an existing version without clobbering repository customization:
+
+```bash
+python install.py C:/path/to/project --upgrade --check
+```
+
+`--upgrade` performs a three-way comparison between the recorded pristine
+hashes from the installed version, the new template, and each user file.
+Unmodified managed files advance atomically. Modified files remain byte-for-byte
+untouched and receive the current template as a `.new` sidecar. Edited existing
+sidecars, malformed/missing state, links, unstable reads, and ambiguous paths
+fail before any write. `--dry-run` exercises the same preflight without writes;
+`--upgrade` cannot be combined with `--force` or `--tailor`.
 
 For a real project, generate a non-vacuous manifest from bounded top-level
 Python, tox, Lean, and Node markers instead of accepting template placeholders:
@@ -52,6 +68,15 @@ currently absent.
 Then start a **new** Prime Agent session from the repo root (Python-backed
 skills install into the kernel venv at session setup — an existing session
 won't see them).
+
+### Standalone development and self-CI
+
+Prime Harness is versioned as a standalone repository. Its pinned
+`.github/workflows/ci.yml` runs the complete `tests/` suite across
+`ubuntu-latest` and `windows-latest` under both Bash (Git Bash on Windows) and
+PowerShell. The repository `.gitignore` excludes bytecode, pytest/Hypothesis
+state, virtual environments, and generated artifacts; none are installed into
+consumer repositories.
 
 ### Windows notes (important)
 
@@ -87,7 +112,7 @@ your-repo/
 │   ├── backup.py                # verified state backup/restore
 │   ├── model_routing.py         # measured role-routing scorer
 │   ├── numeric_reference.py     # shared Decimal cancellation reference
-│   ├── manifest.json            # gate profiles: quick / default / changed-files / holdout
+│   ├── manifest.json            # gate profiles: quick / default / changed-files / final / holdout
 │   ├── roster.yaml              # retained-specialist roster
 │   ├── config.json              # caps, budget floor, critic config
 │   ├── doctor.py                # preflight checks

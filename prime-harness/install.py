@@ -2,17 +2,18 @@
 """Install the Prime Harness into a target repository.
 
 Copies template/ into the target, merges .gitignore entries, and never
-overwrites modified files unless --force. Idempotent: re-running against an
-installed target reports "unchanged" and touches nothing.
+overwrites modified files unless --force. Versioned --upgrade uses the recorded
+pristine hash as a third comparison arm and emits .new files for local edits.
+Idempotent: re-running against an installed target reports "unchanged" and
+touches nothing.
 
 Usage:
-  python install.py <target-repo> [--force] [--check] [--tailor] [--dry-run]
+  python install.py <target-repo> [--force|--upgrade] [--check] [--tailor] [--dry-run]
 """
 
 from __future__ import annotations
 
 import argparse
-import filecmp
 import hashlib
 import json
 import os
@@ -22,9 +23,15 @@ import stat
 import tempfile
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-TEMPLATE = Path(__file__).resolve().parent / "template"
+INSTALLER_ROOT = Path(__file__).resolve().parent
+TEMPLATE = INSTALLER_ROOT / "template"
+VERSION_FILE = INSTALLER_ROOT / "VERSION"
+INSTALL_STATE_RELATIVE = Path(".prime/agent/harness-install-state.json")
+INSTALL_STATE_SCHEMA_VERSION = 1
+MAX_TEMPLATE_FILE_BYTES = 64 * 1024 * 1024
+MAX_INSTALL_STATE_FILES = 10_000
 
 GITIGNORE_BLOCK = [
     "# prime-harness runtime state (evidence db, gate logs, child results)",
@@ -462,6 +469,116 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     }
 
 
+def read_harness_version() -> str:
+    try:
+        value = VERSION_FILE.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise TailorError("VERSION is not readable UTF-8") from exc
+    if re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", value) is None:
+        raise TailorError("VERSION must contain one canonical semantic version")
+    return value
+
+
+def _stable_regular_bytes(path: Path, *, limit: int = MAX_TEMPLATE_FILE_BYTES) -> bytes | None:
+    try:
+        if _is_linklike(path) or not path.is_file():
+            return None
+        before = path.stat(follow_symlinks=False)
+        if before.st_size > limit:
+            return None
+        with path.open("rb") as handle:
+            value = handle.read(limit + 1)
+        after = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if len(value) > limit:
+        return None
+    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    return value if identity_before == identity_after else None
+
+
+def _materialize_template(source: Path, relative: Path, version: str) -> bytes:
+    raw = _stable_regular_bytes(source)
+    if raw is None:
+        raise TailorError(f"template source is not a stable bounded regular file: {relative.as_posix()}")
+    if relative.as_posix() != "harness/config.json":
+        return raw
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise TailorError("template harness/config.json is not UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise TailorError("template harness/config.json must be an object")
+    value["prime_harness_version"] = version
+    return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _template_inventory(version: str) -> dict[str, tuple[Path, bytes, int]]:
+    inventory: dict[str, tuple[Path, bytes, int]] = {}
+    for source in sorted(TEMPLATE.rglob("*")):
+        if source.is_dir() and not _is_linklike(source):
+            continue
+        if is_ignored_template_artifact(source):
+            continue
+        relative = source.relative_to(TEMPLATE)
+        key = relative.as_posix()
+        if len(inventory) >= MAX_INSTALL_STATE_FILES:
+            raise TailorError("template file count exceeds the installer limit")
+        payload = _materialize_template(source, relative, version)
+        try:
+            mode = stat.S_IMODE(source.stat(follow_symlinks=False).st_mode)
+        except OSError as exc:
+            raise TailorError(f"template source became unreadable: {key}") from exc
+        inventory[key] = (source, payload, mode)
+    if not inventory or "harness/config.json" not in inventory:
+        raise TailorError("template inventory is incomplete")
+    return inventory
+
+
+def _inventory_hashes(inventory: dict[str, tuple[Path, bytes, int]]) -> dict[str, str]:
+    return {key: hashlib.sha256(value[1]).hexdigest() for key, value in sorted(inventory.items())}
+
+
+def _valid_state_relative(value: str) -> bool:
+    if not value or "\\" in value or "\0" in value or ":" in value:
+        return False
+    path = PurePosixPath(value)
+    return not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts)
+
+
+def load_install_state(path: Path) -> dict[str, object] | None:
+    if not os.path.lexists(path):
+        return None
+    text = _bounded_text(path)
+    if text is None:
+        raise TailorError("install state is not a stable bounded UTF-8 regular file")
+    try:
+        state = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise TailorError("install state is not valid JSON") from exc
+    if not isinstance(state, dict) or set(state) != {"schema_version", "installed_version", "template_sha256"}:
+        raise TailorError("install state schema is invalid")
+    version = state.get("installed_version")
+    hashes = state.get("template_sha256")
+    if state.get("schema_version") != INSTALL_STATE_SCHEMA_VERSION or not isinstance(version, str) or re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version) is None:
+        raise TailorError("install state version is invalid")
+    if not isinstance(hashes, dict) or not hashes or len(hashes) > MAX_INSTALL_STATE_FILES:
+        raise TailorError("install state template hash map is invalid")
+    normalized: dict[str, str] = {}
+    for relative, digest in hashes.items():
+        if not isinstance(relative, str) or not _valid_state_relative(relative):
+            raise TailorError("install state contains an unsafe template path")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise TailorError("install state contains an invalid template digest")
+        normalized[relative] = digest
+    return {
+        "schema_version": INSTALL_STATE_SCHEMA_VERSION,
+        "installed_version": version,
+        "template_sha256": normalized,
+    }
+
+
 def assert_safe_destination(root: Path, destination: Path) -> None:
     """Reject any existing link/reparse or non-directory parent below root."""
     root = root.resolve()
@@ -557,6 +674,107 @@ def atomic_json(path: Path, value: object) -> None:
             pass
 
 
+def atomic_bytes(path: Path, value: bytes, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _run_upgrade(target: Path, *, version: str,
+                 inventory: dict[str, tuple[Path, bytes, int]], dry_run: bool) -> tuple[int, dict[str, int]]:
+    state_path = target / INSTALL_STATE_RELATIVE
+    try:
+        assert_safe_destination(target, state_path)
+        state = load_install_state(state_path)
+    except TailorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2, {}
+    if state is None:
+        print("error: install state is missing; --upgrade requires a versioned prior installation", file=sys.stderr)
+        return 2, {}
+    old_hashes = state["template_sha256"]
+    assert isinstance(old_hashes, dict)
+    decisions: list[tuple[str, Path, bytes, int]] = []
+    counts = {"updated": 0, "new": 0, "unchanged": 0, "conflicts": 0, "obsolete": 0}
+    try:
+        for key, (_source, payload, mode) in sorted(inventory.items()):
+            destination = target / Path(*PurePosixPath(key).parts)
+            sidecar = Path(str(destination) + ".new")
+            assert_safe_destination(target, destination)
+            assert_safe_destination(target, sidecar)
+            current_digest = hashlib.sha256(payload).hexdigest()
+            old_digest = old_hashes.get(key)
+            if os.path.lexists(destination):
+                user_payload = _stable_regular_bytes(destination)
+                if user_payload is None:
+                    raise TailorError(f"upgrade destination is not a stable bounded regular file: {key}")
+                user_digest = hashlib.sha256(user_payload).hexdigest()
+                if user_digest == current_digest:
+                    counts["unchanged"] += 1
+                    continue
+                if isinstance(old_digest, str) and user_digest == old_digest:
+                    decisions.append(("updated", destination, payload, mode))
+                    counts["updated"] += 1
+                    continue
+                counts["conflicts"] += 1
+                if os.path.lexists(sidecar):
+                    sidecar_payload = _stable_regular_bytes(sidecar)
+                    if sidecar_payload is None:
+                        raise TailorError(f"upgrade sidecar is not a stable bounded regular file: {key}.new")
+                    if hashlib.sha256(sidecar_payload).hexdigest() != current_digest:
+                        raise TailorError(f"edited upgrade sidecar would be overwritten: {key}.new")
+                else:
+                    decisions.append(("conflict", sidecar, payload, mode))
+            else:
+                decisions.append(("new", destination, payload, mode))
+                counts["new"] += 1
+        counts["obsolete"] = len(set(old_hashes) - set(inventory))
+    except TailorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2, {}
+    if not dry_run:
+        try:
+            for _action, destination, payload, mode in decisions:
+                assert_safe_destination(target, destination)
+                atomic_bytes(destination, payload, mode)
+            atomic_json(state_path, {
+                "schema_version": INSTALL_STATE_SCHEMA_VERSION,
+                "installed_version": version,
+                "template_sha256": _inventory_hashes(inventory),
+            })
+        except (OSError, TailorError) as exc:
+            print(f"error: upgrade write failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2, {}
+    prefix = "[dry-run] " if dry_run else ""
+    print(f"{prefix}upgraded Prime Harness {state['installed_version']} -> {version}")
+    print(f"  updated managed: {counts['updated']}")
+    print(f"  new managed:     {counts['new']}")
+    print(f"  unchanged:       {counts['unchanged']}")
+    print(f"  upgrade conflicts: {counts['conflicts']} (.new sidecars; local files preserved)")
+    print(f"  obsolete kept:   {counts['obsolete']}")
+    return 0, counts
+
+
 def json_matches(path: Path, value: object) -> bool:
     text = _bounded_text(path)
     if text is None:
@@ -599,6 +817,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="run harness/doctor.py after installing")
     parser.add_argument("--tailor", action="store_true", help="generate a non-vacuous manifest draft from the target layout")
     parser.add_argument("--dry-run", action="store_true", help="report actions without writing")
+    parser.add_argument("--upgrade", action="store_true", help="three-way safe upgrade using the versioned install state")
     args = parser.parse_args()
 
     target = Path(args.target).resolve()
@@ -609,6 +828,38 @@ def main() -> int:
               f"(worktrees, commit provenance, changed-file gates)")
     if not TEMPLATE.is_dir():
         sys.exit(f"error: template directory missing at {TEMPLATE}")
+    if args.upgrade and (args.force or args.tailor):
+        print("error: --upgrade cannot be combined with --force or --tailor", file=sys.stderr)
+        return 2
+    try:
+        version = read_harness_version()
+        inventory = _template_inventory(version)
+    except TailorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.upgrade:
+        code, _counts = _run_upgrade(target, version=version, inventory=inventory, dry_run=args.dry_run)
+        if code != 0:
+            return code
+        if args.check and not args.dry_run:
+            result = subprocess.run([sys.executable, str(target / "harness" / "doctor.py")], cwd=str(target))
+            print(NEXT_STEPS.format(target=target))
+            return result.returncode
+        print(NEXT_STEPS.format(target=target))
+        return 0
+    state_path = target / INSTALL_STATE_RELATIVE
+    try:
+        assert_safe_destination(target, state_path)
+        existing_install_state = load_install_state(state_path)
+    except TailorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if existing_install_state is not None and existing_install_state["installed_version"] != version:
+        print(
+            f"error: installed Prime Harness {existing_install_state['installed_version']} differs from installer {version}; use --upgrade",
+            file=sys.stderr,
+        )
+        return 2
 
     manifest_existed = (target / "harness/manifest.json").exists()
     tailored = None
@@ -620,26 +871,24 @@ def main() -> int:
             return 2
 
     copied, skipped_same, skipped_diff, overwritten = [], [], [], []
-    template_sources = [
-        source for source in sorted(TEMPLATE.rglob("*"))
-        if not source.is_dir() and not is_ignored_template_artifact(source)
-    ]
+    template_sources = [entry[0] for entry in inventory.values()]
     try:
-        for source in template_sources:
-            assert_safe_destination(target, target / source.relative_to(TEMPLATE))
+        for key in inventory:
+            assert_safe_destination(target, target / Path(*PurePosixPath(key).parts))
         for extra in (
             target / ".gitignore",
             target / "harness/manifest.tailored.json",
             target / "artifacts/harness/upstream-watch/baseline.json",
             target / INSTALLED_EXAMPLES_RELATIVE,
+            state_path,
         ):
             assert_safe_destination(target, extra)
     except TailorError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    for source in template_sources:
-        rel = source.relative_to(TEMPLATE)
+    for key, (_source, payload, mode) in sorted(inventory.items()):
+        rel = Path(*PurePosixPath(key).parts)
         dest = target / rel
         try:
             assert_safe_destination(target, dest)
@@ -647,20 +896,22 @@ def main() -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if dest.exists():
-            if filecmp.cmp(str(source), str(dest), shallow=False):
+            installed_payload = _stable_regular_bytes(dest)
+            if installed_payload is None:
+                print(f"error: destination is not a stable bounded regular file: {key}", file=sys.stderr)
+                return 2
+            if installed_payload == payload:
                 skipped_same.append(rel)
                 continue
             if not args.force:
                 skipped_diff.append(rel)
                 continue
             if not args.dry_run:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                atomic_copy(source, dest)
+                atomic_bytes(dest, payload, mode)
             overwritten.append(rel)
         else:
             if not args.dry_run:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                atomic_copy(source, dest)
+                atomic_bytes(dest, payload, mode)
             copied.append(rel)
 
     prefix = "[dry-run] " if args.dry_run else ""
@@ -687,6 +938,12 @@ def main() -> int:
         print(f"{prefix}updated .gitignore (+{sum(1 for l in missing_lines if not l.startswith('#'))} entries)")
     if not args.dry_run:
         try:
+            if existing_install_state is None or args.force:
+                atomic_json(state_path, {
+                    "schema_version": INSTALL_STATE_SCHEMA_VERSION,
+                    "installed_version": version,
+                    "template_sha256": _inventory_hashes(inventory),
+                })
             _record_installed_example_hashes(target, template_sources)
         except TailorError as exc:
             print(f"error: {exc}", file=sys.stderr)

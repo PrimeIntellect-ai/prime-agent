@@ -15,7 +15,7 @@ child lifecycle/selfcheck, evidence provenance, critic panel/ledger behavior,
 scientific verification, and the gate runner.
 
 `test_installer.py`, `tests/test_live_kernel_e2e.py`,
-`test_source_reviewability.py`, `test_template_checks.py`, `test_workflow.py`,
+`test_source_reviewability.py`, `test_standalone.py`, `test_template_checks.py`, `test_workflow.py`,
 and Phase 1 source-document checks remain upstream-only.
 The exact template-check and workflow tests intentionally are not installed
 because those files are consumer customization contracts; freezing upstream
@@ -24,6 +24,6 @@ defaults would make legitimate customization fail the mandatory self-test step.
 properties (read-only permissions, full-SHA action pins, no secrets, full
 history, and selftests-before-doctor-before-gate ordering) without freezing
 custom gate commands. The
-other exclusions need installer source, a live kernel, or upstream build-history
+other exclusions need installer/standalone source, a live kernel, or upstream build-history
 documentation. Upstream tests enforce byte-for-byte sync for every bundled test
 and fixture that remains consumer-safe.

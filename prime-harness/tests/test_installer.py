@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import hashlib
+import re
 import os
 import shutil
 import subprocess
@@ -729,6 +731,7 @@ def test_installed_component_selftests_match_upstream_sources():
         "test_installer.py",
         "test_live_kernel_e2e.py",
         "test_source_reviewability.py",
+        "test_standalone.py",
         "test_template_checks.py",
         "test_workflow.py",
     }
@@ -955,11 +958,11 @@ def test_main_atomic_writes_resist_final_component_swap_after_validation(tmp_rep
     outside_copy.write_text("outside-template\n", encoding="utf-8")
     outside_ignore = tmp_path / "outside-ignore.txt"
     outside_ignore.write_text("outside-ignore\n", encoding="utf-8")
-    original_copy = installer.atomic_copy
+    original_bytes = installer.atomic_bytes
     original_text = installer.atomic_text
     raced = {"copy": None, "ignore": False}
 
-    def race_copy(source, destination):
+    def race_bytes(destination, value, mode=0o644):
         if raced["copy"] is None:
             destination.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -967,7 +970,7 @@ def test_main_atomic_writes_resist_final_component_swap_after_validation(tmp_rep
             except OSError:
                 pytest.skip("file symlink creation unavailable")
             raced["copy"] = destination
-        original_copy(source, destination)
+        original_bytes(destination, value, mode)
 
     def race_text(destination, value):
         if destination.name == ".gitignore":
@@ -975,7 +978,7 @@ def test_main_atomic_writes_resist_final_component_swap_after_validation(tmp_rep
             raced["ignore"] = True
         original_text(destination, value)
 
-    monkeypatch.setattr(installer, "atomic_copy", race_copy)
+    monkeypatch.setattr(installer, "atomic_bytes", race_bytes)
     monkeypatch.setattr(installer, "atomic_text", race_text)
     monkeypatch.setattr(sys, "argv", [str(INSTALL), str(tmp_repo)])
     assert installer.main() == 0
@@ -983,3 +986,133 @@ def test_main_atomic_writes_resist_final_component_swap_after_validation(tmp_rep
     assert raced["ignore"] is True and not (tmp_repo / ".gitignore").is_symlink()
     assert outside_copy.read_text(encoding="utf-8") == "outside-template\n"
     assert outside_ignore.read_text(encoding="utf-8") == "outside-ignore\n"
+
+
+
+INSTALL_STATE = Path(".prime/agent/harness-install-state.json")
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def test_install_stamps_version_and_records_pristine_template_hashes(tmp_repo):
+    proc = run_install(tmp_repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    version = (HARNESS_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    config = json.loads((tmp_repo / "harness/config.json").read_text(encoding="utf-8"))
+    assert config["prime_harness_version"] == version
+    state = json.loads((tmp_repo / INSTALL_STATE).read_text(encoding="utf-8"))
+    assert state["schema_version"] == 1
+    assert state["installed_version"] == version
+    assert state["template_sha256"]["harness/config.json"] == _sha256_bytes(
+        (tmp_repo / "harness/config.json").read_bytes()
+    )
+    assert not any("__pycache__" in path.parts or path.suffix == ".pyc" for path in tmp_repo.rglob("*"))
+
+
+def _prepare_old_version_install(tmp_repo: Path) -> tuple[str, bytes]:
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    old_version = "0.0.0"
+    managed = tmp_repo / "harness/backup.py"
+    old_bytes = b"# old pristine managed file\n"
+    managed.write_bytes(old_bytes)
+    config_path = tmp_repo / "harness/config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["prime_harness_version"] = old_version
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    state_path = tmp_repo / INSTALL_STATE
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["installed_version"] = old_version
+    state["template_sha256"]["harness/backup.py"] = _sha256_bytes(old_bytes)
+    state["template_sha256"]["harness/config.json"] = _sha256_bytes(config_path.read_bytes())
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return old_version, old_bytes
+
+
+def test_upgrade_updates_unmodified_files_and_preserves_modified_files_as_new_sidecars(tmp_repo):
+    _old_version, old_bytes = _prepare_old_version_install(tmp_repo)
+    managed = tmp_repo / "harness/backup.py"
+    modified = tmp_repo / "harness/scorecard.py"
+    user_bytes = modified.read_bytes() + b"\n# user customization\n"
+    modified.write_bytes(user_bytes)
+    state_path = tmp_repo / INSTALL_STATE
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    # scorecard.py's existing state hash remains its old-pristine comparison arm.
+    assert state["template_sha256"]["harness/scorecard.py"] != _sha256_bytes(user_bytes)
+
+    proc = run_install(tmp_repo, "--upgrade")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert managed.read_bytes() == (HARNESS_ROOT / "template/harness/backup.py").read_bytes()
+    assert managed.read_bytes() != old_bytes
+    assert modified.read_bytes() == user_bytes
+    sidecar = tmp_repo / "harness/scorecard.py.new"
+    assert sidecar.read_bytes() == (HARNESS_ROOT / "template/harness/scorecard.py").read_bytes()
+    version = (HARNESS_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert json.loads((tmp_repo / "harness/config.json").read_text(encoding="utf-8"))["prime_harness_version"] == version
+    assert json.loads(state_path.read_text(encoding="utf-8"))["installed_version"] == version
+    assert "upgrade conflicts: 1" in proc.stdout
+
+
+def test_upgrade_fails_closed_on_missing_or_malformed_install_state(tmp_repo):
+    before = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    missing = run_install(tmp_repo, "--upgrade")
+    assert missing.returncode == 2
+    assert "install state" in missing.stderr.lower()
+    after = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    assert after == before
+
+    state_path = tmp_repo / INSTALL_STATE
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text('{"schema_version": 1, "installed_version": "bad"}', encoding="utf-8")
+    before = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    malformed = run_install(tmp_repo, "--upgrade")
+    assert malformed.returncode == 2
+    after = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    assert after == before
+
+
+def test_upgrade_preserves_existing_edited_new_sidecar_and_dry_run_is_read_only(tmp_repo):
+    _prepare_old_version_install(tmp_repo)
+    modified = tmp_repo / "harness/backup.py"
+    modified.write_bytes(modified.read_bytes() + b"# edit\n")
+    sidecar = tmp_repo / "harness/backup.py.new"
+    sidecar.write_bytes(b"operator-reviewed sidecar\n")
+    before = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    conflict = run_install(tmp_repo, "--upgrade")
+    assert conflict.returncode == 2
+    assert "sidecar" in conflict.stderr.lower()
+    after = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    assert after == before
+
+    sidecar.unlink()
+    dry = run_install(tmp_repo, "--upgrade", "--dry-run")
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    after_dry = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    expected = dict(before)
+    expected.pop("harness/backup.py.new")
+    assert after_dry == expected
+
+
+
+@pytest.mark.parametrize("bad_path,bad_digest", [
+    ("../escape.py", "a" * 64),
+    ("C:/escape.py", "a" * 64),
+    ("harness\\escape.py", "a" * 64),
+    ("harness/file.py", "not-a-digest"),
+])
+def test_upgrade_rejects_unsafe_state_paths_and_digests_without_writes(tmp_repo, bad_path, bad_digest):
+    installed = run_install(tmp_repo)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    state_path = tmp_repo / INSTALL_STATE
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["installed_version"] = "0.0.0"
+    state["template_sha256"][bad_path] = bad_digest
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    proc = run_install(tmp_repo, "--upgrade")
+    assert proc.returncode == 2
+    after = {path.relative_to(tmp_repo).as_posix(): path.read_bytes() for path in tmp_repo.rglob("*") if path.is_file()}
+    assert after == before
