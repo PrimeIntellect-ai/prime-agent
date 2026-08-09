@@ -1,5 +1,6 @@
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
 
 interface ReceivedRecord {
@@ -45,10 +46,43 @@ export function createCommandIdempotencyKey(clientId: DaemonClientId, commandId:
 	return JSON.stringify([clientId, commandId]);
 }
 
+function journalCorruption(lineNumber: number, reason: string): Error {
+	return new Error(`Invalid command recovery journal record at line ${lineNumber}: ${reason}`);
+}
+
+function assertCommandTypeMatches(entry: JournalEntry, key: string, commandType: string): void {
+	if (entry.received.commandType === commandType) return;
+	throw new Error(
+		`Daemon idempotency key ${key} was already received as ${entry.received.commandType} and cannot be reused as ${commandType}`,
+	);
+}
+
+function assertResponseMatchesReceipt(entry: JournalEntry, key: string, response: DaemonResponse): void {
+	if (response.id !== entry.received.commandId) {
+		throw new Error(
+			`Daemon response id ${response.id} does not match received command id ${entry.received.commandId} for ${key}`,
+		);
+	}
+	if (response.command !== entry.received.commandType) {
+		throw new Error(
+			`Daemon response command ${response.command} does not match received command type ${entry.received.commandType} for ${key}`,
+		);
+	}
+}
+
+function responsesEqual(left: DaemonResponse, right: DaemonResponse): boolean {
+	return isDeepStrictEqual(left, right);
+}
+
 /**
  * Append-only command journal used at the supervisor boundary. A received
  * record is durable before a mutating command is dispatched; a missing result
  * after a crash is therefore treated as uncertain and is never replayed.
+ *
+ * The pair [clientId, commandId] identifies one logical command for the life of
+ * the journal. Reusing that key for a different command type or recording a
+ * response whose id/type does not match the durable receipt is rejected before
+ * the inconsistent state can be persisted.
  */
 export class CommandRecoveryJournal {
 	private readonly entries = new Map<string, JournalEntry>();
@@ -62,8 +96,13 @@ export class CommandRecoveryJournal {
 	lookup(
 		clientId: DaemonClientId,
 		commandId: DaemonCommandId,
+		commandType?: string,
 	): Exclude<CommandJournalBeginResult, { status: "new" }> | undefined {
-		const existing = this.entries.get(createCommandIdempotencyKey(clientId, commandId));
+		const key = createCommandIdempotencyKey(clientId, commandId);
+		const existing = this.entries.get(key);
+		if (existing && commandType !== undefined) {
+			assertCommandTypeMatches(existing, key, commandType);
+		}
 		if (existing?.response) {
 			return { status: "complete", response: existing.response };
 		}
@@ -72,8 +111,11 @@ export class CommandRecoveryJournal {
 
 	begin(clientId: DaemonClientId, commandId: DaemonCommandId, commandType: string): CommandJournalBeginResult {
 		const key = createCommandIdempotencyKey(clientId, commandId);
-		const existing = this.lookup(clientId, commandId);
-		if (existing) return existing;
+		const entry = this.entries.get(key);
+		if (entry) {
+			assertCommandTypeMatches(entry, key, commandType);
+			return entry.response ? { status: "complete", response: entry.response } : { status: "pending" };
+		}
 		const received: ReceivedRecord = {
 			version: 1,
 			type: "received",
@@ -93,6 +135,11 @@ export class CommandRecoveryJournal {
 		const entry = this.entries.get(key);
 		if (!entry) {
 			throw new Error(`Cannot record a result before command receipt: ${key}`);
+		}
+		assertResponseMatchesReceipt(entry, key, response);
+		if (entry.response) {
+			if (responsesEqual(entry.response, response)) return;
+			throw new Error(`Cannot replace the durable result for daemon command ${key} with a conflicting response`);
 		}
 		const record: ResultRecord = {
 			version: 1,
@@ -135,39 +182,82 @@ export class CommandRecoveryJournal {
 			}
 			throw error;
 		}
-		for (const line of contents.split("\n")) {
-			if (!line) {
-				continue;
-			}
-			let record: JournalRecord;
+
+		const lines = contents.split("\n");
+		const partialTailIndex = contents.endsWith("\n") ? -1 : lines.length - 1;
+		for (let index = 0; index < lines.length; index++) {
+			const line = lines[index];
+			if (!line) continue;
+
+			let parsedValue: unknown;
 			try {
-				record = JSON.parse(line) as JournalRecord;
+				parsedValue = JSON.parse(line);
 			} catch {
-				// A crash may leave only the final append truncated.
-				continue;
+				// A crash may leave exactly one unterminated final append. Corruption in
+				// any earlier record is ambiguous and must stop recovery rather than be
+				// skipped while later effects are replayed.
+				if (index === partialTailIndex) continue;
+				throw journalCorruption(index + 1, "malformed JSON outside the final partial append");
 			}
-			if (record.version !== 1 || typeof record.key !== "string") {
-				continue;
+
+			if (typeof parsedValue !== "object" || parsedValue === null || Array.isArray(parsedValue)) {
+				throw journalCorruption(index + 1, "record must be a JSON object");
 			}
+			const parsed = parsedValue as Record<string, unknown>;
+			if (parsed.version !== 1 || typeof parsed.type !== "string" || typeof parsed.key !== "string") {
+				throw journalCorruption(index + 1, "unsupported version or missing type/key");
+			}
+			if (parsed.type !== "received" && parsed.type !== "result" && parsed.type !== "acknowledged") {
+				throw journalCorruption(index + 1, `unknown record type ${JSON.stringify(parsed.type)}`);
+			}
+
+			const record = parsed as unknown as JournalRecord;
 			this.recordCount++;
 			if (record.type === "received") {
 				if (
-					typeof record.clientId === "string" &&
-					typeof record.commandId === "string" &&
-					typeof record.commandType === "string"
+					typeof record.clientId !== "string" ||
+					typeof record.commandId !== "string" ||
+					typeof record.commandType !== "string"
 				) {
-					this.entries.set(record.key, { received: record });
+					throw journalCorruption(index + 1, "received record is missing clientId, commandId, or commandType");
 				}
+				const expectedKey = createCommandIdempotencyKey(record.clientId, record.commandId);
+				if (record.key !== expectedKey) {
+					throw journalCorruption(index + 1, `non-canonical key ${record.key}; expected ${expectedKey}`);
+				}
+				const existing = this.entries.get(record.key);
+				if (existing) {
+					try {
+						assertCommandTypeMatches(existing, record.key, record.commandType);
+					} catch (error) {
+						throw journalCorruption(index + 1, (error as Error).message);
+					}
+					continue;
+				}
+				this.entries.set(record.key, { received: record });
 				continue;
+			}
+
+			const entry = this.entries.get(record.key);
+			if (!entry) {
+				throw journalCorruption(index + 1, `${record.type} record has no preceding received record`);
 			}
 			if (record.type === "acknowledged") {
 				this.entries.delete(record.key);
 				continue;
 			}
-			const entry = this.entries.get(record.key);
-			if (entry && record.response?.type === "response") {
-				entry.response = record.response;
+			if (!record.response || record.response.type !== "response") {
+				throw journalCorruption(index + 1, "result record is missing a daemon response");
 			}
+			try {
+				assertResponseMatchesReceipt(entry, record.key, record.response);
+			} catch (error) {
+				throw journalCorruption(index + 1, (error as Error).message);
+			}
+			if (entry.response && !responsesEqual(entry.response, record.response)) {
+				throw journalCorruption(index + 1, "conflicting durable results for one idempotency key");
+			}
+			entry.response = record.response;
 		}
 	}
 
