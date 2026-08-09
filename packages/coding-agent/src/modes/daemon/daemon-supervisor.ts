@@ -528,11 +528,22 @@ function isProcessAlive(pid: number): boolean {
 function workerDescriptorProcessIdentityMatches(
 	descriptor: Pick<DaemonWorkerDescriptor, "pid" | "processStartId">,
 ): boolean {
-	if (!descriptor.processStartId || !isProcessAlive(descriptor.pid)) {
+	// Old workers without recorded start ID - trust the pid for backward compat
+	if (!descriptor.processStartId) {
 		return true;
 	}
+	// Process is dead - signal will fail with ESRCH, harmless to proceed
+	if (!isProcessAlive(descriptor.pid)) {
+		return true;
+	}
+	// We have a recorded ID - verify it matches the running process
 	const observedProcessStartId = getProcessStartId(descriptor.pid);
-	return observedProcessStartId === undefined || observedProcessStartId === descriptor.processStartId;
+	// If we can't observe the ID (platform limitation), refuse to signal
+	// since we have an expected ID and can't verify it
+	if (observedProcessStartId === undefined) {
+		return false;
+	}
+	return observedProcessStartId === descriptor.processStartId;
 }
 
 function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
