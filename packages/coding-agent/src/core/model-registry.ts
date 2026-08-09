@@ -980,6 +980,9 @@ export class ModelRegistry {
 		const authFingerprint = createHash("sha256").update(auth.apiKey).digest("hex");
 		const cached = this.openAICodexModelsCache;
 		if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
+			if (cached.modelIds.size === 0) {
+				return availableModels;
+			}
 			return availableModels.filter((model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id));
 		}
 
@@ -1002,6 +1005,16 @@ export class ModelRegistry {
 			}
 			const modelIds = readOpenAICodexModelIds(await response.json());
 			this.openAICodexModelsCache = { authFingerprint, modelIds, refreshedAt: Date.now() };
+			// An empty catalog means discovery told us nothing, not that the account has
+			// no models. Some accounts get `{"models": []}` with HTTP 200 for every
+			// client and originator. Filtering on that removes every Codex model, and
+			// since Codex is often the only authenticated provider the executable list
+			// becomes empty — which silently breaks rlm.find_models and makes every
+			// subagent model selector fail as "unavailable, unauthenticated, or expired".
+			// Treat it like any other discovery failure and keep the configured list.
+			if (modelIds.size === 0) {
+				return availableModels;
+			}
 			return availableModels.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
 		} catch {
 			if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {

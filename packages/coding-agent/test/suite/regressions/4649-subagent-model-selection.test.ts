@@ -386,4 +386,42 @@ describe("ENG-4649 subagent model selection", () => {
 			harness.cleanup();
 		}
 	});
+	it("keeps Codex models when discovery returns an empty catalog", async () => {
+		// Some accounts get HTTP 200 with {"models": []} from Codex model discovery,
+		// for every client and originator. Filtering on that emptied the executable
+		// list, and since Codex is often the only authenticated provider the result
+		// was no models at all: find_models returned nothing and every subagent model
+		// selector failed as "unavailable, unauthenticated, or expired".
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({
+			provider: codexProvider,
+			models: [{ id: "parent-model" }, { id: "other-model" }],
+		});
+		const fetchModels = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ models: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		vi.stubGlobal("fetch", fetchModels);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+
+			const discovered = await harness.session.findRlmModels("", 20);
+			expect(discovered.models.map((model) => model.selector).sort()).toEqual([
+				`${codexProvider}/other-model`,
+				`${codexProvider}/parent-model`,
+			]);
+
+			harness.setResponses([fauxAssistantMessage("child answer")]);
+			const result = await harness.session.runRlmChild("use a non-parent model", {
+				model: `${codexProvider}/other-model`,
+			});
+			expect(result.model).toBe(`${codexProvider}/other-model`);
+		} finally {
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
 });
