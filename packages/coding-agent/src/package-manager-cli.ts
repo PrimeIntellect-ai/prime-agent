@@ -436,7 +436,28 @@ function setSelfUpdateNoChangeExitCode(): void {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : undefined;
 }
 
+/**
+ * Local fork builds carry `+<tag>` build metadata in their version.
+ *
+ * Semver ignores build metadata for precedence, so a fork of 0.7.1 compares equal
+ * to released 0.7.1 and the updater reports "already up to date" — right answer,
+ * wrong reason. The moment upstream ships 0.7.2 the updater would replace the
+ * fork with the release and silently drop whatever the fork was carrying.
+ */
+function isLocalForkBuild(version: string): boolean {
+	return version.includes("+");
+}
+
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
+	if (isLocalForkBuild(VERSION) && !force) {
+		console.log(
+			chalk.yellow(
+				`${APP_NAME} v${VERSION} is a local fork build; refusing to self-update over it.\n` +
+					`Rebuild from your fork, or pass --force to replace it with the published release.`,
+			),
+		);
+		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false };
+	}
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION);
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;

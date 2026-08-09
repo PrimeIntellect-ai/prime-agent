@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-coding-agent",
-	"version": "0.7.1",
+	"version": "0.7.1+luna.1",
 	"description": "Coding agent CLI with IPython-backed tools and session management",
 	"type": "module",
 	"piConfig": {
