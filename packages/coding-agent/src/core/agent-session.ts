@@ -179,6 +179,7 @@ import {
 	type CustomMessage,
 	createCompactionOutcomeMessage,
 	createHeartbeatPromptMessage,
+	createLengthContinuationExhaustedMessage,
 	createPostCompactionContinuationFailureMessage,
 	createRlmChildFailureMessage,
 	createRlmChildTerminalNoticeMessage,
@@ -562,18 +563,18 @@ const LENGTH_CONTINUATION_PROMPT =
  * off a user-visible response at its output-token limit. Empty output remains
  * the context-pressure/overflow path; tool calls remain actionable as-is.
  */
+export function isTextTruncatedResponse(message: AssistantMessage): boolean {
+	if (message.stopReason !== "length") return false;
+	if (message.content.some((content) => content.type === "toolCall")) return false;
+	return message.content.some((content) => content.type === "text" && content.text.trim().length > 0);
+}
+
 export function shouldAutoContinueTruncatedResponse(
 	message: AssistantMessage,
 	continuationCount: number,
 	maxContinuations: number = MAX_LENGTH_CONTINUATIONS,
 ): boolean {
-	if (message.stopReason !== "length" || continuationCount >= maxContinuations) {
-		return false;
-	}
-	if (message.content.some((content) => content.type === "toolCall")) {
-		return false;
-	}
-	return message.content.some((content) => content.type === "text" && content.text.trim().length > 0);
+	return continuationCount < maxContinuations && isTextTruncatedResponse(message);
 }
 
 /** Options for AgentSession.prompt() */
@@ -1150,6 +1151,8 @@ export class AgentSession {
 	private _sessionInputArrivalEpoch = 0;
 	// Persists abort/restart suspension after the initiating call returns.
 	private _sessionInputPumpSuspended = false;
+	/** Identifies the operation that currently owns the scheduler suspension. */
+	private _sessionInputPumpSuspensionOwner: symbol | undefined;
 	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
@@ -1178,9 +1181,11 @@ export class AgentSession {
 	private _overflowRecovery: "idle" | "attempted" | "reported" = "idle";
 	/** Consecutive automatic continuations in the current truncated-response chain. */
 	private _lengthContinuations = 0;
-	/** Exact assistant results for which threshold compaction was already found ineligible. */
-	private readonly _skippedThresholdCompactionMessages = new WeakSet<AssistantMessage>();
-	private _pendingThresholdCompactionMessage: AssistantMessage | undefined;
+	private _lengthContinuationChainId: string | undefined;
+	private _lengthContinuationExhausted = false;
+	/** Stable assistant keys for which threshold compaction was already found ineligible. */
+	private readonly _skippedThresholdCompactionKeys = new Set<string>();
+	private _pendingThresholdCompactionKey: string | undefined;
 	private _continueAfterThresholdCompaction = false;
 	private _pendingRequestedCompaction: { customInstructions?: string } | undefined;
 	private _pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
@@ -2245,13 +2250,18 @@ export class AgentSession {
 		// A non-empty `length` result is a partial response, not a successful
 		// terminal answer. Queue a bounded, hidden session-owned steer prompt.
 		if (!this._steeringStopPending && this._shouldAutoContinueTruncation(context.message)) {
+			let chainId = this._lengthContinuationChainId;
+			if (!chainId) {
+				chainId = randomUUID();
+				this._lengthContinuationChainId = chainId;
+			}
 			const sequence = ++this._lengthContinuations;
-			const message: CustomMessage<{ sequence: number }> = {
+			const message: CustomMessage<{ chainId: string; sequence: number }> = {
 				role: "custom",
 				customType: LENGTH_CONTINUATION_PROMPT_CUSTOM_TYPE,
 				content: LENGTH_CONTINUATION_PROMPT,
 				display: false,
-				details: { sequence },
+				details: { chainId, sequence },
 				timestamp: Date.now(),
 			};
 			await this._queuePreparedPrompt("steer", LENGTH_CONTINUATION_PROMPT, undefined, {
@@ -2263,6 +2273,13 @@ export class AgentSession {
 			});
 			return false;
 		}
+		if (
+			!this._steeringStopPending &&
+			isTextTruncatedResponse(context.message) &&
+			this._lengthContinuations >= MAX_LENGTH_CONTINUATIONS
+		) {
+			this._recordLengthContinuationExhaustion();
+		}
 		// Steering stops continuation only after mandatory serialized checkpoints.
 		// Returning true here still prevents the agent loop from starting another turn.
 		return this._steeringStopPending;
@@ -2273,6 +2290,44 @@ export class AgentSession {
 			return false;
 		}
 		return shouldAutoContinueTruncatedResponse(message, this._lengthContinuations);
+	}
+
+	private _resetLengthContinuationChain(): void {
+		this._lengthContinuations = 0;
+		this._lengthContinuationChainId = undefined;
+		this._lengthContinuationExhausted = false;
+	}
+
+	private _recordLengthContinuationExhaustion(): void {
+		if (this._lengthContinuationExhausted) return;
+		this._lengthContinuationExhausted = true;
+		let chainId = this._lengthContinuationChainId;
+		if (!chainId) {
+			chainId = randomUUID();
+			this._lengthContinuationChainId = chainId;
+		}
+		const details = {
+			chainId,
+			attempts: this._lengthContinuations,
+		};
+		let message = createLengthContinuationExhaustedMessage(details);
+		try {
+			this.sessionManager.appendCustomMessageEntryWithRollback(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
+		} catch (error) {
+			const persistenceError = error instanceof Error ? error.message : String(error);
+			message = {
+				...message,
+				content: `${message.content}\n\nThis truncation notice could not be saved to session history: ${persistenceError}`,
+			};
+		}
+		this.agent.state.messages.push(message);
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
 	}
 
 	private async _shouldStopForThresholdCompaction(context: ShouldStopAfterTurnContext): Promise<boolean> {
@@ -2752,11 +2807,28 @@ export class AgentSession {
 		}
 	}
 
+	private _thresholdCompactionKey(message: AssistantMessage): string {
+		const persisted = this.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message === message);
+		if (persisted) return `entry:${persisted.id}`;
+		return [
+			"assistant",
+			message.timestamp,
+			message.provider,
+			message.model,
+			message.stopReason,
+			message.usage.totalTokens,
+			JSON.stringify(message.content),
+		].join(":");
+	}
+
 	private _claimThresholdCompactionMessage(message: AssistantMessage): boolean {
-		if (this._skippedThresholdCompactionMessages.has(message)) {
+		const key = this._thresholdCompactionKey(message);
+		if (this._skippedThresholdCompactionKeys.has(key)) {
 			return false;
 		}
-		this._pendingThresholdCompactionMessage = message;
+		this._pendingThresholdCompactionKey = key;
 		return true;
 	}
 
@@ -3549,8 +3621,8 @@ export class AgentSession {
 		if (event.type === "message_start" && this._isPromptTurnStartMessage(event.message)) {
 			this._overflowRecovery = "idle";
 			// The hidden length-continuation custom message is intentionally not a
-			// prompt-turn start, so only genuinely new input resets this budget.
-			this._lengthContinuations = 0;
+			// prompt-turn start, so only genuinely new input resets this chain.
+			this._resetLengthContinuationChain();
 		}
 
 		// Emit to extensions first
@@ -3611,7 +3683,7 @@ export class AgentSession {
 					this._overflowRecovery = "idle";
 				}
 				if (assistantMsg.stopReason === "stop" || assistantMsg.stopReason === "toolUse") {
-					this._lengthContinuations = 0;
+					this._resetLengthContinuationChain();
 				}
 				if (this._isConcreteProviderAuthFailure(assistantMsg)) {
 					this._captureRetryAuthFailureSource(assistantMsg);
@@ -6512,6 +6584,7 @@ export class AgentSession {
 
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
+		this._sessionInputPumpSuspensionOwner = undefined;
 		this._sessionInputPumpSuspended = false;
 		this._notifySessionInputCheckpointChange();
 		this._scheduleSessionInputPump();
@@ -6607,10 +6680,14 @@ export class AgentSession {
 		return this._resourceLoader;
 	}
 
-	requestAbort(): void {
+	private _requestAbort(options: { suspensionOwner?: symbol; preserveExistingSuspensionOwner?: boolean } = {}): void {
+		const wasSuspended = this._sessionInputPumpSuspended;
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
 		this._sessionInputPumpSuspended = true;
+		if (!(options.preserveExistingSuspensionOwner && wasSuspended)) {
+			this._sessionInputPumpSuspensionOwner = options.suspensionOwner;
+		}
 		this._cancelSessionActions(
 			(action) => action.payload.kind === "turn" && !action.payload.queueVisible,
 			new Error("Prompt aborted before delivery."),
@@ -6627,13 +6704,16 @@ export class AgentSession {
 		this.agent.abort();
 	}
 
-	/**
-	 * Abort current operation and wait for agent to become idle.
-	 */
-	async abort(): Promise<void> {
+	requestAbort(): void {
+		this._requestAbort();
+	}
+
+	private async _abortWithSuspension(
+		options: { suspensionOwner?: symbol; preserveExistingSuspensionOwner?: boolean } = {},
+	): Promise<void> {
 		const compactionOperation = this._compactionOperation;
 		const branchSummaryOperation = this._branchSummaryOperation;
-		this.requestAbort();
+		this._requestAbort(options);
 		this._cancelActiveRlmChildRuns("Parent session aborted");
 		this._goalAbortInProgress = this._goalState.status === "active";
 		try {
@@ -6646,6 +6726,11 @@ export class AgentSession {
 		} finally {
 			this._goalAbortInProgress = false;
 		}
+	}
+
+	/** Abort current operation and wait for agent to become idle. */
+	async abort(): Promise<void> {
+		await this._abortWithSuspension();
 	}
 
 	abortForUpdateRestart(): void {
@@ -6988,18 +7073,19 @@ export class AgentSession {
 
 	// Added to history (not a nextTurn message) so it also reaches the continue()-driven
 	// auto-compaction resume, which never injects nextTurn messages.
-	private async _notifyKernelStateAfterCompaction(): Promise<void> {
+	private async _notifyKernelStateAfterCompaction(signal?: AbortSignal): Promise<void> {
 		const provisioner = this._ipythonKernelProvisioner;
 		// No kernel means no state to remind about; only stay silent in that case.
 		if (!provisioner?.hasRunningKernel) return;
 		// Bound the probe so a wedged kernel can't stall recovery, and abort it on timeout so
 		// the kernel's serialized execution queue isn't left occupied by a never-resolving cell.
-		const abort = new AbortController();
-		const timer = setTimeout(() => abort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
+		const timeoutAbort = new AbortController();
+		const timer = setTimeout(() => timeoutAbort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
 		if (typeof timer === "object" && "unref" in timer) timer.unref();
+		const probeSignal = signal ? AbortSignal.any([signal, timeoutAbort.signal]) : timeoutAbort.signal;
 		let names: string[] | null;
 		try {
-			names = await provisioner.listNamespaceNames(abort.signal).catch(() => null);
+			names = await provisioner.listNamespaceNames(probeSignal).catch(() => null);
 		} finally {
 			clearTimeout(timer);
 		}
@@ -7107,15 +7193,25 @@ export class AgentSession {
 			throw new Error("Cannot compact without aborting while the agent is running.");
 		}
 		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
-		// Public compaction owns only the suspension it creates. Preserve a
-		// pre-existing suspension, and use the pump epoch so a later external
-		// abort/restart request cannot be accidentally undone in finally.
-		const ownsInputPumpSuspension = !options.skipAbort && !this._sessionInputPumpSuspended;
-		let ownedInputPumpEpoch: number | undefined;
+		const suspensionOwner =
+			!options.skipAbort && !this._sessionInputPumpSuspended ? Symbol("manual-compaction") : undefined;
 		this._disconnectFromAgent();
 		if (!options.skipAbort) {
-			await this.abort();
-			if (ownsInputPumpSuspension) ownedInputPumpEpoch = this._sessionInputPumpEpoch;
+			try {
+				await this._abortWithSuspension({
+					suspensionOwner,
+					preserveExistingSuspensionOwner: suspensionOwner === undefined,
+				});
+			} catch (error) {
+				this._reconnectToAgent();
+				if (suspensionOwner && this._sessionInputPumpSuspensionOwner === suspensionOwner) {
+					this._sessionInputPumpSuspensionOwner = undefined;
+					this._sessionInputPumpSuspended = false;
+					this._notifySessionInputCheckpointChange();
+				}
+				this._scheduleSessionInputPump();
+				throw error;
+			}
 		}
 		let didCompact = false;
 		this._compactionAbortController = new AbortController();
@@ -7180,12 +7276,13 @@ export class AgentSession {
 			}
 			resolveCompactionOperation();
 			if (
-				ownedInputPumpEpoch !== undefined &&
+				suspensionOwner &&
+				this._sessionInputPumpSuspensionOwner === suspensionOwner &&
 				this._sessionInputPumpSuspended &&
-				this._sessionInputPumpEpoch === ownedInputPumpEpoch &&
 				!this._disposed &&
 				!this._disposing
 			) {
+				this._sessionInputPumpSuspensionOwner = undefined;
 				this._sessionInputPumpSuspended = false;
 				this._notifySessionInputCheckpointChange();
 			}
@@ -7259,7 +7356,7 @@ export class AgentSession {
 			throw new Error("Compaction cancelled");
 		}
 
-		this.sessionManager.appendCompaction(
+		const compactionEntryId = this.sessionManager.appendCompaction(
 			summary,
 			firstKeptEntryId,
 			tokensBefore,
@@ -7267,7 +7364,6 @@ export class AgentSession {
 			fromExtension,
 			customInstructions,
 		);
-		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
@@ -7275,9 +7371,10 @@ export class AgentSession {
 		// The compaction is durable at this point. Extension notification,
 		// kernel inspection, and stale-child cleanup are best-effort maintenance:
 		// none may convert a committed compaction into an indefinite hang.
-		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-			| CompactionEntry
-			| undefined;
+		const savedCompactionEntry = this.sessionManager.getEntry(compactionEntryId);
+		if (savedCompactionEntry?.type !== "compaction") {
+			throw new Error(`Committed compaction entry ${compactionEntryId} could not be reloaded`);
+		}
 		await this._runPostCompactionMaintenance(savedCompactionEntry, fromExtension);
 
 		return { summary, firstKeptEntryId, tokensBefore, details };
@@ -7285,26 +7382,35 @@ export class AgentSession {
 
 	private async _runBoundedPostCompactionMaintenanceTask(
 		task: PostCompactionMaintenanceTask,
-		operation: () => Promise<unknown>,
+		operation: (signal: AbortSignal) => Promise<unknown>,
 		timeoutMs = POST_COMPACTION_MAINTENANCE_TIMEOUT_MS,
 	): Promise<PostCompactionMaintenanceIssue | undefined> {
 		const timeoutError = new Error(`${task} timed out after ${timeoutMs} ms`);
+		const abort = new AbortController();
+		let timedOut = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		const operationPromise = Promise.resolve().then(() => operation(abort.signal));
 		const timeout = new Promise<never>((_resolve, reject) => {
-			timer = setTimeout(() => reject(timeoutError), timeoutMs);
+			timer = setTimeout(() => {
+				timedOut = true;
+				abort.abort();
+				reject(timeoutError);
+			}, timeoutMs);
 			if (typeof timer === "object" && "unref" in timer) timer.unref();
 		});
 		try {
-			await Promise.race([Promise.resolve().then(operation), timeout]);
+			await Promise.race([operationPromise, timeout]);
 			return undefined;
 		} catch (error) {
 			return {
 				task,
 				error: error instanceof Error ? error.message : String(error),
-				timedOut: error === timeoutError,
+				timedOut: timedOut || error === timeoutError,
 			};
 		} finally {
 			if (timer) clearTimeout(timer);
+			if (!abort.signal.aborted) abort.abort();
+			void operationPromise.catch(() => {});
 		}
 	}
 
@@ -7314,21 +7420,22 @@ export class AgentSession {
 	): Promise<void> {
 		const issues: PostCompactionMaintenanceIssue[] = [];
 		if (compactionEntry) {
-			const issue = await this._runBoundedPostCompactionMaintenanceTask("session_compact_hook", () =>
+			const issue = await this._runBoundedPostCompactionMaintenanceTask("session_compact_hook", (signal) =>
 				this._extensionRunner.emit({
 					type: "session_compact",
 					compactionEntry,
 					fromExtension,
+					signal,
 				}),
 			);
 			if (issue) issues.push(issue);
 		}
-		const kernelIssue = await this._runBoundedPostCompactionMaintenanceTask("kernel_state_probe", () =>
-			this._notifyKernelStateAfterCompaction(),
+		const kernelIssue = await this._runBoundedPostCompactionMaintenanceTask("kernel_state_probe", (signal) =>
+			this._notifyKernelStateAfterCompaction(signal),
 		);
 		if (kernelIssue) issues.push(kernelIssue);
-		const cleanupIssue = await this._runBoundedPostCompactionMaintenanceTask("rlm_cleanup", () =>
-			this._reapDeletedRlmSubagentRuntimesAfterCompaction(),
+		const cleanupIssue = await this._runBoundedPostCompactionMaintenanceTask("rlm_cleanup", (signal) =>
+			this._reapDeletedRlmSubagentRuntimesAfterCompaction(signal),
 		);
 		if (cleanupIssue) issues.push(cleanupIssue);
 		if (issues.length > 0) {
@@ -7372,11 +7479,20 @@ export class AgentSession {
 		this._emit({ type: "message_end", message: warningMessage });
 	}
 
-	private async _reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void> {
+	private async _reapDeletedRlmSubagentRuntimesAfterCompaction(signal?: AbortSignal): Promise<void> {
 		const childIds = [...this._rlmChildCleanupFailures.keys()].filter(
 			(childId) => !this._activeRlmChildRuns.get(childId)?.detachedDeletion,
 		);
-		await Promise.allSettled(childIds.map((childId) => this.deleteRlmSubagent(childId)));
+		const failures: string[] = [];
+		for (const childId of childIds) {
+			if (signal?.aborted) throw new Error("RLM cleanup aborted");
+			try {
+				await this.deleteRlmSubagent(childId);
+			} catch (error) {
+				failures.push(`${childId}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		if (failures.length > 0) throw new Error(failures.join("; "));
 	}
 
 	/**
@@ -7414,8 +7530,8 @@ export class AgentSession {
 		this._postCompactionContinuationSettled = undefined;
 	}
 
-	private _recordPostCompactionContinuationFailure(errorMessage: string): void {
-		const details = { error: errorMessage };
+	private _recordPostCompactionContinuationFailure(errorMessage: string, droppedContinuationCount: number): void {
+		const details = { error: errorMessage, droppedContinuationCount };
 		let failureMessage = createPostCompactionContinuationFailureMessage(details);
 		try {
 			this.sessionManager.appendCustomMessageEntryWithRollback(
@@ -7434,6 +7550,21 @@ export class AgentSession {
 		this.agent.state.messages.push(failureMessage);
 		this._emit({ type: "message_start", message: failureMessage });
 		this._emit({ type: "message_end", message: failureMessage });
+	}
+
+	private _dropPostCompactionContinuations(continuationMessages: AgentMessage[]): number {
+		const owned = continuationMessages.filter((message) =>
+			this._postCompactionContinuationMessages.includes(message),
+		);
+		if (owned.length === 0) return 0;
+		const ownedSet = new Set(owned);
+		this.agent.removeQueuedMessages((message) => ownedSet.has(message));
+		for (const message of owned) this._queuedAutonomousContinuationSnapshots.delete(message);
+		this._postCompactionContinuationMessages = this._postCompactionContinuationMessages.filter(
+			(message) => !ownedSet.has(message),
+		);
+		this._scheduledPostCompactionContinuationMessages = [];
+		return owned.length;
 	}
 
 	private _discardPendingAutoRefine(options: { cancelPostCompactionContinue?: boolean } = {}): void {
@@ -7599,11 +7730,14 @@ export class AgentSession {
 			await this.agent.continue();
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = (error instanceof Error ? error.message : String(error))
+				.replace(/(Bearer\s+)[^\s]+/gi, "$1[REDACTED]")
+				.slice(0, 2000);
 			if (message.includes("already processing")) {
 				this._schedulePostCompactionContinue();
 			} else {
-				this._recordPostCompactionContinuationFailure(message);
+				const droppedContinuationCount = this._dropPostCompactionContinuations(continuationMessages);
+				this._recordPostCompactionContinuationFailure(message, droppedContinuationCount);
 			}
 		} finally {
 			if (!this._postCompactionContinuationScheduled) {
@@ -8346,8 +8480,8 @@ export class AgentSession {
 	): Promise<boolean> {
 		// Any compaction consumes a pending model request and honors its instructions
 		// (overflow recovery can fire first and take the request with it).
-		const thresholdMessage = reason === "threshold" ? this._pendingThresholdCompactionMessage : undefined;
-		this._pendingThresholdCompactionMessage = undefined;
+		const thresholdKey = reason === "threshold" ? this._pendingThresholdCompactionKey : undefined;
+		this._pendingThresholdCompactionKey = undefined;
 		const pending = this._pendingRequestedCompaction;
 		this._pendingRequestedCompaction = undefined;
 		const customInstructions = pending?.customInstructions;
@@ -8449,8 +8583,8 @@ export class AgentSession {
 				return false;
 			}
 			if (error instanceof CompactionSkippedError) {
-				if (reason === "threshold" && thresholdMessage) {
-					this._skippedThresholdCompactionMessages.add(thresholdMessage);
+				if (reason === "threshold" && thresholdKey) {
+					this._skippedThresholdCompactionKeys.add(thresholdKey);
 				}
 				this._endCompactionUnsuccessfully(
 					reason,
