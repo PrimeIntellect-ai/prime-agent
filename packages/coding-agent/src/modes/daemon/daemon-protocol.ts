@@ -101,8 +101,10 @@ export type DaemonServerCapability =
 	| "prompt_admission_cancellation"
 	// Attach results report wasAttached (whether the attach created the
 	// socket's attachment entry). Clients must check before relying on the
-	// field for cleanup decisions; without it they fall back to the legacy
-	// unconditional detach.
+	// field for cleanup decisions; without it shared DaemonClient users need
+	// client-local holder/pending-attach tracking before detaching. Protocol
+	// reattach always removes its source from the socket, so clients sharing a
+	// socket must switch with target attach plus refcounted source cleanup.
 	| "attach_ownership";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";

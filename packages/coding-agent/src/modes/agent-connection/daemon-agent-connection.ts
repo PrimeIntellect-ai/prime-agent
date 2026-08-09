@@ -109,6 +109,171 @@ const MAX_COMPLETED_SNAPSHOTS = 128;
 const OWNED_SESSION_DISPOSE_RECONNECT_WAIT_MS = 10_000;
 const updateTransportReconnects = new WeakMap<DaemonClient, Promise<void>>();
 
+type LocalAttachmentOwner = object;
+
+interface LocalAttachmentAttempt {
+	readonly activeSessionId: string;
+}
+
+interface LocalAttachmentEntry {
+	readonly holders: Set<LocalAttachmentOwner>;
+	readonly pending: Set<LocalAttachmentAttempt>;
+	attached: boolean;
+	deferredCleanup?: () => Promise<void>;
+}
+
+/**
+ * Mirrors the daemon's per-socket attachment Set with per-connection holders.
+ * Legacy daemons cannot say whether an attach inserted that Set entry, so the
+ * only safe cleanup point is when no local connection holds or is attempting
+ * the id. A displaced binding keeps its known attached state until its caller
+ * explicitly requests refcounted cleanup.
+ */
+class LocalAttachmentTracker {
+	private readonly entries = new Map<string, LocalAttachmentEntry>();
+	private readonly bindings = new Map<LocalAttachmentOwner, string>();
+
+	begin(activeSessionId: string): LocalAttachmentAttempt {
+		const attempt = { activeSessionId };
+		this.entry(activeSessionId).pending.add(attempt);
+		return attempt;
+	}
+
+	fail(attempt: LocalAttachmentAttempt): void {
+		const entry = this.entries.get(attempt.activeSessionId);
+		if (!entry || !entry.pending.delete(attempt)) return;
+		this.flushDeferredCleanup(attempt.activeSessionId, entry);
+	}
+
+	/** Atomically publish a successful attempt before deferred cleanup can observe it as idle. */
+	commit(owner: LocalAttachmentOwner, attempt: LocalAttachmentAttempt): string | undefined {
+		const entry = this.entries.get(attempt.activeSessionId);
+		if (!entry || !entry.pending.delete(attempt)) {
+			throw new Error(`Local attachment attempt is no longer pending: ${attempt.activeSessionId}`);
+		}
+		entry.attached = true;
+		entry.holders.add(owner);
+		const previousActiveSessionId = this.bindings.get(owner);
+		if (previousActiveSessionId !== undefined && previousActiveSessionId !== attempt.activeSessionId) {
+			this.entries.get(previousActiveSessionId)?.holders.delete(owner);
+		}
+		this.bindings.set(owner, attempt.activeSessionId);
+		return previousActiveSessionId === attempt.activeSessionId ? undefined : previousActiveSessionId;
+	}
+
+	/** Finish a successful attempt that was superseded before it could publish. */
+	abandon(attempt: LocalAttachmentAttempt, cleanup?: () => Promise<void>): void {
+		const entry = this.entries.get(attempt.activeSessionId);
+		if (!entry || !entry.pending.delete(attempt)) return;
+		entry.attached = true;
+		entry.deferredCleanup ??= cleanup;
+		this.flushDeferredCleanup(attempt.activeSessionId, entry);
+	}
+
+	/** The socket closed, so its entire server attachment Set disappeared. */
+	markAllServerDetached(): void {
+		for (const [activeSessionId, entry] of this.entries) {
+			entry.attached = false;
+			entry.deferredCleanup = undefined;
+			this.deleteEmpty(activeSessionId, entry);
+		}
+	}
+
+	release(
+		owner: LocalAttachmentOwner,
+		fallbackActiveSessionId: string,
+		cleanup: (activeSessionId: string) => Promise<void>,
+	): Promise<void> | undefined {
+		const boundActiveSessionId = this.bindings.get(owner);
+		const activeSessionId = boundActiveSessionId ?? fallbackActiveSessionId;
+		if (boundActiveSessionId !== undefined) {
+			this.bindings.delete(owner);
+			this.entries.get(boundActiveSessionId)?.holders.delete(owner);
+		}
+		const entry = this.entries.get(activeSessionId);
+		// Preserve the historical best-effort detach after an attach request
+		// failed before publishing a binding, but only when no tracked sibling
+		// can own or be acquiring the same socket entry.
+		if (!entry) return cleanup(activeSessionId);
+		return this.requestCleanup(activeSessionId, () => cleanup(activeSessionId));
+	}
+
+	requestCleanup(
+		activeSessionId: string,
+		cleanup: () => Promise<void>,
+		cleanupIfUntracked = false,
+	): Promise<void> | undefined {
+		const entry = this.entries.get(activeSessionId);
+		if (!entry) return cleanupIfUntracked ? cleanup() : undefined;
+		if (!entry.attached) {
+			this.deleteEmpty(activeSessionId, entry);
+			return undefined;
+		}
+		// Persist the cleanup request across both holders and pending attempts.
+		// In particular, a failed pending attach must still release the known
+		// attachment inherited from a binding that moved away.
+		entry.deferredCleanup ??= cleanup;
+		if (entry.holders.size > 0 || entry.pending.size > 0) return undefined;
+		return this.runDeferredCleanup(activeSessionId, entry);
+	}
+
+	forget(owner: LocalAttachmentOwner): void {
+		const activeSessionId = this.bindings.get(owner);
+		if (activeSessionId === undefined) return;
+		this.bindings.delete(owner);
+		const entry = this.entries.get(activeSessionId);
+		entry?.holders.delete(owner);
+		if (entry && entry.holders.size === 0) {
+			entry.attached = false;
+			entry.deferredCleanup = undefined;
+		}
+		this.deleteEmpty(activeSessionId, entry);
+	}
+
+	private entry(activeSessionId: string): LocalAttachmentEntry {
+		let entry = this.entries.get(activeSessionId);
+		if (!entry) {
+			entry = { holders: new Set(), pending: new Set(), attached: false };
+			this.entries.set(activeSessionId, entry);
+		}
+		return entry;
+	}
+
+	private flushDeferredCleanup(activeSessionId: string, entry: LocalAttachmentEntry): void {
+		if (entry.pending.size > 0 || entry.holders.size > 0 || !entry.attached || !entry.deferredCleanup) {
+			this.deleteEmpty(activeSessionId, entry);
+			return;
+		}
+		void this.runDeferredCleanup(activeSessionId, entry)?.catch(() => undefined);
+	}
+
+	private runDeferredCleanup(activeSessionId: string, entry: LocalAttachmentEntry): Promise<void> | undefined {
+		const cleanup = entry.deferredCleanup;
+		if (!cleanup) return undefined;
+		entry.deferredCleanup = undefined;
+		entry.attached = false;
+		this.deleteEmpty(activeSessionId, entry);
+		return cleanup();
+	}
+
+	private deleteEmpty(activeSessionId: string, entry: LocalAttachmentEntry | undefined): void {
+		if (entry && !entry.attached && entry.holders.size === 0 && entry.pending.size === 0 && !entry.deferredCleanup) {
+			this.entries.delete(activeSessionId);
+		}
+	}
+}
+
+const localAttachmentTrackers = new WeakMap<DaemonClient, LocalAttachmentTracker>();
+
+function getLocalAttachmentTracker(client: DaemonClient): LocalAttachmentTracker {
+	let tracker = localAttachmentTrackers.get(client);
+	if (!tracker) {
+		tracker = new LocalAttachmentTracker();
+		localAttachmentTrackers.set(client, tracker);
+	}
+	return tracker;
+}
+
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -217,6 +382,8 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly unsubscribeDaemonMessages: () => void;
 	private readonly unsubscribeDaemonClose: () => void;
 	private readonly clientId = `daemon-agent-connection:${randomUUID()}`;
+	private readonly attachmentOwner: LocalAttachmentOwner = {};
+	private readonly localAttachments: LocalAttachmentTracker;
 	private ownedSessionPromotionTail = Promise.resolve();
 	private lastEventCursor: DaemonEventCursor | undefined;
 	private readonly retiredEventGenerations = new Set<string>();
@@ -235,12 +402,11 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly completedSnapshots = new Map<string, DaemonSessionSnapshot>();
 	private readonly pendingBindingCatchupSnapshots = new Map<string, DaemonSessionSnapshot>();
 	private readonly pendingBindingCatchupFailures = new Set<string>();
-	private readonly pendingReattachActiveSessionIds = new Set<string>();
+	private readonly pendingBindingActiveSessionIds = new Set<string>();
 	private readonly snapshotRecoveryPromises = new Map<string, Promise<void>>();
 	private readonly ignoredSnapshotIds = new Set<string>();
 	private reconnectPromise?: Promise<void>;
 	private reviveSession?: { promise: Promise<RevivedSessionBinding>; sourceActiveSessionId: string };
-	private lastAttachCreatedAttachment = false;
 	/** undefined = not yet captured; null = captured for a fileless (in-memory) session. */
 	private reviveConfigSessionFile: string | null | undefined;
 	private lastAttachPublishedIdentity: { sessionId: string; sessionFile: string | undefined } | undefined;
@@ -254,6 +420,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		private activeSessionId: string,
 		private readonly options: DaemonAgentConnectionOptions = {},
 	) {
+		this.localAttachments = getLocalAttachmentTracker(client);
 		if (options.recoverDaemon) {
 			this.client.enableRequestRecovery();
 		}
@@ -271,6 +438,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 		this.captureDaemonLogPath();
 		this.unsubscribeDaemonClose = this.client.onClose((error) => {
+			this.localAttachments.markAllServerDetached();
 			this.rejectSnapshotAssemblies(error);
 			if (this.disposed || this.terminalCloseEmitted) {
 				return;
@@ -330,10 +498,11 @@ export class DaemonAgentConnection implements AgentConnection {
 		// here is lost (the snapshot assembly then times out or rejects).
 		const admitPendingTarget = targetActiveSessionId !== entryActiveSessionId;
 		if (admitPendingTarget) {
-			this.pendingReattachActiveSessionIds.add(targetActiveSessionId);
+			this.pendingBindingActiveSessionIds.add(targetActiveSessionId);
 		}
+		let displacedActiveSessionId: string | undefined;
 		try {
-			await this.attachSessionBindingAdmitted(
+			displacedActiveSessionId = await this.attachSessionBindingAdmitted(
 				targetActiveSessionId,
 				resetCursors,
 				entryActiveSessionId,
@@ -358,10 +527,13 @@ export class DaemonAgentConnection implements AgentConnection {
 				this.latestSnapshotIsFresh = false;
 			}
 		} finally {
+			if (displacedActiveSessionId !== undefined) {
+				void this.releaseLocalAttachment(displacedActiveSessionId);
+			}
 			if (admitPendingTarget) {
 				// A failed or superseded transition discards its buffered
 				// catch-up and failure marker along with the admission.
-				this.pendingReattachActiveSessionIds.delete(targetActiveSessionId);
+				this.pendingBindingActiveSessionIds.delete(targetActiveSessionId);
 				this.pendingBindingCatchupSnapshots.delete(targetActiveSessionId);
 				this.pendingBindingCatchupFailures.delete(targetActiveSessionId);
 			}
@@ -373,39 +545,53 @@ export class DaemonAgentConnection implements AgentConnection {
 		resetCursors: boolean,
 		entryActiveSessionId: string,
 		resumeCursor: DaemonEventCursor | undefined,
-	): Promise<void> {
+	): Promise<string | undefined> {
 		const supportsExtensionUi = this.options.supportsExtensionUi !== false;
-		const result = await this.requestData<SessionSummary | DaemonAttachResult>({
-			type: "attach",
-			activeSessionId: targetActiveSessionId,
-			supportsExtensionUi,
-			clientId: this.clientId,
-			capabilities: [
-				"attach_snapshot",
-				"event_sequence",
-				...(supportsExtensionUi ? (["extension_ui"] as const) : []),
-				"slim_attach",
-				"chunked_snapshot",
-				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
-			],
-			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
-			launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
-			telemetryDisabled: this.options.telemetryDisabled,
-			resumeCursor:
-				resumeCursor === undefined
-					? undefined
-					: {
-							activeSessionId: targetActiveSessionId,
-							...resumeCursor,
-						},
-		});
-		// Recorded before any supersession throw: cleanup paths need to know
-		// whether THIS attach created the socket's attachment entry (a sibling
-		// connection on the shared client may already hold it, in which case a
-		// detach would remove the sibling's subscription). Older daemons omit
-		// the field; the conservative default is "did not create it".
-		this.lastAttachCreatedAttachment = "wasAttached" in result && result.wasAttached === false;
+		const attachmentAttempt = this.localAttachments.begin(targetActiveSessionId);
+		let result: SessionSummary | DaemonAttachResult;
+		try {
+			result = await this.requestData<SessionSummary | DaemonAttachResult>({
+				type: "attach",
+				activeSessionId: targetActiveSessionId,
+				supportsExtensionUi,
+				clientId: this.clientId,
+				capabilities: [
+					"attach_snapshot",
+					"event_sequence",
+					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
+					"slim_attach",
+					"chunked_snapshot",
+					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
+				],
+				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
+				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
+				telemetryDisabled: this.options.telemetryDisabled,
+				resumeCursor:
+					resumeCursor === undefined
+						? undefined
+						: {
+								activeSessionId: targetActiveSessionId,
+								...resumeCursor,
+							},
+			});
+		} catch (error) {
+			this.localAttachments.fail(attachmentAttempt);
+			throw error;
+		}
+		const attachCreatedAttachment = "wasAttached" in result && result.wasAttached === false;
 		if (this.activeSessionId !== entryActiveSessionId) {
+			// The response registered the socket attachment, but the binding can no
+			// longer publish. End the successful attempt and request its cleanup as
+			// one tracker transition so an earlier deferred cleanup is neither early
+			// nor duplicated. Legacy daemons cannot report ownership, so local
+			// refcounting is the conservative authority there.
+			this.localAttachments.abandon(
+				attachmentAttempt,
+				this.client.supportsServerCapability("attach_ownership") && !attachCreatedAttachment
+					? undefined
+					: () =>
+							this.requestOk({ type: "detach", activeSessionId: targetActiveSessionId }).catch(() => undefined),
+			);
 			throw new Error(`Session attach superseded: binding moved from ${entryActiveSessionId}`);
 		}
 		if (resetCursors) {
@@ -414,84 +600,93 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.retiredEventGenerations.clear();
 		}
 		this.activeSessionId = getAttachActiveSessionId(result);
-		const summary = "snapshot" in result ? result.snapshot.summary : result;
-		this.attachedSessionId = summary.sessionId;
-		this.attachedSessionFile =
-			summary.sessionFile ?? ("snapshot" in result ? result.snapshot.state.sessionFile : undefined);
-		// The invocation's reviveConfig was computed for the transcript this
-		// connection first attached to; later transcripts (session switches)
-		// must not inherit its cwd. A fileless first attach (--no-session)
-		// records null so a transcript resumed later still counts as foreign -
-		// checked strictly against undefined because ??= would re-assign over
-		// the null marker on the next reconnect attach.
-		if (this.reviveConfigSessionFile === undefined) {
-			this.reviveConfigSessionFile = this.attachedSessionFile ?? null;
-		}
-		// Recorded before the snapshot await below: a replacement snapshot
-		// landing mid-stream can rewrite the attached identity, and a caller
-		// capturing it afterwards would adopt the switched transcript as its
-		// own.
-		this.lastAttachPublishedIdentity = { sessionId: summary.sessionId, sessionFile: this.attachedSessionFile };
-		this.captureDaemonLogPath();
-		this.updateReconnectFailed = false;
-		this.terminalCloseEmitted = false;
-		const attachCursor = getAttachLastEventCursor(result);
-		if (attachCursor) {
-			this.observeEventCursor(attachCursor);
-		}
-		this.lastEventSequence = maxEventSequence(this.lastEventSequence, getAttachLastEventSequence(result));
-		if ("snapshot" in result) {
-			const appliedActiveSessionId = this.activeSessionId;
-			const preAwaitSnapshot = this.latestSnapshot;
-			const snapshot = result.snapshotStream
-				? await this.waitForSnapshot(result.snapshotStream.id)
-				: result.snapshot;
-			if (this.activeSessionId !== appliedActiveSessionId) {
-				// A concurrent transition rebound the connection while the
-				// streamed snapshot was in flight; applying the late snapshot
-				// would describe a session this connection no longer shows.
-				throw new Error(`Session attach superseded: binding moved from ${appliedActiveSessionId}`);
+		const displacedActiveSessionId = this.publishLocalAttachment(attachmentAttempt);
+		try {
+			const summary = "snapshot" in result ? result.snapshot.summary : result;
+			this.attachedSessionId = summary.sessionId;
+			this.attachedSessionFile =
+				summary.sessionFile ?? ("snapshot" in result ? result.snapshot.state.sessionFile : undefined);
+			// The invocation's reviveConfig was computed for the transcript this
+			// connection first attached to; later transcripts (session switches)
+			// must not inherit its cwd. A fileless first attach (--no-session)
+			// records null so a transcript resumed later still counts as foreign -
+			// checked strictly against undefined because ??= would re-assign over
+			// the null marker on the next reconnect attach.
+			if (this.reviveConfigSessionFile === undefined) {
+				this.reviveConfigSessionFile = this.attachedSessionFile ?? null;
 			}
-			// The daemon can deliver the attach snapshot's end frame and a queued
-			// catch-up resync in one socket read; the resync then lands on the
-			// published binding via completeSnapshotAssembly before this
-			// continuation resumes. Newest wins by event sequence: overwriting
-			// it with the older attach snapshot would drop the intervening
-			// events. The identity checks come first because a sequence is only
-			// comparable within one session: an unchanged object can still
-			// describe the previous binding, and a live event's spread-copy can
-			// change the object while carrying the previous session's state.
-			// Freshness deliberately does NOT gate the choice - a live event
-			// clearing the flag must not resurrect the older attach snapshot.
-			const concurrent = this.latestSnapshot;
-			const concurrentSeq = concurrent?.lastEventSequence;
-			const keepConcurrentlyAppliedSnapshot =
-				concurrent !== undefined &&
-				concurrent !== preAwaitSnapshot &&
-				concurrent.state.sessionId === this.attachedSessionId &&
-				concurrentSeq !== undefined &&
-				(snapshot.lastEventSequence === undefined || concurrentSeq > snapshot.lastEventSequence);
-			if (!keepConcurrentlyAppliedSnapshot) {
-				this.latestSnapshot = mapDaemonSessionSnapshot(snapshot, result.replay);
-				if (this.lastEventSequence !== undefined) {
-					this.latestSnapshot.lastEventSequence = this.lastEventSequence;
-				}
-				if (this.lastEventCursor) {
-					this.latestSnapshot.lastEventCursor = this.lastEventCursor;
-				}
-				// A live event parsed between the snapshot's end frame and this
-				// continuation advanced the connection cursor past the snapshot's
-				// content; marking such a cache fresh would serve state whose
-				// stamped cursor claims it includes an event it does not. The
-				// invalidation is preserved so the next read re-reads.
-				this.latestSnapshotIsFresh =
-					this.lastEventSequence === undefined ||
-					snapshot.lastEventSequence === undefined ||
-					this.lastEventSequence <= snapshot.lastEventSequence;
+			// Recorded before the snapshot await below: a replacement snapshot
+			// landing mid-stream can rewrite the attached identity, and a caller
+			// capturing it afterwards would adopt the switched transcript as its
+			// own.
+			this.lastAttachPublishedIdentity = { sessionId: summary.sessionId, sessionFile: this.attachedSessionFile };
+			this.captureDaemonLogPath();
+			this.updateReconnectFailed = false;
+			this.terminalCloseEmitted = false;
+			const attachCursor = getAttachLastEventCursor(result);
+			if (attachCursor) {
+				this.observeEventCursor(attachCursor);
 			}
-		} else {
-			this.latestSnapshot = undefined;
-			this.latestSnapshotIsFresh = false;
+			this.lastEventSequence = maxEventSequence(this.lastEventSequence, getAttachLastEventSequence(result));
+			if ("snapshot" in result) {
+				const appliedActiveSessionId = this.activeSessionId;
+				const preAwaitSnapshot = this.latestSnapshot;
+				const snapshot = result.snapshotStream
+					? await this.waitForSnapshot(result.snapshotStream.id)
+					: result.snapshot;
+				if (this.activeSessionId !== appliedActiveSessionId) {
+					// A concurrent transition rebound the connection while the
+					// streamed snapshot was in flight; applying the late snapshot
+					// would describe a session this connection no longer shows.
+					throw new Error(`Session attach superseded: binding moved from ${appliedActiveSessionId}`);
+				}
+				// The daemon can deliver the attach snapshot's end frame and a queued
+				// catch-up resync in one socket read; the resync then lands on the
+				// published binding via completeSnapshotAssembly before this
+				// continuation resumes. Newest wins by event sequence: overwriting
+				// it with the older attach snapshot would drop the intervening
+				// events. The identity checks come first because a sequence is only
+				// comparable within one session: an unchanged object can still
+				// describe the previous binding, and a live event's spread-copy can
+				// change the object while carrying the previous session's state.
+				// Freshness deliberately does NOT gate the choice - a live event
+				// clearing the flag must not resurrect the older attach snapshot.
+				const concurrent = this.latestSnapshot;
+				const concurrentSeq = concurrent?.lastEventSequence;
+				const keepConcurrentlyAppliedSnapshot =
+					concurrent !== undefined &&
+					concurrent !== preAwaitSnapshot &&
+					concurrent.state.sessionId === this.attachedSessionId &&
+					concurrentSeq !== undefined &&
+					(snapshot.lastEventSequence === undefined || concurrentSeq > snapshot.lastEventSequence);
+				if (!keepConcurrentlyAppliedSnapshot) {
+					this.latestSnapshot = mapDaemonSessionSnapshot(snapshot, result.replay);
+					if (this.lastEventSequence !== undefined) {
+						this.latestSnapshot.lastEventSequence = this.lastEventSequence;
+					}
+					if (this.lastEventCursor) {
+						this.latestSnapshot.lastEventCursor = this.lastEventCursor;
+					}
+					// A live event parsed between the snapshot's end frame and this
+					// continuation advanced the connection cursor past the snapshot's
+					// content; marking such a cache fresh would serve state whose
+					// stamped cursor claims it includes an event it does not. The
+					// invalidation is preserved so the next read re-reads.
+					this.latestSnapshotIsFresh =
+						this.lastEventSequence === undefined ||
+						snapshot.lastEventSequence === undefined ||
+						this.lastEventSequence <= snapshot.lastEventSequence;
+				}
+			} else {
+				this.latestSnapshot = undefined;
+				this.latestSnapshotIsFresh = false;
+			}
+			return displacedActiveSessionId;
+		} catch (error) {
+			if (displacedActiveSessionId !== undefined) {
+				void this.releaseLocalAttachment(displacedActiveSessionId);
+			}
+			throw error;
 		}
 	}
 
@@ -992,7 +1187,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	/**
-	 * Resume this connection's saved session file into the daemon and reattach.
+	 * Resume this connection's saved session file into the daemon and attach to it.
 	 * The daemon's create-with-sessionPath is idempotent: a session that is
 	 * still (or again) resident is reused instead of resumed twice.
 	 *
@@ -1072,7 +1267,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			);
 			const revivedActiveSessionId = readCreatedActiveSessionId(summary);
 			if (this.disposed || this.disposing) {
-				this.releaseRevivedSession(revivedActiveSessionId, false);
+				this.releaseRevivedSession(revivedActiveSessionId);
 				throw new Error("Connection was disposed during session revival");
 			}
 			if (this.activeSessionId !== sourceActiveSessionId) {
@@ -1084,37 +1279,23 @@ export class DaemonAgentConnection implements AgentConnection {
 				// session file), releasing it would detach the currently
 				// published binding and leave the connection deaf to its events.
 				if (this.activeSessionId !== revivedActiveSessionId) {
-					this.releaseRevivedSession(revivedActiveSessionId, false);
+					this.releaseRevivedSession(revivedActiveSessionId);
 				}
 				throw new Error(`Session revival superseded: binding moved from ${sourceActiveSessionId}`);
 			}
 			try {
 				await this.attachSessionBinding(revivedActiveSessionId, true);
 			} catch (error) {
-				// Supersede errors are thrown after a successful attach response,
-				// and the response's wasAttached tells whether that attach CREATED
-				// the socket's attachment entry - a sibling connection may already
-				// have held it, in which case a detach would remove the sibling's
-				// subscription rather than ours. Reliance on the field is gated on
-				// the negotiated capability: a pre-revision-15 daemon never
-				// reports ownership, and skipping the detach there would leave a
-				// stale attachment that blocks the worker's idle eviction until
-				// the socket closes - so legacy daemons keep the historical
-				// unconditional detach instead.
-				const attachAcquired =
-					DaemonAgentConnection.isAttachSupersededError(error) &&
-					(this.client.supportsServerCapability("attach_ownership") ? this.lastAttachCreatedAttachment : true);
 				if (this.disposed || this.disposing) {
-					this.releaseRevivedSession(revivedActiveSessionId, attachAcquired);
+					this.releaseRevivedSession(revivedActiveSessionId);
 					throw error;
 				}
 				if (this.activeSessionId !== revivedActiveSessionId) {
-					// The attach did not publish the revived binding (transient
-					// failure or supersession); drop the attachment bookkeeping
-					// only when this attach actually registered it, and complete
-					// an owned revived worker so it cannot outlive the failed
-					// revival.
-					this.releaseRevivedSession(revivedActiveSessionId, attachAcquired);
+					// A failed request acquired nothing; a successful superseded
+					// attempt already finalized its tracker cleanup transaction.
+					// Complete an owned revived worker so it cannot outlive the
+					// failed revival.
+					this.releaseRevivedSession(revivedActiveSessionId);
 					throw error;
 				}
 				// The attach response was applied — the binding is published and
@@ -1148,21 +1329,10 @@ export class DaemonAgentConnection implements AgentConnection {
 			}
 			this.activeSideQuestionIds.clear();
 			if (this.disposed) {
-				// The attach succeeded, but it only ACQUIRED the attachment when it
-				// created the socket entry; a sibling's pre-existing attachment
-				// must survive this cleanup. Without the negotiated ownership
-				// report, legacy daemons keep the historical unconditional detach.
-				this.releaseRevivedSession(
-					revivedActiveSessionId,
-					this.client.supportsServerCapability("attach_ownership") ? this.lastAttachCreatedAttachment : true,
-				);
+				// publishLocalAttachment already released a non-owned binding (or
+				// forgot an owned one) when disposal won the race.
+				this.releaseRevivedSession(revivedActiveSessionId);
 				throw new Error("Connection was disposed during session revival");
-			}
-			if (sourceActiveSessionId !== revivedActiveSessionId) {
-				// The dead id lingers in the shared socket client's attachment
-				// bookkeeping; the supervisor's detach cleans it even when no
-				// worker matches the selector anymore.
-				void this.requestOk({ type: "detach", activeSessionId: sourceActiveSessionId }).catch(() => undefined);
 			}
 			// The emission must verify the full binding identity, not just the
 			// id: an in-worker switch landing during the snapshot read keeps the
@@ -1212,45 +1382,34 @@ export class DaemonAgentConnection implements AgentConnection {
 		})();
 	}
 
-	/**
-	 * Best-effort cleanup for a session revived after disposal began or after
-	 * the revival was superseded: dispose() only released the previous
-	 * binding, so an owned revived session would otherwise outlive this
-	 * connection indefinitely.
-	 *
-	 * The detach is conditional on THIS revival having acquired the socket
-	 * attachment. The supervisor tracks attachedActiveSessionIds once per
-	 * socket (no refcount), and a DaemonClient can be shared by sibling
-	 * connections: detaching an id we never attached would deafen a sibling
-	 * attached to the session the create returned. create alone never
-	 * attaches — only attachSessionBinding does — so pre-attach call-sites
-	 * pass false. Completing an owned session stays unconditional: the create
-	 * claimed ownership regardless of any attachment.
-	 */
-	private releaseRevivedSession(revivedActiveSessionId: string, detachAttachment: boolean): void {
+	/** Complete an owned worker that a failed or superseded revival created. */
+	private releaseRevivedSession(revivedActiveSessionId: string): void {
 		if (this.options.ownedSession) {
 			void this.requestOk({ type: "complete_owned_session", activeSessionId: revivedActiveSessionId }).catch(
 				() => undefined,
 			);
 		}
-		if (detachAttachment) {
-			void this.requestOk({ type: "detach", activeSessionId: revivedActiveSessionId }).catch(() => undefined);
-		}
 	}
 
-	/**
-	 * attachSessionBinding throws its supersession errors strictly AFTER a
-	 * successful attach response — i.e. after the supervisor registered this
-	 * socket's attachment. Any other attach failure (transport, rejected
-	 * request) acquired nothing. A server-side registration whose response
-	 * was lost client-side without a supersede error is the residual
-	 * trade-off: it may leave a stale socket attachment (inflating the
-	 * supervisor's attachedClients until the socket closes) but cannot
-	 * deafen a sibling connection; with a per-socket attachment Set both
-	 * cannot be avoided at once, and deafening a live sibling is worse.
-	 */
-	private static isAttachSupersededError(error: unknown): boolean {
-		return error instanceof Error && error.message.startsWith("Session attach superseded");
+	private publishLocalAttachment(attempt: LocalAttachmentAttempt): string | undefined {
+		const displacedActiveSessionId = this.localAttachments.commit(this.attachmentOwner, attempt);
+		if (!this.disposed) return displacedActiveSessionId;
+		if (this.options.ownedSession) {
+			this.localAttachments.forget(this.attachmentOwner);
+			return displacedActiveSessionId;
+		}
+		void this.localAttachments.release(this.attachmentOwner, attempt.activeSessionId, (releasedActiveSessionId) =>
+			this.requestOk({ type: "detach", activeSessionId: releasedActiveSessionId }).catch(() => undefined),
+		);
+		return displacedActiveSessionId;
+	}
+
+	private releaseLocalAttachment(activeSessionId: string): Promise<void> | undefined {
+		return this.localAttachments.requestCleanup(
+			activeSessionId,
+			() => this.requestOk({ type: "detach", activeSessionId }).catch(() => undefined),
+			true,
+		);
 	}
 
 	private async promptWithAdmissionCancellation(
@@ -1624,7 +1783,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			if (error.activeSessionId === sourceActiveSessionId) {
 				return { cancelled: false };
 			}
-			const result = await this.reattachSession(sourceActiveSessionId, error.activeSessionId);
+			const result = await this.attachLiveSession(error.activeSessionId);
 			if (options?.cwdOverride) {
 				// The transcript is live under another worker, but the user still
 				// selected a fallback cwd because its recorded directory is
@@ -1638,82 +1797,16 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 	}
 
-	private async reattachSession(
-		sourceActiveSessionId: string,
-		targetActiveSessionId: string,
-	): Promise<{ cancelled: false }> {
-		const previousState = {
-			lastEventCursor: this.lastEventCursor,
-			lastEventSequence: this.lastEventSequence,
-			latestSnapshot: this.latestSnapshot,
-			latestSnapshotIsFresh: this.latestSnapshotIsFresh,
-			retiredEventGenerations: new Set(this.retiredEventGenerations),
-		};
-		this.activeSessionId = targetActiveSessionId;
-		this.lastEventCursor = undefined;
-		this.lastEventSequence = undefined;
-		this.latestSnapshot = undefined;
-		this.latestSnapshotIsFresh = false;
-		this.retiredEventGenerations.clear();
-		this.pendingReattachActiveSessionIds.add(targetActiveSessionId);
-		let reattached = false;
-		try {
-			const supportsExtensionUi = this.options.supportsExtensionUi !== false;
-			const result = await this.requestData<DaemonAttachResult>({
-				type: "reattach",
-				activeSessionId: sourceActiveSessionId,
-				targetActiveSessionId,
-				supportsExtensionUi,
-				clientId: this.clientId,
-				capabilities: [
-					"attach_snapshot",
-					"event_sequence",
-					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
-					"slim_attach",
-					"chunked_snapshot",
-					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
-				],
-				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
-				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
-				telemetryDisabled: this.options.telemetryDisabled,
-			});
-			reattached = true;
-			this.activeSessionId = result.activeSessionId;
-			this.activeSideQuestionIds.clear();
-			if (result.snapshotStream) {
-				try {
-					await this.waitForSnapshot(result.snapshotStream.id);
-				} catch (snapshotError) {
-					await this.snapshotRecoveryPromises.get(result.snapshotStream.id);
-					if (!this.latestSnapshotIsFresh) {
-						throw snapshotError;
-					}
-				}
-			} else {
-				this.applyReplacementSnapshot(result.snapshot, result.replay);
-				await this.emit({
-					type: "session_replaced",
-					state: result.snapshot.state,
-					messages: result.snapshot.messages,
-				});
-			}
-			return { cancelled: false };
-		} catch (error) {
-			if (!reattached) {
-				this.activeSessionId = sourceActiveSessionId;
-				this.lastEventCursor = previousState.lastEventCursor;
-				this.lastEventSequence = previousState.lastEventSequence;
-				this.latestSnapshot = previousState.latestSnapshot;
-				this.latestSnapshotIsFresh = previousState.latestSnapshotIsFresh;
-				this.retiredEventGenerations.clear();
-				for (const generation of previousState.retiredEventGenerations) {
-					this.retiredEventGenerations.add(generation);
-				}
-			}
-			throw error;
-		} finally {
-			this.pendingReattachActiveSessionIds.delete(targetActiveSessionId);
-		}
+	private async attachLiveSession(targetActiveSessionId: string): Promise<{ cancelled: false }> {
+		await this.attachSessionBinding(targetActiveSessionId, true);
+		this.activeSideQuestionIds.clear();
+		const snapshot = await this.getInitialSnapshot();
+		await this.emit({
+			type: "session_replaced",
+			state: snapshot.state,
+			messages: snapshot.messages,
+		});
+		return { cancelled: false };
 	}
 
 	async fork(
@@ -1836,12 +1929,16 @@ export class DaemonAgentConnection implements AgentConnection {
 		await Promise.allSettled([...this.activeSideQuestionIds].map((id) => this.abortSideQuestion(id)));
 		this.unsubscribeDaemonMessages();
 		this.unsubscribeDaemonClose();
+		const disposeActiveSessionId = this.activeSessionId;
 		if (this.options.ownedSession) {
-			await this.requestOk({ type: "complete_owned_session", activeSessionId: this.activeSessionId }).catch(
+			this.localAttachments.forget(this.attachmentOwner);
+			await this.requestOk({ type: "complete_owned_session", activeSessionId: disposeActiveSessionId }).catch(
 				() => undefined,
 			);
 		} else {
-			await this.requestOk({ type: "detach", activeSessionId: this.activeSessionId }).catch(() => undefined);
+			await this.localAttachments.release(this.attachmentOwner, disposeActiveSessionId, (releasedActiveSessionId) =>
+				this.requestOk({ type: "detach", activeSessionId: releasedActiveSessionId }).catch(() => undefined),
+			);
 		}
 		if (this.options.closeClientOnDispose) {
 			this.client.close();
@@ -1982,7 +2079,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			// supersession the marker is discarded.
 			const isPendingCatchupFailure =
 				(purpose === "replacement" || purpose === "resync") && message.activeSessionId !== this.activeSessionId;
-			if (isPendingCatchupFailure && this.pendingReattachActiveSessionIds.has(message.activeSessionId)) {
+			if (isPendingCatchupFailure && this.pendingBindingActiveSessionIds.has(message.activeSessionId)) {
 				this.pendingBindingCatchupFailures.add(message.activeSessionId);
 				// Newest wins in both directions: this failure is newer than any
 				// buffered success, whose snapshot now predates the events the
@@ -2436,7 +2533,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		clearTimeout(assembly.timeout);
 		if (purpose !== "attach") {
 			this.snapshotAssemblies.delete(message.snapshotId);
-			if (this.pendingReattachActiveSessionIds.has(message.activeSessionId)) {
+			if (this.pendingBindingActiveSessionIds.has(message.activeSessionId)) {
 				this.completedSnapshots.set(message.snapshotId, snapshot);
 				while (this.completedSnapshots.size > MAX_COMPLETED_SNAPSHOTS) {
 					const oldest = this.completedSnapshots.keys().next().value;
@@ -2496,7 +2593,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		// supersession they belong to a session this window no longer shows.
 		return (
 			message.activeSessionId !== undefined &&
-			this.pendingReattachActiveSessionIds.has(message.activeSessionId) &&
+			this.pendingBindingActiveSessionIds.has(message.activeSessionId) &&
 			isSnapshotTransferMessage(message)
 		);
 	}

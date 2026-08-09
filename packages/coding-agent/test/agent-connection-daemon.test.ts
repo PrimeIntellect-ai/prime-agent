@@ -44,6 +44,8 @@ class FakeDaemonClient {
 	resetTransportCount = 0;
 	reconnectError: Error | undefined;
 	attachFailures = 0;
+	readonly attachGates = new Map<string, Promise<void>>();
+	readonly attachFailureIds = new Set<string>();
 	connectionStateGate: Promise<void> | undefined;
 	connectionStateFactory: ((activeSessionId: string) => AgentConnectionState) | undefined;
 	abortBashUnknownCommand = false;
@@ -141,6 +143,10 @@ class FakeDaemonClient {
 				if (this.attachFailures > 0) {
 					this.attachFailures--;
 					throw new Error("attach failed");
+				}
+				await this.attachGates.get(command.activeSessionId);
+				if (this.attachFailureIds.delete(command.activeSessionId)) {
+					throw new Error(`attach failed: ${command.activeSessionId}`);
 				}
 				if (command.activeSessionId === "active-revived" && this.revivedAttachGate) {
 					await this.revivedAttachGate;
@@ -501,13 +507,6 @@ class FakeDaemonClient {
 						},
 					},
 				};
-			case "reattach":
-				return {
-					type: "response",
-					command: command.type,
-					success: true,
-					data: createAttachResult(command.targetActiveSessionId, command.clientId, command.capabilities, 30),
-				};
 			case "switch_session":
 				if (this.switchSessionSucceeds) {
 					return { type: "response", command: command.type, success: true, data: { cancelled: false } };
@@ -580,6 +579,7 @@ class FakeDaemonClient {
 	}
 
 	emitClose(error: Error): void {
+		this.attachedIds.clear();
 		for (const listener of [...this.closeListeners]) {
 			listener(error);
 		}
@@ -763,6 +763,42 @@ function createAttachResult(
 			),
 		},
 	};
+}
+
+function gateFirstRevivedAttachSnapshot(client: FakeDaemonClient, snapshotId: string): () => void {
+	let armed = true;
+	let emitSnapshot: () => void = () => {
+		throw new Error(`Revived attach ${snapshotId} has not started`);
+	};
+	client.attachResultFactory = (command) => {
+		const full = createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 23);
+		if (command.activeSessionId !== "active-revived" || !armed) return full;
+		armed = false;
+		const { messages: _messages, ...snapshotHeader } = full.snapshot;
+		emitSnapshot = () => {
+			client.emitMessage({
+				type: "session_snapshot_begin",
+				activeSessionId: command.activeSessionId,
+				snapshotId,
+				snapshot: snapshotHeader,
+				messageCount: 0,
+				targetChunkBytes: 512 * 1024,
+			});
+			client.emitMessage({
+				type: "session_snapshot_end",
+				activeSessionId: command.activeSessionId,
+				snapshotId,
+				chunkCount: 0,
+				lastEventSequence: 23,
+			});
+		};
+		return {
+			...full,
+			snapshot: { ...full.snapshot, messages: [] },
+			snapshotStream: { id: snapshotId, messageCount: 0, targetChunkBytes: 512 * 1024 },
+		};
+	};
+	return () => emitSnapshot();
 }
 
 function emitSequencedQueueUpdate(client: FakeDaemonClient, activeSessionId: string, sequence: number): void {
@@ -1526,6 +1562,9 @@ describe("DaemonAgentConnection", () => {
 
 	it("discards a late revived snapshot when a switch lands during the stream and releases the revived session", async () => {
 		const fakeClient = new FakeDaemonClient();
+		// A negotiated ownership response proves this revival created the
+		// attachment, so superseded cleanup can safely release it.
+		fakeClient.serverCapabilities.add("attach_ownership");
 		let emitRevivedSnapshot = () => {};
 		fakeClient.attachResultFactory = (command) => {
 			if (command.activeSessionId !== "active-revived") {
@@ -2328,9 +2367,14 @@ describe("DaemonAgentConnection", () => {
 		await vi.waitFor(() => expect(siblingEvents.some((event) => event.type === "session_event")).toBe(true));
 	});
 
-	it("keeps the legacy detach when the daemon cannot report attach ownership", async () => {
+	it("keeps a legacy daemon sibling attached when revival ownership is unknowable", async () => {
 		const fakeClient = new FakeDaemonClient();
 		fakeClient.omitWasAttached = true;
+		const sibling = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-revived");
+		const siblingEvents: AgentConnectionEvent[] = [];
+		sibling.subscribe((event) => {
+			siblingEvents.push(event);
+		});
 		let emitRevivedSnapshot = () => {};
 		fakeClient.attachResultFactory = (command) => {
 			if (command.activeSessionId !== "active-revived") {
@@ -2371,21 +2415,164 @@ describe("DaemonAgentConnection", () => {
 				fakeClient.requests.filter(
 					(request) => request.type === "attach" && request.activeSessionId === "active-revived",
 				),
+			).toHaveLength(2),
+		);
+		await connection.switchSession("/tmp/session-b.jsonl");
+		emitRevivedSnapshot();
+		await expect(prompt).rejects.toThrow("Unknown active session: active-1");
+
+		// Legacy responses cannot prove which connection created the shared
+		// socket attachment. Cleanup must preserve it rather than risk removing
+		// the sibling's subscription.
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-revived" }),
+		);
+		emitSequencedQueueUpdate(fakeClient, "active-revived", 24);
+		await vi.waitFor(() => expect(siblingEvents.some((event) => event.type === "session_event")).toBe(true));
+	});
+
+	it("detaches a legacy revival with no sibling so idle eviction stays possible", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.omitWasAttached = true;
+		const emitRevivedSnapshot = gateFirstRevivedAttachSnapshot(fakeClient, "snapshot-legacy-only");
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		fakeClient.deadActiveSessionIds.add("active-1");
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+
+		const prompt = connection.prompt("continue");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-revived",
+				),
 			).toHaveLength(1),
 		);
 		await connection.switchSession("/tmp/session-b.jsonl");
 		emitRevivedSnapshot();
 		await expect(prompt).rejects.toThrow("Unknown active session: active-1");
 
-		// A daemon that cannot report attach ownership gets the historical
-		// unconditional detach: skipping it would leave a stale attachment
-		// that blocks the revived worker's idle eviction until the socket
-		// closes, which is worse than the pre-existing shared-client edge.
 		await vi.waitFor(() =>
 			expect(fakeClient.requests).toContainEqual(
 				expect.objectContaining({ type: "detach", activeSessionId: "active-revived" }),
 			),
 		);
+		expect(fakeClient.attachedIds.has("active-revived")).toBe(false);
+	});
+
+	it("defers legacy revival cleanup across a sibling attach in flight", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.omitWasAttached = true;
+		const emitRevivedSnapshot = gateFirstRevivedAttachSnapshot(fakeClient, "snapshot-legacy-pending-sibling");
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		fakeClient.deadActiveSessionIds.add("active-1");
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+
+		const prompt = connection.prompt("continue");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-revived",
+				),
+			).toHaveLength(1),
+		);
+		let releaseSiblingAttach = () => {};
+		fakeClient.revivedAttachGate = new Promise<void>((resolve) => {
+			releaseSiblingAttach = resolve;
+		});
+		const siblingAttach = DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-revived");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-revived",
+				),
+			).toHaveLength(2),
+		);
+
+		await connection.switchSession("/tmp/session-b.jsonl");
+		emitRevivedSnapshot();
+		await expect(prompt).rejects.toThrow("Unknown active session: active-1");
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-revived" }),
+		);
+
+		releaseSiblingAttach();
+		const sibling = await siblingAttach;
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-revived" }),
+		);
+		await sibling.dispose();
+		expect(fakeClient.attachedIds.has("active-revived")).toBe(false);
+		await connection.dispose();
+		expect(fakeClient.attachedIds.size).toBe(0);
+	});
+
+	it("detaches a displaced revival source after a pending sibling attach fails", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.omitWasAttached = true;
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		fakeClient.deadActiveSessionIds.add("active-1");
+
+		let releaseSiblingAttach = () => {};
+		fakeClient.attachGates.set(
+			"active-1",
+			new Promise<void>((resolve) => {
+				releaseSiblingAttach = resolve;
+			}),
+		);
+		fakeClient.attachFailureIds.add("active-1");
+		const siblingAttach = DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-1",
+				),
+			).toHaveLength(2),
+		);
+
+		await connection.prompt("continue");
+		// Publishing the revived binding moved the only holder off active-1,
+		// but its known socket attachment must survive until the pending sibling
+		// resolves. A failed sibling then exposes the deferred cleanup.
+		expect(fakeClient.attachedIds.has("active-1")).toBe(true);
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-1" }),
+		);
+
+		releaseSiblingAttach();
+		await expect(siblingAttach).rejects.toThrow("attach failed: active-1");
+		await vi.waitFor(() => expect(fakeClient.attachedIds.has("active-1")).toBe(false));
+		expect(fakeClient.requests).toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-1" }),
+		);
+
+		await connection.dispose();
+		expect(fakeClient.attachedIds.size).toBe(0);
+	});
+
+	it("detaches a legacy revival disposed after its attach response", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.omitWasAttached = true;
+		const emitRevivedSnapshot = gateFirstRevivedAttachSnapshot(fakeClient, "snapshot-legacy-disposed");
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		fakeClient.deadActiveSessionIds.add("active-1");
+
+		const prompt = connection.prompt("continue");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-revived",
+				),
+			).toHaveLength(1),
+		);
+		await connection.dispose();
+		emitRevivedSnapshot();
+		await expect(prompt).rejects.toThrow("Unknown active session: active-1");
+
+		const revivedDetaches = fakeClient.requests.filter(
+			(request) => request.type === "detach" && request.activeSessionId === "active-revived",
+		);
+		expect(revivedDetaches).toHaveLength(1);
+		expect(fakeClient.attachedIds.has("active-revived")).toBe(false);
 	});
 
 	it("suppresses a background revival resync after an in-worker transcript switch", async () => {
@@ -2594,22 +2781,22 @@ describe("DaemonAgentConnection", () => {
 		});
 	});
 
-	it("retains the fallback cwd when the switch lands as a reattach to a live worker", async () => {
+	it("retains the fallback cwd when the switch attaches to a live worker", async () => {
 		const fakeClient = new FakeDaemonClient();
 		fakeClient.switchSessionAlreadyActiveId = "active-b";
 		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
 
 		// The transcript's recorded directory is missing; the user selects a
-		// fallback cwd, and the switch resolves as a reattach because another
+		// fallback cwd, and the switch resolves as an attach because another
 		// worker already owns the transcript.
 		await connection.switchSession("/tmp/session-b.jsonl", { cwdOverride: "/tmp/fallback-b" });
 		fakeClient.deadActiveSessionIds.add("active-b");
 
 		await connection.prompt("continue");
 
-		// Reviving the reattached transcript must reuse the selected fallback
+		// Reviving the attached transcript must reuse the selected fallback
 		// cwd, exactly like an in-worker switch. The override is keyed to the
-		// canonical file the reattach reported (the fake's default state), not
+		// canonical file the attach reported (the fake's default state), not
 		// the caller's path spelling.
 		expect(fakeClient.requests.find((request) => request.type === "create")).toMatchObject({
 			sessionPath: "/tmp/session-current.jsonl",
@@ -2617,15 +2804,218 @@ describe("DaemonAgentConnection", () => {
 		});
 	});
 
-	it("behaves like an old client when the ownership capability is absent despite the field", async () => {
+	it.each([
+		{ mode: "legacy", negotiated: false },
+		{ mode: "negotiated", negotiated: true },
+	])("preserves a source sibling during a $mode live-session switch", async ({ negotiated }) => {
 		const fakeClient = new FakeDaemonClient();
-		// New daemon (field present in responses), old-client behavior (no
-		// negotiated capability): the field must be ignored entirely, keeping
-		// the pre-revision-15 semantics - the mirror direction of the
-		// omitted-field test above.
+		fakeClient.omitWasAttached = !negotiated;
+		if (negotiated) fakeClient.serverCapabilities.add("attach_ownership");
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		const sibling = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		const siblingEvents: AgentConnectionEvent[] = [];
+		sibling.subscribe((event) => {
+			siblingEvents.push(event);
+		});
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+
+		await connection.switchSession("/tmp/session-b.jsonl");
+
+		// Protocol reattach would remove active-1 from the shared socket and
+		// deafen the sibling. Plain attach keeps both Set entries until each
+		// logical holder releases its binding.
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "reattach", activeSessionId: "active-1" }),
+		);
+		expect(fakeClient.requests).toContainEqual(
+			expect.objectContaining({ type: "attach", activeSessionId: "active-b" }),
+		);
+		expect(fakeClient.attachedIds).toEqual(new Set(["active-1", "active-b"]));
+		emitSequencedQueueUpdate(fakeClient, "active-1", 13);
+		await vi.waitFor(() => expect(siblingEvents.some((event) => event.type === "session_event")).toBe(true));
+
+		await connection.dispose();
+		expect(fakeClient.attachedIds).toEqual(new Set(["active-1"]));
+		await sibling.dispose();
+		expect(fakeClient.attachedIds.size).toBe(0);
+	});
+
+	it("keeps the source binding and snapshot when the live switch target attach fails", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		const before = await connection.getInitialSnapshot();
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+		fakeClient.attachFailureIds.add("active-b");
+
+		await expect(connection.switchSession("/tmp/session-b.jsonl")).rejects.toThrow("attach failed: active-b");
+
+		expect(fakeClient.attachedIds).toEqual(new Set(["active-1"]));
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-1" }),
+		);
+		await expect(connection.getInitialSnapshot()).resolves.toBe(before);
+		await connection.prompt("still source");
+		expect(fakeClient.requests.at(-1)).toMatchObject({ type: "prompt", activeSessionId: "active-1" });
+		await connection.dispose();
+	});
+
+	it("preserves a source sibling that attaches while the switch target is pending", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+		let releaseTargetAttach = () => {};
+		fakeClient.attachGates.set(
+			"active-b",
+			new Promise<void>((resolve) => {
+				releaseTargetAttach = resolve;
+			}),
+		);
+
+		const switching = connection.switchSession("/tmp/session-b.jsonl");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-b",
+				),
+			).toHaveLength(1),
+		);
+
+		// This source attach starts after switching has begun, but before the
+		// target attach can publish. It must acquire a holder before source
+		// cleanup is requested, rather than racing an atomic server-side delete.
+		const sibling = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		const siblingEvents: AgentConnectionEvent[] = [];
+		sibling.subscribe((event) => {
+			siblingEvents.push(event);
+		});
+		releaseTargetAttach();
+		await switching;
+
+		expect(fakeClient.requests).not.toContainEqual(expect.objectContaining({ type: "reattach" }));
+		expect(fakeClient.attachedIds).toEqual(new Set(["active-1", "active-b"]));
+		emitSequencedQueueUpdate(fakeClient, "active-1", 13);
+		await vi.waitFor(() => expect(siblingEvents.some((event) => event.type === "session_event")).toBe(true));
+
+		await connection.dispose();
+		expect(fakeClient.attachedIds).toEqual(new Set(["active-1"]));
+		await sibling.dispose();
+		expect(fakeClient.attachedIds.size).toBe(0);
+	});
+
+	it("commits a successful pending source attach before deferred cleanup", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.omitWasAttached = true;
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		let releaseSiblingAttach = () => {};
+		fakeClient.attachGates.set(
+			"active-1",
+			new Promise<void>((resolve) => {
+				releaseSiblingAttach = resolve;
+			}),
+		);
+		const siblingAttach = DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-1",
+				),
+			).toHaveLength(2),
+		);
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+
+		await connection.switchSession("/tmp/session-b.jsonl");
+		// The source cleanup is deferred while the sibling attempt is pending.
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-1" }),
+		);
+
+		releaseSiblingAttach();
+		const sibling = await siblingAttach;
+		// Successful completion publishes the holder in the same tracker step
+		// that removes the pending attempt, so deferred cleanup cannot run in
+		// between and deafen the newly attached sibling.
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-1" }),
+		);
+		const siblingEvents: AgentConnectionEvent[] = [];
+		sibling.subscribe((event) => {
+			siblingEvents.push(event);
+		});
+		emitSequencedQueueUpdate(fakeClient, "active-1", 13);
+		await vi.waitFor(() => expect(siblingEvents.some((event) => event.type === "session_event")).toBe(true));
+
+		await connection.dispose();
+		expect(fakeClient.attachedIds).toEqual(new Set(["active-1"]));
+		await sibling.dispose();
+		expect(fakeClient.attachedIds.size).toBe(0);
+		expect(
+			fakeClient.requests.filter((request) => request.type === "detach" && request.activeSessionId === "active-1"),
+		).toHaveLength(1);
+	});
+
+	it("defers switch source cleanup through a pending sibling attach failure", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		let releaseSiblingAttach = () => {};
+		fakeClient.attachGates.set(
+			"active-1",
+			new Promise<void>((resolve) => {
+				releaseSiblingAttach = resolve;
+			}),
+		);
+		fakeClient.attachFailureIds.add("active-1");
+		const siblingAttach = DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		await vi.waitFor(() =>
+			expect(
+				fakeClient.requests.filter(
+					(request) => request.type === "attach" && request.activeSessionId === "active-1",
+				),
+			).toHaveLength(2),
+		);
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+
+		await connection.switchSession("/tmp/session-b.jsonl");
+		expect(fakeClient.requests).not.toContainEqual(expect.objectContaining({ type: "reattach" }));
+		expect(fakeClient.attachedIds.has("active-1")).toBe(true);
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-1" }),
+		);
+
+		releaseSiblingAttach();
+		await expect(siblingAttach).rejects.toThrow("attach failed: active-1");
+		await vi.waitFor(() => expect(fakeClient.attachedIds.has("active-1")).toBe(false));
+		await connection.dispose();
+		expect(fakeClient.attachedIds.size).toBe(0);
+	});
+
+	it("attaches the target before releasing an unshared switch source", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-1");
+		fakeClient.switchSessionAlreadyActiveId = "active-b";
+
+		await connection.switchSession("/tmp/session-b.jsonl");
+
+		expect(fakeClient.requests.map((request) => request.type)).toEqual([
+			"attach",
+			"switch_session",
+			"attach",
+			"detach",
+		]);
+		expect(fakeClient.attachedIds).toEqual(new Set(["active-b"]));
+		await connection.dispose();
+		expect(fakeClient.attachedIds.size).toBe(0);
+	});
+
+	it("ignores unnegotiated ownership fields and keeps the sibling attached", async () => {
+		const fakeClient = new FakeDaemonClient();
+		// New daemon field without the negotiated capability must be ignored;
+		// ownership remains unknowable, just as when an old daemon omits it.
 		expect(fakeClient.serverCapabilities.has("attach_ownership")).toBe(false);
 		const sibling = await DaemonAgentConnection.attach(asDaemonClient(fakeClient), "active-revived");
-		void sibling;
+		const siblingEvents: AgentConnectionEvent[] = [];
+		sibling.subscribe((event) => {
+			siblingEvents.push(event);
+		});
 		let emitRevivedSnapshot = () => {};
 		fakeClient.attachResultFactory = (command) => {
 			if (command.activeSessionId !== "active-revived") {
@@ -2672,14 +3062,13 @@ describe("DaemonAgentConnection", () => {
 		emitRevivedSnapshot();
 		await expect(prompt).rejects.toThrow("Unknown active session: active-1");
 
-		// wasAttached=true travels in the response (the sibling attached
-		// first), but without the capability the client keeps the historical
-		// unconditional detach - identical to a client predating the field.
-		await vi.waitFor(() =>
-			expect(fakeClient.requests).toContainEqual(
-				expect.objectContaining({ type: "detach", activeSessionId: "active-revived" }),
-			),
+		// wasAttached=true travels in the response, but without the capability
+		// it cannot authorize cleanup of the shared attachment.
+		expect(fakeClient.requests).not.toContainEqual(
+			expect.objectContaining({ type: "detach", activeSessionId: "active-revived" }),
 		);
+		emitSequencedQueueUpdate(fakeClient, "active-revived", 24);
+		await vi.waitFor(() => expect(siblingEvents.some((event) => event.type === "session_event")).toBe(true));
 	});
 
 	it("drops the launch cwd when a fileless chat later revives a resumed transcript", async () => {
