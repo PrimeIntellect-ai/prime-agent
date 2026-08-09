@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -120,6 +121,98 @@ def test_conditional_when_changed(tmp_repo):
     verdict = gate_result(proc.stdout)
     assert verdict["passed"] == ["symbolic"]
     assert verdict["skipped"] == ["sim"]
+
+
+
+
+
+def _changed_files_from_git_output(monkeypatch, *, status_output: str, diff_output: str):
+    monkeypatch.syspath_prepend(str(GATE_TEMPLATE))
+    spec = importlib.util.spec_from_file_location("gate_verify_nul_test", VERIFY)
+    assert spec and spec.loader
+    verify = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verify)
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        if "status" in command:
+            return subprocess.CompletedProcess(command, 0, status_output, "")
+        if "rev-parse" in command:
+            return subprocess.CompletedProcess(command, 0, "resolved\n", "")
+        if "diff" in command:
+            return subprocess.CompletedProcess(command, 0, diff_output, "")
+        raise AssertionError(f"unexpected git command: {command}")
+
+    monkeypatch.setattr(verify.subprocess, "run", fake_run)
+    files, resolved = verify.changed_files(Path.cwd(), "HEAD")
+    return verify, files, resolved, calls
+
+
+def test_changed_files_preserves_literal_arrow_path_with_nul_porcelain(monkeypatch):
+    literal = "checks/properties/a -> b.py"
+    verify, files, resolved, calls = _changed_files_from_git_output(
+        monkeypatch, status_output=f"?? {literal}\0", diff_output=f"{literal}\0",
+    )
+    assert resolved == "HEAD"
+    assert files == [literal]
+    assert verify.matches_any(files, ["checks/properties/**"])
+    assert ["git", "-c", "core.quotePath=false", "status", "--porcelain", "-z", "-uall"] in calls
+    assert ["git", "-c", "core.quotePath=false", "diff", "--name-only", "-z", "HEAD...HEAD"] in calls
+
+
+def test_changed_files_consumes_genuine_nul_rename_record(monkeypatch):
+    destination = "docs/new.py"
+    source = "checks/properties/old.py"
+    _verify, files, _resolved, _calls = _changed_files_from_git_output(
+        monkeypatch, status_output=f"R  {destination}\0{source}\0", diff_output="",
+    )
+    assert files == sorted([destination, source])
+    assert all("\0" not in path for path in files)
+
+
+def test_nul_paths_and_rename_sources_drive_when_changed_globs(monkeypatch):
+    literal = "checks/properties/a -> b.py"
+    renamed_destination = "docs/moved.py"
+    renamed_source = "src/symbolic/original.py"
+    verify, files, _resolved, _calls = _changed_files_from_git_output(
+        monkeypatch,
+        status_output=f"?? {literal}\0R  {renamed_destination}\0{renamed_source}\0",
+        diff_output="",
+    )
+    assert verify.matches_any(files, ["checks/properties/**"])
+    assert verify.matches_any(files, ["src/symbolic/**"])
+    assert not verify.matches_any(files, ["src/simulation/**"])
+
+
+
+
+
+def test_genuine_rename_source_triggers_when_changed_glob(tmp_repo):
+    source = tmp_repo / "checks/properties/original.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", source.relative_to(tmp_repo).as_posix()], cwd=tmp_repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "add property source"], cwd=tmp_repo, check=True)
+    destination = tmp_repo / "docs/moved.py"
+    destination.parent.mkdir()
+    subprocess.run(
+        ["git", "mv", source.relative_to(tmp_repo).as_posix(), destination.relative_to(tmp_repo).as_posix()],
+        cwd=tmp_repo, check=True,
+    )
+    write_manifest(tmp_repo, {"default": {
+        "required": [{"name": "always", "command": f'"{sys.executable}" -c "print(1)"'}],
+        "conditional": [{
+            "name": "property-on-rename",
+            "command": f'"{sys.executable}" -c "print(2)"',
+            "when_changed": ["checks/properties/**"],
+        }],
+    }})
+    proc = run_gate(tmp_repo, "--base", "HEAD")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    verdict = gate_result(proc.stdout)
+    assert verdict["passed"] == ["always", "property-on-rename"]
+    assert verdict["skipped"] == []
 
 
 def test_timeout_kills_and_fails(tmp_repo):

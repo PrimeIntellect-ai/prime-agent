@@ -107,14 +107,28 @@ def changed_files(root: Path, base: str | None) -> tuple[list[str], str | None]:
         return proc.returncode == 0
 
     # -uall: list untracked files individually (default collapses to "dir/",
-    # which would defeat when_changed globs for brand-new subtrees)
-    for line in _git(["status", "--porcelain", "-uall"]).splitlines():
-        payload = line[3:].strip()
-        if " -> " in payload:
-            payload = payload.split(" -> ", 1)[1]
-        payload = payload.strip('"')
-        if payload:
-            files.add(payload)
+    # which would defeat when_changed globs for brand-new subtrees). NUL
+    # records are unquoted and unambiguous for spaces, newlines, and " -> ".
+    status_records = _git(["status", "--porcelain", "-z", "-uall"]).split("\0")
+    index = 0
+    while index < len(status_records):
+        record = status_records[index]
+        if not record:
+            index += 1
+            continue
+        if len(record) < 4 or record[2] != " ":
+            gate_error("malformed NUL-delimited git status record")
+        status_code = record[:2]
+        path = record[3:]
+        if not path:
+            gate_error("empty path in NUL-delimited git status record")
+        files.add(path)
+        if "R" in status_code or "C" in status_code:
+            index += 1
+            if index >= len(status_records) or not status_records[index]:
+                gate_error("rename/copy record missing source path in git status")
+            files.add(status_records[index])
+        index += 1
 
     resolved_base: str | None = None
     if base:
@@ -127,9 +141,9 @@ def changed_files(root: Path, base: str | None) -> tuple[list[str], str | None]:
                 resolved_base = candidate
                 break
     if resolved_base:
-        for path in _git(["diff", "--name-only", f"{resolved_base}...HEAD"]).splitlines():
-            if path.strip():
-                files.add(path.strip())
+        for path in _git(["diff", "--name-only", "-z", f"{resolved_base}...HEAD"]).split("\0"):
+            if path:
+                files.add(path)
     return sorted(files), resolved_base
 
 
