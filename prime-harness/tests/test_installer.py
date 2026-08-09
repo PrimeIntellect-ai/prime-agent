@@ -804,3 +804,27 @@ def test_tailor_rejects_casefold_ambiguous_layout_markers(tmp_repo):
     proc = run_install(tmp_repo, "--tailor")
     assert proc.returncode != 0
     assert "ambiguous under case folding" in (proc.stdout + proc.stderr)
+
+
+
+def _load_installer_module(name: str):
+    spec = importlib.util.spec_from_file_location(name, INSTALL)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired(["upstream_check"], 120), OSError("spawn denied")])
+def test_post_install_baseline_launch_failures_degrade_to_warning(tmp_repo, monkeypatch, capsys, failure):
+    installer = _load_installer_module(f"prime_harness_installer_{{type(failure).__name__}}")
+
+    def fail_run(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(installer.subprocess, "run", fail_run)
+    monkeypatch.setattr(sys, "argv", [str(INSTALL), str(tmp_repo)])
+    assert installer.main() == 0
+    output = capsys.readouterr()
+    assert "warning: could not record upstream baseline" in output.out
+    assert (tmp_repo / "harness/upstream_check.py").is_file()

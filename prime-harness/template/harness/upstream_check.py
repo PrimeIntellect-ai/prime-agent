@@ -66,6 +66,26 @@ def baseline_path(root: Path) -> Path:
     return root / "artifacts/harness/upstream-watch/baseline.json"
 
 
+def retirement_marker_path(root: Path) -> Path:
+    return root / "artifacts/harness/upstream-watch/pr-825-merged-seen.json"
+
+
+def _retirement_seen(root: Path) -> bool:
+    marker = _read_json(retirement_marker_path(root))
+    return bool(marker and marker.get("pr_825_merged_seen") is True)
+
+
+def _remember_retirement(root: Path, source: str) -> None:
+    if _retirement_seen(root):
+        return
+    atomic_write_json(retirement_marker_path(root), {
+        "schema_version": SCHEMA_VERSION,
+        "pr_825_merged_seen": True,
+        "first_seen_at": utc_now(),
+        "source": source,
+    })
+
+
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -261,7 +281,7 @@ def _local_pr_825_merge(source_root: Path | None) -> bool:
         return False
     try:
         process = subprocess.run(
-            ["git", "log", "-500", "--format=%s"], cwd=str(source_root),
+            ["git", "log", "--format=%s"], cwd=str(source_root),
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -280,14 +300,21 @@ def probe(root: Path, *, check_pr: bool = False) -> dict[str, Any]:
     current = capture_current(root)
     warnings: list[str] = []
     network_merged = False
+    pr_query_ok: bool | None = None
     if check_pr:
         try:
             network_merged = query_pr_825()
+            pr_query_ok = True
         except (RuntimeError, ValueError) as exc:
+            pr_query_ok = False
             warnings.append(str(exc))
     source_value = current.get("prime_agent", {}).get("source_root")
     source_root = Path(source_value) if isinstance(source_value, str) else None
-    merged = network_merged or _local_pr_825_merge(source_root)
+    local_merged = _local_pr_825_merge(source_root)
+    newly_merged = network_merged or local_merged
+    if newly_merged:
+        _remember_retirement(root, "network" if network_merged else "checked-out HEAD history")
+    merged = newly_merged or _retirement_seen(root)
     comparison = (
         {"status": "uninitialized", "reasons": ["install-time upstream baseline is missing"]}
         if baseline is None
@@ -300,6 +327,8 @@ def probe(root: Path, *, check_pr: bool = False) -> dict[str, Any]:
         "baseline_present": baseline is not None,
         "comparison": comparison,
         "pr_825_merged": merged,
+        "pr_query_requested": check_pr,
+        "pr_query_ok": pr_query_ok,
         "current": current,
         "warnings": warnings,
     }
@@ -356,22 +385,28 @@ def _run_doctor(root: Path) -> dict[str, Any]:
     }
 
 
-def _record_evidence(root: Path, artifact: Path, passed: bool) -> dict[str, Any]:
+def _record_evidence(root: Path, artifact: Path, passed: bool, *, degraded: bool = False) -> dict[str, Any]:
     python = _kernel_python()
     if python is None:
         return {"status": "fail", "reason": "kernel Python unavailable for evidence ledger"}
     script = (
         "import sys; import evidence_ledger; "
         "status='verified' if sys.argv[2]=='pass' else 'refuted'; "
+        "degraded=sys.argv[3]=='degraded'; "
+        "claim=('Prime Agent local upstream compatibility baseline remains satisfied; PR #825 network query was unavailable' "
+        "if degraded else 'Prime Agent upstream compatibility baseline remains satisfied'); "
+        "notes=('requested PR #825 network query failed; local history and compatibility checks passed' if degraded else None); "
         "print(evidence_ledger.record("
-        "'Prime Agent upstream compatibility baseline remains satisfied',"
-        "status=status, verifier='harness/upstream_check.py',"
-        "artifacts=[sys.argv[1]], confidence=1.0,"
+        "claim,status=status, verifier='harness/upstream_check.py',"
+        "artifacts=[sys.argv[1]], confidence=(0.7 if degraded else 1.0),notes=notes,"
         "source='scheduled/install-time upstream drift watch'))"
     )
     try:
         process = subprocess.run(
-            [str(python), "-c", script, str(artifact), "pass" if passed else "fail"],
+            [
+                str(python), "-c", script, str(artifact),
+                "pass" if passed else "fail", "degraded" if degraded else "complete",
+            ],
             cwd=str(root), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=60,
         )
@@ -405,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_pr_only:
         try:
             merged = query_pr_825()
+            if merged:
+                _remember_retirement(root, "network")
             result = {"status": "retirement_required" if merged else "open", "pr_825_merged": merged}
         except (RuntimeError, ValueError) as exc:
             result = {"status": "error", "reason": str(exc)}
@@ -426,16 +463,17 @@ def main(argv: list[str] | None = None) -> int:
         and result["doctor"]["status"] == "pass"
         and result["kernel_critical"]["status"] == "pass"
     )
-    result["status"] = "pass" if passed else "fail"
+    degraded = bool(args.check_pr and result.get("pr_query_ok") is False)
+    result["status"] = "pass-degraded" if passed and degraded else ("pass" if passed else "fail")
     artifact = _artifact_path(root)
     atomic_write_json(artifact, result)
     if not args.no_ledger:
-        result["ledger"] = _record_evidence(root, artifact, passed)
+        result["ledger"] = _record_evidence(root, artifact, passed, degraded=degraded)
         if result["ledger"]["status"] != "pass":
             result["status"] = "fail"
     result["artifact"] = str(artifact)
     print(json.dumps(result, indent=2 if args.json else None, sort_keys=True))
-    return 0 if result["status"] == "pass" else 2
+    return 0 if result["status"] in {"pass", "pass-degraded"} else 2
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -98,22 +100,29 @@ def test_pr_825_payload_is_bounded_and_fail_closed():
             raise AssertionError("invalid PR payload was accepted")
 
 
-def test_archived_local_patches_are_parseable_and_cover_both_fixes():
+def test_archived_local_patches_apply_to_pristine_upstream_and_reproduce_postpatch_hashes(tmp_path):
     patch_dir = ROOT / "template/harness/patches/prime-agent"
-    venv_patch = patch_dir / "windows-kernel-venv-python.patch"
-    hide_patch = patch_dir / "windows-kernel-windows-hide.patch"
-    assert "venvPythonPath" in venv_patch.read_text(encoding="utf-8")
-    hide_text = hide_patch.read_text(encoding="utf-8")
-    assert hide_text.count("windowsHide: true") == 3
-    for patch in (venv_patch, hide_patch):
-        parsed = subprocess.run(
-            ["git", "apply", "--numstat", str(patch)],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=30,
+    fixture = ROOT / "tests/fixtures/prime-agent-prepatch"
+    worktree = tmp_path / "pristine"
+    shutil.copytree(fixture, worktree)
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=worktree, check=True)
+    for patch in (
+        patch_dir / "windows-kernel-venv-python.patch",
+        patch_dir / "windows-kernel-windows-hide.patch",
+    ):
+        applied = subprocess.run(
+            ["git", "apply", str(patch)], cwd=worktree,
+            capture_output=True, text=True, timeout=30,
         )
-        assert parsed.returncode == 0, parsed.stderr
+        assert applied.returncode == 0, applied.stderr
+    expected = {
+        "packages/coding-agent/src/core/kernel/bootstrap.ts": "fd6e5b4c250c82c1ec6a94a89fa401f27ff722360fb8f4dca9aab3badd2eae72",
+        "packages/coding-agent/src/core/kernel/fork-server.ts": "7a6545774cb92906895152f6ab94e9989a6b0b6106cb5576a94dea82621653f9",
+        "packages/coding-agent/src/core/kernel/index.ts": "48f5748cb307e944b6104cff16d8dc8b4fcab9fee3b80d9d9bf9812c7e474c66"
+}
+    for relative, digest in expected.items():
+        assert hashlib.sha256((worktree / relative).read_bytes()).hexdigest() == digest
 
 
 def test_scheduled_pr_watch_is_read_only_pinned_and_calls_bounded_probe():
@@ -182,3 +191,63 @@ def test_patch_signature_drift_is_baseline_relative_and_source_aware(tmp_path):
     assert watch.compare_snapshots(distribution, distribution, pr_825_merged=False) == {
         "status": "stable", "reasons": [],
     }
+
+
+
+def test_check_pr_failure_is_explicitly_degraded_and_reduces_ledger_confidence(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(watch, "probe", lambda _root, check_pr: {
+        "comparison": {"status": "stable", "reasons": []},
+        "pr_query_requested": check_pr,
+        "pr_query_ok": False,
+        "warnings": ["network unavailable"],
+    })
+    monkeypatch.setattr(watch, "_run_doctor", lambda _root: {"status": "pass"})
+    monkeypatch.setattr(watch, "kernel_critical_probe", lambda: {"status": "pass"})
+    monkeypatch.setattr(watch, "_artifact_path", lambda _root: tmp_path / "check.json")
+    recorded = {}
+
+    def record(_root, _artifact, passed, *, degraded):
+        recorded.update(passed=passed, degraded=degraded)
+        return {"status": "pass", "evidence_id": "ev-degraded"}
+
+    monkeypatch.setattr(watch, "_record_evidence", record)
+    assert watch.main(["--repo", str(tmp_path), "--check-pr", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "pass-degraded"
+    assert recorded == {"passed": True, "degraded": True}
+
+
+def test_local_pr_scan_is_full_history_and_retirement_marker_is_one_way(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    calls = []
+
+    class GitResult:
+        returncode = 0
+        stdout = "Merge pull request #825 from upstream\n"
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return GitResult()
+
+    monkeypatch.setattr(watch.subprocess, "run", fake_run)
+    assert watch._local_pr_825_merge(source) is True
+    assert calls == [["git", "log", "--format=%s"]]
+
+    root = tmp_path / "repo"
+    snapshot = {
+        "schema_version": watch.SCHEMA_VERSION,
+        "prime_agent": {"version": "0.7.1", "binary_sha256": "a", "source_root": str(source)},
+        "patch_state": {"venv_python_path": False, "windows_hide": False},
+        "source_file_sha256": {}, "archived_patch_sha256": {},
+    }
+    watch.atomic_write_json(watch.baseline_path(root), snapshot)
+    monkeypatch.setattr(watch, "capture_current", lambda _root: copy.deepcopy(snapshot))
+    merge_values = iter((True, False))
+    monkeypatch.setattr(watch, "_local_pr_825_merge", lambda _source: next(merge_values))
+    first = watch.probe(root)
+    assert first["pr_825_merged"] is True
+    assert watch.retirement_marker_path(root).is_file()
+    second = watch.probe(root)
+    assert second["pr_825_merged"] is True
+    assert second["comparison"]["status"] == "retirement_required"

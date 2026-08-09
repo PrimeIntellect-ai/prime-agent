@@ -591,19 +591,23 @@ def main() -> int:
     if not args.dry_run:
         upstream_watch = target / "harness" / "upstream_check.py"
         if upstream_watch.is_file():
-            baseline = subprocess.run(
-                [sys.executable, "-S", str(upstream_watch), "--repo", str(target),
-                 "--record-baseline", "--json"],
-                cwd=str(target), capture_output=True, text=True, timeout=120,
-            )
-            if baseline.returncode == 0:
-                try:
-                    action = json.loads(baseline.stdout).get("action", "recorded")
-                except json.JSONDecodeError:
-                    action = "recorded"
-                print(f"upstream baseline: {action}")
+            try:
+                baseline = subprocess.run(
+                    [sys.executable, "-S", str(upstream_watch), "--repo", str(target),
+                     "--record-baseline", "--json"],
+                    cwd=str(target), capture_output=True, text=True, timeout=120,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                print(f"warning: could not record upstream baseline: {type(exc).__name__}: {exc}")
             else:
-                print(f"warning: could not record upstream baseline: {baseline.stderr.strip()[:300]}")
+                if baseline.returncode == 0:
+                    try:
+                        action = json.loads(baseline.stdout).get("action", "recorded")
+                    except json.JSONDecodeError:
+                        action = "recorded"
+                    print(f"upstream baseline: {action}")
+                else:
+                    print(f"warning: could not record upstream baseline: {baseline.stderr.strip()[:300]}")
 
     if args.check and not args.dry_run:
         print("\nrunning doctor...\n")
