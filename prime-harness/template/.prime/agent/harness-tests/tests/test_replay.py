@@ -741,3 +741,40 @@ def test_invalid_corpus_contract_uses_exit_two_and_removes_stale_output(replay_r
     assert proc.returncode == 2
     assert "max_tolerance_digits" in proc.stderr
     assert not stale.exists()
+
+
+def test_zero_promotion_thresholds_are_rejected_as_vacuous(tmp_path):
+    replay = load_replay_module("prime_harness_replay_zero_threshold")
+    corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
+    corpus["promotion_policy"]["minimum_category_rate"] = 0
+    corpus["promotion_policy"]["minimum_score_rate"] = 0
+    with pytest.raises(replay.ReplayError, match="minimum_.*_rate"):
+        replay.load_corpus(write_json(tmp_path / "zero-thresholds.json", corpus))
+
+
+def test_symbolic_expression_depth_fails_with_replay_error(tmp_path):
+    replay = load_replay_module("prime_harness_replay_expression_depth")
+    corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
+    task = _corpus_task(corpus, "symbolic")
+    task["lhs"] = "+".join(["1"] * 1500)
+    task["rhs"] = task["lhs"]
+    with pytest.raises(replay.ReplayError, match="expression"):
+        replay.load_corpus(write_json(tmp_path / "deep-expression.json", corpus))
+
+
+def test_huge_json_integer_fails_with_replay_error(tmp_path):
+    replay = load_replay_module("prime_harness_replay_huge_integer")
+    corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
+    _corpus_task(corpus, "convergence")["expected_order"] = 10**1000
+    with pytest.raises(replay.ReplayError, match="expected_order"):
+        replay.load_corpus(write_json(tmp_path / "huge-integer.json", corpus))
+
+
+def test_oversized_integer_literal_is_wrapped_as_replay_error(tmp_path):
+    replay = load_replay_module("prime_harness_replay_integer_literal_limit")
+    corpus_text = CORPUS.read_text(encoding="utf-8")
+    corpus_text = corpus_text.replace('"default_seed": 20260808', '"default_seed": ' + "9" * 5000, 1)
+    path = tmp_path / "oversized-integer-literal.json"
+    path.write_text(corpus_text, encoding="utf-8")
+    with pytest.raises(replay.ReplayError, match="invalid JSON"):
+        replay.load_corpus(path)

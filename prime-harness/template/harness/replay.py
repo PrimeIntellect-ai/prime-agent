@@ -65,7 +65,9 @@ def _read_json(path: Path) -> Any:
         )
     except (OSError, UnicodeError) as exc:
         raise ReplayError(f"cannot read {path}: {type(exc).__name__}") from exc
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except ReplayError:
+        raise
+    except (json.JSONDecodeError, RecursionError, ValueError, MemoryError) as exc:
         raise ReplayError(f"invalid JSON in {path}: {type(exc).__name__}") from exc
 
 
@@ -178,6 +180,47 @@ def _bounded_text(value: Any, label: str, maximum: int, *, allow_empty: bool = F
     return value
 
 
+
+def _validate_expression(value: Any, label: str) -> str:
+    expression = _bounded_text(value, label, MAX_EXPRESSION_CHARS)
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except (SyntaxError, RecursionError, ValueError, MemoryError) as exc:
+        raise ReplayError(f"{label} expression could not be parsed safely") from exc
+    pending: list[tuple[ast.AST, int]] = [(tree, 1)]
+    count = 0
+    while pending:
+        node, depth = pending.pop()
+        count += 1
+        if count > 512 or depth > 64:
+            raise ReplayError(f"{label} expression exceeds the 512-node or 64-level bound")
+        children: list[ast.AST]
+        if isinstance(node, ast.Expression):
+            children = [node.body]
+        elif isinstance(node, ast.Constant) and type(node.value) in {int, float}:
+            _json_number(node.value, f"{label} constant")
+            children = []
+        elif isinstance(node, ast.Name):
+            _variable_name(node.id, f"{label} variable")
+            children = []
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            children = [node.operand]
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+            children = [node.left, node.right]
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ALLOWED_FUNCS
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            children = [node.args[0]]
+        else:
+            raise ReplayError(f"{label} expression contains unsupported node {type(node).__name__}")
+        pending.extend((child, depth + 1) for child in children)
+    return expression
+
+
 def _bounded_identifier(value: Any, label: str, maximum: int) -> str:
     text = _bounded_text(value, label, maximum)
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
@@ -198,7 +241,10 @@ def _variable_name(value: Any, label: str) -> str:
 def _json_number(value: Any, label: str, *, positive: bool = False) -> float:
     if type(value) not in {int, float}:
         raise ReplayError(f"{label} must be a JSON number")
-    result = float(value)
+    try:
+        result = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ReplayError(f"{label} must be a representable finite JSON number") from exc
     if not math.isfinite(result) or abs(result) > MAX_FINITE_MAGNITUDE:
         raise ReplayError(f"{label} must be finite with magnitude at most {MAX_FINITE_MAGNITUDE:g}")
     if positive and result <= 0:
@@ -288,8 +334,8 @@ def _sample_list(value: Any, label: str, *, require_nonempty: bool) -> list[dict
 
 
 def _validate_symbolic_task(task: dict[str, Any], label: str) -> None:
-    _bounded_text(task["lhs"], f"{label}.lhs", MAX_EXPRESSION_CHARS)
-    _bounded_text(task["rhs"], f"{label}.rhs", MAX_EXPRESSION_CHARS)
+    _validate_expression(task["lhs"], f"{label}.lhs")
+    _validate_expression(task["rhs"], f"{label}.rhs")
     expected = task["expected_verdict"]
     if expected not in SYMBOLIC_VERDICTS:
         raise ReplayError(f"{label}.expected_verdict must be one of {sorted(SYMBOLIC_VERDICTS)}")
@@ -413,8 +459,14 @@ def load_corpus(path: Path) -> tuple[dict[str, Any], str]:
         corpus["promotion_policy"], "corpus.promotion_policy",
         frozenset({"minimum_category_rate", "minimum_score_rate", "repetitions"}),
     )
-    _bounded_number(policy["minimum_category_rate"], "corpus.promotion_policy.minimum_category_rate", lower=0.0, upper=1.0)
-    _bounded_number(policy["minimum_score_rate"], "corpus.promotion_policy.minimum_score_rate", lower=0.0, upper=1.0)
+    _bounded_number(
+        policy["minimum_category_rate"], "corpus.promotion_policy.minimum_category_rate",
+        lower=0.0, upper=1.0, lower_inclusive=False,
+    )
+    _bounded_number(
+        policy["minimum_score_rate"], "corpus.promotion_policy.minimum_score_rate",
+        lower=0.0, upper=1.0, lower_inclusive=False,
+    )
     _bounded_int(policy["repetitions"], "corpus.promotion_policy.repetitions", 2, 5)
 
     contracts = _require_dict(corpus["response_contracts"], "corpus.response_contracts")
