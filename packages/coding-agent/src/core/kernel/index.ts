@@ -39,6 +39,15 @@ const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
 // on-disk copy is the fallback if this is exceeded.
 const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
+// An awaited dispose() must outlive the kill: the kernel is spawned with `cwd`
+// set to its temp dir, and Windows keeps that directory locked until the
+// process is really gone, so a caller deleting it after dispose() gets EPERM.
+const KERNEL_EXIT_TIMEOUT_MS = 2000;
+const KERNEL_EXIT_POLL_INTERVAL_MS = 10;
+// rmSync's own maxRetries does not cover this: the native implementation
+// surfaces the directory-level EPERM without retrying.
+const TEMP_DIR_REMOVE_ATTEMPTS = 10;
+const TEMP_DIR_REMOVE_DELAY_MS = 20;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
@@ -1301,7 +1310,55 @@ export class KernelManager {
 		await this.control.send(encode(msg, this.connection.key));
 	}
 
-	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
+	/**
+	 * Resolves once the killed kernel has actually exited, or the timeout
+	 * elapses. A forked kernel is not a direct child and emits no "exit", so it
+	 * is polled the same way `forkedKernelDied` checks liveness.
+	 */
+	private static async waitForKernelExit(child: ChildProcess | undefined, pid: number | undefined): Promise<void> {
+		const deadline = Date.now() + KERNEL_EXIT_TIMEOUT_MS;
+
+		if (child && child.exitCode === null && child.signalCode === null) {
+			await new Promise<void>((resolve) => {
+				const done = () => {
+					globalThis.clearTimeout(timer);
+					child.removeListener("exit", done);
+					resolve();
+				};
+				const timer = globalThis.setTimeout(done, KERNEL_EXIT_TIMEOUT_MS);
+				if (typeof timer === "object" && "unref" in timer) timer.unref();
+				child.once("exit", done);
+			});
+			return;
+		}
+
+		if (pid === undefined) return;
+		while (Date.now() < deadline) {
+			try {
+				process.kill(pid, 0);
+			} catch (error) {
+				// ESRCH means gone. EPERM means the pid exists but is not ours to
+				// signal, which still counts as alive.
+				if (!(error instanceof Error && (error as NodeJS.ErrnoException).code === "EPERM")) return;
+			}
+			await new Promise((resolve) => globalThis.setTimeout(resolve, KERNEL_EXIT_POLL_INTERVAL_MS));
+		}
+	}
+
+	/** Removes a kernel temp dir, retrying while the OS still holds a handle. */
+	private static async removeTempDirWithRetries(dir: string): Promise<void> {
+		for (let attempt = 0; attempt < TEMP_DIR_REMOVE_ATTEMPTS; attempt++) {
+			try {
+				rmSync(dir, { recursive: true, force: true });
+				return;
+			} catch {
+				await new Promise((resolve) => globalThis.setTimeout(resolve, TEMP_DIR_REMOVE_DELAY_MS));
+			}
+		}
+		// Leave the temp dir for OS tmp cleanup.
+	}
+
+	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM", options: { removeTempDir?: boolean } = {}): void {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		if (this.forkedLivenessTimer) {
@@ -1339,14 +1396,16 @@ export class KernelManager {
 		this.kernel = undefined;
 		this.kernelPid = undefined;
 		this.connection = undefined;
-		if (this.tempDir) {
+		// dispose() defers this so it can wait for the kernel to exit first;
+		// disposeSync() has no such option and removes it best-effort here.
+		if (this.tempDir && options.removeTempDir !== false) {
 			try {
 				rmSync(this.tempDir, { recursive: true, force: true });
 			} catch {
 				// Leave the temp dir for OS tmp cleanup.
 			}
 		}
-		this.tempDir = undefined;
+		if (options.removeTempDir !== false) this.tempDir = undefined;
 		this.startPromise = undefined;
 	}
 
@@ -1535,7 +1594,15 @@ export class KernelManager {
 					await this.waitForHostRequestsToSettle(inFlightHostRequests, HOST_REQUEST_DISPOSE_TIMEOUT_MS);
 				}
 			} finally {
-				this.cleanupResources();
+				// Capture before cleanupResources clears them; the kill happens
+				// inside it and the exit has to be awaited afterwards.
+				const child = this.kernel;
+				const pid = this.kernelPid;
+				const tempDir = this.tempDir;
+				this.cleanupResources("SIGTERM", { removeTempDir: false });
+				this.tempDir = undefined;
+				await KernelManager.waitForKernelExit(child, pid);
+				if (tempDir) await KernelManager.removeTempDirWithRetries(tempDir);
 			}
 		})();
 	}
