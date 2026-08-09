@@ -196,10 +196,9 @@ describe("InteractiveMode interrupt shortcuts", () => {
 	});
 
 	it("clears the exit hint after two seconds", async () => {
-		const mode = createInteractiveFake({ editorText: "draft" });
+		const mode = createInteractiveFake({});
 
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
-		expect(mode.editor.getText()).toBe("draft");
 		expect(Reflect.get(InteractiveMode.prototype, "getTrayOverrideLabel").call(mode)).toBe(
 			"Press Ctrl+C again to exit",
 		);
@@ -211,13 +210,33 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		expect(mode.ui.requestRender).toHaveBeenCalled();
 	});
 
-	it("preserves idle draft input on first Ctrl+C", () => {
+	it("clears idle draft input on first Ctrl+C", () => {
 		const mode = createInteractiveFake({ editorText: "draft" });
 
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
 
-		expect(mode.editor.getText()).toBe("draft");
+		expect(mode.editor.getText()).toBe("");
 		expect(mode.restoreQueuedMessagesToEditor).not.toHaveBeenCalled();
+		expect(mode.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("does not clear draft on Ctrl+C when streaming (interrupts instead)", () => {
+		const mode = createInteractiveFake({ editorText: "draft", streaming: true });
+
+		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
+
+		expect(mode.editor.getText()).toBe("draft");
+		expect(mode.restoreQueuedMessagesToEditor).toHaveBeenCalledWith({ abort: true });
+		expect(mode.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("does not clear draft on Ctrl+C when bash is running (interrupts instead)", () => {
+		const mode = createInteractiveFake({ editorText: "draft", bashRunning: true });
+
+		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
+
+		expect(mode.editor.getText()).toBe("draft");
+		expect(mode.agentConnection.abortBash).toHaveBeenCalledTimes(1);
 		expect(mode.shutdown).not.toHaveBeenCalled();
 	});
 
