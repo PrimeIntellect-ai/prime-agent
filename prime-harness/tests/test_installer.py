@@ -379,6 +379,34 @@ def test_tailor_detects_tox_lean_and_nonplaceholder_node_tests(tmp_repo):
     assert sum(int(entry["timeout_seconds"]) for entry in quick) < 600
 
 
+
+
+
+def test_tailor_emits_one_unit_check_per_detected_test_directory(tmp_repo):
+    for directory in ("tests", "test"):
+        path = tmp_repo / directory
+        path.mkdir()
+        (path / f"test_{directory}.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    proc = run_install(tmp_repo, "--tailor")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
+    units = [entry for entry in manifest["profiles"]["default"]["required"] if entry["name"].startswith("unit")]
+    assert {entry["skip_if_missing"] for entry in units} == {"tests", "test"}
+    assert len(units) == 2
+    for entry in units:
+        assert entry["command"].split()[-1] == entry["skip_if_missing"]
+
+    shutil.rmtree(tmp_repo / "tests")
+    gate = subprocess.run(
+        [sys.executable, "-S", str(tmp_repo / "harness/verify.py"), "--profile", "default", "--json"],
+        cwd=tmp_repo, capture_output=True, text=True, timeout=300,
+    )
+    assert gate.returncode == 0, gate.stdout + gate.stderr
+    verdict = json.loads(next(line[12:] for line in gate.stdout.splitlines() if line.startswith("GATE_RESULT ")))
+    assert any(name.startswith("unit:test") for name in verdict["passed"])
+    assert len(verdict["skipped"]) == 1
+
+
 def test_tailored_manifest_passes_doctor_static_applicability(tmp_repo):
     (tmp_repo / "src/pkg").mkdir(parents=True)
     (tmp_repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")

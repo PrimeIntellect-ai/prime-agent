@@ -233,9 +233,27 @@ def compare_snapshots(
     }
 
 
+def _snapshot_identity_available(snapshot: dict[str, Any]) -> bool:
+    prime = snapshot.get("prime_agent")
+    if not isinstance(prime, dict):
+        return False
+    version = prime.get("version")
+    digest = prime.get("binary_sha256")
+    return (
+        isinstance(version, str) and bool(version.strip())
+        and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+    )
+
+
 def record_baseline(path: Path, snapshot: dict[str, Any], *, force: bool) -> str:
+    if not _snapshot_identity_available(snapshot):
+        return "deferred-unavailable"
     if path.exists() and not force:
-        return "unchanged"
+        existing = _read_json(path)
+        if existing is None or _snapshot_identity_available(existing):
+            return "unchanged"
+        atomic_write_json(path, snapshot)
+        return "replaced-incomplete"
     action = "replaced" if path.exists() else "created"
     atomic_write_json(path, snapshot)
     return action

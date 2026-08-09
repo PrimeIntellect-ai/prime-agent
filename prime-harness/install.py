@@ -383,8 +383,9 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     if pyproject_text is not None:
         detected.append(pyproject_name)
     if test_dirs:
-        joined = " ".join(test_dirs)
-        checks.append(_check("unit", f"python -m pytest -q {joined}", test_dirs[0], 900))
+        for item in test_dirs:
+            name = "unit" if len(test_dirs) == 1 else f"unit:{item}"
+            checks.append(_check(name, f"python -m pytest -q {item}", item, 900))
         detected.extend(f"python-tests:{item}" for item in test_dirs)
     elif pyproject_text is not None and "[tool.pytest" in pyproject_text:
         checks.append(_check("unit", "python -m pytest -q", pyproject_name, 900))
@@ -432,7 +433,7 @@ def tailor_manifest(target: Path) -> dict[str, object]:
     quick_timeout = max(1, 480 // len(checks))
     for entry in checks:
         item = dict(entry)
-        if item["name"] == "unit":
+        if str(item["name"]).startswith("unit"):
             item["command"] = str(item["command"]).replace("pytest -q", "pytest -q -x", 1)
         item["timeout_seconds"] = min(int(item.get("timeout_seconds", quick_timeout)), quick_timeout)
         quick.append(item)

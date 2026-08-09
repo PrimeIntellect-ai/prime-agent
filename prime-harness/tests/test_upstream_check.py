@@ -75,10 +75,32 @@ def test_snapshot_detects_binary_source_and_patch_drift(tmp_path):
     assert any("#825" in reason for reason in retirement["reasons"])
 
 
+
+
+
+def test_incomplete_identity_baseline_is_deferred_and_legacy_copy_self_heals(tmp_path):
+    path = tmp_path / "baseline.json"
+    unavailable = {
+        "schema_version": watch.SCHEMA_VERSION,
+        "prime_agent": {"version": None, "binary_sha256": None, "source_root": None},
+        "patch_state": {}, "source_file_sha256": {}, "archived_patch_sha256": {},
+    }
+    assert watch.record_baseline(path, unavailable, force=False) == "deferred-unavailable"
+    assert not path.exists()
+
+    # Simulate a baseline created by the pre-fix installer before Prime Agent existed.
+    watch.atomic_write_json(path, unavailable)
+    available = copy.deepcopy(unavailable)
+    available["prime_agent"].update({"version": "0.7.1", "binary_sha256": "a" * 64})
+    assert watch.record_baseline(path, available, force=False) == "replaced-incomplete"
+    assert json.loads(path.read_text(encoding="utf-8"))["prime_agent"]["version"] == "0.7.1"
+    assert watch.record_baseline(path, {**available, "captured_at": "later"}, force=False) == "unchanged"
+
+
 def test_baseline_is_create_once_unless_force_is_explicit(tmp_path):
     baseline = tmp_path / "baseline.json"
-    first = {"schema_version": 1, "prime_agent": {"version": "0.7.1"}}
-    second = {"schema_version": 1, "prime_agent": {"version": "0.8.0"}}
+    first = {"schema_version": 1, "prime_agent": {"version": "0.7.1", "binary_sha256": "a" * 64}}
+    second = {"schema_version": 1, "prime_agent": {"version": "0.8.0", "binary_sha256": "b" * 64}}
     assert watch.record_baseline(baseline, first, force=False) == "created"
     assert watch.record_baseline(baseline, second, force=False) == "unchanged"
     assert json.loads(baseline.read_text(encoding="utf-8")) == first
