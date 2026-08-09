@@ -7,7 +7,7 @@
 
 import type { TableCellSelectionRegion } from "./selection-metadata.js";
 import { isImageLine } from "./terminal-image.js";
-import { sliceByColumn, stripAnsi, visibleWidth } from "./utils.js";
+import { getWordSegmenter, sliceByColumn, stripAnsi, visibleWidth } from "./utils.js";
 
 export const FULLSCREEN_MIN_TRANSCRIPT_ROWS = 3;
 
@@ -71,6 +71,8 @@ interface TableSelectionRange {
 
 type SelectionMode = "transcript" | "table" | "frame";
 
+type SelectionGranularity = "character" | "word" | "line";
+
 export class FullscreenViewport {
 	private scrollTop = 0;
 	private following = true;
@@ -90,6 +92,8 @@ export class FullscreenViewport {
 	private selectionAnchor: SelectionPoint | null = null;
 	private selectionHead: SelectionPoint | null = null;
 	private selectionMode: SelectionMode | null = null;
+	private selectionGranularity: SelectionGranularity = "character";
+	private selectionInitialRange: { start: SelectionPoint; end: SelectionPoint } | null = null;
 
 	/**
 	 * Compose a frame of exactly `height` lines: scrolled transcript window on
@@ -135,7 +139,22 @@ export class FullscreenViewport {
 	private orderedSelection(): { start: SelectionPoint; end: SelectionPoint } | null {
 		const a = this.selectionAnchor;
 		const b = this.selectionHead;
-		if (!a || !b || (a.line === b.line && a.col === b.col)) return null;
+		if (!a || !b) return null;
+
+		// For word/line granularity the anchor is the click position and head is the
+		// drag target; the effective range spans the initial word/line plus the head.
+		if (
+			(this.selectionGranularity === "word" || this.selectionGranularity === "line") &&
+			this.selectionInitialRange
+		) {
+			const initial = this.selectionInitialRange;
+			const start = this.compareSelectionPoints(b, initial.start) < 0 ? b : initial.start;
+			const end = this.compareSelectionPoints(b, initial.end) > 0 ? b : initial.end;
+			if (this.compareSelectionPoints(start, end) === 0) return null;
+			return { start, end };
+		}
+
+		if (a.line === b.line && a.col === b.col) return null;
 		const flipped = a.line > b.line || (a.line === b.line && a.col > b.col);
 		return flipped ? { start: b, end: a } : { start: a, end: b };
 	}
@@ -175,6 +194,8 @@ export class FullscreenViewport {
 		const point = { line, col: Math.max(0, screenCol) };
 		this.selectionAnchor = point;
 		this.selectionHead = { ...point };
+		this.selectionGranularity = "character";
+		this.selectionInitialRange = null;
 		const table = this.tableAtPoint(point);
 		const tableCell = table ? this.closestTableCell(table, point) : null;
 		if (table && tableCell) {
@@ -187,11 +208,97 @@ export class FullscreenViewport {
 		return true;
 	}
 
+	beginWordSelection(screenRow: number, screenCol: number): boolean {
+		const line = this.transcriptLineForScreenRow(screenRow, false);
+		if (line === null) {
+			this.clearSelection();
+			return false;
+		}
+		const text = stripAnsi(this.lastTranscript[line] ?? "");
+		const word = this.wordAtColumn(text, Math.max(0, screenCol));
+		this.selectionAnchor = { line, col: Math.max(0, screenCol) };
+		this.selectionHead = { line, col: word.end };
+		this.selectionInitialRange = {
+			start: { line, col: word.start },
+			end: { line, col: word.end },
+		};
+		this.selectionGranularity = "word";
+		this.selectionMode = "transcript";
+		this.activeTableSelection = null;
+		return true;
+	}
+
+	beginLineSelection(screenRow: number, screenCol: number): boolean {
+		const line = this.transcriptLineForScreenRow(screenRow, false);
+		if (line === null) {
+			this.clearSelection();
+			return false;
+		}
+		const text = stripAnsi(this.lastTranscript[line] ?? "");
+		const width = visibleWidth(text);
+		this.selectionAnchor = { line, col: Math.max(0, screenCol) };
+		this.selectionHead = { line, col: width };
+		this.selectionInitialRange = {
+			start: { line, col: 0 },
+			end: { line, col: width },
+		};
+		this.selectionGranularity = "line";
+		this.selectionMode = "transcript";
+		this.activeTableSelection = null;
+		return true;
+	}
+
+	private wordAtColumn(text: string, col: number): { start: number; end: number } {
+		const segmenter = getWordSegmenter();
+		let start = 0;
+		for (const { segment } of segmenter.segment(text)) {
+			const segWidth = visibleWidth(segment);
+			const end = start + segWidth;
+			if (col >= start && col < end) return { start, end };
+			start = end;
+		}
+		return { start, end: start };
+	}
+
+	/** Word segment boundaries (terminal columns) at a screen position, or null outside transcript. */
+	wordRangeAt(screenRow: number, screenCol: number): { start: number; end: number } | null {
+		const line = this.transcriptLineForScreenRow(screenRow, false);
+		if (line === null) return null;
+		const text = stripAnsi(this.lastTranscript[line] ?? "");
+		return this.wordAtColumn(text, Math.max(0, screenCol));
+	}
+
 	extendSelection(screenRow: number, screenCol: number): void {
 		if (!this.selectionAnchor || (this.selectionMode !== "transcript" && this.selectionMode !== "table")) return;
 		const line = this.transcriptLineForScreenRow(screenRow, true);
 		if (line === null) return;
-		this.selectionHead = { line, col: Math.max(0, screenCol) };
+
+		if (this.selectionMode === "table") {
+			this.selectionHead = { line, col: Math.max(0, screenCol) };
+			return;
+		}
+
+		const clampedCol = Math.max(0, screenCol);
+
+		if (this.selectionGranularity === "character" || !this.selectionInitialRange) {
+			this.selectionHead = { line, col: clampedCol };
+			return;
+		}
+
+		const initial = this.selectionInitialRange;
+
+		if (this.selectionGranularity === "word") {
+			const text = stripAnsi(this.lastTranscript[line] ?? "");
+			const word = this.wordAtColumn(text, clampedCol);
+			if (line < initial.start.line || (line === initial.start.line && clampedCol < initial.start.col)) {
+				this.selectionHead = { line, col: word.start };
+			} else {
+				this.selectionHead = { line, col: word.end };
+			}
+		} else {
+			const text = stripAnsi(this.lastTranscript[line] ?? "");
+			this.selectionHead = line < initial.start.line ? { line, col: 0 } : { line, col: visibleWidth(text) };
+		}
 	}
 
 	selectionAutoScrollDirection(screenRow: number): SelectionScrollDirection | null {
@@ -235,13 +342,10 @@ export class FullscreenViewport {
 			return null;
 		}
 		const sel = this.orderedSelection();
-		const text = sel
-			? this.selectionMode === "table"
-				? this.extractTableSelectionText(this.lastTranscript, sel)
-				: this.extractSelectionText(this.lastTranscript, sel)
-			: null;
-		this.clearSelection();
-		return text;
+		if (!sel) return null;
+		return this.selectionMode === "table"
+			? this.extractTableSelectionText(this.lastTranscript, sel)
+			: this.extractSelectionText(this.lastTranscript, sel);
 	}
 
 	extendActiveSelection(screenRow: number, screenCol: number): void {
@@ -297,6 +401,8 @@ export class FullscreenViewport {
 		};
 		this.selectionAnchor = point;
 		this.selectionHead = { ...point };
+		this.selectionGranularity = "character";
+		this.selectionInitialRange = null;
 		this.selectionMode = "frame";
 		return true;
 	}
@@ -319,7 +425,6 @@ export class FullscreenViewport {
 		const active = this.activeFrameSelection;
 		const sourceLines = active?.frame ?? this.lastFrame;
 		const regions = active?.regions ?? this.frameSelectionRegions;
-		this.clearSelection();
 		if (!sel) return null;
 		return this.extractFrameSelectionText(sourceLines, regions, sel);
 	}
@@ -617,6 +722,8 @@ export class FullscreenViewport {
 		this.selectionAnchor = null;
 		this.selectionHead = null;
 		this.selectionMode = null;
+		this.selectionGranularity = "character";
+		this.selectionInitialRange = null;
 		this.activeFrameSelection = null;
 		this.activeTableSelection = null;
 	}

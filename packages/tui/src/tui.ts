@@ -350,6 +350,12 @@ export class TUI extends Container {
 	private static readonly WHEEL_SCROLL_LINES = 3;
 	private static readonly SELECTION_AUTO_SCROLL_DELAY_MS = 150;
 	private static readonly SELECTION_AUTO_SCROLL_INTERVAL_MS = 50;
+	private static readonly DOUBLE_CLICK_MS = 500;
+	private lastClickTime = 0;
+	private lastClickRow = -1;
+	private lastClickWordStart = -1;
+	private lastClickWordEnd = -1;
+	private clickCount = 0;
 	private selectionAutoScrollTimer: NodeJS.Timeout | undefined;
 	private selectionAutoScrollDirection: SelectionScrollDirection | null = null;
 	private selectionAutoScrollRow = 0;
@@ -793,6 +799,26 @@ export class TUI extends Container {
 		this.selectionAutoScrollTimer.unref();
 	}
 
+	private countClick(screenRow: number, screenCol: number, viewport: FullscreenViewport): number {
+		const now = Date.now();
+		const word = viewport.wordRangeAt(screenRow, screenCol);
+		const sameWord =
+			screenRow === this.lastClickRow &&
+			word !== null &&
+			word.start === this.lastClickWordStart &&
+			word.end === this.lastClickWordEnd;
+		if (now - this.lastClickTime <= TUI.DOUBLE_CLICK_MS && sameWord) {
+			this.clickCount = (this.clickCount % 3) + 1;
+		} else {
+			this.clickCount = 1;
+		}
+		this.lastClickTime = now;
+		this.lastClickRow = screenRow;
+		this.lastClickWordStart = word?.start ?? screenCol;
+		this.lastClickWordEnd = word?.end ?? screenCol;
+		return this.clickCount;
+	}
+
 	private stopSelectionAutoScroll(): void {
 		if (this.selectionAutoScrollTimer) {
 			clearTimeout(this.selectionAutoScrollTimer);
@@ -902,7 +928,16 @@ export class TUI extends Container {
 					this.scrollBy(TUI.WHEEL_SCROLL_LINES);
 				} else if (event.button === MOUSE_BUTTON_LEFT && event.press && !event.motion) {
 					this.stopSelectionAutoScroll();
-					if (!viewport.beginSelection(event.y - 1, event.x - 1)) {
+					const clicks = this.countClick(event.y - 1, event.x - 1, viewport);
+					let began = false;
+					if (clicks === 2) {
+						began = viewport.beginWordSelection(event.y - 1, event.x - 1);
+					} else if (clicks === 3) {
+						began = viewport.beginLineSelection(event.y - 1, event.x - 1);
+					} else {
+						began = viewport.beginSelection(event.y - 1, event.x - 1);
+					}
+					if (!began) {
 						viewport.beginFrameSelection(event.y - 1, event.x - 1);
 					}
 					this.requestRender();

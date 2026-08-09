@@ -3,11 +3,21 @@ import { eastAsianWidth } from "get-east-asian-width";
 // Grapheme segmenter (shared instance)
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+// Word-level segmenter (shared instance) for double-click word selection
+const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+
 /**
  * Get the shared grapheme segmenter instance.
  */
 export function getSegmenter(): Intl.Segmenter {
 	return segmenter;
+}
+
+/**
+ * Get the shared word-level segmenter instance.
+ */
+export function getWordSegmenter(): Intl.Segmenter {
+	return wordSegmenter;
 }
 
 /**

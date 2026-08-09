@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Added double-click word selection, triple-click line selection, and word-granularity drag selection in the fullscreen TUI.
+- Changed click counting to use word-level proximity instead of exact column match, so slight mouse drift between clicks still registers multi-clicks.
+- Fixed selection anchor mutating during word/line drag by computing the effective range from the initial word/line boundary.
+- Changed fullscreen mouse selection to keep the highlight visible after release instead of clearing immediately.
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05
