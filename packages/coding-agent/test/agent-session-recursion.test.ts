@@ -2016,6 +2016,162 @@ describe("AgentSession rlm recursion", () => {
 		expect(captured[1]).toBe(250);
 	});
 
+	it("lets the model set a child token budget that draws from the parent reservation", async () => {
+		const captured: Array<number | undefined> = [];
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					captured.push(options.rlmTokenAllowance);
+					throw new Error("stop after capturing the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		// pool is 500; an explicit request overrides the 250 equal share.
+		await root.runRlmChild("expensive child", { token_budget: 400 });
+		await vi.waitFor(() => expect(captured).toHaveLength(1));
+		expect(captured[0]).toBe(400);
+
+		// Only 100 tokens remain, so a second 400-token request cannot be funded.
+		await expect(root.runRlmChild("second", { token_budget: 400 })).rejects.toThrow(/subtree pool exhausted/);
+	});
+
+	it("rejects a model token budget larger than a depth-indexed schedule funds", async () => {
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "geometric", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+		});
+
+		await expect(root.runRlmChild("greedy", { token_budget: 900 })).rejects.toThrow(
+			/exceeds the 500 tokens the "geometric" schedule funds at depth 1/,
+		);
+	});
+
+	it("validates the model-supplied token budget kwarg", async () => {
+		const root = createSession({ maxDepth: 3 });
+
+		await expect(root.runRlmChild("bad", { token_budget: 0 })).rejects.toThrow(/positive integer/);
+		await expect(root.runRlmChild("bad", { token_budget: "lots" })).rejects.toThrow(/positive integer/);
+	});
+
+	it("starts a budget for the child subtree when no budget is active", async () => {
+		const captured: Array<{ allowance?: number; total?: number }> = [];
+		const root = createSession({
+			maxDepth: 3,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					captured.push({ allowance: options.rlmTokenAllowance, total: options.rlmTokenBudget?.totalTokens });
+					throw new Error("stop after capturing the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		expect(root.getRlmTokenBudgetStatus().config).toBeNull();
+		await root.runRlmChild("capped delegation", { token_budget: 50_000 });
+		await vi.waitFor(() => expect(captured).toHaveLength(1));
+
+		expect(captured[0]).toEqual({ allowance: 50_000, total: 50_000 });
+	});
+
+	it("publishes the child allowance on subagent snapshots", async () => {
+		const snapshots: Array<{ tokenAllowance?: number }> = [];
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+		});
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") snapshots.push({ tokenAllowance: event.child.tokenAllowance });
+		});
+
+		await root.runRlmChild("child");
+		await vi.waitFor(() => expect(snapshots.length).toBeGreaterThan(0));
+
+		expect(snapshots[0]?.tokenAllowance).toBe(250);
+	});
+
+	it("funds as much of a requested range as the pool affords", async () => {
+		const captured: Array<number | undefined> = [];
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					captured.push(options.rlmTokenAllowance);
+					throw new Error("stop after capturing the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		// pool is 500: the first child takes its full ceiling.
+		await root.runRlmChild("first", { token_budget: [100, 400] });
+		await vi.waitFor(() => expect(captured).toHaveLength(1));
+		expect(captured[0]).toBe(400);
+
+		// Only 100 remain, which still clears the floor, so the child is funded at 100.
+		await root.runRlmChild("second", { token_budget: [100, 400] });
+		await vi.waitFor(() => expect(captured).toHaveLength(2));
+		expect(captured[1]).toBe(100);
+
+		// Nothing left, so a floor of 100 can no longer be met.
+		await expect(root.runRlmChild("third", { token_budget: [100, 400] })).rejects.toThrow(
+			/cannot fund a subagent with at least 100 tokens/,
+		);
+	});
+
+	it("refuses a range whose floor the schedule cannot fund", async () => {
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "geometric", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+		});
+
+		await expect(root.runRlmChild("greedy", { token_budget: [800, 900] })).rejects.toThrow(
+			/floor 800 exceeds the 500 tokens/,
+		);
+	});
+
+	it("grants the affordable part of a range under a depth-indexed schedule", async () => {
+		const captured: Array<number | undefined> = [];
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "geometric", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					captured.push(options.rlmTokenAllowance);
+					throw new Error("stop after capturing the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		await root.runRlmChild("flexible", { token_budget: [100, 900] });
+		await vi.waitFor(() => expect(captured).toHaveLength(1));
+
+		// The schedule funds 500 at depth 1, which sits inside the requested range.
+		expect(captured[0]).toBe(500);
+	});
+
+	it("keeps a configured floor from starving a depth", async () => {
+		const child = createSession({
+			depth: 3,
+			maxDepth: 8,
+			tokenBudget: { totalTokens: 1_000_000, schedule: "geometric", factor: 0.01, fanout: 3, minTokens: 25_000 },
+		});
+
+		// The raw schedule would grant 1 token at depth 3; the floor lifts it.
+		expect(child.getRlmTokenBudgetStatus().allowanceTokens).toBe(25_000);
+	});
+
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {
 		let releaseTurn!: () => void;
 		const release = new Promise<void>((resolve) => {

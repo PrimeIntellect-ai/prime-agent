@@ -698,6 +698,8 @@ interface StateOptions {
 	contextTokens?: number;
 	streamingMessage?: AgentMessage;
 	rlmDepth?: number;
+	rlmTokenAllowance?: number;
+	rlmTokensUsed?: number;
 	metadata?: {
 		kind: "top-level" | "subagent";
 		createdAt: number;
@@ -742,6 +744,15 @@ function makeState(options: StateOptions): ActiveSessionState {
 				},
 				messages: options.messages ?? ([] as AgentMessage[]),
 				getRlmChildRunStatus: (childId: string) => options.childRunStatuses?.[childId],
+				getRlmTokenBudgetStatus: () => ({
+					config: null,
+					source: "default" as const,
+					depth: options.rlmDepth ?? 0,
+					allowanceTokens: options.rlmTokenAllowance ?? null,
+					tokensUsed: options.rlmTokensUsed ?? 0,
+					subtreePoolTokens: null,
+					exhausted: false,
+				}),
 				hasRunningRlmChildren: () => options.hasRunningRlmChildren ?? false,
 				hasAcceptedPromptInFlight: options.hasAcceptedPromptInFlight ?? false,
 				unfinishedActionCount: options.unfinishedActionCount ?? (options.hasAcceptedPromptInFlight ? 1 : 0),

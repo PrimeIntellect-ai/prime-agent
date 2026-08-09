@@ -6,6 +6,7 @@ import { compactRlmText, rlmChildLabel } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
+import type { RlmTokenBudgetStatus } from "../../core/rlm-token-budget.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
@@ -42,6 +43,10 @@ export interface SessionSummary {
 	runtimeKind?: "top-level" | "subagent";
 	/** RLM spawn depth (0 for roots); fork edges preserve the source depth. */
 	rlmDepth?: number;
+	/** Token allowance for this session's depth, when RLM token budgeting is active. */
+	rlmTokenAllowance?: number;
+	/** Tokens generated against that allowance. */
+	rlmTokensUsed?: number;
 	activeSessionId?: string;
 	sessionId: string;
 	sessionFile?: string;
@@ -209,6 +214,7 @@ export function summaryForActiveSession(
 		}
 	}
 
+	const rlmTokenBudget = readRlmTokenBudget(session);
 	return {
 		id: activeSession.activeSessionId,
 		lifecycle: activeLifecycleForSession(activeSession),
@@ -221,6 +227,8 @@ export function summaryForActiveSession(
 			latestMessageActivityAt(session.messages) ?? modified ?? session.sessionManager.getHeader?.()?.timestamp,
 		runtimeKind: metadata.kind,
 		rlmDepth: session.rlmDepth,
+		rlmTokenAllowance: rlmTokenBudget.allowanceTokens,
+		rlmTokensUsed: rlmTokenBudget.tokensUsed,
 		activeSessionId: activeSession.activeSessionId,
 		sessionId: session.sessionId,
 		sessionFile: session.sessionFile,
@@ -268,6 +276,19 @@ export function summaryForActiveSession(
 		summary: activeSession.summaryState?.summary,
 		...(isSummaryCurrent(activeSession) ? { taskState: activeSession.summaryState?.taskState } : {}),
 	};
+}
+
+/**
+ * RLM budget is optional display metadata, so a session that cannot report one must
+ * still list and attach normally rather than failing the whole summary.
+ */
+function readRlmTokenBudget(session: { getRlmTokenBudgetStatus?: () => RlmTokenBudgetStatus }): {
+	allowanceTokens?: number;
+	tokensUsed?: number;
+} {
+	const status = session.getRlmTokenBudgetStatus?.();
+	if (!status || status.allowanceTokens === null) return {};
+	return { allowanceTokens: status.allowanceTokens, tokensUsed: status.tokensUsed };
 }
 
 function latestMessageActivityAt(messages: readonly AgentMessage[]): string | undefined {
@@ -395,6 +416,7 @@ function rlmChildSnapshotForActiveSession(
 		: undefined;
 	const status = runStatus ?? (session.isSessionActive ? "running" : "done");
 	const isActive = status === "running" || session.isSessionActive;
+	const childBudget = readRlmTokenBudget(session);
 	return {
 		id: metadata.rlmChildId ?? activeSession.activeSessionId,
 		parentId: parentNodeId,
@@ -406,6 +428,8 @@ function rlmChildSnapshotForActiveSession(
 		answerPreview,
 		toolUseCount: toolUseCount > 0 ? toolUseCount : undefined,
 		tokenCount: session._contextTokensForCurrentMessages(),
+		tokenAllowance: childBudget.allowanceTokens,
+		tokensUsed: childBudget.tokensUsed,
 		recap: session.getCurrentRecap(),
 		sessionDir: metadata.sessionDir ?? session.sessionManager.getSessionDir(),
 		activity: isActive ? { kind: session.isStreaming ? "writing" : "waiting" } : undefined,

@@ -30,6 +30,7 @@ import {
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
+	formatSessionBudget,
 	getAgentsViewSelectionKey,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
@@ -1515,6 +1516,31 @@ describe("agents view state", () => {
 			expect(formatAgentDepthLabel(0, true)).toBe("depth 0");
 			expect(formatAgentDepthLabel(3, false)).toBe("depth 3");
 		});
+	});
+});
+
+describe("agents-view budget display", () => {
+	test("omits the budget fragment when the session has no RLM token budget", () => {
+		expect(formatSessionBudget(makeSummary({}))).toBeUndefined();
+	});
+
+	test("shows used and granted tokens for a budgeted depth", () => {
+		expect(formatSessionBudget(makeSummary({ rlmTokenAllowance: 500_000, rlmTokensUsed: 12_000 }))).toBe(
+			"budget 12k/500k",
+		);
+		expect(formatSessionBudget(makeSummary({ rlmTokenAllowance: 500_000, rlmTokensUsed: 1_500 }))).toBe(
+			"budget 1.5k/500k",
+		);
+	});
+
+	test("treats a fresh budgeted session as zero used", () => {
+		expect(formatSessionBudget(makeSummary({ rlmTokenAllowance: 250 }))).toBe("budget 0/250");
+	});
+
+	test("scales compactly into millions", () => {
+		expect(formatSessionBudget(makeSummary({ rlmTokenAllowance: 2_000_000, rlmTokensUsed: 1_500_000 }))).toBe(
+			"budget 1.5m/2.0m",
+		);
 	});
 });
 

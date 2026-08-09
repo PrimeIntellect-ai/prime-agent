@@ -44,6 +44,7 @@ export {
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
+	formatSessionBudget,
 	getAgentsViewSelectionKey,
 	getAgentsViewSessionTitle,
 	getUnifiedSessionAncestorSessionIds,

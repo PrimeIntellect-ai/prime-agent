@@ -9136,12 +9136,17 @@ export class InteractiveMode {
 		if (!status.config) {
 			return `RLM token budget: off (${status.source})`;
 		}
-		const { totalTokens, schedule, factor, fanout } = status.config;
+		const { totalTokens, schedule, factor, fanout, minTokens, maxTokens } = status.config;
+		const range =
+			minTokens === undefined && maxTokens === undefined
+				? undefined
+				: `range=${minTokens ?? 0}-${maxTokens ?? totalTokens}`;
 		const parts = [
 			`RLM token budget: ${totalTokens} tokens`,
 			`schedule=${schedule}`,
 			`factor=${factor}`,
 			`fanout=${fanout}`,
+			...(range ? [range] : []),
 			`(${status.source})`,
 		];
 		const allowance =

@@ -3,6 +3,7 @@ import {
 	childAllowance,
 	DEFAULT_RLM_TOKEN_BUDGET_FANOUT,
 	isRlmTokenBudgetConfig,
+	normalizeRlmTokenBudgetRequest,
 	ownAllowance,
 	parseRlmTokenBudgetCommand,
 	parseRlmTokenBudgetTokens,
@@ -163,5 +164,96 @@ describe("rlm token budget command parsing", () => {
 		expect(() => parseRlmTokenBudgetCommand("1000 --factor 3")).toThrow(/greater than 0/);
 		expect(() => parseRlmTokenBudgetCommand("1000 --fanout 0")).toThrow(/fanout/);
 		expect(() => parseRlmTokenBudgetCommand("1000 bogus")).toThrow(/Unexpected argument/);
+	});
+});
+
+describe("rlm token budget ranges", () => {
+	test("clamps depth-indexed allowances into the configured range", () => {
+		const cfg = config({ schedule: "geometric", factor: 0.1, minTokens: 20_000, maxTokens: 400_000 });
+
+		// unclamped: 1000000, 100000, 10000 -> clamped by ceiling, untouched, raised to floor
+		expect(ownAllowance(cfg, 0)).toBe(400_000);
+		expect(ownAllowance(cfg, 1)).toBe(100_000);
+		expect(ownAllowance(cfg, 2)).toBe(20_000);
+	});
+
+	test("applies only the ceiling under split so the subtree bound survives", () => {
+		const cfg = config({ schedule: "split", factor: 0.5, minTokens: 900_000, maxTokens: 300_000 - 1 });
+
+		// The floor would raise the allowance above what the parent reserved, so it is ignored here.
+		expect(ownAllowance(cfg, 0, 1_000_000)).toBe(299_999);
+	});
+
+	test("keeps the tree bounded when a ceiling is configured", () => {
+		const cfg = config({ schedule: "split", factor: 0.5, fanout: 3, maxTokens: 120_000 });
+
+		for (const fanout of [1, 3, 8]) {
+			expect(simulateTree(cfg, 6, fanout)).toBeLessThanOrEqual(cfg.totalTokens);
+		}
+	});
+
+	test("validates range ordering", () => {
+		expect(isRlmTokenBudgetConfig({ ...config(), minTokens: 10, maxTokens: 5 })).toBe(false);
+		expect(isRlmTokenBudgetConfig({ ...config(), minTokens: 5, maxTokens: 10 })).toBe(true);
+		expect(() => validateRlmTokenBudgetConfig({ ...config(), minTokens: 10, maxTokens: 5 })).toThrow(
+			/floor 10 exceeds its ceiling 5/,
+		);
+	});
+
+	test("parses the <floor>-<ceiling> command form", () => {
+		expect(parseRlmTokenBudgetCommand("200k-600k")).toEqual({
+			kind: "set",
+			global: false,
+			config: {
+				totalTokens: 600_000,
+				schedule: "split",
+				factor: 0.5,
+				fanout: 3,
+				minTokens: 200_000,
+				maxTokens: 600_000,
+			},
+		});
+	});
+
+	test("parses explicit floor and ceiling flags", () => {
+		expect(parseRlmTokenBudgetCommand("1m --floor 50k --ceiling 400k")).toEqual({
+			kind: "set",
+			global: false,
+			config: {
+				totalTokens: 1_000_000,
+				schedule: "split",
+				factor: 0.5,
+				fanout: 3,
+				minTokens: 50_000,
+				maxTokens: 400_000,
+			},
+		});
+	});
+
+	test("rejects an inverted range from the command line", () => {
+		expect(() => parseRlmTokenBudgetCommand("600k-200k")).toThrow(/exceeds its ceiling/);
+	});
+});
+
+describe("rlm token budget request normalization", () => {
+	test("accepts a bare ceiling", () => {
+		expect(normalizeRlmTokenBudgetRequest(500)).toEqual({ minTokens: 500, maxTokens: 500 });
+		expect(normalizeRlmTokenBudgetRequest(undefined)).toBeUndefined();
+	});
+
+	test("accepts tuple and object range forms", () => {
+		expect(normalizeRlmTokenBudgetRequest([200, 600])).toEqual({ minTokens: 200, maxTokens: 600 });
+		expect(normalizeRlmTokenBudgetRequest({ min: 200, max: 600 })).toEqual({ minTokens: 200, maxTokens: 600 });
+		expect(normalizeRlmTokenBudgetRequest({ minTokens: 200, maxTokens: 600 })).toEqual({
+			minTokens: 200,
+			maxTokens: 600,
+		});
+	});
+
+	test("rejects malformed requests", () => {
+		expect(() => normalizeRlmTokenBudgetRequest(0)).toThrow(/positive integer/);
+		expect(() => normalizeRlmTokenBudgetRequest([600, 200])).toThrow(/floor 600 exceeds its ceiling 200/);
+		expect(() => normalizeRlmTokenBudgetRequest([1, 2, 3])).toThrow(/floor, ceiling/);
+		expect(() => normalizeRlmTokenBudgetRequest("lots")).toThrow(/floor, ceiling/);
 	});
 });

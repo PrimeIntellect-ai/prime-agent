@@ -942,9 +942,28 @@ export function getAgentsViewSessionTitle(summary: SessionSummary): string {
 	return "Untitled agent";
 }
 
+/** Compact token count for tree rows, e.g. 1500 -> "1.5k", 250000 -> "250k". */
+function formatTokenCount(tokens: number): string {
+	if (tokens < 1000) return String(tokens);
+	if (tokens < 1_000_000) {
+		const thousands = tokens / 1000;
+		return `${thousands < 10 ? thousands.toFixed(1) : Math.round(thousands)}k`;
+	}
+	const millions = tokens / 1_000_000;
+	return `${millions < 10 ? millions.toFixed(1) : Math.round(millions)}m`;
+}
+
+/** Budget fragment shown on a tree row; empty when the session has no RLM token budget. */
+export function formatSessionBudget(summary: SessionSummary): string | undefined {
+	if (summary.rlmTokenAllowance === undefined) return undefined;
+	const used = summary.rlmTokensUsed ?? 0;
+	return `budget ${formatTokenCount(used)}/${formatTokenCount(summary.rlmTokenAllowance)}`;
+}
+
 function getSessionSubtitle(summary: SessionSummary): string {
 	const parts = [
 		summary.model ? `${summary.model.provider}/${summary.model.id}` : undefined,
+		formatSessionBudget(summary),
 		summary.cwd,
 		summary.activeSessionId ?? summary.id,
 	].filter((part): part is string => part !== undefined && part.length > 0);

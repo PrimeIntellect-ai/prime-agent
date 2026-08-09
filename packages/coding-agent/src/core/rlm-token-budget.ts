@@ -26,6 +26,19 @@ export interface RlmTokenBudgetConfig {
 	factor: number;
 	/** Number of children a `split` allowance is divided between. */
 	fanout: number;
+	/**
+	 * Smallest allowance a depth may receive. A depth the schedule would starve is raised to this
+	 * floor; under `split`, where raising would break the subtree bound, the spawn is refused instead.
+	 */
+	minTokens?: number;
+	/** Largest allowance any single depth may receive, applied after the schedule. */
+	maxTokens?: number;
+}
+
+/** A token budget expressed as a range instead of a single ceiling. */
+export interface RlmTokenBudgetRange {
+	minTokens: number;
+	maxTokens: number;
 }
 
 export interface RlmTokenBudgetStatus {
@@ -78,8 +91,45 @@ export function isRlmTokenBudgetConfig(value: unknown): value is RlmTokenBudgetC
 		Number.isFinite(candidate.factor) &&
 		candidate.factor > 0 &&
 		candidate.factor <= 1 &&
-		isPositiveInteger(candidate.fanout)
+		isPositiveInteger(candidate.fanout) &&
+		(candidate.minTokens === undefined || isPositiveInteger(candidate.minTokens)) &&
+		(candidate.maxTokens === undefined || isPositiveInteger(candidate.maxTokens)) &&
+		(candidate.minTokens === undefined ||
+			candidate.maxTokens === undefined ||
+			candidate.minTokens <= candidate.maxTokens)
 	);
+}
+
+/** Normalize a model-supplied `token_budget`, which may be a single ceiling or a [floor, ceiling] range. */
+export function normalizeRlmTokenBudgetRequest(value: unknown): RlmTokenBudgetRange | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value === "number") {
+		if (!Number.isSafeInteger(value) || value <= 0) {
+			throw new Error("rlm.run token_budget must be a positive integer");
+		}
+		return { minTokens: value, maxTokens: value };
+	}
+	const pair = Array.isArray(value)
+		? value
+		: typeof value === "object" && value !== null
+			? [
+					(value as { min?: unknown; minTokens?: unknown }).min ?? (value as { minTokens?: unknown }).minTokens,
+					(value as { max?: unknown; maxTokens?: unknown }).max ?? (value as { maxTokens?: unknown }).maxTokens,
+				]
+			: undefined;
+	if (!pair || pair.length !== 2) {
+		throw new Error(
+			"rlm.run token_budget must be a positive integer or a (floor, ceiling) pair such as (200000, 600000)",
+		);
+	}
+	const [min, max] = pair;
+	if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || Number(min) <= 0 || Number(max) <= 0) {
+		throw new Error("rlm.run token_budget bounds must be positive integers");
+	}
+	if (Number(min) > Number(max)) {
+		throw new Error(`rlm.run token_budget floor ${min} exceeds its ceiling ${max}`);
+	}
+	return { minTokens: Number(min), maxTokens: Number(max) };
 }
 
 /** Validate a config supplied by a user or a persisted entry, throwing a user-facing message when invalid. */
@@ -96,19 +146,42 @@ export function validateRlmTokenBudgetConfig(config: RlmTokenBudgetConfig): RlmT
 	if (!isPositiveInteger(config.fanout)) {
 		throw new Error("RLM token budget fanout must be a positive integer.");
 	}
+	if (config.minTokens !== undefined && !isPositiveInteger(config.minTokens)) {
+		throw new Error("RLM token budget floor must be a positive integer.");
+	}
+	if (config.maxTokens !== undefined && !isPositiveInteger(config.maxTokens)) {
+		throw new Error("RLM token budget ceiling must be a positive integer.");
+	}
+	if (config.minTokens !== undefined && config.maxTokens !== undefined && config.minTokens > config.maxTokens) {
+		throw new Error(`RLM token budget floor ${config.minTokens} exceeds its ceiling ${config.maxTokens}.`);
+	}
 	return { ...config };
+}
+
+/** Clamp a scheduled allowance into the configured [floor, ceiling] range. */
+export function clampToBudgetRange(config: RlmTokenBudgetConfig, tokens: number): number {
+	let clamped = tokens;
+	if (config.maxTokens !== undefined) clamped = Math.min(clamped, config.maxTokens);
+	if (config.minTokens !== undefined) clamped = Math.max(clamped, config.minTokens);
+	return clamped;
 }
 
 /** Tokens the session at `depth` may generate itself under the given allowance. */
 export function ownAllowance(config: RlmTokenBudgetConfig, depth: number, inheritedAllowance?: number): number {
 	switch (config.schedule) {
 		case "flat":
-			return config.totalTokens;
+			return clampToBudgetRange(config, config.totalTokens);
 		case "geometric":
-			return Math.max(1, Math.floor(config.totalTokens * config.factor ** Math.max(0, depth)));
+			return clampToBudgetRange(
+				config,
+				Math.max(1, Math.floor(config.totalTokens * config.factor ** Math.max(0, depth))),
+			);
 		case "split": {
 			const allowance = inheritedAllowance ?? config.totalTokens;
-			return Math.max(1, Math.floor(allowance * (1 - config.factor)));
+			// The floor is deliberately not applied here: raising a split allowance would break the
+			// subtree bound. Under-funded children are refused at spawn instead.
+			const own = Math.max(1, Math.floor(allowance * (1 - config.factor)));
+			return config.maxTokens === undefined ? own : Math.min(own, config.maxTokens);
 		}
 	}
 }
@@ -151,7 +224,7 @@ export type RlmTokenBudgetCommand =
 	| { kind: "set"; config: RlmTokenBudgetConfig; global: boolean };
 
 const RLM_TOKEN_BUDGET_USAGE =
-	"Usage: /rlm-token-budget [off|<tokens> [--schedule flat|geometric|split] [--factor <0-1>] [--fanout <int>] [--global]]";
+	"Usage: /rlm-token-budget [off|<tokens>|<floor>-<ceiling> [--schedule flat|geometric|split] [--factor <0-1>] [--fanout <int>] [--floor <tokens>] [--ceiling <tokens>] [--global]]";
 
 /** Parse a token count, accepting `_` separators and `k`/`m` suffixes (e.g. `500k`, `1_000_000`, `2m`). */
 export function parseRlmTokenBudgetTokens(value: string): number {
@@ -188,6 +261,8 @@ export function parseRlmTokenBudgetCommand(args: string): RlmTokenBudgetCommand 
 	let schedule = DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE;
 	let factor = DEFAULT_RLM_TOKEN_BUDGET_FACTOR;
 	let fanout = DEFAULT_RLM_TOKEN_BUDGET_FANOUT;
+	let minTokens: number | undefined;
+	let maxTokens: number | undefined;
 
 	const head = tokens[0].toLowerCase();
 	let index = 1;
@@ -211,6 +286,14 @@ export function parseRlmTokenBudgetCommand(args: string): RlmTokenBudgetCommand 
 			const { value, nextIndex } = takeFlagValue(tokens, index, "--fanout");
 			fanout = Number(value);
 			index = nextIndex;
+		} else if (token === "--floor" || token.startsWith("--floor=")) {
+			const { value, nextIndex } = takeFlagValue(tokens, index, "--floor");
+			minTokens = parseRlmTokenBudgetTokens(value);
+			index = nextIndex;
+		} else if (token === "--ceiling" || token.startsWith("--ceiling=")) {
+			const { value, nextIndex } = takeFlagValue(tokens, index, "--ceiling");
+			maxTokens = parseRlmTokenBudgetTokens(value);
+			index = nextIndex;
 		} else {
 			throw new Error(`Unexpected argument "${token}". ${RLM_TOKEN_BUDGET_USAGE}`);
 		}
@@ -219,6 +302,23 @@ export function parseRlmTokenBudgetCommand(args: string): RlmTokenBudgetCommand 
 	if (head === "off" || head === "none" || head === "clear") {
 		return { kind: "off", global };
 	}
-	const totalTokens = parseRlmTokenBudgetTokens(tokens[0]);
-	return { kind: "set", config: validateRlmTokenBudgetConfig({ totalTokens, schedule, factor, fanout }), global };
+	// `<floor>-<ceiling>` is the range form; a bare value is a single ceiling.
+	const rangeMatch = /^([\d_]+[km]?)-([\d_]+[km]?)$/i.exec(tokens[0]);
+	if (rangeMatch) {
+		minTokens = parseRlmTokenBudgetTokens(rangeMatch[1]);
+		maxTokens = parseRlmTokenBudgetTokens(rangeMatch[2]);
+	}
+	const totalTokens = rangeMatch ? (maxTokens as number) : parseRlmTokenBudgetTokens(tokens[0]);
+	return {
+		kind: "set",
+		config: validateRlmTokenBudgetConfig({
+			totalTokens,
+			schedule,
+			factor,
+			fanout,
+			...(minTokens === undefined ? {} : { minTokens }),
+			...(maxTokens === undefined ? {} : { maxTokens }),
+		}),
+		global,
+	};
 }

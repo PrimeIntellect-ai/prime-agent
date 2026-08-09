@@ -238,8 +238,10 @@ import {
 	DEFAULT_RLM_TOKEN_BUDGET_FANOUT,
 	DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE,
 	isRlmTokenBudgetConfig,
+	normalizeRlmTokenBudgetRequest,
 	ownAllowance,
 	type RlmTokenBudgetConfig,
+	type RlmTokenBudgetRange,
 	type RlmTokenBudgetSource,
 	type RlmTokenBudgetStatus,
 	rlmTokenDeltaForUsage,
@@ -318,6 +320,10 @@ export interface RlmChildAgentSnapshot {
 	toolUseCount?: number;
 	/** Context size (tokens) of the subagent's latest turn. */
 	tokenCount?: number;
+	/** Token allowance granted to this subagent, when RLM token budgeting is active. */
+	tokenAllowance?: number;
+	/** Tokens the subagent has generated against its allowance. */
+	tokensUsed?: number;
 	/** Latest recap of what the subagent is doing, from the summarizer. */
 	recap?: string;
 	sessionDir: string;
@@ -1666,22 +1672,37 @@ export class AgentSession {
 	 * Draw a child's allowance from this session's budget, refusing the spawn when the
 	 * schedule cannot fund another child. Returns undefined when budgeting is disabled.
 	 */
-	private _reserveRlmChildAllowance(): number | undefined {
+	private _reserveRlmChildAllowance(requested?: RlmTokenBudgetRange): number | undefined {
 		const config = this._rlmTokenBudget;
-		if (!config) return undefined;
+		if (!config) {
+			// No active budget: an explicit request starts one for that child's subtree only.
+			return requested?.maxTokens;
+		}
 		if (this._rlmTokenBudgetExhausted()) {
 			throw new Error(
 				`RLM token budget exhausted (used ${this._rlmTokensUsed} of ${this._rlmTokenAllowance} tokens); cannot spawn a subagent`,
 			);
 		}
 		if (config.schedule !== "split") {
-			return childAllowance(config, this._rlmDepth + 1, null);
+			const fundable = childAllowance(config, this._rlmDepth + 1, null);
+			if (requested === undefined) return fundable;
+			if (requested.minTokens > fundable) {
+				throw new Error(
+					`rlm.run token_budget floor ${requested.minTokens} exceeds the ${fundable} tokens the "${config.schedule}" schedule funds at depth ${this._rlmDepth + 1}`,
+				);
+			}
+			// Grant as much of the requested range as the schedule funds.
+			return Math.min(requested.maxTokens, fundable);
 		}
-		const granted = this._rlmChildAllowanceShare ?? 0;
 		const remaining = this._rlmSubtreePool ?? 0;
-		if (granted <= 0 || remaining < granted) {
+		const share = this._rlmChildAllowanceShare ?? 0;
+		// A range draws from the same reservation, so the subtree stays bounded either way.
+		const floor = requested?.minTokens ?? config.minTokens ?? 0;
+		const desired = requested === undefined ? Math.max(share, floor) : requested.maxTokens;
+		const granted = Math.min(desired, remaining);
+		if (granted <= 0 || granted < floor) {
 			throw new Error(
-				`RLM token budget subtree pool exhausted (schedule="split", fanout=${config.fanout}); cannot fund another subagent`,
+				`RLM token budget subtree pool exhausted (schedule="split", fanout=${config.fanout}, ${remaining} tokens left); cannot fund a subagent with at least ${Math.max(floor, 1)} tokens`,
 			);
 		}
 		this._rlmSubtreePool = remaining - granted;
@@ -9288,6 +9309,7 @@ export class AgentSession {
 		sessionDir: string;
 		model: Model<any>;
 		tokenAllowance?: number;
+		tokenBudget?: RlmTokenBudgetConfig;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9308,7 +9330,7 @@ export class AgentSession {
 			includeCompactSkill: this._includeCompactSkill,
 			rlmDepth: this._rlmDepth + 1,
 			rlmMaxDepth: this._rlmMaxDepth,
-			rlmTokenBudget: this._rlmTokenBudget,
+			rlmTokenBudget: options.tokenBudget,
 			rlmTokenAllowance: options.tokenAllowance,
 			rlmParentNodeId: options.id,
 		};
@@ -9963,7 +9985,7 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, ...unsupported } = kwargs;
+		const { name: rawName, model: rawModel, token_budget: rawTokenBudget, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
@@ -9976,7 +9998,19 @@ export class AgentSession {
 				`RLM recursion depth limit reached (RLM_DEPTH=${this._rlmDepth}, RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
 			);
 		}
-		const childTokenAllowance = this._reserveRlmChildAllowance();
+		const childTokenAllowance = this._reserveRlmChildAllowance(normalizeRlmTokenBudgetRequest(rawTokenBudget));
+		// With no active budget, a model-supplied allowance still needs a config so the
+		// child (and its own descendants) are governed by a schedule.
+		const childTokenBudget =
+			this._rlmTokenBudget ??
+			(childTokenAllowance === undefined
+				? undefined
+				: {
+						totalTokens: childTokenAllowance,
+						schedule: DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE,
+						factor: DEFAULT_RLM_TOKEN_BUDGET_FACTOR,
+						fanout: DEFAULT_RLM_TOKEN_BUDGET_FANOUT,
+					});
 		if (requestedSessionName) {
 			if (this._pendingRlmSubagentSessionNames.has(requestedSessionName)) {
 				throw new Error(formatAgentSessionNameUnavailable(requestedSessionName, this._rlmDepth + 1));
@@ -10034,6 +10068,8 @@ export class AgentSession {
 					answerPreview,
 					toolUseCount: toolUseCount > 0 ? toolUseCount : undefined,
 					tokenCount: childSession?._contextTokensForCurrentMessages(),
+					tokenAllowance: childTokenAllowance,
+					tokensUsed: childSession?.getRlmTokenBudgetStatus().tokensUsed,
 					recap: childSession?.getCurrentRecap(),
 					sessionDir: childSessionDir,
 					activity,
@@ -10061,6 +10097,7 @@ export class AgentSession {
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
 				tokenAllowance: childTokenAllowance,
+				tokenBudget: childTokenBudget,
 			}),
 			onSessionPublished: publishChildSession,
 		};

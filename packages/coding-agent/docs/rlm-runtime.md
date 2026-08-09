@@ -188,6 +188,19 @@ Three schedules distribute a total allowance across depths:
 
 Only `split` bounds the whole tree: node count grows as `fanout^depth`, so a fixed per-depth allowance still lets total spend grow without limit. Under `split` a parent funds exactly `fanout` children and every descendant is paid for out of the root grant, so the tree total never exceeds it regardless of depth or fan-out.
 
+### Ranges
+
+A budget may be a range instead of a single ceiling, which keeps every depth inside a band rather than letting a schedule starve deep levels:
+
+```
+/rlm-token-budget 200k-600k
+/rlm-token-budget 1m --floor 50k --ceiling 400k
+```
+
+A scheduled allowance is clamped into `[floor, ceiling]`. Under `flat` and `geometric` both bounds apply directly. Under `split` only the ceiling is applied to a session's own allowance, because raising an allowance to a floor would break the subtree bound; an under-funded child is refused at spawn instead, which preserves the bound and still guarantees no child runs below the floor.
+
+A spawning model may set a child's allowance explicitly with `rlm.run(..., token_budget=N)`, or as a range with `rlm.run(..., token_budget=(floor, ceiling))`. With a range the parent funds as much of it as the reservation affords and refuses only when it cannot reach the floor. The request is bounded by what the parent may grant: under `split` it draws from the same subtree reservation (so an uneven split is allowed but the subtree bound holds), and under the depth-indexed schedules it may not exceed what the schedule funds at that depth. When no budget is active, an explicit `token_budget` starts one for that child's subtree alone, which makes budgeting opt-in per delegation.
+
 Budget state flows downward as a value snapshot taken at spawn time. A running child never re-reads its parent, so changing a budget mid-run affects only sessions spawned afterwards. A child that persists its own per-chat override can lower its allowance but never raise it above the grant it was spawned with.
 
 Kernel env exposes `RLM_TOKEN_ALLOWANCE` and `RLM_TOKEN_SUBTREE_POOL` at provisioning time; as with `RLM_MAX_DEPTH`, the TypeScript-side check is authoritative.

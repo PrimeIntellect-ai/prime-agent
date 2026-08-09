@@ -567,6 +567,8 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 	toolUseCount?: number;
 	/** Context size (tokens) of the subagent's latest turn. */
 	tokenCount?: number;
+	tokenAllowance?: number;
+	tokensUsed?: number;
 	/** Latest recap of what the subagent is doing. */
 	recap?: string;
 	sessionDir: string;

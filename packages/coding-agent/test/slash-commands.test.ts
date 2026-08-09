@@ -34,7 +34,8 @@ describe("built-in slash commands", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "rlm-token-budget")).toMatchObject({
 			description:
 				"Set/view the per-chat persistent RLM token budget and depth schedule; never interrupts or queues the running turn",
-			argumentHint: "[off|<tokens> [--schedule flat|geometric|split] [--factor <0-1>] [--fanout <int>] [--global]]",
+			argumentHint:
+				"[off|<tokens>|<floor>-<ceiling> [--schedule flat|geometric|split] [--factor <0-1>] [--fanout <int>] [--global]]",
 			takesArgument: true,
 		});
 	});
