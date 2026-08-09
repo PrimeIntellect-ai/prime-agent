@@ -426,11 +426,15 @@ def tailor_manifest(target: Path) -> dict[str, object]:
         )
 
     quick: list[dict[str, object]] = []
+    # Repair bursts allow 600 seconds for the complete quick gate. Keep 120
+    # seconds of launcher/result headroom and divide the rest deterministically
+    # across every detected check; default retains each check's full timeout.
+    quick_timeout = max(1, 480 // len(checks))
     for entry in checks:
         item = dict(entry)
         if item["name"] == "unit":
             item["command"] = str(item["command"]).replace("pytest -q", "pytest -q -x", 1)
-            item["timeout_seconds"] = 300
+        item["timeout_seconds"] = min(int(item.get("timeout_seconds", quick_timeout)), quick_timeout)
         quick.append(item)
     default = [dict(entry) for entry in checks]
     changed = [dict(entry) for entry in checks]

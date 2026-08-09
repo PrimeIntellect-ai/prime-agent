@@ -122,7 +122,8 @@ def test_archived_local_patches_apply_to_pristine_upstream_and_reproduce_postpat
         "packages/coding-agent/src/core/kernel/index.ts": "48f5748cb307e944b6104cff16d8dc8b4fcab9fee3b80d9d9bf9812c7e474c66"
 }
     for relative, digest in expected.items():
-        assert hashlib.sha256((worktree / relative).read_bytes()).hexdigest() == digest
+        patched = (worktree / relative).read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(patched).hexdigest() == digest
 
 
 def test_scheduled_pr_watch_is_read_only_pinned_and_calls_bounded_probe():

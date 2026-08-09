@@ -79,6 +79,11 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def _source_digest(path: Path) -> str:
+    """Hash source semantics while ignoring Git's LF/CRLF materialization."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def _require_dict(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReplayError(f"{label} must be an object")
@@ -1059,7 +1064,7 @@ def build_report(
     if not isinstance(repetitions, int) or isinstance(repetitions, bool) or not 2 <= repetitions <= 5:
         raise ReplayError("promotion_policy.repetitions must be an integer from 2 through 5")
     try:
-        executor_digest = hashlib.sha256(executor.read_bytes()).hexdigest()
+        executor_digest = _source_digest(executor)
     except OSError as exc:
         raise ReplayError(f"cannot read executor: {exc}") from exc
     common = {

@@ -157,10 +157,26 @@ def test_corpus_is_versioned_covered_and_has_thresholds():
     assert sum(task["category"] == "symbolic" for task in corpus["tasks"]) >= 4
     assert all(len(task["precisions_digits"]) >= 3 for task in corpus["tasks"] if task["category"] == "numeric")
     assert corpus["promotion_policy"] == {"minimum_category_rate": 0.5, "minimum_score_rate": 0.75, "repetitions": 2}
-    assert corpus["reference_executor_sha256"] == hashlib.sha256(REFERENCE_EXECUTOR.read_bytes()).hexdigest()
+    replay = load_replay_module("corpus_executor_digest")
+    assert corpus["reference_executor_sha256"] == replay._source_digest(REFERENCE_EXECUTOR)
     assert set(corpus["response_contracts"]) == {"symbolic", "numeric", "convergence", "invariant"}
     assert baseline["corpus_sha256"] == canonical_digest(corpus)
     assert "responses" not in baseline
+
+
+
+
+
+def test_executor_source_digest_is_stable_across_lf_and_crlf(tmp_path):
+    replay = load_replay_module("line_ending_digest")
+    lf = tmp_path / "lf.py"
+    crlf = tmp_path / "crlf.py"
+    changed = tmp_path / "changed.py"
+    lf.write_bytes(b"print('same')\nraise SystemExit(0)\n")
+    crlf.write_bytes(b"print('same')\r\nraise SystemExit(0)\r\n")
+    changed.write_bytes(b"print('different')\nraise SystemExit(0)\n")
+    assert replay._source_digest(lf) == replay._source_digest(crlf)
+    assert replay._source_digest(lf) != replay._source_digest(changed)
 
 
 def test_numeric_precision_ladder_cannot_be_empty_or_malformed(tmp_path):

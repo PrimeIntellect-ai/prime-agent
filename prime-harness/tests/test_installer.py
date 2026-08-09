@@ -375,6 +375,8 @@ def test_tailor_detects_tox_lean_and_nonplaceholder_node_tests(tmp_repo):
     manifest = json.loads((tmp_repo / "harness/manifest.json").read_text(encoding="utf-8"))
     names = {entry["name"] for entry in manifest["profiles"]["default"]["required"]}
     assert names == {"tox", "lean-build", "node-test"}
+    quick = manifest["profiles"]["quick"]["required"]
+    assert sum(int(entry["timeout_seconds"]) for entry in quick) < 600
 
 
 def test_tailored_manifest_passes_doctor_static_applicability(tmp_repo):
