@@ -30,6 +30,7 @@ import {
 	getCronJobsPath,
 	getDaemonLogPath,
 	getDaemonUpdateRestartManifestPath,
+	getSessionsDir,
 	VERSION,
 } from "../../config.js";
 import {
@@ -106,8 +107,13 @@ import {
 	type IdleEvictionMinutes,
 	type SessionPassivationSnapshot,
 } from "../../core/session-action-store.js";
-import { deleteSessionFile } from "../../core/session-file-actions.js";
-import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
+import { deleteSessionFile, sweepGhostSessionFiles } from "../../core/session-file-actions.js";
+import {
+	acquireSessionLease,
+	canonicalSessionPath,
+	type SessionLease,
+	sweepStaleSessionLeases,
+} from "../../core/session-lease.js";
 import {
 	readSessionInfo,
 	resolveSessionRlmDepth,
@@ -617,12 +623,37 @@ export class AgentDaemon {
 
 		this.registerSignalHandlers();
 		this.summarizer.start();
+		this.sweepStaleStartupState();
 		this.log(`Prime Agent daemon listening on ${this.socketPath}`);
 		// No startup restore: on-disk sessions return only via --resume or the agents view.
 		if (!this.shuttingDown) {
 			this.cronScheduler.start();
 		}
 		this.startSupervisorMonitor();
+	}
+
+	/**
+	 * Best-effort cleanup at daemon startup: remove stale session leases left by
+	 * crashed processes and ghost session files (empty drafts that were never
+	 * sent a message). These accumulate when a daemon exits without cleaning up.
+	 */
+	private sweepStaleStartupState(): void {
+		try {
+			const staleLeases = sweepStaleSessionLeases(this.agentDir);
+			if (staleLeases > 0) {
+				this.log(`swept ${staleLeases} stale session lease(s) at startup`);
+			}
+		} catch (error) {
+			this.log(`session lease sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		const sessionDir = this.options.defaultSessionConfig.sessionDir ?? getSessionsDir(this.agentDir);
+		void sweepGhostSessionFiles(sessionDir)
+			.then((count) => {
+				if (count > 0) this.log(`swept ${count} ghost session file(s) at startup`);
+			})
+			.catch((error) => {
+				this.log(`ghost session sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
 	}
 
 	private startSupervisorMonitor(): void {
@@ -6035,10 +6066,11 @@ export class AgentDaemon {
 			? await this.closeChildSessions(state, reason, waitForAbort, descendants)
 			: undefined;
 		// Empty draft (no messages, config, or jobs): discard rather than persist an
-		// empty session file. Mirrors the detach-time discard so a config-bearing
-		// draft closed via kill/completed is never wiped.
+		// empty session file. A busy session is never discarded even if empty — the
+		// activity may produce content. Mirrors isDiscardableDraft so all close
+		// reasons (including shutdown/update) agree on what an abandoned draft is.
 		const keepsResumeEntry = this.closeKeepsResumeEntry(reason);
-		const isEmptyDraftSession = !keepsResumeEntry && this.isEmptyDraftContent(state);
+		const isEmptyDraftSession = this.isEmptyDraftContent(state) && !isActiveSessionBusy(state);
 		let persistError: unknown;
 		// Clean shutdown leaves the session un-archived so it stays in the resume list.
 		if (!keepsResumeEntry && !isEmptyDraftSession) {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
@@ -11,6 +11,7 @@ import {
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 	SessionAlreadyActiveError,
+	sweepStaleSessionLeases,
 } from "../src/core/session-lease.js";
 
 const tempDirs: string[] = [];
@@ -185,5 +186,53 @@ describe("session leases", () => {
 	it("is inert for direct SDK runtimes unless worker isolation enables it", () => {
 		const agentDir = createTempDir();
 		expect(acquireSessionLease(join(agentDir, "session.jsonl"), agentDir, {})).toBeUndefined();
+	});
+
+	it("sweeps stale leases at startup while keeping live ones", () => {
+		const agentDir = createTempDir();
+
+		// Stale lease: owner PID does not exist.
+		const stalePath = canonicalSessionPath(resolve(agentDir, "stale.jsonl"));
+		const staleKey = createHash("sha256").update(stalePath).digest("hex");
+		const staleDir = join(agentDir, "session-leases", `${staleKey}.lock`);
+		mkdirSync(staleDir, { recursive: true });
+		writeFileSync(
+			join(staleDir, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				token: "stale",
+				pid: 2_147_483_647,
+				activeSessionId: "dead-owner",
+				sessionPath: stalePath,
+				createdAt: new Date(0).toISOString(),
+			}),
+		);
+
+		// Live lease: owner is this process.
+		const livePath = canonicalSessionPath(resolve(agentDir, "live.jsonl"));
+		const liveKey = createHash("sha256").update(livePath).digest("hex");
+		const liveDir = join(agentDir, "session-leases", `${liveKey}.lock`);
+		mkdirSync(liveDir, { recursive: true });
+		writeFileSync(
+			join(liveDir, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				token: "live",
+				pid: process.pid,
+				activeSessionId: "this-process",
+				sessionPath: livePath,
+				createdAt: new Date(0).toISOString(),
+			}),
+		);
+
+		const swept = sweepStaleSessionLeases(agentDir);
+		expect(swept).toBe(1);
+		expect(existsSync(staleDir)).toBe(false);
+		expect(existsSync(liveDir)).toBe(true);
+	});
+
+	it("handles a missing session-leases directory gracefully", () => {
+		const agentDir = createTempDir();
+		expect(sweepStaleSessionLeases(agentDir)).toBe(0);
 	});
 });

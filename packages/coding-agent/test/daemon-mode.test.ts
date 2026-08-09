@@ -1287,6 +1287,8 @@ describe("daemon mode helpers", () => {
 			session: {
 				sessionId: "session-child",
 				sessionFile: undefined,
+				isSessionActive: false,
+				hasRunningRlmChildren: () => false,
 				abort: vi.fn(() => new Promise<void>(() => {})),
 			},
 		} as unknown as ActiveSessionState["runtime"];
@@ -4543,6 +4545,8 @@ describe("daemon mode helpers", () => {
 					sessionId: "session-active",
 					sessionFile: undefined,
 					isBashRunning: false,
+					isSessionActive: false,
+					hasRunningRlmChildren: () => false,
 					abort: vi.fn(async () => {}),
 					sessionManager: { appendSessionState: vi.fn() },
 				},
@@ -9535,6 +9539,113 @@ describe("daemon mode helpers", () => {
 				activeSessionId: "missing",
 			}),
 		).rejects.toThrow("Unknown active session: missing");
+	});
+
+	it("deletes an empty draft session file when closed via shutdown", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-ghost-shutdown-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendSessionState({ status: "active" });
+			manager.flushNow();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Missing session file");
+
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					isStreaming: false,
+					isCompacting: false,
+					isSessionActive: false,
+					isBashRunning: false,
+					isRetrying: false,
+					unfinishedActionCount: 0,
+					hasRunningRlmChildren: () => false,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				closeSession(state: ActiveSessionState, reason: "shutdown"): Promise<void>;
+			};
+
+			const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+			expect(existsSync(sessionFile)).toBe(true);
+
+			await internals.closeSession(state, "shutdown");
+
+			expect(existsSync(sessionFile)).toBe(false);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves a session with user content when closed via shutdown", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-shutdown-content-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendMessage({ role: "user", content: "hello world", timestamp: 1 });
+			manager.appendSessionState({ status: "active" });
+			manager.flushNow();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Missing session file");
+
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					isStreaming: false,
+					isCompacting: false,
+					isSessionActive: false,
+					isBashRunning: false,
+					isRetrying: false,
+					unfinishedActionCount: 0,
+					hasRunningRlmChildren: () => false,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				closeSession(state: ActiveSessionState, reason: "shutdown"): Promise<void>;
+			};
+
+			const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+			expect(existsSync(sessionFile)).toBe(true);
+
+			await internals.closeSession(state, "shutdown");
+
+			expect(existsSync(sessionFile)).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 

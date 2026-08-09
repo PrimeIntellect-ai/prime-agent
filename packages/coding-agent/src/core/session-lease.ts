@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
 
@@ -227,6 +236,33 @@ function reclaimStaleLease(directory: string): boolean {
 	}
 	rmSync(stalePath, { recursive: true, force: true });
 	return true;
+}
+
+/**
+ * Remove all session-lease directories whose owner process is no longer alive.
+ * Called at daemon startup to reclaim leases left behind by crashed or killed
+ * processes. Safe because a live process can always re-acquire a swept lease.
+ */
+export function sweepStaleSessionLeases(agentDir: string): number {
+	const root = join(agentDir, "session-leases");
+	if (!existsSync(root)) return 0;
+	let swept = 0;
+	for (const entry of readdirSync(root)) {
+		if (!entry.endsWith(".lock")) continue;
+		const directory = join(root, entry);
+		const owner = readLeaseOwner(directory);
+		if (!owner) {
+			// Malformed or incomplete lease directory: reclaim it.
+			reclaimStaleLease(directory);
+			swept++;
+			continue;
+		}
+		if (!isLeaseOwnerAlive(owner)) {
+			reclaimStaleLease(directory);
+			swept++;
+		}
+	}
+	return swept;
 }
 
 export function acquireSessionLease(
