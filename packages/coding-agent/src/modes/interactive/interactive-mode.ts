@@ -2541,12 +2541,15 @@ export class InteractiveMode {
 
 	private async refreshConnectionCatalog(): Promise<void> {
 		this.invalidateConnectionModelRefresh();
-		const [state, commands, modelCatalog, resources] = await Promise.all([
-			this.agentConnection.getState(),
+		// Fetch the catalog before the state: serving the catalog can rebind the
+		// session's live models (e.g. auth.json changed while detached), and the
+		// state snapshot must reflect the rebound models.
+		const [commands, modelCatalog, resources] = await Promise.all([
 			this.agentConnection.getCommands().catch(() => []),
 			this.agentConnection.getModelCatalog(),
 			this.agentConnection.getResourceSnapshot(),
 		]);
+		const state = await this.agentConnection.getState();
 		this.applyConnectionStateSnapshot(state);
 		this.connectionCommands = commands;
 		this.applyConnectionModelCatalog(modelCatalog);
