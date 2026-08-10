@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added Mermaid diagram rendering as Unicode box-drawing art in chat messages, with a settings toggle.
 - Added the current working directory to the editor status line.
 - Changed `ctrl+c` to clear the prompt when it has content and no operation is running.
 - Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.

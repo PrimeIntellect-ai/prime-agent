@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added an optional `MarkdownOptions.transform` callback to the Markdown component for pre-processing raw text before parsing.
 - Added double-click word selection, triple-click line selection, and word-granularity drag selection in the fullscreen TUI.
 - Changed click counting to use word-level proximity instead of exact column match, so slight mouse drift between clicks still registers multi-clicks.
 - Fixed selection anchor mutating during word/line drag by computing the effective range from the initial word/line boundary.
