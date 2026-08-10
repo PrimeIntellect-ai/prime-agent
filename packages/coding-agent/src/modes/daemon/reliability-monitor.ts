@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getProcessStartId } from "../../core/session-lease.js";
+import { OperationExtensionInbox } from "./operation-extension-inbox.js";
 import type { OperationLedgerSnapshot } from "./operation-ledger.js";
 
 export const DEFAULT_SILENCE_WARNING_MS = 4 * 60_000;
@@ -247,6 +248,7 @@ export interface ReliabilityMonitorResult {
 	alerts: ReliabilityAlert[];
 	attemptedNotifications: number;
 	pendingNotifications: number;
+	settledExtensionRequests: number;
 }
 
 export function readOperationSnapshots(rootDir: string): OperationLedgerSnapshot[] {
@@ -328,6 +330,28 @@ export async function runReliabilityMonitorOnce(options: {
 	processAlive?: (snapshot: OperationLedgerSnapshot) => boolean;
 }): Promise<ReliabilityMonitorResult> {
 	const snapshots = readOperationSnapshots(options.rootDir);
+	const now = options.now ?? Date.now();
+	const openOperationIds = new Set(
+		snapshots.flatMap((snapshot) =>
+			snapshot.operations
+				.filter((operation) => operation.status === "open")
+				.map((operation) => operation.operationId),
+		),
+	);
+	const extensionInbox = new OperationExtensionInbox(options.rootDir, () => now);
+	let settledExtensionRequests = 0;
+	// Settling stale extension requests is best-effort; alert delivery below is the monitor's
+	// actual contract and must still run when the inbox cannot be written.
+	try {
+		for (const request of extensionInbox.pending()) {
+			if (openOperationIds.has(request.operationId)) continue;
+			if (now - Date.parse(request.requestedAt) < DEFAULT_MONITOR_INTERVAL_MS) continue;
+			extensionInbox.record(request, { status: "rejected", reason: "not_open" });
+			settledExtensionRequests += 1;
+		}
+	} catch {
+		settledExtensionRequests = 0;
+	}
 	const alerts = snapshots.flatMap((snapshot) =>
 		evaluateReliabilitySnapshot(snapshot, { now: options.now, processAlive: options.processAlive }),
 	);
@@ -348,5 +372,6 @@ export async function runReliabilityMonitorOnce(options: {
 		alerts,
 		attemptedNotifications,
 		pendingNotifications: outbox.pending().length,
+		settledExtensionRequests,
 	};
 }

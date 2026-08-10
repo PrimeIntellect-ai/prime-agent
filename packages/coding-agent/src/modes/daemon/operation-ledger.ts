@@ -45,6 +45,11 @@ export interface OperationRecord {
 	deadlineAt?: string;
 	timeoutClass?: string;
 	timeoutPolicySource?: string;
+	deadlineExtensionCount?: number;
+	maxDeadlineExtensions?: number;
+	lastDeadlineExtendedAt?: string;
+	deadlineExtensionSource?: "human" | "parent" | "verified_external";
+	budgetState?: "within_budget" | "budget_exhausted";
 	ownershipStatus?: "owned" | "unowned" | "uncertain";
 	cleanupStatus?: "not_started" | "in_progress" | "verified" | "cleanup_uncertain";
 	outcome?: OperationOutcome;
@@ -85,6 +90,7 @@ interface OpenOperationInput {
 	deadlineAt?: string;
 	timeoutClass?: string;
 	timeoutPolicySource?: string;
+	maxDeadlineExtensions?: number;
 	ownershipStatus?: OperationRecord["ownershipStatus"];
 	cleanupStatus?: OperationRecord["cleanupStatus"];
 	detail?: string;
@@ -95,6 +101,7 @@ interface ProgressOperationInput {
 	phase?: OperationPhase;
 	detail?: string;
 	deadlineAt?: string;
+	budgetState?: OperationRecord["budgetState"];
 	ownershipStatus?: OperationRecord["ownershipStatus"];
 	cleanupStatus?: OperationRecord["cleanupStatus"];
 }
@@ -115,6 +122,16 @@ interface OperationJournalEvent {
 }
 
 const MAX_RETAINED_TERMINAL_OPERATIONS = 500;
+const MAX_DEADLINE_EXTENSION_MS = 60 * 60_000;
+const DEFAULT_MAX_DEADLINE_EXTENSIONS = 3;
+
+export type DeadlineExtensionSource = "human" | "parent" | "verified_external";
+export type DeadlineExtensionResult =
+	| { status: "applied"; record: OperationRecord }
+	| {
+			status: "rejected";
+			reason: "not_open" | "no_deadline" | "invalid_source" | "invalid_duration" | "renewal_cap";
+	  };
 
 function writeJsonAtomically(path: string, value: unknown): void {
 	const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -194,6 +211,11 @@ export class OperationLedger {
 			deadlineAt: input.deadlineAt,
 			timeoutClass: input.timeoutClass,
 			timeoutPolicySource: input.timeoutPolicySource,
+			deadlineExtensionCount: input.deadlineAt ? 0 : undefined,
+			maxDeadlineExtensions: input.deadlineAt
+				? (input.maxDeadlineExtensions ?? DEFAULT_MAX_DEADLINE_EXTENSIONS)
+				: undefined,
+			budgetState: input.deadlineAt ? "within_budget" : undefined,
 			ownershipStatus: input.ownershipStatus,
 			cleanupStatus: input.cleanupStatus,
 			detail: input.detail,
@@ -213,6 +235,7 @@ export class OperationLedger {
 			updatedAt: timestamp,
 			lastMeaningfulProgressAt: input.progressKind === "semantic" ? timestamp : previous.lastMeaningfulProgressAt,
 			deadlineAt: input.deadlineAt ?? previous.deadlineAt,
+			budgetState: input.budgetState ?? previous.budgetState,
 			ownershipStatus: input.ownershipStatus ?? previous.ownershipStatus,
 			cleanupStatus: input.cleanupStatus ?? previous.cleanupStatus,
 			detail: input.detail ?? previous.detail,
@@ -220,6 +243,42 @@ export class OperationLedger {
 		this.records.set(operationId, record);
 		this.commit("progress", record, input.progressKind);
 		return { ...record };
+	}
+
+	extendDeadline(
+		operationId: string,
+		extensionMs: number,
+		source: DeadlineExtensionSource | "self",
+	): DeadlineExtensionResult {
+		const previous = this.records.get(operationId);
+		if (!previous || previous.status !== "open") return { status: "rejected", reason: "not_open" };
+		if (!previous.deadlineAt) return { status: "rejected", reason: "no_deadline" };
+		if (!(["human", "parent", "verified_external"] as const).includes(source as DeadlineExtensionSource)) {
+			return { status: "rejected", reason: "invalid_source" };
+		}
+		const validatedSource = source as DeadlineExtensionSource;
+		if (!Number.isFinite(extensionMs) || extensionMs <= 0 || extensionMs > MAX_DEADLINE_EXTENSION_MS) {
+			return { status: "rejected", reason: "invalid_duration" };
+		}
+		const extensionCount = previous.deadlineExtensionCount ?? 0;
+		const maxExtensions = previous.maxDeadlineExtensions ?? DEFAULT_MAX_DEADLINE_EXTENSIONS;
+		if (extensionCount >= maxExtensions) return { status: "rejected", reason: "renewal_cap" };
+		const nowMs = this.now();
+		const currentDeadlineMs = Date.parse(previous.deadlineAt);
+		if (!Number.isFinite(currentDeadlineMs)) return { status: "rejected", reason: "no_deadline" };
+		const timestamp = new Date(nowMs).toISOString();
+		const record: OperationRecord = {
+			...previous,
+			deadlineAt: new Date(Math.max(nowMs, currentDeadlineMs) + extensionMs).toISOString(),
+			deadlineExtensionCount: extensionCount + 1,
+			lastDeadlineExtendedAt: timestamp,
+			deadlineExtensionSource: validatedSource,
+			budgetState: "within_budget",
+			updatedAt: timestamp,
+		};
+		this.records.set(operationId, record);
+		this.commit("progress", record, "bookkeeping");
+		return { status: "applied", record: { ...record } };
 	}
 
 	close(operationId: string, input: CloseOperationInput): OperationRecord | undefined {
@@ -539,10 +598,21 @@ export class OperationTracker {
 		const claimed: OperationRecord[] = [];
 		for (const operation of this.openOperations()) {
 			if (operation.phase === "cancelling") continue;
-			if (evaluateOperationDeadline(operation, nowMs, allowOwnedCancellation) !== "cancel") continue;
+			const decision = evaluateOperationDeadline(operation, nowMs, allowOwnedCancellation);
+			if (decision === "none") continue;
+			if (decision === "warn") {
+				if (operation.budgetState !== "budget_exhausted") {
+					this.ledger.progress(operation.operationId, {
+						progressKind: "bookkeeping",
+						budgetState: "budget_exhausted",
+					});
+				}
+				continue;
+			}
 			const updated = this.ledger.progress(operation.operationId, {
 				progressKind: "semantic",
 				phase: "cancelling",
+				budgetState: "budget_exhausted",
 				cleanupStatus: operation.cleanupStatus ?? "not_started",
 				detail: "owned operation exceeded its persisted hard deadline; cancellation requested",
 			});
@@ -551,16 +621,28 @@ export class OperationTracker {
 		return claimed;
 	}
 
+	private parentOperationFor(kind: OperationKind): OperationRecord | undefined {
+		if (kind === "turn") return undefined;
+		const open = this.openOperations().filter((operation) => operation.kind === "turn");
+		return open.sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+	}
+
 	private begin(kind: OperationKind, externalId?: string, detail?: string): void {
 		const key = `${kind}:${externalId ?? "default"}`;
-		const policy = resolveOperationTimeoutPolicy(kind, detail, this.identity.now?.() ?? Date.now());
+		const nowMs = this.identity.now?.() ?? Date.now();
+		const policy = resolveOperationTimeoutPolicy(kind, detail, nowMs);
+		const parent = this.parentOperationFor(kind);
+		const parentDeadlineMs = parent?.deadlineAt ? Date.parse(parent.deadlineAt) : Number.POSITIVE_INFINITY;
+		const ownDeadlineMs = policy.deadlineAt ? Date.parse(policy.deadlineAt) : Number.POSITIVE_INFINITY;
+		const effectiveDeadlineMs = Math.min(parentDeadlineMs, ownDeadlineMs);
 		const operation = this.ledger.open({
 			operationId: `op_${this.identity.activeSessionId}_${kind}_${externalId ?? ++this.sequence}`,
 			activeSessionId: this.identity.activeSessionId,
 			sessionId: this.identity.sessionId,
+			parentOperationId: parent?.operationId,
 			kind,
 			phase: "active",
-			deadlineAt: policy.deadlineAt,
+			deadlineAt: Number.isFinite(effectiveDeadlineMs) ? new Date(effectiveDeadlineMs).toISOString() : undefined,
 			timeoutClass: policy.timeoutClass,
 			timeoutPolicySource: policy.timeoutPolicySource,
 			detail,

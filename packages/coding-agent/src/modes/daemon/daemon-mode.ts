@@ -201,6 +201,7 @@ import {
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
+import { OperationExtensionInbox } from "./operation-extension-inbox.js";
 import { OperationLedger, OperationTracker } from "./operation-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
@@ -537,6 +538,7 @@ export class AgentDaemon {
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private readonly operationLedger: OperationLedger;
+	private readonly operationExtensionInbox: OperationExtensionInbox;
 	private operationDeadlineTimer?: ReturnType<typeof setInterval>;
 
 	constructor(
@@ -547,10 +549,12 @@ export class AgentDaemon {
 			throw new Error("Daemon config is missing agentDir");
 		}
 		this.agentDir = options.defaultSessionConfig.agentDir;
+		const reliabilityRoot = join(this.agentDir, "reliability");
 		this.operationLedger = new OperationLedger({
-			rootDir: join(this.agentDir, "reliability"),
+			rootDir: reliabilityRoot,
 			role: options.worker ? "worker" : "daemon",
 		});
+		this.operationExtensionInbox = new OperationExtensionInbox(reliabilityRoot);
 		this.cronStore = options.worker
 			? AgentCronJobStore.forSessionArtifacts()
 			: new AgentCronJobStore(getCronJobsPath(this.agentDir));
@@ -639,6 +643,7 @@ export class AgentDaemon {
 
 		this.registerSignalHandlers();
 		this.summarizer.start();
+		this.sweepOperationDeadlines();
 		this.operationDeadlineTimer = setInterval(() => this.sweepOperationDeadlines(), 30_000);
 		this.operationDeadlineTimer.unref?.();
 		this.log(`Prime Agent daemon listening on ${this.socketPath}`);
@@ -650,6 +655,21 @@ export class AgentDaemon {
 	}
 
 	private sweepOperationDeadlines(): void {
+		// An unusable reliability directory must degrade the extension lane only; it must never stop
+		// the deadline sweep, which is the watchdog the rest of the mission depends on.
+		try {
+			for (const request of this.operationExtensionInbox.pending()) {
+				const result = this.operationLedger.extendDeadline(
+					request.operationId,
+					request.extensionMs,
+					request.source,
+				);
+				if (result.status === "rejected" && result.reason === "not_open") continue;
+				this.operationExtensionInbox.record(request, result);
+			}
+		} catch (error) {
+			this.log(`Operation extension inbox unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		}
 		const allowOwnedCancellation = process.env.PRIME_AGENT_ENABLE_OWNED_OPERATION_DEADLINES === "1";
 		for (const state of this.sessions.values()) {
 			const claimed = state.operationTracker?.claimExpiredCancellations(Date.now(), allowOwnedCancellation) ?? [];

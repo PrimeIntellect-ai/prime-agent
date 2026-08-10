@@ -87,9 +87,14 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["monitor"],
-		usage: "monitor [--json] [--ack <notification-id>]",
-		summary: "Check detached work and retry durable warning delivery",
-		options: ["--json  Print JSON", "--ack <notification-id>  Acknowledge an alert"],
+		usage: "monitor [--json] [--calibration | --ack <notification-id> | --extend <operation-id> --minutes <1-60>]",
+		summary: "Check detached work, calibrate policy, retry warnings, or extend a deadline",
+		options: [
+			"--json  Print JSON",
+			"--calibration  Report phase-specific latency percentiles and canary readiness",
+			"--ack <notification-id>  Acknowledge an alert",
+			"--extend <operation-id> --minutes <1-60>  Queue a capped human deadline extension",
+		],
 	},
 	{
 		path: ["shutdown"],

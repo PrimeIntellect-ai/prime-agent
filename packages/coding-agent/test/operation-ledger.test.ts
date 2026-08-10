@@ -76,6 +76,7 @@ describe("OperationLedger", () => {
 			deadlineAt: "2026-08-10T11:00:00.000Z",
 			timeoutClass: "owned-tool-hard-cap",
 			timeoutPolicySource: "prime-agent-default-v1",
+			parentOperationId: summary.operations[0]!.operationId,
 		});
 
 		tracker.handleBookkeeping("classifier_poll");

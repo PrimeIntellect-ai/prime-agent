@@ -1,7 +1,13 @@
 import { join } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
-import { NotificationOutbox, runReliabilityMonitorOnce } from "../modes/daemon/reliability-monitor.js";
+import { buildOperationCalibrationReport } from "../modes/daemon/operation-calibration.js";
+import { OperationExtensionInbox } from "../modes/daemon/operation-extension-inbox.js";
+import {
+	NotificationOutbox,
+	readOperationSnapshots,
+	runReliabilityMonitorOnce,
+} from "../modes/daemon/reliability-monitor.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
 import {
@@ -264,20 +270,59 @@ async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 
 async function runMonitor(args: string[]): Promise<PublicCommandResult> {
 	const json = args.includes("--json");
+	const calibration = args.includes("--calibration");
 	const acknowledgeIndex = args.indexOf("--ack");
 	const acknowledgementId = acknowledgeIndex >= 0 ? args[acknowledgeIndex + 1] : undefined;
-	const recognized = new Set(["--json", "--ack", acknowledgementId]);
+	const extendIndex = args.indexOf("--extend");
+	const operationId = extendIndex >= 0 ? args[extendIndex + 1] : undefined;
+	const minutesIndex = args.indexOf("--minutes");
+	const minutesText = minutesIndex >= 0 ? args[minutesIndex + 1] : undefined;
+	const minutes = minutesText === undefined ? undefined : Number(minutesText);
+	const recognized = new Set([
+		"--json",
+		"--calibration",
+		"--ack",
+		acknowledgementId,
+		"--extend",
+		operationId,
+		"--minutes",
+		minutesText,
+	]);
 	if (
 		args.some((arg) => !recognized.has(arg)) ||
-		(acknowledgeIndex >= 0 && (!acknowledgementId || acknowledgementId.startsWith("-")))
+		(acknowledgeIndex >= 0 && (!acknowledgementId || acknowledgementId.startsWith("-"))) ||
+		(extendIndex >= 0 && (!operationId || operationId.startsWith("-") || minutesIndex < 0)) ||
+		(minutesIndex >= 0 && (extendIndex < 0 || !Number.isInteger(minutes) || minutes! < 1 || minutes! > 60)) ||
+		(acknowledgeIndex >= 0 && extendIndex >= 0) ||
+		(calibration && (acknowledgeIndex >= 0 || extendIndex >= 0))
 	) {
-		return fail(`Usage: ${APP_NAME} monitor [--json] [--ack <notification-id>]`);
+		return fail(
+			`Usage: ${APP_NAME} monitor [--json] [--calibration | --ack <notification-id> | --extend <operation-id> --minutes <1-60>]`,
+		);
 	}
 	const rootDir = join(getAgentDir(), "reliability");
 	const outboxPath = join(rootDir, "notification-outbox.json");
+	if (calibration) {
+		const report = buildOperationCalibrationReport(readOperationSnapshots(rootDir));
+		console.log(
+			json
+				? JSON.stringify(report, null, 2)
+				: `Prime Agent calibration: ${report.terminalSampleCount} sample(s), ${report.verdict}.`,
+		);
+		return HANDLED;
+	}
 	if (acknowledgementId) {
 		const record = new NotificationOutbox(outboxPath).acknowledge(acknowledgementId);
 		console.log(json ? JSON.stringify(record, null, 2) : `Acknowledged Prime Agent alert ${record.id}.`);
+		return HANDLED;
+	}
+	if (operationId && minutes !== undefined) {
+		const request = new OperationExtensionInbox(rootDir).request(operationId, minutes * 60_000);
+		console.log(
+			json
+				? JSON.stringify(request, null, 2)
+				: `Queued ${minutes}-minute deadline extension for ${operationId} (${request.requestId}).`,
+		);
 		return HANDLED;
 	}
 	const result = await runReliabilityMonitorOnce({

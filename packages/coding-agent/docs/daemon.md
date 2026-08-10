@@ -151,6 +151,25 @@ Update preparation is two-phase:
 
 If preparation or manifest validation fails, prepared workers are released and all roots continue running.
 
+## Reliability truth and detached monitoring
+
+Every daemon and worker writes an owner-only operation snapshot plus append-only transition journal under `<agent-dir>/reliability/operations/`. Runtime operations carry their phase, parent operation, last meaningful progress, absolute deadline, timeout-policy class, ownership, cleanup state, and terminal outcome. Classifier health and transcript bookkeeping are advisory and do not advance meaningful progress.
+
+`prime-agent monitor` is a warning-only, out-of-process reader. It alerts after four minutes of unexplained silence, so a healthy delivery path satisfies the five-minute notification invariant on the next one-minute monitor tick. Alerts enter a restart-safe outbox; macOS and webhook attempts retain delivery receipts and retry with backoff until acknowledged.
+
+Useful commands:
+
+```sh
+prime-agent monitor --json
+prime-agent monitor --calibration --json
+prime-agent monitor --ack <notification-id>
+prime-agent monitor --extend <operation-id> --minutes 15
+```
+
+Deadline policy is phase-specific. Provider, retry, compaction, and turn caps remain advisory. Tool, kernel, child, and bash caps can cancel only when process ownership is proven and `PRIME_AGENT_ENABLE_OWNED_OPERATION_DEADLINES=1` enables the canary. Child deadlines never exceed the open parent turn deadline. A human extension is capped at 60 minutes and three renewals per operation; self-renewal is rejected and reconnect does not extend a deadline. `monitor --calibration` reports per-class p50/p95/p99 latency, uncertainty, cleanup uncertainty, and whether the minimum clean canary sample exists. It does not silently enable hard enforcement.
+
+A session is complete only when its root verdict is `completed` and its recursive RLM tree is quiescent. Running, recovering, uncertain, or failed descendants keep completion false. Goal pause/resume provides a model-callable waiting state, and streaming repetition protection terminates low-period degenerate output without suppressing normal repeated language.
+
 ## Benchmarks
 
 From `packages/coding-agent`:
