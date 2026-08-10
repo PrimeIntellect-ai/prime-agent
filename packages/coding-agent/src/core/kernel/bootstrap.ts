@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { constants, type Dirent, existsSync, readdirSync, readFileSync } from "node:fs";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
@@ -56,6 +56,11 @@ const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
+const BOOTSTRAP_STDERR_MAX_CHARS = 2_000;
+const BOOTSTRAP_STDERR_MAX_LINES = 20;
+const BOOTSTRAP_STDERR_BUFFER_CHARS = 8_000;
+const KERNEL_VENV_IDENTITY_CHARS = 20;
+const KERNEL_VENV_GENERATION_PREFIX = "generation-";
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
 
@@ -371,20 +376,48 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 	}
 }
 
+function sanitizeBootstrapDiagnostic(value: string): string {
+	return value
+		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@")
+		.replace(/\b(Bearer)\s+\S+/gi, "$1 [redacted]")
+		.replace(/([?&](?:access_token|api[_-]?key|password|secret|token)=)[^&\s]+/gi, "$1[redacted]")
+		.replace(/\b((?:api[_-]?key|password|secret|token)\s*[=:]\s*)\S+/gi, "$1[redacted]");
+}
+
+function boundedStderrTail(value: string): string {
+	const lines = value.trimEnd().split(/\r?\n/).slice(-BOOTSTRAP_STDERR_MAX_LINES);
+	return sanitizeBootstrapDiagnostic(lines.join("\n").slice(-BOOTSTRAP_STDERR_MAX_CHARS));
+}
+
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
+		const stdio = options.stdio ?? "pipe";
 		const child = spawn(command, args, {
 			env: process.env,
-			stdio: options.stdio ?? "ignore",
+			stdio,
 		});
+		let stderrBuffer = "";
+		if (stdio === "pipe") {
+			child.stdout?.resume();
+			child.stderr?.setEncoding("utf8");
+			child.stderr?.on("data", (chunk: string) => {
+				stderrBuffer = `${stderrBuffer}${chunk}`.slice(-BOOTSTRAP_STDERR_BUFFER_CHARS);
+			});
+		}
 		child.on("error", reject);
-		child.on("exit", (code, signal) => {
+		child.on("close", (code, signal) => {
 			if (code === 0) {
 				resolve();
 				return;
 			}
 			const reason = signal ? `signal ${signal}` : `exit code ${code}`;
-			reject(new Error(`${command} ${args.join(" ")} failed with ${reason}`));
+			const stderrTail = boundedStderrTail(stderrBuffer);
+			const diagnostic = stderrTail
+				? `
+stderr (tail):
+${stderrTail}`
+				: "";
+			reject(new Error(`${command} ${args.join(" ")} failed with ${reason}${diagnostic}`));
 		});
 	});
 }
@@ -718,6 +751,62 @@ async function hashRuntimeSource(sourceDir: string): Promise<string> {
 	return `sha256:${hash.digest("hex")}`;
 }
 
+function kernelEnvironmentIdentity(runtimeIdentity: string, pythonSkills: readonly BootstrapPythonSkill[]): string {
+	const identity = JSON.stringify({
+		schema: BOOTSTRAP_SCHEMA,
+		python: PYTHON_VERSION,
+		ipykernel: IPYKERNEL_REQUIREMENT,
+		runtime: runtimeIdentity,
+		snapshot: STATE_SNAPSHOT_REQUIREMENT,
+		extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
+		pythonSkills,
+	});
+	return createHash("sha256").update(identity).digest("hex").slice(0, KERNEL_VENV_IDENTITY_CHARS);
+}
+
+function kernelEnvironmentDir(
+	baseVenv: string,
+	runtimeIdentity: string,
+	pythonSkills: readonly BootstrapPythonSkill[],
+): string {
+	return `${baseVenv}-${kernelEnvironmentIdentity(runtimeIdentity, pythonSkills)}`;
+}
+
+export async function resolveKernelVenvDir(pythonSkills: readonly KernelPythonSkill[] = []): Promise<string> {
+	const baseVenv = await resolveWritableKernelVenvDir();
+	const runtimeIdentity = await resolveRuntimeIdentity();
+	return kernelEnvironmentDir(baseVenv, runtimeIdentity, normalizePythonSkills(pythonSkills));
+}
+
+async function findReadyKernelVenv(
+	environmentDir: string,
+	runtimeIdentity: string,
+	pythonSkills: readonly BootstrapPythonSkill[],
+): Promise<string | null> {
+	let entries: Dirent[];
+	try {
+		entries = await readdir(environmentDir, { withFileTypes: true });
+	} catch (error) {
+		if (isNodeError(error, "ENOENT")) return null;
+		throw error;
+	}
+	const generationNames = entries
+		.filter((entry) => entry.isDirectory() && entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX))
+		.map((entry) => entry.name)
+		.sort((a, b) => b.localeCompare(a));
+	for (const generationName of generationNames) {
+		const venv = path.join(environmentDir, generationName);
+		const python = path.join(venv, "bin", "python");
+		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return venv;
+	}
+	return null;
+}
+
+async function createKernelVenvGeneration(environmentDir: string): Promise<string> {
+	await mkdir(environmentDir, { recursive: true });
+	return mkdtemp(path.join(environmentDir, `${KERNEL_VENV_GENERATION_PREFIX}${Date.now()}-${process.pid}-`));
+}
+
 async function bootstrapVenv(
 	venv: string,
 	pythonSkills: readonly BootstrapPythonSkill[],
@@ -823,14 +912,6 @@ async function syncPythonSkills(
 	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
 }
 
-async function kernelBaseReady(python: string, venv: string, runtimeIdentity: string): Promise<boolean> {
-	return (
-		(await hasIpykernel(python)) &&
-		(await hasPrimeAgentRuntime(python)) &&
-		bootstrapBaseVersionCurrent(await readBootstrapVersion(venv), runtimeIdentity)
-	);
-}
-
 async function kernelReady(
 	python: string,
 	venv: string,
@@ -885,35 +966,31 @@ async function ensureKernelPythonUncached(
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
-	const venv = await resolveWritableKernelVenvDir();
-	const python = path.join(venv, "bin", "python");
+	const baseVenv = await resolveWritableKernelVenvDir();
 	const runtimeIdentity = await resolveRuntimeIdentity();
-	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+	const environmentDir = kernelEnvironmentDir(baseVenv, runtimeIdentity, pythonSkills);
+	const readyVenv = await findReadyKernelVenv(environmentDir, runtimeIdentity, pythonSkills);
+	if (readyVenv) return path.join(readyVenv, "bin", "python");
 
-	const releaseLock = await acquireBootstrapLock(venv);
+	const releaseLock = await acquireBootstrapLock(environmentDir);
+	let buildingVenv: string | null = null;
 	try {
-		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
-		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
-			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
-			return python;
-		}
+		const concurrentlyBuiltVenv = await findReadyKernelVenv(environmentDir, runtimeIdentity, pythonSkills);
+		if (concurrentlyBuiltVenv) return path.join(concurrentlyBuiltVenv, "bin", "python");
 
-		const hadVenv = existsSync(venv);
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
-		if (hadVenv) {
-			reportProgress(options, "rebuilding kernel venv");
-			await rm(venv, { recursive: true, force: true });
-		}
-
-		await bootstrapVenv(venv, pythonSkills, options);
+		buildingVenv = await createKernelVenvGeneration(environmentDir);
+		await bootstrapVenv(buildingVenv, pythonSkills, options);
+		const python = path.join(buildingVenv, "bin", "python");
+		buildingVenv = null;
+		reportProgress(options, "✓ ready");
+		return python;
 	} catch (error) {
+		if (buildingVenv) await rm(buildingVenv, { recursive: true, force: true }).catch(() => undefined);
 		throw formatBootstrapFailure(error);
 	} finally {
 		await releaseLock().catch(() => undefined);
 	}
-
-	reportProgress(options, "✓ ready");
-	return python;
 }
 
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
