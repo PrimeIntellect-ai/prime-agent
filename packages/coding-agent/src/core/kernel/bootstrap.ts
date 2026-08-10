@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, type Dirent, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
@@ -61,6 +61,7 @@ const BOOTSTRAP_STDERR_MAX_LINES = 20;
 const BOOTSTRAP_STDERR_BUFFER_CHARS = 8_000;
 const KERNEL_VENV_IDENTITY_CHARS = 20;
 const KERNEL_VENV_GENERATION_PREFIX = "generation-";
+const MAX_PUBLISHED_KERNEL_GENERATIONS = 2;
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
 
@@ -86,6 +87,7 @@ interface BootstrapVersion {
 	snapshot?: string;
 	extraUvArgs?: string[];
 	pythonSkills?: BootstrapPythonSkill[];
+	requestedPythonSkills?: BootstrapPythonSkill[];
 }
 
 function errorMessage(error: unknown): string {
@@ -335,6 +337,7 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 	return [
 		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
 		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT ?? "",
 		process.env.HOME ?? "",
 		process.env.XDG_DATA_HOME ?? "",
 		JSON.stringify(pythonSkills),
@@ -378,15 +381,20 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 
 function sanitizeBootstrapDiagnostic(value: string): string {
 	return value
-		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@")
-		.replace(/\b(Bearer)\s+\S+/gi, "$1 [redacted]")
+		.replace(/\b(Authorization\s*:\s*)(Basic|Bearer|Token)\s+\S+/gi, "$1$2 [redacted]")
+		.replace(/\b(Bearer|Token)\s+\S+/gi, "$1 [redacted]")
+		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
 		.replace(/([?&](?:access_token|api[_-]?key|password|secret|token)=)[^&\s]+/gi, "$1[redacted]")
 		.replace(/\b((?:api[_-]?key|password|secret|token)\s*[=:]\s*)\S+/gi, "$1[redacted]");
 }
 
-function boundedStderrTail(value: string): string {
-	const lines = value.trimEnd().split(/\r?\n/).slice(-BOOTSTRAP_STDERR_MAX_LINES);
-	return sanitizeBootstrapDiagnostic(lines.join("\n").slice(-BOOTSTRAP_STDERR_MAX_CHARS));
+function boundedStderrTail(value: string, leadingTokenMayBeTruncated = false): string {
+	// Sanitize while the authorization marker and URL userinfo are still present;
+	// truncating the raw tail first can retain a token after discarding its marker.
+	let sanitized = sanitizeBootstrapDiagnostic(value);
+	if (leadingTokenMayBeTruncated) sanitized = sanitized.replace(/^\S+/, "[redacted]");
+	const lines = sanitized.trimEnd().split(/\r?\n/).slice(-BOOTSTRAP_STDERR_MAX_LINES);
+	return lines.join("\n").slice(-BOOTSTRAP_STDERR_MAX_CHARS);
 }
 
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
@@ -397,11 +405,14 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
 			stdio,
 		});
 		let stderrBuffer = "";
+		let stderrLeadingTokenMayBeTruncated = false;
 		if (stdio === "pipe") {
 			child.stdout?.resume();
 			child.stderr?.setEncoding("utf8");
 			child.stderr?.on("data", (chunk: string) => {
-				stderrBuffer = `${stderrBuffer}${chunk}`.slice(-BOOTSTRAP_STDERR_BUFFER_CHARS);
+				const combined = `${stderrBuffer}${chunk}`;
+				if (combined.length > BOOTSTRAP_STDERR_BUFFER_CHARS) stderrLeadingTokenMayBeTruncated = true;
+				stderrBuffer = combined.slice(-BOOTSTRAP_STDERR_BUFFER_CHARS);
 			});
 		}
 		child.on("error", reject);
@@ -411,13 +422,14 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
 				return;
 			}
 			const reason = signal ? `signal ${signal}` : `exit code ${code}`;
-			const stderrTail = boundedStderrTail(stderrBuffer);
+			const stderrTail = boundedStderrTail(stderrBuffer, stderrLeadingTokenMayBeTruncated);
 			const diagnostic = stderrTail
 				? `
 stderr (tail):
 ${stderrTail}`
 				: "";
-			reject(new Error(`${command} ${args.join(" ")} failed with ${reason}${diagnostic}`));
+			const renderedCommand = sanitizeBootstrapDiagnostic(`${command} ${args.join(" ")}`);
+			reject(new Error(`${renderedCommand} failed with ${reason}${diagnostic}`));
 		});
 	});
 }
@@ -600,10 +612,11 @@ async function readBootstrapVersion(venv: string): Promise<BootstrapVersion | nu
 			parsed.extraUvArgs.every((v: unknown): v is string => typeof v === "string")
 				? (parsed.extraUvArgs as string[])
 				: undefined;
-		let pythonSkills: BootstrapPythonSkill[] | undefined;
-		if (Array.isArray(parsed.pythonSkills)) {
+		const parsePythonSkills = (value: unknown): BootstrapPythonSkill[] | null | undefined => {
+			if (value === undefined) return undefined;
+			if (!Array.isArray(value)) return null;
 			if (
-				!parsed.pythonSkills.every((v: unknown): v is BootstrapPythonSkill => {
+				!value.every((v: unknown): v is BootstrapPythonSkill => {
 					if (!isRecord(v)) return false;
 					return (
 						typeof v.importName === "string" &&
@@ -615,8 +628,11 @@ async function readBootstrapVersion(venv: string): Promise<BootstrapVersion | nu
 			) {
 				return null;
 			}
-			pythonSkills = parsed.pythonSkills as BootstrapPythonSkill[];
-		}
+			return value;
+		};
+		const pythonSkills = parsePythonSkills(parsed.pythonSkills);
+		const requestedPythonSkills = parsePythonSkills(parsed.requestedPythonSkills);
+		if (pythonSkills === null || requestedPythonSkills === null) return null;
 		return {
 			schema: parsed.schema,
 			ipykernel: typeof parsed.ipykernel === "string" ? parsed.ipykernel : undefined,
@@ -624,6 +640,7 @@ async function readBootstrapVersion(venv: string): Promise<BootstrapVersion | nu
 			snapshot: typeof parsed.snapshot === "string" ? parsed.snapshot : undefined,
 			extraUvArgs,
 			pythonSkills,
+			requestedPythonSkills,
 		};
 	} catch {
 		return null;
@@ -659,7 +676,7 @@ function bootstrapVersionCurrent(
 	return (
 		version !== null &&
 		bootstrapBaseVersionCurrent(version, runtimeIdentity) &&
-		pythonSkillsMatch(version.pythonSkills, pythonSkills)
+		pythonSkillsMatch(version.requestedPythonSkills ?? version.pythonSkills, pythonSkills)
 	);
 }
 
@@ -676,7 +693,8 @@ function bootstrapBaseVersionCurrent(version: BootstrapVersion | null, runtimeId
 async function writeBootstrapVersion(
 	venv: string,
 	runtimeIdentity: string,
-	pythonSkills: readonly BootstrapPythonSkill[],
+	installedPythonSkills: readonly BootstrapPythonSkill[],
+	requestedPythonSkills: readonly BootstrapPythonSkill[],
 ): Promise<void> {
 	const version: BootstrapVersion = {
 		schema: BOOTSTRAP_SCHEMA,
@@ -684,7 +702,8 @@ async function writeBootstrapVersion(
 		runtime: runtimeIdentity,
 		snapshot: STATE_SNAPSHOT_REQUIREMENT,
 		extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
-		pythonSkills: [...pythonSkills],
+		pythonSkills: [...installedPythonSkills],
+		requestedPythonSkills: [...requestedPythonSkills],
 	};
 	await writeFile(path.join(venv, BOOTSTRAP_VERSION_FILE), `${JSON.stringify(version)}\n`, "utf8");
 }
@@ -764,28 +783,25 @@ function kernelEnvironmentIdentity(runtimeIdentity: string, pythonSkills: readon
 	return createHash("sha256").update(identity).digest("hex").slice(0, KERNEL_VENV_IDENTITY_CHARS);
 }
 
-function kernelEnvironmentDir(
-	baseVenv: string,
-	runtimeIdentity: string,
-	pythonSkills: readonly BootstrapPythonSkill[],
-): string {
-	return `${baseVenv}-${kernelEnvironmentIdentity(runtimeIdentity, pythonSkills)}`;
+function kernelGenerationRoot(baseVenv: string): string {
+	const override = process.env.PRIME_AGENT_KERNEL_VENV_ROOT;
+	if (override) return path.resolve(expandHome(override));
+	return `${baseVenv}.generations`;
 }
 
-export async function resolveKernelVenvDir(pythonSkills: readonly KernelPythonSkill[] = []): Promise<string> {
+export async function resolveKernelVenvDir(): Promise<string> {
 	const baseVenv = await resolveWritableKernelVenvDir();
-	const runtimeIdentity = await resolveRuntimeIdentity();
-	return kernelEnvironmentDir(baseVenv, runtimeIdentity, normalizePythonSkills(pythonSkills));
+	return process.env.PRIME_AGENT_KERNEL_VENV ? baseVenv : kernelGenerationRoot(baseVenv);
 }
 
 async function findReadyKernelVenv(
-	environmentDir: string,
+	generationRoot: string,
 	runtimeIdentity: string,
 	pythonSkills: readonly BootstrapPythonSkill[],
 ): Promise<string | null> {
 	let entries: Dirent[];
 	try {
-		entries = await readdir(environmentDir, { withFileTypes: true });
+		entries = await readdir(generationRoot, { withFileTypes: true });
 	} catch (error) {
 		if (isNodeError(error, "ENOENT")) return null;
 		throw error;
@@ -795,16 +811,48 @@ async function findReadyKernelVenv(
 		.map((entry) => entry.name)
 		.sort((a, b) => b.localeCompare(a));
 	for (const generationName of generationNames) {
-		const venv = path.join(environmentDir, generationName);
+		const venv = path.join(generationRoot, generationName);
 		const python = path.join(venv, "bin", "python");
 		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return venv;
 	}
 	return null;
 }
 
-async function createKernelVenvGeneration(environmentDir: string): Promise<string> {
-	await mkdir(environmentDir, { recursive: true });
-	return mkdtemp(path.join(environmentDir, `${KERNEL_VENV_GENERATION_PREFIX}${Date.now()}-${process.pid}-`));
+async function prepareGenerationSlot(generationRoot: string): Promise<void> {
+	await mkdir(generationRoot, { recursive: true });
+	const entries = await readdir(generationRoot, { withFileTypes: true });
+	let publishedCount = 0;
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX)) continue;
+		const generation = path.join(generationRoot, entry.name);
+		if (!(await exists(path.join(generation, BOOTSTRAP_VERSION_FILE)))) {
+			// The global generation-root lock proves that no same-host builder is
+			// active. A directory without the publish marker was never selectable.
+			await rm(generation, { recursive: true, force: true });
+		} else {
+			// Even an old or malformed marker may belong to a live kernel returned by
+			// an older Prime Agent process, so it consumes a slot instead of being GC'd.
+			publishedCount += 1;
+		}
+	}
+	if (publishedCount >= MAX_PUBLISHED_KERNEL_GENERATIONS) {
+		throw new Error(
+			`kernel environment retention limit reached at ${generationRoot} (${MAX_PUBLISHED_KERNEL_GENERATIONS} published generations). ` +
+				"Prime Agent will not delete a generation that a running kernel may still use. Stop Prime Agent sessions, remove an obsolete generation directory manually, then retry; or set PRIME_AGENT_KERNEL_PYTHON.",
+		);
+	}
+}
+
+async function createKernelVenvGeneration(
+	generationRoot: string,
+	runtimeIdentity: string,
+	pythonSkills: readonly BootstrapPythonSkill[],
+): Promise<string> {
+	await prepareGenerationSlot(generationRoot);
+	const identity = kernelEnvironmentIdentity(runtimeIdentity, pythonSkills);
+	return mkdtemp(
+		path.join(generationRoot, `${KERNEL_VENV_GENERATION_PREFIX}${identity}-${Date.now()}-${process.pid}-`),
+	);
 }
 
 async function bootstrapVenv(
@@ -909,7 +957,7 @@ async function syncPythonSkills(
 			);
 		}
 	}
-	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
+	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills, pythonSkills);
 }
 
 async function kernelReady(
@@ -931,6 +979,23 @@ function formatBootstrapFailure(error: unknown): Error {
 			"First-time setup needs internet to install uv, Python, ipykernel, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. " +
 			"Set PRIME_AGENT_KERNEL_PYTHON to a Python with ipykernel, a current prime-agent-runtime, and default Python packages installed to skip auto-bootstrap.",
 	);
+}
+
+async function cleanupAbandonedExactVenvBuilds(baseVenv: string): Promise<void> {
+	const parent = path.dirname(baseVenv);
+	const prefix = `${path.basename(baseVenv)}.building-`;
+	let entries: Dirent[];
+	try {
+		entries = await readdir(parent, { withFileTypes: true });
+	} catch (error) {
+		if (isNodeError(error, "ENOENT")) return;
+		throw error;
+	}
+	for (const entry of entries) {
+		if (entry.isDirectory() && entry.name.startsWith(prefix)) {
+			await rm(path.join(parent, entry.name), { recursive: true, force: true });
+		}
+	}
 }
 
 async function ensureKernelPythonUncached(
@@ -968,18 +1033,58 @@ async function ensureKernelPythonUncached(
 
 	const baseVenv = await resolveWritableKernelVenvDir();
 	const runtimeIdentity = await resolveRuntimeIdentity();
-	const environmentDir = kernelEnvironmentDir(baseVenv, runtimeIdentity, pythonSkills);
-	const readyVenv = await findReadyKernelVenv(environmentDir, runtimeIdentity, pythonSkills);
+	const exactPython = path.join(baseVenv, "bin", "python");
+
+	// PRIME_AGENT_KERNEL_VENV remains an exact-path contract. Never silently
+	// reinterpret it as a prefix, and never replace a non-current directory that
+	// a live process may still be using.
+	if (process.env.PRIME_AGENT_KERNEL_VENV) {
+		if (await kernelReady(exactPython, baseVenv, runtimeIdentity, pythonSkills)) return exactPython;
+		const releaseLock = await acquireBootstrapLock(baseVenv);
+		let buildingVenv: string | null = null;
+		try {
+			await cleanupAbandonedExactVenvBuilds(baseVenv);
+			if (await kernelReady(exactPython, baseVenv, runtimeIdentity, pythonSkills)) return exactPython;
+			if (await exists(baseVenv)) {
+				throw new Error(
+					`PRIME_AGENT_KERNEL_VENV points to a non-current environment at ${baseVenv}. ` +
+						"Prime Agent will not replace it while another kernel may use it. Stop dependent sessions and remove or move that directory manually, choose a new PRIME_AGENT_KERNEL_VENV, or set PRIME_AGENT_KERNEL_PYTHON.",
+				);
+			}
+			reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
+			await mkdir(path.dirname(baseVenv), { recursive: true });
+			buildingVenv = await mkdtemp(path.join(path.dirname(baseVenv), `${path.basename(baseVenv)}.building-`));
+			await bootstrapVenv(buildingVenv, pythonSkills, options);
+			await rename(buildingVenv, baseVenv);
+			buildingVenv = null;
+			reportProgress(options, "✓ ready");
+			return exactPython;
+		} catch (error) {
+			if (buildingVenv) await rm(buildingVenv, { recursive: true, force: true }).catch(() => undefined);
+			throw formatBootstrapFailure(error);
+		} finally {
+			await releaseLock().catch(() => undefined);
+		}
+	}
+
+	// Compatibility discovery: a current legacy ~/.prime/agent/kernel-venv is
+	// returned in place rather than stranded by the generational layout.
+	if (await kernelReady(exactPython, baseVenv, runtimeIdentity, pythonSkills)) return exactPython;
+
+	const generationRoot = kernelGenerationRoot(baseVenv);
+	const readyVenv = await findReadyKernelVenv(generationRoot, runtimeIdentity, pythonSkills);
 	if (readyVenv) return path.join(readyVenv, "bin", "python");
 
-	const releaseLock = await acquireBootstrapLock(environmentDir);
+	// One root-wide lock serializes both same-identity publication and the global
+	// retention check across Node processes.
+	const releaseLock = await acquireBootstrapLock(generationRoot);
 	let buildingVenv: string | null = null;
 	try {
-		const concurrentlyBuiltVenv = await findReadyKernelVenv(environmentDir, runtimeIdentity, pythonSkills);
+		const concurrentlyBuiltVenv = await findReadyKernelVenv(generationRoot, runtimeIdentity, pythonSkills);
 		if (concurrentlyBuiltVenv) return path.join(concurrentlyBuiltVenv, "bin", "python");
 
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
-		buildingVenv = await createKernelVenvGeneration(environmentDir);
+		buildingVenv = await createKernelVenvGeneration(generationRoot, runtimeIdentity, pythonSkills);
 		await bootstrapVenv(buildingVenv, pythonSkills, options);
 		const python = path.join(buildingVenv, "bin", "python");
 		buildingVenv = null;
