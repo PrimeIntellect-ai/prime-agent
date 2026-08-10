@@ -1311,6 +1311,74 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(persistWorker.mock.invocationCallOrder[0]).toBeLessThan(recoverWorker.mock.invocationCallOrder[0]!);
 	});
 
+	it("rejects retry while the worker is actively stopping", async () => {
+		type RetryWorker = {
+			descriptor: {
+				workerId: string;
+				rootActiveSessionId: string;
+				rootSessionId: string;
+				lifecycle: "ready";
+				consecutiveFailures: number;
+				stopRequestedAt: string;
+				archiveOnStop: boolean;
+			};
+			intentionalStop: boolean;
+			summaries: Map<string, SessionSummary>;
+		};
+		type RetryHarness = {
+			stopWorker(worker: RetryWorker, removeDescriptor: boolean): Promise<void>;
+			handleCommand(
+				client: DaemonSocketClient,
+				command: { type: "retry_worker"; activeSessionId: string },
+			): Promise<unknown>;
+		};
+		const worker: RetryWorker = {
+			descriptor: {
+				workerId: "worker-stopping",
+				rootActiveSessionId: "active-stopping",
+				rootSessionId: "session-stopping",
+				lifecycle: "ready",
+				consecutiveFailures: 2,
+				stopRequestedAt: new Date().toISOString(),
+				archiveOnStop: true,
+			},
+			intentionalStop: true,
+			summaries: new Map(),
+		};
+		const stopStarted = createDeferred<void>();
+		const releaseStop = createDeferred<void>();
+		const persistWorker = vi.fn();
+		const recoverWorker = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			workerStopCounts: new Map(),
+			stopWorkerUntracked: vi.fn(async () => {
+				stopStarted.resolve();
+				await releaseStop.promise;
+			}),
+			persistWorker,
+			recoverWorker,
+			assertWorkerAccessibleToClient: vi.fn(),
+		}) as RetryHarness;
+
+		const stopping = supervisor.stopWorker(worker, true);
+		await stopStarted.promise;
+		await expect(
+			supervisor.handleCommand({} as DaemonSocketClient, {
+				type: "retry_worker",
+				activeSessionId: worker.descriptor.rootSessionId,
+			}),
+		).rejects.toThrow("Session worker is stopping; retry after it finishes");
+
+		expect(worker.intentionalStop).toBe(true);
+		expect(worker.descriptor.stopRequestedAt).toBeDefined();
+		expect(worker.descriptor.archiveOnStop).toBe(true);
+		expect(persistWorker).not.toHaveBeenCalled();
+		expect(recoverWorker).not.toHaveBeenCalled();
+		releaseStop.resolve();
+		await stopping;
+	});
+
 	it("cancels an in-flight recovery after an intentional stop tombstone", async () => {
 		vi.useFakeTimers();
 		type RecoveryWorker = {
