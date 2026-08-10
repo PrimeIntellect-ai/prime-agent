@@ -92,6 +92,17 @@ key; any other non-empty value is rejected with HTTP 401. Requests with
 `OPENCODE_API_KEY=public` are anonymous — the gateway may retain prompt data for
 model improvement during the free period.
 
+The API key must be visible to the process that makes the request. Shell
+`export`s work when the CLI runs in-process; daemon workers are separate
+processes and read credentials from the auth file instead. To use the free tier
+with a daemon install, store it there:
+
+```json
+{
+  "opencode": { "type": "api_key", "key": "public" }
+}
+```
+
 #### Auth File
 
 Store credentials in `~/.prime/agent/auth.json`:
