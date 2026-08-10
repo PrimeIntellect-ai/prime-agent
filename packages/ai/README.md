@@ -75,7 +75,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Cerebras**
 - **Cloudflare AI Gateway**
 - **Cloudflare Workers AI**
-- **xAI**
+- **xAI** (API key, or SuperGrok/X Premium OAuth, see below)
 - **OpenRouter**
 - **Vercel AI Gateway**
 - **MiniMax**
@@ -1101,6 +1101,7 @@ Several providers require OAuth authentication instead of static API keys:
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
+- **xAI** (SuperGrok/X Premium subscription, device flow; served over the Responses API)
 
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
 
@@ -1168,6 +1169,7 @@ import {
   loginOpenAICodex,
   loginGitHubCopilot,
   loginGeminiCli,
+  loginXai,
 
   // Token management
   refreshOAuthToken,   // (provider, credentials) => new credentials
@@ -1237,6 +1239,8 @@ const response = await complete(model, {
 **Azure OpenAI (Responses)**: Uses the Responses API only. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
 
 **GitHub Copilot**: If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
+
+**xAI**: `loginXai` uses the RFC 8628 device flow against `https://auth.x.ai`, so it needs no local callback server and works over SSH. Subscription tokens authorize the Responses API rail used by xAI's Grok CLI; while OAuth credentials are active the provider's `modifyModels` hook serves xAI models over `https://api.x.ai/v1/responses`. API-key (`XAI_API_KEY`) usage keeps the Chat Completions models unchanged.
 
 ## Development
 

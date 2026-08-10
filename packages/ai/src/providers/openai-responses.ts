@@ -267,6 +267,11 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
 			};
 		}
+		// Grok always reasons; without encrypted content the reasoning items
+		// cannot be replayed on the next turn.
+		if (model.provider === "xai" && !params.include) {
+			params.include = ["reasoning.encrypted_content"];
+		}
 	}
 
 	return params;

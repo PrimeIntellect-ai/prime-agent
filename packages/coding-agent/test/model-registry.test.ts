@@ -1684,4 +1684,31 @@ describe("ModelRegistry", () => {
 			});
 		});
 	});
+
+	describe("xAI OAuth models", () => {
+		test("serves xAI models over the Responses API while OAuth credentials are stored", () => {
+			authStorage.set("xai", {
+				type: "oauth",
+				refresh: "refresh",
+				access: "access",
+				expires: Date.now() + 3600_000,
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const xaiModels = getModelsForProvider(registry, "xai");
+			expect(xaiModels.length).toBeGreaterThan(0);
+			for (const model of xaiModels) {
+				expect(model.api).toBe("openai-responses");
+			}
+		});
+
+		test("keeps xAI models on Chat Completions without OAuth credentials", () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const xaiModels = getModelsForProvider(registry, "xai");
+			expect(xaiModels.length).toBeGreaterThan(0);
+			for (const model of xaiModels) {
+				expect(model.api).toBe("openai-completions");
+			}
+		});
+	});
 });
