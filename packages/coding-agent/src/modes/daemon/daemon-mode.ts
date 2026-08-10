@@ -208,6 +208,7 @@ import {
 	SNAPSHOT_TARGET_CHUNK_BYTES,
 	type SnapshotTranscriptChunkSource,
 } from "./snapshot-transcript-cache.js";
+import { annotateSessionTreeQuiescence, evaluateSessionTreeQuiescence } from "./tree-quiescence.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
 export interface DaemonModeOptions {
@@ -1185,28 +1186,77 @@ export class AgentDaemon {
 		for (const [path, passive] of passiveByPath) {
 			savedByPath.set(path, passive.info);
 		}
-		return buildSessionList(activeSessions, [...savedByPath.values()], scheduledJobs).map((summary) => {
-			const passive = summary.sessionFile ? passiveByPath.get(resolve(summary.sessionFile)) : undefined;
-			if (!passive || summary.activeSessionId) return summary;
-			const parentEntry = passive.chain.at(-2);
+		const summaries = buildSessionList(activeSessions, [...savedByPath.values()], scheduledJobs).map<SessionSummary>(
+			(summary) => {
+				const passive = summary.sessionFile ? passiveByPath.get(resolve(summary.sessionFile)) : undefined;
+				if (!passive || summary.activeSessionId) return summary;
+				const parentEntry = passive.chain.at(-2);
+				return {
+					...summary,
+					runtimeKind: "subagent",
+					...(passive.chain.length === 1 && passive.rootParentState
+						? { parentActiveSessionId: passive.rootParentState.activeSessionId }
+						: {}),
+					parentSessionId: passive.entry.parentSessionId,
+					parentSessionPath:
+						passive.entry.parentSessionFile ??
+						parentEntry?.sessionFile ??
+						passive.rootParentState?.runtime.session.sessionFile ??
+						passive.rootInfo?.path,
+					rlmDepth: passive.entry.rlmDepth ?? passive.info.rlmDepth,
+					rlmChildId: passive.entry.childId,
+					rlmParentNodeId: passive.entry.rlmParentNodeId ?? passive.entry.childId,
+					spawnCode: passive.entry.spawnCode,
+					passiveRegistryStatus: passive.entry.status,
+				};
+			},
+		);
+		return annotateSessionTreeQuiescence(summaries);
+	}
+
+	private async currentSessionTreeQuiescence(rootState: ActiveSessionState) {
+		const summaries = await this.buildSessionListWithPassiveRlmSubagents(
+			[...this.sessions.values()],
+			[],
+			this.cronStore.list(),
+		);
+		const root = summaries.find((summary) => summary.activeSessionId === rootState.activeSessionId);
+		if (!root) {
 			return {
-				...summary,
-				runtimeKind: "subagent",
-				...(passive.chain.length === 1 && passive.rootParentState
-					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
-					: {}),
-				parentSessionId: passive.entry.parentSessionId,
-				parentSessionPath:
-					passive.entry.parentSessionFile ??
-					parentEntry?.sessionFile ??
-					passive.rootParentState?.runtime.session.sessionFile ??
-					passive.rootInfo?.path,
-				rlmDepth: passive.entry.rlmDepth ?? passive.info.rlmDepth,
-				rlmChildId: passive.entry.childId,
-				rlmParentNodeId: passive.entry.rlmParentNodeId ?? passive.entry.childId,
-				spawnCode: passive.entry.spawnCode,
+				state: "uncertain" as const,
+				quiescent: false,
+				nonQuiescentDescendantCount: 0,
+				uncertainDescendantCount: 1,
+				blockingSessionIds: [rootState.activeSessionId],
 			};
-		});
+		}
+		return evaluateSessionTreeQuiescence(root, summaries);
+	}
+
+	private async waitForSessionTreeQuiescence(
+		rootState: ActiveSessionState,
+		timeoutMs = 4 * 60_000,
+	): Promise<ReturnType<typeof evaluateSessionTreeQuiescence> & { timedOut: boolean }> {
+		const deadline = Date.now() + timeoutMs;
+		while (true) {
+			const tree = await this.currentSessionTreeQuiescence(rootState);
+			if (tree.quiescent) return { ...tree, timedOut: false };
+			const residentBlockers = tree.blockingSessionIds
+				.map((activeSessionId) => this.sessions.get(activeSessionId))
+				.filter((state): state is ActiveSessionState => Boolean(state));
+			if (residentBlockers.length === 0) return { ...tree, timedOut: false };
+			const remainingMs = deadline - Date.now();
+			if (remainingMs <= 0) return { ...tree, timedOut: true };
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			await Promise.race([
+				Promise.allSettled(residentBlockers.map((state) => state.runtime.session.waitForIdle())),
+				new Promise<void>((resolveDelay) => {
+					timer = setTimeout(resolveDelay, Math.min(1_000, remainingMs));
+					timer.unref?.();
+				}),
+			]);
+			if (timer) clearTimeout(timer);
+		}
 	}
 
 	private async findPassiveRlmSubagent(
@@ -4142,11 +4192,17 @@ export class AgentDaemon {
 
 			case "wait_for_headless_completion": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(
-					command.id,
-					"wait_for_headless_completion",
-					await waitForHeadlessCompletion(state.runtime.session),
-				);
+				const completion = await waitForHeadlessCompletion(state.runtime.session);
+				const tree = await this.waitForSessionTreeQuiescence(state);
+				return success(command.id, "wait_for_headless_completion", {
+					...completion,
+					treeQuiescence: tree.state,
+					treeQuiescent: tree.quiescent,
+					nonQuiescentDescendantCount: tree.nonQuiescentDescendantCount,
+					uncertainDescendantCount: tree.uncertainDescendantCount,
+					treeWaitTimedOut: tree.timedOut,
+					blockingSessionIds: tree.blockingSessionIds,
+				});
 			}
 
 			case "get_session_header": {

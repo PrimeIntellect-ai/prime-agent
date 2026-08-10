@@ -76,6 +76,15 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	/** Recursive root + descendant quiescence; completion must not be inferred when this is false or uncertain. */
+	treeQuiescence?: "quiescent" | "working" | "uncertain";
+	treeQuiescent?: boolean;
+	/** Authoritative completion gate: completed only when the root verdict and recursive tree agree. */
+	completionState?: "completed" | "not_completed" | "uncertain";
+	nonQuiescentDescendantCount?: number;
+	uncertainDescendantCount?: number;
+	/** Persisted registry truth for a saved-only RLM child. */
+	passiveRegistryStatus?: "running" | "completed" | "deleted";
 	/** Negotiated reliability surface. Runtime truth is separate from advisory classification. */
 	reliability?: {
 		classifier?: ActiveSessionState["summaryClassifierState"];
