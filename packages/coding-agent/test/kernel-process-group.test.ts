@@ -54,9 +54,14 @@ describeIfKernel("kernel process-group isolation (real kernel)", { tags: ["kerne
 	});
 
 	async function expectInterruptReachesDescendants(useForkserver: boolean): Promise<void> {
+		const ownershipEvents: unknown[] = [];
 		process.env.PRIME_AGENT_KERNEL_FORKSERVER = useForkserver ? "1" : "0";
 		tempDir = mkdtempSync(join(tmpdir(), `prime-agent-kernel-pgrp-${useForkserver ? "fork" : "direct"}-`));
-		const manager = new KernelManager({ python: python as string, cwd: tempDir });
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: tempDir,
+			onProcessOwnershipChange: (event) => ownershipEvents.push(event),
+		});
 		const controller = new AbortController();
 		let output = "";
 		let ready!: () => void;
@@ -89,8 +94,11 @@ describeIfKernel("kernel process-group isolation (real kernel)", { tags: ["kerne
 			expect(match?.[1]).toBe(match?.[2]);
 
 			controller.abort();
-			await expect(withTimeout(execution, 5_000, "interrupted execution")).resolves.toMatchObject({
+			const aborted = await withTimeout(execution, 5_000, "interrupted execution");
+			expect(aborted).toMatchObject({
 				status: "aborted",
+				cleanupStatus: "verified",
+				survivingProcessIds: [],
 			});
 			const followUp = await withTimeout(manager.execute("print(123)"), 5_000, "follow-up execution");
 			expect(followUp.status).toBe("ok");
@@ -105,6 +113,15 @@ describeIfKernel("kernel process-group isolation (real kernel)", { tags: ["kerne
 				childPid = undefined;
 			}
 			await manager.dispose();
+			expect(ownershipEvents).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ resource: "kernel", status: expect.stringMatching(/owned|untracked/) }),
+					expect.objectContaining({
+						resource: "kernel",
+						cleanupStatus: expect.stringMatching(/verified|uncertain/),
+					}),
+				]),
+			);
 		}
 	}
 

@@ -362,6 +362,10 @@ export class OperationTracker {
 	) {}
 
 	handleSessionEvent(event: { type: string; [key: string]: unknown }): void {
+		if (event.type === "process_ownership_update") {
+			this.handleProcessOwnershipEvent(event);
+			return;
+		}
 		if (event.type === "message_start" && isAssistantMessageEvent(event)) {
 			this.begin("provider", eventExternalId(event));
 			return;
@@ -378,12 +382,62 @@ export class OperationTracker {
 		}
 		const endKind = EVENT_END_KIND[event.type];
 		if (endKind) {
-			this.finish(endKind, eventExternalId(event));
+			this.finish(endKind, eventExternalId(event), event);
 			return;
 		}
 		if (event.type === "message_update" || event.type === "message_end") {
 			this.markAllOpenSemantic(event.type);
 		}
+	}
+
+	private handleProcessOwnershipEvent(event: Record<string, unknown>): void {
+		const pid = typeof event.pid === "number" ? event.pid : undefined;
+		const processStartId = typeof event.processStartId === "string" ? event.processStartId : undefined;
+		const status = typeof event.status === "string" ? event.status : "uncertain";
+		const rawCleanupStatus = typeof event.cleanupStatus === "string" ? event.cleanupStatus : "not_attempted";
+		const ownershipStatus: NonNullable<OperationRecord["ownershipStatus"]> =
+			status === "owned" || status === "released" ? "owned" : status === "untracked" ? "unowned" : "uncertain";
+		const cleanupStatus: OperationRecord["cleanupStatus"] =
+			rawCleanupStatus === "verified"
+				? "verified"
+				: rawCleanupStatus === "uncertain"
+					? "cleanup_uncertain"
+					: undefined;
+		const detail = [
+			pid === undefined ? undefined : `pid=${pid}`,
+			processStartId ? `start=${processStartId}` : undefined,
+			typeof event.error === "string" ? event.error : undefined,
+		]
+			.filter((value): value is string => Boolean(value))
+			.join(" ");
+		const target = this.openOperations()
+			.filter((operation) => operation.kind === "tool")
+			.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+		if (target) {
+			this.ledger.progress(target.operationId, {
+				progressKind: "semantic",
+				ownershipStatus,
+				cleanupStatus,
+				detail,
+			});
+			return;
+		}
+		if (!cleanupStatus) return;
+		const receipt = this.ledger.open({
+			activeSessionId: this.identity.activeSessionId,
+			sessionId: this.identity.sessionId,
+			kind: "kernel",
+			phase: "cleanup",
+			ownershipStatus,
+			cleanupStatus,
+			detail,
+		});
+		this.ledger.close(receipt.operationId, {
+			phase: cleanupStatus === "verified" ? "completed" : "uncertain",
+			outcome: cleanupStatus === "verified" ? "completed" : "uncertain",
+			cleanupStatus,
+			detail,
+		});
 	}
 
 	handleBookkeeping(_label: string): void {
@@ -427,7 +481,7 @@ export class OperationTracker {
 		this.openByKey.set(key, stack);
 	}
 
-	private finish(kind: OperationKind, externalId?: string): void {
+	private finish(kind: OperationKind, externalId?: string, event?: Record<string, unknown>): void {
 		const preferredKey = `${kind}:${externalId ?? "default"}`;
 		let key = preferredKey;
 		let stack = this.openByKey.get(key);
@@ -438,7 +492,35 @@ export class OperationTracker {
 		const operationId = stack?.pop();
 		if (!operationId) return;
 		if (stack?.length === 0) this.openByKey.delete(key);
-		this.ledger.close(operationId, { phase: "completed", outcome: "completed" });
+		const result = event?.result as { details?: Record<string, unknown> } | undefined;
+		const details = result?.details;
+		const rawCleanupStatus = details?.cleanupStatus;
+		const cleanupStatus: OperationRecord["cleanupStatus"] =
+			rawCleanupStatus === "verified"
+				? "verified"
+				: rawCleanupStatus === "uncertain"
+					? "cleanup_uncertain"
+					: undefined;
+		const isError = event?.isError === true;
+		const wasAborted = details?.status === "aborted";
+		const outcome: OperationOutcome =
+			cleanupStatus === "cleanup_uncertain"
+				? "uncertain"
+				: wasAborted
+					? "cancelled"
+					: isError
+						? "failed"
+						: "completed";
+		const phase: CloseOperationInput["phase"] = outcome === "completed" ? "completed" : outcome;
+		this.ledger.close(operationId, {
+			phase,
+			outcome,
+			cleanupStatus,
+			detail:
+				cleanupStatus === "cleanup_uncertain" && Array.isArray(details?.survivingProcessIds)
+					? `surviving pids: ${details.survivingProcessIds.join(",")}`
+					: undefined,
+		});
 	}
 
 	private markAllOpenSemantic(detail: string): void {

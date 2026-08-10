@@ -1,5 +1,5 @@
 // TODO: reconsider persistent kernel vs stateless `python -c` once RLM-1 weights land.
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +8,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
+import { type OrphanProcessOwnershipResult, recordOrphanProcessState } from "../orphan-process-journal.js";
+import { getProcessStartId } from "../session-lease.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
@@ -66,6 +68,18 @@ function killIsolatedKernelProcessGroup(pid: number, signal: NodeJS.Signals): vo
 	}
 }
 
+function listProcessGroupMembers(processGroupId: number): number[] | undefined {
+	if (process.platform === "win32") return undefined;
+	const result = spawnSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" });
+	if (result.error || result.status !== 0 || typeof result.stdout !== "string") return undefined;
+	const members: number[] = [];
+	for (const line of result.stdout.split("\n")) {
+		const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+		if (match && Number(match[2]) === processGroupId) members.push(Number(match[1]));
+	}
+	return members;
+}
+
 export class KernelBusyAfterInterruptError extends Error {
 	constructor() {
 		super(KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE);
@@ -84,6 +98,12 @@ export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<R
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
+
+export interface KernelProcessOwnershipEvent extends OrphanProcessOwnershipResult {
+	resource: "kernel";
+	cleanupStatus: "not_attempted" | "verified" | "uncertain";
+	survivingProcessIds?: number[];
+}
 
 /** Where and how to persist the kernel's user namespace so it survives resume. */
 export interface KernelSnapshotConfig {
@@ -109,6 +129,8 @@ export interface KernelManagerOptions {
 	snapshot?: KernelSnapshotConfig;
 	/** Default: "prime-agent". */
 	username?: string;
+	/** Emits durable ownership and cleanup receipts without affecting kernel availability. */
+	onProcessOwnershipChange?: (event: KernelProcessOwnershipEvent) => void;
 }
 
 export interface KernelStartOptions {
@@ -186,6 +208,9 @@ export interface ExecuteResult {
 	/** Agent messages sent from this cell, in order. */
 	sentAgentMessages?: KernelSentAgentMessage[];
 	status: "ok" | "error" | "aborted";
+	/** Aborted is not a cleanup claim. This receipt says whether descendants were excluded. */
+	cleanupStatus?: "not_attempted" | "verified" | "uncertain";
+	survivingProcessIds?: number[];
 	error?: { ename: string; evalue: string; traceback: string[] };
 	durationMs: number;
 }
@@ -532,7 +557,7 @@ function installSignalHandlersOnce(): void {
 export class KernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
+		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot" | "onProcessOwnershipChange"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
@@ -542,6 +567,9 @@ export class KernelManager {
 	// Set instead of `kernel` when the kernel was forked from the forkserver: it is
 	// not a direct child, so it has no ChildProcess handle and is killed by pid.
 	private kernelPid?: number;
+	private kernelProcessStartId?: string;
+	private kernelOwnership?: OrphanProcessOwnershipResult;
+	private _lastCleanupReceipt?: KernelProcessOwnershipEvent;
 	/** Polls a forked kernel's pid for death (no "exit" event on a non-child). */
 	private forkedLivenessTimer?: ReturnType<typeof globalThis.setInterval>;
 	private shell?: Dealer;
@@ -576,12 +604,64 @@ export class KernelManager {
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
+			onProcessOwnershipChange: options.onProcessOwnershipChange,
 			username: options.username ?? "prime-agent",
 		};
 	}
 
 	get ownerSessionId(): string | undefined {
 		return this.options.sessionId;
+	}
+
+	get processOwnership(): KernelProcessOwnershipEvent | undefined {
+		if (!this.kernelOwnership) return undefined;
+		return { ...this.kernelOwnership, resource: "kernel", cleanupStatus: "not_attempted" };
+	}
+
+	get lastCleanupReceipt(): KernelProcessOwnershipEvent | undefined {
+		return this._lastCleanupReceipt ? structuredClone(this._lastCleanupReceipt) : undefined;
+	}
+
+	private registerKernelOwnership(pid: number): void {
+		this.kernelProcessStartId = getProcessStartId(pid);
+		this.kernelOwnership = recordOrphanProcessState(pid, true);
+		this.options.onProcessOwnershipChange?.({
+			...this.kernelOwnership,
+			resource: "kernel",
+			cleanupStatus: "not_attempted",
+		});
+	}
+
+	private abortedExecutionCleanup(): Pick<ExecuteResult, "cleanupStatus" | "survivingProcessIds"> {
+		const pid = this.kernel?.pid ?? this.kernelPid;
+		if (!pid || process.platform === "win32") return { cleanupStatus: "uncertain" };
+		if (!this.kernelProcessStartId || getProcessStartId(pid) !== this.kernelProcessStartId) {
+			return { cleanupStatus: "uncertain" };
+		}
+		const members = listProcessGroupMembers(pid);
+		if (!members) return { cleanupStatus: "uncertain" };
+		const survivingProcessIds = members.filter((memberPid) => memberPid !== pid);
+		return { cleanupStatus: survivingProcessIds.length === 0 ? "verified" : "uncertain", survivingProcessIds };
+	}
+
+	private recordKernelCleanup(pid: number | undefined): void {
+		if (!pid) return;
+		const survivingProcessIds = process.platform === "win32" ? undefined : listProcessGroupMembers(pid);
+		for (const survivingPid of survivingProcessIds ?? []) {
+			if (survivingPid !== pid) recordOrphanProcessState(survivingPid, true);
+		}
+		const released = recordOrphanProcessState(pid, false);
+		const cleanupStatus =
+			released.status === "released" && survivingProcessIds?.length === 0 ? "verified" : "uncertain";
+		this._lastCleanupReceipt = {
+			...released,
+			resource: "kernel",
+			cleanupStatus,
+			...(survivingProcessIds && survivingProcessIds.length > 0 ? { survivingProcessIds } : {}),
+		};
+		this.options.onProcessOwnershipChange?.(this._lastCleanupReceipt);
+		this.kernelProcessStartId = undefined;
+		this.kernelOwnership = undefined;
 	}
 
 	private appendKernelDiagnostic(message: string): void {
@@ -645,6 +725,7 @@ export class KernelManager {
 					// inherited env snapshot may be stale by fork time).
 					env: this.options.env ? { ...process.env, ...this.options.env } : { ...process.env },
 				});
+				this.registerKernelOwnership(this.kernelPid);
 				forked = true;
 			} catch (err) {
 				if (!(err instanceof ForkServerUnavailable)) throw err;
@@ -675,6 +756,7 @@ export class KernelManager {
 				detached: process.platform !== "win32",
 			});
 			this.kernel = kernel;
+			if (kernel.pid !== undefined) this.registerKernelOwnership(kernel.pid);
 
 			kernel.stderr?.on("data", (buf: Buffer) => {
 				const s = buf.toString();
@@ -696,7 +778,9 @@ export class KernelManager {
 				}
 				this.state = "shutdown";
 				liveKernels.delete(this);
+				const exitedPid = kernel.pid;
 				this.cleanupResources();
+				this.recordKernelCleanup(exitedPid);
 			});
 		}
 
@@ -748,7 +832,9 @@ export class KernelManager {
 			this.appendKernelDiagnostic("forked kernel exited unexpectedly");
 			this.state = "shutdown";
 			liveKernels.delete(this);
+			const exitedPid = this.kernelPid;
 			this.cleanupResources();
+			this.recordKernelCleanup(exitedPid);
 		}, FORKED_LIVENESS_POLL_MS);
 		this.forkedLivenessTimer.unref?.();
 	}
@@ -888,7 +974,13 @@ export class KernelManager {
 		const requestMsgId = msg.header.msg_id;
 
 		if (opts.signal?.aborted) {
-			return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
+			return {
+				stdout: "",
+				stderr: "",
+				status: "aborted",
+				cleanupStatus: "not_attempted",
+				durationMs: Date.now() - started,
+			};
 		}
 		if (this.activeExecution) {
 			throw new Error("Kernel already has an active execution");
@@ -1096,6 +1188,7 @@ export class KernelManager {
 			}
 
 			if (execution.opts.signal?.aborted) status = "aborted";
+			const cleanupReceipt = status === "aborted" ? this.abortedExecutionCleanup() : undefined;
 
 			execution.resolve({
 				stdout,
@@ -1106,6 +1199,7 @@ export class KernelManager {
 				sentAgentMessages: execution.sentAgentMessages.length > 0 ? execution.sentAgentMessages : undefined,
 				error: execution.error,
 				status,
+				...cleanupReceipt,
 				durationMs: Date.now() - execution.started,
 			});
 		}
@@ -1373,15 +1467,22 @@ export class KernelManager {
 		this.iopub = undefined;
 		this.control = undefined;
 		this.iopubPumpPromise = undefined;
+		const ownedPid = this.kernel?.pid ?? this.kernelPid;
+		const identityCurrent =
+			ownedPid !== undefined &&
+			this.kernelProcessStartId !== undefined &&
+			getProcessStartId(ownedPid) === this.kernelProcessStartId;
 		try {
 			if (this.kernel) {
 				const pid = this.kernel.pid;
-				if (process.platform !== "win32" && pid !== undefined) {
+				if (process.platform !== "win32" && pid !== undefined && identityCurrent) {
 					killIsolatedKernelProcessGroup(pid, killSignal);
 				} else {
+					// A ChildProcess handle is still exact even when process-start identity
+					// capture failed; only the descendant cleanup claim degrades.
 					this.kernel.kill(killSignal);
 				}
-			} else if (this.kernelPid !== undefined && !this.forkedKernelDied()) {
+			} else if (this.kernelPid !== undefined && identityCurrent && !this.forkedKernelDied()) {
 				// Only signal a forked kernel confirmed still alive: a dead pid may have
 				// been recycled by the OS, and a kill would then hit an unrelated process.
 				if (process.platform !== "win32") {
@@ -1430,9 +1531,8 @@ export class KernelManager {
 	}
 
 	async shutdown(opts: { snapshot?: boolean } = {}): Promise<void> {
-		if (this.state === "shutdown") {
+		if (this.state === "shutdown" && !this.kernel && this.kernelPid === undefined) {
 			liveKernels.delete(this);
-			this.cleanupResources();
 			return;
 		}
 		// Best-effort final flush (bounded) before teardown — used by signal handlers
@@ -1455,7 +1555,12 @@ export class KernelManager {
 			);
 		}
 
+		const child = this.kernel;
+		const pid = this.kernelPid;
+		const ownershipPid = child?.pid ?? pid;
 		this.cleanupResources();
+		await KernelManager.waitForKernelExit(child, pid);
+		this.recordKernelCleanup(ownershipPid);
 	}
 
 	async restart(): Promise<void> {
@@ -1479,7 +1584,12 @@ export class KernelManager {
 	async kill(): Promise<void> {
 		this.state = "shutdown";
 		liveKernels.delete(this);
+		const child = this.kernel;
+		const pid = this.kernelPid;
+		const ownershipPid = child?.pid ?? pid;
 		this.cleanupResources("SIGKILL");
+		await KernelManager.waitForKernelExit(child, pid);
+		this.recordKernelCleanup(ownershipPid);
 	}
 
 	/**
@@ -1598,10 +1708,12 @@ export class KernelManager {
 				// inside it and the exit has to be awaited afterwards.
 				const child = this.kernel;
 				const pid = this.kernelPid;
+				const ownershipPid = child?.pid ?? pid;
 				const tempDir = this.tempDir;
 				this.cleanupResources("SIGTERM", { removeTempDir: false });
 				this.tempDir = undefined;
 				await KernelManager.waitForKernelExit(child, pid);
+				this.recordKernelCleanup(ownershipPid);
 				if (tempDir) await KernelManager.removeTempDirWithRetries(tempDir);
 			}
 		})();

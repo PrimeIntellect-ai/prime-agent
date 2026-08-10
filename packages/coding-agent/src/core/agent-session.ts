@@ -169,7 +169,7 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
-import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
+import type { HostRequestHandlers, KernelProcessOwnershipEvent, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
@@ -320,6 +320,7 @@ export type AgentSessionEvent =
 			message: KernelSentAgentMessage;
 	  }
 	| { type: "session_action_update"; actions: SessionActionSnapshot }
+	| ({ type: "process_ownership_update" } & KernelProcessOwnershipEvent)
 	| {
 			type: "compaction_start";
 			reason: CompactionReason;
@@ -8583,6 +8584,7 @@ export class AgentSession {
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
+				onProcessOwnershipChange: (event) => this._emit({ type: "process_ownership_update", ...event }),
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {

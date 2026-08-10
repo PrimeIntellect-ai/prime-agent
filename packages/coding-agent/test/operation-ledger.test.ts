@@ -88,4 +88,35 @@ describe("OperationLedger", () => {
 		expect(ledger.snapshot()).toMatchObject({ persistenceState: "memory_only" });
 		expect(ledger.snapshot().persistenceError).toBeTruthy();
 	});
+
+	it("makes aborted tool cleanup uncertainty terminal and durable", () => {
+		const now = { value: Date.parse("2026-08-10T10:00:00.000Z") };
+		const ledger = makeLedger(now);
+		const tracker = new OperationTracker(ledger, { activeSessionId: "active-4", sessionId: "session-4" });
+		tracker.handleSessionEvent({ type: "tool_execution_start", toolCallId: "tool-4", toolName: "ipython" });
+		tracker.handleSessionEvent({
+			type: "process_ownership_update",
+			resource: "kernel",
+			status: "owned",
+			pid: 44,
+			processStartId: "start-44",
+			cleanupStatus: "not_attempted",
+		});
+		tracker.handleSessionEvent({
+			type: "tool_execution_end",
+			toolCallId: "tool-4",
+			isError: true,
+			result: {
+				details: { status: "aborted", cleanupStatus: "uncertain", survivingProcessIds: [45] },
+			},
+		});
+		expect(tracker.summary().operations[0]).toMatchObject({
+			status: "terminal",
+			phase: "uncertain",
+			outcome: "uncertain",
+			ownershipStatus: "owned",
+			cleanupStatus: "cleanup_uncertain",
+		});
+		expect(tracker.summary().operations[0]?.detail).toContain("45");
+	});
 });
