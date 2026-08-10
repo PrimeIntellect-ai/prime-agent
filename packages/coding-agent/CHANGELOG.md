@@ -6,6 +6,9 @@
 - Changed sent agent messages in the IPython cell UI to show only the message text with a `╰─` gutter when expanded, matching received messages, and hid the raw `agent_message.send` receipt dictionary.
 - Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade prime-agent` ([#844](https://github.com/PrimeIntellect-ai/prime-agent/issues/844))
 
+- Fixed crafted session IDs allowing path traversal outside the session directory during resume; session IDs are now validated, artifact paths contained, and symlinks rejected ([#1105](https://github.com/PrimeIntellect-ai/prime-agent/pull/1105) by [@avion23](https://github.com/avion23))
+- Enforced private file modes on session artifacts, snapshots, exports, and debug logs ([#1105](https://github.com/PrimeIntellect-ai/prime-agent/pull/1105) by [@avion23](https://github.com/avion23))
+
 ## [0.7.1] - 2026-08-07
 
 - Fixed the bundled `websearch` skill description and missing-key guidance omitting the `/login` → **MCP Connections** step required to configure Serper.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed API-key auth writes to use secure atomic writes with exclusive creation, symlink rejection, and private file modes ([#1105](https://github.com/PrimeIntellect-ai/prime-agent/pull/1105) by [@avion23](https://github.com/avion23))
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05
