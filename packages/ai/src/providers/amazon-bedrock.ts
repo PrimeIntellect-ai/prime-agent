@@ -41,7 +41,11 @@ import type {
 	ToolResultMessage,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
+import {
+	createStreamingJsonParseState,
+	discardStreamingJsonParseState,
+	type StreamingJsonParseState,
+} from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { recordStreamFailure, streamFailureFromStopReason } from "../utils/stream-failure.js";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.js";
@@ -83,7 +87,10 @@ export interface BedrockOptions extends StreamOptions {
 	bearerToken?: string;
 }
 
-type Block = (TextContent | ThinkingContent | ToolCall) & { index?: number; partialJson?: string };
+type Block = (TextContent | ThinkingContent | ToolCall) & {
+	index?: number;
+	parser?: StreamingJsonParseState<Record<string, unknown>>;
+};
 
 export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOptions> = (
 	model: Model<"bedrock-converse-stream">,
@@ -271,8 +278,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as Block).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as Block).partialJson;
+				const parser = (block as Block).parser;
+				if (parser) discardStreamingJsonParseState(parser);
+				delete (block as Block).parser;
 			}
 			output.stopReason = options.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatBedrockError(error);
@@ -374,7 +382,7 @@ function handleContentBlockStart(
 			id: start.toolUse.toolUseId || "",
 			name: start.toolUse.name || "",
 			arguments: {},
-			partialJson: "",
+			parser: createStreamingJsonParseState<Record<string, unknown>>(),
 			index,
 		};
 		output.content.push(block);
@@ -407,8 +415,8 @@ function handleContentBlockDelta(
 			stream.push({ type: "text_delta", contentIndex: index, delta: delta.text, partial: output });
 		}
 	} else if (delta?.toolUse && block?.type === "toolCall") {
-		block.partialJson = (block.partialJson || "") + (delta.toolUse.input || "");
-		block.arguments = parseStreamingJson(block.partialJson);
+		if (!block.parser) throw new Error("Missing Bedrock streaming JSON parser");
+		block.arguments = block.parser.append(delta.toolUse.input || "");
 		stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
 	} else if (delta?.reasoningContent) {
 		let thinkingBlock = block;
@@ -474,10 +482,9 @@ function handleContentBlockStop(
 			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
 			break;
 		case "toolCall":
-			block.arguments = parseStreamingJson(block.partialJson);
-			// Finalize in-place and strip the scratch buffer so replay only
-			// carries parsed arguments.
-			delete (block as Block).partialJson;
+			if (!block.parser) throw new Error("Missing Bedrock streaming JSON parser");
+			block.arguments = block.parser.finalize();
+			delete (block as Block).parser;
 			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: output });
 			break;
 	}

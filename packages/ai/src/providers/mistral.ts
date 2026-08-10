@@ -24,7 +24,11 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
+import {
+	createStreamingJsonParseState,
+	discardStreamingJsonParseState,
+	type StreamingJsonParseState,
+} from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { recordStreamFailure, streamFailureFromStopReason } from "../utils/stream-failure.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -93,8 +97,9 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
-				// partialArgs is only a streaming scratch buffer; never persist it.
-				delete (block as { partialArgs?: string }).partialArgs;
+				const parser = (block as { parser?: StreamingJsonParseState<unknown> }).parser;
+				if (parser) discardStreamingJsonParseState(parser);
+				delete (block as { parser?: StreamingJsonParseState<Record<string, unknown>> }).parser;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatMistralError(error);
@@ -402,12 +407,12 @@ async function consumeChatStream(
 					: deriveMistralToolCallId(`toolcall:${toolCall.index ?? 0}`, 0);
 			const key = `${callId}:${toolCall.index || 0}`;
 			const existingIndex = toolBlocksByKey.get(key);
-			let block: (ToolCall & { partialArgs?: string }) | undefined;
+			let block: (ToolCall & { parser?: StreamingJsonParseState<Record<string, unknown>> }) | undefined;
 
 			if (existingIndex !== undefined) {
 				const existing = output.content[existingIndex];
 				if (existing?.type === "toolCall") {
-					block = existing as ToolCall & { partialArgs?: string };
+					block = existing as ToolCall & { parser?: StreamingJsonParseState<Record<string, unknown>> };
 				}
 			}
 
@@ -417,7 +422,7 @@ async function consumeChatStream(
 					id: callId,
 					name: toolCall.function.name,
 					arguments: {},
-					partialArgs: "",
+					parser: createStreamingJsonParseState<Record<string, unknown>>(),
 				};
 				output.content.push(block);
 				toolBlocksByKey.set(key, output.content.length - 1);
@@ -428,8 +433,8 @@ async function consumeChatStream(
 				typeof toolCall.function.arguments === "string"
 					? toolCall.function.arguments
 					: JSON.stringify(toolCall.function.arguments || {});
-			block.partialArgs = (block.partialArgs || "") + argsDelta;
-			block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
+			if (!block.parser) throw new Error("Missing Mistral streaming JSON parser");
+			block.arguments = block.parser.append(argsDelta);
 			stream.push({
 				type: "toolcall_delta",
 				contentIndex: toolBlocksByKey.get(key)!,
@@ -443,11 +448,10 @@ async function consumeChatStream(
 	for (const index of toolBlocksByKey.values()) {
 		const block = output.content[index];
 		if (block.type !== "toolCall") continue;
-		const toolBlock = block as ToolCall & { partialArgs?: string };
-		toolBlock.arguments = parseStreamingJson<Record<string, unknown>>(toolBlock.partialArgs);
-		// Finalize in-place and strip the scratch buffer so replay only
-		// carries parsed arguments.
-		delete toolBlock.partialArgs;
+		const toolBlock = block as ToolCall & { parser?: StreamingJsonParseState<Record<string, unknown>> };
+		if (!toolBlock.parser) throw new Error("Missing Mistral streaming JSON parser");
+		toolBlock.arguments = toolBlock.parser.finalize();
+		delete toolBlock.parser;
 		stream.push({
 			type: "toolcall_end",
 			contentIndex: index,

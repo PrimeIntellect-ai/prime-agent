@@ -16,6 +16,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { discardStreamingJsonParseState, type StreamingJsonParseState } from "../utils/json-parse.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -132,8 +133,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+				const parser = (block as { parser?: StreamingJsonParseState<unknown> }).parser;
+				if (parser) discardStreamingJsonParseState(parser);
+				delete (block as { parser?: StreamingJsonParseState<unknown> }).parser;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);

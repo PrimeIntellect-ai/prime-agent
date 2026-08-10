@@ -30,7 +30,12 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
-import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.js";
+import {
+	createStreamingJsonParseState,
+	discardStreamingJsonParseState,
+	parseJsonWithRepair,
+	type StreamingJsonParseState,
+} from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	classifyStreamFailure,
@@ -532,7 +537,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			const requestId = response.headers.get("request-id") ?? undefined;
 			stream.push({ type: "start", partial: output });
 
-			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
+			type Block = (
+				| ThinkingContent
+				| TextContent
+				| (ToolCall & { parser: StreamingJsonParseState<Record<string, unknown>> })
+			) & { index: number };
 			const blocks = output.content as Block[];
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal, requestId)) {
@@ -595,7 +604,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								? fromClaudeCodeName(event.content_block.name, context.tools)
 								: event.content_block.name,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
-							partialJson: "",
+							parser: createStreamingJsonParseState<Record<string, unknown>>(),
 							index: event.index,
 						};
 						output.content.push(block);
@@ -630,8 +639,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const index = blocks.findIndex((b) => b.index === event.index);
 						const block = blocks[index];
 						if (block && block.type === "toolCall") {
-							block.partialJson += event.delta.partial_json;
-							block.arguments = parseStreamingJson(block.partialJson);
+							block.arguments = block.parser.append(event.delta.partial_json);
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: index,
@@ -667,10 +675,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								partial: output,
 							});
 						} else if (block.type === "toolCall") {
-							block.arguments = parseStreamingJson(block.partialJson);
-							// Finalize in-place and strip the scratch buffer so replay only
-							// carries parsed arguments.
-							delete (block as { partialJson?: string }).partialJson;
+							block.arguments = block.parser.finalize();
+							delete (block as { parser?: StreamingJsonParseState<Record<string, unknown>> }).parser;
 							stream.push({
 								type: "toolcall_end",
 								contentIndex: index,
@@ -724,8 +730,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+				const parser = (block as { parser?: StreamingJsonParseState<unknown> }).parser;
+				if (parser) discardStreamingJsonParseState(parser);
+				delete (block as { parser?: StreamingJsonParseState<Record<string, unknown>> }).parser;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);

@@ -88,6 +88,7 @@ describe("openai responses partialJson cleanup", () => {
 		}
 		expect(persistedToolCall.arguments).toEqual({ path: "README.md", content: "updated" });
 		expect("partialJson" in persistedToolCall).toBe(false);
+		expect("parser" in persistedToolCall).toBe(false);
 
 		const emittedEvents = pushSpy.mock.calls.map(([event]) => event as AssistantMessageEvent);
 		const toolCallEnd = emittedEvents.find((event) => event.type === "toolcall_end");
@@ -97,5 +98,26 @@ describe("openai responses partialJson cleanup", () => {
 		}
 		expect(toolCallEnd.toolCall).toBe(persistedToolCall);
 		expect("partialJson" in toolCallEnd.toolCall).toBe(false);
+		expect("parser" in toolCallEnd.toolCall).toBe(false);
+	});
+
+	it("rejects an authoritative done replacement that is not a streamed prefix", async () => {
+		const model = {
+			id: "gpt-5-mini",
+			name: "GPT-5 Mini",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		} satisfies Model<"openai-responses">;
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+		await expect(
+			processResponsesStream(createFunctionCallEvents('{"replacement":true}'), output, stream, model),
+		).rejects.toThrow("replaced a streamed prefix");
 	});
 });

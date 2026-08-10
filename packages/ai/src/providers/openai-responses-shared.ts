@@ -29,7 +29,11 @@ import type {
 } from "../types.js";
 import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
+import {
+	createStreamingJsonParseState,
+	getStreamingJsonRawForProviderCheck,
+	type StreamingJsonParseState,
+} from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { transformMessages } from "./transform-messages.js";
@@ -289,7 +293,11 @@ export async function processResponsesStream<TApi extends Api>(
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
 	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;
-	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
+	let currentBlock:
+		| ThinkingContent
+		| TextContent
+		| (ToolCall & { parser: StreamingJsonParseState<Record<string, unknown>> })
+		| null = null;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
 
@@ -315,9 +323,10 @@ export async function processResponsesStream<TApi extends Api>(
 					id: `${item.call_id}|${item.id}`,
 					name: item.name,
 					arguments: {},
-					partialJson: item.arguments || "",
+					parser: createStreamingJsonParseState<Record<string, unknown>>(),
 				};
 				output.content.push(currentBlock);
+				if (item.arguments) currentBlock.arguments = currentBlock.parser.append(item.arguments);
 				stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
 			}
 		} else if (event.type === "response.reasoning_summary_part.added") {
@@ -409,8 +418,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.delta") {
 			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				currentBlock.partialJson += event.delta;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+				currentBlock.arguments = currentBlock.parser.append(event.delta);
 				stream.push({
 					type: "toolcall_delta",
 					contentIndex: blockIndex(),
@@ -420,20 +428,19 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.done") {
 			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				const previousPartialJson = currentBlock.partialJson;
-				currentBlock.partialJson = event.arguments;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
-
-				if (event.arguments.startsWith(previousPartialJson)) {
-					const delta = event.arguments.slice(previousPartialJson.length);
-					if (delta.length > 0) {
-						stream.push({
-							type: "toolcall_delta",
-							contentIndex: blockIndex(),
-							delta,
-							partial: output,
-						});
-					}
+				const accumulated = getStreamingJsonRawForProviderCheck(currentBlock.parser);
+				if (!event.arguments.startsWith(accumulated)) {
+					throw new Error("OpenAI Responses function-call arguments replaced a streamed prefix");
+				}
+				const delta = event.arguments.slice(accumulated.length);
+				if (delta.length > 0) {
+					currentBlock.arguments = currentBlock.parser.append(delta);
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: blockIndex(),
+						delta,
+						partial: output,
+					});
 				}
 			}
 		} else if (event.type === "response.output_item.done") {
@@ -462,24 +469,26 @@ export async function processResponsesStream<TApi extends Api>(
 				});
 				currentBlock = null;
 			} else if (item.type === "function_call") {
-				const args =
-					currentBlock?.type === "toolCall" && currentBlock.partialJson
-						? parseStreamingJson(currentBlock.partialJson)
-						: parseStreamingJson(item.arguments || "{}");
-
 				let toolCall: ToolCall;
 				if (currentBlock?.type === "toolCall") {
-					// Finalize in-place and strip the scratch buffer so replay only
-					// carries parsed arguments.
-					currentBlock.arguments = args;
-					delete (currentBlock as { partialJson?: string }).partialJson;
+					const accumulated = getStreamingJsonRawForProviderCheck(currentBlock.parser);
+					if (accumulated.length === 0)
+						currentBlock.arguments = currentBlock.parser.append(item.arguments || "{}");
+					else if (!item.arguments.startsWith(accumulated))
+						throw new Error("OpenAI Responses function-call item replaced a streamed prefix");
+					else if (item.arguments.length > accumulated.length)
+						currentBlock.arguments = currentBlock.parser.append(item.arguments.slice(accumulated.length));
+					currentBlock.arguments = currentBlock.parser.finalize();
+					delete (currentBlock as { parser?: StreamingJsonParseState<Record<string, unknown>> }).parser;
 					toolCall = currentBlock;
 				} else {
+					const parser = createStreamingJsonParseState<Record<string, unknown>>();
+					parser.append(item.arguments || "{}");
 					toolCall = {
 						type: "toolCall",
 						id: `${item.call_id}|${item.id}`,
 						name: item.name,
-						arguments: args,
+						arguments: parser.finalize(),
 					};
 				}
 

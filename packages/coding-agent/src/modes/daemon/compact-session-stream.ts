@@ -1,4 +1,9 @@
-import { type AssistantMessage, type AssistantMessageEvent, parseStreamingJson } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	createStreamingJsonParseState,
+	type StreamingJsonParseState,
+} from "@earendil-works/pi-ai";
 import type { DaemonEventMeta, DaemonOutbound } from "./daemon-protocol.js";
 
 type SessionEvent = Extract<DaemonOutbound, { type: "session_event" }>["event"];
@@ -71,10 +76,14 @@ function compactContentStart(
 
 export class CompactAssistantStreamReconstructor {
 	private readonly partialMessages = new Map<string, AssistantMessage>();
-	private readonly toolCallJson = new Map<string, string>();
+	private readonly toolCallParsers = new Map<string, StreamingJsonParseState<Record<string, unknown>>>();
+	private readonly toolCallSnapshots = new Set<string>();
 
 	seed(activeSessionId: string, message: AssistantMessage): void {
 		this.partialMessages.set(activeSessionId, message);
+		for (const [contentIndex, content] of message.content.entries()) {
+			if (content.type === "toolCall") this.toolCallSnapshots.add(this.toolCallKey(activeSessionId, contentIndex));
+		}
 	}
 
 	observe(message: DaemonOutbound): void {
@@ -147,27 +156,38 @@ export class CompactAssistantStreamReconstructor {
 					return undefined;
 				}
 				partial.content[event.contentIndex] = delta.contentStart;
-				this.toolCallJson.set(this.toolCallKey(delta.activeSessionId, event.contentIndex), "");
+				this.toolCallParsers.set(
+					this.toolCallKey(delta.activeSessionId, event.contentIndex),
+					createStreamingJsonParseState(),
+				);
 				break;
 			case "toolcall_delta": {
 				const content = partial.content[event.contentIndex];
 				if (content?.type !== "toolCall") {
 					return undefined;
 				}
+				const key = this.toolCallKey(delta.activeSessionId, event.contentIndex);
 				if (delta.toolCallArguments) {
+					// Producer snapshots are already materialized; never reconstruct them.
 					content.arguments = delta.toolCallArguments;
+					this.toolCallSnapshots.add(key);
 				} else {
-					const key = this.toolCallKey(delta.activeSessionId, event.contentIndex);
-					const partialJson = `${this.toolCallJson.get(key) ?? ""}${event.delta}`;
-					this.toolCallJson.set(key, partialJson);
-					content.arguments = parseStreamingJson<Record<string, unknown>>(partialJson);
+					// A snapshot has no corresponding raw prefix. Ask the caller to resync
+					// rather than treating a later raw suffix as a whole document.
+					if (this.toolCallSnapshots.has(key)) return undefined;
+					const parser = this.toolCallParsers.get(key);
+					if (!parser) return undefined;
+					content.arguments = parser.append(event.delta);
 				}
 				break;
 			}
-			case "toolcall_end":
+			case "toolcall_end": {
 				partial.content[event.contentIndex] = event.toolCall;
-				this.toolCallJson.delete(this.toolCallKey(delta.activeSessionId, event.contentIndex));
+				const key = this.toolCallKey(delta.activeSessionId, event.contentIndex);
+				this.toolCallParsers.delete(key);
+				this.toolCallSnapshots.delete(key);
 				break;
+			}
 			case "start":
 			case "done":
 			case "error":
@@ -187,10 +207,11 @@ export class CompactAssistantStreamReconstructor {
 
 	clear(activeSessionId: string): void {
 		this.partialMessages.delete(activeSessionId);
-		for (const key of this.toolCallJson.keys()) {
-			if (key.startsWith(`${activeSessionId}:`)) {
-				this.toolCallJson.delete(key);
-			}
+		for (const key of this.toolCallParsers.keys()) {
+			if (key.startsWith(`${activeSessionId}:`)) this.toolCallParsers.delete(key);
+		}
+		for (const key of this.toolCallSnapshots) {
+			if (key.startsWith(`${activeSessionId}:`)) this.toolCallSnapshots.delete(key);
 		}
 	}
 
