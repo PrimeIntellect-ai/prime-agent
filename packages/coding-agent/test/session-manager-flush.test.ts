@@ -437,3 +437,66 @@ describe("SessionManager.appendCustomMessageEntryWithRollback", () => {
 		expect(readFileSync(file)).toEqual(before);
 	});
 });
+
+describe("SessionManager _persist gate: session_state must not create ghost files", () => {
+	it("does not write a file when appendSessionState(active) is called before any assistant message", () => {
+		const dir = createTempDir();
+		const sessionDir = join(dir, "sessions");
+		const mgr = SessionManager.create(dir, sessionDir);
+
+		// Daemon addRuntime() calls appendSessionState("active") immediately.
+		mgr.appendSessionState({ status: "active" });
+
+		const file = mgr.getSessionFile()!;
+		expect(existsSync(file)).toBe(false);
+	});
+
+	it("writes the file — including the session_state entry — once the first assistant message arrives", () => {
+		const dir = createTempDir();
+		const sessionDir = join(dir, "sessions");
+		const mgr = SessionManager.create(dir, sessionDir);
+
+		// Simulate daemon addRuntime: state written in-memory but NOT to disk yet.
+		mgr.appendSessionState({ status: "active" });
+		const file = mgr.getSessionFile()!;
+		expect(existsSync(file)).toBe(false);
+
+		// User message alone is still not enough to trigger a write.
+		mgr.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		expect(existsSync(file)).toBe(false);
+
+		// First assistant message triggers _rewriteFile, which writes ALL
+		// accumulated entries at once — including the deferred session_state.
+		mgr.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+
+		expect(existsSync(file)).toBe(true);
+
+		const entries = readFileSync(file, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+
+		// Order: header, session_state, user message, assistant message.
+		expect(entries[0]!.type).toBe("session");
+		expect(entries[1]!.type).toBe("session_state");
+		expect(entries[1]!.state).toEqual({ status: "active" });
+		expect(entries[2]!.message.role).toBe("user");
+		expect(entries[3]!.message.role).toBe("assistant");
+	});
+});
