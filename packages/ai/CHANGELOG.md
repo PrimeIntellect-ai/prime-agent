@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Fixed degenerate generations streaming to the output cap by aborting a stream once it settles into repeating the same fragment.
+- Changed the generated model catalog to current provider data, removing delisted entries including `claude-opus-4-1`, `gemini-2.5-pro`, `gemini-2.0-flash`, and `nemotron-3-ultra`, and adding `grok-4.5`, `kimi-k3`, `gemini-3.6-flash`, `deepseek-v4-flash`, and `qwen3.8-max`.
+- Changed `undici` to `^7.29.0` and declared `@opentelemetry/api` explicitly, which the Mistral SDK's observability modules require for a clean-install browser bundle.
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05
