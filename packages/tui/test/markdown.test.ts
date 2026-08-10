@@ -1366,3 +1366,55 @@ bar`,
 		});
 	});
 });
+
+describe("Markdown transform", () => {
+	it("transform receives raw text and content width", () => {
+		let receivedText = "";
+		let receivedWidth = 0;
+		const transform = (text: string, width: number): string => {
+			receivedText = text;
+			receivedWidth = width;
+			return text;
+		};
+		const markdown = new Markdown("Hello world", 2, 0, defaultMarkdownTheme, undefined, { transform });
+		markdown.render(80);
+		assert.strictEqual(receivedText, "Hello world");
+		// contentWidth = width - paddingX * 2 = 80 - 4 = 76
+		assert.strictEqual(receivedWidth, 76);
+	});
+
+	it("transformed text is rendered instead of original", () => {
+		const transform = (text: string): string => text.replace("Hello", "Goodbye");
+		const markdown = new Markdown("Hello world", 0, 0, defaultMarkdownTheme, undefined, { transform });
+		const lines = markdown.render(80);
+		const plainLines = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+		assert.ok(plainLines.some((l) => l.includes("Goodbye")));
+		assert.ok(!plainLines.some((l) => l.includes("Hello")));
+	});
+
+	it("no transform is backward compatible", () => {
+		const md1 = new Markdown("# Heading\n\nParagraph text", 0, 0, defaultMarkdownTheme);
+		const md2 = new Markdown("# Heading\n\nParagraph text", 0, 0, defaultMarkdownTheme, undefined, undefined);
+		assert.deepStrictEqual(md1.render(80), md2.render(80));
+	});
+
+	it("options without transform is backward compatible", () => {
+		const md1 = new Markdown("# Heading\n\nParagraph text", 0, 0, defaultMarkdownTheme);
+		const md2 = new Markdown("# Heading\n\nParagraph text", 0, 0, defaultMarkdownTheme, undefined, {});
+		assert.deepStrictEqual(md1.render(80), md2.render(80));
+	});
+
+	it("cache invalidation on text change with transform active", () => {
+		const transform = (text: string): string => text.replace("RED", "GREEN");
+		const markdown = new Markdown("Color: RED", 0, 0, defaultMarkdownTheme, undefined, { transform });
+		const first = markdown.render(80);
+		const plainFirst = first.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+		assert.ok(plainFirst.some((l) => l.includes("GREEN")));
+
+		markdown.setText("Color: BLUE and RED");
+		const second = markdown.render(80);
+		const plainSecond = second.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+		assert.ok(plainSecond.some((l) => l.includes("GREEN")));
+		assert.ok(plainSecond.some((l) => l.includes("BLUE")));
+	});
+});

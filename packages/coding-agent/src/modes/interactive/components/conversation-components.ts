@@ -39,6 +39,7 @@ export interface ConversationComponentsOptions {
 	toolsExpanded?: boolean;
 	agentMessagesExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
+	markdownTransform?: (text: string, availableWidth: number) => string;
 }
 
 export function isCompactAgentMessageNeighbor(component: Component | undefined): boolean {
@@ -85,6 +86,7 @@ export function buildConversationComponents(
 						precededByToolActivity:
 							components.at(-1) instanceof ToolExecutionComponent ||
 							components.at(-1) instanceof AgentMessageComponent,
+						markdownTransform: options.markdownTransform,
 					},
 				),
 			);
@@ -129,7 +131,14 @@ export function buildConversationComponents(
 			} else if (isSessionSlashCommandResultMessage(message)) {
 				components.push(new SlashCommandResultMessageComponent(message));
 			} else {
-				components.push(new UserMessageComponent("[Malformed session command message]", options.markdownTheme));
+				components.push(
+					new UserMessageComponent(
+						"[Malformed session command message]",
+						options.markdownTheme,
+						undefined,
+						options.markdownTransform,
+					),
+				);
 			}
 		} else if (message.role === "custom" && message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) {
 			if (!message.display) continue;
@@ -155,7 +164,14 @@ export function buildConversationComponents(
 			// An image-only prompt has no text; show a placeholder rather than dropping it.
 			const display = text || (hasContent ? "[image]" : "");
 			if (display) {
-				components.push(new UserMessageComponent(display, options.markdownTheme, options.isRecognizedSlashCommand));
+				components.push(
+					new UserMessageComponent(
+						display,
+						options.markdownTheme,
+						options.isRecognizedSlashCommand,
+						options.markdownTransform,
+					),
+				);
 			}
 		}
 		// Non-conversational messages (bash/branch-summary/compaction/other custom) aren't shown.

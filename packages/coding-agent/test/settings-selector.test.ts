@@ -32,6 +32,7 @@ const config: SettingsConfig = {
 	clearOnShrink: false,
 	showTerminalProgress: false,
 	fullscreen: true,
+	mermaidRenderingMode: "streaming",
 	warnings: {},
 };
 
@@ -57,6 +58,7 @@ const callbacks: SettingsCallbacks = {
 	onClearOnShrinkChange: () => {},
 	onShowTerminalProgressChange: () => {},
 	onFullscreenChange: () => {},
+	onMermaidRenderingModeChange: () => {},
 	onWarningsChange: () => {},
 	onCancel: () => {},
 };

@@ -27,6 +27,7 @@ const LOGIN_RECOVERY_SUFFIX = `\n\n${LOGIN_RECOVERY_MESSAGE}`;
 export interface AssistantMessageComponentOptions {
 	expanded?: boolean;
 	precededByToolActivity?: boolean;
+	markdownTransform?: (text: string, availableWidth: number) => string;
 }
 
 function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
@@ -123,6 +124,7 @@ export class AssistantMessageComponent extends Container {
 	private blockMarkdowns = new Map<number, Markdown>();
 	private lastBlockTexts = new Map<number, string>();
 	private precededByToolActivity: boolean;
+	private markdownTransform?: (text: string, availableWidth: number) => string;
 
 	constructor(
 		message?: AssistantMessage,
@@ -138,6 +140,7 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.expanded = options.expanded ?? false;
 		this.precededByToolActivity = options.precededByToolActivity ?? false;
+		this.markdownTransform = options.markdownTransform;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -272,7 +275,9 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme);
+				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme, undefined, {
+					transform: this.markdownTransform,
+				});
 				this.blockMarkdowns.set(i, markdown);
 				this.lastBlockTexts.set(i, content.text.trim());
 				this.contentContainer.addChild(markdown);

@@ -4,6 +4,7 @@ import stripAnsi from "strip-ansi";
 import { describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { AssistantMessageComponent, thinkingRecap } from "../src/modes/interactive/components/assistant-message.js";
+import { createMermaidMarkdownTransformer } from "../src/modes/interactive/mermaid-transformer.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -306,5 +307,195 @@ describe("AssistantMessageComponent streaming identity", () => {
 			component.updateContent(message);
 			expectIdentity(component, message, widths[i % widths.length]);
 		}
+	});
+});
+
+describe("AssistantMessageComponent mermaid rendering", () => {
+	const mermaidTransform = createMermaidMarkdownTransformer({
+		getMode: () => "streaming",
+		theme: {
+			fg: (color, text) => theme.fg(color as "accent" | "dim", text),
+			bold: (text) => theme.bold(text),
+		},
+	});
+
+	const FLOWCHART = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+
+	test("renders mermaid code blocks as Unicode box-drawing characters", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: FLOWCHART }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+		const rendered = stripAnsi(component.render(80).join("\n"));
+
+		// Should contain box-drawing characters
+		expect(rendered).toContain("┌");
+		expect(rendered).toContain("─");
+		expect(rendered).toContain("▶");
+		expect(rendered).toContain("Start");
+		expect(rendered).toContain("Done");
+	});
+
+	test("does not render mermaid diagrams in thinking blocks", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: FLOWCHART }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+		const rendered = stripAnsi(component.render(80).join("\n"));
+
+		// Thinking blocks should NOT render diagrams — just the raw source as a code block
+		expect(rendered).toContain("flowchart");
+		expect(rendered).not.toContain("┌");
+		expect(rendered).not.toContain("▶");
+	});
+
+	test("renders non-mermaid code blocks unchanged", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: "```typescript\nconst x: number = 42;\n```" }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+		const rendered = stripAnsi(component.render(80).join("\n"));
+
+		expect(rendered).toContain("const x");
+		expect(rendered).not.toContain("┌");
+		expect(rendered).not.toContain("▶");
+	});
+
+	test("falls back to source for diagrams wider than terminal width", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: FLOWCHART }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+		// Width is very narrow — diagram (21 cols) won't fit
+		const rendered = stripAnsi(component.render(10).join("\n"));
+
+		// Should fall back to original mermaid source as a code block
+		// (at narrow widths, words may wrap but no diagram should appear)
+		expect(rendered).toContain("A[Start]");
+		expect(rendered).not.toContain("┌");
+		expect(rendered).not.toContain("▶");
+	});
+
+	test("does not transform when mode is off", () => {
+		initTheme("dark");
+
+		const offTransform = createMermaidMarkdownTransformer({
+			getMode: () => "off",
+			theme: {
+				fg: (color, text) => theme.fg(color as "accent" | "dim", text),
+				bold: (text) => theme.bold(text),
+			},
+		});
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: FLOWCHART }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: offTransform },
+		);
+		const rendered = stripAnsi(component.render(80).join("\n"));
+
+		expect(rendered).toContain("flowchart");
+		expect(rendered).not.toContain("┌");
+		expect(rendered).not.toContain("▶");
+	});
+
+	test("renders mixed content with mermaid diagram correctly", () => {
+		initTheme("dark");
+
+		const mixedContent = ["Here is a flowchart:", "", FLOWCHART, "", "And some text after."].join("\n");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: mixedContent }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+		const rendered = stripAnsi(component.render(80).join("\n"));
+
+		expect(rendered).toContain("Here is a flowchart:");
+		expect(rendered).toContain("┌");
+		expect(rendered).toContain("▶");
+		expect(rendered).toContain("And some text after.");
+	});
+
+	test("renders state diagrams", () => {
+		initTheme("dark");
+
+		const stateDiagram =
+			"```mermaid\nstateDiagram-v2\n  [*] --> Idle\n  Idle --> Processing: start\n  Processing --> [*]\n```";
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: stateDiagram }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+		const rendered = stripAnsi(component.render(80).join("\n"));
+
+		// State diagrams use rounded box characters
+		expect(rendered).toContain("Idle");
+		expect(rendered).toContain("Processing");
+		expect(rendered).toMatch(/[╭┌]/);
+	});
+
+	test("falls back to source for unsupported diagram types", () => {
+		initTheme("dark");
+
+		const pieDiagram = '```mermaid\npie\n  "A": 50\n  "B": 50\n```';
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: pieDiagram }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+		const rendered = stripAnsi(component.render(80).join("\n"));
+
+		// pie charts are unsupported — should fall back to source code block
+		expect(rendered).toContain("pie");
+		expect(rendered).not.toContain("┌");
+	});
+
+	test("handles partial/streaming mermaid source without throwing", () => {
+		initTheme("dark");
+
+		// Partial source — no closing fence
+		const partial = "```mermaid\nflowchart LR\n  A -->";
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: partial }]),
+			undefined,
+			undefined,
+			"Thinking...",
+			{ markdownTransform: mermaidTransform },
+		);
+
+		// Should not throw
+		expect(() => component.render(80)).not.toThrow();
 	});
 });

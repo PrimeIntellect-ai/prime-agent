@@ -238,6 +238,7 @@ import type {
 	InteractiveModeLocalToolRendererDefinition,
 	InteractiveModeUiServices,
 } from "./interactive-mode-services.js";
+import { createMermaidMarkdownTransformer } from "./mermaid-transformer.js";
 import {
 	isOnboardingModelReady,
 	type OnboardingStartupState,
@@ -1801,6 +1802,16 @@ export class InteractiveMode {
 			...getMarkdownTheme(),
 			codeBlockIndent: this.settingsManager.getCodeBlockIndent(),
 		};
+	}
+
+	private getMermaidMarkdownTransform(): (text: string, availableWidth: number) => string {
+		return createMermaidMarkdownTransformer({
+			getMode: () => this.settingsManager.getMermaidRenderingMode(),
+			theme: {
+				fg: (color, text) => theme.fg(color as ThemeColor, text),
+				bold: (text) => theme.bold(text),
+			},
+		});
 	}
 
 	// =========================================================================
@@ -5731,6 +5742,7 @@ export class InteractiveMode {
 				precededByToolActivity:
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+				markdownTransform: this.getMermaidMarkdownTransform(),
 			},
 		);
 		this.streamingMessage = message;
@@ -6221,8 +6233,11 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Spacer(1));
 		}
 		this.chatContainer.addChild(
-			new UserMessageComponent(text, this.getMarkdownThemeWithSettings(), (name) =>
-				this.isRecognizedSlashCommand(name),
+			new UserMessageComponent(
+				text,
+				this.getMarkdownThemeWithSettings(),
+				(name) => this.isRecognizedSlashCommand(name),
+				this.getMermaidMarkdownTransform(),
 			),
 		);
 	}
@@ -6349,6 +6364,7 @@ export class InteractiveMode {
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
 								(name) => this.isRecognizedSlashCommand(name),
+								this.getMermaidMarkdownTransform(),
 							);
 							this.chatContainer.addChild(userComponent);
 						}
@@ -6357,6 +6373,7 @@ export class InteractiveMode {
 							textContent,
 							this.getMarkdownThemeWithSettings(),
 							(name) => this.isRecognizedSlashCommand(name),
+							this.getMermaidMarkdownTransform(),
 						);
 						this.chatContainer.addChild(userComponent);
 					}
@@ -6377,6 +6394,7 @@ export class InteractiveMode {
 						precededByToolActivity:
 							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+						markdownTransform: this.getMermaidMarkdownTransform(),
 					},
 				);
 				this.chatContainer.addChild(assistantComponent);
@@ -7501,6 +7519,7 @@ export class InteractiveMode {
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
 					fullscreen: this.fullscreenEnabled,
+					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					warnings: this.settingsManager.getWarnings(),
 				},
 				{
@@ -7625,6 +7644,20 @@ export class InteractiveMode {
 					},
 					onFullscreenChange: (enabled) => {
 						this.setFullscreenMode(enabled);
+					},
+					onMermaidRenderingModeChange: (mode) => {
+						this.settingsManager.setMermaidRenderingMode(mode);
+						// Invalidate and re-render existing components so the change
+						// takes effect immediately on already-displayed messages.
+						for (const child of this.chatContainer.children) {
+							if (child instanceof AssistantMessageComponent) {
+								child.invalidate();
+							}
+							if (child instanceof UserMessageComponent) {
+								child.invalidate();
+							}
+						}
+						this.ui.requestRender();
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);

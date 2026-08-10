@@ -11,7 +11,7 @@ import {
 	Text,
 } from "@earendil-works/pi-tui";
 import type { IdleEvictionMinutes } from "../../../core/session-action-store.js";
-import type { WarningSettings } from "../../../core/settings-manager.js";
+import type { MermaidRenderingMode, WarningSettings } from "../../../core/settings-manager.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 
@@ -54,6 +54,7 @@ export interface SettingsConfig {
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
 	fullscreen: boolean;
+	mermaidRenderingMode: MermaidRenderingMode;
 	warnings: WarningSettings;
 }
 
@@ -80,6 +81,7 @@ export interface SettingsCallbacks {
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
 	onFullscreenChange: (enabled: boolean) => void;
+	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
 }
@@ -443,6 +445,16 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
+		// Mermaid rendering toggle (insert after fullscreen)
+		const fullscreenIndex = items.findIndex((item) => item.id === "fullscreen");
+		items.splice(fullscreenIndex + 1, 0, {
+			id: "mermaid-rendering",
+			label: "Mermaid rendering",
+			description: "Render Mermaid diagrams as Unicode box-drawing art in chat",
+			currentValue: config.mermaidRenderingMode,
+			values: ["streaming", "off"],
+		});
+
 		// Add borders
 		this.addChild(new DynamicBorder());
 
@@ -510,6 +522,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "fullscreen":
 						callbacks.onFullscreenChange(newValue === "true");
+						break;
+					case "mermaid-rendering":
+						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);
 						break;
 				}
 			},

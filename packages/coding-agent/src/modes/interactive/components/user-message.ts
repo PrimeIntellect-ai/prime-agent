@@ -63,15 +63,24 @@ export class UserMessageComponent extends Container {
 		text: string,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		isRecognizedSlashCommand: (name: string) => boolean = () => false,
+		markdownTransform?: (text: string, availableWidth: number) => string,
 	) {
 		super();
+		const markdownOptions = markdownTransform ? { transform: markdownTransform } : undefined;
 		this.contentBox = new Box(2, 1, (content: string) => theme.getUserMessageBackgroundColor()(content));
 		this.contentBox.addChild(
 			isLeadingSlashCommand(text, isRecognizedSlashCommand)
 				? new SlashCommandMarkdown(text, markdownTheme)
-				: new Markdown(text, 0, 0, markdownTheme, {
-						color: (content: string) => theme.fg("userMessageText", content),
-					}),
+				: new Markdown(
+						text,
+						0,
+						0,
+						markdownTheme,
+						{
+							color: (content: string) => theme.fg("userMessageText", content),
+						},
+						markdownOptions,
+					),
 		);
 		this.addChild(this.contentBox);
 	}

@@ -147,6 +147,18 @@ export interface DefaultTextStyle {
 }
 
 /**
+ * Optional configuration for the Markdown component.
+ */
+export interface MarkdownOptions {
+	/**
+	 * Pre-processing callback applied to the raw text before the markdown parser runs.
+	 * Receives the raw text and the available content width (width minus horizontal padding).
+	 * The returned text is what gets parsed and rendered.
+	 */
+	transform?: (text: string, availableWidth: number) => string;
+}
+
+/**
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
  */
@@ -186,6 +198,7 @@ export class Markdown implements Component {
 	private defaultTextStyle?: DefaultTextStyle;
 	private theme: MarkdownTheme;
 	private defaultStylePrefix?: string;
+	private options?: MarkdownOptions;
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -204,12 +217,14 @@ export class Markdown implements Component {
 		paddingY: number,
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
+		options?: MarkdownOptions,
 	) {
 		this.text = text;
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 		this.theme = theme;
 		this.defaultTextStyle = defaultTextStyle;
+		this.options = options;
 	}
 
 	setText(text: string): void {
@@ -253,7 +268,12 @@ export class Markdown implements Component {
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedText = this.text.replace(/\t/g, "   ");
+		let normalizedText = this.text.replace(/\t/g, "   ");
+
+		// Apply optional pre-processing transform before parsing
+		if (this.options?.transform) {
+			normalizedText = this.options.transform(normalizedText, contentWidth);
+		}
 
 		// Parse markdown to HTML-like tokens
 		const tokens = pickMarkdownParser(normalizedText).lexer(normalizedText);

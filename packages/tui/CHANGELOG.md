@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added an optional `MarkdownOptions.transform` callback to the Markdown component for pre-processing raw text before parsing.
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05
