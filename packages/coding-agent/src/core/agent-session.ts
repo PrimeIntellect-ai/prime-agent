@@ -638,7 +638,7 @@ export interface TurnExecutionPolicy {
  * headers). Used to decide if a live session model must be rebound after the
  * registry catalog is rebuilt.
  */
-function modelRequestShapeChanged(a: Model<any>, b: Model<any>): boolean {
+function modelRequestShapeChanged(a: Model<Api>, b: Model<Api>): boolean {
 	return (
 		a.api !== b.api ||
 		a.baseUrl !== b.baseUrl ||
