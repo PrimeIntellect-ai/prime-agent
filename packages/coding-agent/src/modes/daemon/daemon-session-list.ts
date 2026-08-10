@@ -1,4 +1,3 @@
-import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -200,14 +199,9 @@ export function summaryForActiveSession(
 ): SessionSummary {
 	const session = activeSession.runtime.session;
 	const metadata = activeSession.runtime.metadata ?? { kind: "top-level" as const };
-	let modified = savedSession?.modified.toISOString();
-	if (!modified && session.sessionFile) {
-		try {
-			modified = statSync(session.sessionFile).mtime.toISOString();
-		} catch {
-			// Leave age blank when the active session has not flushed a jsonl yet.
-		}
-	}
+	const meaningfulMessageAt = latestMessageActivityAt(session.messages);
+	const modified =
+		meaningfulMessageAt ?? savedSession?.modified.toISOString() ?? session.sessionManager.getHeader?.()?.timestamp;
 
 	return {
 		id: activeSession.activeSessionId,
@@ -217,8 +211,7 @@ export function summaryForActiveSession(
 		hasActiveHeartbeat: hasActiveHeartbeat || undefined,
 		hasRegisteredHeartbeat: hasRegisteredHeartbeat || undefined,
 		hasRegisteredCronJob: hasRegisteredCronJob || undefined,
-		lastActivityAt:
-			latestMessageActivityAt(session.messages) ?? modified ?? session.sessionManager.getHeader?.()?.timestamp,
+		lastActivityAt: modified,
 		runtimeKind: metadata.kind,
 		rlmDepth: session.rlmDepth,
 		activeSessionId: activeSession.activeSessionId,
@@ -460,9 +453,9 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
 	if (activeSession.runtime.metadata?.kind === "subagent") {
 		return "idle";
 	}
-	// Hold at "working" until the idle verdict is current, so the view never
-	// buckets an unlabeled idle session.
-	return isSummaryCurrent(activeSession) ? "idle" : "working";
+	// Classification is advisory. A quiescent runtime is idle even when the
+	// classifier is unavailable or has not produced a current verdict.
+	return "idle";
 }
 
 /**

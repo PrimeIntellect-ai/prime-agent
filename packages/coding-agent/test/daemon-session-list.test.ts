@@ -65,6 +65,28 @@ describe("buildSessionList", () => {
 		expect(second.created).toBe(first.created);
 	});
 
+	it("uses meaningful message time instead of status-only file mtime for resident rows", () => {
+		const timestamp = Date.parse("2026-05-05T12:00:00.000Z");
+		const state = makeState({
+			activeSessionId: "meaningful-age",
+			messages: [{ role: "assistant", content: "done", timestamp }] as unknown as AgentMessage[],
+		});
+
+		const summary = summaryForActiveSession(state);
+		expect(summary.modified).toBe(new Date(timestamp).toISOString());
+		expect(summary.lastActivityAt).toBe(new Date(timestamp).toISOString());
+	});
+
+	it("reports a quiescent top-level session idle even when status classification is unavailable", () => {
+		const summary = summaryForActiveSession(
+			makeState({
+				activeSessionId: "classifier-unavailable",
+				messages: [{ role: "user", content: "hi" }] as unknown as AgentMessage[],
+			}),
+		);
+		expect(summary.activity).toBe("idle");
+	});
+
 	it("takes last activity from custom messages and tool results", () => {
 		const oldMessage = {
 			role: "user",

@@ -360,6 +360,20 @@ const RECOVERY_CHECKPOINT_EVENTS: ReadonlySet<string> = new Set([
 	"rlm_child_update",
 ]);
 
+const POST_SETTLEMENT_RECOVERY_EVENTS: ReadonlySet<string> = new Set([
+	"agent_end",
+	"turn_end",
+	"message_end",
+	"tool_execution_end",
+	"compaction_end",
+	"auto_retry_end",
+	"bash_end",
+]);
+
+export function shouldDeferRecoveryCheckpoint(eventType: string): boolean {
+	return POST_SETTLEMENT_RECOVERY_EVENTS.has(eventType);
+}
+
 function delay(ms: number): Promise<void> {
 	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
@@ -6133,7 +6147,17 @@ export class AgentDaemon {
 				void this.closeSession(state, "killed");
 			}
 			if (RECOVERY_CHECKPOINT_EVENTS.has(eventType)) {
-				this.recordWorkerRecoveryState(state, eventType);
+				if (shouldDeferRecoveryCheckpoint(eventType)) {
+					// Session event listeners settle busy/retry/tool flags after broadcasting.
+					// Checkpoint on the next microtask so recovery records the post-event truth.
+					queueMicrotask(() => {
+						if (this.sessions.get(state.activeSessionId) === state) {
+							this.recordWorkerRecoveryState(state, `${eventType}_settled`);
+						}
+					});
+				} else {
+					this.recordWorkerRecoveryState(state, eventType);
+				}
 			}
 		}
 		this.stampRlmChildActiveSessionId(message);

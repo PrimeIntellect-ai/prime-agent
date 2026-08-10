@@ -174,6 +174,38 @@ export function parsePsEtimes(stdout: string): Map<number, number> {
 	return uptimes;
 }
 
+function parseEtimeSeconds(value: string): number | undefined {
+	const dayAndTime = value.match(/^(?:(\d+)-)?(\d+):(\d+):(\d+)$/);
+	if (dayAndTime) {
+		const days = Number.parseInt(dayAndTime[1] ?? "0", 10);
+		return (
+			days * 86_400 +
+			Number.parseInt(dayAndTime[2]!, 10) * 3_600 +
+			Number.parseInt(dayAndTime[3]!, 10) * 60 +
+			Number.parseInt(dayAndTime[4]!, 10)
+		);
+	}
+	const minuteAndSecond = value.match(/^(\d+):(\d+)$/);
+	if (!minuteAndSecond) return undefined;
+	return Number.parseInt(minuteAndSecond[1]!, 10) * 60 + Number.parseInt(minuteAndSecond[2]!, 10);
+}
+
+/** Parse portable `ps -o pid=,etime=` output into a pid → uptime-seconds map. */
+export function parsePsEtime(stdout: string): Map<number, number> {
+	const uptimes = new Map<number, number>();
+	for (const line of stdout.split("\n")) {
+		const match = line.trim().match(/^(\d+)\s+(\S+)$/);
+		if (!match) continue;
+		const seconds = parseEtimeSeconds(match[2]!);
+		if (seconds !== undefined) uptimes.set(Number.parseInt(match[1]!, 10), seconds);
+	}
+	return uptimes;
+}
+
+export function uptimePsArgs(pids: readonly number[], platform: NodeJS.Platform = process.platform): string[] {
+	return ["-o", platform === "darwin" ? "pid=,etime=" : "pid=,etimes=", "-p", pids.join(",")];
+}
+
 function scanListeningDaemons(): DiscoveredDaemonProcess[] {
 	if (process.platform === "win32") {
 		return [];
@@ -210,11 +242,11 @@ function enrichUptimes(daemons: DiscoveredDaemonProcess[]): DiscoveredDaemonProc
 	if (pids.length === 0) {
 		return daemons;
 	}
-	const ps = spawnSync("ps", ["-o", "pid=,etimes=", "-p", pids.join(",")], { encoding: "utf8" });
-	if (ps.error || typeof ps.stdout !== "string") {
+	const ps = spawnSync("ps", uptimePsArgs(pids), { encoding: "utf8" });
+	if (ps.error || ps.status !== 0 || typeof ps.stdout !== "string") {
 		return daemons;
 	}
-	const uptimes = parsePsEtimes(ps.stdout);
+	const uptimes = process.platform === "darwin" ? parsePsEtime(ps.stdout) : parsePsEtimes(ps.stdout);
 	return daemons.map((daemon) => ({ ...daemon, uptimeSeconds: uptimes.get(daemon.pid) }));
 }
 
