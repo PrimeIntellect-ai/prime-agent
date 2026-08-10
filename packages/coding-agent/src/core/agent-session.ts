@@ -197,9 +197,11 @@ import {
 	appendGlobalRefinement,
 	applyRefinementProposal,
 	getGlobalHarnessStateDir,
+	getHarnessStatePath,
 	getLocalHarnessStateDir,
 	getRefinementHistory,
 	type HarnessState,
+	HarnessGenerationConflict,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
 	loadHarnessState,
@@ -7568,8 +7570,8 @@ export class AgentSession {
 	private _loadMergedHarnessState(): HarnessState {
 		const localHarnessStateDir = this._localHarnessStateDir();
 		return mergeHarnessStates(
-			loadHarnessState(getGlobalHarnessStateDir(), "global"),
-			localHarnessStateDir ? loadHarnessState(localHarnessStateDir, "local") : undefined,
+			loadHarnessState(getGlobalHarnessStateDir(), "global").state,
+			localHarnessStateDir ? loadHarnessState(localHarnessStateDir, "local").state : undefined,
 		);
 	}
 
@@ -7688,7 +7690,16 @@ export class AgentSession {
 			if (this._disposed || refineAbort.signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
-			return await this._applyRefine(plan, options, refineAbort);
+			try {
+				return await this._applyRefine(plan, options, refineAbort);
+			} catch (error) {
+				if (!(error instanceof HarnessGenerationConflict)) throw error;
+				// One explicit retry is special to /refine: it regenerates the LLM
+				// proposal against the current target root. A second conflict is a
+				// normal failure rather than a stale-plan replay.
+				const retryPlan = await this._planRefine(options, refineAbort.signal);
+				return await this._applyRefine(retryPlan, options, refineAbort);
+			}
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {
@@ -7738,12 +7749,11 @@ export class AgentSession {
 		if (!options.rollbackId && requestedScope === "local" && !localHarnessStateDir) {
 			throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
 		}
-		const globalPlanningState = loadHarnessState(globalHarnessStateDir, "global");
-		const localPlanningState = localHarnessStateDir ? loadHarnessState(localHarnessStateDir, "local") : undefined;
-		const planningState =
-			requestedScope === "global"
-				? globalPlanningState
-				: mergeHarnessStates(globalPlanningState, localPlanningState);
+		const globalPlanningLoaded = loadHarnessState(globalHarnessStateDir, "global");
+		const localPlanningLoaded = localHarnessStateDir ? loadHarnessState(localHarnessStateDir, "local") : undefined;
+		const globalPlanningState = globalPlanningLoaded.state;
+		const localPlanningState = localPlanningLoaded?.state;
+		const planningState = requestedScope === "global" ? globalPlanningState : mergeHarnessStates(globalPlanningState, localPlanningState);
 		const history = this._loadRefinementHistory();
 		const rollbackTarget = options.rollbackId ? history.find((item) => item.id === options.rollbackId) : undefined;
 		let baselineScope = rollbackTarget
@@ -7757,11 +7767,10 @@ export class AgentSession {
 		if (!baselineHarnessStateDir) {
 			throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
 		}
-		const baselineState = rollbackTarget
+		const baselineLoaded = rollbackTarget
 			? loadHarnessState(baselineHarnessStateDir, baselineScope)
-			: baselineScope === "global"
-				? globalPlanningState
-				: localPlanningState!;
+			: baselineScope === "global" ? globalPlanningLoaded : localPlanningLoaded!;
+		const baselineState = baselineLoaded.state;
 		const plan = await planRefinement(
 			this.agent.state.messages,
 			planningState,
@@ -7776,7 +7785,7 @@ export class AgentSession {
 		if (this._disposed || signal.aborted) {
 			throw new Error("Refinement cancelled because the session was disposed.");
 		}
-		return { ...plan, baselineState };
+		return { ...plan, baselineState, rootSnapshot: baselineLoaded.snapshot };
 	}
 
 	/**
@@ -7820,9 +7829,12 @@ export class AgentSession {
 			if (!targetHarnessStateDir) {
 				throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
 			}
-			// Re-read the target state immediately before applying so concurrent kernel
-			// (`rlm.harness`) writes during the LLM pass are not clobbered.
-			const state = loadHarnessState(targetHarnessStateDir, targetScope);
+			// Apply only to the exact root snapshot used for planning. A generation
+			// conflict is handled by refine() through one fresh replan, never by
+			// replaying this proposal against a different state.
+			const state = plan.baselineState;
+			const expectedSnapshot = plan.rootSnapshot;
+			if (!state || !expectedSnapshot) throw new Error("Refinement plan is missing its root snapshot.");
 			const proposal = {
 				...plan.proposal,
 				edits: plan.proposal.edits.map((edit) => {
@@ -7847,7 +7859,10 @@ export class AgentSession {
 				scope: targetScope,
 				baselineState: plan.baselineState,
 			});
-			result.harnessStatePath = saveHarnessState(targetHarnessStateDir, state);
+			const committed = saveHarnessState(targetHarnessStateDir, state, expectedSnapshot, targetScope);
+			state.schema = 2;
+			state.generation = committed.generation;
+			result.harnessStatePath = getHarnessStatePath(targetHarnessStateDir);
 			if (targetScope === "global") {
 				appendGlobalRefinement(globalHarnessStateDir, result);
 			}

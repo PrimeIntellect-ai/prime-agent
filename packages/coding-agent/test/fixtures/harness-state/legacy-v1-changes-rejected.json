@@ -1,0 +1,1 @@
+{"schema":1,"entries":{},"refinements":[{"id":"drop_null","trigger":"invalid","changes":null},{"id":"drop_bool","trigger":"invalid","changes":true},{"id":"drop_object","trigger":"invalid","changes":{"unsafe":"object"}},{"id":"keep_strings","trigger":"valid","changes":["first","second"]}]}

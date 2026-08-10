@@ -1,0 +1,1 @@
+{"entries":{"memory":{},"prompt":{},"skill":{},"subagent":{}},"generation":1,"refinements":[{"changes":["first","second"],"created_at":"1970-01-01T00:00:00.000Z","evidence":"","id":"keep_strings","outcome":"","trigger":"valid"}],"schema":2}

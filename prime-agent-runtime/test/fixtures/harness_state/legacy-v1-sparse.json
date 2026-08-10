@@ -1,0 +1,1 @@
+{"schema":1,"entries":{"memory":{"sparse":{"title":"Sparse","content":"deterministic defaults"}}},"refinements":[{"id":"sparse_event","trigger":"sparse fixture","changes":["kept"]}]}

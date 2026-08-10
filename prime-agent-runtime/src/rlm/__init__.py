@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
+from .harness import (
+    HarnessAtomicWriteUnsupported, HarnessEntry, HarnessGenerationConflict, HarnessLockBusy,
+    HarnessRecoveryRequired, HarnessScope, HarnessSnapshot, HarnessState, RefinementEvent, get_harness_state,
+)
 
 try:
     from ipykernel.comm import Comm
@@ -313,8 +316,13 @@ class _CallableModule(types.ModuleType):
 sys.modules[__name__].__class__ = _CallableModule
 
 __all__ = [
+    "HarnessAtomicWriteUnsupported",
     "HarnessEntry",
+    "HarnessGenerationConflict",
+    "HarnessLockBusy",
+    "HarnessRecoveryRequired",
     "HarnessScope",
+    "HarnessSnapshot",
     "HarnessState",
     "McpIntegration",
     "McpToolError",

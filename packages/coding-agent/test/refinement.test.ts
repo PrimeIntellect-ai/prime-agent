@@ -1,4 +1,14 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -214,12 +224,14 @@ describe("harness refinement", () => {
 		const state = loadHarnessState(harnessStateDir);
 		seedEntry(state, "memory");
 
-		const statePath = saveHarnessState(harnessStateDir, state);
+		saveHarnessState(harnessStateDir, state);
+		const statePath = getHarnessStatePath(harnessStateDir);
 
 		expect(loadHarnessState(harnessStateDir).entries.memory.memory_entry).toBeDefined();
 		expect(readdirSync(harnessStateDir)).toEqual([statePath.split("/").at(-1)]);
 		chmodSync(statePath, 0o600);
-		saveHarnessState(harnessStateDir, state);
+		// Re-load after the first commit so this second write carries the current CAS fence.
+		saveHarnessState(harnessStateDir, loadHarnessState(harnessStateDir));
 		expect(statSync(statePath).mode & 0o777).toBe(0o600);
 	});
 
@@ -654,7 +666,8 @@ describe("harness refinement", () => {
 			{ id: "refine_1" },
 		);
 
-		const statePath = saveHarnessState(dir, state);
+		saveHarnessState(dir, state);
+		const statePath = getHarnessStatePath(dir);
 		const reloaded = loadHarnessState(dir, "local");
 
 		expect(statePath.endsWith("harness_state.json")).toBe(true);
@@ -1194,6 +1207,90 @@ describe("harness refinement", () => {
 			refineHarness([], state, [], {} as never, "api-key", { rollbackId: "missing_refinement" }),
 		).rejects.toThrow("Refinement missing_refinement not found");
 	});
+	it("rejects duplicate entry ids across kinds during schema-2 load", () => {
+		const dir = makeTempDir();
+		const state = loadHarnessState(dir, "local");
+		seedEntry(state, "memory", "shared");
+		saveHarnessState(dir, state);
+		const path = getHarnessStatePath(dir);
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		raw.entries.prompt.shared = { ...raw.entries.memory.shared, kind: "prompt" };
+		writeFileSync(path, JSON.stringify(raw), "utf8");
+		const recovered = loadHarnessState(dir, "local");
+		expect(recovered.recovered).toBe(true);
+		expect(recovered.recovery).toBe("invalid_entry");
+	});
+
+	it("verifies the shared fixture manifest and accepts canonical v2 byte-identically", () => {
+		const root = new URL("./fixtures/harness-state/", import.meta.url);
+		const pythonRoot = new URL("../../../prime-agent-runtime/test/fixtures/harness_state/", import.meta.url);
+		const manifest = JSON.parse(readFileSync(new URL("expected-canonical-sha256.json", root), "utf8")) as Record<
+			string,
+			{ bytes: number; sha256: string }
+		>;
+		expect(Object.keys(manifest).sort()).toEqual(
+			readdirSync(root)
+				.filter((name) => name !== "expected-canonical-sha256.json")
+				.sort(),
+		);
+		for (const [name, expected] of Object.entries(manifest)) {
+			const raw = readFileSync(new URL(name, root));
+			expect(raw).toEqual(readFileSync(new URL(name, pythonRoot)));
+			expect(expected).toEqual({ bytes: raw.length, sha256: createHash("sha256").update(raw).digest("hex") });
+		}
+
+		const dir = makeTempDir();
+		const canonical = readFileSync(new URL("v2-populated.json", root));
+		writeFileSync(getHarnessStatePath(dir), canonical);
+		const state = loadHarnessState(dir, "local");
+		expect(state.recovered).toBe(false);
+		expect(state.snapshot.sha256).toBe(createHash("sha256").update(canonical).digest("hex"));
+		expect(readFileSync(getHarnessStatePath(dir))).toEqual(canonical);
+	});
+
+	it("deterministically migrates shared normalized and sparse schema-1 fixtures", () => {
+		const root = new URL("./fixtures/harness-state/", import.meta.url);
+		const manifest = JSON.parse(readFileSync(new URL("expected-canonical-sha256.json", root), "utf8")) as Record<
+			string,
+			{ bytes: number; sha256: string }
+		>;
+		for (const [legacy, canonical] of [
+			["legacy-v1-normalized.json", "v2-populated.json"],
+			["legacy-v1-sparse.json", "v2-sparse.json"],
+		] as const) {
+			const dir = makeTempDir();
+			writeFileSync(getHarnessStatePath(dir), readFileSync(new URL(legacy, root)));
+			const state = loadHarnessState(dir, "local");
+			saveHarnessState(dir, state);
+			const actual = readFileSync(getHarnessStatePath(dir));
+			const expected = readFileSync(new URL(canonical, root));
+			expect(actual).toEqual(expected);
+			expect(actual.length).toBe(manifest[canonical].bytes);
+			expect(createHash("sha256").update(actual).digest("hex")).toBe(manifest[canonical].sha256);
+		}
+	});
+
+	it("rejects non-string legacy refinement changes without coercion", () => {
+		const dir = makeTempDir();
+		const root = new URL("./fixtures/harness-state/", import.meta.url);
+		writeFileSync(getHarnessStatePath(dir), readFileSync(new URL("legacy-v1-changes-rejected.json", root)));
+		const state = loadHarnessState(dir, "local");
+		expect(state.refinements).toEqual([
+			expect.objectContaining({ id: "keep_strings", changes: ["first", "second"] }),
+		]);
+		saveHarnessState(dir, state);
+		expect(readFileSync(getHarnessStatePath(dir))).toEqual(readFileSync(new URL("v2-changes-rejected.json", root)));
+	});
+
+	it("fails closed on duplicate-key or noncanonical lock owners", () => {
+		const dir = makeTempDir();
+		const state = loadHarnessState(dir, "local");
+		const path = getHarnessStatePath(dir);
+		const lock = `${path}.lock`;
+		writeFileSync(lock, readFileSync(new URL("./fixtures/harness-state/lock-duplicate-key.json", import.meta.url)));
+		expect(() => saveHarnessState(dir, state)).toThrow(/lease is busy/);
+		rmSync(lock, { force: true });
+	});
 });
 
 describe("global refinement history", () => {
@@ -1432,7 +1529,8 @@ describe("global refinement history", () => {
 			]),
 			{ id: "refine_session_a" },
 		);
-		applied.harnessStatePath = saveHarnessState(dir, sessionAState);
+		saveHarnessState(dir, sessionAState);
+		applied.harnessStatePath = getHarnessStatePath(dir);
 		appendGlobalRefinement(dir, applied);
 
 		// A fresh session loads the global state and the global history (its own session

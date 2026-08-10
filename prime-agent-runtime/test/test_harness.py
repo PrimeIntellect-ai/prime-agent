@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from rlm import harness as package_harness
 from rlm import rlm as callable_rlm
-from rlm.harness import HarnessState, get_harness_state
+from rlm.harness import HarnessEntry, HarnessGenerationConflict, HarnessState, get_harness_state
 
 PYTHON_REFERENCE = {
     "type": "python",
@@ -163,7 +164,7 @@ class HarnessStateTest(unittest.TestCase):
                             {
                                 "id": "refine_extra",
                                 "trigger": "extra keys",
-                                "changes": [1, "loaded"],
+                                "changes": ["loaded"],
                                 "ignored": "value",
                             },
                             {
@@ -188,9 +189,9 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(state.get("memory", "known").metadata, {})
             self.assertIsNone(state.get("memory", "missing_content"))
             self.assertEqual(state.refinements[0].id, "refine_extra")
-            self.assertEqual(state.refinements[0].changes, ["1", "loaded"])
+            self.assertEqual(state.refinements[0].changes, ["loaded"])
             self.assertEqual(len(state.refinements), 1)
-            self.assertIn("1, loaded", state.overview())
+            self.assertIn("loaded", state.overview())
 
             updated = state.update_memory("known", "Known memory", "Updated content.")
             self.assertEqual(updated.version, 3)
@@ -446,10 +447,12 @@ class HarnessStateTest(unittest.TestCase):
             future = state_path.stat().st_mtime + 5
             os.utime(state_path, (future, future))
 
-            # create() must observe the external entry and honor create-or-fail.
-            with self.assertRaisesRegex(ValueError, "already exists"):
+            # A stale candidate must receive a typed CAS conflict rather than
+            # silently reload/replay and claim a different operation succeeded.
+            with self.assertRaises(HarnessGenerationConflict):
                 state.create_memory("Local", "Should not overwrite.", id="dup")
-            self.assertEqual(state.get("memory", "dup").content, "Written elsewhere.")
+            self.assertIsNone(state.entries["memory"].get("dup"))
+            self.assertEqual(HarnessState(state_path).get("memory", "dup").content, "Written elsewhere.")
 
     def test_explicit_create_and_update_enforce_entry_existence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -929,6 +932,123 @@ class HarnessStateTest(unittest.TestCase):
                 state.delete("tool", "tool")
             with self.assertRaisesRegex(ValueError, "unknown harness kind"):
                 state.list("tool")
+
+    def test_schema2_cas_is_digest_fenced_and_atomic(self) -> None:
+        from rlm.harness import HarnessGenerationConflict
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            first = HarnessState(path)
+            second = HarnessState(path)
+            first.create_memory("First", "winner", id="first")
+            # Raw save is deliberately CAS-fenced even if mtimes are equal. CRUD
+            # may refresh before an operation for legacy source compatibility.
+            candidate = second._candidate()
+            candidate.entries["memory"]["second"] = HarnessEntry(
+                id="second", kind="memory", title="Second", content="loser", scope="local"
+            )
+            with self.assertRaises(HarnessGenerationConflict):
+                candidate.save(expected=second._snapshot)
+            self.assertIsNone(second.entries["memory"].get("second"))
+            loaded = HarnessState(path)
+            self.assertEqual(loaded.snapshot().generation, 1)
+            self.assertEqual(loaded.get("memory", "first").content, "winner")
+            self.assertIsNone(loaded.get("memory", "second"))
+            self.assertFalse((Path(f"{path}.lock")).exists())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
+            raw = path.read_bytes()
+            self.assertTrue(raw.endswith(b"\n"))
+            self.assertEqual(json.loads(raw)["schema"], 2)
+
+    def test_corruption_is_preserved_before_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            damaged = b'{"schema":2,'
+            path.write_bytes(damaged)
+            recovered = HarnessState(path)
+            self.assertTrue(recovered.recovered)
+            self.assertEqual(recovered.recovery, "invalid_json")
+            copies = list(path.parent.glob("harness_state.corrupt.*.json"))
+            self.assertEqual(len(copies), 1)
+            self.assertEqual(copies[0].read_bytes(), damaged)
+            self.assertEqual(json.loads(path.read_bytes())["generation"], 1)
+            recovered.create_memory("after", "recovery", id="after")
+            self.assertEqual(HarnessState(path).get("memory", "after").content, "recovery")
+
+
+    def test_schema2_rejects_entry_ids_duplicated_across_kinds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(path)
+            state.create_memory("One", "one", id="shared")
+            raw = json.loads(path.read_text())
+            raw["entries"]["prompt"]["shared"] = {**raw["entries"]["memory"]["shared"], "kind": "prompt"}
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            recovered = HarnessState(path)
+            self.assertTrue(recovered.recovered)
+            self.assertEqual(recovered.recovery, "invalid_entry")
+
+    def test_lock_owner_requires_exact_canonical_duplicate_free_wire_bytes(self) -> None:
+        from rlm.harness import _canonical_lock_bytes, _lock_owner
+        owner = {"nonce": "a" * 32, "pid": 1, "process_start": "100", "created_at": "2026-01-01T00:00:00.000Z"}
+        canonical = _canonical_lock_bytes(owner)
+        canonical_fixture = Path(__file__).parent / "fixtures" / "harness_state" / "lock-canonical.json"
+        self.assertEqual(canonical_fixture.read_bytes(), canonical)
+        self.assertEqual(_lock_owner(canonical), owner)
+        duplicate = Path(__file__).parent / "fixtures" / "harness_state" / "lock-duplicate-key.json"
+        self.assertIsNone(_lock_owner(duplicate.read_bytes()))
+        self.assertIsNone(_lock_owner(b'{"pid":1,"nonce":"' + b"a" * 32 + b'","process_start":"100","created_at":"2026-01-01T00:00:00.000Z"}\n'))
+
+    def test_cross_runtime_fixture_manifest_and_canonical_v2_round_trip(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "harness_state"
+        typescript_root = Path(__file__).parents[2] / "packages" / "coding-agent" / "test" / "fixtures" / "harness-state"
+        manifest = json.loads((root / "expected-canonical-sha256.json").read_text("utf-8"))
+        self.assertEqual(set(manifest), {path.name for path in root.iterdir()} - {"expected-canonical-sha256.json"})
+        for name, expected in manifest.items():
+            raw = (root / name).read_bytes()
+            self.assertEqual(raw, (typescript_root / name).read_bytes(), name)
+            self.assertEqual(expected, {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}, name)
+
+        canonical = (root / "v2-populated.json").read_bytes()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            path.write_bytes(canonical)
+            loaded = HarnessState(path)
+            self.assertFalse(loaded.recovered)
+            self.assertEqual(loaded.snapshot().sha256, hashlib.sha256(canonical).hexdigest())
+            self.assertEqual(path.read_bytes(), canonical)
+
+    def test_shared_normalized_and_sparse_legacy_fixtures_migrate_byte_for_byte(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "harness_state"
+        manifest = json.loads((root / "expected-canonical-sha256.json").read_text("utf-8"))
+        for legacy, canonical in (("legacy-v1-normalized.json", "v2-populated.json"), ("legacy-v1-sparse.json", "v2-sparse.json")):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "harness_state.json"
+                path.write_bytes((root / legacy).read_bytes())
+                state = HarnessState(path)
+                state.save()
+                actual = path.read_bytes()
+                expected = (root / canonical).read_bytes()
+                self.assertEqual(actual, expected)
+                self.assertEqual(len(actual), manifest[canonical]["bytes"])
+                self.assertEqual(hashlib.sha256(actual).hexdigest(), manifest[canonical]["sha256"])
+
+    def test_legacy_refinement_changes_reject_null_bool_and_objects_without_coercion(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "harness_state"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            path.write_bytes((root / "legacy-v1-changes-rejected.json").read_bytes())
+            state = HarnessState(path)
+            self.assertEqual([(event.id, event.changes) for event in state.refinements], [("keep_strings", ["first", "second"])])
+            state.save()
+            self.assertEqual(path.read_bytes(), (root / "v2-changes-rejected.json").read_bytes())
+
+    def test_atomic_state_file_is_owner_only_after_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(path)
+            state.create_memory("Private", "state", id="private")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
 
 
 if __name__ == "__main__":
