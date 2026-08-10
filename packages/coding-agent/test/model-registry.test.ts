@@ -1733,6 +1733,54 @@ describe("ModelRegistry", () => {
 			}
 		});
 
+		test("surfaces the revoked-refresh-token guidance through request auth", async () => {
+			const providerId = `test-oauth-revoked-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			registerOAuthProvider({
+				id: providerId,
+				name: "Test OAuth Revoked",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				async refreshToken() {
+					throw new Error(
+						"xAI OAuth token refresh failed (HTTP 400): invalid_grant. Run /login and sign in to xAI again.",
+					);
+				},
+				getApiKey(credentials) {
+					return credentials.access;
+				},
+			});
+			authStorage.set(providerId, {
+				type: "oauth",
+				refresh: "revoked-refresh-token",
+				access: "expired-access-token",
+				expires: Date.now() - 10_000,
+			});
+			writeRawModelsJson({
+				[providerId]: { baseUrl: "https://api.example.com/v1", api: "openai-completions", models: [] },
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model: Model<Api> = {
+				id: "test-model",
+				name: "Test Model",
+				api: "openai-completions",
+				provider: providerId,
+				baseUrl: "https://api.example.com/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 100000,
+				maxTokens: 8000,
+			};
+
+			const auth = await registry.getApiKeyAndHeaders(model);
+			expect(auth.ok).toBe(false);
+			if (!auth.ok) {
+				expect(auth.error).toContain("Run /login and sign in to xAI again.");
+			}
+		});
+
 		test("keeps xAI models on Chat Completions while a runtime API key outranks the OAuth credential", () => {
 			authStorage.set("xai", {
 				type: "oauth",
