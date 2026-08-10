@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
@@ -10,7 +11,9 @@ import {
 	createAgentSessionServices,
 } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import type { C04ChildResultReference } from "../src/core/rlm-child-results.js";
 import { materializedTerminalMessageId, readRlmDurableOperationRegistry } from "../src/core/rlm-durable-operations.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -71,7 +74,11 @@ function providerRegistration(models: readonly BarrierScriptedProvider["models"]
 	};
 }
 
-async function createRealDaemonFixture(root: string, scripted: BarrierScriptedProvider) {
+async function createRealDaemonFixture(
+	root: string,
+	scripted: BarrierScriptedProvider,
+	customTools: ToolDefinition[] = [],
+) {
 	const authStorage = AuthStorage.inMemory();
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
 	const model = scripted.models[0]!;
@@ -102,7 +109,7 @@ async function createRealDaemonFixture(root: string, scripted: BarrierScriptedPr
 			scopedModels: runtimeOptions.sessionOptions?.scopedModels,
 			initialActiveToolNames: runtimeOptions.sessionOptions?.initialActiveToolNames,
 			allowedToolNames: runtimeOptions.sessionOptions?.allowedToolNames,
-			customTools: runtimeOptions.sessionOptions?.customTools,
+			customTools: runtimeOptions.sessionOptions?.customTools ?? customTools,
 			includeGoals: runtimeOptions.sessionOptions?.includeGoals,
 			includeCompactSkill: runtimeOptions.sessionOptions?.includeCompactSkill,
 			agentMessageController: runtimeOptions.sessionOptions?.agentMessageController,
@@ -175,10 +182,22 @@ function terminalEntries(session: { sessionManager: Pick<SessionManager, "getEnt
 		const message = candidate.message ?? candidate;
 		return (
 			(candidate.type === "message" || candidate.type === "custom_message") &&
-			(message.role === "custom" || message.customType === "rlm_child_terminal_notice") &&
+			(message.role === "custom" ||
+				message.customType === "rlm_child_terminal_notice" ||
+				message.customType === "rlm_safe_terminal_result") &&
 			message.details?.id === id
 		);
 	});
+}
+
+function terminalResultProjection(entry: unknown): C04ChildResultReference {
+	const candidate = entry as {
+		message?: { details?: { projection?: unknown } };
+		details?: { projection?: unknown };
+	};
+	const message = candidate.message ?? candidate;
+	if (typeof message.details?.projection !== "string") throw new Error("Missing C04 terminal projection");
+	return JSON.parse(message.details.projection) as C04ChildResultReference;
 }
 
 describe("C03 real daemon production recovery", () => {
@@ -516,6 +535,148 @@ describe("C03 real daemon production recovery", () => {
 				expect.objectContaining({ requestId: bRequest, signalAborted: false }),
 			]),
 		);
+		await internals.closeSession(parentState, "shutdown");
+	}, 20_000);
+
+	it.each([
+		{
+			label: "empty",
+			requestId: "request-9010",
+			scripts: [{ requestId: "request-9010", usage: usage(5, 0) }] satisfies readonly ProviderScript[],
+			expectedObservations: 1,
+		},
+		{
+			label: "tool-only",
+			requestId: "request-9011",
+			scripts: [
+				{
+					requestId: "request-9011",
+					stopReason: "toolUse",
+					usage: usage(5, 1),
+					blocks: [
+						{
+							type: "toolCall",
+							id: "finish-9011",
+							name: "finish",
+							argumentChunks: ["{}"],
+						},
+					],
+				},
+			] satisfies readonly ProviderScript[],
+			expectedObservations: 1,
+		},
+	])(
+		"commits a bounded empty C04 artifact and exactly one C03 terminal for a successful $label child",
+		async ({ label, requestId, scripts, expectedObservations }) => {
+			const root = await mkdtemp(join(tmpdir(), `prime-agent-c04-${label}-`));
+			const scripted = createBarrierScriptedProvider({
+				api: `c04-${label}-scripted`,
+				provider: `c04-${label}-scripted`,
+				barrier: { expected: [requestId], timeoutMs: 10_000 },
+				models: [{ id: `c04-${label}-model`, responseModel: `c04-${label}-model` }],
+				scripts: { [requestId]: scripts },
+			});
+			cleanups.push(() => scripted.unregister());
+			cleanups.push(() => rm(root, { recursive: true, force: true }));
+			const tools: ToolDefinition[] =
+				label === "tool-only"
+					? [
+							{
+								name: "finish",
+								label: "finish",
+								description: "Finish the test-only child task.",
+								parameters: Type.Object({}),
+								execute: async () => ({ content: [], details: {}, terminate: true }),
+							},
+						]
+					: [];
+			const fixture = await createRealDaemonFixture(root, scripted, tools);
+			const internals = fixture.daemon as unknown as DaemonInternals;
+			const parentState = await internals.createRuntime({ type: "create" });
+			const parent = parentState.runtime.session;
+			const handle = await parent.runRlmChild(`C04 ${label} ${requestId}`, {
+				name: `c04-${label}-worker`,
+				model: `c04-${label}-scripted/c04-${label}-model`,
+			});
+			await scripted.open;
+			scripted.release([requestId]);
+			const artifacts = parent.sessionManager.getSessionArtifactDir();
+			if (!artifacts) throw new Error("Missing parent C04 artifact directory");
+			await vi.waitFor(() => {
+				const operation = [...realRegistry(artifacts).operations.values()].find(
+					(candidate) => candidate.childId === handle.rlm_child_id,
+				);
+				expect(operation).toMatchObject({ lifecycle: "terminal_recorded" });
+				if (!operation) throw new Error("Missing C04 operation");
+				expect(terminalEntries(parent, operation.deliveryId)).toHaveLength(1);
+			});
+			const operation = [...realRegistry(artifacts).operations.values()].find(
+				(candidate) => candidate.childId === handle.rlm_child_id,
+			);
+			if (!operation) throw new Error("Missing C04 operation");
+			const terminal = terminalEntries(parent, operation.deliveryId)[0];
+			if (!terminal) throw new Error("Missing C03 terminal");
+			const projected = terminalResultProjection(terminal);
+			expect(projected).toMatchObject({
+				status: "completed",
+				artifacts: [expect.objectContaining({ byteLength: 0 })],
+			});
+			expect(projected.artifacts[0]?.sha256).toBe(
+				"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			);
+			await internals.getOrHydrateBoundSessionState(handle.rlm_child_id);
+			expect(terminalEntries(parent, operation.deliveryId)).toHaveLength(1);
+			expect(scripted.observations()).toHaveLength(expectedObservations);
+			await internals.closeSession(parentState, "shutdown");
+		},
+		20_000,
+	);
+
+	it("keeps a live text-delta producer open until its nonempty C04 artifact commits", async () => {
+		const root = await mkdtemp(join(tmpdir(), "prime-agent-c04-live-delta-"));
+		const requestId = "request-9012";
+		const scripted = createBarrierScriptedProvider({
+			api: "c04-live-delta-scripted",
+			provider: "c04-live-delta-scripted",
+			barrier: { expected: [requestId], timeoutMs: 10_000 },
+			models: [{ id: "c04-live-delta-model", responseModel: "c04-live-delta-model" }],
+			scripts: {
+				[requestId]: [{ requestId, usage: usage(5, 2), blocks: [{ type: "text", chunks: ["live ", "delta"] }] }],
+			},
+		});
+		cleanups.push(() => scripted.unregister());
+		cleanups.push(() => rm(root, { recursive: true, force: true }));
+		const fixture = await createRealDaemonFixture(root, scripted);
+		const internals = fixture.daemon as unknown as DaemonInternals;
+		const parentState = await internals.createRuntime({ type: "create" });
+		const parent = parentState.runtime.session;
+		const handle = await parent.runRlmChild(`C04 live delta ${requestId}`, {
+			name: "c04-live-delta-worker",
+			model: "c04-live-delta-scripted/c04-live-delta-model",
+		});
+		await scripted.open;
+		scripted.release([requestId]);
+		const artifacts = parent.sessionManager.getSessionArtifactDir();
+		if (!artifacts) throw new Error("Missing parent C04 artifact directory");
+		await vi.waitFor(() => {
+			const operation = [...realRegistry(artifacts).operations.values()].find(
+				(candidate) => candidate.childId === handle.rlm_child_id,
+			);
+			if (!operation) throw new Error("Missing C04 operation");
+			expect(terminalEntries(parent, operation.deliveryId)).toHaveLength(1);
+		});
+		const operation = [...realRegistry(artifacts).operations.values()].find(
+			(candidate) => candidate.childId === handle.rlm_child_id,
+		);
+		if (!operation) throw new Error("Missing C04 operation");
+		const terminal = terminalEntries(parent, operation.deliveryId)[0];
+		if (!terminal) throw new Error("Missing C03 terminal");
+		const projected = terminalResultProjection(terminal);
+		expect(projected.artifacts[0]).toMatchObject({
+			byteLength: 10,
+			sha256: "7050e1d30ca92a1ee1dbde7702615c72b8fa94ac9842395ec1773e2851966c26",
+		});
+		expect(scripted.observations()).toHaveLength(1);
 		await internals.closeSession(parentState, "shutdown");
 	}, 20_000);
 });

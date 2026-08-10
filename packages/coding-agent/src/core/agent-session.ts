@@ -214,7 +214,17 @@ import {
 } from "./refinement/index.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
-import { materializedTerminalMessageId, type RlmTerminalMessage } from "./rlm-durable-operations.js";
+import {
+	type C04ChildResultStatus,
+	canonicalChildResultBytes,
+	createOrGetTerminalChildResult,
+	terminalStorageFailedProjection,
+} from "./rlm-child-results.js";
+import {
+	createRlmSafeTerminalResultTerminalMessage,
+	materializedTerminalMessageId,
+	type RlmTerminalMessage,
+} from "./rlm-durable-operations.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -1066,11 +1076,61 @@ export function rlmChildLabel(prompt: string): string {
 	return prompt.replace(/\s+/g, " ").trim() || "child agent";
 }
 
-function readAssistantText(message: AssistantMessage): string {
-	return message.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
-		.join("");
+/** C04 terminal bytes are accepted exactly at the producer event boundary. This
+ * queue never consults a completed AssistantMessage, transcript, or prompt
+ * result; backpressure is the C04 artifact writer's bounded chunk contract. */
+export class C04ProducerSink implements AsyncIterable<Uint8Array> {
+	private static readonly MAX_BUFFERED_BYTES = 2 * 64 * 1024;
+	private readonly chunks: Uint8Array[] = [];
+	private readonly waiters: Array<() => void> = [];
+	private bufferedBytes = 0;
+	private failure: Error | undefined;
+	private closed = false;
+	push(text: string): void {
+		if (this.closed || !text) return;
+		const bytes = new TextEncoder().encode(text);
+		if (this.bufferedBytes + bytes.length > C04ProducerSink.MAX_BUFFERED_BYTES) {
+			this.failure = new Error("C04 producer sink exceeded its bounded buffer");
+			this.closed = true;
+			this.wake();
+			return;
+		}
+		for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
+			const chunk = bytes.slice(offset, offset + 64 * 1024);
+			this.chunks.push(chunk);
+			this.bufferedBytes += chunk.length;
+		}
+		this.wake();
+	}
+	close(): void {
+		this.closed = true;
+		this.wake();
+	}
+	private wake(): void {
+		for (const waiter of this.waiters.splice(0)) waiter();
+	}
+	async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+		while (!this.closed || this.chunks.length > 0) {
+			const chunk = this.chunks.shift();
+			if (chunk) {
+				this.bufferedBytes -= chunk.length;
+				yield chunk;
+				continue;
+			}
+			if (this.failure) throw this.failure;
+			await new Promise<void>((resolve) => this.waiters.push(resolve));
+		}
+		if (this.failure) throw this.failure;
+	}
+}
+/** A bounded sanitized presentation is maintained while the child produces it. */
+function safeAssistantPreview(message: AssistantMessage): string | undefined {
+	for (const block of message.content) {
+		if (block.type !== "text" || !block.text) continue;
+		const bounded = block.text.slice(0, 512);
+		return compactRlmText(bounded, 160).replace(/[\u0000-\u001f\u007f]/g, " ");
+	}
+	return undefined;
 }
 
 function waitForPromiseOrAbort<T>(
@@ -10040,6 +10100,10 @@ export class AgentSession {
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		const label = rlmChildLabel(prompt);
 		let answerPreview: string | undefined;
+		// This atomically materializes the parent-bound C04 recovery authority
+		// before a child can stream. Its key bytes never leave SessionManager.
+		const parentRecoveryAuthority = this.sessionManager.getC04ParentRecoveryAuthority();
+		let terminalOutputSink: C04ProducerSink | undefined;
 		let durationMs: number | undefined;
 		let toolUseCount = 0;
 		let runningToolCount = 0;
@@ -10148,7 +10212,107 @@ export class AgentSession {
 			onSessionPublished: publishChildSession,
 		};
 
-		const deliverTerminalMessageToParent = async (message: CustomMessage): Promise<void> => {
+		/** C04 commits a bounded projection before daemon C03 sees any terminal envelope. */
+		const createDaemonTerminalResultMessage = async (): Promise<RlmTerminalMessage | undefined> => {
+			const isCurrent = () =>
+				this._activeRlmChildRuns.get(run.id) === run &&
+				this._activeRlmChildRuns.get(run.id)?.assignmentId === run.assignmentId &&
+				this._activeRlmChildRuns.get(run.id)?.operationId === run.operationId &&
+				childSession?.sessionManager.getSessionFile?.() !== undefined;
+			if (
+				!this._subagentRuntimeHost?.assignmentIdentityFenced ||
+				!parentRecoveryAuthority ||
+				!childSession ||
+				!isCurrent()
+			)
+				return undefined;
+			const childFile = childSession.sessionManager.getSessionFile?.();
+			const childArtifactDir = childSession.sessionManager.getSessionArtifactDir?.();
+			if (!childFile || !childArtifactDir) return undefined;
+			const status: C04ChildResultStatus =
+				run.status === "done" ? "completed" : run.status === "cancelled" ? "cancelled" : "failed";
+			const terminalModel = childSession.model ?? modelSelection.model;
+			try {
+				const reference = await createOrGetTerminalChildResult({
+					owner: {
+						parentSessionId: this.sessionId,
+						childSessionId: childSession.sessionId,
+						childSessionFile: childFile,
+						assignmentId: run.assignmentId,
+						operationId: run.operationId,
+						deliveryId: run.deliveryId,
+					},
+					childArtifactRoot: childArtifactDir,
+					parentRecoveryAuthority,
+					isCurrent,
+					candidate: {
+						status,
+						summary: status === "completed" ? "Child completed." : "Child terminal result is unavailable.",
+						preview: answerPreview || "No bounded terminal preview is available.",
+						...(status === "completed"
+							? {
+									artifacts: [
+										{
+											kind: "terminal_output" as const,
+											contentType: "text/plain" as const,
+											data: (() => {
+												// A producer opened by a text delta remains live until the child has
+												// actually finished.  Empty and tool-only completions have no such
+												// producer, so their fallback must already be closed: otherwise C04
+												// correctly waits forever for bytes that can never arrive.
+												if (terminalOutputSink) return terminalOutputSink;
+												const emptyTerminalOutput = new C04ProducerSink();
+												emptyTerminalOutput.close();
+												return emptyTerminalOutput;
+											})(),
+										},
+									],
+								}
+							: {}),
+						...(status === "completed"
+							? {}
+							: {
+									error: {
+										code: status === "cancelled" ? "cancelled" : "terminal_storage_failed",
+										message:
+											status === "cancelled"
+												? "Child was cancelled."
+												: "Child failed without a publishable diagnostic.",
+									},
+								}),
+						model: {
+							initialResolvedSelector: `${modelSelection.model.provider}/${modelSelection.model.id}`,
+							terminalResolvedSelector: `${terminalModel.provider}/${terminalModel.id}`,
+						},
+					},
+				});
+				if (!isCurrent()) return undefined;
+				// C03 treats this as opaque bytes. C04 is the only parser/codec authority.
+				const projection = Buffer.from(canonicalChildResultBytes(reference)).toString("utf8");
+				const content =
+					status === "completed"
+						? "Child completed; bounded result available."
+						: "Child ended; bounded result available.";
+				return createRlmSafeTerminalResultTerminalMessage(content, projection, Date.now());
+			} catch {
+				// Storage failure is itself a normal, bounded C04 projection. It always
+				// enters C03 through the same safe-terminal envelope, never as undefined.
+				const fallback = terminalStorageFailedProjection({
+					status: status === "completed" ? "failed" : status,
+					model: {
+						initialResolvedSelector: `${modelSelection.model.provider}/${modelSelection.model.id}`,
+						terminalResolvedSelector: `${terminalModel.provider}/${terminalModel.id}`,
+					},
+				});
+				return createRlmSafeTerminalResultTerminalMessage(
+					"Child ended; bounded terminal result unavailable.",
+					Buffer.from(canonicalChildResultBytes(fallback)).toString("utf8"),
+					Date.now(),
+				);
+			}
+		};
+
+		const deliverTerminalMessageToParent = async (message: RlmTerminalMessage | CustomMessage): Promise<void> => {
 			const activeOwner =
 				this._activeRlmChildRuns.get(run.id) === run &&
 				this._activeRlmChildRuns.get(run.id)?.assignmentId === run.assignmentId &&
@@ -10287,13 +10451,17 @@ export class AgentSession {
 								}
 							}
 						}
-						const text = compactRlmText(readAssistantText(assistant));
+						const text = safeAssistantPreview(assistant);
 						if (text) answerPreview = text;
 						void flushAgentTraceUpload(child.sessionManager).catch(() => undefined);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
-							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
+							if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+								if (!terminalOutputSink) terminalOutputSink = new C04ProducerSink();
+								terminalOutputSink.push(event.assistantMessageEvent.delta);
+							}
+							const text = safeAssistantPreview(event.message as AssistantMessage);
 							if (text) answerPreview = text;
 							activity = { kind: "writing" };
 							emitChildUpdate();
@@ -10342,18 +10510,21 @@ export class AgentSession {
 					customMessage: spawnMessage,
 				});
 				if (run.error) throw new Error(run.error);
+				terminalOutputSink?.close();
 				run.status = "done";
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
 				emitChildUpdate();
-				if (!run.detachedDeletion && child._parentReplyCount === parentReplyCountBeforeRun) {
-					const lastAssistantText = child.getLastAssistantText();
+				if (!run.detachedDeletion && this._subagentRuntimeHost?.assignmentIdentityFenced) {
+					const terminal = await createDaemonTerminalResultMessage();
+					if (terminal) await deliverTerminalMessageToParent(terminal);
+				} else if (!run.detachedDeletion && child._parentReplyCount === parentReplyCountBeforeRun) {
 					await deliverTerminalMessageToParent(
 						createRlmChildTerminalNoticeMessage({
 							kind: "completed_without_reply",
 							childId: run.id,
 							sessionName,
-							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
+							lastAssistantTextPreview: answerPreview || undefined,
 						}),
 					);
 				}
@@ -10373,6 +10544,7 @@ export class AgentSession {
 				}
 			} catch (error) {
 				const runError = error instanceof Error ? error : new Error(String(error));
+				terminalOutputSink?.close();
 				run.publication.reject(runError);
 				if (run.status !== "cancelled") {
 					run.status = "error";
@@ -10385,9 +10557,12 @@ export class AgentSession {
 				// the daemon's durable delete intent turns it into deleted/discarded.
 				// Do not suppress this merely because UI cleanup is detached.
 				if (
-					run.status === "cancelled" &&
-					(!run.detachedDeletion || this._subagentRuntimeHost?.assignmentIdentityFenced)
+					this._subagentRuntimeHost?.assignmentIdentityFenced &&
+					(!run.detachedDeletion || run.status === "cancelled")
 				) {
+					const terminal = await createDaemonTerminalResultMessage();
+					if (terminal) await deliverTerminalMessageToParent(terminal);
+				} else if (run.status === "cancelled" && !run.detachedDeletion) {
 					await deliverTerminalMessageToParent(
 						createRlmChildTerminalNoticeMessage({
 							kind: "cancelled",

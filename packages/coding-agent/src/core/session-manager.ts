@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
-import { randomUUID } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import {
 	appendFileSync,
 	chmodSync,
@@ -8,6 +8,7 @@ import {
 	closeSync,
 	existsSync,
 	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -17,6 +18,7 @@ import {
 	rmSync,
 	statSync,
 	writeFileSync,
+	writeSync,
 } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
@@ -360,6 +362,14 @@ export interface SessionInfo {
 	agentStatus?: AgentStatus;
 	/** A malformed lifecycle/verdict was seen while scanning durable JSONL. */
 	hasInvalidDurableState?: boolean;
+}
+
+/** Private C04 recovery authority. The key itself remains on disk and is never
+ * returned, serialized, or included in a child-result projection. */
+export interface C04ParentRecoveryAuthority {
+	parentSessionFile: string;
+	parentArtifactRoot: string;
+	recoveryKeyPath: string;
 }
 
 export type ReadonlySessionManager = Pick<
@@ -1538,6 +1548,60 @@ export class SessionManager {
 
 	getSessionArtifactDir(): string | undefined {
 		return this.persist ? getSessionArtifactPath(this.sessionDir, this.sessionId) : undefined;
+	}
+
+	/**
+	 * Materialize C04's parent-scoped recovery key. This is deliberately a
+	 * SessionManager capability: C04 callers receive only its pathname and must
+	 * prove the session/artifact binding before reading it.
+	 */
+	getC04ParentRecoveryAuthority(): C04ParentRecoveryAuthority | undefined {
+		if (!this.persist || !this.sessionFile) return undefined;
+		const parentSessionFile = resolve(this.sessionFile);
+		const parentArtifactRoot = this.getSessionArtifactDir();
+		if (!parentArtifactRoot) return undefined;
+		mkdirSync(parentArtifactRoot, { recursive: true, mode: 0o700 });
+		const keyPath = join(parentArtifactRoot, ".c04-recovery-key");
+		const candidate = `${keyPath}.${process.pid}.${randomUUID()}.tmp`;
+		let fd: number | undefined;
+		try {
+			// fsync the random candidate before link(2)'s atomic no-replace cut.
+			// Unlike rename, link refuses to replace an authority created by another
+			// concurrent SessionManager.
+			fd = openSync(candidate, "wx", 0o600);
+			const bytes = randomBytes(32);
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(fd, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error("C04 recovery key write made no progress");
+				offset += written;
+			}
+			fsyncSync(fd);
+			closeSync(fd);
+			fd = undefined;
+			try {
+				linkSync(candidate, keyPath);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			}
+			const dirFd = openSync(parentArtifactRoot, "r");
+			try {
+				fsyncSync(dirFd);
+			} finally {
+				closeSync(dirFd);
+			}
+		} finally {
+			if (fd !== undefined) closeSync(fd);
+			rmSync(candidate, { force: true });
+		}
+		// Normalize the authority key's exact requested mode even when this
+		// manager lost the no-replace race; both contenders are SessionManager
+		// instances for the same parent authority.
+		chmodSync(keyPath, 0o600);
+		const existing = statSync(keyPath);
+		if (!existing.isFile() || (existing.mode & 0o777) !== 0o600 || existing.size !== 32)
+			throw new Error("Invalid C04 recovery key");
+		return { parentSessionFile, parentArtifactRoot: resolve(parentArtifactRoot), recoveryKeyPath: keyPath };
 	}
 
 	/**
