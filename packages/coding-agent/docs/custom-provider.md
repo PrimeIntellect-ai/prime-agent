@@ -13,6 +13,7 @@ See these complete provider examples:
 
 - [`examples/extensions/custom-provider-anthropic/`](../examples/extensions/custom-provider-anthropic/)
 - [`examples/extensions/custom-provider-gitlab-duo/`](../examples/extensions/custom-provider-gitlab-duo/)
+- [`examples/extensions/custom-provider-lynkr/`](../examples/extensions/custom-provider-lynkr/) - self-hosted OpenAI-compatible gateway with dynamic model discovery
 
 ## Table of Contents
 
@@ -126,7 +127,7 @@ export default async function (pi: ExtensionAPI) {
 }
 ```
 
-This registers the fetched models before startup finishes.
+This registers the fetched models before startup finishes. For a concrete, real-world version of this pattern, see the [Lynkr example](../examples/extensions/custom-provider-lynkr/) - Lynkr is an open-source self-hosted LLM gateway that exposes this same `/v1/models` discovery endpoint.
 
 ```typescript
 pi.registerProvider("my-llm", {
