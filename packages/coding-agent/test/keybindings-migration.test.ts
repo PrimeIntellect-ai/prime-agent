@@ -85,4 +85,13 @@ describe("keybindings migration", () => {
 		expect(effective["tui.select.confirm"]).toBe("enter");
 		expect(effective["app.interrupt"]).toBe("ctrl+x");
 	});
+
+	it("gives explicit editor bindings precedence over application defaults", () => {
+		const keybindings = new KeybindingsManager({
+			"tui.editor.cursorUp": ["up", "ctrl+p"],
+		});
+
+		expect(keybindings.getKeys("tui.editor.cursorUp")).toEqual(["up", "ctrl+p"]);
+		expect(keybindings.getKeys("app.messages.expand")).toEqual([]);
+	});
 });

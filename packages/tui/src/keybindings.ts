@@ -191,8 +191,11 @@ export class KeybindingsManager {
 
 		const userClaims = new Map<KeyId, Set<Keybinding>>();
 		for (const [keybinding, keys] of Object.entries(this.userBindings)) {
-			if (!(keybinding in this.definitions)) continue;
+			const definition = this.definitions[keybinding];
+			if (!definition) continue;
+			const defaults = new Set(normalizeKeys(definition.defaultKeys));
 			for (const key of normalizeKeys(keys)) {
+				if (defaults.has(key)) continue;
 				const claimants = userClaims.get(key) ?? new Set<Keybinding>();
 				claimants.add(keybinding as Keybinding);
 				userClaims.set(key, claimants);
@@ -207,7 +210,10 @@ export class KeybindingsManager {
 
 		for (const [id, definition] of Object.entries(this.definitions)) {
 			const userKeys = this.userBindings[id];
-			const keys = userKeys === undefined ? normalizeKeys(definition.defaultKeys) : normalizeKeys(userKeys);
+			const keys =
+				userKeys === undefined
+					? normalizeKeys(definition.defaultKeys).filter((key) => !userClaims.has(key))
+					: normalizeKeys(userKeys);
 			this.keysById.set(id as Keybinding, keys);
 		}
 	}

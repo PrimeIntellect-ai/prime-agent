@@ -181,6 +181,8 @@ On native Windows, `app.suspend` has no default binding because Windows terminal
 
 ### Emacs Example
 
+Binding `ctrl+p` below automatically releases the default `app.messages.expand` binding.
+
 ```json
 {
   "tui.editor.cursorUp": ["up", "ctrl+p"],
