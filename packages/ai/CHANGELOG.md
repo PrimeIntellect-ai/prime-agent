@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added xAI subscription login (SuperGrok/X Premium) via the RFC 8628 device flow, serving xAI models over the Responses API while OAuth credentials are active.
+- Added xAI subscription login (SuperGrok/X Premium) via the RFC 8628 device flow, serving xAI models over the Responses API while OAuth credentials are active ([#678](https://github.com/PrimeIntellect-ai/prime-agent/issues/678)).
 
 ## [0.7.2] - 2026-08-11
 
