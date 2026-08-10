@@ -4244,6 +4244,31 @@ export class AgentSession {
 		this._scopedModels = scopedModels;
 	}
 
+	/**
+	 * Re-resolve the live and scoped model objects from the current registry
+	 * catalog after a credential change reshaped it (e.g. an OAuth login or
+	 * logout switching a provider between API rails). Keeps the same logical
+	 * model selection, so no session history or settings are touched beyond
+	 * re-clamping the thinking level for the rebound model's capabilities.
+	 */
+	rebindModelsFromRegistry(): void {
+		this._scopedModels = this._scopedModels.map((scoped) => {
+			const rebound = this._modelRegistry.find(scoped.model.provider, scoped.model.id);
+			return rebound && rebound !== scoped.model ? { ...scoped, model: rebound } : scoped;
+		});
+
+		const current = this.agent.state.model;
+		if (!current) {
+			return;
+		}
+		const rebound = this._modelRegistry.find(current.provider, current.id);
+		if (!rebound || rebound === current) {
+			return;
+		}
+		this.agent.state.model = rebound;
+		this.setThinkingLevel(this.thinkingLevel);
+	}
+
 	/** File-based prompt templates */
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
 		return this._resourceLoader.getPrompts().prompts;

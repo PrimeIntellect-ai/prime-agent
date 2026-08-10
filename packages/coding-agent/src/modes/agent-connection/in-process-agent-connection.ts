@@ -145,11 +145,15 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getAvailableModels(): Promise<AgentConnectionModel[]> {
-		return this.session.modelRegistry.refreshAvailableModels();
+		const models = await this.session.modelRegistry.refreshAvailableModels();
+		this.session.rebindModelsFromRegistry();
+		return models;
 	}
 
 	async getModelCatalog(): Promise<AgentConnectionModelCatalog> {
-		return this.session.modelRegistry.refreshModelCatalog();
+		const catalog = await this.session.modelRegistry.refreshModelCatalog();
+		this.session.rebindModelsFromRegistry();
+		return catalog;
 	}
 
 	async getSessionStats(): Promise<SessionStats> {

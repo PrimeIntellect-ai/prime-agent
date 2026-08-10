@@ -4160,18 +4160,16 @@ export class AgentDaemon {
 
 			case "get_available_models": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_available_models", {
-					models: await state.runtime.session.modelRegistry.refreshAvailableModels(),
-				});
+				const models = await state.runtime.session.modelRegistry.refreshAvailableModels();
+				state.runtime.session.rebindModelsFromRegistry();
+				return success(command.id, "get_available_models", { models });
 			}
 
 			case "get_model_catalog": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(
-					command.id,
-					"get_model_catalog",
-					await state.runtime.session.modelRegistry.refreshModelCatalog(),
-				);
+				const catalog = await state.runtime.session.modelRegistry.refreshModelCatalog();
+				state.runtime.session.rebindModelsFromRegistry();
+				return success(command.id, "get_model_catalog", catalog);
 			}
 
 			case "get_queue": {
