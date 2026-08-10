@@ -795,6 +795,12 @@ async function prepareRuntimeServices(options: {
 				modelRegistry.refresh();
 				if (modelPatterns && modelPatterns.length > 0) {
 					scopedModels = await resolveModelScope(modelPatterns, modelRegistry);
+					if (scopedModels.length > 0) {
+						sessionOptions.scopedModels = scopedModels.map((sm) => ({
+							model: sm.model,
+							thinkingLevel: sm.thinkingLevel,
+						}));
+					}
 				}
 				if (!options.sessionOptionsOverride?.model && sessionOptions.model) {
 					const rebuilt = modelRegistry.find(sessionOptions.model.provider, sessionOptions.model.id);
