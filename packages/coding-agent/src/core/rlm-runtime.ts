@@ -91,6 +91,26 @@ export function normalizeRequestedRlmSubagentModel(value: unknown): string | und
 	return model;
 }
 
+const RLM_SUBAGENT_THINKING_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Validate a requested per-child reasoning level. The level is clamped against the child's model
+ * at spawn, so a model that cannot reach the requested level degrades instead of failing.
+ */
+export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run thinking must be a string");
+	}
+	const thinking = value.trim();
+	if (!RLM_SUBAGENT_THINKING_LEVELS.includes(thinking as ThinkingLevel)) {
+		throw new Error(`rlm.run thinking must be one of: ${RLM_SUBAGENT_THINKING_LEVELS.join(", ")}`);
+	}
+	return thinking as ThinkingLevel;
+}
+
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
 export function createDefaultRlmSubagentSessionName(prompt: string, childId: string): string {
 	const promptSlug = prompt
