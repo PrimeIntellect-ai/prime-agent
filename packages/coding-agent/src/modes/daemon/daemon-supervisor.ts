@@ -2086,7 +2086,7 @@ export class DaemonSupervisor {
 		// Fail fast before waiting on anything: only a confirmed-dead process is
 		// reclaimable. A live, unknown, or still-stopping worker is left alone
 		// and the caller reports the session as already active.
-		const identity = this.workerProcessIdentity(worker);
+		const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
 		if (identity !== "gone" && identity !== "replaced") {
 			return false;
 		}
