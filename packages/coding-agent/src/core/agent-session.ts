@@ -6801,6 +6801,9 @@ export class AgentSession {
 		options: ModelSelectOptions,
 	): Promise<ModelCycleResult | undefined> {
 		const availableModels = await this._modelRegistry.refreshAvailableModels();
+		// The refresh may have reshaped provider models (e.g. an auth change
+		// switching API rails), so re-resolve the scoped objects before cycling.
+		this.rebindModelsFromRegistry();
 		const scopedModels = this._scopedModels.filter((scoped) =>
 			availableModels.some((model) => modelsAreEqual(model, scoped.model)),
 		);
