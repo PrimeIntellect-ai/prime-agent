@@ -21,6 +21,7 @@ export interface AppKeybindings {
 	"app.model.toggleScope": true;
 	"app.configuration.previousTab": true;
 	"app.tools.expand": true;
+	"app.messages.expand": true;
 	"app.thinking.toggle": true;
 	"app.subagents.focus": true;
 	"app.heartbeats.open": true;
@@ -30,6 +31,7 @@ export interface AppKeybindings {
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
 	"app.clipboard.pasteImage": true;
+	"app.clipboard.copyLoginUrl": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -81,10 +83,16 @@ export const KEYBINDINGS = {
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.model.toggleScope": { defaultKeys: "alt+s", description: "Toggle model selector scope" },
 	"app.configuration.previousTab": { defaultKeys: "shift+tab", description: "Select previous configuration tab" },
-	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
+	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output", defaultKeyScope: "editor" },
+	"app.messages.expand": {
+		defaultKeys: "ctrl+p",
+		description: "Toggle agent message expansion",
+		defaultKeyScope: "editor",
+	},
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",
+		defaultKeyScope: "editor",
 	},
 	"app.subagents.focus": {
 		defaultKeys: "alt+a",
@@ -117,6 +125,10 @@ export const KEYBINDINGS = {
 	"app.clipboard.pasteImage": {
 		defaultKeys: process.platform === "win32" ? "alt+v" : "ctrl+v",
 		description: "Paste image from clipboard",
+	},
+	"app.clipboard.copyLoginUrl": {
+		defaultKeys: ["c", "alt+c"],
+		description: "Copy login URL",
 	},
 	"app.session.new": { defaultKeys: [], description: "Start a new session" },
 	"app.session.tree": { defaultKeys: [], description: "Open session tree" },

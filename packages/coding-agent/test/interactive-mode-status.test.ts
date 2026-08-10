@@ -42,6 +42,7 @@ import type {
 import { AgentConnectionPromptAdmissionError } from "../src/modes/agent-connection/types.js";
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AuthenticationResult } from "../src/modes/interactive/auth-flows.js";
+import { AgentMessageComponent } from "../src/modes/interactive/components/agent-message.js";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.js";
 import type { ConfigurationMenuComponent } from "../src/modes/interactive/components/configuration-menu.js";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.js";
@@ -4193,28 +4194,61 @@ describe("truncatePathMiddle", () => {
 });
 
 describe("InteractiveMode.setToolsExpanded", () => {
-	test("applies expansion state to the active header and chat entries", () => {
-		const header = { setExpanded: vi.fn() };
-		const chatChild = { setExpanded: vi.fn() };
+	function createExpansionFakeThis(chatChildren: unknown[]): any {
 		const fakeThis: any = {
 			toolOutputExpanded: false,
+			agentMessagesExpanded: false,
 			customHeader: undefined,
-			builtInHeader: header,
-			chatContainer: { children: [chatChild] },
+			builtInHeader: { setExpanded: vi.fn() },
+			chatContainer: { children: chatChildren },
 			ui: {
 				requestRender: vi.fn(),
 				requestRenderPreservingViewport: vi.fn(),
 				isFullscreen: vi.fn().mockReturnValue(false),
 			},
 		};
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+		return fakeThis;
+	}
 
-		(InteractiveMode as any).prototype.setToolsExpanded.call(fakeThis, true);
+	test("applies expansion state to the active header and chat entries", () => {
+		const chatChild = { setExpanded: vi.fn() };
+		const fakeThis = createExpansionFakeThis([chatChild]);
+
+		fakeThis.setToolsExpanded(true);
 
 		expect(fakeThis.toolOutputExpanded).toBe(true);
-		expect(header.setExpanded).toHaveBeenCalledWith(true);
+		expect(fakeThis.builtInHeader.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
 		// Expansion keeps the user anchored, so it uses the viewport-preserving path.
 		expect(fakeThis.ui.requestRenderPreservingViewport).toHaveBeenCalledTimes(1);
+	});
+
+	test("toggles agent messages separately from tools", () => {
+		const toolChild = { setExpanded: vi.fn() };
+		const messageChild = new AgentMessageComponent({
+			role: "custom",
+			customType: "agent_message",
+			content: "Ping.",
+			display: true,
+			details: { id: "agentmsg_split", message: "Ping.", from: null },
+			timestamp: 123,
+		} as any);
+		const messageSetExpanded = vi.spyOn(messageChild, "setExpanded");
+		const fakeThis = createExpansionFakeThis([toolChild, messageChild]);
+
+		fakeThis.toggleAgentMessageExpansion();
+
+		expect(fakeThis.agentMessagesExpanded).toBe(true);
+		expect(fakeThis.toolOutputExpanded).toBe(false);
+		expect(messageSetExpanded).toHaveBeenCalledWith(true);
+		expect(toolChild.setExpanded).toHaveBeenCalledWith(false);
+
+		fakeThis.setToolsExpanded(true);
+
+		expect(toolChild.setExpanded).toHaveBeenCalledWith(true);
+		expect(messageSetExpanded).toHaveBeenLastCalledWith(true);
+		expect(fakeThis.agentMessagesExpanded).toBe(true);
 	});
 });
 
