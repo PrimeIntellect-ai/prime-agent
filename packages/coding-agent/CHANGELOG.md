@@ -9,6 +9,8 @@
 - Added a `ctrl+t` expand hint to collapsed thinking blocks, matching the tool output hint.
 - Changed expand/collapse hints to a consistent bracketed `(Ctrl+O to expand)` style across tool, message, summary, and error rows.
 - Added xAI (SuperGrok/X Premium) to `/login` so Grok models can be used on a subscription without an `XAI_API_KEY` ([#678](https://github.com/PrimeIntellect-ai/prime-agent/issues/678)).
+- Fixed OAuth refresh failures surfacing generic missing-key guidance instead of the provider's actionable error message.
+- Fixed model shapes not following the active auth source: a runtime `--api-key` or an environment fallback after a stale credential now outranks a stored OAuth credential's model modifications, and live sessions rebind their selected and scoped models when `/login`, `/logout`, auth staleness, or model cycling reshapes the catalog.
 - Added a configurable copy action to login dialogs so raw sign-in URLs can be copied without selecting wrapped text ([#643](https://github.com/PrimeIntellect-ai/prime-agent/issues/643)).
 - Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).
 - Changed sent agent messages in the IPython cell UI to show only the message text with a `╰─` gutter when expanded, matching received messages, and hid the raw `agent_message.send` receipt dictionary.
