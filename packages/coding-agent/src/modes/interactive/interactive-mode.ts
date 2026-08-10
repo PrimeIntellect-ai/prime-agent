@@ -7826,6 +7826,16 @@ export class InteractiveMode {
 	private async refreshConnectionModelsAfterAuthChange(): Promise<void> {
 		this.invalidateConnectionModels();
 		await this.getConnectionAvailableModels();
+		// The catalog refresh may have rebound the session's live and scoped
+		// models (e.g. an auth change switching API rails), so pull the fields
+		// that mirror them into the connection snapshot.
+		const state = await this.agentConnection.getState();
+		this.patchConnectionState({
+			model: state.model,
+			scopedModels: state.scopedModels,
+			availableThinkingLevels: state.availableThinkingLevels,
+			thinkingLevel: state.thinkingLevel,
+		});
 	}
 
 	private async getModelCandidates(): Promise<AgentConnectionModel[]> {
