@@ -1,0 +1,51 @@
+name: Apply model fixture compatibility fix
+
+on:
+  push:
+    branches:
+      - fix/operational-recovery-journal-hardening
+    paths:
+      - .github/workflows/apply-ci-fixture-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/operational-recovery-journal-hardening
+          fetch-depth: 0
+      - name: Patch stale Google model fixtures
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path("packages/ai/test/total-tokens.test.ts"),
+              Path("packages/ai/test/context-overflow.test.ts"),
+          ]
+          for path in paths:
+              text = path.read_text()
+              count = text.count('gemini-2.0-flash')
+              if count == 0:
+                  raise SystemExit(f"expected stale fixture in {path}")
+              path.write_text(text.replace('gemini-2.0-flash', 'gemini-2.5-flash'))
+              print(f"updated {path}: {count} occurrence(s)")
+          PY
+          rm .github/workflows/apply-ci-fixture-fix.yml
+      - name: Validate TypeScript check
+        run: |
+          npm ci
+          npm run check
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/ai/test/total-tokens.test.ts packages/ai/test/context-overflow.test.ts .github/workflows/apply-ci-fixture-fix.yml
+          git commit -m "test(ai): align Google fixtures with current model registry"
+          git push origin HEAD:fix/operational-recovery-journal-hardening
