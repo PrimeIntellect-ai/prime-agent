@@ -58,6 +58,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 12 publishes idle-residency metadata on session summary rows.
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
+// Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 export const DAEMON_SCHEMA_REVISION = 15;
 export const DAEMON_SCHEMA_ID = "protocol-7-schema-15-1bcb9e7f1a49";
 
