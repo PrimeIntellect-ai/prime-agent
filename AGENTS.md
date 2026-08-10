@@ -29,6 +29,7 @@
   1. **Installing** — the deliverable is that a locally installed agent runs current code. `packages/agent` resolves through `main: ./dist/index.js`, and `pi-ai`/`pi-tui`/`pi-agent-core` resolve via `node_modules/@earendil-works/*` symlinks into `packages/*`, so BOTH `--dist` and source (`tsx`) modes load built artifacts. A changed package whose `dist` predates its `src` is stale in either mode.
   2. **Verifying a clean install** — the full suite cannot pass from a fresh `npm ci` without it. Extension loading fails with `Cannot find package '.../pi-agent-core/dist/index.js'`, which is designed behaviour: every CI workflow runs `npm ci` → `npm run build` → `npm run check`. Confirm the failures are environmental by reproducing them at the pristine pre-merge tip in the same worktree before blaming a change.
 - Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
+- The one standing exception is a protected update reconciling this fork onto upstream: that mission MUST run the literal full suite, because a merge can only be cleared against the whole tree. Cap the workers (`--maxWorkers=5`) so the real-process daemon tests are not starved into a false failure, and record the counts in the receipt.
 - Run tests from the package root, not the repo root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
 - When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
