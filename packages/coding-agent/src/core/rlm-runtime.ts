@@ -208,6 +208,10 @@ export interface RlmSubagentRuntime {
 	session: AgentSession;
 	/** Immutable attempt identity; never expose this in the public child catalog. */
 	assignmentId?: string;
+	/** C03 internal durable operation identity. */
+	operationId?: string;
+	/** C03 internal terminal delivery identity. */
+	deliveryId?: string;
 }
 
 export interface CreateRlmSubagentRuntimeOptions {
@@ -215,6 +219,9 @@ export interface CreateRlmSubagentRuntimeOptions {
 	id: string;
 	/** Minted by the parent before this child is published. */
 	assignmentId?: string;
+	/** Durable daemon-only identities; never projected through public handles. */
+	operationId?: string;
+	deliveryId?: string;
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
@@ -241,7 +248,12 @@ export interface SubagentRuntimeHost {
 	readonly assignmentIdentityFenced?: true;
 	createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
 	/** Persist host-owned completion before the child becomes passivation-eligible. */
-	completeRlmSubagentRuntime?(childId: string, session: AgentSession, assignmentId?: string): boolean;
+	completeRlmSubagentRuntime?(
+		childId: string,
+		session: AgentSession,
+		assignmentId?: string,
+		operationId?: string,
+	): boolean;
 	/** Release a host-owned child after its detached initial task settles. */
 	releaseRlmSubagentRuntime?: (
 		runtime: RlmSubagentRuntime,
@@ -249,6 +261,19 @@ export interface SubagentRuntimeHost {
 		status: "done" | "error" | "cancelled",
 	) => Promise<void>;
 	/** Close or remove the host-owned child; session is absent when a persisted child is still passive. */
-	deleteRlmSubagentRuntime(childId: string, session?: AgentSession, assignmentId?: string): Promise<void>;
+	deleteRlmSubagentRuntime(
+		childId: string,
+		session?: AgentSession,
+		assignmentId?: string,
+		operationId?: string,
+	): Promise<void>;
+	/** Private daemon durable seams. No protocol/public-handle field may use these. */
+	admitRlmSubagentOperation?(options: CreateRlmSubagentRuntimeOptions): void;
+	deliverRlmSubagentTerminal?(
+		runtime: RlmSubagentRuntime,
+		options: CreateRlmSubagentRuntimeOptions,
+		terminal: RlmChildTerminalStatus,
+		message: import("./rlm-durable-operations.js").RlmTerminalMessage,
+	): Promise<void>;
 	disposeRlmSubagentRuntimes?(): Promise<void>;
 }

@@ -5,8 +5,11 @@ import {
 	appendFileSync,
 	chmodSync,
 	chownSync,
+	closeSync,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
@@ -71,6 +74,45 @@ function statMetadataIfPresent(path: string): { mode: number; uid: number; gid: 
 		throw error;
 	}
 }
+
+/**
+ * Private persistence cut points. They are intentionally narrower than fs: the
+ * only supported test fault injections are the five durability boundaries C03
+ * relies upon. Production always uses the synchronous Node primitives below.
+ */
+type SessionDurabilityIo = {
+	writeAll(fd: number, bytes: Buffer): void;
+	fileFsync(fd: number): void;
+	tempFsync(fd: number): void;
+	rename(tempPath: string, targetPath: string): void;
+	directoryFsync(directory: string): void;
+};
+
+const productionSessionDurabilityIo: SessionDurabilityIo = {
+	writeAll(fd, bytes) {
+		// writeFileSync(fd, ...) completes the full buffer (unlike one writeSync
+		// call) and preserves the established synchronous fs-failure contract used
+		// by flush callers. The descriptor remains open for the required fsync.
+		writeFileSync(fd, bytes);
+	},
+	fileFsync(fd) {
+		fsyncSync(fd);
+	},
+	tempFsync(fd) {
+		fsyncSync(fd);
+	},
+	rename(tempPath, targetPath) {
+		renameSync(tempPath, targetPath);
+	},
+	directoryFsync(directory) {
+		const fd = openSync(directory, "r");
+		try {
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+	},
+};
 
 export interface SessionHeader {
 	type: "session";
@@ -1220,6 +1262,22 @@ async function listSessionsFromDir(
  * handles compaction summaries and follows the path from root to current leaf.
  */
 export class SessionManager {
+	private static durabilityIo: SessionDurabilityIo = productionSessionDurabilityIo;
+
+	/**
+	 * Test-only, process-local C03 durability seam. This is deliberately not
+	 * exported from the package surface; callers get a restore closure so a cut
+	 * cannot leak into another test or into a later retry.
+	 */
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: tests invoke the deliberately private seam through a narrowed cast.
+	private static _setDurabilityIoForTest(overrides: Partial<SessionDurabilityIo>): () => void {
+		const previous = SessionManager.durabilityIo;
+		SessionManager.durabilityIo = { ...previous, ...overrides };
+		return () => {
+			SessionManager.durabilityIo = previous;
+		};
+	}
+
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
 	private sessionDir: string;
@@ -1373,21 +1431,33 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Replace the transcript atomically.  This is also the durability primitive
+	 * used when C03 creates a transcript: bytes and metadata are fsynced before
+	 * rename, then the containing directory is fsynced before acknowledgement.
+	 */
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
+		const bytes = Buffer.from(`${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`);
 		const targetPath = realpathIfPresent(this.sessionFile);
 		const directory = dirname(targetPath);
 		mkdirSync(directory, { recursive: true });
 		const tempPath = join(directory, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
 		try {
 			const metadata = statMetadataIfPresent(targetPath);
-			writeFileSync(tempPath, content, metadata === undefined ? undefined : { mode: metadata.mode });
-			if (metadata !== undefined) {
-				chownSync(tempPath, metadata.uid, metadata.gid);
-				chmodSync(tempPath, metadata.mode);
+			const fd = openSync(tempPath, "wx", metadata?.mode ?? 0o600);
+			try {
+				SessionManager.durabilityIo.writeAll(fd, bytes);
+				if (metadata !== undefined) {
+					chownSync(tempPath, metadata.uid, metadata.gid);
+					chmodSync(tempPath, metadata.mode);
+				}
+				SessionManager.durabilityIo.tempFsync(fd);
+			} finally {
+				closeSync(fd);
 			}
-			renameSync(tempPath, targetPath);
+			SessionManager.durabilityIo.rename(tempPath, targetPath);
+			SessionManager.durabilityIo.directoryFsync(directory);
 		} finally {
 			rmSync(tempPath, { force: true });
 		}
@@ -1825,6 +1895,67 @@ export class SessionManager {
 		details?: T,
 	): string {
 		return this._appendEntryWithRollback(() => this.appendCustomMessageEntry(customType, content, display, details));
+	}
+
+	/**
+	 * Internal C03 seam: append one ordinary custom transcript entry without
+	 * using the prompt/stream queue.  It mutates the in-memory tree only while
+	 * the matching bytes are durably persisted and rolls the tree back on every
+	 * write/fsync/rename failure.  Returns false for non-persisted managers.
+	 */
+	appendDurableCustomMessageEntry<T = unknown>(
+		customType: string,
+		content: string | (TextContent | ImageContent)[],
+		display: boolean,
+		details?: T,
+	): boolean {
+		if (!this.persist || !this.sessionFile) return false;
+		const entry: CustomMessageEntry<T> = {
+			type: "custom_message",
+			customType,
+			content,
+			display,
+			details,
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+		};
+		const previousLeafId = this.leafId;
+		this.fileEntries.push(entry);
+		this.byId.set(entry.id, entry);
+		this.leafId = entry.id;
+		try {
+			const file = this.sessionFile;
+			if (!this.flushed || !existsSync(file)) {
+				this._rewriteFile();
+				this.flushed = true;
+			} else {
+				const fd = openSync(file, "a");
+				try {
+					SessionManager.durabilityIo.writeAll(fd, Buffer.from(`${JSON.stringify(entry)}\n`));
+					SessionManager.durabilityIo.fileFsync(fd);
+				} finally {
+					closeSync(fd);
+				}
+				this._notifyPersistListeners();
+			}
+			return true;
+		} catch (error) {
+			this.byId.delete(entry.id);
+			this.fileEntries.pop();
+			this.leafId = previousLeafId;
+			// A failed append can have reached the kernel before fsync reports an
+			// error. Best-effort restore the pre-append tree, never acknowledge this
+			// attempt, and force a later retry/restart to re-establish authority.
+			this.flushed = false;
+			try {
+				this._rewriteFile();
+				this.flushed = true;
+			} catch {
+				this.flushed = false;
+			}
+			throw error;
+		}
 	}
 
 	private _appendEntryWithRollback(append: () => string): string {

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
@@ -14,7 +14,7 @@ import {
 	createAgentSessionServices,
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
-import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
+import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import type {
 	ExtensionAPI,
@@ -24,6 +24,10 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../../src/index.js";
+import { initTheme } from "../../src/modes/interactive/theme/theme.js";
+
+// The runtime characterization exercises an error renderer; initialize its test-only theme dependency.
+initTheme("dark");
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -33,6 +37,8 @@ type RecordedSessionEvent =
 
 type RuntimeSubagentMapAccess = {
 	subagentRuntimes: Map<string, AgentSessionRuntime>;
+	subagentRuntimeAssignments: Map<string, string>;
+	subagentRuntimeOperations: Map<string, string | undefined>;
 };
 
 describe("AgentSessionRuntime characterization", () => {
@@ -373,6 +379,123 @@ describe("AgentSessionRuntime characterization", () => {
 			}),
 		).rejects.toThrow("startup was cancelled");
 		expect((runtime as unknown as RuntimeSubagentMapAccess).subagentRuntimes.has("cancelled-child")).toBe(false);
+	});
+
+	it("fences deferred inline C03 binding by operation when a selector and assignment are reused", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-inline-c03-operation-"));
+		cleanups.push(() => rmSync(tempDir, { recursive: true, force: true }));
+		const parentManager = SessionManager.inMemory(tempDir);
+		const parentSession = {
+			sessionManager: parentManager,
+			getRlmChildRunStatus: vi.fn(() => "running"),
+			setSubagentRuntimeHost: vi.fn(),
+		} as unknown as AgentSession;
+		let markBindAStarted!: () => void;
+		const bindAStarted = new Promise<void>((resolve) => {
+			markBindAStarted = resolve;
+		});
+		let releaseBindA!: () => void;
+		const bindAGate = new Promise<void>((resolve) => {
+			releaseBindA = resolve;
+		});
+		const childSessions: AgentSession[] = [];
+		const childDisposals: Array<ReturnType<typeof vi.fn>> = [];
+		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ sessionManager }) => {
+			const childIndex = childSessions.length;
+			let sessionName = "pending";
+			const disposeAsync = vi.fn(async () => {});
+			const session = {
+				sessionManager,
+				extensionRunner: { hasHandlers: () => false },
+				get sessionName() {
+					return sessionName;
+				},
+				setSessionName: vi.fn((name: string) => {
+					sessionName = name;
+				}),
+				setSubagentRuntimeHost: vi.fn(),
+				bindExtensions: vi.fn(async () => {
+					if (childIndex === 0) {
+						markBindAStarted();
+						await bindAGate;
+					}
+				}),
+				disposeAsync,
+			} as unknown as AgentSession;
+			childSessions.push(session);
+			childDisposals.push(disposeAsync);
+			return {
+				session,
+				services: { cwd: tempDir, agentDir: tempDir } as AgentSessionServices,
+				diagnostics: [],
+				extensionsResult: { extensions: [], errors: [], runtime: {} },
+			} as unknown as Awaited<ReturnType<CreateAgentSessionRuntimeFactory>>;
+		};
+		const runtime = new AgentSessionRuntime(
+			parentSession,
+			{ cwd: tempDir, agentDir: tempDir } as AgentSessionServices,
+			createRuntime,
+		);
+		const baseOptions: Omit<CreateRlmSubagentRuntimeOptions, "operationId" | "sessionDir"> = {
+			parentSession,
+			id: "reused-child",
+			assignmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			deliveryId: "delivery-is-not-used-inline",
+			prompt: "run",
+			sessionName: "reused-child",
+			model: {} as never,
+			thinkingLevel: "off",
+			serviceTier: null,
+			scopedModels: [],
+			activeToolNames: [],
+			customTools: [],
+			includeGoals: false,
+			includeCompactSkill: false,
+			rlmDepth: 1,
+			rlmMaxDepth: 2,
+			rlmParentNodeId: "reused-child",
+		};
+		const publishedA = vi.fn();
+		const a = runtime.createRlmSubagentRuntime({
+			...baseOptions,
+			operationId: "aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
+			sessionDir: join(tempDir, "inline-c03-a"),
+			onSessionPublished: publishedA,
+		});
+		await bindAStarted;
+		const publishedB = vi.fn();
+		const b = await runtime.createRlmSubagentRuntime({
+			...baseOptions,
+			operationId: "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+			sessionDir: join(tempDir, "inline-c03-b"),
+			onSessionPublished: publishedB,
+		});
+		releaseBindA();
+		await expect(a).rejects.toThrow("startup was cancelled");
+
+		const maps = runtime as unknown as RuntimeSubagentMapAccess;
+		expect(publishedA).not.toHaveBeenCalled();
+		expect(publishedB).toHaveBeenCalledOnce();
+		expect(maps.subagentRuntimes.get("reused-child")?.session).toBe(b.session);
+		expect(maps.subagentRuntimeAssignments.get("reused-child")).toBe(baseOptions.assignmentId);
+		expect(maps.subagentRuntimeOperations.get("reused-child")).toBe("bbbbbbbb-bbbb-4bbb-8bbb-000000000001");
+		expect(childDisposals[1]).not.toHaveBeenCalled();
+
+		await runtime.deleteRlmSubagentRuntime(
+			"reused-child",
+			childSessions[0],
+			baseOptions.assignmentId,
+			"aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
+		);
+		expect(maps.subagentRuntimes.get("reused-child")?.session).toBe(b.session);
+		expect(childDisposals[1]).not.toHaveBeenCalled();
+		await runtime.deleteRlmSubagentRuntime("reused-child", childSessions[0], baseOptions.assignmentId);
+		expect(maps.subagentRuntimes.get("reused-child")?.session).toBe(b.session);
+		expect(childDisposals[1]).not.toHaveBeenCalled();
+		// The normal inline owner does not carry C03 operation IDs through this
+		// delete call. Its matching session is still sufficient authority to clean up.
+		await runtime.deleteRlmSubagentRuntime("reused-child", b.session, baseOptions.assignmentId);
+		expect(maps.subagentRuntimes.has("reused-child")).toBe(false);
 	});
 
 	it("releases a failed child run from the inline runtime host", async () => {

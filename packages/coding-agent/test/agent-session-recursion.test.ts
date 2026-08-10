@@ -647,6 +647,50 @@ describe("AgentSession rlm recursion", () => {
 		expect(internals._deletedRlmChildIds.has(`${childId}\0${assignmentA}`)).toBe(true);
 	});
 
+	it("does not let an exact A tombstone hide a daemon B or legacy row with the same child id", async () => {
+		const childId = "reused-daemon-child";
+		const assignmentA = "deleted-assignment-A";
+		const daemonRow = (sessionName: string) => ({
+			activeSessionId: `${sessionName}-active`,
+			sessionId: `${sessionName}-session`,
+			sessionName,
+			runtimeKind: "subagent" as const,
+			cwd: tempDir,
+			isStreaming: false,
+			unfinishedActionCount: 0,
+			parentActiveSessionId: "parent-active",
+			rlmChildId: childId,
+			sessionDir: join(tempDir, sessionName),
+		});
+		const listWith = (row: ReturnType<typeof daemonRow>) =>
+			createSession({
+				agentMessageController: {
+					listAgents: () => ({
+						current: { activeSessionId: "parent-active", sessionId: "parent-session" },
+						agents: [row],
+					}),
+					sendAgentMessage: vi.fn(),
+				},
+			});
+
+		// The daemon owns exact C03 (assignmentId, operationId) filtering. Its public
+		// list seam intentionally exposes neither identity, so an old local A key
+		// cannot be used as a child-id-wide fallback predicate.
+		const b = listWith(daemonRow("later-B"));
+		(b as unknown as InspectableRlmSession)._deletedRlmChildIds.add(`${childId}\0${assignmentA}`);
+		expect(await b.listRlmSubagents()).toMatchObject({
+			subagents: [expect.objectContaining({ rlm_child_id: childId, session_name: "later-B" })],
+		});
+
+		// The same guarantee applies to an identity-less legacy daemon row: it is not
+		// silently treated as A merely because it shares A's public child id.
+		const legacy = listWith(daemonRow("legacy-child"));
+		(legacy as unknown as InspectableRlmSession)._deletedRlmChildIds.add(`${childId}\0${assignmentA}`);
+		expect(await legacy.listRlmSubagents()).toMatchObject({
+			subagents: [expect.objectContaining({ rlm_child_id: childId, session_name: "legacy-child" })],
+		});
+	});
+
 	it("retries and releases failed retained child cleanup on the next compaction", async () => {
 		const childId = "retained-retry-child";
 		const childDir = join(tempDir, childId);
@@ -1204,6 +1248,52 @@ describe("AgentSession rlm recursion", () => {
 
 		const resumed = createSession({ depth: 1, sessionManager: manager });
 		expect(resumed.repliedToParentSinceTask).toBeUndefined();
+	});
+
+	it("fails a real public spawn before child construction when daemon durable admission cannot fsync", async () => {
+		const root = createSession();
+		const parentArtifactDir = root.sessionManager.getSessionArtifactDir();
+		if (!parentArtifactDir) throw new Error("Missing persisted parent artifact dir");
+		let childFactoryCalls = 0;
+		const daemon = new AgentDaemon(join(tempDir, "admission-failure.sock"), {
+			defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "daemon-sessions") },
+			createRuntime: async () => {
+				childFactoryCalls += 1;
+				throw new Error("child factory must not run before durable admission");
+			},
+		});
+		const parentState = {
+			activeSessionId: "real-parent",
+			eventGeneration: "admission-failure-generation",
+			runtime: {
+				session: root,
+				services: { agentDir: tempDir },
+				metadata: { kind: "top-level", createdAt: 0 },
+			},
+		} as unknown as ActiveSessionState;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+		};
+		internals.sessions.set(parentState.activeSessionId, parentState);
+		root.setSubagentRuntimeHost(internals.createSubagentRuntimeHost(parentState));
+
+		// A non-directory artifact path is a deterministic durable append/fsync failure.
+		// The normal public runRlmChild boundary must reject before it publishes a run
+		// or asks the daemon to construct a child runtime/provider task.
+		rmSync(parentArtifactDir, { recursive: true, force: true });
+		writeFileSync(parentArtifactDir, "injected admission append failure");
+		await expect(root.runRlmChild("must not start", { name: "durable-failure-worker" })).rejects.toThrow();
+
+		expect(childFactoryCalls).toBe(0);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns).toHaveLength(0);
+		expect(root.getRlmChildSession("durable-failure-worker")).toBeUndefined();
+		expect(root.messages).not.toContainEqual(
+			expect.objectContaining({
+				customType: "rlm_child_failure",
+				content: expect.stringContaining("must not start"),
+			}),
+		);
 	});
 
 	it("surfaces post-admission startup failure in the parent transcript and subagent registry", async () => {

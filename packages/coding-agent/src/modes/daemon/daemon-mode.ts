@@ -100,7 +100,16 @@ import {
 } from "../../core/cron-jobs.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
-import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
+import {
+	materializedTerminalMessageId,
+	openRlmDurableOperationStore,
+	type RlmTerminalOutbox,
+} from "../../core/rlm-durable-operations.js";
+import type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "../../core/rlm-runtime.js";
 import {
 	canPassivateSession,
 	type IdleEvictionMinutes,
@@ -108,12 +117,7 @@ import {
 } from "../../core/session-action-store.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
-import {
-	readSessionInfo,
-	resolveSessionRlmDepth,
-	type SessionInfo,
-	SessionManager,
-} from "../../core/session-manager.js";
+import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
@@ -169,6 +173,7 @@ import {
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "./daemon-protocol.js";
+import { assertRlmRegistryWriteIdentity, classifyRlmRegistryIdentity } from "./daemon-rlm-registry-identity.js";
 import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import {
 	buildRlmChildSnapshots,
@@ -381,6 +386,9 @@ interface PersistedRlmSubagentRegistryEntry {
 	childId: string;
 	/** Undefined only for legacy display rows; C01 callbacks must never bind one. */
 	assignmentId?: string;
+	/** C03 private recovery binding facts; never sent through catalog/wire output. */
+	operationId?: string;
+	deliveryId?: string;
 	sessionName: string;
 	sessionDir: string;
 	sessionFile: string;
@@ -415,6 +423,9 @@ interface RecoveryOperationToken {
 
 class RuntimeOpenCancelledError extends Error {}
 class BoundSessionUnavailableError extends Error {}
+
+/** A C03 lifecycle boundary cannot proceed without its parent-owned registry. */
+export class RlmRegistryAuthorityError extends Error {}
 
 export async function runDaemonMode(options: DaemonModeOptions): Promise<never> {
 	const socketPath = options.socketPath ?? defaultDaemonSocketPath();
@@ -458,6 +469,8 @@ export class AgentDaemon {
 	/** Covers path resolution through publication in openingSessions, before the runtime promise exists. */
 	private readonly reservingSessionOpens = new Map<string, Promise<void>>();
 	private readonly bindingCompletions = new Map<string, Promise<void>>();
+	/** Parent-object/generation-local delivery joins; never a global delivery queue. */
+	private readonly rlmTerminalImportJoins = new WeakMap<ActiveSessionState, Map<string, Promise<void>>>();
 	/**
 	 * Resolved-session-file keyed passivations let wake paths join after closeSessionOnce
 	 * removes the live session. This intentionally complements closingSessions: that map
@@ -917,51 +930,80 @@ export class AgentDaemon {
 	}
 
 	private rlmSubagentRegistryPath(parentSession: AgentSession): string | undefined {
-		const artifactDir = parentSession.sessionManager.getSessionArtifactDir();
+		// Legacy/session-shaped hosts without artifact authority cannot read a durable registry.
+		const artifactDir = parentSession.sessionManager?.getSessionArtifactDir?.();
 		if (!artifactDir) {
 			return undefined;
 		}
 		return join(artifactDir, RLM_SUBAGENT_REGISTRY_FILE);
 	}
 
-	private rlmAssignmentKey(entry: Pick<PersistedRlmSubagentRegistryEntry, "childId" | "assignmentId">): string {
-		// Missing assignment is a legacy display identity and is deliberately never
-		// equal to a C01 UUID callback identity.
-		return `${entry.childId}\u0000${entry.assignmentId ?? "legacy"}`;
+	private rlmRegistryIncarnationKey(entry: PersistedRlmSubagentRegistryEntry): string | undefined {
+		const identity = classifyRlmRegistryIdentity(entry);
+		switch (identity.kind) {
+			case "legacy-display":
+				return `${entry.childId}\u0000legacy`;
+			case "assignment-display":
+				return `${entry.childId}\u0000assignment-display\u0000${identity.assignmentId}`;
+			case "c03":
+				return `${entry.childId}\u0000${identity.assignmentId}\u0000${identity.operationId}\u0000${identity.deliveryId}`;
+			case "invalid":
+				return undefined;
+		}
 	}
 
-	/**
-	 * Registry entries retain one terminal state per durable assignment, ordered
-	 * by the assignment's first durable publication. A later terminal update for
-	 * old A must not make A the public incarnation after B reuses its childId.
-	 */
+	/** Only a complete C03 tuple is daemon authority, including passive hydrate/delete selection. */
+	private isAuthoritativeC03RegistryEntry(entry: PersistedRlmSubagentRegistryEntry): boolean {
+		return classifyRlmRegistryIdentity(entry).kind === "c03";
+	}
+
 	private currentRlmSubagentRegistryEntry(
 		entries: readonly PersistedRlmSubagentRegistryEntry[],
 		childId: string,
 	): PersistedRlmSubagentRegistryEntry | undefined {
-		for (let index = entries.length - 1; index >= 0; index--) {
-			const entry = entries[index];
-			if (entry?.childId === childId) return entry;
-		}
-		return undefined;
+		return this.currentLiveRlmSubagentRegistryEntries(entries).find((entry) => entry.childId === childId);
 	}
 
-	/** The sole public/passive row for each reused child selector. */
+	/** The sole authoritative C03 row for each reused child selector. */
 	private currentLiveRlmSubagentRegistryEntries(
 		entries: readonly PersistedRlmSubagentRegistryEntry[],
 	): PersistedRlmSubagentRegistryEntry[] {
-		const currentByChildId = new Map<string, PersistedRlmSubagentRegistryEntry>();
-		for (const entry of entries) currentByChildId.set(entry.childId, entry);
-		return [...currentByChildId.values()].filter((entry) => entry.status !== "deleted");
+		const c03ByChildId = new Map<string, PersistedRlmSubagentRegistryEntry>();
+		const displayByChildId = new Map<string, PersistedRlmSubagentRegistryEntry>();
+		for (const entry of entries) {
+			if (this.isAuthoritativeC03RegistryEntry(entry)) {
+				c03ByChildId.set(entry.childId, entry);
+			} else {
+				// Pre-C03 rows remain selectable for display/compatibility, but never
+				// outrank an authoritative C03 lifecycle incarnation of the selector.
+				displayByChildId.set(entry.childId, entry);
+			}
+		}
+		return [
+			...[...c03ByChildId.values()].filter((entry) => entry.status !== "deleted"),
+			...[...displayByChildId.values()].filter(
+				(entry) => !c03ByChildId.has(entry.childId) && entry.status !== "deleted",
+			),
+		];
+	}
+
+	private requireRlmSubagentRegistryPath(parentState: ActiveSessionState): string {
+		const path = this.rlmSubagentRegistryPath(parentState.runtime.session);
+		if (!path) {
+			throw new RlmRegistryAuthorityError("Durable RLM requires a parent registry artifact");
+		}
+		return path;
 	}
 
 	private appendRlmSubagentRegistryEntry(
 		parentState: ActiveSessionState,
 		entry: PersistedRlmSubagentRegistryEntry,
 	): boolean {
+		assertRlmRegistryWriteIdentity(entry);
 		const path = this.rlmSubagentRegistryPath(parentState.runtime.session);
 		if (!path) {
-			return true;
+			this.log("failed to persist RLM subagent registry entry: parent registry artifact is unavailable");
+			return false;
 		}
 		try {
 			mkdirSync(dirname(path), { recursive: true });
@@ -988,6 +1030,8 @@ export class AgentDaemon {
 		input: {
 			childId: string;
 			assignmentId: string;
+			operationId?: string;
+			deliveryId?: string;
 			sessionName: string;
 			sessionDir: string;
 			sessionFile: string;
@@ -1001,11 +1045,14 @@ export class AgentDaemon {
 			createdAt?: number;
 		},
 	): boolean {
+		assertRlmRegistryWriteIdentity(input);
 		const parentSession = parentState.runtime.session;
 		return this.appendRlmSubagentRegistryEntry(parentState, {
 			type: "rlm_subagent",
 			childId: input.childId,
 			assignmentId: input.assignmentId,
+			operationId: input.operationId,
+			deliveryId: input.deliveryId,
 			sessionName: input.sessionName,
 			sessionDir: input.sessionDir,
 			sessionFile: input.sessionFile,
@@ -1027,9 +1074,17 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		childId: string,
 		assignmentId: string,
+		operationId?: string,
 	): Promise<void> {
+		// A C03 deletion is an authoritative lifecycle acknowledgement and must
+		// not degrade into an in-memory success. Assignment-only legacy cleanup
+		// retains its compatibility behavior when no registry exists.
+		if (operationId) this.requireRlmSubagentRegistryPath(parentState);
 		const latest = (await this.readLatestRlmSubagentRegistry(parentState, true)).find(
-			(entry) => entry.childId === childId && entry.assignmentId === assignmentId,
+			(entry) =>
+				entry.childId === childId &&
+				entry.assignmentId === assignmentId &&
+				(operationId === undefined ? entry.operationId === undefined : entry.operationId === operationId),
 		);
 		if (!latest || latest.status === "deleted") {
 			return;
@@ -1091,35 +1146,22 @@ export class AgentDaemon {
 					typeof entry.sessionFile !== "string" ||
 					(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
 					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
-					(entry.rlmMaxDepth !== undefined &&
-						(!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0)) ||
-					(entry.assignmentId !== undefined &&
-						(typeof entry.assignmentId !== "string" ||
-							!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-								entry.assignmentId,
-							)))
+					(entry.rlmMaxDepth !== undefined && (!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0))
 				) {
 					continue;
 				}
-				latest.set(
-					this.rlmAssignmentKey(entry as PersistedRlmSubagentRegistryEntry),
-					entry as PersistedRlmSubagentRegistryEntry,
-				);
+				const authoritative = entry as PersistedRlmSubagentRegistryEntry;
+				const key = this.rlmRegistryIncarnationKey(authoritative);
+				// Partial/malformed identities never enter reduction, so a late corrupt
+				// row cannot overwrite a complete C03 incarnation.
+				if (key) latest.set(key, authoritative);
 			} catch (error) {
 				this.log(
 					`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
-		const entries = [...latest.values()];
-		// Once an explicit hydrate has durably rebound an old display-only row,
-		// suppress that legacy duplicate from catalog traversal. Its late callbacks
-		// still cannot match the assigned row because callback matching is exact.
-		return entries.filter(
-			(entry) =>
-				entry.assignmentId !== undefined ||
-				!entries.some((candidate) => candidate.childId === entry.childId && candidate.assignmentId !== undefined),
-		);
+		return [...latest.values()];
 	}
 
 	/** Read only selectable catalog incarnations; exact lifecycle operations use the full reader above. */
@@ -1484,7 +1526,7 @@ export class AgentDaemon {
 				}
 				await this.assertFamilySessionNameAvailable({
 					name: normalizedName,
-					depth: passiveSubagent.info.rlmDepth ?? passiveSubagent.entry.rlmDepth ?? 1,
+					depth: this.passiveRlmSubagentOpenDepth(passiveSubagent),
 					parentSessionId: passiveSubagent.entry.parentSessionId,
 					parentSessionPath:
 						passiveSubagent.entry.parentSessionFile ??
@@ -2325,11 +2367,286 @@ export class AgentDaemon {
 		return passive ? this.hydratePassiveRlmSubagent(passive) : this.getOrHydrateBoundSessionState(selector);
 	}
 
+	private importBoundRlmTerminalInbox(
+		parentState: ActiveSessionState,
+		child: RlmSubagentRuntime,
+		identity: { childId: string; assignmentId: string; operationId: string; deliveryId: string },
+		store: ReturnType<typeof openRlmDurableOperationStore>,
+	): Promise<void> {
+		const parent = parentState.runtime.session;
+		const generation = parentState.eventGeneration;
+		const key = `${identity.assignmentId}\u0000${identity.operationId}\u0000${identity.deliveryId}`;
+		let joins = this.rlmTerminalImportJoins.get(parentState);
+		if (!joins) {
+			joins = new Map();
+			this.rlmTerminalImportJoins.set(parentState, joins);
+		}
+		const existing = joins.get(key);
+		if (existing) return existing;
+		const current = () =>
+			this.sessions.get(parentState.activeSessionId) === parentState &&
+			parentState.eventGeneration === generation &&
+			!this.closingSessions.has(parentState.activeSessionId) &&
+			parentState.runtime.session === parent &&
+			child.session.sessionId !== "" &&
+			[...this.sessions.values()].some(
+				(state) =>
+					state.runtime.metadata.kind === "subagent" &&
+					state.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
+					state.runtime.metadata.rlmChildId === identity.childId &&
+					state.runtime.metadata.assignmentId === identity.assignmentId &&
+					state.runtime.metadata.operationId === identity.operationId &&
+					state.runtime.metadata.deliveryId === identity.deliveryId &&
+					state.runtime.session === child.session,
+			);
+		const work = (async () => {
+			// Every mutation is preceded by the complete parent + resident child fence.
+			if (!current()) return;
+			store.importPendingOutboxes();
+			// A complete unkeyed record globally quarantines the recovery projection.
+			// Do not wake a provider-facing parent or materialize any transcript body.
+			if (store.rebuild().hasGlobalUncertainty || !current()) return;
+			for (const inbox of store.pendingInbox()) {
+				if (
+					inbox.parentSessionId !== parent.sessionId ||
+					inbox.childId !== identity.childId ||
+					inbox.assignmentId !== identity.assignmentId ||
+					inbox.operationId !== identity.operationId ||
+					inbox.deliveryId !== identity.deliveryId
+				)
+					continue;
+				if (!current()) return;
+				const operation = store
+					.rebuild()
+					.operations.get(JSON.stringify([parent.sessionId, identity.assignmentId, identity.operationId]));
+				// Only the exact deleted durable incarnation is discardable. A replacement
+				// selector assignment remains unrelated and cannot suppress this record.
+				if (operation?.lifecycle === "deleted") {
+					if (!current()) return;
+					store.markDiscardedDelivery({
+						parentSessionId: parent.sessionId,
+						assignmentId: identity.assignmentId,
+						operationId: identity.operationId,
+						deliveryId: identity.deliveryId,
+						reason: "deleted",
+					});
+					continue;
+				}
+				if (!current()) return;
+				const persisted = await parent.appendDurableRlmTerminalMessage(inbox.message, inbox.deliveryId, current);
+				// `persisted` is true only for the actual fsynced append or the deterministic
+				// transcript duplicate. Recheck the complete resident incarnation after the
+				// call before the consumed fact: no stale/failed append may be acknowledged.
+				if (!persisted || !current()) return;
+				store.markMaterializedDelivery({
+					parentSessionId: parent.sessionId,
+					assignmentId: identity.assignmentId,
+					operationId: identity.operationId,
+					deliveryId: identity.deliveryId,
+					sessionMessageId: materializedTerminalMessageId(identity.deliveryId),
+				});
+			}
+		})();
+		joins.set(key, work);
+		void work.catch(() => undefined);
+		void work
+			.finally(() => {
+				if (joins?.get(key) === work) joins.delete(key);
+			})
+			.catch(() => undefined);
+		return work;
+	}
+
 	private createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost {
+		// Some legacy host-only tests construct no real parent session. Such a host
+		// remains C03-incapable; every durable seam below rejects before mutation.
+		const parent = parentState.runtime.session;
+		// C03 must remain ABI-compatible with legacy host-only embeddings whose
+		// session manager exposes neither persisted-artifact accessor. Feature-test
+		// the methods themselves before a durable seam can use their result.
+		const parentFile = parent?.sessionManager?.getSessionFile?.();
+		const parentArtifactDir = parent?.sessionManager?.getSessionArtifactDir?.();
+		const parentGeneration = parentState.eventGeneration;
+		let parentStore: ReturnType<typeof openRlmDurableOperationStore> | undefined;
+		const durableStore = () => {
+			if (!parentFile || !parentArtifactDir)
+				throw new Error("Durable RLM requires a persisted parent session/artifact");
+			// A parent host owns one store instance. Its in-process materialization
+			// bindings are manager-originated and survive all terminal/import calls;
+			// do not reopen a ledger and use its own child paths as authority.
+			if (parentStore) return parentStore;
+			parentStore = openRlmDurableOperationStore(parentArtifactDir, {
+				trustedChildRecoveryRoots: (operation) => {
+					const state = [...this.sessions.values()].find(
+						(candidate) =>
+							candidate.runtime.metadata.kind === "subagent" &&
+							candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
+							candidate.runtime.metadata.assignmentId === operation.assignmentId &&
+							candidate.runtime.metadata.operationId === operation.operationId,
+					);
+					if (!state) return undefined;
+					const child = state.runtime.session;
+					const childFile = child.sessionManager.getSessionFile?.();
+					const childArtifactDir = child.sessionManager.getSessionArtifactDir?.();
+					if (!childFile || !childArtifactDir) return undefined;
+					return {
+						childSessionId: child.sessionId,
+						childSessionFile: childFile,
+						childSessionRoot: dirname(childFile),
+						childArtifactDir,
+						childArtifactRoot: dirname(childArtifactDir),
+					};
+				},
+			});
+			return parentStore;
+		};
+		const current = (options: CreateRlmSubagentRuntimeOptions, runtime?: RlmSubagentRuntime) =>
+			this.sessions.get(parentState.activeSessionId) === parentState &&
+			parentState.eventGeneration === parentGeneration &&
+			options.parentSession === parent &&
+			!!options.assignmentId &&
+			!!options.operationId &&
+			!!options.deliveryId &&
+			(!runtime ||
+				(runtime.assignmentId === options.assignmentId &&
+					runtime.operationId === options.operationId &&
+					runtime.deliveryId === options.deliveryId &&
+					[...this.sessions.values()].some(
+						(state) =>
+							state.runtime.metadata.kind === "subagent" &&
+							state.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
+							state.runtime.metadata.rlmChildId === options.id &&
+							state.runtime.metadata.assignmentId === options.assignmentId &&
+							state.runtime.metadata.operationId === options.operationId &&
+							state.runtime.metadata.deliveryId === options.deliveryId &&
+							state.runtime.session === runtime.session,
+					)));
+
 		return {
 			assignmentIdentityFenced: true,
+			admitRlmSubagentOperation: (options) => {
+				if (!current(options)) throw new RlmRegistryAuthorityError("Stale durable RLM admission");
+				// Admission is the first C03 mutation. Require the companion registry
+				// before ledger/factory work, so an unpublishable operation never reaches a
+				// provider or public child state.
+				this.requireRlmSubagentRegistryPath(parentState);
+				if (!parentFile || !parentArtifactDir)
+					throw new RlmRegistryAuthorityError("Unpersisted durable RLM admission");
+				durableStore().admit({
+					parentSessionId: parent.sessionId,
+					parentSessionFile: parentFile,
+					parentSessionRoot: dirname(parentFile),
+					parentArtifactRoot: dirname(parentArtifactDir),
+					childId: options.id,
+					assignmentId: options.assignmentId!,
+					operationId: options.operationId!,
+					deliveryId: options.deliveryId!,
+					childSessionDir: options.sessionDir,
+					requestedModel: { provider: options.model.provider, modelId: options.model.id },
+					rlmDepth: options.rlmDepth,
+					rlmMaxDepth: options.rlmMaxDepth,
+				});
+			},
+			deliverRlmSubagentTerminal: async (runtime, options, terminal, message) => {
+				if (
+					!parentFile ||
+					!parentArtifactDir ||
+					!options.assignmentId ||
+					!options.operationId ||
+					!options.deliveryId
+				)
+					throw new RlmRegistryAuthorityError("Durable RLM terminal requires a parent registry artifact");
+				this.requireRlmSubagentRegistryPath(parentState);
+				const store = durableStore();
+				const durableOperation = () =>
+					store
+						.rebuild()
+						.operations.get(JSON.stringify([parent.sessionId, options.assignmentId!, options.operationId!]));
+				// A live explicit delete closes C01 before its cancelled task unwinds. Its
+				// exact intent can finish only A's outbox/terminal/deleted/discarded chain.
+				const deleteIntent = () => durableOperation()?.deleteIntent === true;
+				if (!current(options, runtime) && !deleteIntent()) return;
+				const child = runtime.session;
+				const childFile = child.sessionManager.getSessionFile?.();
+				const childArtifactDir = child.sessionManager.getSessionArtifactDir?.();
+				if (!childFile || !childArtifactDir) return;
+				const outbox: RlmTerminalOutbox = {
+					parentSessionId: parent.sessionId,
+					parentSessionFile: parentFile,
+					parentSessionRoot: dirname(parentFile),
+					parentArtifactRoot: dirname(parentArtifactDir),
+					childSessionId: child.sessionId,
+					childSessionFile: childFile,
+					childSessionRoot: dirname(childFile),
+					childArtifactDir,
+					childArtifactRoot: dirname(childArtifactDir),
+					childId: options.id,
+					assignmentId: options.assignmentId,
+					operationId: options.operationId,
+					deliveryId: options.deliveryId,
+					terminal,
+					message,
+				};
+				store.appendOutbox(outbox); // child outbox fsync happens before parent ledger.
+				if (
+					!store.recordTerminal({
+						parentSessionId: parent.sessionId,
+						assignmentId: options.assignmentId,
+						operationId: options.operationId,
+						deliveryId: options.deliveryId,
+						terminal,
+					})
+				)
+					return;
+				// An explicit live delete is a durable intent, not an early deleted
+				// transition. Once its terminal hand-off is fsynced, make deleted legal
+				// before the importer can materialize this exact delivery.
+				const operation = durableOperation();
+				if (operation?.deleteIntent) {
+					if (
+						!store.recordRelease(
+							{
+								parentSessionId: parent.sessionId,
+								assignmentId: options.assignmentId,
+								operationId: options.operationId,
+							},
+							"deleted",
+						)
+					) {
+						// Keep the exact outbox/terminal/intent pending for recovery rather than
+						// falsely materializing a delete whose terminal transition is uncertain.
+						return;
+					}
+					// Do not require A to remain resident after live close: deleted delivery
+					// has no parent transcript mutation and is consumed exactly once.
+					store.importPendingOutboxes();
+					store.markDiscardedDelivery({
+						parentSessionId: parent.sessionId,
+						assignmentId: options.assignmentId,
+						operationId: options.operationId,
+						deliveryId: options.deliveryId,
+						reason: "deleted",
+					});
+					return;
+				}
+				if (!current(options, runtime)) return;
+				// The owner-local join imports the fsynced outbox, then performs the
+				// normal no-turn transcript append before the consumed fsync.
+				await this.importBoundRlmTerminalInbox(
+					parentState,
+					runtime,
+					{
+						childId: options.id,
+						assignmentId: options.assignmentId,
+						operationId: options.operationId,
+						deliveryId: options.deliveryId,
+					},
+					store,
+				);
+				if (!current(options, runtime)) return;
+			},
 			createRlmSubagentRuntime: async (options) => this.createRlmSubagentRuntime(parentState, options),
-			completeRlmSubagentRuntime: (childId, childSession, assignmentId) => {
+			completeRlmSubagentRuntime: (childId, childSession, assignmentId, operationId) => {
 				if (!assignmentId || !childSession) return false;
 				const state = [...this.sessions.values()].find(
 					(candidate) =>
@@ -2337,16 +2654,27 @@ export class AgentDaemon {
 						candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
 						candidate.runtime.metadata.rlmChildId === childId &&
 						candidate.runtime.metadata.assignmentId === assignmentId &&
+						// Fresh C03 runtimes must carry the exact durable operation. Only a
+						// genuinely pre-C03 metadata record (no operation at all) may use
+						// the C01 assignment fence for host ABI compatibility.
+						(operationId !== undefined
+							? candidate.runtime.metadata.operationId === operationId
+							: candidate.runtime.metadata.operationId === undefined) &&
 						candidate.runtime.session === childSession,
 				);
 				if (!state?.runtime.session.sessionFile || this.sessions.get(parentState.activeSessionId) !== parentState)
 					return false;
 				if (state.runtime.metadata.rehydratedCompleted) return true;
+				// A registry-less assignment-only embedded runtime is display-compatible,
+				// not a C03 completion boundary. Do not claim that an append occurred.
+				if (operationId === undefined && !this.rlmSubagentRegistryPath(parentState.runtime.session)) return true;
 				const metadata = state.runtime.metadata;
 				const model = childSession.model;
 				return this.recordRlmSubagentRegistryEntry(parentState, {
 					childId,
 					assignmentId,
+					operationId,
+					deliveryId: metadata.deliveryId,
 					sessionName: childSession.sessionName ?? childId,
 					sessionDir: metadata.sessionDir ?? dirname(state.runtime.session.sessionFile),
 					sessionFile: state.runtime.session.sessionFile,
@@ -2362,21 +2690,43 @@ export class AgentDaemon {
 			},
 			releaseRlmSubagentRuntime: async (runtime, options, status) => {
 				const assignmentId = runtime.assignmentId ?? options.assignmentId;
+				const operationId = runtime.operationId ?? options.operationId;
 				// A callback without an assignment is a legacy display path and may only
-				// dispose its own unpublished runtime, never mutate daemon state.
-				if (!assignmentId || this.sessions.get(parentState.activeSessionId) !== parentState) {
-					await runtime.session.disposeAsync();
+				// dispose its own unpublished runtime, never mutate daemon state.  Both
+				// durable identifiers must agree: a held A continuation must never acquire
+				// B merely because the public selector was reused.
+				const identityMismatch =
+					(runtime.assignmentId !== undefined && runtime.assignmentId !== options.assignmentId) ||
+					(runtime.operationId !== undefined && runtime.operationId !== options.operationId);
+				if (!assignmentId || identityMismatch || this.sessions.get(parentState.activeSessionId) !== parentState) {
+					const resident = [...this.sessions.values()].some((state) => state.runtime.session === runtime.session);
+					// A failed/unpublished A still owns its local runtime and can clean it up;
+					// never dispose a resident B supplied by a stale/malformed continuation.
+					if (!resident) await runtime.session.disposeAsync();
 					return;
 				}
-				// Persist the deletion boundary first, but never let a registry failure
-				// strand the cancelled child as a stale resident session.
-				let deletionError: unknown;
-				if (status === "cancelled") {
-					try {
-						await this.recordRlmSubagentDeletion(parentState, options.id, assignmentId);
-					} catch (error) {
-						deletionError = error;
+				// Lifecycle facts are exact operation keyed. A stale A cannot release B.
+				if (operationId && options.deliveryId && current(options, runtime)) {
+					const parentArtifactDir = parent.sessionManager.getSessionArtifactDir?.();
+					if (parentArtifactDir && status !== "cancelled") {
+						// A cancellation's durable terminal owner alone may turn a live intent
+						// into deleted.  Releasing it here races the actual child terminal and
+						// can incorrectly make terminal-before-deleted unobservable.
+						durableStore().recordRelease(
+							{ parentSessionId: parent.sessionId, assignmentId, operationId },
+							"released",
+						);
 					}
+				}
+				// A C03 cancellation may close only after its exact registry tombstone is
+				// durable.  In particular, do not turn an authority/write failure into a
+				// local cleanup success: the child must remain wholly untouched for a retry.
+				// Awaiting this can interleave a replacement, but a deletion failure still
+				// wins over that later stale observation.
+				if (status === "cancelled") {
+					if (operationId)
+						await this.recordRlmSubagentDeletion(parentState, options.id, assignmentId, operationId);
+					else await this.recordRlmSubagentDeletion(parentState, options.id, assignmentId);
 				}
 				const state = [...this.sessions.values()].find(
 					(candidate) =>
@@ -2384,16 +2734,22 @@ export class AgentDaemon {
 						candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
 						candidate.runtime.metadata.rlmChildId === options.id &&
 						candidate.runtime.metadata.assignmentId === assignmentId &&
+						candidate.runtime.metadata.operationId === operationId &&
 						candidate.runtime.session === runtime.session,
 				);
+				// Awaited registry I/O may have allowed a reused selector to replace this
+				// operation. Recheck the full compound identity before close/dispose.
+				if (operationId && !current(options, runtime)) return;
 				if (state && this.sessions.get(state.activeSessionId) === state) {
 					await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
 				} else {
 					await runtime.session.disposeAsync();
 				}
-				if (deletionError !== undefined) throw deletionError;
 			},
-			deleteRlmSubagentRuntime: async (childId, childSession, requestedAssignmentId) => {
+			deleteRlmSubagentRuntime: async (childId, childSession, requestedAssignmentId, requestedOperationId) => {
+				// An operation-bearing request is C03 authority. Never convert a missing
+				// registry into an in-memory close or a successful deletion acknowledgement.
+				if (requestedOperationId) this.requireRlmSubagentRegistryPath(parentState);
 				// Public catalog entries intentionally hide assignment IDs. An explicit
 				// delete is therefore the one legacy operation permitted to resolve its
 				// durable row internally. A missing legacy ID is rebound *before* delete;
@@ -2438,6 +2794,20 @@ export class AgentDaemon {
 						persisted = { ...persisted, assignmentId };
 					} else assignmentId = persisted.assignmentId;
 				}
+				// A retained C03 child passes its operation; an explicit selector delete
+				// resolves the newest durable C03 incarnation, while legacy stays undefined.
+				const operationId = requestedOperationId ?? persisted?.operationId;
+				// A selector may resolve a C03 row only after proving it can persist the
+				// corresponding tombstone. Do this before durable intent or runtime close.
+				if (operationId) this.requireRlmSubagentRegistryPath(parentState);
+				// Callback cleanup carries an operation; it is never a selector or
+				// assignment-only capability.  A legacy explicit delete has no operation
+				// and intentionally retains its historical catalog behavior.
+				if (requestedOperationId && persisted?.operationId !== requestedOperationId) {
+					const resident = [...this.sessions.values()].some((state) => state.runtime.session === childSession);
+					if (!resident) await childSession?.disposeAsync();
+					return;
+				}
 				// Assignment-less resident children are old host data. They remain
 				// deletable only by this explicit (not callback) path; do not invent a
 				// durable row for a fixture/legacy runtime that was never published.
@@ -2446,7 +2816,8 @@ export class AgentDaemon {
 						candidate.runtime.metadata.kind === "subagent" &&
 						candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
 						candidate.runtime.metadata.rlmChildId === childId &&
-						(assignmentId === undefined || candidate.runtime.metadata.assignmentId === assignmentId),
+						(assignmentId === undefined || candidate.runtime.metadata.assignmentId === assignmentId) &&
+						(operationId === undefined || candidate.runtime.metadata.operationId === operationId),
 				);
 				if (!assignmentId && !state) {
 					await childSession?.disposeAsync();
@@ -2457,12 +2828,98 @@ export class AgentDaemon {
 				if (
 					(this.sessions.get(parentState.activeSessionId) !== undefined &&
 						this.sessions.get(parentState.activeSessionId) !== parentState) ||
-					(state && this.sessions.get(state.activeSessionId) !== state)
+					(operationId !== undefined && parentState.eventGeneration !== parentGeneration) ||
+					(state &&
+						(this.sessions.get(state.activeSessionId) !== state ||
+							state.runtime.metadata.assignmentId !== assignmentId ||
+							state.runtime.metadata.operationId !== operationId))
 				) {
 					await childSession?.disposeAsync();
 					return;
 				}
-				if (assignmentId) await this.recordRlmSubagentDeletion(parentState, childId, assignmentId);
+				if (operationId && (!assignmentId || persisted?.operationId !== operationId)) return;
+				if (assignmentId && operationId) {
+					const artifactDir = parent.sessionManager.getSessionArtifactDir?.();
+					if (!artifactDir) throw new Error("Durable RLM deletion requires parent artifact");
+					// A materialized live child cannot yet be `deleted`: retain an exact
+					// intent through cancellation. The terminal owner converts it to deleted
+					// before any inbox import, while C01 deletion/close proceeds normally.
+					// A passive C03 incarnation has no resident runtime, so bind its exact
+					// already-selected registry tuple through SessionManager before reading
+					// its private outbox.  This is a manager-owned materialization check,
+					// never an assignment-only/ledger-path fallback.
+					const store = persisted
+						? openRlmDurableOperationStore(artifactDir, {
+								trustedChildRecoveryRoots: (candidate) => {
+									if (
+										candidate.parentSessionId !== parent.sessionId ||
+										candidate.assignmentId !== assignmentId ||
+										candidate.operationId !== operationId ||
+										persisted.assignmentId !== assignmentId ||
+										persisted.operationId !== operationId ||
+										persisted.deliveryId !== candidate.deliveryId
+									)
+										return undefined;
+									try {
+										const manager = SessionManager.open(persisted.sessionFile);
+										const childFile = manager.getSessionFile();
+										const childArtifactDir = manager.getSessionArtifactDir();
+										if (!childFile || !childArtifactDir) return undefined;
+										return {
+											childSessionId: manager.getSessionId(),
+											childSessionFile: childFile,
+											childSessionRoot: dirname(childFile),
+											childArtifactDir,
+											childArtifactRoot: dirname(childArtifactDir),
+										};
+									} catch {
+										return undefined;
+									}
+								},
+							})
+						: durableStore();
+					const operation = store
+						.rebuild()
+						.operations.get(JSON.stringify([parent.sessionId, assignmentId, operationId]));
+					// A full registry tuple without a durable ledger operation is passive
+					// historical display only: it has no live cancellation hand-off to
+					// complete. Preserve its ordinary C01 tombstone behavior. A real
+					// durable operation must retain its exact intent or remain live.
+					if (
+						operation &&
+						!store.recordDeleteIntent({ parentSessionId: parent.sessionId, assignmentId, operationId })
+					) {
+						const refreshed = store
+							.rebuild()
+							.operations.get(JSON.stringify([parent.sessionId, assignmentId, operationId]));
+						if (!refreshed?.deleteIntent && refreshed?.lifecycle !== "deleted")
+							throw new Error(`Failed to retain durable deletion intent for RLM subagent ${childId}`);
+					}
+				}
+				if (assignmentId) await this.recordRlmSubagentDeletion(parentState, childId, assignmentId, operationId);
+				// A live C03 deletion has already durably hidden the public row and retained
+				// its exact delete intent. Keep only the active cancelled run alive long
+				// enough for its abort to write the owner-local terminal hand-off. Passive
+				// and passivating instances have no such owner and must close normally.
+				if (
+					assignmentId &&
+					operationId &&
+					parent.getRlmChildRunStatus(childId, assignmentId, operationId) === "cancelled"
+				) {
+					const pendingDelete = durableStore()
+						.rebuild()
+						.operations.get(JSON.stringify([parent.sessionId, assignmentId, operationId]));
+					if (pendingDelete?.deleteIntent && pendingDelete.lifecycle !== "deleted") return;
+				}
+				// C01 append awaited above; reject a late A before it can close B.
+				if (
+					parentState.eventGeneration !== parentGeneration ||
+					(state &&
+						(this.sessions.get(state.activeSessionId) !== state ||
+							state.runtime.metadata.assignmentId !== assignmentId ||
+							state.runtime.metadata.operationId !== operationId))
+				)
+					return;
 				const staleSession =
 					state && childSession && state.runtime.session !== childSession ? childSession : undefined;
 				try {
@@ -2487,12 +2944,35 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
-		// Assignment is mandatory authority for every daemon-hosted incarnation.
-		// Legacy callers that omit it are adapted by minting here; untrusted values
-		// are never written because readers correctly reject them.
+		// C03 creation is all-or-nothing: the parent mints all opaque identities
+		// before admission. The old assignment-only compatibility path has no C03
+		// authority and never acquires an operation/delivery here.
+		const hasDurableIdentity = options.operationId !== undefined || options.deliveryId !== undefined;
+		if (
+			hasDurableIdentity &&
+			(!assertFreshUuid(options.assignmentId) ||
+				!assertFreshUuid(options.operationId) ||
+				!assertFreshUuid(options.deliveryId))
+		) {
+			throw new Error("Daemon C03 child creation requires parent-minted durable identities");
+		}
 		const assignmentId = assertFreshUuid(options.assignmentId) ? options.assignmentId : randomUUID();
 		const assignedOptions = assignmentId === options.assignmentId ? options : { ...options, assignmentId };
 		options = assignedOptions;
+		const parent = parentState.runtime.session;
+		// Direct daemon callers share the host admission invariant: a C03 child
+		// cannot construct a runtime before the parent registry is writable.
+		if (options.operationId) this.requireRlmSubagentRegistryPath(parentState);
+		const parentArtifactDir = options.operationId ? parent.sessionManager.getSessionArtifactDir?.() : undefined;
+		const durableStore = () => {
+			if (!parentArtifactDir) throw new Error("Durable RLM requires a persisted parent artifact");
+			return openRlmDurableOperationStore(parentArtifactDir);
+		};
+		// Admission may have preceded a later complete corrupt append.  Check again
+		// before creating a child session: global uncertainty must not launch or
+		// materialize a provider-facing operation.
+		if (options.operationId && durableStore().rebuild().hasGlobalUncertainty)
+			throw new Error("Durable RLM history is globally uncertain");
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		sessionManager.newSession({
 			parentSession: options.parentSession.sessionFile,
@@ -2559,6 +3039,8 @@ export class AgentDaemon {
 					parentSessionFile: options.parentSession.sessionFile,
 					rlmChildId: options.id,
 					assignmentId: options.assignmentId,
+					operationId: options.operationId,
+					deliveryId: options.deliveryId,
 					rlmParentNodeId: options.rlmParentNodeId,
 					prompt: options.prompt,
 					spawnCode: options.spawnCode,
@@ -2579,24 +3061,55 @@ export class AgentDaemon {
 					runtime.session.setSessionName(options.sessionName);
 				}
 				if (runtime.session.sessionFile) {
-					this.recordRlmSubagentRegistryEntry(parentState, {
-						childId: options.id,
-						assignmentId,
-						sessionName: options.sessionName,
-						sessionDir: options.sessionDir,
-						sessionFile: runtime.session.sessionFile,
-						rlmDepth: options.rlmDepth,
-						rlmMaxDepth: options.rlmMaxDepth,
-						rlmParentNodeId: options.rlmParentNodeId,
-						prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
-						spawnCode: options.spawnCode,
-						model: {
-							provider: options.model.provider,
-							modelId: options.model.id,
-						},
-						status: "running",
-						createdAt: runtime.metadata.createdAt,
-					});
+					// Only C03-admitted children carry the opaque operation. Legacy rows stay
+					// display-compatible and deliberately acquire no durable delivery authority.
+					if (options.operationId) {
+						const artifactDir = runtime.session.sessionManager.getSessionArtifactDir();
+						if (!artifactDir || !options.assignmentId || !parentArtifactDir)
+							throw new Error("RLM child lacks durable artifact identity");
+						if (
+							!durableStore().markMaterialized({
+								parentSessionId: parent.sessionId,
+								assignmentId: options.assignmentId,
+								operationId: options.operationId,
+								childSessionId: runtime.session.sessionId,
+								childSessionFile: runtime.session.sessionFile,
+								childSessionRoot: dirname(runtime.session.sessionFile),
+								childArtifactDir: artifactDir,
+								childArtifactRoot: dirname(artifactDir),
+							})
+						)
+							throw new Error("Failed durable RLM child materialization");
+					}
+					const hasRegistryAuthority = this.rlmSubagentRegistryPath(parent) !== undefined;
+					if (
+						(options.operationId || hasRegistryAuthority) &&
+						!this.recordRlmSubagentRegistryEntry(parentState, {
+							childId: options.id,
+							assignmentId,
+							operationId: options.operationId,
+							deliveryId: options.deliveryId,
+							sessionName: options.sessionName,
+							sessionDir: options.sessionDir,
+							sessionFile: runtime.session.sessionFile,
+							rlmDepth: options.rlmDepth,
+							rlmMaxDepth: options.rlmMaxDepth,
+							rlmParentNodeId: options.rlmParentNodeId,
+							prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
+							spawnCode: options.spawnCode,
+							model: {
+								provider: options.model.provider,
+								modelId: options.model.id,
+							},
+							status: "running",
+							createdAt: runtime.metadata.createdAt,
+						})
+					) {
+						// C01 publication is a second durable boundary. The C03 materialized
+						// fact remains recoverably pending, but this unpublished runtime must
+						// never become addressable or start prompt work.
+						throw new Error("Failed to persist running RLM subagent registry entry");
+					}
 				}
 				options.onSessionPublished?.(runtime.session);
 			},
@@ -2661,6 +3174,7 @@ export class AgentDaemon {
 		const parentActiveSessionId = metadata.parentActiveSessionId;
 		const childId = metadata.rlmChildId;
 		const assignmentId = metadata.assignmentId;
+		const operationId = metadata.operationId;
 		// Legacy resident children remain readable but cannot let an asynchronous
 		// passivation callback unbind a newer same-selector assignment.
 		if (!assignmentId) return false;
@@ -2687,6 +3201,9 @@ export class AgentDaemon {
 				this.shuttingDown ||
 				this.updateRestart !== undefined ||
 				this.sessions.get(state.activeSessionId) !== state ||
+				state.eventGeneration !== passivationOperation.generation ||
+				state.runtime.metadata.assignmentId !== assignmentId ||
+				state.runtime.metadata.operationId !== operationId ||
 				!canPassivateSession(await this.sessionPassivationSnapshot(state), idleEvictionMinutes, now)
 			) {
 				return;
@@ -2696,11 +3213,14 @@ export class AgentDaemon {
 			const idleMinutes = Math.floor((now - snapshot.lastActivityAt) / 60_000);
 			// Detach parent tracking before the standard graceful runtime disposal. The
 			// registry/catalog rows remain the sole passive representation after close.
-			const unsubscribeChild = parentState.runtime.session.releaseRlmChildSession(
-				childId,
-				state.runtime.session,
-				assignmentId,
-			);
+			const unsubscribeChild = operationId
+				? parentState.runtime.session.releaseRlmChildSession(
+						childId,
+						state.runtime.session,
+						assignmentId,
+						operationId,
+					)
+				: parentState.runtime.session.releaseRlmChildSession(childId, state.runtime.session, assignmentId);
 			if (!unsubscribeChild) {
 				return;
 			}
@@ -2711,22 +3231,41 @@ export class AgentDaemon {
 				// parent's ownership map or disconnect its event forwarder.
 				if (
 					this.sessions.get(state.activeSessionId) === state &&
+					state.eventGeneration === passivationOperation.generation &&
+					state.runtime.metadata.assignmentId === assignmentId &&
+					state.runtime.metadata.operationId === operationId &&
 					this.sessions.get(parentActiveSessionId) === parentState &&
-					parentState.runtime.session.registerRlmChildSession(
-						childId,
-						state.runtime.session,
-						unsubscribeChild,
-						assignmentId,
-					)
+					(operationId
+						? parentState.runtime.session.registerRlmChildSession(
+								childId,
+								state.runtime.session,
+								unsubscribeChild,
+								assignmentId,
+								operationId,
+							)
+						: parentState.runtime.session.registerRlmChildSession(
+								childId,
+								state.runtime.session,
+								unsubscribeChild,
+								assignmentId,
+							))
 				) {
 					// The adapter is deliberately optional so old embedded/test hosts observe
 					// the historical register arity. Real AgentSession instances bind the
 					// durable assignment immediately after that compatibility call.
-					parentState.runtime.session.rebindRlmChildSessionAssignment?.(
-						childId,
-						state.runtime.session,
-						assignmentId,
-					);
+					if (operationId)
+						parentState.runtime.session.rebindRlmChildSessionAssignment?.(
+							childId,
+							state.runtime.session,
+							assignmentId,
+							operationId,
+						);
+					else
+						parentState.runtime.session.rebindRlmChildSessionAssignment?.(
+							childId,
+							state.runtime.session,
+							assignmentId,
+						);
 					throw error;
 				}
 				unsubscribeChild();
@@ -2954,10 +3493,21 @@ export class AgentDaemon {
 		clientEnv?: Record<string, string>,
 	): Promise<ActiveSessionState> {
 		const hydrationEnv = parentState.clientEnv ?? clientEnv;
+		// Recovery must not wake a durable child after a complete unkeyed/malformed
+		// record quarantines the parent's history.  This read is intentionally before
+		// acquiring the child lease or opening its session manager.
+		if (entry.operationId && entry.assignmentId && entry.deliveryId) {
+			const parentArtifactDir = parentState.runtime.session.sessionManager.getSessionArtifactDir?.();
+			if (parentArtifactDir && openRlmDurableOperationStore(parentArtifactDir).rebuild().hasGlobalUncertainty)
+				throw new Error("Durable RLM history is globally uncertain");
+		}
 		let stateRef: ActiveSessionState | undefined;
 		let runtime: AgentSessionRuntime | undefined;
 		let sessionLease: SessionLease | undefined;
 		try {
+			// Read this before SessionManager compatibility loading can derive and append
+			// a legacy path depth. Only the stored registry/header may establish depth.
+			const persistedDepth = this.persistedRlmSubagentOpenDepth(entry);
 			sessionLease = acquireSessionLease(entry.sessionFile, parentState.runtime.services.agentDir);
 			const sessionManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
 			const modelRegistry = parentState.runtime.services.modelRegistry;
@@ -3007,14 +3557,9 @@ export class AgentDaemon {
 							},
 						},
 						rlmSessionDir: entry.sessionDir,
-						// Registry depth is authoritative (written at spawn); for legacy entries
-						// without it, the shared accessor resolves persisted header depth or the
-						// session file's sub- path before the depth-1 default.
-						rlmDepth:
-							entry.rlmDepth ??
-							(existsSync(entry.sessionFile)
-								? resolveSessionRlmDepth(sessionManager.getHeader() ?? {}, entry.sessionFile)
-								: 1),
+						// Registry depth is authoritative. If it is absent, only an explicit
+						// persisted header depth can establish nesting; path ancestry is not authority.
+						rlmDepth: persistedDepth,
 						rlmMaxDepth: entry.rlmMaxDepth,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
 					},
@@ -3028,6 +3573,8 @@ export class AgentDaemon {
 							: {}),
 						rlmChildId: entry.childId,
 						assignmentId: entry.assignmentId,
+						operationId: entry.operationId,
+						deliveryId: entry.deliveryId,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
 						rehydratedCompleted: true,
 						...(entry.prompt ? { prompt: entry.prompt } : {}),
@@ -3049,35 +3596,94 @@ export class AgentDaemon {
 			);
 			// The session transcript is authoritative for mutable metadata such as a
 			// later user-assigned name; the registry value is only the spawn snapshot.
-			const registered = parentState.runtime.session.registerRlmChildSession(
-				entry.childId,
-				runtime.session,
-				undefined,
-				entry.assignmentId,
-			);
+			const registered = entry.operationId
+				? parentState.runtime.session.registerRlmChildSession(
+						entry.childId,
+						runtime.session,
+						undefined,
+						entry.assignmentId,
+						entry.operationId,
+					)
+				: parentState.runtime.session.registerRlmChildSession(
+						entry.childId,
+						runtime.session,
+						undefined,
+						entry.assignmentId,
+					);
 			// The explicit assignment is the authority boundary for lazy hydration.
 			// Keep the historical rebinding adapter only for an old session host that
 			// does not accept the fourth argument.
 			const assignmentBound = entry.assignmentId
-				? parentState.runtime.session.rebindRlmChildSessionAssignment?.(
-						entry.childId,
-						runtime.session,
-						entry.assignmentId,
-					)
+				? entry.operationId
+					? parentState.runtime.session.rebindRlmChildSessionAssignment?.(
+							entry.childId,
+							runtime.session,
+							entry.assignmentId,
+							entry.operationId,
+						)
+					: parentState.runtime.session.rebindRlmChildSessionAssignment?.(
+							entry.childId,
+							runtime.session,
+							entry.assignmentId,
+						)
 				: undefined;
 			if (!registered || assignmentBound === false) {
 				await this.closeSession(state, "replaced");
 				throw new RuntimeOpenCancelledError();
 			}
+			// Hydration is the sole restart join. It binds the exact registry incarnation
+			// before reading a child outbox and never starts prompt/task work.
+			if (entry.operationId && entry.deliveryId && entry.assignmentId) {
+				const parent = parentState.runtime.session;
+				const parentArtifactDir = parent.sessionManager.getSessionArtifactDir();
+				const parentFile = parent.sessionManager.getSessionFile();
+				const childFile = runtime.session.sessionManager.getSessionFile();
+				const childArtifactDir = runtime.session.sessionManager.getSessionArtifactDir();
+				if (parentArtifactDir && parentFile && childFile && childArtifactDir) {
+					const store = openRlmDurableOperationStore(parentArtifactDir, {
+						trustedChildRecoveryRoots: (operation) =>
+							operation.parentSessionId === parent.sessionId &&
+							operation.assignmentId === entry.assignmentId &&
+							operation.operationId === entry.operationId
+								? {
+										childSessionId: runtime!.session.sessionId,
+										childSessionFile: childFile,
+										childSessionRoot: dirname(childFile),
+										childArtifactDir,
+										childArtifactRoot: dirname(childArtifactDir),
+									}
+								: undefined,
+					});
+					await this.importBoundRlmTerminalInbox(
+						parentState,
+						{
+							session: runtime.session,
+							assignmentId: entry.assignmentId,
+							operationId: entry.operationId,
+							deliveryId: entry.deliveryId,
+						},
+						{
+							childId: entry.childId,
+							assignmentId: entry.assignmentId,
+							operationId: entry.operationId,
+							deliveryId: entry.deliveryId,
+						},
+						store,
+					);
+				}
+			}
 			if (
 				this.sessions.get(parentState.activeSessionId) !== parentState ||
 				this.closingSessions.has(parentState.activeSessionId)
 			) {
-				const unsubscribeChild = parentState.runtime.session.releaseRlmChildSession(
-					entry.childId,
-					runtime.session,
-					entry.assignmentId,
-				);
+				const unsubscribeChild = entry.operationId
+					? parentState.runtime.session.releaseRlmChildSession(
+							entry.childId,
+							runtime.session,
+							entry.assignmentId,
+							entry.operationId,
+						)
+					: parentState.runtime.session.releaseRlmChildSession(entry.childId, runtime.session, entry.assignmentId);
 				try {
 					await this.closeSession(state, "replaced");
 				} finally {
@@ -3089,6 +3695,19 @@ export class AgentDaemon {
 			}
 			return state;
 		} catch (error) {
+			// Registration happens before inbox import. If a later hydration step fails,
+			// detach this exact incarnation so a retry is not blocked by the closed child.
+			if (runtime && entry.assignmentId) {
+				const unsubscribe = entry.operationId
+					? parentState.runtime.session.releaseRlmChildSession(
+							entry.childId,
+							runtime.session,
+							entry.assignmentId,
+							entry.operationId,
+						)
+					: parentState.runtime.session.releaseRlmChildSession(entry.childId, runtime.session, entry.assignmentId);
+				if (unsubscribe) unsubscribe();
+			}
 			if (stateRef && this.sessions.get(stateRef.activeSessionId) === stateRef) {
 				await this.closeSession(stateRef, "completed").catch(() => undefined);
 			} else {
@@ -5292,9 +5911,30 @@ export class AgentDaemon {
 	}
 
 	private async createAgentMessageListResult(current: ActiveSessionState): Promise<AgentSessionMessageListResult> {
-		const localAgents = this.listTargetableSessionStates(current).map((state) =>
-			this.createAgentMessageAgentSummary(state),
+		// Keep C03 deletion identity private to daemon mode. The model-facing
+		// AgentSessionMessageAgentSummary ABI intentionally has no assignment or
+		// operation fields, but this internal seam can exactly suppress only A while
+		// retaining a later same-childId B or an identity-less legacy catalog row.
+		// Each child is tombstoned in its direct parent's registry. The result can
+		// include descendants and siblings, so inspect every resident owner rather
+		// than only `current`'s direct registry.
+		const deletedC03Operations = new Set(
+			(await Promise.all([...this.sessions.values()].map((state) => this.readLatestRlmSubagentRegistry(state))))
+				.flat()
+				.filter((entry) => this.isAuthoritativeC03RegistryEntry(entry) && entry.status === "deleted")
+				.map((entry) => `${entry.assignmentId}\u0000${entry.operationId}`),
 		);
+		const localAgents = this.listTargetableSessionStates(current)
+			.filter((state) => {
+				const metadata = state.runtime.metadata;
+				return !(
+					metadata.kind === "subagent" &&
+					metadata.assignmentId !== undefined &&
+					metadata.operationId !== undefined &&
+					deletedC03Operations.has(`${metadata.assignmentId}\u0000${metadata.operationId}`)
+				);
+			})
+			.map((state) => this.createAgentMessageAgentSummary(state));
 		for (const passive of await this.listPassiveRlmSubagents()) {
 			const { entry, info } = passive;
 			localAgents.push({
@@ -5338,14 +5978,94 @@ export class AgentDaemon {
 		};
 	}
 
+	/**
+	 * A nonresident complete C03 record is a durable passive lifecycle fact, not a
+	 * live family member. It remains in the explicit list/observe projections, but
+	 * cannot reserve a public family name, appear in the active roster, or be woken
+	 * through an agent-family operation. Match the exact catalog row by its durable
+	 * session path plus child identity so legacy rows and resident C03 runtimes keep
+	 * their established behavior.
+	 */
+	private isNonresidentAuthoritativeC03Passive(passive: PassiveRlmSubagent): boolean {
+		return (
+			this.isAuthoritativeC03RegistryEntry(passive.entry) &&
+			(passive.entry.status === "completed" || passive.entry.status === "deleted") &&
+			this.findSessionBySessionFile(passive.entry.sessionFile) === undefined
+		);
+	}
+
+	private isNonresidentAuthoritativeC03PassiveFamilyEntry(
+		agent: AgentSessionMessageAgentSummary,
+		passiveByPath: ReadonlyMap<string, PassiveRlmSubagent>,
+	): boolean {
+		if (!agent.sessionPath || !agent.rlmChildId) return false;
+		const passive = passiveByPath.get(canonicalSessionPath(agent.sessionPath));
+		return (
+			passive !== undefined &&
+			passive.info.id === agent.sessionId &&
+			passive.entry.childId === agent.rlmChildId &&
+			this.isNonresidentAuthoritativeC03Passive(passive)
+		);
+	}
+
+	/** Use only explicit depth facts when a passive C03 child is about to be re-opened. */
+	private persistedRlmSubagentOpenDepth(entry: PersistedRlmSubagentRegistryEntry): number {
+		if (entry.rlmDepth !== undefined) return entry.rlmDepth;
+		try {
+			const header = JSON.parse(readFileSync(entry.sessionFile, "utf8").split(/\r?\n/, 1)[0] ?? "{}") as {
+				rlmDepth?: unknown;
+			};
+			if (typeof header.rlmDepth === "number" && Number.isSafeInteger(header.rlmDepth) && header.rlmDepth >= 0) {
+				return header.rlmDepth;
+			}
+		} catch {
+			// The subsequent hydration reports file failures; this preflight has no depth authority.
+		}
+		return 1;
+	}
+
+	private passiveRlmSubagentOpenDepth(passive: PassiveRlmSubagent): number {
+		return this.persistedRlmSubagentOpenDepth(passive.entry);
+	}
+
 	private async createAgentFamilyCatalog(currentState?: ActiveSessionState): Promise<AgentFamilyCatalogEntry[]> {
 		const current =
 			currentState ?? [...this.sessions.values()].find((state) => !this.bindingSessions.has(state.activeSessionId));
 		const listed = current ? await this.createAgentMessageListResult(current) : { agents: [] };
+		const passiveByPath = new Map(
+			(await this.listPassiveRlmSubagents()).map((passive) => [
+				canonicalSessionPath(passive.entry.sessionFile),
+				passive,
+			]),
+		);
 		const remotePeers = new Set(this.remoteAgentPeers.values());
+		// A live C03 deletion immediately closes its public registry row but retains
+		// the cancelled runtime until its exact terminal hand-off is durable. Exclude
+		// only that deleted durable incarnation from family-name authority, allowing B
+		// to reuse A's public selector while A completes its private discard path.
+		const deletedC03Operations = new Set(
+			current
+				? (await this.readLatestRlmSubagentRegistry(current))
+						.filter((entry) => this.isAuthoritativeC03RegistryEntry(entry) && entry.status === "deleted")
+						.map((entry) => `${entry.assignmentId}\u0000${entry.operationId}`)
+				: [],
+		);
+		const visibleLocalAgents = listed.agents.filter((agent) => {
+			if (remotePeers.has(agent) || this.isNonresidentAuthoritativeC03PassiveFamilyEntry(agent, passiveByPath)) {
+				return false;
+			}
+			const state = this.sessions.get(agent.activeSessionId);
+			const metadata = state?.runtime.metadata;
+			return !(
+				metadata?.kind === "subagent" &&
+				metadata.assignmentId !== undefined &&
+				metadata.operationId !== undefined &&
+				deletedC03Operations.has(`${metadata.assignmentId}\u0000${metadata.operationId}`)
+			);
+		});
 		const localAgents = current
-			? [this.createAgentMessageAgentSummary(current), ...listed.agents.filter((agent) => !remotePeers.has(agent))]
-			: listed.agents.filter((agent) => !remotePeers.has(agent));
+			? [this.createAgentMessageAgentSummary(current), ...visibleLocalAgents]
+			: visibleLocalAgents;
 		const activePaths = new Set(
 			localAgents.flatMap((agent) => (agent.sessionPath ? [canonicalSessionPath(agent.sessionPath)] : [])),
 		);
@@ -5393,7 +6113,7 @@ export class AgentDaemon {
 			if (entry && state.runtime.session.sessionFile)
 				entry.sessionPath = canonicalSessionPath(state.runtime.session.sessionFile);
 		}
-		for (const passive of await this.listPassiveRlmSubagents()) {
+		for (const passive of passiveByPath.values()) {
 			const entry = byId.get(passive.info.id);
 			if (entry) entry.sessionPath = canonicalSessionPath(passive.entry.sessionFile);
 		}

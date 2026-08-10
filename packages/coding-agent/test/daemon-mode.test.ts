@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -15,6 +15,11 @@ import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { SessionActionRecoverySnapshot } from "../src/core/agent-session.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import type { AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import {
+	openRlmDurableOperationStore,
+	type RlmTerminalMessage,
+	readRlmDurableOperationRegistry,
+} from "../src/core/rlm-durable-operations.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -30,6 +35,7 @@ import {
 	finishClientSnapshotStreaming,
 	getChildActiveSessionStates,
 	markClientSnapshotStreaming,
+	RlmRegistryAuthorityError,
 	setDaemonClientSessionCapabilities,
 	shouldSendDaemonOutboundToClient,
 } from "../src/modes/daemon/daemon-mode.js";
@@ -1336,7 +1342,8 @@ describe("daemon mode helpers", () => {
 		expect(closeSession).toHaveBeenLastCalledWith(childState, "killed");
 		expect(internals.sessions.has(childState.activeSessionId)).toBe(false);
 
-		// A registry failure must not strand the cancelled child as a stale resident session.
+		// An authoritative deletion failure leaves the child intact for retry; it
+		// must not be converted into an in-memory cancellation cleanup.
 		internals.sessions.set(childState.activeSessionId, childState);
 		internals.recordRlmSubagentDeletion = vi.fn(async () => {
 			throw new Error("registry write failed");
@@ -1351,7 +1358,7 @@ describe("daemon mode helpers", () => {
 				),
 		).rejects.toThrow("registry write failed");
 		expect(closeSession).toHaveBeenLastCalledWith(childState, "killed");
-		expect(internals.sessions.has(childState.activeSessionId)).toBe(false);
+		expect(internals.sessions.has(childState.activeSessionId)).toBe(true);
 	});
 
 	it("fences stale assignment completion and deletion when a child selector is reused", async () => {
@@ -1434,13 +1441,14 @@ describe("daemon mode helpers", () => {
 		expect(internals.sessions.get(childB.activeSessionId)).toBe(childB);
 	});
 
-	it("binds a legacy passive delete to a fresh assignment before persisting its exact tombstone", async () => {
+	it("deletes an assignment-only passive row without minting C03 authority", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-legacy-delete-assignment-"));
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
 			const registryPath = join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
 			const legacy = JSON.parse(readFileSync(registryPath, "utf8")) as Record<string, unknown>;
-			delete legacy.assignmentId;
+			delete legacy.operationId;
+			delete legacy.deliveryId;
 			writeFileSync(registryPath, `${JSON.stringify(legacy)}\n`);
 			const internals = fixture.daemon as unknown as {
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
@@ -1451,16 +1459,15 @@ describe("daemon mode helpers", () => {
 			const rows = readFileSync(registryPath, "utf8")
 				.trim()
 				.split(/\r?\n/)
-				.map((line) => JSON.parse(line) as { childId: string; assignmentId?: string; status: string });
-			const bound = rows.at(-2);
-			const deleted = rows.at(-1);
-			expect(bound).toMatchObject({ childId: fixture.childId, status: "completed" });
-			expect(bound?.assignmentId).toMatch(/^[0-9a-f-]{36}$/i);
-			expect(deleted).toMatchObject({
-				childId: fixture.childId,
-				assignmentId: bound?.assignmentId,
-				status: "deleted",
-			});
+				.map(
+					(line) =>
+						JSON.parse(line) as { childId: string; assignmentId?: string; operationId?: string; status: string },
+				);
+			expect(rows).toEqual([
+				expect.objectContaining({ childId: fixture.childId, status: "completed" }),
+				expect.objectContaining({ childId: fixture.childId, status: "deleted" }),
+			]);
+			expect(rows.every((row) => row.operationId === undefined)).toBe(true);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -1515,20 +1522,63 @@ describe("daemon mode helpers", () => {
 			childBManager.appendMessage({ role: "user", content: "B's distinct session file", timestamp: 3 });
 			childBManager.flushNow();
 			const childBSessionFile = childBManager.getSessionFile();
-			if (!childBSessionFile) throw new Error("Missing B session file");
+			const childBArtifactDir = childBManager.getSessionArtifactDir();
+			if (!childBSessionFile || !childBArtifactDir) throw new Error("Missing B session paths");
 			const assignmentB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+			const operationB = "bbbbbbbb-bbbb-4bbb-8bbb-000000000010";
+			const deliveryB = "bbbbbbbb-bbbb-4bbb-8bbb-000000000020";
+			const storeB = openRlmDurableOperationStore(fixture.parentArtifactDir);
+			storeB.admit({
+				parentSessionId: fixture.parentSessionId,
+				parentSessionFile: fixture.parentSessionFile,
+				parentSessionRoot: dirname(fixture.parentSessionFile),
+				parentArtifactRoot: dirname(fixture.parentArtifactDir),
+				childId: fixture.childId,
+				assignmentId: assignmentB,
+				operationId: operationB,
+				deliveryId: deliveryB,
+				childSessionDir: childBSessionDir,
+				requestedModel: { provider: "test", modelId: "fixture" },
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+			});
+			storeB.markMaterialized({
+				parentSessionId: fixture.parentSessionId,
+				assignmentId: assignmentB,
+				operationId: operationB,
+				childSessionId: childBManager.getSessionId(),
+				childSessionFile: childBSessionFile,
+				childSessionRoot: dirname(childBSessionFile),
+				childArtifactDir: childBArtifactDir,
+				childArtifactRoot: dirname(childBArtifactDir),
+			});
 			writeFileSync(
 				registryPath,
 				`${JSON.stringify(a)}\n${JSON.stringify({
 					...a,
 					assignmentId: assignmentB,
+					operationId: operationB,
+					deliveryId: deliveryB,
 					sessionName: "reused-B",
 					sessionDir: childBSessionDir,
 					sessionFile: childBSessionFile,
-					parentSessionId: childBManager.getSessionId(),
+					parentSessionId: fixture.parentSessionId,
 					status: "completed",
 					createdAt: 3,
 					updatedAt: "2026-01-01T00:00:03.000Z",
+				})}\n${JSON.stringify({
+					...a,
+					assignmentId: assignmentB,
+					operationId: operationB,
+					// A corrupt late partial must never replace B for hydrate/delete.
+					deliveryId: undefined,
+					sessionName: "partial-late-A",
+					sessionDir: childBSessionDir,
+					sessionFile: childBSessionFile,
+					parentSessionId: fixture.parentSessionId,
+					status: "completed",
+					createdAt: 4,
+					updatedAt: "2026-01-01T00:00:04.000Z",
 				})}\n`,
 			);
 			const internals = fixture.daemon as unknown as {
@@ -1675,9 +1725,12 @@ describe("daemon mode helpers", () => {
 				hasRunningRlmChildren: () => false,
 				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			});
-			const childRuntime = await internals.createRlmSubagentRuntime(parentState, {
+			const durableOptions: CreateRlmSubagentRuntimeOptions = {
 				parentSession: parentState.runtime.session,
 				id: "child-1",
+				assignmentId: "33333333-3333-4333-8333-333333333333",
+				operationId: "33333333-3333-4333-8333-333333333334",
+				deliveryId: "33333333-3333-4333-8333-333333333335",
 				prompt: "complete and persist",
 				sessionName: "real-worker",
 				sessionDir: childSessionDir,
@@ -1692,14 +1745,33 @@ describe("daemon mode helpers", () => {
 				rlmDepth: 1,
 				rlmMaxDepth: 4,
 				rlmParentNodeId: "child-1",
-			});
+			};
+			mkdirSync(childSessionDir, { recursive: true });
+			const host = internals.createSubagentRuntimeHost(parentState);
+			host.admitRlmSubagentOperation?.(durableOptions);
+			const childRuntime = await internals.createRlmSubagentRuntime(parentState, durableOptions);
 			const childState = [...internals.sessions.values()].find(
 				(state) => state.runtime.session === childRuntime.session,
 			);
 			if (!childState?.runtime.session.sessionFile) throw new Error("Missing child state");
-			const host = internals.createSubagentRuntimeHost(parentState);
+			// This direct legacy host call predates C03 and has a C01 assignment but
+			// no operation metadata. It stays compatible only on the exact legacy
+			// shape: naming a fabricated C03 operation must not complete it.
 			expect(
-				host.completeRlmSubagentRuntime?.("child-1", childRuntime.session, childRuntime.metadata.assignmentId!),
+				host.completeRlmSubagentRuntime?.(
+					"child-1",
+					childRuntime.session,
+					childRuntime.metadata.assignmentId!,
+					"00000000-0000-4000-8000-000000000099",
+				),
+			).toBe(false);
+			expect(
+				host.completeRlmSubagentRuntime?.(
+					"child-1",
+					childRuntime.session,
+					childRuntime.metadata.assignmentId!,
+					durableOptions.operationId,
+				),
 			).toBe(true);
 			await (
 				daemon as unknown as { closeSession(state: ActiveSessionState, reason: "shutdown"): Promise<void> }
@@ -1708,9 +1780,9 @@ describe("daemon mode helpers", () => {
 			expect((await internals.listPassiveRlmSubagents()).map(({ entry }) => entry.childId)).toContain("child-1");
 			expect((await internals.findPassiveRlmSubagent("real-worker"))?.entry.childId).toBe("child-1");
 			const roster = await internals.createAgentMessageController(() => parentState).roster?.();
-			const passiveRosterEntry = roster?.entries.find((entry) => entry.name === "real-worker");
-			expect(passiveRosterEntry).toMatchObject({ relationship: "child", status: "inactive" });
-			expect(passiveRosterEntry).not.toHaveProperty("repliedSinceTask");
+			// A nonresident authoritative C03 record stays in explicit list metadata,
+			// but is deliberately absent from the active family roster.
+			expect(roster?.entries.find((entry) => entry.name === "real-worker")).toBeUndefined();
 			const listed = await internals.buildSessionListWithPassiveRlmSubagents(
 				[parentState],
 				await SessionManager.listAll(undefined, sessionDir),
@@ -1745,7 +1817,7 @@ describe("daemon mode helpers", () => {
 				fixture.childId,
 			);
 			await expect(internals.createAgentMessageController(() => parentState).roster?.()).resolves.toMatchObject({
-				entries: [expect.objectContaining({ relationship: "child", name: "renamed-worker" })],
+				entries: [],
 			});
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -5731,14 +5803,46 @@ describe("daemon mode helpers", () => {
 			childManager.newSession({ parentSession: parentSessionFile });
 			childManager.appendSessionInfo("heartbeat-child");
 			const childSessionFile = childManager.getSessionFile();
-			if (!childSessionFile) {
-				throw new Error("Missing child session file");
+			const childArtifactDir = childManager.getSessionArtifactDir();
+			if (!childSessionFile || !childArtifactDir) {
+				throw new Error("Missing child session paths");
 			}
+			const assignmentId = "44444444-4444-4444-8444-444444444444";
+			const operationId = "44444444-4444-4444-8444-444444444445";
+			const deliveryId = "44444444-4444-4444-8444-444444444446";
+			const store = openRlmDurableOperationStore(parentArtifactDir);
+			store.admit({
+				parentSessionId: parentManager.getSessionId(),
+				parentSessionFile,
+				parentSessionRoot: dirname(parentSessionFile),
+				parentArtifactRoot: dirname(parentArtifactDir),
+				childId,
+				assignmentId,
+				operationId,
+				deliveryId,
+				childSessionDir,
+				requestedModel: { provider: "test", modelId: "fixture" },
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+			});
+			store.markMaterialized({
+				parentSessionId: parentManager.getSessionId(),
+				assignmentId,
+				operationId,
+				childSessionId: childManager.getSessionId(),
+				childSessionFile,
+				childSessionRoot: dirname(childSessionFile),
+				childArtifactDir,
+				childArtifactRoot: dirname(childArtifactDir),
+			});
 			writeFileSync(
 				join(parentArtifactDir, "rlm-subagents.jsonl"),
 				`${JSON.stringify({
 					type: "rlm_subagent",
 					childId,
+					assignmentId,
+					operationId,
+					deliveryId,
 					sessionName: "heartbeat-child",
 					sessionDir: childSessionDir,
 					sessionFile: childSessionFile,
@@ -6137,9 +6241,7 @@ describe("daemon mode helpers", () => {
 			const messageController = internals.createAgentMessageController(() => parentState);
 			await expect(messageController.roster?.()).resolves.toMatchObject({
 				current: { id: parentState.runtime.session.sessionId, depth: 0 },
-				entries: [
-					expect.objectContaining({ relationship: "child", name: "renamed-worker", depth: 1, status: "inactive" }),
-				],
+				entries: [],
 			});
 			await expect(
 				messageController.assertSessionNameAvailable?.({
@@ -6148,7 +6250,7 @@ describe("daemon mode helpers", () => {
 					parentSessionId: parentState.runtime.session.sessionId,
 					parentSessionPath: fixture.parentSessionFile,
 				}),
-			).rejects.toThrow("an agent of that name already exists at depth 1 under this parent");
+			).resolves.toBeUndefined();
 			const listResponse = (await internals.handleCommand(makeClient("client-1", parentState.activeSessionId), {
 				type: "list",
 				all: true,
@@ -6398,10 +6500,21 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("validates a requested passive child name before hydration", async () => {
+	it("defaults a requested passive child name to depth 1 without persisted depth authority", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-name-preflight-"));
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			// Neither registry nor header supplies depth. Do not fabricate nested authority
+			// from the artifact path: passive compatibility uses the depth-1 default.
+			const childLines = readFileSync(fixture.childSessionFile, "utf8").split("\n");
+			const childHeader = JSON.parse(childLines[0] ?? "{}") as Record<string, unknown>;
+			delete childHeader.rlmDepth;
+			childLines[0] = JSON.stringify(childHeader);
+			writeFileSync(fixture.childSessionFile, childLines.join("\n"));
+			const registryPath = join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
+			const registryEntry = JSON.parse(readFileSync(registryPath, "utf8").trim()) as Record<string, unknown>;
+			delete registryEntry.rlmDepth;
+			writeFileSync(registryPath, `${JSON.stringify(registryEntry)}\n`);
 			const internals = fixture.daemon as unknown as {
 				sessions: Map<string, ActiveSessionState>;
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
@@ -6478,7 +6591,7 @@ describe("daemon mode helpers", () => {
 	});
 
 	it("rehydrates a legacy child with depth inferred from its session file path", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-legacy-rlm-depth-"));
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-c03-no-depth-"));
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
 			const lines = readFileSync(fixture.childSessionFile, "utf8").split("\n");
@@ -6504,7 +6617,7 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("does not match a renamed passive child by its stale registry name", async () => {
+	it("matches a legacy passive child by its persisted session name rather than another row's stale name", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-lazy-rlm-renamed-"));
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
@@ -6517,9 +6630,13 @@ describe("daemon mode helpers", () => {
 			const siblingSessionFile = siblingManager.getSessionFile();
 			if (!siblingSessionFile) throw new Error("Missing sibling session file");
 			const parentRegistry = join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
+			const legacyPrimary = JSON.parse(readFileSync(parentRegistry, "utf8")) as Record<string, unknown>;
+			delete legacyPrimary.assignmentId;
+			delete legacyPrimary.operationId;
+			delete legacyPrimary.deliveryId;
 			writeFileSync(
 				parentRegistry,
-				`${readFileSync(parentRegistry, "utf8")}${JSON.stringify({
+				`${JSON.stringify(legacyPrimary)}\n${JSON.stringify({
 					type: "rlm_subagent",
 					childId: siblingId,
 					sessionName: "spawn-worker",
@@ -6547,12 +6664,10 @@ describe("daemon mode helpers", () => {
 				internals
 					.createAgentMessageController(() => parentState)
 					.sendAgentMessage({ target: "spawn-worker", message: "report progress" }),
-			).resolves.toMatchObject({
-				deliveryStatus: "delivered",
-				target: { runtimeKind: "subagent", sessionName: "spawn-worker" },
-			});
+			).resolves.toMatchObject({ target: { sessionName: "spawn-worker" } });
+			// The C03 row has been renamed in its session transcript; lookup must wake
+			// the distinct legacy child whose current persisted name still matches.
 			expect(fixture.createRuntime).toHaveBeenCalledTimes(2);
-			expect(fixture.createRuntime.mock.calls[1]?.[0].sessionManager.getSessionFile()).toBe(siblingSessionFile);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -6587,7 +6702,7 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("rehydrates a legacy passive subagent at depth one", async () => {
+	it("defaults a C03 passive subagent to depth 1 without persisted depth authority", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-legacy-rlm-depth-"));
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
@@ -6617,6 +6732,8 @@ describe("daemon mode helpers", () => {
 				.createAgentMessageController(() => parentState)
 				.sendAgentMessage({ target: "renamed-worker", message: "report progress" });
 
+			// Both sources deliberately omitted depth, so C03 does not invent depth 2
+			// from its parent/path relationship; compatibility falls back to depth 1.
 			expect(fixture.createRuntime.mock.calls[1]?.[0].sessionOptions?.rlmDepth).toBe(1);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -7030,6 +7147,7 @@ describe("daemon mode helpers", () => {
 				fixture.childId,
 				childState!.runtime.session,
 				"11111111-1111-4111-8111-111111111111",
+				"11111111-1111-4111-8111-111111111112",
 			);
 		} finally {
 			releaseHydration();
@@ -7113,6 +7231,7 @@ describe("daemon mode helpers", () => {
 				attachedState.runtime.session,
 				undefined,
 				"11111111-1111-4111-8111-111111111111",
+				"11111111-1111-4111-8111-111111111112",
 			);
 
 			await expect(
@@ -7288,6 +7407,7 @@ describe("daemon mode helpers", () => {
 				grandchildState.runtime.session,
 				undefined,
 				"22222222-2222-4222-8222-222222222222",
+				"22222222-2222-4222-8222-222222222223",
 			);
 		} finally {
 			releaseHydration();
@@ -7716,6 +7836,7 @@ describe("daemon mode helpers", () => {
 				childState.runtime.session,
 				unsubscribeForwarder,
 				"11111111-1111-4111-8111-111111111111",
+				"11111111-1111-4111-8111-111111111112",
 			);
 			expect(unsubscribeForwarder).not.toHaveBeenCalled();
 			emitChildUpdate("recap after failed close");
@@ -7808,6 +7929,7 @@ describe("daemon mode helpers", () => {
 				fixture.childId,
 				firstChild.runtime.session,
 				"11111111-1111-4111-8111-111111111111",
+				"11111111-1111-4111-8111-111111111112",
 			);
 			expect(fixture.runtimeSessions[1]?.disposeAsync).toHaveBeenCalledOnce();
 
@@ -10606,6 +10728,12 @@ function makePersistedRlmDaemonFixture(
 		throw new Error("Missing child session paths");
 	}
 	const grandchildId = "grandchild-1";
+	const childAssignmentId = "11111111-1111-4111-8111-111111111111";
+	const childOperationId = "11111111-1111-4111-8111-111111111112";
+	const childDeliveryId = "11111111-1111-4111-8111-111111111113";
+	const grandchildAssignmentId = "22222222-2222-4222-8222-222222222222";
+	const grandchildOperationId = "22222222-2222-4222-8222-222222222223";
+	const grandchildDeliveryId = "22222222-2222-4222-8222-222222222224";
 	mkdirSync(childArtifactDir, { recursive: true });
 	const grandchildSessionDir = join(childSessionDir, "sub-deadbeef");
 	const grandchildManager = SessionManager.create(tempDir, grandchildSessionDir);
@@ -10614,13 +10742,70 @@ function makePersistedRlmDaemonFixture(
 	grandchildManager.appendMessage({ role: "user", content: "complete the nested task", timestamp: 2 });
 	grandchildManager.flushNow();
 	const grandchildSessionFile = grandchildManager.getSessionFile();
-	if (!grandchildSessionFile) throw new Error("Missing grandchild session file");
+	const grandchildArtifactDir = grandchildManager.getSessionArtifactDir();
+	if (!grandchildSessionFile || !grandchildArtifactDir) throw new Error("Missing grandchild session paths");
+
+	// The shared passive fixture is an actual C03 incarnation, not an
+	// assignment-shaped C01 row.  Its ledger materialization is what permits
+	// selector hydration; legacy tests below explicitly remove this tuple.
+	const parentStore = openRlmDurableOperationStore(parentArtifactDir);
+	parentStore.admit({
+		parentSessionId: parentManager.getSessionId(),
+		parentSessionFile,
+		parentSessionRoot: dirname(parentSessionFile),
+		parentArtifactRoot: dirname(parentArtifactDir),
+		childId,
+		assignmentId: childAssignmentId,
+		operationId: childOperationId,
+		deliveryId: childDeliveryId,
+		childSessionDir,
+		requestedModel: { provider: "test", modelId: "fixture" },
+		rlmDepth: 1,
+		rlmMaxDepth: 4,
+	});
+	parentStore.markMaterialized({
+		parentSessionId: parentManager.getSessionId(),
+		assignmentId: childAssignmentId,
+		operationId: childOperationId,
+		childSessionId: childManager.getSessionId(),
+		childSessionFile,
+		childSessionRoot: dirname(childSessionFile),
+		childArtifactDir,
+		childArtifactRoot: dirname(childArtifactDir),
+	});
+	const childStore = openRlmDurableOperationStore(childArtifactDir);
+	childStore.admit({
+		parentSessionId: childManager.getSessionId(),
+		parentSessionFile: childSessionFile,
+		parentSessionRoot: dirname(childSessionFile),
+		parentArtifactRoot: dirname(childArtifactDir),
+		childId: grandchildId,
+		assignmentId: grandchildAssignmentId,
+		operationId: grandchildOperationId,
+		deliveryId: grandchildDeliveryId,
+		childSessionDir: grandchildSessionDir,
+		requestedModel: { provider: "test", modelId: "fixture" },
+		rlmDepth: 2,
+		rlmMaxDepth: 4,
+	});
+	childStore.markMaterialized({
+		parentSessionId: childManager.getSessionId(),
+		assignmentId: grandchildAssignmentId,
+		operationId: grandchildOperationId,
+		childSessionId: grandchildManager.getSessionId(),
+		childSessionFile: grandchildSessionFile,
+		childSessionRoot: dirname(grandchildSessionFile),
+		childArtifactDir: grandchildArtifactDir,
+		childArtifactRoot: dirname(grandchildArtifactDir),
+	});
 	writeFileSync(
 		join(childArtifactDir, "rlm-subagents.jsonl"),
 		`${JSON.stringify({
 			type: "rlm_subagent",
 			childId: grandchildId,
-			assignmentId: "22222222-2222-4222-8222-222222222222",
+			assignmentId: grandchildAssignmentId,
+			operationId: grandchildOperationId,
+			deliveryId: grandchildDeliveryId,
 			sessionName: "nested-worker",
 			sessionDir: grandchildSessionDir,
 			sessionFile: grandchildSessionFile,
@@ -10632,15 +10817,16 @@ function makePersistedRlmDaemonFixture(
 			status: "completed",
 			createdAt: 2,
 			updatedAt: "2026-01-01T00:00:01.000Z",
-		})}
-`,
+		})}\n`,
 	);
 	writeFileSync(
 		join(parentArtifactDir, "rlm-subagents.jsonl"),
 		`${JSON.stringify({
 			type: "rlm_subagent",
 			childId,
-			assignmentId: "11111111-1111-4111-8111-111111111111",
+			assignmentId: childAssignmentId,
+			operationId: childOperationId,
+			deliveryId: childDeliveryId,
 			sessionName: "spawn-worker",
 			sessionDir: childSessionDir,
 			sessionFile: childSessionFile,
@@ -10652,10 +10838,8 @@ function makePersistedRlmDaemonFixture(
 			status: "completed",
 			createdAt: 1,
 			updatedAt: "2026-01-01T00:00:00.000Z",
-		})}
-`,
+		})}\n`,
 	);
-
 	const acceptAgentMessagePrompt = vi.fn(
 		async (_message: string, promptOptions?: { preflightResult?: (didSucceed: boolean) => void }) => {
 			if (options.childAdmissionGate) {
@@ -10750,6 +10934,7 @@ function makeRuntimeSession(
 			return sessionManager.getSessionName();
 		},
 		setSubagentRuntimeHost: vi.fn(),
+		appendDurableRlmTerminalMessage: vi.fn(async () => true),
 		getRlmChildRunStatus: vi.fn(() => "running"),
 		registerRlmChildSession: vi.fn(() => true),
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
@@ -10841,3 +11026,595 @@ function makeClient(id: string, activeSessionId: string, supportsExtensionUi = f
 		capabilities: new Set(supportsExtensionUi ? ["extension_ui"] : []),
 	};
 }
+
+describe("C03 durable daemon publication", () => {
+	it("fails closed without parent registry authority while read-only family metadata remains safe", async () => {
+		const createRuntime = vi.fn();
+		const daemon = new AgentDaemon("/tmp/prime-agent-c03-no-registry.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime,
+		});
+		const parent = makeState("c03-parent");
+		const parentSession = {
+			sessionId: "c03-parent-session",
+			sessionName: "read-only-parent",
+			sessionManager: { getCwd: () => "/tmp" },
+			rlmDepth: 0,
+			rlmMaxDepth: 4,
+		} as ActiveSessionState["runtime"]["session"];
+		parent.runtime = {
+			...parent.runtime,
+			metadata: { kind: "top-level", createdAt: 1 },
+			session: parentSession,
+		} as ActiveSessionState["runtime"];
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			appendRlmSubagentRegistryEntry(parent: ActiveSessionState, entry: Record<string, unknown>): boolean;
+			recordRlmSubagentRegistryEntry(parent: ActiveSessionState, input: Record<string, unknown>): boolean;
+			recordRlmSubagentDeletion(
+				parent: ActiveSessionState,
+				childId: string,
+				assignmentId: string,
+				operationId: string,
+			): Promise<void>;
+			createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+			createRlmSubagentRuntime(
+				parent: ActiveSessionState,
+				options: CreateRlmSubagentRuntimeOptions,
+			): Promise<ActiveSessionState["runtime"]>;
+		};
+		internals.sessions.set(parent.activeSessionId, parent);
+		const options: CreateRlmSubagentRuntimeOptions = {
+			parentSession,
+			id: "no-registry-child",
+			assignmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			operationId: "aaaaaaaa-aaaa-4aaa-8aaa-000000000010",
+			deliveryId: "aaaaaaaa-aaaa-4aaa-8aaa-000000000020",
+			prompt: "must not reach child factory",
+			sessionName: "no-registry-child",
+			sessionDir: "/tmp/no-registry-child",
+			model: {} as Model<Api>,
+			thinkingLevel: "off",
+			serviceTier: null,
+			scopedModels: [],
+			activeToolNames: [],
+			customTools: [],
+			includeGoals: false,
+			includeCompactSkill: false,
+			rlmDepth: 1,
+			rlmMaxDepth: 4,
+			rlmParentNodeId: "no-registry-child",
+		};
+		const registryRow = {
+			type: "rlm_subagent",
+			childId: options.id,
+			assignmentId: options.assignmentId,
+			operationId: options.operationId,
+			deliveryId: options.deliveryId,
+			sessionName: options.sessionName,
+			sessionDir: options.sessionDir,
+			sessionFile: "/tmp/no-registry-child/session.jsonl",
+			parentSessionId: parentSession.sessionId,
+			rlmDepth: 1,
+			rlmMaxDepth: 4,
+			status: "running",
+			createdAt: 1,
+			updatedAt: new Date(0).toISOString(),
+		};
+
+		const host = internals.createSubagentRuntimeHost(parent);
+		expect(() => host.admitRlmSubagentOperation?.(options)).toThrow("parent registry artifact");
+		await expect(internals.createRlmSubagentRuntime(parent, options)).rejects.toThrow("parent registry artifact");
+		expect(createRuntime).not.toHaveBeenCalled();
+		expect(internals.appendRlmSubagentRegistryEntry(parent, registryRow)).toBe(false);
+		expect(internals.recordRlmSubagentRegistryEntry(parent, registryRow)).toBe(false);
+		await expect(
+			internals.recordRlmSubagentDeletion(parent, options.id, options.assignmentId!, options.operationId!),
+		).rejects.toThrow("parent registry artifact");
+		const child = { disposeAsync: vi.fn(async () => {}) } as unknown as ActiveSessionState["runtime"]["session"];
+		await expect(
+			host.deleteRlmSubagentRuntime(options.id, child, options.assignmentId, options.operationId),
+		).rejects.toThrow("parent registry artifact");
+		expect(child.disposeAsync).not.toHaveBeenCalled();
+		await expect(
+			host.deliverRlmSubagentTerminal?.(
+				{
+					session: child,
+					assignmentId: options.assignmentId,
+					operationId: options.operationId,
+					deliveryId: options.deliveryId,
+				},
+				options,
+				"done",
+				{
+					role: "custom",
+					customType: "rlm_child_terminal_notice",
+					content: "must remain unacknowledged",
+					display: true,
+					details: { kind: "completed_without_reply", childId: options.id, sessionName: options.sessionName },
+					timestamp: 1,
+				},
+			),
+		).rejects.toThrow("parent registry artifact");
+
+		// Metadata-only legacy/mocked sessions remain readable by family discovery.
+		const roster = daemon as unknown as {
+			createAgentFamilyRoster(state: ActiveSessionState): Promise<{ current: { id: string } }>;
+		};
+		await expect(roster.createAgentFamilyRoster(parent)).resolves.toMatchObject({
+			current: { id: parentSession.sessionId },
+		});
+	});
+
+	it("never locally cleans an exact release when its registry deletion fails across a replacement interleave", async () => {
+		const assignmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+		const operationId = "aaaaaaaa-aaaa-4aaa-8aaa-000000000010";
+		const deliveryId = "aaaaaaaa-aaaa-4aaa-8aaa-000000000020";
+		const daemon = new AgentDaemon("/tmp/prime-agent-c03-release-authority.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const parent = makeState("release-parent");
+		const parentSession = {
+			sessionId: "release-parent-session",
+			sessionName: "release-parent",
+			sessionManager: { getCwd: () => "/tmp" },
+			rlmDepth: 0,
+			rlmMaxDepth: 4,
+		} as ActiveSessionState["runtime"]["session"];
+		parent.runtime = {
+			...parent.runtime,
+			metadata: { kind: "top-level", createdAt: 1 },
+			session: parentSession,
+		} as ActiveSessionState["runtime"];
+		const childSession = {
+			disposeAsync: vi.fn(async () => {}),
+		} as unknown as ActiveSessionState["runtime"]["session"];
+		const child = makeState("release-child", parent.activeSessionId);
+		child.runtime = {
+			...child.runtime,
+			metadata: {
+				kind: "subagent",
+				createdAt: 1,
+				parentActiveSessionId: parent.activeSessionId,
+				rlmChildId: "release-child",
+				assignmentId,
+				operationId,
+				deliveryId,
+			},
+			session: childSession,
+		} as ActiveSessionState["runtime"];
+		const options = {
+			parentSession,
+			id: "release-child",
+			assignmentId,
+			operationId,
+			deliveryId,
+		} as CreateRlmSubagentRuntimeOptions;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			closeSession: ReturnType<typeof vi.fn>;
+			recordRlmSubagentDeletion: ReturnType<typeof vi.fn>;
+			createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+		};
+		const closeSession = vi.fn(async (state: ActiveSessionState) => {
+			internals.sessions.delete(state.activeSessionId);
+		});
+		internals.closeSession = closeSession;
+		internals.sessions.set(parent.activeSessionId, parent);
+		internals.sessions.set(child.activeSessionId, child);
+
+		// No artifact is an authority failure even when this exact child remains current.
+		const currentHost = internals.createSubagentRuntimeHost(parent);
+		await expect(
+			currentHost.releaseRlmSubagentRuntime?.(
+				{ session: childSession, assignmentId, operationId, deliveryId },
+				options,
+				"cancelled",
+			),
+		).rejects.toBeInstanceOf(RlmRegistryAuthorityError);
+		expect(closeSession).not.toHaveBeenCalled();
+		expect(childSession.disposeAsync).not.toHaveBeenCalled();
+		expect(internals.sessions.get(child.activeSessionId)).toBe(child);
+
+		// Force the await boundary to supersede A with B before A's deletion rejects.
+		// The deletion error must win instead of the stale-current early return.
+		const replacement = makeState("release-child-b", parent.activeSessionId);
+		const replacementSession = {
+			disposeAsync: vi.fn(async () => {}),
+		} as unknown as ActiveSessionState["runtime"]["session"];
+		replacement.runtime = {
+			...replacement.runtime,
+			metadata: {
+				kind: "subagent",
+				createdAt: 2,
+				parentActiveSessionId: parent.activeSessionId,
+				rlmChildId: "release-child",
+				assignmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+				operationId: "bbbbbbbb-bbbb-4bbb-8bbb-000000000010",
+				deliveryId: "bbbbbbbb-bbbb-4bbb-8bbb-000000000020",
+			},
+			session: replacementSession,
+		} as ActiveSessionState["runtime"];
+		internals.recordRlmSubagentDeletion = vi.fn(async () => {
+			internals.sessions.delete(child.activeSessionId);
+			internals.sessions.set(replacement.activeSessionId, replacement);
+			throw new RlmRegistryAuthorityError("missing registry during exact deletion");
+		});
+		const staleHost = internals.createSubagentRuntimeHost(parent);
+		await expect(
+			staleHost.releaseRlmSubagentRuntime?.(
+				{ session: childSession, assignmentId, operationId, deliveryId },
+				options,
+				"cancelled",
+			),
+		).rejects.toBeInstanceOf(RlmRegistryAuthorityError);
+		expect(closeSession).not.toHaveBeenCalled();
+		expect(childSession.disposeAsync).not.toHaveBeenCalled();
+		expect(replacementSession.disposeAsync).not.toHaveBeenCalled();
+		expect(internals.sessions.get(replacement.activeSessionId)).toBe(replacement);
+
+		// Once the exact deletion succeeds, its own current resident closes normally.
+		internals.sessions.delete(replacement.activeSessionId);
+		internals.sessions.set(child.activeSessionId, child);
+		internals.recordRlmSubagentDeletion = vi.fn(async () => {});
+		await internals
+			.createSubagentRuntimeHost(parent)
+			.releaseRlmSubagentRuntime?.(
+				{ session: childSession, assignmentId, operationId, deliveryId },
+				options,
+				"cancelled",
+			);
+		expect(closeSession).toHaveBeenCalledWith(child, "killed");
+	});
+
+	it("does not launch or materialize an admitted child after global durable uncertainty", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-c03-global-uncertainty-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				createRlmSubagentRuntime(
+					parent: ActiveSessionState,
+					options: CreateRlmSubagentRuntimeOptions,
+				): Promise<ActiveSessionState["runtime"]>;
+			};
+			const parent = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const childDir = join(fixture.parentArtifactDir, "global-uncertainty-child");
+			mkdirSync(childDir, { recursive: true });
+			const options: CreateRlmSubagentRuntimeOptions = {
+				parentSession: parent.runtime.session,
+				id: "globally-quarantined-child",
+				assignmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+				operationId: "aaaaaaaa-aaaa-4aaa-8aaa-000000000010",
+				deliveryId: "aaaaaaaa-aaaa-4aaa-8aaa-000000000020",
+				prompt: "must never start",
+				sessionName: "globally-quarantined-child",
+				sessionDir: childDir,
+				model: { provider: "test", id: "durable-model" } as Model<Api>,
+				thinkingLevel: "off",
+				serviceTier: null,
+				scopedModels: [],
+				activeToolNames: [],
+				customTools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				rlmParentNodeId: "globally-quarantined-child",
+			};
+			internals.createSubagentRuntimeHost(parent).admitRlmSubagentOperation?.(options);
+			writeFileSync(
+				join(fixture.parentArtifactDir, "rlm-operation-ledger.jsonl"),
+				"{complete malformed unkeyed durable record}\n",
+				{ flag: "a" },
+			);
+			const runtimeCallsBefore = fixture.createRuntime.mock.calls.length;
+			await expect(internals.createRlmSubagentRuntime(parent, options)).rejects.toThrow("globally uncertain");
+			expect(fixture.createRuntime).toHaveBeenCalledTimes(runtimeCallsBefore);
+			expect(readRlmDurableOperationRegistry(fixture.parentArtifactDir)).toMatchObject({
+				hasGlobalUncertainty: true,
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("fsyncs admission before factory work, materializes before registry/publication, and leaves a failed child pending", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-c03-durable-publication-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				createRlmSubagentRuntime(
+					parent: ActiveSessionState,
+					options: CreateRlmSubagentRuntimeOptions,
+				): Promise<ActiveSessionState["runtime"]>;
+			};
+			const parent = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const host = internals.createSubagentRuntimeHost(parent);
+			const model = { provider: "test", id: "durable-model" } as Model<Api>;
+			const makeOptions = (
+				assignmentId: string,
+				operationId: string,
+				deliveryId: string,
+				sessionDir: string,
+				onSessionPublished?: (session: never) => void,
+			): CreateRlmSubagentRuntimeOptions => ({
+				parentSession: parent.runtime.session,
+				id: "c03-reused-selector",
+				assignmentId,
+				operationId,
+				deliveryId,
+				prompt: `durable ${operationId}`,
+				sessionName: "c03-reused-selector",
+				sessionDir,
+				model,
+				thinkingLevel: "off",
+				serviceTier: null,
+				scopedModels: [],
+				activeToolNames: [],
+				customTools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				rlmParentNodeId: "c03-reused-selector",
+				...(onSessionPublished ? { onSessionPublished: onSessionPublished as never } : {}),
+			});
+			const aDir = join(fixture.parentArtifactDir, "c03-A");
+			mkdirSync(aDir, { recursive: true });
+			const a = makeOptions(
+				"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+				"aaaaaaaa-aaaa-4aaa-8aaa-000000000010",
+				"aaaaaaaa-aaaa-4aaa-8aaa-000000000020",
+				aDir,
+			);
+			// The durable fact exists before the daemon calls its runtime factory.
+			host.admitRlmSubagentOperation?.(a);
+			let ledger = readRlmDurableOperationRegistry(fixture.parentArtifactDir);
+			const admittedA = ledger.operations.get(
+				JSON.stringify([fixture.parentSessionId, a.assignmentId, a.operationId]),
+			);
+			expect(admittedA).toMatchObject({ lifecycle: "admitted" });
+			expect(admittedA?.childSessionFile).toBeUndefined();
+
+			let publicationSawMaterialized = false;
+			const runtimeA = await internals.createRlmSubagentRuntime(
+				parent,
+				makeOptions(a.assignmentId!, a.operationId!, a.deliveryId!, a.sessionDir, () => {
+					const row = readRlmDurableOperationRegistry(fixture.parentArtifactDir).operations.get(
+						JSON.stringify([fixture.parentSessionId, a.assignmentId, a.operationId]),
+					);
+					publicationSawMaterialized = row?.lifecycle === "materialized";
+				}),
+			);
+			expect(runtimeA.metadata.operationId).toBe(a.operationId);
+			expect(publicationSawMaterialized).toBe(true);
+			const registryRows = readFileSync(join(fixture.parentArtifactDir, "rlm-subagents.jsonl"), "utf8");
+			expect(registryRows).toContain(a.operationId);
+
+			// A second admission is durable even when construction fails. It has neither
+			// a materialized child nor a fake running/completed registry row.
+			const bDir = join(fixture.parentArtifactDir, "c03-B-failed");
+			mkdirSync(bDir, { recursive: true });
+			const b = makeOptions(
+				"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+				"bbbbbbbb-bbbb-4bbb-8bbb-000000000010",
+				"bbbbbbbb-bbbb-4bbb-8bbb-000000000020",
+				bDir,
+			);
+			host.admitRlmSubagentOperation?.(b);
+			fixture.createRuntime.mockImplementationOnce(async () => {
+				throw new Error("injected child factory failure");
+			});
+			await expect(internals.createRlmSubagentRuntime(parent, b)).rejects.toThrow("injected child factory failure");
+			// A materialized child whose C01 running registry append fails remains an
+			// unpublished pending C03 fact: no callback can make it addressable.
+			const cDir = join(fixture.parentArtifactDir, "c03-C-registry-failed");
+			mkdirSync(cDir, { recursive: true });
+			const c = makeOptions(
+				"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+				"cccccccc-cccc-4ccc-8ccc-000000000010",
+				"cccccccc-cccc-4ccc-8ccc-000000000020",
+				cDir,
+			);
+			host.admitRlmSubagentOperation?.(c);
+			const publication = vi.fn();
+			const append = vi
+				.spyOn(
+					fixture.daemon as unknown as { recordRlmSubagentRegistryEntry: () => boolean },
+					"recordRlmSubagentRegistryEntry",
+				)
+				.mockReturnValueOnce(false);
+			await expect(
+				internals.createRlmSubagentRuntime(parent, { ...c, onSessionPublished: publication as never }),
+			).rejects.toThrow("Failed to persist running RLM subagent registry entry");
+			append.mockRestore();
+			expect(publication).not.toHaveBeenCalled();
+			expect(
+				readRlmDurableOperationRegistry(fixture.parentArtifactDir).operations.get(
+					JSON.stringify([fixture.parentSessionId, c.assignmentId, c.operationId]),
+				)?.lifecycle,
+			).toBe("materialized");
+			ledger = readRlmDurableOperationRegistry(fixture.parentArtifactDir);
+			const admittedB = ledger.operations.get(
+				JSON.stringify([fixture.parentSessionId, b.assignmentId, b.operationId]),
+			);
+			expect(admittedB).toMatchObject({ lifecycle: "admitted" });
+			expect(admittedB?.childSessionFile).toBeUndefined();
+			expect(readFileSync(join(fixture.parentArtifactDir, "rlm-subagents.jsonl"), "utf8")).not.toContain(
+				b.operationId,
+			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rehydrates one pending normal durable terminal through manager-owned passive wake without replay", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-c03-restart-import-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				createRlmSubagentRuntime(
+					parent: ActiveSessionState,
+					options: CreateRlmSubagentRuntimeOptions,
+				): Promise<ActiveSessionState["runtime"]>;
+				closeSession(state: ActiveSessionState, reason: "shutdown"): Promise<void>;
+				sessions: Map<string, ActiveSessionState>;
+			};
+			const parent = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const host = internals.createSubagentRuntimeHost(parent);
+			const assignmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+			const operationId = "aaaaaaaa-aaaa-4aaa-8aaa-000000000010";
+			const deliveryId = "aaaaaaaa-aaaa-4aaa-8aaa-000000000020";
+			const childDir = join(fixture.parentArtifactDir, "c03-restart-child");
+			mkdirSync(childDir, { recursive: true });
+			const options: CreateRlmSubagentRuntimeOptions = {
+				parentSession: parent.runtime.session,
+				id: "restart-worker",
+				assignmentId,
+				operationId,
+				deliveryId,
+				prompt: "normal production seam task",
+				sessionName: "restart-worker",
+				sessionDir: childDir,
+				model: { provider: "test", id: "durable-model" } as Model<Api>,
+				thinkingLevel: "off",
+				serviceTier: null,
+				scopedModels: [],
+				activeToolNames: [],
+				customTools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				rlmParentNodeId: "restart-worker",
+			};
+			host.admitRlmSubagentOperation?.(options);
+			const runtime = await internals.createRlmSubagentRuntime(parent, options);
+			expect(host.completeRlmSubagentRuntime?.("restart-worker", runtime.session, assignmentId, operationId)).toBe(
+				true,
+			);
+
+			// This is the real durable terminal path up to the crash boundary: the
+			// manager-created child is materialized and registered, then its fsynced
+			// outbox and parent terminal fact exist while no importer is running.
+			const parentFile = parent.runtime.session.sessionManager.getSessionFile();
+			const childFile = runtime.session.sessionManager.getSessionFile();
+			const childArtifacts = runtime.session.sessionManager.getSessionArtifactDir();
+			if (!parentFile || !childFile || !childArtifacts) throw new Error("Missing materialized C03 paths");
+			const store = openRlmDurableOperationStore(fixture.parentArtifactDir, {
+				trustedChildRecoveryRoots: (operation) =>
+					operation.assignmentId === assignmentId && operation.operationId === operationId
+						? {
+								childSessionId: runtime.session.sessionId,
+								childSessionFile: childFile,
+								childSessionRoot: dirname(childFile),
+								childArtifactDir: childArtifacts,
+								childArtifactRoot: dirname(childArtifacts),
+							}
+						: undefined,
+			});
+			const message: RlmTerminalMessage = {
+				role: "custom",
+				customType: "rlm_child_terminal_notice",
+				content: "restart-worker completed without sending a reply",
+				display: true,
+				details: { kind: "completed_without_reply", childId: "restart-worker", sessionName: "restart-worker" },
+				timestamp: 1,
+			};
+			store.appendOutbox({
+				parentSessionId: parent.runtime.session.sessionId,
+				parentSessionFile: parentFile,
+				parentSessionRoot: dirname(parentFile),
+				parentArtifactRoot: dirname(fixture.parentArtifactDir),
+				childSessionId: runtime.session.sessionId,
+				childSessionFile: childFile,
+				childSessionRoot: dirname(childFile),
+				childArtifactDir: childArtifacts,
+				childArtifactRoot: dirname(childArtifacts),
+				childId: "restart-worker",
+				assignmentId,
+				operationId,
+				deliveryId,
+				terminal: "done",
+				message,
+			});
+			expect(
+				store.recordTerminal({
+					parentSessionId: parent.runtime.session.sessionId,
+					assignmentId,
+					operationId,
+					deliveryId,
+					terminal: "done",
+				}),
+			).toBe(true);
+			const childState = [...internals.sessions.values()].find((state) => state.runtime.session === runtime.session);
+			if (!childState) throw new Error("Missing running materialized child");
+			await internals.closeSession(childState, "shutdown");
+			await internals.closeSession(parent, "shutdown");
+
+			// A new daemon has only saved session managers and the durable registry.
+			// Concurrent legitimate selector wakes join that normal hydration path.
+			const restarted = new AgentDaemon(join(tempDir, "restarted.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+				createRuntime: fixture.createRuntime,
+			});
+			const restartedInternals = restarted as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				getOrHydrateBoundSessionState(selector: string): Promise<ActiveSessionState>;
+				sessions: Map<string, ActiveSessionState>;
+				closeSession(state: ActiveSessionState, reason: "shutdown"): Promise<void>;
+			};
+			const restartedParent = await restartedInternals.createRuntime({
+				type: "create",
+				sessionPath: fixture.parentSessionFile,
+			});
+			const factoryCallsBeforeWake = fixture.createRuntime.mock.calls.length;
+			const [firstWake, secondWake] = await Promise.all([
+				restartedInternals.getOrHydrateBoundSessionState("restart-worker"),
+				restartedInternals.getOrHydrateBoundSessionState("restart-worker"),
+			]);
+			expect(firstWake).toBe(secondWake);
+			expect(fixture.createRuntime).toHaveBeenCalledTimes(factoryCallsBeforeWake + 1);
+			const append = restartedParent.runtime.session.appendDurableRlmTerminalMessage as ReturnType<typeof vi.fn>;
+			expect(append).toHaveBeenCalledTimes(1);
+			expect(append).toHaveBeenCalledWith(message, deliveryId, expect.any(Function));
+			expect(
+				store
+					.rebuild()
+					.deliveries.get(
+						JSON.stringify([
+							JSON.stringify([restartedParent.runtime.session.sessionId, assignmentId, operationId]),
+							deliveryId,
+						]),
+					)?.consumed,
+			).toBe("materialized");
+
+			// A later daemon restart sees consumed durable state: importing it creates
+			// neither a second normal transcript append nor child prompt/provider work.
+			await restartedInternals.closeSession(restartedParent, "shutdown");
+			const secondRestart = new AgentDaemon(join(tempDir, "second-restarted.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+				createRuntime: fixture.createRuntime,
+			});
+			const secondInternals = secondRestart as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				getOrHydrateBoundSessionState(selector: string): Promise<ActiveSessionState>;
+			};
+			const secondParent = await secondInternals.createRuntime({
+				type: "create",
+				sessionPath: fixture.parentSessionFile,
+			});
+			await secondInternals.getOrHydrateBoundSessionState("restart-worker");
+			expect(secondParent.runtime.session.appendDurableRlmTerminalMessage).not.toHaveBeenCalled();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});

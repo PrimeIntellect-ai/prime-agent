@@ -6,6 +6,7 @@ import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import { classifyRlmRegistryIdentity } from "./daemon-rlm-registry-identity.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
 
@@ -62,8 +63,31 @@ function deserializeSessionInfo(session: SessionInfoWire): SessionInfo {
 interface SavedRlmSubagentRegistryEntry {
 	type?: unknown;
 	childId?: unknown;
+	assignmentId?: unknown;
+	operationId?: unknown;
+	deliveryId?: unknown;
 	sessionFile?: unknown;
 	status?: unknown;
+}
+
+function hasCanonicalC03Identity(entry: SavedRlmSubagentRegistryEntry): boolean {
+	return classifyRlmRegistryIdentity(entry).kind === "c03";
+}
+
+/** Read-only, private registry incarnation key. Legacy rows remain display-only. */
+function savedRlmIncarnationKey(entry: SavedRlmSubagentRegistryEntry): string | undefined {
+	if (typeof entry.childId !== "string") return undefined;
+	const identity = classifyRlmRegistryIdentity(entry);
+	switch (identity.kind) {
+		case "legacy-display":
+			return `${entry.childId}\0legacy`;
+		case "assignment-display":
+			return `${entry.childId}\0legacy-assignment\0${identity.assignmentId}`;
+		case "c03":
+			return `${entry.childId}\0${identity.assignmentId}\0${identity.operationId}\0${identity.deliveryId}`;
+		case "invalid":
+			return undefined;
+	}
 }
 
 export async function listSavedSessionSiblings(sessionPath: string): Promise<SessionInfo[]> {
@@ -81,18 +105,36 @@ export async function listSavedSessionSiblings(sessionPath: string): Promise<Ses
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [target];
 		throw error;
 	}
-	const latest = new Map<string, SavedRlmSubagentRegistryEntry>();
+	// Preserve the first durable incarnation position when a later lifecycle row
+	// updates A. A selector reused by B must still select B, not be overwritten by
+	// A's late completion/deletion. This parser has no authority to wake, write, or
+	// materialize C03 delivery files.
+	const latestByIncarnation = new Map<string, SavedRlmSubagentRegistryEntry>();
 	for (const line of contents.split(/\r?\n/)) {
 		if (!line.trim()) continue;
 		try {
 			const entry = JSON.parse(line) as SavedRlmSubagentRegistryEntry;
-			if (entry.type === "rlm_subagent" && typeof entry.childId === "string") latest.set(entry.childId, entry);
+			if (entry.type !== "rlm_subagent") continue;
+			const key = savedRlmIncarnationKey(entry);
+			if (key) latestByIncarnation.set(key, entry);
 		} catch {
 			// Ignore malformed registry history just like the owning worker does.
 		}
 	}
+	const newestLegacyBySelector = new Map<string, SavedRlmSubagentRegistryEntry>();
+	const newestC03BySelector = new Map<string, SavedRlmSubagentRegistryEntry>();
+	for (const entry of latestByIncarnation.values()) {
+		if (typeof entry.childId !== "string") continue;
+		// Only a canonical full triple may select a current C03 incarnation. A
+		// display-only pre-C03 row cannot displace it, even if its old lifecycle
+		// update is appended after a C03 entry.
+		if (hasCanonicalC03Identity(entry)) newestC03BySelector.set(entry.childId, entry);
+		else newestLegacyBySelector.set(entry.childId, entry);
+	}
+	const newestBySelector = new Map(newestLegacyBySelector);
+	for (const [childId, entry] of newestC03BySelector) newestBySelector.set(childId, entry);
 	const siblingPaths = new Set<string>([resolve(target.path)]);
-	for (const entry of latest.values()) {
+	for (const entry of newestBySelector.values()) {
 		if (entry.status !== "deleted" && typeof entry.sessionFile === "string")
 			siblingPaths.add(resolve(entry.sessionFile));
 	}

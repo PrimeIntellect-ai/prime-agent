@@ -437,3 +437,105 @@ describe("SessionManager.appendCustomMessageEntryWithRollback", () => {
 		expect(readFileSync(file)).toEqual(before);
 	});
 });
+
+type SessionDurabilityTestSeam = {
+	_setDurabilityIoForTest(overrides: {
+		writeAll?: (fd: number, bytes: Buffer) => void;
+		fileFsync?: (fd: number) => void;
+		tempFsync?: (fd: number) => void;
+		rename?: (tempPath: string, targetPath: string) => void;
+		directoryFsync?: (directory: string) => void;
+	}): () => void;
+};
+
+function c03DurabilityManager(): { mgr: SessionManager; file: string; before: Buffer } {
+	const dir = createTempDir();
+	const mgr = SessionManager.create(dir, join(dir, "sessions"));
+	mgr.appendMessage({ role: "user", content: "durable baseline", timestamp: 1 });
+	mgr.appendMessage({
+		role: "assistant",
+		content: [{ type: "text", text: "ready" }],
+		api: "openai-completions",
+		provider: "test",
+		model: "test",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 2,
+	});
+	const file = mgr.getSessionFile()!;
+	return { mgr, file, before: readFileSync(file) };
+}
+
+describe("SessionManager C03 durability cut seam", () => {
+	const seam = SessionManager as unknown as SessionDurabilityTestSeam;
+	const cuts: Array<
+		[
+			"writeAll" | "fileFsync" | "tempFsync" | "rename" | "directoryFsync",
+			// append is already flushed for the first two cuts; replacements exercise
+			// the remaining three pre-/post-rename boundaries.
+			"append" | "rewrite",
+		]
+	> = [
+		["writeAll", "append"],
+		["fileFsync", "append"],
+		["tempFsync", "rewrite"],
+		["rename", "rewrite"],
+		["directoryFsync", "rewrite"],
+	];
+
+	it.each(cuts)("does not acknowledge or duplicate a C03 entry across a %s %s cut", (cut, path) => {
+		const { mgr, file, before } = c03DurabilityManager();
+		if (path === "rewrite") {
+			// A failed append repair and a first durable materialization both use
+			// the same replacement primitive. Force that path without changing the
+			// already-authoritative transcript bytes.
+			(mgr as unknown as { flushed: boolean }).flushed = false;
+		}
+		const authorityBefore = readFileSync(file);
+		const restore = seam._setDurabilityIoForTest({
+			[cut]: () => {
+				throw new Error(`injected ${cut} cut`);
+			},
+		});
+		try {
+			expect(() =>
+				mgr.appendDurableCustomMessageEntry("rlm_child_terminal_notice", "one terminal", true, { id: "c03-cut" }),
+			).toThrow(`injected ${cut} cut`);
+		} finally {
+			restore();
+		}
+		// No failed attempt remains in the manager tree. A cut after kernel write
+		// or rename can leave ambiguous bytes, so the manager remains unflushed;
+		// its first post-fault flush deterministically restores prior authority.
+		expect(mgr.getEntries().filter((entry) => entry.type === "custom_message")).toHaveLength(0);
+		mgr.flushNow();
+		expect(readFileSync(file)).toEqual(authorityBefore);
+		expect(
+			SessionManager.open(file)
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message"),
+		).toHaveLength(0);
+		expect(before.length).toBeGreaterThan(0);
+
+		// The same delivery retry has one deterministic transcript fact, not a
+		// provider/prompt replay or a second entry.
+		expect(
+			mgr.appendDurableCustomMessageEntry("rlm_child_terminal_notice", "one terminal", true, { id: "c03-cut" }),
+		).toBe(true);
+		const reopened = SessionManager.open(file);
+		const terminals = reopened
+			.getEntries()
+			.filter(
+				(entry) =>
+					entry.type === "custom_message" && (entry.details as { id?: string } | undefined)?.id === "c03-cut",
+			);
+		expect(terminals).toHaveLength(1);
+	});
+});
