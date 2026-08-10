@@ -246,6 +246,14 @@ For a persisted root session, the relevant layout is:
 
 Exact artifact files are created only when their features are used. Non-persistent sessions place RLM directories under the OS temporary directory and do not gain revivable session artifacts.
 
+## Role-policy rollout and rollback
+
+When the server-side `PRIME_AGENT_ENABLE_SWARM_ROLE_POLICY` flag is unset or `0`, role-policy admission is disabled and legacy `rlm.run(name=..., model=...)` behavior remains in effect. A configured policy is retained but not consulted. With `=1`, a valid policy may bind a new child to a user-defined role, exact authenticated `provider/model` profile, requested decision/implementation scopes, explicitly supplied bounded context capsules, and the intersection of role and parent tools.
+
+The policy is not a sandbox. It narrows existing tool names only; shell-capable tools still have the worker OS identity's permissions. Project policy is not authority by default: it is selected only if valid global policy explicitly sets `trustProjectPolicy: true`. Malformed or untrusted policy fails closed for role-policy admission and never falls back to a model or profile.
+
+For an approved rollback, preserve assignment-specific records and session artifacts, cleanly stop affected workers, set `PRIME_AGENT_ENABLE_SWARM_ROLE_POLICY=0`, then restart. This affects only new admissions. Do not edit a retained assignment or policy snapshot to widen an existing child; re-enable only with `=1` to create fresh assignments from a newly validated snapshot.
+
 ## Trust Boundary
 
 IPython executes model-generated Python and shell-magics with the worker's OS permissions. The kernel boundary isolates protocol and lifecycle concerns; it is not a security sandbox. Installed Python packages, skills, and extensions are trusted code. Use an external sandbox or restricted execution environment when the workspace or generated code is untrusted.
@@ -267,3 +275,8 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 ## Focused Validation
 
 From the repository root, the implementation is covered by focused kernel, recursion, context-tree, daemon RLM, and runtime tests. When changing child creation or accounting, include `agent-session-recursion.test.ts`; when changing comm transport, include the kernel comm tests; when changing daemon retention, include the daemon RLM lifecycle tests.
+
+
+## Optional swarm role policy
+
+The server-only `PRIME_AGENT_ENABLE_SWARM_ROLE_POLICY=1` rollout flag enables a host-authorized role admission policy when a valid configured policy exists. In that mode use `await rlm.list_roles()` and `await rlm.run(prompt, role=..., decision_scopes=..., implementation_scopes=..., shared_context=...)`; `model` is rejected. With the flag unset or `0`, policy arguments and `list_roles` are rejected and the existing model API is unchanged. Roles narrow host-provided tools and are **not** a filesystem, process, or network sandbox. Shared context is explicitly supplied, untrusted, bounded, and non-transitive.

@@ -33,6 +33,14 @@ class RLMSpawnHandle:
 
 
 @dataclass(frozen=True)
+class RLMRole:
+    id: str
+    model_profile: str
+    decision_scopes: tuple[str, ...]
+    implementation_scopes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RLMModel:
     provider: str
     id: str
@@ -149,6 +157,32 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
+
+
+def _role_from_payload(payload: Any) -> RLMRole:
+    if not isinstance(payload, dict):
+        raise RuntimeError("rlm.list_roles returned an invalid role entry")
+    role_id = payload.get("id")
+    profile = payload.get("model_profile")
+    decision = payload.get("decision_scopes")
+    implementation = payload.get("implementation_scopes")
+    if not isinstance(role_id, str) or not role_id or not isinstance(profile, str) or not profile:
+        raise RuntimeError("rlm.list_roles returned an invalid role entry")
+    if not all(isinstance(values, list) and all(isinstance(value, str) and value for value in values) for values in (decision, implementation)):
+        raise RuntimeError("rlm.list_roles returned an invalid role entry")
+    return RLMRole(role_id, profile, tuple(decision), tuple(implementation))
+
+
+async def list_roles() -> list[RLMRole]:
+    """Return the minimal host-authorized role policy projection."""
+    payload = await host_request("rlm.list_roles")
+    roles = payload.get("roles")
+    if not isinstance(roles, list) or len(roles) > 64:
+        raise RuntimeError("rlm.list_roles returned an invalid roles list")
+    parsed = [_role_from_payload(role) for role in roles]
+    if parsed != sorted(parsed, key=lambda role: role.id):
+        raise RuntimeError("rlm.list_roles returned unsorted roles")
+    return parsed
 
 
 def _model_from_payload(payload: Any) -> RLMModel:
@@ -291,6 +325,9 @@ class _RLMCallable:
     async def find_models(self, query: str = "", limit: int = 8) -> list[RLMModel]:
         return await find_models(query, limit)
 
+    async def list_roles(self) -> list[RLMRole]:
+        return await list_roles()
+
     async def list_subagents(self) -> list[RLMSubagent]:
         return await list_subagents()
 
@@ -320,6 +357,7 @@ __all__ = [
     "McpToolError",
     "NotEnabled",
     "RLMModel",
+    "RLMRole",
     "RLMSpawnHandle",
     "RLMSubagent",
     "RefinementEvent",
@@ -329,6 +367,7 @@ __all__ = [
     "harness",
     "host_request",
     "list_subagents",
+    "list_roles",
     "rlm",
     "run",
 ]

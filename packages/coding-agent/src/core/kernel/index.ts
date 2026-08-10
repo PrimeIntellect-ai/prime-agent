@@ -567,6 +567,13 @@ export class KernelManager {
 		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
 	}
 
+	private _kernelEnv(): NodeJS.ProcessEnv {
+		const env: NodeJS.ProcessEnv = { ...process.env, ...this.options.env };
+		// Server-only policy rollout state must never cross the host/kernel boundary.
+		delete env.PRIME_AGENT_ENABLE_SWARM_ROLE_POLICY;
+		return env;
+	}
+
 	async start(options: KernelStartOptions = {}): Promise<void> {
 		if (options.signal?.aborted) {
 			throw createKernelStartupAbortError();
@@ -619,10 +626,8 @@ export class KernelManager {
 				this.kernelPid = await forkKernel(python, {
 					connectionPath: connection.path,
 					cwd: this.options.cwd,
-					// Match the direct-spawn env exactly: merge the current host env with
-					// the per-kernel overrides, applied fresh in the child (the template's
-					// inherited env snapshot may be stale by fork time).
-					env: this.options.env ? { ...process.env, ...this.options.env } : { ...process.env },
+					// This is a host rollout switch, never a child/kernel capability.
+					env: this._kernelEnv(),
 				});
 				forked = true;
 			} catch (err) {
@@ -646,7 +651,7 @@ export class KernelManager {
 		if (!forked) {
 			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
 				cwd: this.options.cwd,
-				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
+				env: this._kernelEnv(),
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			this.kernel = kernel;

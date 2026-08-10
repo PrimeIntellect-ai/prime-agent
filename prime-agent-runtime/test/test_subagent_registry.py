@@ -94,6 +94,48 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
+    def test_lists_sorted_minimal_roles_from_host(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "roles": [
+                    {
+                        "id": "reviewer",
+                        "model_profile": "approved_profile",
+                        "decision_scopes": ["review"],
+                        "implementation_scopes": ["patch"],
+                    }
+                ]
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            roles = asyncio.run(rlm_module.rlm.list_roles())
+
+        self.assertEqual(roles[0].id, "reviewer")
+        self.assertEqual(roles[0].model_profile, "approved_profile")
+        self.assertEqual(roles[0].decision_scopes, ("review",))
+        self.assertEqual(roles[0].implementation_scopes, ("patch",))
+        host_request.assert_awaited_once_with("rlm.list_roles")
+
+    def test_rejects_unsorted_or_malformed_role_payload(self) -> None:
+        with patch.object(rlm_module, "host_request", AsyncMock(return_value={"roles": [{"id": "bad"}]})):
+            with self.assertRaisesRegex(RuntimeError, "invalid role entry"):
+                asyncio.run(rlm_module.list_roles())
+        with patch.object(
+            rlm_module,
+            "host_request",
+            AsyncMock(
+                return_value={
+                    "roles": [
+                        {"id": "z", "model_profile": "profile", "decision_scopes": [], "implementation_scopes": []},
+                        {"id": "a", "model_profile": "profile", "decision_scopes": [], "implementation_scopes": []},
+                    ]
+                }
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unsorted roles"):
+                asyncio.run(rlm_module.list_roles())
+
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(
             return_value={

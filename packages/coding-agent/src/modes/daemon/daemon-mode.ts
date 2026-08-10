@@ -117,6 +117,11 @@ import {
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import {
+	SWARM_ROLE_MAX_CONTEXT_BYTES,
+	SWARM_ROLE_MAX_ITEMS,
+	type SwarmRoleAssignment,
+} from "../../core/swarm-role-policy.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
 	createAgentConnectionCommands,
@@ -392,9 +397,192 @@ interface PersistedRlmSubagentRegistryEntry {
 	prompt?: string;
 	spawnCode?: string;
 	model?: { provider: string; modelId: string };
+	/** Private safe policy snapshot; no instructions, capsule bodies, settings, or credentials. */
+	swarmRoleAssignment?: SwarmRoleAssignment;
 	status: "running" | "completed" | "deleted";
 	createdAt: number;
 	updatedAt: string;
+}
+
+const PERSISTED_SWARM_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const PERSISTED_SWARM_RESERVED_IDENTIFIERS = new Set(["default", "inherit", "none"]);
+const PERSISTED_SWARM_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const PERSISTED_SWARM_SERVICE_TIERS = new Set(["auto", "default", "flex", "scale", "priority"]);
+const PERSISTED_SWARM_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PERSISTED_SWARM_DIGEST = /^[0-9a-f]{64}$/;
+
+function isPersistedSwarmRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The journal is untrusted input, including values written by older daemon versions. */
+function persistedSwarmString(value: unknown, label: string): string {
+	if (typeof value !== "string") throw new Error(`invalid persisted swarm assignment ${label}`);
+	return value;
+}
+function persistedSwarmIdentifier(value: unknown, label: string, reserved = false): string {
+	const result = persistedSwarmString(value, label);
+	if (!result || result.length > 64 || !PERSISTED_SWARM_IDENTIFIER.test(result))
+		throw new Error(`invalid persisted swarm assignment ${label}`);
+	if (reserved && PERSISTED_SWARM_RESERVED_IDENTIFIERS.has(result.toLowerCase()))
+		throw new Error(`invalid persisted swarm assignment ${label}`);
+	return result;
+}
+function persistedSwarmIdentifierArray(value: unknown, label: string, reserved = false): string[] {
+	if (!Array.isArray(value)) throw new Error(`invalid persisted swarm assignment ${label}`);
+	const result = value.map((item, index) => persistedSwarmIdentifier(item, `${label}[${index}]`, reserved));
+	if (new Set(result).size !== result.length) throw new Error(`invalid persisted swarm assignment ${label}`);
+	return result;
+}
+function persistedSwarmToolArray(value: unknown): string[] {
+	if (!Array.isArray(value)) throw new Error("invalid persisted swarm assignment allowedToolNames");
+	const result = value.map((item, index) => {
+		const tool = persistedSwarmString(item, `allowedToolNames[${index}]`);
+		if (!tool || tool !== tool.trim()) throw new Error("invalid persisted swarm assignment allowedToolNames");
+		return tool;
+	});
+	if (new Set(result).size !== result.length) throw new Error("invalid persisted swarm assignment allowedToolNames");
+	return result;
+}
+function splitSwarmModelSelector(model: string): { provider: string; modelId: string } {
+	const slash = model.indexOf("/");
+	return { provider: model.slice(0, slash), modelId: model.slice(slash + 1) };
+}
+function assertPersistedPolicyRegistryModelMatches(value: unknown, assignment: Readonly<SwarmRoleAssignment>): void {
+	if (value === undefined) return;
+	if (!isPersistedSwarmRecord(value) || typeof value.provider !== "string" || typeof value.modelId !== "string")
+		throw new Error("invalid persisted policy registry model");
+	const { provider, modelId } = splitSwarmModelSelector(assignment.model);
+	if (value.provider !== provider || value.modelId !== modelId)
+		throw new Error("persisted policy swarm assignment model does not match registry model");
+}
+function freezePersistedSwarmAssignment(value: SwarmRoleAssignment): Readonly<SwarmRoleAssignment> {
+	const sharedContext: SwarmRoleAssignment["sharedContext"] = {
+		maxItems: value.sharedContext.maxItems,
+		maxBytes: value.sharedContext.maxBytes,
+		...(value.sharedContext.allowedKinds
+			? { allowedKinds: Object.freeze([...value.sharedContext.allowedKinds]) as unknown as string[] }
+			: {}),
+	};
+	return Object.freeze({
+		assignmentId: value.assignmentId,
+		policyDigest: value.policyDigest,
+		roleId: value.roleId,
+		modelProfile: value.modelProfile,
+		model: value.model,
+		...(value.thinkingLevel === undefined ? {} : { thinkingLevel: value.thinkingLevel }),
+		...(value.serviceTier === undefined ? {} : { serviceTier: value.serviceTier }),
+		decisionScopes: Object.freeze([...value.decisionScopes]) as unknown as string[],
+		implementationScopes: Object.freeze([...value.implementationScopes]) as unknown as string[],
+		allowedToolNames: Object.freeze([...value.allowedToolNames]) as unknown as string[],
+		delegableRoleIds: Object.freeze([...value.delegableRoleIds]) as unknown as string[],
+		sharedContext: Object.freeze(sharedContext) as SwarmRoleAssignment["sharedContext"],
+	});
+}
+
+/**
+ * Decode the private role snapshot embedded in a JSONL registry row. This is
+ * deliberately separate from policy parsing: a registry must never become a
+ * second policy language or silently normalize a capability on restore.
+ */
+function decodePersistedSwarmRoleAssignment(
+	value: unknown,
+	registryAssignmentId: string | undefined,
+): Readonly<SwarmRoleAssignment> {
+	if (!isPersistedSwarmRecord(value) || !registryAssignmentId) throw new Error("invalid persisted swarm assignment");
+	const allowed = new Set([
+		"assignmentId",
+		"policyDigest",
+		"roleId",
+		"modelProfile",
+		"model",
+		"thinkingLevel",
+		"serviceTier",
+		"decisionScopes",
+		"implementationScopes",
+		"allowedToolNames",
+		"delegableRoleIds",
+		"sharedContext",
+	]);
+	const required = [
+		"assignmentId",
+		"policyDigest",
+		"roleId",
+		"modelProfile",
+		"model",
+		"decisionScopes",
+		"implementationScopes",
+		"allowedToolNames",
+		"delegableRoleIds",
+		"sharedContext",
+	];
+	if (Object.keys(value).some((key) => !allowed.has(key)) || required.some((key) => !(key in value)))
+		throw new Error("invalid persisted swarm assignment schema");
+	const assignmentId = persistedSwarmString(value.assignmentId, "assignmentId");
+	if (!PERSISTED_SWARM_UUID.test(assignmentId) || assignmentId !== registryAssignmentId)
+		throw new Error("persisted swarm assignment ID does not match registry row");
+	const policyDigest = persistedSwarmString(value.policyDigest, "policyDigest");
+	if (!PERSISTED_SWARM_DIGEST.test(policyDigest)) throw new Error("invalid persisted swarm assignment policyDigest");
+	const roleId = persistedSwarmIdentifier(value.roleId, "roleId", true);
+	const modelProfile = persistedSwarmIdentifier(value.modelProfile, "modelProfile", true);
+	const model = persistedSwarmString(value.model, "model");
+	const slash = model.indexOf("/");
+	if (!model || slash <= 0 || slash === model.length - 1 || /\s/.test(model))
+		throw new Error("invalid persisted swarm assignment model");
+	let thinkingLevel: SwarmRoleAssignment["thinkingLevel"];
+	if (value.thinkingLevel !== undefined) {
+		const candidate = persistedSwarmString(value.thinkingLevel, "thinkingLevel");
+		if (!PERSISTED_SWARM_THINKING_LEVELS.has(candidate))
+			throw new Error("invalid persisted swarm assignment thinkingLevel");
+		thinkingLevel = candidate as NonNullable<typeof thinkingLevel>;
+	}
+	let serviceTier: SwarmRoleAssignment["serviceTier"];
+	if (value.serviceTier !== undefined) {
+		const candidate = persistedSwarmString(value.serviceTier, "serviceTier");
+		if (!PERSISTED_SWARM_SERVICE_TIERS.has(candidate))
+			throw new Error("invalid persisted swarm assignment serviceTier");
+		serviceTier = candidate as NonNullable<typeof serviceTier>;
+	}
+	if (!isPersistedSwarmRecord(value.sharedContext))
+		throw new Error("invalid persisted swarm assignment sharedContext");
+	const context = value.sharedContext;
+	if (Object.keys(context).some((key) => key !== "maxItems" && key !== "maxBytes" && key !== "allowedKinds"))
+		throw new Error("invalid persisted swarm assignment sharedContext");
+	const maxItems = context.maxItems;
+	const maxBytes = context.maxBytes;
+	if (
+		typeof maxItems !== "number" ||
+		!Number.isSafeInteger(maxItems) ||
+		maxItems < 0 ||
+		maxItems > SWARM_ROLE_MAX_ITEMS ||
+		typeof maxBytes !== "number" ||
+		!Number.isSafeInteger(maxBytes) ||
+		maxBytes < 0 ||
+		maxBytes > SWARM_ROLE_MAX_CONTEXT_BYTES
+	)
+		throw new Error("invalid persisted swarm assignment sharedContext");
+	const allowedKinds =
+		context.allowedKinds === undefined
+			? undefined
+			: persistedSwarmIdentifierArray(context.allowedKinds, "sharedContext.allowedKinds");
+	return freezePersistedSwarmAssignment({
+		assignmentId,
+		policyDigest,
+		roleId,
+		modelProfile,
+		model,
+		...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+		...(serviceTier === undefined ? {} : { serviceTier }),
+		decisionScopes: persistedSwarmIdentifierArray(value.decisionScopes, "decisionScopes"),
+		implementationScopes: persistedSwarmIdentifierArray(value.implementationScopes, "implementationScopes"),
+		allowedToolNames: persistedSwarmToolArray(value.allowedToolNames),
+		delegableRoleIds: persistedSwarmIdentifierArray(value.delegableRoleIds, "delegableRoleIds", true),
+		sharedContext: {
+			maxItems,
+			maxBytes,
+			...(allowedKinds === undefined ? {} : { allowedKinds }),
+		},
+	});
 }
 
 type PassiveRlmRoot =
@@ -997,6 +1185,7 @@ export class AgentDaemon {
 			prompt?: string;
 			spawnCode?: string;
 			model?: { provider: string; modelId: string };
+			swarmRoleAssignment?: SwarmRoleAssignment;
 			status: PersistedRlmSubagentRegistryEntry["status"];
 			createdAt?: number;
 		},
@@ -1017,6 +1206,7 @@ export class AgentDaemon {
 			...(input.prompt ? { prompt: input.prompt } : {}),
 			...(input.spawnCode ? { spawnCode: input.spawnCode } : {}),
 			...(input.model ? { model: input.model } : {}),
+			...(input.swarmRoleAssignment ? { swarmRoleAssignment: input.swarmRoleAssignment } : {}),
 			status: input.status,
 			createdAt: input.createdAt ?? Date.now(),
 			updatedAt: new Date().toISOString(),
@@ -1063,6 +1253,43 @@ export class AgentDaemon {
 			return [];
 		}
 		const latest = new Map<string, PersistedRlmSubagentRegistryEntry>();
+		// A C03 assignment is an immutable capability, not a display field. Once a
+		// selector has published one, a later assignment-less row cannot safely be
+		// interpreted as a legacy row for that selector. Keep this state while
+		// replaying the append-only journal so corruption cannot resurrect A.
+		const c03Selectors = new Set<string>();
+		const quarantinedSelectors = new Set<string>();
+		const quarantineSelector = (childId: string) => {
+			// A selector fence must also discard every prior incarnation. Otherwise
+			// the next complete publication clears the fence but exposes stale A via
+			// exact lifecycle reads alongside the newly published B.
+			quarantinedSelectors.add(childId);
+			for (const [key, entry] of latest) if (entry.childId === childId) latest.delete(key);
+		};
+		const quarantineMalformedEntry = (rawEntry: Partial<PersistedRlmSubagentRegistryEntry> | undefined) => {
+			if (typeof rawEntry?.childId !== "string") return;
+			const assignmentId = rawEntry.assignmentId;
+			if (assignmentId === undefined) {
+				// An omitted ID is compatible only with a selector which has never
+				// carried C03 identity. Otherwise its target is ambiguous, so fence
+				// the selector rather than guessing an assignment to delete.
+				if (c03Selectors.has(rawEntry.childId)) quarantineSelector(rawEntry.childId);
+				else latest.delete(this.rlmAssignmentKey({ childId: rawEntry.childId }));
+			} else if (!assertFreshUuid(assignmentId)) {
+				// An invalid ID cannot name an immutable assignment. Quarantine only
+				// its declared selector; in particular, never use it to delete an
+				// unrelated valid assignment sharing another selector.
+				quarantineSelector(rawEntry.childId);
+			} else {
+				// The selector and immutable ID are both syntactically meaningful, but
+				// the rest of this append-only update is corrupt. Fencing just that ID
+				// would allow an older assignment for this selector to become current
+				// after replay. Quarantine the entire selector until a later complete
+				// C03 publication explicitly repopulates it.
+				latest.delete(this.rlmAssignmentKey({ childId: rawEntry.childId, assignmentId }));
+				quarantineSelector(rawEntry.childId);
+			}
+		};
 		let lines: string[];
 		try {
 			lines = (await readFile(path, "utf8")).split(/\r?\n/);
@@ -1081,8 +1308,23 @@ export class AgentDaemon {
 			if (!trimmed) {
 				continue;
 			}
+			let rawEntry: Partial<PersistedRlmSubagentRegistryEntry> | undefined;
 			try {
-				const entry = JSON.parse(trimmed) as Partial<PersistedRlmSubagentRegistryEntry>;
+				rawEntry = JSON.parse(trimmed) as Partial<PersistedRlmSubagentRegistryEntry>;
+				const entry =
+					rawEntry.swarmRoleAssignment === undefined
+						? rawEntry
+						: {
+								...rawEntry,
+								swarmRoleAssignment: (() => {
+									const assignment = decodePersistedSwarmRoleAssignment(
+										rawEntry.swarmRoleAssignment,
+										rawEntry.assignmentId,
+									);
+									assertPersistedPolicyRegistryModelMatches(rawEntry.model, assignment);
+									return assignment;
+								})(),
+							};
 				if (
 					entry.type !== "rlm_subagent" ||
 					typeof entry.childId !== "string" ||
@@ -1093,25 +1335,34 @@ export class AgentDaemon {
 					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
 					(entry.rlmMaxDepth !== undefined &&
 						(!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0)) ||
-					(entry.assignmentId !== undefined &&
-						(typeof entry.assignmentId !== "string" ||
-							!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-								entry.assignmentId,
-							)))
+					(entry.assignmentId !== undefined && !assertFreshUuid(entry.assignmentId))
 				) {
+					quarantineMalformedEntry(rawEntry);
 					continue;
 				}
-				latest.set(
-					this.rlmAssignmentKey(entry as PersistedRlmSubagentRegistryEntry),
-					entry as PersistedRlmSubagentRegistryEntry,
-				);
+				const persisted = entry as PersistedRlmSubagentRegistryEntry;
+				if (persisted.assignmentId === undefined && c03Selectors.has(persisted.childId)) {
+					// Legacy rows are accepted only before a selector enters C03. After
+					// that transition, a missing identity is malformed rather than a
+					// permitted fallback to mutable display identity.
+					quarantineSelector(persisted.childId);
+					continue;
+				}
+				if (persisted.assignmentId !== undefined) {
+					c03Selectors.add(persisted.childId);
+					// A complete immutable publication is the only event which can
+					// deliberately republish a selector after corruption.
+					quarantinedSelectors.delete(persisted.childId);
+				}
+				latest.set(this.rlmAssignmentKey(persisted), persisted);
 			} catch (error) {
+				quarantineMalformedEntry(rawEntry);
 				this.log(
 					`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
-		const entries = [...latest.values()];
+		const entries = [...latest.values()].filter((entry) => !quarantinedSelectors.has(entry.childId));
 		// Once an explicit hydrate has durably rebound an old display-only row,
 		// suppress that legacy duplicate from catalog traversal. Its late callbacks
 		// still cannot match the assigned row because callback matching is exact.
@@ -2356,6 +2607,7 @@ export class AgentDaemon {
 					prompt: metadata.prompt && metadata.prompt.length <= 4096 ? metadata.prompt : undefined,
 					spawnCode: metadata.spawnCode,
 					...(model ? { model: { provider: model.provider, modelId: model.id } } : {}),
+					...(childSession.swarmRoleAssignment ? { swarmRoleAssignment: childSession.swarmRoleAssignment } : {}),
 					status: "completed",
 					createdAt: metadata.createdAt,
 				});
@@ -2430,6 +2682,7 @@ export class AgentDaemon {
 								prompt: persisted.prompt,
 								spawnCode: persisted.spawnCode,
 								model: persisted.model,
+								swarmRoleAssignment: persisted.swarmRoleAssignment,
 								status: persisted.status,
 								createdAt: persisted.createdAt,
 							})
@@ -2550,6 +2803,7 @@ export class AgentDaemon {
 					rlmSessionDir: options.sessionDir,
 					rlmParentNodeId: options.rlmParentNodeId,
 					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
+					swarmRoleAssignment: options.swarmRoleAssignment,
 				},
 				runtimeMetadata: {
 					kind: "subagent",
@@ -2594,6 +2848,7 @@ export class AgentDaemon {
 							provider: options.model.provider,
 							modelId: options.model.id,
 						},
+						...(options.swarmRoleAssignment ? { swarmRoleAssignment: options.swarmRoleAssignment } : {}),
 						status: "running",
 						createdAt: runtime.metadata.createdAt,
 					});
@@ -2881,6 +3136,7 @@ export class AgentDaemon {
 					prompt: entry.prompt,
 					spawnCode: entry.spawnCode,
 					model: entry.model,
+					swarmRoleAssignment: entry.swarmRoleAssignment,
 					status: entry.status,
 					createdAt: entry.createdAt,
 				})
@@ -2962,7 +3218,34 @@ export class AgentDaemon {
 			const sessionManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
 			const modelRegistry = parentState.runtime.services.modelRegistry;
 			let rehydratedModel: Model<Api> | undefined;
-			if (entry.model) {
+			if (entry.swarmRoleAssignment) {
+				// A policy assignment is the immutable authority for a restored child.
+				// The registry model is only a legacy spawn display snapshot and must
+				// never select a policy child's provider or model.
+				const { provider, modelId } = splitSwarmModelSelector(entry.swarmRoleAssignment.model);
+				if (entry.model && (entry.model.provider !== provider || entry.model.modelId !== modelId)) {
+					throw new Error("persisted policy swarm assignment model does not match registry model");
+				}
+				const resolved = modelRegistry.find(provider, modelId);
+				let available = false;
+				try {
+					available = resolved !== undefined && (await modelRegistry.canUseModel(resolved));
+				} catch {
+					// Authorization checks can fail rather than return false. A valid persisted
+					// policy assignment that cannot be authorized is just as unsafe to retry.
+					available = false;
+				}
+				if (!available) {
+					// Tombstone precisely this immutable assignment. The append-only registry
+					// reader will then omit it from every passive catalog traversal, while
+					// rows for legacy incarnations and other assignments remain untouched.
+					await this.recordRlmSubagentDeletion(parentState, entry.childId, entry.assignmentId!);
+					throw new Error("persisted policy swarm assignment model is unavailable in the authenticated catalog");
+				}
+				rehydratedModel = resolved!;
+			} else if (entry.model) {
+				// Assignment-less registry rows predate policy authority and retain
+				// their historical best-effort registry model restoration behavior.
 				const resolved = modelRegistry.find(entry.model.provider, entry.model.modelId);
 				if (resolved && (await modelRegistry.canUseModel(resolved))) {
 					rehydratedModel = resolved;
@@ -2978,6 +3261,14 @@ export class AgentDaemon {
 					sessionLease,
 					sessionOptions: {
 						...(rehydratedModel ? { model: rehydratedModel } : {}),
+						...(entry.swarmRoleAssignment
+							? {
+									thinkingLevel: entry.swarmRoleAssignment.thinkingLevel,
+									serviceTier: entry.swarmRoleAssignment.serviceTier,
+									initialActiveToolNames: [...entry.swarmRoleAssignment.allowedToolNames],
+									allowedToolNames: [...entry.swarmRoleAssignment.allowedToolNames],
+								}
+							: {}),
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),
 						rlmHeartbeatController: {
@@ -3017,6 +3308,7 @@ export class AgentDaemon {
 								: 1),
 						rlmMaxDepth: entry.rlmMaxDepth,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
+						swarmRoleAssignment: entry.swarmRoleAssignment,
 					},
 					runtimeMetadata: {
 						kind: "subagent",

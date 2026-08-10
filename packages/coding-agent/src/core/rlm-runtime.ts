@@ -50,6 +50,17 @@ export interface RlmFindModelsResult {
 }
 
 export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
+/** Deliberately minimal policy projection; selectors, tools and policy data stay host-private. */
+export interface RlmRole {
+	id: string;
+	model_profile: string;
+	decision_scopes: string[];
+	implementation_scopes: string[];
+}
+export interface RlmListRolesResult {
+	roles: RlmRole[];
+}
+export type RlmListRolesHandler = () => RlmListRolesResult | Promise<RlmListRolesResult>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -154,7 +165,10 @@ export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHand
 		if (typeof payload.prompt !== "string") {
 			throw new Error("rlm.run prompt must be a string");
 		}
-		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
+		if (!isRecord(payload.kwargs)) {
+			throw new Error("rlm.run kwargs must be an object");
+		}
+		const kwargs = payload.kwargs;
 		const cellSourceCode = typeof payload.cellSourceCode === "string" ? payload.cellSourceCode : undefined;
 		const result = await handler({
 			prompt: payload.prompt,
@@ -176,6 +190,14 @@ export function createRlmFindModelsHostHandler(handler: RlmFindModelsHandler): H
 			throw new Error(`rlm.find_models limit must be an integer from 1 to ${MAX_RLM_MODEL_SEARCH_LIMIT}`);
 		}
 		return { models: (await handler(payload.query, limit as number)).models };
+	};
+}
+
+/** Expose the bounded safe projection of a role policy to its kernel. */
+export function createRlmListRolesHostHandler(handler: RlmListRolesHandler): HostRequestHandler {
+	return async () => {
+		const { roles } = await handler();
+		return { roles };
 	};
 }
 
@@ -215,6 +237,8 @@ export interface CreateRlmSubagentRuntimeOptions {
 	id: string;
 	/** Minted by the parent before this child is published. */
 	assignmentId?: string;
+	/** Host-private immutable policy assignment, if admission used policy mode. */
+	swarmRoleAssignment?: import("./swarm-role-policy.js").SwarmRoleAssignment;
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
@@ -232,6 +256,8 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmParentNodeId: string;
 	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
+	/** Host-built policy preamble for the child task; never a kernel-provided value. */
+	policyPreamble?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */
 	onSessionPublished?: (session: AgentSession) => void;
 }

@@ -129,11 +129,12 @@ function providerRegistration(models: ReturnType<typeof provider>["models"]) {
 async function runtimeForRlmFixture(
 	fixture: ReturnType<typeof provider>,
 	directory: string,
+	settings: Parameters<typeof SettingsManager.inMemory>[0] = {},
 ): Promise<AgentSessionRuntime> {
 	const authStorage = AuthStorage.inMemory();
 	const rootModel = fixture.models[0]!;
 	authStorage.setRuntimeApiKey(rootModel.provider, "fixture-key");
-	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false } });
+	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, ...settings });
 	const registration = providerRegistration(fixture.models);
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
 		const services = await createAgentSessionServices({
@@ -580,6 +581,86 @@ describe("B00B production scripted provider", () => {
 		);
 		expect(written.artifactBundleId).toMatch(/^[a-f0-9]{64}$/);
 	});
+
+	test("dispatches two policy-role siblings through the production runtime without a serial local gate", async () => {
+		const ids = ["request-0901", "request-0902"] as const;
+		const fixture = provider(
+			{
+				[ids[0]]: [simple(ids[0], { waitForRelease: true, responseModel: "fixture-a-resolved" })],
+				[ids[1]]: [simple(ids[1], { waitForRelease: true, responseModel: "fixture-b-resolved" })],
+			},
+			ids,
+		);
+		const directory = await mkdtemp(join(tmpdir(), "b00b-policy-role-siblings-"));
+		const runtime = await runtimeForRlmFixture(fixture, directory, {
+			swarmRolePolicy: {
+				version: 1,
+				modelProfiles: {
+					profile_a: { model: "b00b-scripted/fixture-a" },
+					profile_b: { model: "b00b-scripted/fixture-b" },
+				},
+				roles: {
+					analyst: {
+						modelProfile: "profile_a",
+						decisionScopes: ["analyze"],
+						implementationScopes: [],
+						allowedToolNames: [],
+						sharedContext: { maxItems: 0, maxBytes: 2 },
+					},
+					reviewer: {
+						modelProfile: "profile_b",
+						decisionScopes: ["review"],
+						implementationScopes: [],
+						allowedToolNames: [],
+						sharedContext: { maxItems: 0, maxBytes: 2 },
+					},
+				},
+			},
+		});
+		cleanups.push(async () => {
+			await runtime.dispose();
+			await rm(directory, { recursive: true, force: true });
+		});
+		try {
+			vi.stubEnv("PRIME_AGENT_ENABLE_SWARM_ROLE_POLICY", "1");
+			const handles = await Promise.all([
+				runtime.session.runRlmChild(ids[0], {
+					name: "policy-analyst",
+					role: "analyst",
+					decision_scopes: ["analyze"],
+				}),
+				runtime.session.runRlmChild(ids[1], {
+					name: "policy-reviewer",
+					role: "reviewer",
+					decision_scopes: ["review"],
+				}),
+			]);
+			expect(handles.map((handle) => handle.model).sort()).toEqual([
+				"b00b-scripted/fixture-a",
+				"b00b-scripted/fixture-b",
+			]);
+			await fixture.open;
+			// Both provider entries precede release. The barrier observes concurrent
+			// production runtime dispatch; it is not an admission queue or limiter.
+			expect(
+				fixture
+					.observations()
+					.map((entry) => entry.requestId)
+					.sort(),
+			).toEqual([...ids]);
+			expect(fixture.observations().every((entry) => entry.eventKinds.length === 0)).toBe(true);
+			fixture.release(ids);
+			await waitForTerminals(fixture, 2);
+			expect(
+				fixture
+					.observations()
+					.map((entry) => entry.requested.model)
+					.sort(),
+			).toEqual(["fixture-a", "fixture-b"]);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	}, 20_000);
 
 	test("runs through AgentSession.promptAndWait with a registered provider and writes no canary or network fixture", async () => {
 		const id = "request-0009";

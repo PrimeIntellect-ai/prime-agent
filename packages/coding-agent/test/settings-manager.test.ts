@@ -579,3 +579,67 @@ describe("SettingsManager", () => {
 		});
 	});
 });
+
+describe("SettingsManager swarm role policy provenance", () => {
+	const root = join(process.cwd(), "test-swarm-policy-provenance-tmp");
+	const agentDir = join(root, "agent");
+	const projectDir = join(root, "project");
+	const rolePolicy = {
+		version: 1,
+		modelProfiles: { profile: { model: "provider/model" } },
+		roles: {
+			arbitrary_role: {
+				modelProfile: "profile",
+				decisionScopes: [],
+				implementationScopes: [],
+				allowedToolNames: [],
+				sharedContext: { maxItems: 0, maxBytes: 0 },
+			},
+		},
+	};
+
+	beforeEach(() => {
+		rmSync(root, { recursive: true, force: true });
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+	});
+	afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+	it("uses global policy, reports an untrusted project policy, and never rewrites settings", () => {
+		const globalPath = join(agentDir, "settings.json");
+		const projectPath = join(projectDir, ".prime", "agent", "settings.json");
+		writeFileSync(globalPath, JSON.stringify({ swarmRolePolicy: rolePolicy }));
+		writeFileSync(projectPath, JSON.stringify({ swarmRolePolicy: { ...rolePolicy, roles: {} } }));
+		const before = [readFileSync(globalPath, "utf8"), readFileSync(projectPath, "utf8")];
+
+		const result = SettingsManager.create(projectDir, agentDir).getSwarmRolePolicy();
+		expect(result.source).toBe("global");
+		expect(result.diagnostic).toContain("ignored");
+		expect(result.snapshot?.policy.roles).toHaveProperty("arbitrary_role");
+		expect([readFileSync(globalPath, "utf8"), readFileSync(projectPath, "utf8")]).toEqual(before);
+	});
+
+	it("selects project policy only after global explicit trust and fails closed when selected policy is malformed", () => {
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ swarmRolePolicy: { ...rolePolicy, trustProjectPolicy: true } }),
+		);
+		writeFileSync(
+			join(projectDir, ".prime", "agent", "settings.json"),
+			JSON.stringify({
+				swarmRolePolicy: { ...rolePolicy, roles: { project_role: rolePolicy.roles.arbitrary_role } },
+			}),
+		);
+		expect(SettingsManager.create(projectDir, agentDir).getSwarmRolePolicy().snapshot?.policy.roles).toHaveProperty(
+			"project_role",
+		);
+
+		writeFileSync(
+			join(projectDir, ".prime", "agent", "settings.json"),
+			JSON.stringify({ swarmRolePolicy: { version: 1, modelProfiles: {}, roles: {} } }),
+		);
+		const malformed = SettingsManager.create(projectDir, agentDir).getSwarmRolePolicy();
+		expect(malformed.snapshot).toBeUndefined();
+		expect(malformed.diagnostic).toContain("invalid");
+	});
+});

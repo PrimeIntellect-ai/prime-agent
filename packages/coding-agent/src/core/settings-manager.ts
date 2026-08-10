@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { parseSwarmRolePolicy, type SwarmRolePolicy, type SwarmRolePolicySnapshot } from "./swarm-role-policy.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -120,6 +121,8 @@ export type McpServerConfig =
 	  };
 
 export interface Settings {
+	/** Host-owned, provider-neutral child role policy. Never merged across sources. */
+	swarmRolePolicy?: SwarmRolePolicy;
 	onboardingShown?: boolean;
 	onboardingCompleted?: boolean;
 	defaultProvider?: string;
@@ -215,6 +218,13 @@ export interface SettingsStorage {
 export interface SettingsError {
 	scope: SettingsScope;
 	error: Error;
+}
+
+/** A read-only, content-free policy selection result. */
+export interface SwarmRolePolicyReadResult {
+	snapshot?: SwarmRolePolicySnapshot;
+	source?: "global" | "project";
+	diagnostic?: string;
 }
 
 export class FileSettingsStorage implements SettingsStorage {
@@ -471,6 +481,41 @@ export class SettingsManager {
 
 	getProjectSettings(): Settings {
 		return structuredClone(this.projectSettings);
+	}
+
+	/**
+	 * Select a role policy without merging or mutating either settings source.
+	 * Project policy is authority-bearing only after an independently valid
+	 * global policy explicitly opts in to it.
+	 */
+	getSwarmRolePolicy(): SwarmRolePolicyReadResult {
+		const globalValue = this.globalSettings.swarmRolePolicy;
+		let globalSnapshot: SwarmRolePolicySnapshot | undefined;
+		if (globalValue !== undefined) {
+			try {
+				globalSnapshot = parseSwarmRolePolicy(globalValue);
+			} catch {
+				return { diagnostic: "Global swarm role policy is invalid; role-policy admission is disabled." };
+			}
+		}
+
+		const projectValue = this.projectSettings.swarmRolePolicy;
+		if (!globalSnapshot?.policy.trustProjectPolicy) {
+			if (projectValue !== undefined) {
+				return {
+					snapshot: globalSnapshot,
+					source: globalSnapshot ? "global" : undefined,
+					diagnostic: "Project swarm role policy is ignored because global settings do not trust project policy.",
+				};
+			}
+			return globalSnapshot ? { snapshot: globalSnapshot, source: "global" } : {};
+		}
+		if (projectValue === undefined) return { snapshot: globalSnapshot, source: "global" };
+		try {
+			return { snapshot: parseSwarmRolePolicy(projectValue), source: "project" };
+		} catch {
+			return { diagnostic: "Trusted project swarm role policy is invalid; role-policy admission is disabled." };
+		}
 	}
 
 	async reload(): Promise<void> {
