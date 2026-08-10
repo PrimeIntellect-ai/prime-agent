@@ -536,6 +536,7 @@ export class AgentDaemon {
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private readonly operationLedger: OperationLedger;
+	private operationDeadlineTimer?: ReturnType<typeof setInterval>;
 
 	constructor(
 		private readonly socketPath: string,
@@ -637,12 +638,28 @@ export class AgentDaemon {
 
 		this.registerSignalHandlers();
 		this.summarizer.start();
+		this.operationDeadlineTimer = setInterval(() => this.sweepOperationDeadlines(), 30_000);
+		this.operationDeadlineTimer.unref?.();
 		this.log(`Prime Agent daemon listening on ${this.socketPath}`);
 		// No startup restore: on-disk sessions return only via --resume or the agents view.
 		if (!this.shuttingDown) {
 			this.cronScheduler.start();
 		}
 		this.startSupervisorMonitor();
+	}
+
+	private sweepOperationDeadlines(): void {
+		const allowOwnedCancellation = process.env.PRIME_AGENT_ENABLE_OWNED_OPERATION_DEADLINES === "1";
+		for (const state of this.sessions.values()) {
+			const claimed = state.operationTracker?.claimExpiredCancellations(Date.now(), allowOwnedCancellation) ?? [];
+			if (claimed.length === 0) continue;
+			this.recordWorkerRecoveryState(state, "operation_deadline_cancellation_started");
+			void state.runtime.session.abort().catch((error) => {
+				this.log(
+					`Deadline cancellation failed for ${state.activeSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			});
+		}
 	}
 
 	private startSupervisorMonitor(): void {
@@ -6651,6 +6668,10 @@ export class AgentDaemon {
 		}
 
 		this.summarizer.stop();
+		if (this.operationDeadlineTimer) {
+			clearInterval(this.operationDeadlineTimer);
+			this.operationDeadlineTimer = undefined;
+		}
 		for (const cleanup of this.signalCleanupHandlers) {
 			cleanup();
 		}

@@ -59,6 +59,17 @@ describe("reliability monitor", () => {
 		expect(alerts).toEqual([expect.objectContaining({ kind: "process_missing", severity: "warning" })]);
 	});
 
+	it("surfaces a persisted deadline separately from generic silence", () => {
+		const base = snapshot();
+		base.operations[0]!.deadlineAt = "2026-08-10T08:03:00.000Z";
+		base.operations[0]!.timeoutClass = "provider-advisory-cap";
+		const alerts = evaluateReliabilitySnapshot(base, {
+			now: Date.parse("2026-08-10T08:04:01.000Z"),
+			processAlive: () => true,
+		});
+		expect(alerts).toEqual([expect.objectContaining({ kind: "operation_deadline_exceeded", operationId: "op-1" })]);
+	});
+
 	it("deduplicates durable alerts, records channel receipts, retries failures, and supports acknowledgement", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-outbox-"));
 		roots.push(root);

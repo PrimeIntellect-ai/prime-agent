@@ -7,7 +7,11 @@ import type { OperationLedgerSnapshot } from "./operation-ledger.js";
 
 export const DEFAULT_SILENCE_WARNING_MS = 4 * 60_000;
 export const DEFAULT_MONITOR_INTERVAL_MS = 60_000;
-export type ReliabilityAlertKind = "operation_silent" | "heartbeat_stale" | "process_missing";
+export type ReliabilityAlertKind =
+	| "operation_silent"
+	| "operation_deadline_exceeded"
+	| "heartbeat_stale"
+	| "process_missing";
 
 export interface ReliabilityAlert {
 	alertKey: string;
@@ -71,6 +75,20 @@ export function evaluateReliabilitySnapshot(
 	}
 	for (const operation of snapshot.operations) {
 		if (operation.status !== "open") continue;
+		const deadlineMs = operation.deadlineAt ? Date.parse(operation.deadlineAt) : Number.NaN;
+		if (Number.isFinite(deadlineMs) && deadlineMs <= now) {
+			alerts.push({
+				alertKey: `operation_deadline_exceeded:${snapshot.instanceId}:${operation.operationId}`,
+				kind: "operation_deadline_exceeded",
+				severity: "warning",
+				message: `${operation.kind} operation ${operation.operationId} exceeded its persisted ${operation.timeoutClass ?? "operation"} deadline (phase: ${operation.phase}).`,
+				instanceId: snapshot.instanceId,
+				operationId: operation.operationId,
+				activeSessionId: operation.activeSessionId,
+				detectedAt,
+			});
+			continue;
+		}
 		const silenceMs = now - Date.parse(operation.lastMeaningfulProgressAt);
 		if (!Number.isFinite(silenceMs) || silenceMs < threshold) continue;
 		alerts.push({

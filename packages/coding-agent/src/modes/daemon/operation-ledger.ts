@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getProcessStartId } from "../../core/session-lease.js";
+import { compareProcessStartIds, getProcessStartId } from "../../core/session-lease.js";
+import { evaluateOperationDeadline, resolveOperationTimeoutPolicy } from "./operation-timeout-policy.js";
 
 export const OPERATION_LEDGER_SCHEMA_VERSION = 1 as const;
 export type OperationKind =
@@ -134,6 +135,8 @@ export class OperationLedger {
 	readonly snapshotPath: string;
 	readonly journalPath: string;
 	private readonly records = new Map<string, OperationRecord>();
+	private readonly operationDir: string;
+	private readonly reconciledSessions = new Set<string>();
 	private readonly now: () => number;
 	private readonly snapshotState: OperationLedgerSnapshot;
 	private readonly heartbeatTimer?: ReturnType<typeof setInterval>;
@@ -142,12 +145,12 @@ export class OperationLedger {
 		const pid = options.pid ?? process.pid;
 		const now = options.now ?? Date.now;
 		const instanceId = options.instanceId ?? `${pid}-${randomUUID()}`;
-		const operationDir = join(options.rootDir, "operations");
-		this.snapshotPath = join(operationDir, `${instanceId}.json`);
-		this.journalPath = join(operationDir, `${instanceId}.jsonl`);
+		this.operationDir = join(options.rootDir, "operations");
+		this.snapshotPath = join(this.operationDir, `${instanceId}.json`);
+		this.journalPath = join(this.operationDir, `${instanceId}.jsonl`);
 		let persistenceError: string | undefined;
 		try {
-			mkdirSync(operationDir, { recursive: true, mode: 0o700 });
+			mkdirSync(this.operationDir, { recursive: true, mode: 0o700 });
 		} catch (error) {
 			persistenceError = error instanceof Error ? error.message : String(error);
 		}
@@ -238,6 +241,69 @@ export class OperationLedger {
 		return { ...record };
 	}
 
+	reconcileSession(activeSessionId: string, sessionId?: string): OperationRecord[] {
+		const key = sessionId ?? activeSessionId;
+		if (this.reconciledSessions.has(key)) return [];
+		this.reconciledSessions.add(key);
+		const recovered: OperationRecord[] = [];
+		let files: string[];
+		try {
+			files = readdirSync(this.operationDir).filter((file) => file.endsWith(".json"));
+		} catch {
+			return [];
+		}
+		for (const file of files) {
+			const path = join(this.operationDir, file);
+			if (path === this.snapshotPath) continue;
+			let snapshot: OperationLedgerSnapshot;
+			try {
+				snapshot = JSON.parse(readFileSync(path, "utf8")) as OperationLedgerSnapshot;
+			} catch {
+				continue;
+			}
+			if (snapshot.schemaVersion !== OPERATION_LEDGER_SCHEMA_VERSION || this.snapshotOwnerAlive(snapshot)) continue;
+			for (const previous of snapshot.operations ?? []) {
+				if (previous.status !== "open") continue;
+				if (previous.activeSessionId !== activeSessionId && (!sessionId || previous.sessionId !== sessionId))
+					continue;
+				if (this.records.has(previous.operationId)) continue;
+				const record: OperationRecord = {
+					...previous,
+					activeSessionId,
+					sessionId: sessionId ?? previous.sessionId,
+					status: "terminal",
+					phase: "uncertain",
+					outcome: "uncertain",
+					cleanupStatus:
+						previous.ownershipStatus === "owned"
+							? "cleanup_uncertain"
+							: (previous.cleanupStatus ?? "not_started"),
+					updatedAt: this.timestamp(),
+					detail: [
+						previous.detail,
+						`reconciled after owner ${snapshot.instanceId} stopped; operation was not replayed`,
+					]
+						.filter(Boolean)
+						.join("; "),
+				};
+				this.records.set(record.operationId, record);
+				this.commit("close", record);
+				recovered.push({ ...record });
+			}
+		}
+		return recovered;
+	}
+
+	private snapshotOwnerAlive(snapshot: OperationLedgerSnapshot): boolean {
+		if (snapshot.processState !== "active") return false;
+		try {
+			process.kill(snapshot.pid, 0);
+		} catch {
+			return false;
+		}
+		return compareProcessStartIds(snapshot.processStartId, getProcessStartId(snapshot.pid)) !== "mismatch";
+	}
+
 	heartbeat(): void {
 		this.snapshotState.heartbeatAt = this.timestamp();
 		this.persist();
@@ -318,6 +384,7 @@ export interface OperationTrackerSummary {
 interface OperationTrackerIdentity {
 	activeSessionId: string;
 	sessionId?: string;
+	now?: () => number;
 }
 
 const EVENT_START_KIND: Record<string, OperationKind> = {
@@ -359,7 +426,9 @@ export class OperationTracker {
 	constructor(
 		private readonly ledger: OperationLedger,
 		private readonly identity: OperationTrackerIdentity,
-	) {}
+	) {
+		this.ledger.reconcileSession(identity.activeSessionId, identity.sessionId);
+	}
 
 	handleSessionEvent(event: { type: string; [key: string]: unknown }): void {
 		if (event.type === "process_ownership_update") {
@@ -466,14 +535,34 @@ export class OperationTracker {
 		return { openOperationCount: open.length, lastMeaningfulProgressAt, operations };
 	}
 
+	claimExpiredCancellations(nowMs: number, allowOwnedCancellation: boolean): OperationRecord[] {
+		const claimed: OperationRecord[] = [];
+		for (const operation of this.openOperations()) {
+			if (operation.phase === "cancelling") continue;
+			if (evaluateOperationDeadline(operation, nowMs, allowOwnedCancellation) !== "cancel") continue;
+			const updated = this.ledger.progress(operation.operationId, {
+				progressKind: "semantic",
+				phase: "cancelling",
+				cleanupStatus: operation.cleanupStatus ?? "not_started",
+				detail: "owned operation exceeded its persisted hard deadline; cancellation requested",
+			});
+			if (updated) claimed.push(updated);
+		}
+		return claimed;
+	}
+
 	private begin(kind: OperationKind, externalId?: string, detail?: string): void {
 		const key = `${kind}:${externalId ?? "default"}`;
+		const policy = resolveOperationTimeoutPolicy(kind, detail, this.identity.now?.() ?? Date.now());
 		const operation = this.ledger.open({
 			operationId: `op_${this.identity.activeSessionId}_${kind}_${externalId ?? ++this.sequence}`,
 			activeSessionId: this.identity.activeSessionId,
 			sessionId: this.identity.sessionId,
 			kind,
 			phase: "active",
+			deadlineAt: policy.deadlineAt,
+			timeoutClass: policy.timeoutClass,
+			timeoutPolicySource: policy.timeoutPolicySource,
 			detail,
 		});
 		const stack = this.openByKey.get(key) ?? [];
