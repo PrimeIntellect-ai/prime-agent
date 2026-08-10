@@ -93,7 +93,7 @@ screen_case() {
 }
 
 progress_case() {
-	progress_details="Preparing global install.
+	progress_details="Preparing isolated install.
 Linking command binaries.
 Finalizing npm install."
 	for progress_frame in 1 24 25 48 49 200; do
@@ -241,8 +241,8 @@ function assertInstallerProgress(progress) {
 	if (progress.length !== 6) return;
 
 	const expectedDetails = [
-		"Preparing global install.",
-		"Preparing global install.",
+		"Preparing isolated install.",
+		"Preparing isolated install.",
 		"Linking command binaries.",
 		"Linking command binaries.",
 		"Finalizing npm install.",

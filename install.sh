@@ -1589,10 +1589,49 @@ confirm_kernel_runtime_setup() {
 	fi
 }
 
+prime_agent_owned_npm_prefix() {
+	if [ -n "${PRIME_AGENT_INSTALL_PREFIX:-}" ]; then
+		printf '%s' "$PRIME_AGENT_INSTALL_PREFIX"
+	elif [ -n "${XDG_DATA_HOME:-}" ]; then
+		printf '%s/prime-agent/npm' "$XDG_DATA_HOME"
+	else
+		printf '%s/.local/share/prime-agent/npm' "$HOME"
+	fi
+}
+
+prime_agent_user_npm_prefix() {
+	npm prefix -g
+}
+
+prime_agent_link_command_binary() {
+	install_prefix="$1"
+	user_prefix=$(prime_agent_user_npm_prefix)
+	user_bin_dir="$user_prefix/bin"
+	owned_bin="$install_prefix/bin/$prime_agent_cmd"
+	user_bin="$user_bin_dir/$prime_agent_cmd"
+
+	mkdir -p "$user_bin_dir"
+	if [ "$user_bin" = "$owned_bin" ]; then
+		return
+	fi
+	rm -f "$user_bin"
+	ln -s "$owned_bin" "$user_bin"
+}
+
+prime_agent_remove_legacy_global_package() {
+	user_prefix=$(prime_agent_user_npm_prefix)
+	install_prefix="$1"
+	if [ "$user_prefix" = "$install_prefix" ]; then
+		return
+	fi
+	npm uninstall -g --prefix "$user_prefix" --no-fund --no-audit --loglevel=error "$prime_agent_package" >/dev/null 2>&1 || true
+}
+
 install_prime_agent_package() {
 	tarball_path="$1"
+	install_prefix=$(prime_agent_owned_npm_prefix)
 	if [ "$prime_agent_bootstrap_kernel_on_install" = 1 ]; then
-		npm_install_details="Preparing global install.
+		npm_install_details="Preparing isolated install.
 Linking command binaries.
 Installing runtime packages.
 Preloading search tools.
@@ -1602,9 +1641,9 @@ Finalizing npm install."
 			"Installing Prime Agent" \
 			"Installing Prime Agent" \
 			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 PRIME_AGENT_INSTALL_UV=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
+			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 PRIME_AGENT_INSTALL_UV=1 npm install -g --prefix "$install_prefix" --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
 	else
-		npm_install_details="Preparing global install.
+		npm_install_details="Preparing isolated install.
 Linking command binaries.
 Installing runtime packages.
 Preloading search tools.
@@ -1613,8 +1652,10 @@ Finalizing npm install."
 			"Installing Prime Agent" \
 			"Installing Prime Agent" \
 			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
+			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 npm install -g --prefix "$install_prefix" --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
 	fi
+	prime_agent_remove_legacy_global_package "$install_prefix"
+	prime_agent_link_command_binary "$install_prefix"
 }
 
 main "$@"
