@@ -44,7 +44,6 @@ import {
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
-	isKeylessModel,
 	modelsAreEqual,
 	resetApiProviders,
 	supportsFastMode,
@@ -1400,8 +1399,8 @@ export class AgentSession {
 			}
 			throw new Error(result.error);
 		}
-		if (result.apiKey || isKeylessModel(model)) {
-			return { apiKey: result.apiKey ?? "", headers: result.headers };
+		if (result.apiKey) {
+			return { apiKey: result.apiKey, headers: result.headers };
 		}
 
 		const isOAuth = this._modelRegistry.isUsingOAuth(model);
@@ -8117,7 +8116,7 @@ export class AgentSession {
 
 		try {
 			const authResult = this.model ? await this._modelRegistry.getApiKeyAndHeaders(this.model) : undefined;
-			if (!this.model || !authResult || !authResult.ok || (!authResult.apiKey && !isKeylessModel(this.model))) {
+			if (!this.model || !authResult || !authResult.ok || !authResult.apiKey) {
 				const detail =
 					!this.model || !authResult
 						? "no model is selected"
@@ -8135,7 +8134,7 @@ export class AgentSession {
 
 			const result = await this._performCompaction({
 				model: this.model,
-				apiKey: authResult.apiKey ?? "",
+				apiKey: authResult.apiKey,
 				headers: authResult.headers,
 				customInstructions,
 				signal: this._autoCompactionAbortController.signal,

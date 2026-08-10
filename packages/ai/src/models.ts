@@ -106,13 +106,3 @@ export function modelsAreEqual<TApi extends Api>(
 	if (!a || !b) return false;
 	return a.id === b.id && a.provider === b.provider;
 }
-
-/**
- * OpenCode Zen free-tier models (the `opencode` provider) accept requests with
- * no API key at all and reject any non-empty Authorization header with 401.
- * They are exactly the zero-cost models on that provider; `opencode-go` and all
- * paid models still require a key.
- */
-export function isKeylessModel<TApi extends Api>(model: Pick<Model<TApi>, "provider" | "cost">): boolean {
-	return model.provider === "opencode" && model.cost.input === 0 && model.cost.output === 0;
-}

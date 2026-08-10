@@ -77,13 +77,20 @@ prime-agent
 
 Reference for environment variables and `auth.json` keys: [`env-api-keys.ts`](../../ai/src/env-api-keys.ts).
 
-#### Keyless Free Tier (OpenCode Zen)
+#### Free Tier (OpenCode Zen)
 
-Free-tier models on the `opencode` provider (zero-cost models such as
-`deepseek-v4-flash-free`) work without any API key: requests are sent without
-an `Authorization` header. They are treated as configured even when
-`OPENCODE_API_KEY` is unset. Paid `opencode` models and all `opencode-go`
-models still require a key.
+OpenCode Zen free-tier models (`opencode` provider, e.g. `deepseek-v4-flash-free`)
+accept unauthenticated requests when the API key is the reserved value `public`:
+
+```bash
+OPENCODE_API_KEY=public pi --provider opencode --model deepseek-v4-flash-free "Say OK"
+```
+
+The Zen gateway treats `public` as anonymous access, so no account or key is
+needed for free models. Paid `opencode` and `opencode-go` models require a real
+key; any other non-empty value is rejected with HTTP 401. Requests with
+`OPENCODE_API_KEY=public` are anonymous — the gateway may retain prompt data for
+model improvement during the free period.
 
 #### Auth File
 

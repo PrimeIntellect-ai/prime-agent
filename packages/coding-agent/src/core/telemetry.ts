@@ -37,7 +37,6 @@ export type TelemetryAuthCategory =
 	| "prime_cli"
 	| "models_json"
 	| "fallback"
-	| "keyless"
 	| "stale"
 	| "stored"
 	| "none";
@@ -484,8 +483,6 @@ export function telemetryAuthCategory(
 			return "models_json";
 		case "fallback":
 			return "fallback";
-		case "keyless":
-			return "keyless";
 		case "stale":
 			return "stale";
 		default:

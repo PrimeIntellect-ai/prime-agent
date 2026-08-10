@@ -63,8 +63,7 @@ export type AuthStatus = {
 		| "fallback"
 		| "models_json_key"
 		| "models_json_command"
-		| "stale"
-		| "keyless";
+		| "stale";
 	label?: string;
 };
 
