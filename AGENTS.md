@@ -257,3 +257,22 @@ git pull --rebase && git push
 ### User override
 
 If the user instructions conflict with rules set out here, ask for confirmation that they want to override the rules. Only then execute their instructions.
+
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in a local bd (beads) database (prefix `pai`, committed mode — `.beads/` tracked in git with Dolt-remote sync). See `docs/agents/issue-tracker.md`.
+
+### Persistent memory
+
+In bd, via `bd remember` / `bd recall` — auto-injected at `bd prime` time, so present in every session. Reach for `bd remember "<insight>"` for anything worth keeping across sessions. See *Memory* in `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles using default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout — `CONTEXT.md` at repo root, `docs/adr/` for decisions. See `docs/agents/domain.md`.

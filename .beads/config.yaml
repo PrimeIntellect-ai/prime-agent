@@ -1,0 +1,68 @@
+# Beads Configuration File
+# This file configures default behavior for all bd commands in this repository
+# All settings can also be set via environment variables (BD_* prefix)
+# or overridden with command-line flags
+
+# Issue prefix for this repository (used by bd init)
+# If not set, bd init will auto-detect from directory name
+# Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
+# issue-prefix: ""
+
+# Use no-db mode: JSONL-only, no Dolt database
+# When true, .beads/issues.jsonl is the only local store
+# no-db: false
+
+# Enable JSON output by default
+# json: false
+
+# Feedback title formatting for mutating commands (create/update/close/dep/edit)
+# 0 = hide titles, N > 0 = truncate to N characters
+# output:
+#   title-length: 255
+
+# Default actor for audit trails (overridden by BEADS_ACTOR or --actor)
+# actor: ""
+
+# Export events (audit trail) to .beads/events.jsonl on each flush/sync
+# When enabled, new events are appended incrementally using a high-water mark.
+# Use 'bd export --events' to trigger manually regardless of this setting.
+# events-export: false
+
+# Multi-repo configuration (experimental - bd-307)
+# Allows hydrating from multiple repositories and routing writes to the correct database
+# repos:
+#   primary: "."  # Primary repo (where this database lives)
+#   additional:   # Additional repos to hydrate from (read-only)
+#     - ~/beads-planning  # Personal planning repo
+#     - ~/work-planning   # Work planning repo
+
+# Dolt-native backup (periodic backup for off-machine recovery)
+# This is full database backup only. Cross-machine sync uses Dolt remotes.
+# backup:
+#   enabled: false     # Disable auto-backup entirely
+#   interval: 15m      # Minimum time between auto-backups
+#   git-push: false    # Disable git push (backup locally only)
+#   git-repo: ""       # Separate git repo for backups (default: project repo)
+
+# Optional JSONL auto-export for viewers, interchange, and issue-level migration.
+# Disabled by default; enable only when an integration needs fresh .beads/issues.jsonl.
+# Use relative paths under .beads/ for JSONL import/export filenames.
+# export:
+#   auto: false
+#   path: issues.jsonl
+#   interval: 60s
+#   git-add: false
+# import:
+#   path: issues.jsonl
+
+# Integration settings (access with 'bd config get/set')
+# Non-secret keys (stored in the database):
+# - jira.url, jira.project
+# - linear.team_id
+# - github.org, github.repo
+#
+# Secret keys (stored in this file but prefer env vars to avoid git exposure):
+# - linear.api_key  → use LINEAR_API_KEY env var instead
+# - github.token    → use GITHUB_TOKEN env var instead
+
+sync.remote: "git+https://github.com/ruttybob/prime-agent.git"
