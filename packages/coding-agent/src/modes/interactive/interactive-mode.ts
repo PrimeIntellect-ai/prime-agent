@@ -2725,7 +2725,9 @@ export class InteractiveMode {
 		}
 		// The auth source change can reshape provider models, so refetch the
 		// catalog (the session rebinds its live models during that refresh).
-		void this.refreshConnectionModelsAfterAuthChange();
+		void this.refreshConnectionModelsAfterAuthChange().catch((error) => {
+			this.showError(error instanceof Error ? error.message : String(error));
+		});
 		this.footer.invalidate();
 		this.updateEditorBorderColor();
 	}
