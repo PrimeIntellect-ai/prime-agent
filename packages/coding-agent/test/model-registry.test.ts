@@ -1711,6 +1711,28 @@ describe("ModelRegistry", () => {
 			}
 		});
 
+		test("keeps xAI models on Chat Completions when a stale OAuth credential falls back to the environment key", async () => {
+			authStorage.set("xai", {
+				type: "oauth",
+				refresh: "refresh",
+				access: "access",
+				expires: Date.now() + 3600_000,
+			});
+			await authStorage.getApiKey("xai");
+			expect(authStorage.markAuthStale("xai")).toBe(true);
+			process.env.XAI_API_KEY = "env-key";
+			try {
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const xaiModels = getModelsForProvider(registry, "xai");
+				expect(xaiModels.length).toBeGreaterThan(0);
+				for (const model of xaiModels) {
+					expect(model.api).toBe("openai-completions");
+				}
+			} finally {
+				delete process.env.XAI_API_KEY;
+			}
+		});
+
 		test("keeps xAI models on Chat Completions while a runtime API key outranks the OAuth credential", () => {
 			authStorage.set("xai", {
 				type: "oauth",

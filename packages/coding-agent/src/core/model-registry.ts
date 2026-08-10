@@ -527,9 +527,10 @@ export class ModelRegistry {
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
 			const cred = this.authStorage.get(oauthProvider.id);
 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
-				// A runtime --api-key override outranks stored OAuth credentials,
-				// so keep the API-key model shapes while one is active.
-				if (this.authStorage.getAuthStatus(oauthProvider.id).source === "runtime") {
+				// Only reshape models while the stored OAuth credential is the
+				// active auth source; a runtime --api-key override or an
+				// environment fallback after a stale credential outranks it.
+				if (this.authStorage.getAuthStatus(oauthProvider.id).source !== "stored") {
 					continue;
 				}
 				combined = oauthProvider.modifyModels(combined, cred);
