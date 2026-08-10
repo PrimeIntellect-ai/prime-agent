@@ -13,6 +13,7 @@ type Harness = {
 	showError: (message: string) => void;
 	ui: { requestRender: () => void };
 	agentConnection: { mutateQueuedMessage: ReturnType<typeof vi.fn>; abort?: ReturnType<typeof vi.fn> };
+	sessionEventGeneration: number;
 	queueMutationChain: Promise<void>;
 	enqueueQueueMutation: <T>(run: () => Promise<T>) => Promise<T>;
 	applyQueueSelection: (text: string, targetLane: "steering" | "followUp") => Promise<boolean>;
@@ -43,6 +44,7 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		showError: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		agentConnection: { mutateQueuedMessage: vi.fn(async () => mutateResult), abort: vi.fn(async () => {}) },
+		sessionEventGeneration: 0,
 		queueMutationChain: Promise.resolve(),
 		enqueueQueueMutation: proto.enqueueQueueMutation,
 		applyQueueSelection: proto.applyQueueSelection,
@@ -145,6 +147,35 @@ describe("interactive queued-message editing", () => {
 		resolveMutation("rejected");
 		await pending;
 		expect(harness.editor.getText()).toBe("newer typing");
+	});
+
+	it("does not reset queue browsing in a replacement session when an old mutation completes", async () => {
+		let resolveMutation: (status: string) => void = () => {};
+		const harness = createHarness({ steering: ["old queued"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveMutation = resolve;
+				}),
+		);
+		harness.editor.setText("old draft");
+		harness.browseQueueSelection(-1);
+		harness.editor.setText(""); // Enter cleared the old session's editor.
+		const pending = harness.applyQueueSelection("old edited", "steering");
+		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalled());
+
+		// A session replacement resets queue state, then the user starts browsing
+		// the replacement session before the old daemon response arrives.
+		harness.sessionEventGeneration++;
+		harness.queueSelection.reset();
+		harness.connectionQueue = { steering: ["new queued"], followUp: [] };
+		harness.editor.setText("new draft");
+		harness.browseQueueSelection(-1);
+
+		resolveMutation("applied");
+		await pending;
+		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "new queued" });
+		expect(harness.editor.getText()).toBe("new queued");
 	});
 
 	it("serializes rapid moves and addresses the second with the post-move index before any queue event", async () => {

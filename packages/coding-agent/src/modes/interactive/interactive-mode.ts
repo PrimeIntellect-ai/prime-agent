@@ -6974,7 +6974,9 @@ export class InteractiveMode {
 	}
 
 	private moveQueueSelection(direction: -1 | 1): void {
+		const sessionGeneration = this.sessionEventGeneration;
 		void this.enqueueQueueMutation(async () => {
+			if (sessionGeneration !== this.sessionEventGeneration) return;
 			const selected = this.queueSelection.selected;
 			if (!selected) return;
 			const queueBefore = this.connectionQueue;
@@ -6982,6 +6984,7 @@ export class InteractiveMode {
 				type: "move",
 				direction,
 			});
+			if (sessionGeneration !== this.sessionEventGeneration) return;
 			if (status === "applied") {
 				// The queue event for this mutation can land before or after the
 				// response. Patch the mirror only when no event has replaced it
@@ -7002,7 +7005,11 @@ export class InteractiveMode {
 				}
 			} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
 			else this.showStatus("Queue changed; reorder not applied");
-		}).catch((error) => this.showError(error instanceof Error ? error.message : String(error)));
+		}).catch((error) => {
+			if (sessionGeneration === this.sessionEventGeneration) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+		});
 	}
 
 	/**
@@ -7012,7 +7019,9 @@ export class InteractiveMode {
 	 */
 	private applyQueueSelection(text: string, targetLane: "steering" | "followUp"): Promise<boolean> {
 		if (!this.queueSelection.isBrowsing) return Promise.resolve(false);
+		const sessionGeneration = this.sessionEventGeneration;
 		return this.enqueueQueueMutation(async () => {
+			if (sessionGeneration !== this.sessionEventGeneration) return true;
 			// Re-read inside the serialized task: an earlier mutation may have
 			// resolved or retargeted the selection while this one waited.
 			const selected = this.queueSelection.selected;
@@ -7039,10 +7048,12 @@ export class InteractiveMode {
 					mutation,
 				);
 			} catch (error) {
+				if (sessionGeneration !== this.sessionEventGeneration) return true;
 				// The editor was already cleared by Enter; restore the edit before surfacing the error.
 				if (this.editor.getText() === editorTextBefore) this.setEditorTextFromQueueSelection(text);
 				throw error;
 			}
+			if (sessionGeneration !== this.sessionEventGeneration) return true;
 			const editorUntouched = this.editor.getText() === editorTextBefore;
 			if (status === "applied") {
 				// Same optimistic patch as moveQueueSelection, and the same guard:
