@@ -7760,12 +7760,28 @@ export class InteractiveMode {
 		}
 
 		const version = this.connectionModelsRefreshVersion;
-		const promise = this.agentConnection.getModelCatalog().then((catalog) => {
+		const promise = this.agentConnection.getModelCatalog().then(async (catalog) => {
 			if (version !== this.connectionModelsRefreshVersion) {
 				return [...this.connectionModels];
 			}
 			this.applyConnectionModelCatalog(catalog);
 			this.connectionModelsFetchedAt = Date.now();
+			// The catalog refresh may have rebound the session's live and scoped
+			// models (e.g. an auth change switching API rails), so pull the
+			// fields that mirror them into the connection snapshot. This sync is
+			// best-effort: the models were already fetched, and the next state
+			// event refreshes the snapshot anyway.
+			try {
+				const state = await this.agentConnection.getState();
+				if (version === this.connectionModelsRefreshVersion) {
+					this.patchConnectionState({
+						model: state.model,
+						scopedModels: state.scopedModels,
+						availableThinkingLevels: state.availableThinkingLevels,
+						thinkingLevel: state.thinkingLevel,
+					});
+				}
+			} catch {}
 			return [...this.connectionModels];
 		});
 		this.connectionModelsRefreshInFlight = { version, promise };
@@ -7826,16 +7842,6 @@ export class InteractiveMode {
 	private async refreshConnectionModelsAfterAuthChange(): Promise<void> {
 		this.invalidateConnectionModels();
 		await this.getConnectionAvailableModels();
-		// The catalog refresh may have rebound the session's live and scoped
-		// models (e.g. an auth change switching API rails), so pull the fields
-		// that mirror them into the connection snapshot.
-		const state = await this.agentConnection.getState();
-		this.patchConnectionState({
-			model: state.model,
-			scopedModels: state.scopedModels,
-			availableThinkingLevels: state.availableThinkingLevels,
-			thinkingLevel: state.thinkingLevel,
-		});
 	}
 
 	private async getModelCandidates(): Promise<AgentConnectionModel[]> {
