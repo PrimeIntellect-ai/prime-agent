@@ -205,6 +205,8 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 			["--offline", "Disable startup network operations"],
 			["--verbose", "Force verbose startup"],
 			["--daemon-socket <path>", "Use a specific daemon socket"],
+			["-a, --approve", "Trust this project's resources for this run only"],
+			["-na, --no-approve", "Do not trust this project's resources for this run"],
 		],
 	},
 	{
