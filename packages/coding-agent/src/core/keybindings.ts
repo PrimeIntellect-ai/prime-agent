@@ -83,14 +83,16 @@ export const KEYBINDINGS = {
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.model.toggleScope": { defaultKeys: "alt+s", description: "Toggle model selector scope" },
 	"app.configuration.previousTab": { defaultKeys: "shift+tab", description: "Select previous configuration tab" },
-	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
+	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output", defaultKeyScope: "editor" },
 	"app.messages.expand": {
 		defaultKeys: "ctrl+p",
 		description: "Toggle agent message expansion",
+		defaultKeyScope: "editor",
 	},
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",
+		defaultKeyScope: "editor",
 	},
 	"app.subagents.focus": {
 		defaultKeys: "alt+a",

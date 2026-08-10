@@ -181,7 +181,7 @@ On native Windows, `app.suspend` has no default binding because Windows terminal
 
 ### Emacs Example
 
-Binding `ctrl+p` below automatically releases the default `app.messages.expand` binding.
+Binding `ctrl+p` below releases the conflicting `app.messages.expand` default; shortcuts in other views keep their defaults.
 
 ```json
 {

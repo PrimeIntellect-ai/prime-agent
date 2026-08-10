@@ -44,4 +44,20 @@ describe("KeybindingsManager", () => {
 		]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorLeft"), ["left", "ctrl+b"]);
 	});
+
+	it("reports conflicts when an explicit binding restates its default", () => {
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.editor.cursorUp": ["up", "ctrl+b"],
+			"tui.editor.cursorLeft": ["left", "ctrl+b"],
+		});
+
+		assert.deepStrictEqual(keybindings.getConflicts(), [
+			{
+				key: "ctrl+b",
+				keybindings: ["tui.editor.cursorUp", "tui.editor.cursorLeft"],
+			},
+		]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorUp"), ["up", "ctrl+b"]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorLeft"), ["left", "ctrl+b"]);
+	});
 });
