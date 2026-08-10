@@ -1,18 +1,37 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { compareProcessStartIds, getProcessStartId } from "../../core/session-lease.js";
+import { acquireSyncFileLock, errorCode } from "../../utils/sync-file-lock.js";
 import { OperationExtensionInbox } from "./operation-extension-inbox.js";
-import type { OperationLedgerSnapshot } from "./operation-ledger.js";
+import {
+	type OperationLedgerSnapshot,
+	type OperationSnapshotEvidence,
+	readOperationLedgerEvidence,
+} from "./operation-ledger.js";
+import {
+	beginReliabilityMonitorServiceRunInDirectory,
+	completeReliabilityMonitorServiceRunInDirectory,
+	failReliabilityMonitorServiceRunInDirectory,
+	RELIABILITY_MONITOR_SERVICE_LABEL,
+	RELIABILITY_MONITOR_SERVICE_STALE_MS,
+	type ReliabilityMonitorServiceState,
+} from "./reliability-monitor-service.js";
 
 export const DEFAULT_SILENCE_WARNING_MS = 4 * 60_000;
 export const DEFAULT_MONITOR_INTERVAL_MS = 60_000;
+export const DEFAULT_NOTIFICATION_RETRY_BASE_MS = 60_000;
+export const DEFAULT_NOTIFICATION_RETRY_MAX_MS = 15 * 60_000;
+export const DEFAULT_NOTIFICATION_REMINDER_INTERVAL_MS = 15 * 60_000;
 export type ReliabilityAlertKind =
 	| "operation_silent"
 	| "operation_deadline_exceeded"
 	| "heartbeat_stale"
-	| "process_missing";
+	| "process_missing"
+	| "operation_journal_corrupt"
+	| "monitor_service_failed"
+	| "monitor_service_stale";
 
 export interface ReliabilityAlert {
 	alertKey: string;
@@ -110,6 +129,38 @@ export function evaluateReliabilitySnapshot(
 	return alerts;
 }
 
+export function evaluateReliabilityMonitorServiceState(
+	state: ReliabilityMonitorServiceState,
+	now: number = Date.now(),
+): ReliabilityAlert | undefined {
+	const detectedAt = new Date(now).toISOString();
+	if (state.status === "failed") {
+		return {
+			alertKey: "monitor_service_failed",
+			kind: "monitor_service_failed",
+			severity: "warning",
+			message: `Prime Agent reliability monitor service failed${state.lastError ? `: ${state.lastError}` : "."}`,
+			instanceId: RELIABILITY_MONITOR_SERVICE_LABEL,
+			detectedAt,
+		};
+	}
+	const referenceAt = state.status === "running" ? state.lastStartedAt : state.lastCompletedAt;
+	if (!referenceAt) return undefined;
+	const ageMs = now - Date.parse(referenceAt);
+	if (!Number.isFinite(ageMs) || ageMs < RELIABILITY_MONITOR_SERVICE_STALE_MS) return undefined;
+	return {
+		alertKey: "monitor_service_stale",
+		kind: "monitor_service_stale",
+		severity: "warning",
+		message:
+			state.status === "running"
+				? `Prime Agent reliability monitor service has been running for ${Math.floor(ageMs / 1000)} seconds without completing.`
+				: `Prime Agent reliability monitor service last completed ${Math.floor(ageMs / 1000)} seconds ago.`,
+		instanceId: RELIABILITY_MONITOR_SERVICE_LABEL,
+		detectedAt,
+	};
+}
+
 export interface NotificationAttempt {
 	attemptedAt: string;
 	channel: string;
@@ -125,11 +176,18 @@ export interface NotificationRecord extends ReliabilityAlert {
 	status: "pending" | "failed" | "delivered" | "acknowledged";
 	attempts: NotificationAttempt[];
 	acknowledgedAt?: string;
+	retryCount: number;
+	nextAttemptAt?: string;
 }
+
+type PersistedNotificationRecord = Omit<NotificationRecord, "retryCount" | "nextAttemptAt"> & {
+	retryCount?: number;
+	nextAttemptAt?: string;
+};
 
 interface NotificationOutboxFile {
 	schemaVersion: 1;
-	records: NotificationRecord[];
+	records: PersistedNotificationRecord[];
 }
 
 function writeJsonAtomically(path: string, value: unknown): void {
@@ -149,77 +207,121 @@ function writeJsonAtomically(path: string, value: unknown): void {
 }
 
 export class NotificationOutbox {
-	private records: NotificationRecord[];
+	private records: NotificationRecord[] = [];
 
 	constructor(
 		private readonly path: string,
 		private readonly now: () => number = Date.now,
 	) {
-		this.records = this.read();
+		this.withLock(() => undefined);
 	}
 
 	enqueue(alert: ReliabilityAlert): NotificationRecord {
-		const existing = this.records.find(
-			(record) => record.alertKey === alert.alertKey && record.status !== "acknowledged",
-		);
-		if (existing) return structuredClone(existing);
-		const timestamp = this.timestamp();
-		const record: NotificationRecord = {
-			...alert,
-			id: `notification_${randomUUID()}`,
-			createdAt: timestamp,
-			updatedAt: timestamp,
-			status: "pending",
-			attempts: [],
-		};
-		this.records.push(record);
-		this.persist();
-		return structuredClone(record);
+		return this.withLock(() => {
+			const existing = this.records.find(
+				(record) => record.alertKey === alert.alertKey && record.status !== "acknowledged",
+			);
+			if (existing) return structuredClone(existing);
+			const timestamp = this.timestamp();
+			const record: NotificationRecord = {
+				...alert,
+				id: `notification_${randomUUID()}`,
+				createdAt: timestamp,
+				updatedAt: timestamp,
+				status: "pending",
+				attempts: [],
+				retryCount: 0,
+			};
+			this.records.push(record);
+			this.persistUnlocked();
+			return structuredClone(record);
+		});
 	}
 
-	recordAttempt(
-		id: string,
-		attempt: Omit<NotificationAttempt, "attemptedAt"> & { attemptedAt?: string },
-	): NotificationRecord {
-		const record = this.require(id);
-		const normalized: NotificationAttempt = { ...attempt, attemptedAt: attempt.attemptedAt ?? this.timestamp() };
-		record.attempts.push(normalized);
-		record.updatedAt = normalized.attemptedAt;
-		record.status = normalized.status === "delivered" ? "delivered" : "failed";
-		this.persist();
-		return structuredClone(record);
+	recordDeliveryCycle(id: string, attempts: NotificationAttempt[]): NotificationRecord {
+		return this.withLock(() => {
+			if (attempts.length === 0) {
+				throw new Error("A notification delivery cycle requires at least one attempt.");
+			}
+			const record = this.require(id);
+			record.attempts.push(...attempts);
+			const cycleTimestamp = this.deliveryCycleTimestamp(attempts);
+			record.updatedAt = cycleTimestamp;
+			if (record.status !== "acknowledged") {
+				if (attempts.some((attempt) => attempt.status === "delivered")) {
+					record.status = "delivered";
+					record.retryCount = 0;
+					delete record.nextAttemptAt;
+				} else {
+					record.status = "failed";
+					record.retryCount += 1;
+					record.nextAttemptAt = new Date(
+						Date.parse(cycleTimestamp) + notificationRetryDelayMs(record.retryCount),
+					).toISOString();
+				}
+			}
+			this.persistUnlocked();
+			return structuredClone(record);
+		});
 	}
 
 	acknowledge(id: string): NotificationRecord {
-		const record = this.require(id);
-		const timestamp = this.timestamp();
-		record.status = "acknowledged";
-		record.acknowledgedAt = timestamp;
-		record.updatedAt = timestamp;
-		this.persist();
-		return structuredClone(record);
+		return this.withLock(() => {
+			const record = this.require(id);
+			const timestamp = this.timestamp();
+			record.status = "acknowledged";
+			record.acknowledgedAt = timestamp;
+			record.updatedAt = timestamp;
+			delete record.nextAttemptAt;
+			this.persistUnlocked();
+			return structuredClone(record);
+		});
 	}
 
 	pending(): NotificationRecord[] {
-		return this.records
-			.filter((record) => record.status === "pending" || record.status === "failed")
-			.map((record) => structuredClone(record));
+		return this.withLock(() =>
+			this.records
+				.filter((record) => record.status === "pending" || record.status === "failed")
+				.map((record) => structuredClone(record)),
+		);
 	}
 
-	dueForDelivery(reminderIntervalMs = 15 * 60_000): NotificationRecord[] {
-		const now = this.now();
-		return this.records
-			.filter((record) => {
-				if (record.status === "acknowledged") return false;
-				if (record.status === "pending" || record.status === "failed") return true;
-				const lastAttempt = record.attempts.at(-1);
-				return !lastAttempt || now - Date.parse(lastAttempt.attemptedAt) >= reminderIntervalMs;
-			})
-			.map((record) => structuredClone(record));
+	dueForDelivery(reminderIntervalMs = DEFAULT_NOTIFICATION_REMINDER_INTERVAL_MS): NotificationRecord[] {
+		return this.withLock(() => {
+			const now = this.now();
+			return this.records
+				.filter((record) => {
+					if (record.status === "acknowledged") return false;
+					if (record.status === "pending") return true;
+					if (record.status === "failed") {
+						if (!record.nextAttemptAt) return true;
+						const nextAttemptAt = Date.parse(record.nextAttemptAt);
+						return !Number.isFinite(nextAttemptAt) || nextAttemptAt <= now;
+					}
+					const lastAttempt = record.attempts.at(-1);
+					if (!lastAttempt) return true;
+					const lastAttemptAt = Date.parse(lastAttempt.attemptedAt);
+					return !Number.isFinite(lastAttemptAt) || now - lastAttemptAt >= reminderIntervalMs;
+				})
+				.map((record) => structuredClone(record));
+		});
 	}
 
 	list(): NotificationRecord[] {
-		return this.records.map((record) => structuredClone(record));
+		return this.withLock(() => this.records.map((record) => structuredClone(record)));
+	}
+
+	private withLock<T>(operation: () => T): T {
+		mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+		// Keyed on the outbox file, not its directory: proper-lockfile registers in-process locks by
+		// target, and the monitor state lock already uses that directory as its own target.
+		const release = acquireSyncFileLock(this.path, { lockfilePath: `${this.path}.lock`, staleMs: 30_000 });
+		try {
+			this.records = this.readUnlocked();
+			return operation();
+		} finally {
+			release();
+		}
 	}
 
 	private require(id: string): NotificationRecord {
@@ -232,31 +334,162 @@ export class NotificationOutbox {
 		return new Date(this.now()).toISOString();
 	}
 
-	private read(): NotificationRecord[] {
-		if (!existsSync(this.path)) return [];
-		try {
-			const parsed = JSON.parse(readFileSync(this.path, "utf8")) as NotificationOutboxFile;
-			return parsed.schemaVersion === 1 && Array.isArray(parsed.records) ? parsed.records : [];
-		} catch {
-			return [];
+	private deliveryCycleTimestamp(attempts: NotificationAttempt[]): string {
+		let latest = Number.NEGATIVE_INFINITY;
+		for (const attempt of attempts) {
+			const attemptedAt = Date.parse(attempt.attemptedAt);
+			if (Number.isFinite(attemptedAt) && attemptedAt > latest) latest = attemptedAt;
 		}
+		return Number.isFinite(latest) ? new Date(latest).toISOString() : this.timestamp();
 	}
 
-	// The launchd monitor and an interactive `prime-agent monitor --ack` run against the same file by
-	// design, so writing our constructor-time snapshot back wholesale would silently drop whichever
-	// side wrote last — losing an acknowledgement, or worse, a real alert. The write itself is atomic,
-	// which prevents a torn file but not a lost update. Re-read and merge per record immediately
-	// before writing: newer updatedAt wins, and records only the other writer knows about survive.
-	private persist(): void {
-		const merged = new Map<string, NotificationRecord>();
-		for (const record of this.read()) merged.set(record.id, record);
-		for (const record of this.records) {
-			const existing = merged.get(record.id);
-			if (!existing || record.updatedAt >= existing.updatedAt) merged.set(record.id, record);
+	private readUnlocked(): NotificationRecord[] {
+		// Preserves an unreadable outbox instead of replacing it: the next persist would otherwise
+		// drop every pending notification and receipt the file still holds.
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readFileSync(this.path, "utf8"));
+		} catch (error) {
+			if (errorCode(error) === "ENOENT") return [];
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`Failed to read notification outbox ${this.path}: ${message}`);
 		}
-		this.records = [...merged.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+		if (!isNotificationOutboxFile(parsed)) {
+			throw new Error(`Invalid notification outbox ${this.path}: expected a notification outbox document`);
+		}
+		return parsed.records.map((record) => normalizeNotificationRecord(record));
+	}
+
+	private persistUnlocked(): void {
 		writeJsonAtomically(this.path, { schemaVersion: 1, records: this.records } satisfies NotificationOutboxFile);
 	}
+}
+
+function notificationRetryDelayMs(retryCount: number): number {
+	const exponentialDelay = DEFAULT_NOTIFICATION_RETRY_BASE_MS * 2 ** Math.max(0, retryCount - 1);
+	return Math.min(exponentialDelay, DEFAULT_NOTIFICATION_RETRY_MAX_MS);
+}
+
+function normalizeNotificationRecord(record: PersistedNotificationRecord): NotificationRecord {
+	let retryCount = record.status === "failed" ? 1 : 0;
+	if (record.retryCount !== undefined && Number.isInteger(record.retryCount) && record.retryCount >= 0) {
+		retryCount = record.retryCount;
+	}
+	const normalized: NotificationRecord = { ...structuredClone(record), retryCount };
+	if (normalized.status !== "failed") {
+		delete normalized.nextAttemptAt;
+		return normalized;
+	}
+	const nextAttemptAt = normalized.nextAttemptAt ? Date.parse(normalized.nextAttemptAt) : Number.NaN;
+	if (Number.isFinite(nextAttemptAt)) return normalized;
+	let retryFrom = Number.NaN;
+	for (let index = normalized.attempts.length - 1; index >= 0; index -= 1) {
+		const attempt = normalized.attempts[index]!;
+		const attemptedAt = Date.parse(attempt.attemptedAt);
+		if (attempt.status === "failed" && Number.isFinite(attemptedAt)) {
+			retryFrom = attemptedAt;
+			break;
+		}
+	}
+	if (!Number.isFinite(retryFrom)) retryFrom = Date.parse(normalized.updatedAt);
+	if (Number.isFinite(retryFrom)) {
+		normalized.nextAttemptAt = new Date(retryFrom + notificationRetryDelayMs(normalized.retryCount)).toISOString();
+	} else {
+		delete normalized.nextAttemptAt;
+	}
+	return normalized;
+}
+
+function isNotificationOutboxFile(value: unknown): value is NotificationOutboxFile {
+	if (typeof value !== "object" || value === null || !("schemaVersion" in value) || !("records" in value)) {
+		return false;
+	}
+	return (
+		value.schemaVersion === 1 && Array.isArray(value.records) && value.records.every(isPersistedNotificationRecord)
+	);
+}
+
+function isPersistedNotificationRecord(value: unknown): value is PersistedNotificationRecord {
+	if (typeof value !== "object" || value === null) return false;
+	if (
+		!("alertKey" in value) ||
+		typeof value.alertKey !== "string" ||
+		!("kind" in value) ||
+		typeof value.kind !== "string" ||
+		!isReliabilityAlertKind(value.kind) ||
+		!("severity" in value) ||
+		value.severity !== "warning" ||
+		!("message" in value) ||
+		typeof value.message !== "string" ||
+		!("instanceId" in value) ||
+		typeof value.instanceId !== "string" ||
+		!("id" in value) ||
+		typeof value.id !== "string" ||
+		!("createdAt" in value) ||
+		typeof value.createdAt !== "string" ||
+		!("updatedAt" in value) ||
+		typeof value.updatedAt !== "string" ||
+		!("status" in value) ||
+		typeof value.status !== "string" ||
+		!isNotificationStatus(value.status) ||
+		!("attempts" in value) ||
+		!Array.isArray(value.attempts) ||
+		!value.attempts.every(isNotificationAttempt)
+	) {
+		return false;
+	}
+	if ("operationId" in value && value.operationId !== undefined && typeof value.operationId !== "string") {
+		return false;
+	}
+	if ("activeSessionId" in value && value.activeSessionId !== undefined && typeof value.activeSessionId !== "string") {
+		return false;
+	}
+	if ("detectedAt" in value && value.detectedAt !== undefined && typeof value.detectedAt !== "string") {
+		return false;
+	}
+	if ("acknowledgedAt" in value && value.acknowledgedAt !== undefined && typeof value.acknowledgedAt !== "string") {
+		return false;
+	}
+	if ("retryCount" in value && value.retryCount !== undefined && typeof value.retryCount !== "number") {
+		return false;
+	}
+	if ("nextAttemptAt" in value && value.nextAttemptAt !== undefined && typeof value.nextAttemptAt !== "string") {
+		return false;
+	}
+	return true;
+}
+
+function isNotificationAttempt(value: unknown): value is NotificationAttempt {
+	if (typeof value !== "object" || value === null) return false;
+	if (
+		!("attemptedAt" in value) ||
+		typeof value.attemptedAt !== "string" ||
+		!("channel" in value) ||
+		typeof value.channel !== "string" ||
+		!("status" in value) ||
+		(value.status !== "delivered" && value.status !== "failed")
+	) {
+		return false;
+	}
+	if ("receipt" in value && value.receipt !== undefined && typeof value.receipt !== "string") return false;
+	if ("error" in value && value.error !== undefined && typeof value.error !== "string") return false;
+	return true;
+}
+
+function isReliabilityAlertKind(value: string): value is ReliabilityAlertKind {
+	return (
+		value === "operation_silent" ||
+		value === "operation_deadline_exceeded" ||
+		value === "heartbeat_stale" ||
+		value === "process_missing" ||
+		value === "operation_journal_corrupt" ||
+		value === "monitor_service_failed" ||
+		value === "monitor_service_stale"
+	);
+}
+
+function isNotificationStatus(value: string): value is NotificationRecord["status"] {
+	return value === "pending" || value === "failed" || value === "delivered" || value === "acknowledged";
 }
 
 export interface ReliabilityMonitorResult {
@@ -267,20 +500,12 @@ export interface ReliabilityMonitorResult {
 	settledExtensionRequests: number;
 }
 
+export function readOperationSnapshotEvidence(rootDir: string): OperationSnapshotEvidence {
+	return readOperationLedgerEvidence(rootDir);
+}
+
 export function readOperationSnapshots(rootDir: string): OperationLedgerSnapshot[] {
-	const operationDir = join(rootDir, "operations");
-	if (!existsSync(operationDir)) return [];
-	const snapshots: OperationLedgerSnapshot[] = [];
-	for (const entry of readdirSync(operationDir)) {
-		if (!entry.endsWith(".json")) continue;
-		try {
-			const parsed = JSON.parse(readFileSync(join(operationDir, entry), "utf8")) as OperationLedgerSnapshot;
-			if (parsed.schemaVersion === 1 && Array.isArray(parsed.operations)) snapshots.push(parsed);
-		} catch {
-			// A corrupt or concurrently-replaced snapshot is skipped this pass and retried next pass.
-		}
-	}
-	return snapshots;
+	return readOperationSnapshotEvidence(rootDir).snapshots;
 }
 
 function escapeAppleScript(value: string): string {
@@ -344,52 +569,122 @@ export async function runReliabilityMonitorOnce(options: {
 	webhookUrl?: string;
 	now?: number;
 	processAlive?: (snapshot: OperationLedgerSnapshot) => boolean;
+	deliveryAttempts?: (record: NotificationRecord) => Promise<NotificationAttempt[]>;
 }): Promise<ReliabilityMonitorResult> {
-	const snapshots = readOperationSnapshots(options.rootDir);
 	const now = options.now ?? Date.now();
-	const openOperationIds = new Set(
-		snapshots.flatMap((snapshot) =>
-			snapshot.operations
-				.filter((operation) => operation.status === "open")
-				.map((operation) => operation.operationId),
-		),
-	);
-	const extensionInbox = new OperationExtensionInbox(options.rootDir, () => now);
-	let settledExtensionRequests = 0;
-	// Settling stale extension requests is best-effort; alert delivery below is the monitor's actual
-	// contract and must still run when the inbox cannot be written. Claim before rejecting for the
-	// same exactly-once reason the daemon does, so a failed receipt cannot resurrect the request.
-	for (const request of extensionInbox.pending()) {
-		if (openOperationIds.has(request.operationId)) continue;
-		if (now - Date.parse(request.requestedAt) < DEFAULT_MONITOR_INTERVAL_MS) continue;
-		try {
-			extensionInbox.claim(request);
-			extensionInbox.record(request, { status: "rejected", reason: "not_open" });
-			settledExtensionRequests += 1;
-		} catch {
-			break;
+	const cycleClock = () => now;
+	const serviceClock = options.now === undefined ? Date.now : cycleClock;
+	const runStart = beginReliabilityMonitorServiceRunInDirectory(options.rootDir, serviceClock);
+	try {
+		const evidence = readOperationSnapshotEvidence(options.rootDir);
+		const snapshots = evidence.snapshots;
+		const openOperationIds = new Set(
+			snapshots.flatMap((snapshot) =>
+				snapshot.operations
+					.filter((operation) => operation.status === "open")
+					.map((operation) => operation.operationId),
+			),
+		);
+		const extensionInbox = new OperationExtensionInbox(options.rootDir, cycleClock);
+		let settledExtensionRequests = 0;
+		// Settling stale extension requests is best-effort; alert delivery below remains available if the
+		// inbox is unwritable. A corrupt journal may hide a newer open operation behind an otherwise
+		// valid snapshot, so never turn that uncertainty into a durable not-open receipt.
+		if (evidence.warnings.length === 0) {
+			for (const request of extensionInbox.pending()) {
+				if (openOperationIds.has(request.operationId)) continue;
+				if (now - Date.parse(request.requestedAt) < DEFAULT_MONITOR_INTERVAL_MS) continue;
+				try {
+					extensionInbox.claim(request);
+					extensionInbox.record(request, { status: "rejected", reason: "not_open" });
+					settledExtensionRequests += 1;
+				} catch {
+					break;
+				}
+			}
 		}
-	}
-	const alerts = snapshots.flatMap((snapshot) =>
-		evaluateReliabilitySnapshot(snapshot, { now: options.now, processAlive: options.processAlive }),
-	);
-	const outbox = new NotificationOutbox(options.outboxPath ?? join(options.rootDir, "notification-outbox.json"));
-	for (const alert of alerts) outbox.enqueue(alert);
-	let attemptedNotifications = 0;
-	for (const record of outbox.dueForDelivery()) {
-		const localAttempt = deliverMacOsNotification(record);
-		outbox.recordAttempt(record.id, localAttempt);
-		attemptedNotifications += 1;
-		if (localAttempt.status === "failed" && options.webhookUrl) {
-			outbox.recordAttempt(record.id, await deliverWebhookNotification(record, options.webhookUrl));
-			attemptedNotifications += 1;
+		const detectedAt = new Date(now).toISOString();
+		const serviceAlert = runStart.previousState
+			? evaluateReliabilityMonitorServiceState(runStart.previousState, now)
+			: undefined;
+		const serviceStateUnreadableAlert: ReliabilityAlert | undefined = runStart.previousStateError
+			? {
+					alertKey: "monitor_service_state_unreadable",
+					kind: "monitor_service_failed",
+					severity: "warning",
+					message: `Prime Agent reliability monitor service state is unreadable: ${runStart.previousStateError}`,
+					instanceId: RELIABILITY_MONITOR_SERVICE_LABEL,
+					detectedAt,
+				}
+			: undefined;
+		const alerts = [
+			...(serviceAlert ? [serviceAlert] : []),
+			...(serviceStateUnreadableAlert ? [serviceStateUnreadableAlert] : []),
+			...evidence.warnings.map(
+				(warning): ReliabilityAlert => ({
+					alertKey: `operation_journal_corrupt:${warning.path}`,
+					kind: "operation_journal_corrupt",
+					severity: "warning",
+					message: `Operation journal is corrupt at ${warning.path}: ${warning.error}`,
+					instanceId: warning.instanceId ?? warning.path,
+					detectedAt,
+				}),
+			),
+			...snapshots.flatMap((snapshot) =>
+				evaluateReliabilitySnapshot(snapshot, { now, processAlive: options.processAlive }),
+			),
+		];
+		const outbox = new NotificationOutbox(
+			options.outboxPath ?? join(options.rootDir, "notification-outbox.json"),
+			cycleClock,
+		);
+		for (const alert of alerts) outbox.enqueue(alert);
+		let attemptedNotifications = 0;
+		for (const record of outbox.dueForDelivery()) {
+			const attempts = options.deliveryAttempts
+				? await options.deliveryAttempts(record)
+				: await collectNotificationDeliveryAttempts(record, options.webhookUrl);
+			if (attempts.length === 0) continue;
+			outbox.recordDeliveryCycle(record.id, attempts);
+			attemptedNotifications += attempts.length;
 		}
+		const result: ReliabilityMonitorResult = {
+			scannedSnapshots: snapshots.length,
+			alerts,
+			attemptedNotifications,
+			pendingNotifications: outbox.pending().length,
+			settledExtensionRequests,
+		};
+		completeReliabilityMonitorServiceRunInDirectory(
+			options.rootDir,
+			{
+				scannedSnapshots: result.scannedSnapshots,
+				alertCount: result.alerts.length,
+				attemptedNotifications: result.attemptedNotifications,
+				pendingNotifications: result.pendingNotifications,
+				settledExtensionRequests: result.settledExtensionRequests,
+			},
+			serviceClock,
+		);
+		return result;
+	} catch (error) {
+		failReliabilityMonitorServiceRunInDirectory(
+			options.rootDir,
+			error instanceof Error ? error.message : String(error),
+			{ exitCode: 1, now: serviceClock },
+		);
+		throw error;
 	}
-	return {
-		scannedSnapshots: snapshots.length,
-		alerts,
-		attemptedNotifications,
-		pendingNotifications: outbox.pending().length,
-		settledExtensionRequests,
-	};
+}
+
+async function collectNotificationDeliveryAttempts(
+	record: NotificationRecord,
+	webhookUrl: string | undefined,
+): Promise<NotificationAttempt[]> {
+	const localAttempt = deliverMacOsNotification(record);
+	const attempts = [localAttempt];
+	if (localAttempt.status === "failed" && webhookUrl) {
+		attempts.push(await deliverWebhookNotification(record, webhookUrl));
+	}
+	return attempts;
 }

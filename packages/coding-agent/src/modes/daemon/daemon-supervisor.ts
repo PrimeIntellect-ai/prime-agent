@@ -1318,16 +1318,14 @@ export class DaemonSupervisor {
 			this.write(client, failure(command.id, command.type, `Unknown daemon command: ${command.type}`));
 			return;
 		}
-		if (
-			command.type === "get_session_tree" &&
-			preParsed.protocolVersion < DAEMON_COMMAND_COMPATIBILITY.get_session_tree.minProtocol
-		) {
+		const commandCompatibility = DAEMON_COMMAND_COMPATIBILITY[command.type];
+		if (preParsed.protocolVersion < commandCompatibility.minProtocol) {
 			this.write(
 				client,
 				failure(
 					command.id,
 					command.type,
-					`get_session_tree requires client protocol ${DAEMON_COMMAND_COMPATIBILITY.get_session_tree.minProtocol} or newer`,
+					`${command.type} requires client protocol ${commandCompatibility.minProtocol} or newer`,
 				),
 			);
 			return;

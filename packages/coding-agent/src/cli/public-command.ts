@@ -4,10 +4,16 @@ import { APP_NAME, getAgentDir, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../con
 import { buildOperationCalibrationReport } from "../modes/daemon/operation-calibration.js";
 import { OperationExtensionInbox } from "../modes/daemon/operation-extension-inbox.js";
 import {
+	evaluateReliabilityMonitorServiceState,
 	NotificationOutbox,
 	readOperationSnapshots,
 	runReliabilityMonitorOnce,
 } from "../modes/daemon/reliability-monitor.js";
+import {
+	createReliabilityMonitorService,
+	RELIABILITY_MONITOR_SERVICE_STALE_MS,
+	readReliabilityMonitorServiceState,
+} from "../modes/daemon/reliability-monitor-service.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
 import {
@@ -260,15 +266,37 @@ async function runStatus(args: string[]): Promise<PublicCommandResult> {
 async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	const options = parseBooleanOptions(args, new Set(["--fix", "--json"]), "doctor");
 	if (!options) return HANDLED;
+	const json = options.has("--json");
 	if (options.has("--fix")) {
-		await runReap(options.has("--json"), false);
+		await runReap(json, false);
 	} else {
-		await runPs(options.has("--json"));
+		await runPs(json);
+	}
+	const agentDir = getAgentDir();
+	const serviceStatus = createReliabilityMonitorService({ agentDir }).status();
+	const serviceState = readReliabilityMonitorServiceState(agentDir);
+	const stateAlert = serviceState ? evaluateReliabilityMonitorServiceState(serviceState) : undefined;
+	if (stateAlert) {
+		console.error(
+			json ? JSON.stringify(stateAlert) : `Prime Agent doctor: ${stateAlert.kind}. ${stateAlert.message}`,
+		);
+	} else if (serviceStatus.status === "failed" || serviceStatus.status === "stale") {
+		const kind = serviceStatus.status === "failed" ? "monitor_service_failed" : "monitor_service_stale";
+		const message =
+			serviceStatus.reason ??
+			serviceStatus.state?.lastError ??
+			(serviceStatus.status === "failed"
+				? "The reliability monitor service failed."
+				: `The reliability monitor service has not completed within ${RELIABILITY_MONITOR_SERVICE_STALE_MS / 1000} seconds.`);
+		console.error(
+			json ? JSON.stringify({ kind, severity: "warning", message }) : `Prime Agent doctor: ${kind}. ${message}`,
+		);
 	}
 	return HANDLED;
 }
 
 async function runMonitor(args: string[]): Promise<PublicCommandResult> {
+	if (args[0] === "service") return runMonitorService(args.slice(1));
 	const json = args.includes("--json");
 	const calibration = args.includes("--calibration");
 	const acknowledgeIndex = args.indexOf("--ack");
@@ -297,7 +325,7 @@ async function runMonitor(args: string[]): Promise<PublicCommandResult> {
 		(calibration && (acknowledgeIndex >= 0 || extendIndex >= 0))
 	) {
 		return fail(
-			`Usage: ${APP_NAME} monitor [--json] [--calibration | --ack <notification-id> | --extend <operation-id> --minutes <1-60>]`,
+			`Usage: ${APP_NAME} monitor [--json] [service <install|uninstall|status> [--json] | --calibration | --ack <notification-id> | --extend <operation-id> --minutes <1-60>]`,
 		);
 	}
 	const rootDir = join(getAgentDir(), "reliability");
@@ -334,6 +362,44 @@ async function runMonitor(args: string[]): Promise<PublicCommandResult> {
 		json
 			? JSON.stringify(result, null, 2)
 			: `Prime Agent monitor: ${result.alerts.length} alert(s), ${result.pendingNotifications} pending notification(s).`,
+	);
+	return HANDLED;
+}
+
+function runMonitorService(args: string[]): PublicCommandResult {
+	const subcommand = args[0];
+	if (!subcommand || subcommand.startsWith("-")) {
+		return fail("Missing monitor service command.", `Run "${APP_NAME} help monitor service" for usage.`);
+	}
+	if (subcommand !== "install" && subcommand !== "uninstall" && subcommand !== "status") {
+		return fail(
+			`Unknown monitor service command: ${subcommand}`,
+			`Run "${APP_NAME} help monitor service" for usage.`,
+		);
+	}
+	const options = parseBooleanOptions(args.slice(1), new Set(["--json"]), "monitor service");
+	if (!options) return HANDLED;
+
+	const service = createReliabilityMonitorService({ agentDir: getAgentDir() });
+	const runService = {
+		install: () => service.install(),
+		uninstall: () => service.uninstall(),
+		status: () => service.status(),
+	};
+	const result = runService[subcommand]();
+	const output =
+		subcommand === "status"
+			? {
+					status: result.status,
+					label: result.label,
+					...(result.state ? { state: result.state } : {}),
+					...(result.reason ? { reason: result.reason } : {}),
+				}
+			: result;
+	console.log(
+		options.has("--json")
+			? JSON.stringify(output, null, 2)
+			: `Prime Agent monitor service: ${result.status}.${result.reason ? ` ${result.reason}` : ""}`,
 	);
 	return HANDLED;
 }

@@ -43,13 +43,6 @@ const POLICY_BY_KIND: Record<OperationKind, Omit<OperationTimeoutPolicy, "deadli
 		hardCapMs: 2 * 60 * 60_000,
 		enforcement: "owned_only",
 	},
-	child: {
-		timeoutClass: "owned-child-hard-cap",
-		timeoutPolicySource: "prime-agent-default-v1",
-		warningAfterMs: FIVE_MINUTES_MS,
-		hardCapMs: 2 * 60 * 60_000,
-		enforcement: "owned_only",
-	},
 	bash: {
 		timeoutClass: "owned-bash-hard-cap",
 		timeoutPolicySource: "prime-agent-default-v1",
@@ -69,20 +62,6 @@ const POLICY_BY_KIND: Record<OperationKind, Omit<OperationTimeoutPolicy, "deadli
 		timeoutPolicySource: "prime-agent-default-v1",
 		warningAfterMs: FIVE_MINUTES_MS,
 		hardCapMs: 30 * 60_000,
-		enforcement: "advisory",
-	},
-	session: {
-		timeoutClass: "session-advisory-cap",
-		timeoutPolicySource: "prime-agent-default-v1",
-		warningAfterMs: FIVE_MINUTES_MS,
-		hardCapMs: 6 * 60 * 60_000,
-		enforcement: "advisory",
-	},
-	unknown: {
-		timeoutClass: "unknown-advisory-cap",
-		timeoutPolicySource: "prime-agent-default-v1",
-		warningAfterMs: FIVE_MINUTES_MS,
-		hardCapMs: 2 * 60 * 60_000,
 		enforcement: "advisory",
 	},
 };

@@ -47,7 +47,8 @@ describe("daemon protocol helpers", () => {
 	});
 
 	it("requires compatibility metadata for the heartbeat protocol surface", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(7);
+		expect(DAEMON_PROTOCOL_VERSION).toBe(8);
+		expect(DAEMON_SCHEMA_REVISION).toBe(16);
 		expect(DAEMON_SCHEMA_ID).toContain(`protocol-${DAEMON_PROTOCOL_VERSION}`);
 		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeats_list).toEqual({
 			minProtocol: 7,
@@ -105,11 +106,11 @@ describe("daemon protocol helpers", () => {
 
 	it("schema-gates session commands that carry the telemetry policy", () => {
 		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual([
-			{ minProtocol: 7 },
+			{ minProtocol: 8 },
 		]);
 		expect(
 			getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } }),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 8 }]);
 		expect(getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1" })).toEqual([
 			{ minProtocol: 7 },
 		]);

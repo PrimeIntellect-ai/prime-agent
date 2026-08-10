@@ -3069,6 +3069,7 @@ export class InteractiveMode {
 			modelRegistry: this.modelRegistry,
 			model: this.getCurrentModel(),
 			isIdle: () => !this.isAgentStreaming(),
+			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 			signal: localSessionHost.getAbortSignal(),
 			abort: () => this.agentConnection.abort(),
 			hasPendingMessages: () => this.getQueuedActionCount() > 0,

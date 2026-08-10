@@ -669,7 +669,7 @@ export class AgentDaemon {
 				);
 				break;
 			}
-			const result = this.operationLedger.extendDeadline(request.operationId, request.extensionMs, request.source);
+			const result = this.operationLedger.extendDeadline(request.operationId, request.extensionMs);
 			try {
 				this.operationExtensionInbox.record(request, result);
 			} catch (error) {

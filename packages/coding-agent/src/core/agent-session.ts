@@ -8450,6 +8450,7 @@ export class AgentSession {
 			{
 				getModel: () => this.model,
 				isIdle: () => !this.isStreaming,
+				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,
 				abort: () => this.abort(),
 				hasPendingMessages: () => this.queuedActionCount > 0,

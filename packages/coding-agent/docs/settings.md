@@ -204,6 +204,17 @@ Normally the package manager's global modules location is queried using `root -g
 
 `idleEvictionMinutes` is a global daemon policy and is read only from `~/.prime/agent/settings.json`. Set it to a positive number to configure the idle threshold.
 
+### Project Trust
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `defaultProjectTrust` | `"ask"`, `"always"`, or `"never"` | `"ask"` | Global default for whether project resources may load |
+
+`defaultProjectTrust` is global-only and is read from `~/.prime/agent/settings.json`; a project settings file cannot use it to trust itself. In interactive mode, `"ask"` prompts for a trust decision. Without an interactive trust prompt, `"ask"` behaves as untrusted and project resources are not loaded.
+
+Trust decisions are stored by canonical project path in `trust.json`. An explicitly trusted ancestor can apply to descendants, but trust for one sibling does not trust another. Invalid or corrupt `trust.json` fails closed with a visible diagnostic and no project resources.
+
+
 ### Sessions
 
 | Setting | Type | Default | Description |
@@ -236,9 +247,10 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 ### Resources
 
-These settings define where to load extensions, skills, prompts, and themes from.
+These settings define where to load extensions, skills, prompts, and themes from. Project-scoped settings and resources are loaded only after the project trust decision allows them.
 
-Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Paths in `.prime/agent/settings.json` resolve relative to `.prime/agent`. Absolute paths and `~` are supported.
+Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Paths in `.prime/agent/settings.json` resolve relative to `.prime/agent`. Absolute paths and `~` are supported. An explicit absolute resource path supplied on the CLI is a user choice and remains CLI-scoped even when project resources are not trusted.
+
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -316,7 +328,7 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.prime/agent/settings.json`) override global settings. Nested objects are merged:
+Project settings (`.prime/agent/settings.json`) override global settings after project trust is resolved. Nested objects are merged; `defaultProjectTrust` is never a project override:
 
 ```json
 // ~/.prime/agent/settings.json (global)

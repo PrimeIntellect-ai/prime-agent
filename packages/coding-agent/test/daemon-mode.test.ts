@@ -44,6 +44,8 @@ import {
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
+import type { OperationExtensionInbox } from "../src/modes/daemon/operation-extension-inbox.js";
+import type { OperationLedger } from "../src/modes/daemon/operation-ledger.js";
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -56,6 +58,47 @@ describe("daemon mode helpers", () => {
 
 		parse(client, JSON.stringify(createDaemonCommandEnvelope({ type: "list" }, "request-1", "public-client")));
 		expect(client.id).toBe("public-client");
+	});
+
+	it("applies persisted human extensions through the exact two-argument ledger contract", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-extension-contract-"));
+		let ledger: OperationLedger | undefined;
+		try {
+			const daemon = new AgentDaemon(join(agentDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir, cwd: agentDir },
+				createRuntime: vi.fn(),
+			});
+			// Reaches private daemon internals to assert the two-argument ledger call.
+			const internals = daemon as unknown as {
+				operationExtensionInbox: OperationExtensionInbox;
+				operationLedger: OperationLedger;
+				sweepOperationDeadlines(): void;
+			};
+			ledger = internals.operationLedger;
+			const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+			const operation = ledger.open({
+				operationId: "daemon-extension",
+				activeSessionId: "active-daemon-extension",
+				kind: "tool",
+				deadlineAt,
+			});
+			const request = internals.operationExtensionInbox.request(operation.operationId, 60_000);
+			const extendDeadline = vi.spyOn(ledger, "extendDeadline");
+
+			internals.sweepOperationDeadlines();
+
+			expect(extendDeadline).toHaveBeenCalledWith(request.operationId, request.extensionMs);
+			expect(ledger.snapshot().operations).toMatchObject([
+				{
+					operationId: operation.operationId,
+					deadlineAt: new Date(Date.parse(deadlineAt) + 60_000).toISOString(),
+					deadlineExtensionSource: "human",
+				},
+			]);
+		} finally {
+			ledger?.dispose();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
 	});
 
 	it("normalizes daemon session names before validation and persistence", async () => {

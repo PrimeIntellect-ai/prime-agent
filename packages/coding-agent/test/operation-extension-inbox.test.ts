@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,7 +17,7 @@ function root(): string {
 }
 
 describe("operation deadline extensions", () => {
-	it("rejects self-renewal and caps explicit human extensions", () => {
+	it("caps human-only deadline extensions and persists their human source", () => {
 		let now = Date.parse("2026-08-10T10:00:00.000Z");
 		const dir = root();
 		const ledger = new OperationLedger({ rootDir: dir, now: () => now, heartbeatIntervalMs: 0 });
@@ -29,11 +29,7 @@ describe("operation deadline extensions", () => {
 			maxDeadlineExtensions: 2,
 		});
 
-		expect(ledger.extendDeadline("op-1", 5 * 60_000, "self")).toEqual({
-			status: "rejected",
-			reason: "invalid_source",
-		});
-		const first = ledger.extendDeadline("op-1", 5 * 60_000, "human");
+		const first = ledger.extendDeadline("op-1", 5 * 60_000);
 		expect(first).toMatchObject({
 			status: "applied",
 			record: {
@@ -43,11 +39,11 @@ describe("operation deadline extensions", () => {
 			},
 		});
 		now += 60_000;
-		expect(ledger.extendDeadline("op-1", 5 * 60_000, "human")).toMatchObject({
+		expect(ledger.extendDeadline("op-1", 5 * 60_000)).toMatchObject({
 			status: "applied",
 			record: { deadlineAt: "2026-08-10T10:20:00.000Z", deadlineExtensionCount: 2 },
 		});
-		expect(ledger.extendDeadline("op-1", 5 * 60_000, "human")).toEqual({
+		expect(ledger.extendDeadline("op-1", 5 * 60_000)).toEqual({
 			status: "rejected",
 			reason: "renewal_cap",
 		});
@@ -69,7 +65,7 @@ describe("operation deadline extensions", () => {
 			deadlineAt: "2026-08-10T10:30:00.000Z",
 		});
 		now += 1_000;
-		const result = ledger.extendDeadline(request.operationId, request.extensionMs, request.source);
+		const result = ledger.extendDeadline(request.operationId, request.extensionMs);
 		const receipt = inbox.record(request, result);
 		expect(receipt).toMatchObject({
 			status: "applied",
@@ -77,6 +73,116 @@ describe("operation deadline extensions", () => {
 		});
 		expect(new OperationExtensionInbox(dir).pending()).toEqual([]);
 		ledger.dispose();
+	});
+
+	it("atomically gives one winner when two consumers claim the same request concurrently", async () => {
+		let now = Date.parse("2026-08-10T10:00:00.000Z");
+		const dir = root();
+		const writer = new OperationExtensionInbox(dir, () => now);
+		writer.request("op-concurrent", 5 * 60_000);
+		const firstConsumer = new OperationExtensionInbox(dir, () => now);
+		const secondConsumer = new OperationExtensionInbox(dir, () => now);
+		const firstRequest = firstConsumer.pending()[0];
+		const secondRequest = secondConsumer.pending()[0];
+		if (!firstRequest || !secondRequest) throw new Error("Expected both consumers to observe the pending request");
+
+		const ledger = new OperationLedger({ rootDir: dir, now: () => now, heartbeatIntervalMs: 0 });
+		ledger.open({
+			operationId: "op-concurrent",
+			activeSessionId: "active",
+			kind: "tool",
+			deadlineAt: "2026-08-10T10:10:00.000Z",
+		});
+		const consumers = [
+			{ inbox: firstConsumer, request: firstRequest },
+			{ inbox: secondConsumer, request: secondRequest },
+		] as const;
+		const claimResults = await Promise.all(
+			consumers.map(({ inbox, request }) =>
+				Promise.resolve().then(() => {
+					try {
+						return inbox.claim(request);
+					} catch {
+						return undefined;
+					}
+				}),
+			),
+		);
+
+		now += 1_000;
+		let appliedExtensions = 0;
+		for (const [index, claimResult] of claimResults.entries()) {
+			if (!claimResult) continue;
+			const consumer = consumers[index];
+			if (!consumer) throw new Error(`Missing consumer for claim attempt ${index}`);
+			const result = ledger.extendDeadline(consumer.request.operationId, consumer.request.extensionMs);
+			if (result.status === "applied") appliedExtensions += 1;
+			consumer.inbox.record(consumer.request, result);
+		}
+
+		const events = new OperationExtensionInbox(dir).events();
+		expect(claimResults.filter(Boolean)).toHaveLength(1);
+		expect(appliedExtensions).toBe(1);
+		expect(events.filter((event) => event.type === "claim")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "receipt")).toHaveLength(1);
+		expect(new OperationExtensionInbox(dir).pending()).toEqual([]);
+		expect(ledger.snapshot().operations[0]).toMatchObject({
+			operationId: "op-concurrent",
+			deadlineAt: "2026-08-10T10:15:00.000Z",
+			deadlineExtensionCount: 1,
+		});
+		ledger.dispose();
+	});
+
+	it("ignores malformed and non-human requests from the durable inbox", () => {
+		const dir = root();
+		const inbox = new OperationExtensionInbox(dir);
+		const valid = inbox.request("op-valid", 60_000);
+		const invalidRequests = [
+			{
+				type: "request",
+				schemaVersion: 1,
+				requestId: "extension-non-human",
+				operationId: "op-non-human",
+				extensionMs: 60_000,
+				source: "self",
+				requestedAt: "2026-08-10T10:00:00.000Z",
+			},
+			{
+				type: "request",
+				schemaVersion: 1,
+				requestId: "extension-invalid-duration",
+				operationId: "op-invalid-duration",
+				extensionMs: "60_000",
+				source: "human",
+				requestedAt: "2026-08-10T10:00:00.000Z",
+			},
+			{
+				type: "request",
+				schemaVersion: 1,
+				requestId: 42,
+				operationId: "op-invalid-request-id",
+				extensionMs: 60_000,
+				source: "human",
+				requestedAt: "2026-08-10T10:00:00.000Z",
+			},
+			{
+				type: "request",
+				schemaVersion: 1,
+				requestId: "extension-invalid-requested-at",
+				operationId: "op-invalid-requested-at",
+				extensionMs: 60_000,
+				source: "human",
+				requestedAt: 1,
+			},
+		];
+		for (const invalid of invalidRequests) {
+			appendFileSync(inbox.path, `${JSON.stringify(invalid)}\n`);
+		}
+
+		const restarted = new OperationExtensionInbox(dir);
+		expect(restarted.events()).toEqual([valid]);
+		expect(restarted.pending()).toEqual([valid]);
 	});
 
 	it("constructs without touching the filesystem and creates the directory on first write", () => {

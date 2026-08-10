@@ -9,7 +9,7 @@ import {
 	type OperationLedgerSnapshot,
 	OperationTracker,
 } from "../src/modes/daemon/operation-ledger.js";
-import { evaluateReliabilitySnapshot, NotificationOutbox } from "../src/modes/daemon/reliability-monitor.js";
+import * as reliabilityMonitor from "../src/modes/daemon/reliability-monitor.js";
 
 // Regressions for the defects found by independent adversarial review of the elite reliability
 // mission. Each test fails against the pre-remediation implementation.
@@ -24,6 +24,13 @@ function root(): string {
 	roots.push(value);
 	return value;
 }
+
+type LedgerOptionsWithJournalCaps = ConstructorParameters<typeof OperationLedger>[0] & {
+	maxJournalBytes: number;
+	maxJournalRecords: number;
+};
+
+const { evaluateReliabilitySnapshot, NotificationOutbox } = reliabilityMonitor;
 
 describe("closeAll never fabricates a completed outcome", () => {
 	it("terminalizes a still-open operation as uncertain even when the session completed", () => {
@@ -64,6 +71,126 @@ describe("calibration eligibility survives terminal-record trimming", () => {
 		expect(after.verdict).toBe("telemetry_insufficient");
 		ledger.dispose();
 	});
+
+	it("does not launder lifetime uncertainty through checkpoint journal compaction", () => {
+		const dir = root();
+		const now = { value: Date.parse("2026-08-10T09:00:00.000Z") };
+		const options: LedgerOptionsWithJournalCaps = {
+			rootDir: dir,
+			instanceId: "uncertainty-capped",
+			pid: 1234,
+			processStartId: "uncertainty-start",
+			now: () => now.value,
+			heartbeatIntervalMs: 0,
+			maxJournalBytes: 8 * 1_024,
+			maxJournalRecords: 4,
+		};
+		const ledger = new OperationLedger(options);
+		const close = (outcome: "completed" | "uncertain") => {
+			const record = ledger.open({
+				activeSessionId: "as1",
+				kind: "tool",
+				timeoutClass: "owned-tool-hard-cap",
+			});
+			now.value += 1_000;
+			ledger.close(record.operationId, { phase: outcome, outcome });
+		};
+
+		close("uncertain");
+		for (let index = 0; index < 600; index += 1) close("completed");
+		rmSync(ledger.snapshotPath);
+
+		const evidence = reliabilityMonitor.readOperationSnapshotEvidence(dir);
+		const report = buildOperationCalibrationReport(evidence.snapshots, { minimumCanarySamples: 100 });
+		expect(evidence.warnings).toEqual([]);
+		expect(report.groups[0]?.sampleCount).toBeLessThan(601);
+		expect(report.groups[0]?.uncertainOutcomeCount).toBe(1);
+		expect(report.hardEnforcementEligible).toBe(false);
+		expect(report.verdict).toBe("telemetry_insufficient");
+		ledger.dispose();
+	});
+});
+
+describe("reconciliation is exact once across owner lifetimes", () => {
+	it("counts one dead open operation once after three owner generations", () => {
+		const dir = root();
+		const now = { value: Date.parse("2026-08-10T09:30:00.000Z") };
+		const operationId = "operation-across-three-generations";
+		const first = new OperationLedger({
+			rootDir: dir,
+			instanceId: "reconcile-generation-1",
+			pid: 12_341,
+			processStartId: "generation-1-start",
+			now: () => now.value,
+			heartbeatIntervalMs: 0,
+		});
+		first.open({
+			operationId,
+			activeSessionId: "shared-active-session",
+			sessionId: "shared-session",
+			kind: "tool",
+			timeoutClass: "owned-tool-hard-cap",
+			ownershipStatus: "owned",
+		});
+		first.dispose();
+
+		now.value += 1_000;
+		const second = new OperationLedger({
+			rootDir: dir,
+			instanceId: "reconcile-generation-2",
+			pid: 12_342,
+			processStartId: "generation-2-start",
+			now: () => now.value,
+			heartbeatIntervalMs: 0,
+		});
+		const secondTracker = new OperationTracker(second, {
+			activeSessionId: "shared-active-session",
+			sessionId: "shared-session",
+			now: () => now.value,
+		});
+		expect(secondTracker.summary().operations).toMatchObject([
+			{
+				operationId,
+				status: "terminal",
+				phase: "uncertain",
+				outcome: "uncertain",
+				cleanupStatus: "cleanup_uncertain",
+			},
+		]);
+		second.dispose();
+
+		now.value += 1_000;
+		const third = new OperationLedger({
+			rootDir: dir,
+			instanceId: "reconcile-generation-3",
+			pid: 12_343,
+			processStartId: "generation-3-start",
+			now: () => now.value,
+			heartbeatIntervalMs: 0,
+		});
+		const thirdTracker = new OperationTracker(third, {
+			activeSessionId: "shared-active-session",
+			sessionId: "shared-session",
+			now: () => now.value,
+		});
+		expect(thirdTracker.summary().openOperationCount).toBe(0);
+
+		const snapshots = reliabilityMonitor.readOperationSnapshots(dir);
+		const reconciledTerminalRecords = snapshots.flatMap((snapshot) =>
+			snapshot.operations.filter(
+				(operation) => operation.operationId === operationId && operation.status === "terminal",
+			),
+		);
+		const report = buildOperationCalibrationReport(snapshots, { minimumCanarySamples: 100, now: now.value });
+		const group = report.groups.find((candidate) => candidate.key === "tool:owned-tool-hard-cap");
+		expect(reconciledTerminalRecords).toHaveLength(1);
+		expect(group).toMatchObject({
+			lifetimeTerminalCount: 1,
+			uncertainOutcomeCount: 1,
+			cleanupUncertainCount: 1,
+		});
+		third.dispose();
+	});
 });
 
 describe("a human deadline extension applies at most once", () => {
@@ -88,7 +215,7 @@ describe("a human deadline extension applies at most once", () => {
 				} catch {
 					break;
 				}
-				const result = ledger.extendDeadline(pending.operationId, pending.extensionMs, pending.source);
+				const result = ledger.extendDeadline(pending.operationId, pending.extensionMs);
 				if (result.status === "applied") applications.push(result.record.deadlineAt!);
 				try {
 					inbox.record(pending, result);
@@ -118,7 +245,7 @@ describe("a human deadline extension applies at most once", () => {
 		for (let sweep = 0; sweep < 5; sweep += 1) {
 			for (const pending of inbox.pending()) {
 				inbox.claim(pending);
-				const result = ledger.extendDeadline(pending.operationId, pending.extensionMs, pending.source);
+				const result = ledger.extendDeadline(pending.operationId, pending.extensionMs);
 				if (result.status === "applied") applications += 1;
 				inbox.record(pending, result);
 			}

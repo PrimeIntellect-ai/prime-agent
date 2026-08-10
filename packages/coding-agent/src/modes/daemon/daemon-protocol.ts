@@ -49,7 +49,7 @@ import type { SessionSummary } from "./daemon-session-list.js";
  */
 
 export const DAEMON_PROTOCOL_NAME = "prime-agent.daemon";
-export const DAEMON_PROTOCOL_VERSION = 7;
+export const DAEMON_PROTOCOL_VERSION = 8;
 export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 9 publishes persisted RLM spawn depth on passive session rows.
 // Revision 10 publishes persisted RLM spawn depth on all session catalog rows.
@@ -58,8 +58,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 negotiates the additive read-only operation-ledger reliability surface.
-export const DAEMON_SCHEMA_REVISION = 15;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-15-816309b1cd50";
+// Revision 16 makes create incompatible with clients that cannot carry project trust.
+export const DAEMON_SCHEMA_REVISION = 16;
+export const DAEMON_SCHEMA_ID = "protocol-8-schema-16-816309b1cd50";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -654,7 +655,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
-	create: LEGACY_DAEMON_COMMAND,
+	create: { minProtocol: 8 },
 	attach: LEGACY_DAEMON_COMMAND,
 	reattach: LEGACY_DAEMON_COMMAND,
 	detach: LEGACY_DAEMON_COMMAND,
