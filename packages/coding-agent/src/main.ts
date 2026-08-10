@@ -764,7 +764,7 @@ async function prepareRuntimeServices(options: {
 	];
 
 	const modelPatterns = config.models ?? settingsManager.getEnabledModels();
-	const scopedModels =
+	let scopedModels =
 		modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
 	const {
 		options: sessionOptions,
@@ -788,6 +788,21 @@ async function prepareRuntimeServices(options: {
 			});
 		} else {
 			authStorage.setRuntimeApiKey(effectiveSessionModel.provider, config.apiKey);
+			// The runtime key outranks a stored OAuth credential for the same
+			// provider, so rebuild the catalog without that credential's model
+			// modifications and re-resolve the already-selected models.
+			if (authStorage.get(effectiveSessionModel.provider)?.type === "oauth") {
+				modelRegistry.refresh();
+				if (modelPatterns && modelPatterns.length > 0) {
+					scopedModels = await resolveModelScope(modelPatterns, modelRegistry);
+				}
+				if (!options.sessionOptionsOverride?.model && sessionOptions.model) {
+					const rebuilt = modelRegistry.find(sessionOptions.model.provider, sessionOptions.model.id);
+					if (rebuilt) {
+						sessionOptions.model = rebuilt;
+					}
+				}
+			}
 		}
 	}
 

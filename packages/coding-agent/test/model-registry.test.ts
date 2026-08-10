@@ -1710,5 +1710,26 @@ describe("ModelRegistry", () => {
 				expect(model.api).toBe("openai-completions");
 			}
 		});
+
+		test("keeps xAI models on Chat Completions while a runtime API key outranks the OAuth credential", () => {
+			authStorage.set("xai", {
+				type: "oauth",
+				refresh: "refresh",
+				access: "access",
+				expires: Date.now() + 3600_000,
+			});
+			authStorage.setRuntimeApiKey("xai", "xai-runtime-key");
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			for (const model of getModelsForProvider(registry, "xai")) {
+				expect(model.api).toBe("openai-completions");
+			}
+
+			authStorage.removeRuntimeApiKey("xai");
+			registry.refresh();
+			for (const model of getModelsForProvider(registry, "xai")) {
+				expect(model.api).toBe("openai-responses");
+			}
+		});
 	});
 });

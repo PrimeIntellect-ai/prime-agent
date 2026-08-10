@@ -527,6 +527,11 @@ export class ModelRegistry {
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
 			const cred = this.authStorage.get(oauthProvider.id);
 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
+				// A runtime --api-key override outranks stored OAuth credentials,
+				// so keep the API-key model shapes while one is active.
+				if (this.authStorage.getAuthStatus(oauthProvider.id).source === "runtime") {
+					continue;
+				}
 				combined = oauthProvider.modifyModels(combined, cred);
 			}
 		}
