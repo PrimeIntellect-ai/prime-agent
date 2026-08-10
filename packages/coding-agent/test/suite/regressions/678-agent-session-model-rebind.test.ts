@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createHarness } from "./harness.js";
+import { createHarness } from "../harness.js";
 
 describe("agent session model rebinding", () => {
 	it("rebinds the live and scoped model objects from the refreshed registry", async () => {
