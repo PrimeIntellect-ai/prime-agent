@@ -4,6 +4,7 @@ import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentStatus } from "../../core/session-manager.js";
 import type { DaemonClientCapability, DaemonEventSequence, DaemonExtensionUIResponse } from "./daemon-protocol.js";
 import { formatSessionDisplayId, matchesSessionIdSuffix } from "./daemon-session-id.js";
+import type { OperationTracker } from "./operation-ledger.js";
 
 export interface DaemonSocketClient {
 	id: string;
@@ -50,6 +51,8 @@ export interface ActiveSessionState {
 		lastAttemptAt: string;
 		nextAttemptAt?: string;
 	};
+	/** Read-only runtime operation truth used by detached monitoring and negotiated clients. */
+	operationTracker?: OperationTracker;
 	/**
 	 * Client env (e.g. herdr pane identity), merged over process.env for this
 	 * session's pi.exec() subprocesses. Bound when the runtime is created (or

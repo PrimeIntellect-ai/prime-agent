@@ -57,8 +57,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 12 publishes idle-residency metadata on session summary rows.
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
-export const DAEMON_SCHEMA_REVISION = 14;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-14-816309b1cd50";
+// Revision 15 negotiates the additive read-only operation-ledger reliability surface.
+export const DAEMON_SCHEMA_REVISION = 15;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-15-816309b1cd50";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -76,7 +77,8 @@ export type DaemonClientCapability =
 	| "extension_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
-	| "client_owned_sessions";
+	| "client_owned_sessions"
+	| "operation_ledger_v1";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
 	status: DaemonPromptAdmissionCancellationStatus;
@@ -113,6 +115,7 @@ export const DAEMON_PROTOCOL_INFO: DaemonProtocolInfo = {
 export const DAEMON_DEFAULT_CLIENT_CAPABILITIES: readonly DaemonClientCapability[] = [
 	"attach_snapshot",
 	"event_sequence",
+	"operation_ledger_v1",
 ];
 
 export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapability[] = [
@@ -122,6 +125,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"slim_attach",
 	"chunked_snapshot",
 	"client_owned_sessions",
+	"operation_ledger_v1",
 ];
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -135,6 +139,16 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_admission",
 	"prompt_admission_cancellation",
 ];
+
+export function isOperationLedgerNegotiated(
+	clientCapabilities: readonly DaemonClientCapability[] | undefined,
+	serverCapabilities: readonly DaemonServerCapability[] | undefined,
+): boolean {
+	return (
+		clientCapabilities?.includes("operation_ledger_v1") === true &&
+		serverCapabilities?.includes("operation_ledger_v1") === true
+	);
+}
 
 export interface DaemonRuntimeIdentity {
 	buildId: string;

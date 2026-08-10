@@ -9,14 +9,14 @@ import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
+import type { OperationRecord } from "./operation-ledger.js";
 
 // Durable lifecycle; decides agents-view visibility. Only "live" is shown.
 // "draft" = no message sent yet (discarded on close); "archived" = ctrl+x'd,
 // reachable only via --resume <selector>.
 export type SessionLifecycle = "draft" | "live" | "archived";
 
-// Heuristic activity of a live session. Classification-in-flight counts as
-// "working" so the view never sees an unlabeled idle session.
+// Runtime activity of a live session. Advisory classification does not alter it.
 export type SessionActivity = "working" | "idle";
 export type SessionRosterStatus = "running" | "idle" | "inactive";
 
@@ -76,6 +76,13 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	/** Negotiated reliability surface. Runtime truth is separate from advisory classification. */
+	reliability?: {
+		classifier?: ActiveSessionState["summaryClassifierState"];
+		openOperationCount: number;
+		lastMeaningfulProgressAt?: string;
+		openOperations: OperationRecord[];
+	};
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
@@ -202,6 +209,7 @@ export function summaryForActiveSession(
 	const meaningfulMessageAt = latestMessageActivityAt(session.messages);
 	const modified =
 		meaningfulMessageAt ?? savedSession?.modified.toISOString() ?? session.sessionManager.getHeader?.()?.timestamp;
+	const operationSummary = activeSession.operationTracker?.summary();
 
 	return {
 		id: activeSession.activeSessionId,
@@ -260,6 +268,16 @@ export function summaryForActiveSession(
 		// that is active again.
 		summary: activeSession.summaryState?.summary,
 		...(isSummaryCurrent(activeSession) ? { taskState: activeSession.summaryState?.taskState } : {}),
+		...(operationSummary || activeSession.summaryClassifierState
+			? {
+					reliability: {
+						classifier: activeSession.summaryClassifierState,
+						openOperationCount: operationSummary?.openOperationCount ?? 0,
+						lastMeaningfulProgressAt: operationSummary?.lastMeaningfulProgressAt,
+						openOperations: operationSummary?.operations.filter((operation) => operation.status === "open") ?? [],
+					},
+				}
+			: {}),
 	};
 }
 

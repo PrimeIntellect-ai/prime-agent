@@ -8,6 +8,7 @@ import {
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_COMMAND_COMPATIBILITY,
+	DAEMON_DEFAULT_CLIENT_CAPABILITIES,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_OUTBOUND_COMPATIBILITY,
 	DAEMON_PROTOCOL_INFO,
@@ -19,6 +20,7 @@ import {
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	isOperationLedgerNegotiated,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
 
@@ -74,6 +76,18 @@ describe("daemon protocol helpers", () => {
 			capability: "delete_rlm_subagent",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("delete_rlm_subagent");
+	});
+
+	it("negotiates operation-ledger fields without breaking either legacy direction", () => {
+		expect(DAEMON_DEFAULT_CLIENT_CAPABILITIES).toContain("operation_ledger_v1");
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("operation_ledger_v1");
+		expect(isOperationLedgerNegotiated(DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES)).toBe(
+			true,
+		);
+		// Old client → new daemon: additive fields stay unnegotiated.
+		expect(isOperationLedgerNegotiated(["attach_snapshot"], DAEMON_DEFAULT_SERVER_CAPABILITIES)).toBe(false);
+		// New client → old daemon: absence is explicit and the client falls back to legacy status.
+		expect(isOperationLedgerNegotiated(DAEMON_DEFAULT_CLIENT_CAPABILITIES, ["attach_snapshot"])).toBe(false);
 	});
 
 	it("capability-gates the optional model catalog surface", () => {

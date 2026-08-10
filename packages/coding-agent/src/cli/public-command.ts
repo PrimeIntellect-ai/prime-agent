@@ -1,5 +1,7 @@
+import { join } from "node:path";
 import chalk from "chalk";
-import { APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
+import { APP_NAME, getAgentDir, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
+import { NotificationOutbox, runReliabilityMonitorOnce } from "../modes/daemon/reliability-monitor.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
 import {
@@ -105,6 +107,8 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runStatus(args.slice(1));
 		case "doctor":
 			return runDoctor(args.slice(1));
+		case "monitor":
+			return runMonitor(args.slice(1));
 		case "shutdown":
 			return runShutdown(args.slice(1));
 		case "package":
@@ -255,6 +259,37 @@ async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	} else {
 		await runPs(options.has("--json"));
 	}
+	return HANDLED;
+}
+
+async function runMonitor(args: string[]): Promise<PublicCommandResult> {
+	const json = args.includes("--json");
+	const acknowledgeIndex = args.indexOf("--ack");
+	const acknowledgementId = acknowledgeIndex >= 0 ? args[acknowledgeIndex + 1] : undefined;
+	const recognized = new Set(["--json", "--ack", acknowledgementId]);
+	if (
+		args.some((arg) => !recognized.has(arg)) ||
+		(acknowledgeIndex >= 0 && (!acknowledgementId || acknowledgementId.startsWith("-")))
+	) {
+		return fail(`Usage: ${APP_NAME} monitor [--json] [--ack <notification-id>]`);
+	}
+	const rootDir = join(getAgentDir(), "reliability");
+	const outboxPath = join(rootDir, "notification-outbox.json");
+	if (acknowledgementId) {
+		const record = new NotificationOutbox(outboxPath).acknowledge(acknowledgementId);
+		console.log(json ? JSON.stringify(record, null, 2) : `Acknowledged Prime Agent alert ${record.id}.`);
+		return HANDLED;
+	}
+	const result = await runReliabilityMonitorOnce({
+		rootDir,
+		outboxPath,
+		webhookUrl: process.env.PRIME_AGENT_MONITOR_WEBHOOK_URL,
+	});
+	console.log(
+		json
+			? JSON.stringify(result, null, 2)
+			: `Prime Agent monitor: ${result.alerts.length} alert(s), ${result.pendingNotifications} pending notification(s).`,
+	);
 	return HANDLED;
 }
 

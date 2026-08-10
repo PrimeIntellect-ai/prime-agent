@@ -201,6 +201,7 @@ import {
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
+import { OperationLedger, OperationTracker } from "./operation-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
 	createSnapshotTranscriptChunks,
@@ -534,6 +535,7 @@ export class AgentDaemon {
 		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
+	private readonly operationLedger: OperationLedger;
 
 	constructor(
 		private readonly socketPath: string,
@@ -543,6 +545,10 @@ export class AgentDaemon {
 			throw new Error("Daemon config is missing agentDir");
 		}
 		this.agentDir = options.defaultSessionConfig.agentDir;
+		this.operationLedger = new OperationLedger({
+			rootDir: join(this.agentDir, "reliability"),
+			role: options.worker ? "worker" : "daemon",
+		});
 		this.cronStore = options.worker
 			? AgentCronJobStore.forSessionArtifacts()
 			: new AgentCronJobStore(getCronJobsPath(this.agentDir));
@@ -1223,6 +1229,7 @@ export class AgentDaemon {
 					? desiredActiveSessionId
 					: createActiveSessionId(this.sessions),
 			runtime,
+			operationTracker: undefined,
 			clients: new Set(),
 			pendingAttaches: 0,
 			extensionUiRequests: new Map(),
@@ -1230,6 +1237,10 @@ export class AgentDaemon {
 			lastEventSequence: 0,
 			clientEnv,
 		};
+		state.operationTracker = new OperationTracker(this.operationLedger, {
+			activeSessionId: state.activeSessionId,
+			sessionId: runtime.session.sessionId,
+		});
 		this.sessions.set(state.activeSessionId, state);
 		this.bindingSessions.add(state.activeSessionId);
 		let completeBinding!: () => void;
@@ -1260,6 +1271,7 @@ export class AgentDaemon {
 			onStateBound?.(state);
 		} catch (error) {
 			state.unsubscribe?.();
+			state.operationTracker?.closeAll("failed", "runtime binding failed");
 			this.sessions.delete(state.activeSessionId);
 			await runtime.dispose().catch(() => undefined);
 			throw error;
@@ -6088,6 +6100,10 @@ export class AgentDaemon {
 		for (const client of state.clients) {
 			abortClientSnapshotStreaming(client, state.activeSessionId);
 		}
+		state.operationTracker?.closeAll(
+			disposeError ? "uncertain" : reason === "completed" ? "completed" : "cancelled",
+			disposeError ? `session ${reason}; runtime disposal uncertain` : `session ${reason}`,
+		);
 		this.broadcastToSession(state, { type: "session_closed", activeSessionId: state.activeSessionId, reason });
 		for (const client of state.clients) {
 			client.attachedActiveSessionIds.delete(state.activeSessionId);
@@ -6133,6 +6149,9 @@ export class AgentDaemon {
 	private broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void {
 		if (message.type === "session_event") {
 			const eventType = message.event.type;
+			state.operationTracker?.handleSessionEvent(
+				message.event as unknown as { type: string; [key: string]: unknown },
+			);
 			// A finished turn/compaction is the cue to refresh status.
 			if (eventType === "turn_end" || eventType === "compaction_end") {
 				this.summarizer.notifyActivity(state);
@@ -6651,6 +6670,7 @@ export class AgentDaemon {
 			this.server.close(() => resolveClose());
 		});
 		this.cleanupSocketPath();
+		this.operationLedger.dispose();
 		process.exit(exitCode);
 	}
 }

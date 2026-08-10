@@ -86,6 +86,12 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["--fix   Remove stale sockets and stop idle orphaned services", "--json  Print JSON"],
 	},
 	{
+		path: ["monitor"],
+		usage: "monitor [--json] [--ack <notification-id>]",
+		summary: "Check detached work and retry durable warning delivery",
+		options: ["--json  Print JSON", "--ack <notification-id>  Acknowledge an alert"],
+	},
+	{
 		path: ["shutdown"],
 		usage: "shutdown [--force] [--json]",
 		summary: "Stop every agent and background service",
