@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getProcessStartId } from "../../core/session-lease.js";
+import { compareProcessStartIds, getProcessStartId } from "../../core/session-lease.js";
 import { OperationExtensionInbox } from "./operation-extension-inbox.js";
 import type { OperationLedgerSnapshot } from "./operation-ledger.js";
 
@@ -37,7 +37,11 @@ function defaultProcessAlive(snapshot: OperationLedgerSnapshot): boolean {
 	} catch {
 		return false;
 	}
-	return snapshot.processStartId === undefined || getProcessStartId(snapshot.pid) === snapshot.processStartId;
+	// Only a positive "mismatch" proves PID reuse. A cross-format comparison — a legacy `ps:` token
+	// against the current `ps2:` rendering — is unverifiable, not a mismatch, and must not be reported
+	// as a missing process: doing so both raises a false alert and suppresses the snapshot's real
+	// alerts below. This matches OperationLedger's own liveness check.
+	return compareProcessStartIds(snapshot.processStartId, getProcessStartId(snapshot.pid)) !== "mismatch";
 }
 
 export function evaluateReliabilitySnapshot(
@@ -49,20 +53,20 @@ export function evaluateReliabilitySnapshot(
 	const processAlive = options.processAlive ?? defaultProcessAlive;
 	const detectedAt = new Date(now).toISOString();
 	if (snapshot.processState === "closed") return [];
-	if (!processAlive(snapshot)) {
-		return [
-			{
-				alertKey: `process_missing:${snapshot.instanceId}`,
-				kind: "process_missing",
-				severity: "warning",
-				message: `Prime Agent ${snapshot.role} process ${snapshot.pid} is missing while its reliability ledger remains.`,
-				instanceId: snapshot.instanceId,
-				detectedAt,
-			},
-		];
-	}
-
 	const alerts: ReliabilityAlert[] = [];
+	// A missing process is reported alongside the snapshot's other alerts, never instead of them.
+	// Short-circuiting here meant one liveness misjudgement silently discarded every genuine deadline
+	// and silence alert for that daemon — the alerts most worth having when something has gone wrong.
+	if (!processAlive(snapshot)) {
+		alerts.push({
+			alertKey: `process_missing:${snapshot.instanceId}`,
+			kind: "process_missing",
+			severity: "warning",
+			message: `Prime Agent ${snapshot.role} process ${snapshot.pid} is missing while its reliability ledger remains.`,
+			instanceId: snapshot.instanceId,
+			detectedAt,
+		});
+	}
 	const heartbeatAgeMs = now - Date.parse(snapshot.heartbeatAt);
 	if (Number.isFinite(heartbeatAgeMs) && heartbeatAgeMs >= threshold) {
 		alerts.push({
@@ -238,7 +242,19 @@ export class NotificationOutbox {
 		}
 	}
 
+	// The launchd monitor and an interactive `prime-agent monitor --ack` run against the same file by
+	// design, so writing our constructor-time snapshot back wholesale would silently drop whichever
+	// side wrote last — losing an acknowledgement, or worse, a real alert. The write itself is atomic,
+	// which prevents a torn file but not a lost update. Re-read and merge per record immediately
+	// before writing: newer updatedAt wins, and records only the other writer knows about survive.
 	private persist(): void {
+		const merged = new Map<string, NotificationRecord>();
+		for (const record of this.read()) merged.set(record.id, record);
+		for (const record of this.records) {
+			const existing = merged.get(record.id);
+			if (!existing || record.updatedAt >= existing.updatedAt) merged.set(record.id, record);
+		}
+		this.records = [...merged.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 		writeJsonAtomically(this.path, { schemaVersion: 1, records: this.records } satisfies NotificationOutboxFile);
 	}
 }
@@ -340,17 +356,19 @@ export async function runReliabilityMonitorOnce(options: {
 	);
 	const extensionInbox = new OperationExtensionInbox(options.rootDir, () => now);
 	let settledExtensionRequests = 0;
-	// Settling stale extension requests is best-effort; alert delivery below is the monitor's
-	// actual contract and must still run when the inbox cannot be written.
-	try {
-		for (const request of extensionInbox.pending()) {
-			if (openOperationIds.has(request.operationId)) continue;
-			if (now - Date.parse(request.requestedAt) < DEFAULT_MONITOR_INTERVAL_MS) continue;
+	// Settling stale extension requests is best-effort; alert delivery below is the monitor's actual
+	// contract and must still run when the inbox cannot be written. Claim before rejecting for the
+	// same exactly-once reason the daemon does, so a failed receipt cannot resurrect the request.
+	for (const request of extensionInbox.pending()) {
+		if (openOperationIds.has(request.operationId)) continue;
+		if (now - Date.parse(request.requestedAt) < DEFAULT_MONITOR_INTERVAL_MS) continue;
+		try {
+			extensionInbox.claim(request);
 			extensionInbox.record(request, { status: "rejected", reason: "not_open" });
 			settledExtensionRequests += 1;
+		} catch {
+			break;
 		}
-	} catch {
-		settledExtensionRequests = 0;
 	}
 	const alerts = snapshots.flatMap((snapshot) =>
 		evaluateReliabilitySnapshot(snapshot, { now: options.now, processAlive: options.processAlive }),

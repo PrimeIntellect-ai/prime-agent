@@ -657,18 +657,26 @@ export class AgentDaemon {
 	private sweepOperationDeadlines(): void {
 		// An unusable reliability directory must degrade the extension lane only; it must never stop
 		// the deadline sweep, which is the watchdog the rest of the mission depends on.
-		try {
-			for (const request of this.operationExtensionInbox.pending()) {
-				const result = this.operationLedger.extendDeadline(
-					request.operationId,
-					request.extensionMs,
-					request.source,
+		for (const request of this.operationExtensionInbox.pending()) {
+			// Claim before applying. If the claim cannot be persisted we grant nothing: applying
+			// without a durable record would re-apply the same request on every sweep, silently
+			// multiplying one human extension into several.
+			try {
+				this.operationExtensionInbox.claim(request);
+			} catch (error) {
+				this.log(
+					`Operation extension inbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
 				);
-				if (result.status === "rejected" && result.reason === "not_open") continue;
-				this.operationExtensionInbox.record(request, result);
+				break;
 			}
-		} catch (error) {
-			this.log(`Operation extension inbox unavailable: ${error instanceof Error ? error.message : String(error)}`);
+			const result = this.operationLedger.extendDeadline(request.operationId, request.extensionMs, request.source);
+			try {
+				this.operationExtensionInbox.record(request, result);
+			} catch (error) {
+				this.log(
+					`Operation extension receipt unwritable: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 		const allowOwnedCancellation = process.env.PRIME_AGENT_ENABLE_OWNED_OPERATION_DEADLINES === "1";
 		for (const state of this.sessions.values()) {

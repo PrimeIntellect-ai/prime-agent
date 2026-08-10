@@ -25,7 +25,14 @@ export interface OperationExtensionReceipt {
 	recordedAt: string;
 }
 
-export type OperationExtensionEvent = OperationExtensionRequest | OperationExtensionReceipt;
+export interface OperationExtensionClaim {
+	type: "claim";
+	schemaVersion: typeof OPERATION_EXTENSION_SCHEMA_VERSION;
+	requestId: string;
+	claimedAt: string;
+}
+
+export type OperationExtensionEvent = OperationExtensionRequest | OperationExtensionReceipt | OperationExtensionClaim;
 
 export class OperationExtensionInbox {
 	readonly path: string;
@@ -52,16 +59,35 @@ export class OperationExtensionInbox {
 		return request;
 	}
 
+	// A request is no longer pending once it has been claimed, not merely once it has a receipt.
+	// Claiming is what makes application exactly-once: if the receipt write later fails, the claim
+	// still suppresses the request, so a sweep can never re-apply the same extension.
 	pending(): OperationExtensionRequest[] {
 		const events = this.events();
 		const settled = new Set(
 			events
-				.filter((event): event is OperationExtensionReceipt => event.type === "receipt")
+				.filter(
+					(event): event is OperationExtensionReceipt | OperationExtensionClaim =>
+						event.type === "receipt" || event.type === "claim",
+				)
 				.map((event) => event.requestId),
 		);
 		return events.filter(
 			(event): event is OperationExtensionRequest => event.type === "request" && !settled.has(event.requestId),
 		);
+	}
+
+	// Durably reserve a request before its extension is applied. Throws if the claim cannot be
+	// persisted, so an unwritable inbox grants zero extensions rather than one per sweep.
+	claim(request: OperationExtensionRequest): OperationExtensionClaim {
+		const claim: OperationExtensionClaim = {
+			type: "claim",
+			schemaVersion: OPERATION_EXTENSION_SCHEMA_VERSION,
+			requestId: request.requestId,
+			claimedAt: new Date(this.now()).toISOString(),
+		};
+		this.append(claim);
+		return claim;
 	}
 
 	record(request: OperationExtensionRequest, result: DeadlineExtensionResult): OperationExtensionReceipt {
@@ -91,7 +117,7 @@ export class OperationExtensionInbox {
 				const event = JSON.parse(line) as OperationExtensionEvent;
 				if (
 					event.schemaVersion === OPERATION_EXTENSION_SCHEMA_VERSION &&
-					(event.type === "request" || event.type === "receipt")
+					(event.type === "request" || event.type === "receipt" || event.type === "claim")
 				) {
 					events.push(event);
 				}

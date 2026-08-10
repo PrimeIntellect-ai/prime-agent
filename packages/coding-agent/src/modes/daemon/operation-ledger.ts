@@ -56,6 +56,15 @@ export interface OperationRecord {
 	detail?: string;
 }
 
+// Monotonic per-group totals. Terminal records are trimmed to a bounded window, so any count derived
+// from `operations` forgets old evidence. Calibration must not: an uncertain outcome that aged out of
+// the window still happened, and hard enforcement eligibility has to reckon with it.
+export interface OperationLifetimeCounts {
+	terminalCount: number;
+	uncertainOutcomeCount: number;
+	cleanupUncertainCount: number;
+}
+
 export interface OperationLedgerSnapshot {
 	schemaVersion: typeof OPERATION_LEDGER_SCHEMA_VERSION;
 	instanceId: string;
@@ -68,6 +77,11 @@ export interface OperationLedgerSnapshot {
 	startedAt: string;
 	heartbeatAt: string;
 	operations: OperationRecord[];
+	lifetimeByGroup?: Record<string, OperationLifetimeCounts>;
+}
+
+export function operationGroupKey(record: Pick<OperationRecord, "kind" | "timeoutClass">): string {
+	return `${record.kind}:${record.timeoutClass ?? "unclassified"}`;
 }
 
 interface OperationLedgerOptions {
@@ -295,6 +309,7 @@ export class OperationLedger {
 			detail: input.detail ?? previous.detail,
 		};
 		this.records.set(operationId, record);
+		this.recordLifetimeTerminal(record);
 		this.trimTerminalRecords();
 		this.commit("close", record);
 		return { ...record };
@@ -421,6 +436,18 @@ export class OperationLedger {
 	private markPersistenceUnavailable(error: unknown): void {
 		this.snapshotState.persistenceState = "memory_only";
 		this.snapshotState.persistenceError = error instanceof Error ? error.message : String(error);
+	}
+
+	// Deliberately independent of the retained-record window: these totals only ever increase.
+	private recordLifetimeTerminal(record: OperationRecord): void {
+		this.snapshotState.lifetimeByGroup ??= {};
+		const lifetime = this.snapshotState.lifetimeByGroup;
+		const key = operationGroupKey(record);
+		lifetime[key] ??= { terminalCount: 0, uncertainOutcomeCount: 0, cleanupUncertainCount: 0 };
+		const counts = lifetime[key];
+		counts.terminalCount += 1;
+		if (record.outcome === "uncertain") counts.uncertainOutcomeCount += 1;
+		if (record.cleanupStatus === "cleanup_uncertain") counts.cleanupUncertainCount += 1;
 	}
 
 	private trimTerminalRecords(): void {
@@ -574,10 +601,15 @@ export class OperationTracker {
 		}
 	}
 
+	// An operation still open when its session closes did not complete, whatever the session's own
+	// reason was. Promoting it would fabricate exactly the false-completion this ledger exists to
+	// prevent, and would feed calibration a clean sample that never happened. `completed` is
+	// reachable only through the operation's own end event.
 	closeAll(outcome: OperationOutcome = "cancelled", detail = "session closed"): void {
-		const phase = outcome === "completed" ? "completed" : outcome;
+		const effective: OperationOutcome = outcome === "completed" ? "uncertain" : outcome;
+		const resolvedDetail = effective === outcome ? detail : `${detail}; operation still open at session close`;
 		for (const operation of this.openOperations()) {
-			this.ledger.close(operation.operationId, { phase, outcome, detail });
+			this.ledger.close(operation.operationId, { phase: effective, outcome: effective, detail: resolvedDetail });
 		}
 		this.openByKey.clear();
 	}
