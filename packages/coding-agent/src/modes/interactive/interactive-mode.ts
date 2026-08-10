@@ -2821,6 +2821,9 @@ export class InteractiveMode {
 		this.pendingMessagesContainer.clear();
 		this.queuedMessagesContainer.clear();
 		this.connectionQueue = { steering: [], followUp: [] };
+		// The selection and its stashed draft belong to the previous session;
+		// every editor draft is cleared below, so discard rather than restore.
+		this.queueSelection?.reset();
 		this.featureHintSuppressedByQueue = false;
 		if (options?.clearPromptStash) {
 			this.promptStash = undefined;
@@ -7034,6 +7037,18 @@ export class InteractiveMode {
 			}
 			const editorUntouched = this.editor.getText() === editorTextBefore;
 			if (status === "applied") {
+				// A daemon's queue event can arrive after the response; swap the
+				// local mirror now so an immediate browse sees the new text. The
+				// later event resyncs to the same state.
+				const lane = this.connectionQueue[selected.lane];
+				if (lane[selected.index] === selected.text) {
+					if (!trimmed) lane.splice(selected.index, 1);
+					else if (targetLane === selected.lane) lane[selected.index] = trimmed;
+					else {
+						lane.splice(selected.index, 1);
+						this.connectionQueue[targetLane].push(trimmed);
+					}
+				}
 				if (trimmed) this.editor.addToHistory?.(trimmed);
 				const draft = this.queueSelection.reset();
 				if (editorUntouched) this.setEditorTextFromQueueSelection(draft);
