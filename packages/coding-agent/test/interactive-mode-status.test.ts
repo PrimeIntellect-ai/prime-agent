@@ -49,6 +49,7 @@ import type { AuthSelectorProvider } from "../src/modes/interactive/components/o
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { formatSplashCwd, InteractiveMode, truncatePathMiddle } from "../src/modes/interactive/interactive-mode.js";
 import { ClientPromptStashStore, type PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
+import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 function renderLastLine(container: Container, width = 120): string {
@@ -1125,8 +1126,11 @@ describe("InteractiveMode pending bash components", () => {
 
 		const editorStub = { clearHistory: vi.fn(), setText: vi.fn() };
 		const endFeatureHintRun = vi.fn();
+		const queueSelection = new QueueSelection();
+		queueSelection.move({ steering: ["s1"], followUp: [] }, "draft", -1);
 		const fakeThis = {
 			endFeatureHintRun,
+			queueSelection,
 			chatContainer: new Container(),
 			shortcutGuideContainer: new Container(),
 			pendingMessagesContainer: new Container(),
@@ -1159,6 +1163,10 @@ describe("InteractiveMode pending bash components", () => {
 		expect(loader.intervalId).toBeNull();
 		expect(endFeatureHintRun).toHaveBeenCalledOnce();
 		expect((fakeThis as unknown as { activeBashComponent: unknown }).activeBashComponent).toBeUndefined();
+		// Queue browsing is session-scoped: Enter in the next session must be a
+		// fresh prompt, and the previous session's stashed draft is discarded.
+		expect(queueSelection.isBrowsing).toBe(false);
+		expect(queueSelection.reset()).toBe("");
 	});
 });
 

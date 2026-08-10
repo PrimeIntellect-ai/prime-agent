@@ -178,6 +178,21 @@ describe("interactive queued-message editing", () => {
 		expect(harness.connectionQueue).toEqual({ steering: ["s1", "s2"], followUp: [] });
 	});
 
+	it("does not double-apply a delete when the queue event lands before the response", async () => {
+		const harness = createHarness({ steering: [], followUp: ["dup", "dup"] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
+			// The server's session_action_update arrives before the response
+			// resolves: the mirror is replaced and the selection retargets to
+			// the remaining same-text item.
+			harness.connectionQueue = { steering: [], followUp: ["dup"] };
+			harness.queueSelection.sync(harness.connectionQueue);
+			return "applied";
+		});
+		harness.browseQueueSelection(-1); // dup at followUp index 1
+		await harness.applyQueueSelection("   ", "followUp");
+		expect(harness.connectionQueue).toEqual({ steering: [], followUp: ["dup"] });
+	});
+
 	it("moves the item across lanes in the local mirror on a lane-changing replace", async () => {
 		const harness = createHarness({ steering: ["s1"], followUp: [] });
 		harness.browseQueueSelection(-1); // s1
@@ -206,51 +221,6 @@ describe("interactive queued-message editing", () => {
 		expect(harness.collectQueueReplaceImages("[image #1] and again [image #1]")).toEqual([
 			{ type: "image", data: "a", mimeType: "image/png" },
 		]);
-	});
-});
-
-describe("session switches reset queue browsing", () => {
-	it("clears the selection and stashed draft when session render state resets", () => {
-		const harness = createHarness({ steering: ["s1"], followUp: [] });
-		harness.editor.setText("draft");
-		harness.browseQueueSelection(-1);
-		expect(harness.queueSelection.isBrowsing).toBe(true);
-
-		const editorStub = { clearHistory: vi.fn(), setText: vi.fn(), getText: () => "" };
-		const fakeThis = {
-			queueSelection: harness.queueSelection,
-			connectionQueue: harness.connectionQueue,
-			endFeatureHintRun: vi.fn(),
-			chatContainer: { clear: vi.fn() },
-			shortcutGuideContainer: { clear: vi.fn() },
-			pendingMessagesContainer: { clear: vi.fn() },
-			queuedMessagesContainer: { clear: vi.fn() },
-			pastedImages: new Map(),
-			liveImageMarkerIds: () => new Set(),
-			defaultEditor: editorStub,
-			editor: editorStub,
-			streamingComponent: undefined,
-			streamingMessage: undefined,
-			activeBashComponent: undefined,
-			pendingBashComponents: [],
-			activityTracker: { reset: vi.fn() },
-			contextUsageTokenBaseline: 0,
-			resetPendingToolState: vi.fn(),
-			agentRunFileChanges: new Map(),
-			renderRecap: vi.fn(),
-			ipythonToolComponents: new Map(),
-			lateIpythonSentAgentMessages: new Map(),
-			resetSubagentSummary: vi.fn(),
-			setGoalAnnouncementBaseline: vi.fn(),
-			syncGoalTray: vi.fn(),
-			getGoalState: () => undefined,
-		};
-		(proto.resetCurrentSessionRenderState as (this: unknown) => void).call(fakeThis);
-
-		// The next Enter in the new session must be a fresh prompt, never a
-		// mutation addressed at the previous session's queue.
-		expect(harness.queueSelection.isBrowsing).toBe(false);
-		expect(harness.queueSelection.reset()).toBe("");
 	});
 });
 

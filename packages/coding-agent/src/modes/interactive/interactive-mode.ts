@@ -2823,7 +2823,7 @@ export class InteractiveMode {
 		this.connectionQueue = { steering: [], followUp: [] };
 		// The selection and its stashed draft belong to the previous session;
 		// every editor draft is cleared below, so discard rather than restore.
-		this.queueSelection?.reset();
+		this.queueSelection.reset();
 		this.featureHintSuppressedByQueue = false;
 		if (options?.clearPromptStash) {
 			this.promptStash = undefined;
@@ -6977,17 +6977,24 @@ export class InteractiveMode {
 		void this.enqueueQueueMutation(async () => {
 			const selected = this.queueSelection.selected;
 			if (!selected) return;
+			const queueBefore = this.connectionQueue;
 			const status = await this.agentConnection.mutateQueuedMessage(selected.lane, selected.index, selected.text, {
 				type: "move",
 				direction,
 			});
 			if (status === "applied") {
-				// A daemon's queue event can arrive after the response; swap the
-				// local mirror now so a queued follow-up move addresses the new
-				// index. The later event resyncs to the same state.
+				// The queue event for this mutation can land before or after the
+				// response. Patch the mirror only when no event has replaced it
+				// meanwhile (events always assign a fresh object); patching an
+				// already-updated mirror would apply the mutation twice.
 				const lane = this.connectionQueue[selected.lane];
 				const target = selected.index + direction;
-				if (lane[selected.index] === selected.text && target >= 0 && target < lane.length) {
+				if (
+					this.connectionQueue === queueBefore &&
+					lane[selected.index] === selected.text &&
+					target >= 0 &&
+					target < lane.length
+				) {
 					[lane[selected.index], lane[target]] = [lane[target] as string, selected.text];
 					this.queueSelection.sync(this.connectionQueue);
 					this.updatePendingMessagesDisplay();
@@ -7022,6 +7029,7 @@ export class InteractiveMode {
 						} as const);
 			// Only write the editor back if the user has not typed meanwhile.
 			const editorTextBefore = this.editor.getText();
+			const queueBefore = this.connectionQueue;
 			let status: AgentConnectionQueuedMessageMutationStatus;
 			try {
 				status = await this.agentConnection.mutateQueuedMessage(
@@ -7037,11 +7045,10 @@ export class InteractiveMode {
 			}
 			const editorUntouched = this.editor.getText() === editorTextBefore;
 			if (status === "applied") {
-				// A daemon's queue event can arrive after the response; swap the
-				// local mirror now so an immediate browse sees the new text. The
-				// later event resyncs to the same state.
+				// Same optimistic patch as moveQueueSelection, and the same guard:
+				// skip when a queue event already replaced the mirror.
 				const lane = this.connectionQueue[selected.lane];
-				if (lane[selected.index] === selected.text) {
+				if (this.connectionQueue === queueBefore && lane[selected.index] === selected.text) {
 					if (!trimmed) lane.splice(selected.index, 1);
 					else if (targetLane === selected.lane) lane[selected.index] = trimmed;
 					else {
