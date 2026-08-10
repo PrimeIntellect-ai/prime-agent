@@ -632,6 +632,22 @@ export interface TurnExecutionPolicy {
 	completionIncludesRetryChain: boolean;
 }
 
+/**
+ * Whether two catalog entries for the same logical model differ in the fields
+ * that shape provider requests (API rail, endpoint, compat, thinking levels,
+ * headers). Used to decide if a live session model must be rebound after the
+ * registry catalog is rebuilt.
+ */
+function modelRequestShapeChanged(a: Model<any>, b: Model<any>): boolean {
+	return (
+		a.api !== b.api ||
+		a.baseUrl !== b.baseUrl ||
+		JSON.stringify(a.compat ?? null) !== JSON.stringify(b.compat ?? null) ||
+		JSON.stringify(a.thinkingLevelMap ?? null) !== JSON.stringify(b.thinkingLevelMap ?? null) ||
+		JSON.stringify(a.headers ?? null) !== JSON.stringify(b.headers ?? null)
+	);
+}
+
 function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecutionPolicy): boolean {
 	return (
 		left.preparation.initialRefineBarrier === right.preparation.initialRefineBarrier &&
@@ -4250,11 +4266,13 @@ export class AgentSession {
 	 * logout switching a provider between API rails). Keeps the same logical
 	 * model selection, so no session history or settings are touched beyond
 	 * re-clamping the thinking level for the rebound model's capabilities.
+	 * Models are only swapped when their request shape actually changed, so
+	 * routine catalog refreshes stay side-effect free.
 	 */
 	rebindModelsFromRegistry(): void {
 		this._scopedModels = this._scopedModels.map((scoped) => {
 			const rebound = this._modelRegistry.find(scoped.model.provider, scoped.model.id);
-			return rebound && rebound !== scoped.model ? { ...scoped, model: rebound } : scoped;
+			return rebound && modelRequestShapeChanged(scoped.model, rebound) ? { ...scoped, model: rebound } : scoped;
 		});
 
 		const current = this.agent.state.model;
@@ -4262,7 +4280,7 @@ export class AgentSession {
 			return;
 		}
 		const rebound = this._modelRegistry.find(current.provider, current.id);
-		if (!rebound || rebound === current) {
+		if (!rebound || !modelRequestShapeChanged(current, rebound)) {
 			return;
 		}
 		this.agent.state.model = rebound;
@@ -10192,6 +10210,7 @@ export class AgentSession {
 				marked = this._modelRegistry.markProviderAuthSourceStale(token) || marked;
 			}
 			if (marked) {
+				this._refreshCatalogAfterAuthStale();
 				this._emit({
 					type: "auth_stale",
 					provider: message.provider,
@@ -10202,9 +10221,21 @@ export class AgentSession {
 		}
 		const marked = this._modelRegistry.markProviderAuthStale(message.provider);
 		if (marked) {
+			this._refreshCatalogAfterAuthStale();
 			this._emit({ type: "auth_stale", provider: message.provider });
 		}
 		return marked;
+	}
+
+	/**
+	 * A stale credential can change the active auth source (e.g. stored OAuth
+	 * falling back to an environment API key), which can reshape provider
+	 * models. Rebuild the catalog and rebind the live models so the next
+	 * request uses the shapes that match the auth source it will resolve.
+	 */
+	private _refreshCatalogAfterAuthStale(): void {
+		this._modelRegistry.refresh();
+		this.rebindModelsFromRegistry();
 	}
 
 	private _markProviderAuthStaleForRetryFailure(

@@ -2723,6 +2723,9 @@ export class InteractiveMode {
 		if (!marked) {
 			this.modelRegistry.markProviderAuthStale(event.provider);
 		}
+		// The auth source change can reshape provider models, so refetch the
+		// catalog (the session rebinds its live models during that refresh).
+		void this.refreshConnectionModelsAfterAuthChange();
 		this.footer.invalidate();
 		this.updateEditorBorderColor();
 	}

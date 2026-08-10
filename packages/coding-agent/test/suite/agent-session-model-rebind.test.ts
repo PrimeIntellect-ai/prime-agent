@@ -44,16 +44,13 @@ describe("agent session model rebinding", () => {
 		}
 	});
 
-	it("keeps the same logical selection when the catalog is unchanged", async () => {
+	it("keeps the same model object when the catalog shape is unchanged", async () => {
 		const harness = await createHarness();
 		try {
 			const { session } = harness;
 			const original = session.model;
 			session.rebindModelsFromRegistry();
-			expect(session.model?.provider).toBe(original!.provider);
-			expect(session.model?.id).toBe(original!.id);
-			expect(session.model?.baseUrl).toBe(original!.baseUrl);
-			expect(session.model?.api).toBe(original!.api);
+			expect(session.model).toBe(original);
 		} finally {
 			harness.cleanup();
 		}

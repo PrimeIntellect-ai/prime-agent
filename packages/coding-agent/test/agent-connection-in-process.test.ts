@@ -104,6 +104,7 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 		modelRegistry: {
 			refreshModelCatalog: async () => ({ models: model ? [model] : [], configuredProviders: ["openai"] }),
 		},
+		rebindModelsFromRegistry: () => {},
 		scopedModels: [],
 		getActiveToolNames: () => ["ipython"],
 		getContextUsage: () => undefined,

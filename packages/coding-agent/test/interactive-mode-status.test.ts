@@ -2784,6 +2784,7 @@ function createFakeConnectionSession(commandName: string): AgentSessionRuntime["
 			getAgentsFiles: () => ({ agentsFiles: [] }),
 		},
 		modelRegistry: { refreshModelCatalog: async () => ({ models: [], configuredProviders: [] }) },
+		rebindModelsFromRegistry: () => {},
 		sessionManager: {
 			getCwd: () => "/tmp/project",
 			getSessionDir: () => "/tmp/sessions",
