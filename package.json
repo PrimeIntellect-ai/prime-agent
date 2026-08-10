@@ -54,6 +54,9 @@
 		"get-east-asian-width": "^1.6.0"
 	},
 	"overrides": {
+		"brace-expansion": "5.0.9",
+		"ip-address": "10.4.0",
+		"protobufjs": "7.6.5",
 		"rimraf": "6.1.2",
 		"gaxios": {
 			"rimraf": "6.1.2"
