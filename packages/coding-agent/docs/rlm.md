@@ -61,6 +61,15 @@ print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 
 The call returns immediately after task admission with a child handle; it never waits for or returns the child's answer. The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model.
 
+A child inherits the parent's reasoning level unless the spawn overrides it with `thinking`, which accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. This lets a cheap scout run deliberately shallow while a critical child runs deep, without changing the parent:
+
+```python
+scout = await rlm("List the files that touch auth", name="scout", thinking="low")
+implementer = await rlm("Implement the fix", name="implementer", thinking="max")
+```
+
+The requested level is clamped against the child's model, so a model that does not offer the level degrades to its nearest supported one instead of failing the spawn.
+
 Spawn independent children in separate calls and end the turn instead of awaiting completion:
 
 ```python
