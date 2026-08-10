@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed interrupted tool turns replaying late tool results after an interposed user message ([#1102](https://github.com/PrimeIntellect-ai/prime-agent/pull/1102) by [@junhoyeo](https://github.com/junhoyeo)).
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05

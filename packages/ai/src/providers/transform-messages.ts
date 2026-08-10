@@ -152,31 +152,40 @@ export function transformMessages<TApi extends Api>(
 		return msg;
 	});
 
-	// Second pass: insert synthetic empty tool results for orphaned tool calls
-	// This preserves thinking signatures and satisfies API requirements
+	// Second pass: pair every emitted tool result with a currently pending tool call.
+	// A persisted user message can race an abort result; recover that result from the
+	// remainder of the same turn before synthesizing anything at the user boundary.
 	const result: Message[] = [];
+	const consumedToolResultIndexes = new Set<number>();
 	let pendingToolCalls: ToolCall[] = [];
 	let existingToolResultIds = new Set<string>();
+	const hasUnresolvedToolCall = (toolCallId: string) =>
+		pendingToolCalls.some((toolCall) => toolCall.id === toolCallId) && !existingToolResultIds.has(toolCallId);
+	const appendRealToolResult = (message: ToolResultMessage): boolean => {
+		if (!hasUnresolvedToolCall(message.toolCallId)) return false;
+		existingToolResultIds.add(message.toolCallId);
+		result.push(message);
+		return true;
+	};
 	const insertSyntheticToolResults = () => {
-		if (pendingToolCalls.length > 0) {
-			for (const tc of pendingToolCalls) {
-				if (!existingToolResultIds.has(tc.id)) {
-					result.push({
-						role: "toolResult",
-						toolCallId: tc.id,
-						toolName: tc.name,
-						content: [{ type: "text", text: "No result provided" }],
-						isError: true,
-						timestamp: Date.now(),
-					} as ToolResultMessage);
-				}
+		for (const toolCall of pendingToolCalls) {
+			if (!existingToolResultIds.has(toolCall.id)) {
+				result.push({
+					role: "toolResult",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					content: [{ type: "text", text: "No result provided" }],
+					isError: true,
+					timestamp: Date.now(),
+				});
 			}
-			pendingToolCalls = [];
-			existingToolResultIds = new Set();
 		}
+		pendingToolCalls = [];
+		existingToolResultIds = new Set();
 	};
 
 	for (let i = 0; i < transformed.length; i++) {
+		if (consumedToolResultIndexes.has(i)) continue;
 		const msg = transformed[i];
 
 		if (msg.role === "assistant") {
@@ -202,13 +211,19 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
-			existingToolResultIds.add(msg.toolCallId);
-			result.push(msg);
+			// Unmatched and duplicate results are invalid at every provider boundary.
+			appendRealToolResult(msg);
 		} else if (msg.role === "user") {
-			// User message interrupts tool flow - insert synthetic results for orphaned calls
+			if (pendingToolCalls.length > 0) {
+				for (let lookahead = i + 1; lookahead < transformed.length; lookahead++) {
+					const later = transformed[lookahead];
+					if (later.role === "assistant") break;
+					if (later.role === "toolResult" && appendRealToolResult(later)) {
+						consumedToolResultIndexes.add(lookahead);
+					}
+				}
+			}
 			insertSyntheticToolResults();
-			result.push(msg);
-		} else {
 			result.push(msg);
 		}
 	}
