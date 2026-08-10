@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Fixed concurrent Python kernel bootstraps deleting active virtual environments by publishing at most two immutable generations, preserving compatible legacy and exact-path overrides, and included a bounded redacted stderr tail when bootstrap commands fail.
+- Fixed concurrent Python kernel bootstraps deleting active virtual environments by publishing leased immutable generations with bounded inactive retention, preserving compatible legacy and exact-path overrides, and included a bounded redacted stderr tail when bootstrap commands fail.
 - Fixed update-restored sessions becoming unresumable when a restart marker preceded an aborted tool result ([#1102](https://github.com/PrimeIntellect-ai/prime-agent/pull/1102) by [@junhoyeo](https://github.com/junhoyeo)).
 - Fixed live daemon supervisors, workers, and session leases being treated as stale when upgrading across process-start identity token formats.
 - Changed `rlm.list_subagents()` to distinguish process-local queued children from running ones and include bounded failure details while the parent tracks the run.

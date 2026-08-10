@@ -535,6 +535,13 @@ dependencies = ["httpx"]
 		const first = spawnBootstrapSubprocess(firstResult);
 		await waitForFileText(startedFile, (text) => text.trim().length > 0);
 		const second = spawnBootstrapSubprocess(secondResult);
+		const waiterPath = join(`${generationRoot}.bootstrap.lock`, `waiter-${second.pid}`);
+		const rendezvous = await waitForFileText(startedFile, (text) => {
+			const buildsAtBarrier = text.trim().split("\n").filter(Boolean).length;
+			return existsSync(waiterPath) || buildsAtBarrier >= 2;
+		});
+		expect(existsSync(waiterPath)).toBe(true);
+		expect(rendezvous.trim().split("\n").filter(Boolean)).toHaveLength(1);
 		rmSync(blockFile);
 		await Promise.all([waitForChild(first), waitForChild(second)]);
 
@@ -603,19 +610,85 @@ dependencies = ["httpx"]
 		expect(existsSync(firstPython)).toBe(true);
 	});
 
-	it("refuses a third published identity instead of growing without bound", async () => {
+	it("reclaims dead leased generations before publishing a third identity", async () => {
 		installFakeUv();
 		const generationRoot = join(tempDir, "kernel-generations");
 		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
 		const skill = createPythonSkill("bounded-skill");
+		const markAllLeasesDead = (): void => {
+			for (const generationName of readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))) {
+				const leaseDir = join(generationRoot, generationName, ".leases");
+				for (const leaseName of readdirSync(leaseDir)) {
+					writeFileSync(
+						join(leaseDir, leaseName),
+						`${JSON.stringify({
+							version: 1,
+							pid: 2_147_483_647,
+							processStartId: "proc:dead",
+							updatedAt: new Date().toISOString(),
+						})}\n`,
+					);
+				}
+			}
+		};
 
 		await ensureKernelPython({ pythonSkills: [skill] });
+		markAllLeasesDead();
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
+		await ensureKernelPython({ pythonSkills: [skill] });
+		markAllLeasesDead();
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
+
+		await expect(ensureKernelPython({ pythonSkills: [skill] })).resolves.toContain("/bin/python");
+		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(2);
+	});
+
+	it("protects a generation with a malformed lease conservatively", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		const skill = createPythonSkill("conservative-skill");
+
+		const firstPython = await ensureKernelPython({ pythonSkills: [skill] });
+		const firstVenv = venvFromPython(firstPython);
+		const firstLease = readdirSync(join(firstVenv, ".leases"))[0];
+		writeFileSync(join(firstVenv, ".leases", firstLease), "not json\n");
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
+		const secondPython = await ensureKernelPython({ pythonSkills: [skill] });
+		const secondVenv = venvFromPython(secondPython);
+		for (const leaseName of readdirSync(join(secondVenv, ".leases"))) {
+			writeFileSync(
+				join(secondVenv, ".leases", leaseName),
+				`${JSON.stringify({
+					version: 1,
+					pid: 2_147_483_647,
+					processStartId: "proc:dead",
+					updatedAt: new Date().toISOString(),
+				})}\n`,
+			);
+		}
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
+
+		await ensureKernelPython({ pythonSkills: [skill] });
+		expect(existsSync(firstPython)).toBe(true);
+		expect(existsSync(secondPython)).toBe(true);
+		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(3);
+	});
+
+	it("publishes instead of refusing startup when every retained generation is live", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		const skill = createPythonSkill("live-skill");
+
+		const firstPython = await ensureKernelPython({ pythonSkills: [skill] });
 		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
 		await ensureKernelPython({ pythonSkills: [skill] });
 		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
 
-		await expect(ensureKernelPython({ pythonSkills: [skill] })).rejects.toThrow(/retention limit reached/);
-		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(2);
+		await expect(ensureKernelPython({ pythonSkills: [skill] })).resolves.toContain("/bin/python");
+		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(3);
+		expect(existsSync(firstPython)).toBe(true);
 	});
 
 	it("reuses a current warm venv without invoking uv", async () => {

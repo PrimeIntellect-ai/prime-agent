@@ -9,6 +9,8 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../../config.js";
+import { isOrphanProcessIdentityCurrent } from "../orphan-process-journal.js";
+import { compareProcessStartIds, getProcessStartId } from "../session-lease.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 8;
@@ -61,7 +63,8 @@ const BOOTSTRAP_STDERR_MAX_LINES = 20;
 const BOOTSTRAP_STDERR_BUFFER_CHARS = 8_000;
 const KERNEL_VENV_IDENTITY_CHARS = 20;
 const KERNEL_VENV_GENERATION_PREFIX = "generation-";
-const MAX_PUBLISHED_KERNEL_GENERATIONS = 2;
+const MAX_RETAINED_INACTIVE_KERNEL_GENERATIONS = 1;
+const KERNEL_GENERATION_LEASE_DIR = ".leases";
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
 
@@ -88,6 +91,13 @@ interface BootstrapVersion {
 	extraUvArgs?: string[];
 	pythonSkills?: BootstrapPythonSkill[];
 	requestedPythonSkills?: BootstrapPythonSkill[];
+}
+
+interface KernelGenerationLease {
+	version: 1;
+	pid: number;
+	processStartId: string;
+	updatedAt: string;
 }
 
 function errorMessage(error: unknown): string {
@@ -531,6 +541,9 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 		} catch (error) {
 			if (!isNodeError(error, "EEXIST")) throw error;
 
+			// Besides making lock contention inspectable, this marker gives process
+			// tests a deterministic rendezvous at the filesystem-lock boundary.
+			await writeFile(path.join(lockDir, `waiter-${process.pid}`), "", "utf8").catch(() => undefined);
 			const pid = await readLockPid(lockDir);
 			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
 				await rm(lockDir, { recursive: true, force: true });
@@ -818,29 +831,103 @@ async function findReadyKernelVenv(
 	return null;
 }
 
+function parseKernelGenerationLease(value: unknown): KernelGenerationLease | null {
+	if (!isRecord(value)) return null;
+	if (
+		value.version !== 1 ||
+		!Number.isInteger(value.pid) ||
+		(value.pid as number) <= 0 ||
+		typeof value.processStartId !== "string" ||
+		value.processStartId.length === 0 ||
+		typeof value.updatedAt !== "string"
+	) {
+		return null;
+	}
+	return value as unknown as KernelGenerationLease;
+}
+
+async function writeKernelGenerationLease(venv: string, pid: number): Promise<void> {
+	const leaseDir = path.join(venv, KERNEL_GENERATION_LEASE_DIR);
+	await mkdir(leaseDir, { recursive: true });
+	const lease: KernelGenerationLease = {
+		version: 1,
+		pid,
+		// An unavailable start id is intentionally unverifiable. The GC still knows
+		// the lease is dead when the PID no longer exists, but cannot mistake PID
+		// reuse for death while that PID is running.
+		processStartId: getProcessStartId(pid) ?? `unverifiable:${pid}`,
+		updatedAt: new Date().toISOString(),
+	};
+	const destination = path.join(leaseDir, `${pid}.json`);
+	const temporary = path.join(leaseDir, `.${pid}-${process.pid}-${Date.now()}.tmp`);
+	await writeFile(
+		temporary,
+		`${JSON.stringify(lease)}
+`,
+		{ encoding: "utf8", mode: 0o600 },
+	);
+	await rename(temporary, destination);
+}
+
+export async function registerKernelPythonLease(python: string, pid: number): Promise<void> {
+	if (!Number.isInteger(pid) || pid <= 0) throw new Error(`invalid kernel pid for environment lease: ${pid}`);
+	const venv = path.dirname(path.dirname(python));
+	if (!path.basename(venv).startsWith(KERNEL_VENV_GENERATION_PREFIX)) return;
+	if (!(await exists(path.join(venv, BOOTSTRAP_VERSION_FILE)))) return;
+	await writeKernelGenerationLease(venv, pid);
+}
+
+async function generationHasOnlyDeadLeases(generation: string): Promise<boolean> {
+	const leaseDir = path.join(generation, KERNEL_GENERATION_LEASE_DIR);
+	let entries: Dirent[];
+	try {
+		entries = await readdir(leaseDir, { withFileTypes: true });
+	} catch {
+		// Generations published by older binaries, unreadable lease directories,
+		// and other unverifiable states are conservatively protected.
+		return false;
+	}
+	for (const entry of entries) {
+		if (!entry.isFile()) return false;
+		let lease: KernelGenerationLease | null = null;
+		try {
+			lease = parseKernelGenerationLease(JSON.parse(await readFile(path.join(leaseDir, entry.name), "utf8")));
+		} catch {
+			return false;
+		}
+		if (!lease) return false;
+		if (!processIsRunning(lease.pid)) continue;
+		if (isOrphanProcessIdentityCurrent({ pid: lease.pid, processStartId: lease.processStartId })) return false;
+		const comparison = compareProcessStartIds(lease.processStartId, getProcessStartId(lease.pid));
+		if (comparison !== "mismatch") return false;
+	}
+	return true;
+}
+
 async function prepareGenerationSlot(generationRoot: string): Promise<void> {
 	await mkdir(generationRoot, { recursive: true });
-	const entries = await readdir(generationRoot, { withFileTypes: true });
-	let publishedCount = 0;
+	const entries = (await readdir(generationRoot, { withFileTypes: true }))
+		.filter((entry) => entry.isDirectory() && entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX))
+		.sort((a, b) => a.name.localeCompare(b.name));
+	const reclaimable: string[] = [];
 	for (const entry of entries) {
-		if (!entry.isDirectory() || !entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX)) continue;
 		const generation = path.join(generationRoot, entry.name);
 		if (!(await exists(path.join(generation, BOOTSTRAP_VERSION_FILE)))) {
 			// The global generation-root lock proves that no same-host builder is
 			// active. A directory without the publish marker was never selectable.
 			await rm(generation, { recursive: true, force: true });
-		} else {
-			// Even an old or malformed marker may belong to a live kernel returned by
-			// an older Prime Agent process, so it consumes a slot instead of being GC'd.
-			publishedCount += 1;
+		} else if (await generationHasOnlyDeadLeases(generation)) {
+			reclaimable.push(generation);
 		}
 	}
-	if (publishedCount >= MAX_PUBLISHED_KERNEL_GENERATIONS) {
-		throw new Error(
-			`kernel environment retention limit reached at ${generationRoot} (${MAX_PUBLISHED_KERNEL_GENERATIONS} published generations). ` +
-				"Prime Agent will not delete a generation that a running kernel may still use. Stop Prime Agent sessions, remove an obsolete generation directory manually, then retry; or set PRIME_AGENT_KERNEL_PYTHON.",
-		);
+
+	const deleteCount = Math.max(0, reclaimable.length - MAX_RETAINED_INACTIVE_KERNEL_GENERATIONS);
+	for (const generation of reclaimable.slice(0, deleteCount)) {
+		await rm(generation, { recursive: true, force: true });
 	}
+	// Live and unverifiable generations are exempt from inactive retention so
+	// publication never blocks. Once their leases die, a later resolution pass
+	// reclaims all but the newest inactive rollback generation.
 }
 
 async function createKernelVenvGeneration(
@@ -1072,20 +1159,25 @@ async function ensureKernelPythonUncached(
 	if (await kernelReady(exactPython, baseVenv, runtimeIdentity, pythonSkills)) return exactPython;
 
 	const generationRoot = kernelGenerationRoot(baseVenv);
-	const readyVenv = await findReadyKernelVenv(generationRoot, runtimeIdentity, pythonSkills);
-	if (readyVenv) return path.join(readyVenv, "bin", "python");
 
-	// One root-wide lock serializes both same-identity publication and the global
-	// retention check across Node processes.
+	// One root-wide lock serializes resolution leases, same-identity publication,
+	// and reclamation so a generation cannot disappear between lookup and lease.
+	// Reclamation removes only generations whose recorded process identities are
+	// all provably dead.
 	const releaseLock = await acquireBootstrapLock(generationRoot);
 	let buildingVenv: string | null = null;
 	try {
 		const concurrentlyBuiltVenv = await findReadyKernelVenv(generationRoot, runtimeIdentity, pythonSkills);
-		if (concurrentlyBuiltVenv) return path.join(concurrentlyBuiltVenv, "bin", "python");
+		if (concurrentlyBuiltVenv) {
+			await writeKernelGenerationLease(concurrentlyBuiltVenv, process.pid);
+			await prepareGenerationSlot(generationRoot);
+			return path.join(concurrentlyBuiltVenv, "bin", "python");
+		}
 
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
 		buildingVenv = await createKernelVenvGeneration(generationRoot, runtimeIdentity, pythonSkills);
 		await bootstrapVenv(buildingVenv, pythonSkills, options);
+		await writeKernelGenerationLease(buildingVenv, process.pid);
 		const python = path.join(buildingVenv, "bin", "python");
 		buildingVenv = null;
 		reportProgress(options, "✓ ready");

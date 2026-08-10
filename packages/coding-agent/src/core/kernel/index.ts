@@ -8,7 +8,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
-import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
+import {
+	ensureKernelPython,
+	type KernelBootstrapProgressHandler,
+	type KernelPythonSkill,
+	registerKernelPythonLease,
+} from "./bootstrap.js";
 import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
 	buildListNamesCode,
@@ -673,6 +678,17 @@ export class KernelManager {
 				liveKernels.delete(this);
 				this.cleanupResources();
 			});
+		}
+
+		const launchedKernelPid = forked ? this.kernelPid : this.kernel?.pid;
+		if (launchedKernelPid) {
+			try {
+				await registerKernelPythonLease(python, launchedKernelPid);
+			} catch (error) {
+				this.appendKernelDiagnostic(`environment lease failed: ${errorMessage(error)}`);
+				await this.kill();
+				throw error;
+			}
 		}
 
 		const connectionPath = connection.path;
