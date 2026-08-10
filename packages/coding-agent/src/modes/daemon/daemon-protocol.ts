@@ -58,8 +58,8 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 12 publishes idle-residency metadata on session summary rows.
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
-export const DAEMON_SCHEMA_REVISION = 14;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-14-816309b1cd50";
+export const DAEMON_SCHEMA_REVISION = 15;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-15-1bcb9e7f1a49";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -694,7 +694,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,
-	mutate_queued_message: { minProtocol: 7, minSchemaRevision: 14, capability: "queue_message_mutation" },
+	mutate_queued_message: { minProtocol: 7, minSchemaRevision: 15, capability: "queue_message_mutation" },
 	clear_queue: LEGACY_DAEMON_COMMAND,
 	abort_and_clear_queue: LEGACY_DAEMON_COMMAND,
 	cron_list: LEGACY_DAEMON_COMMAND,

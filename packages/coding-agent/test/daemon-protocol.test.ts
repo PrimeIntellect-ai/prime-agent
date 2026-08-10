@@ -87,7 +87,7 @@ describe("daemon protocol helpers", () => {
 	it("capability- and schema-gates queued message mutation at its introducing revision", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.mutate_queued_message).toEqual({
 			minProtocol: 7,
-			minSchemaRevision: 14,
+			minSchemaRevision: 15,
 			capability: "queue_message_mutation",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("queue_message_mutation");
