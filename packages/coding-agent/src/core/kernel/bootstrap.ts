@@ -65,6 +65,7 @@ const KERNEL_VENV_IDENTITY_CHARS = 20;
 const KERNEL_VENV_GENERATION_PREFIX = "generation-";
 const MAX_RETAINED_INACTIVE_KERNEL_GENERATIONS = 1;
 const KERNEL_GENERATION_LEASE_DIR = ".leases";
+const KERNEL_GENERATION_PUBLISHED_FILE = ".generation-published";
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
 
@@ -825,6 +826,8 @@ async function findReadyKernelVenv(
 		.sort((a, b) => b.localeCompare(a));
 	for (const generationName of generationNames) {
 		const venv = path.join(generationRoot, generationName);
+		const leaseDirExists = await exists(path.join(venv, KERNEL_GENERATION_LEASE_DIR));
+		if (leaseDirExists && !(await exists(path.join(venv, KERNEL_GENERATION_PUBLISHED_FILE)))) continue;
 		const python = path.join(venv, "bin", "python");
 		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return venv;
 	}
@@ -914,7 +917,14 @@ async function prepareGenerationSlot(generationRoot: string): Promise<void> {
 		const generation = path.join(generationRoot, entry.name);
 		if (!(await exists(path.join(generation, BOOTSTRAP_VERSION_FILE)))) {
 			// The global generation-root lock proves that no same-host builder is
-			// active. A directory without the publish marker was never selectable.
+			// active. A directory without the bootstrap marker was never selectable.
+			await rm(generation, { recursive: true, force: true });
+		} else if (
+			(await exists(path.join(generation, KERNEL_GENERATION_LEASE_DIR))) &&
+			!(await exists(path.join(generation, KERNEL_GENERATION_PUBLISHED_FILE)))
+		) {
+			// New-format builders create the lease directory before bootstrap and
+			// write the publication marker only after the resolver lease is durable.
 			await rm(generation, { recursive: true, force: true });
 		} else if (await generationHasOnlyDeadLeases(generation)) {
 			reclaimable.push(generation);
@@ -937,9 +947,11 @@ async function createKernelVenvGeneration(
 ): Promise<string> {
 	await prepareGenerationSlot(generationRoot);
 	const identity = kernelEnvironmentIdentity(runtimeIdentity, pythonSkills);
-	return mkdtemp(
+	const generation = await mkdtemp(
 		path.join(generationRoot, `${KERNEL_VENV_GENERATION_PREFIX}${identity}-${Date.now()}-${process.pid}-`),
 	);
+	await mkdir(path.join(generation, KERNEL_GENERATION_LEASE_DIR));
+	return generation;
 }
 
 async function bootstrapVenv(
@@ -1169,6 +1181,7 @@ async function ensureKernelPythonUncached(
 	try {
 		const concurrentlyBuiltVenv = await findReadyKernelVenv(generationRoot, runtimeIdentity, pythonSkills);
 		if (concurrentlyBuiltVenv) {
+			await writeFile(path.join(concurrentlyBuiltVenv, KERNEL_GENERATION_PUBLISHED_FILE), "1\n", "utf8");
 			await writeKernelGenerationLease(concurrentlyBuiltVenv, process.pid);
 			await prepareGenerationSlot(generationRoot);
 			return path.join(concurrentlyBuiltVenv, "bin", "python");
@@ -1178,6 +1191,7 @@ async function ensureKernelPythonUncached(
 		buildingVenv = await createKernelVenvGeneration(generationRoot, runtimeIdentity, pythonSkills);
 		await bootstrapVenv(buildingVenv, pythonSkills, options);
 		await writeKernelGenerationLease(buildingVenv, process.pid);
+		await writeFile(path.join(buildingVenv, KERNEL_GENERATION_PUBLISHED_FILE), "1\n", "utf8");
 		const python = path.join(buildingVenv, "bin", "python");
 		buildingVenv = null;
 		reportProgress(options, "✓ ready");
