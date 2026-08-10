@@ -459,6 +459,7 @@ dependencies = ["httpx"]
 			"discarded first line",
 			...Array.from({ length: 20 }, (_, index) => `diagnostic ${index + 1}`),
 			"Authorization: Basic QWxpY2U6c3VwZXItc2VjcmV0",
+			"client_secret=oauth-client-secret refresh_token=oauth-refresh-token",
 			"https://pypi-secret-token@example.test/simple",
 			`Bearer ${"x".repeat(2_100)}`,
 		].join("\n");
@@ -473,6 +474,8 @@ dependencies = ["httpx"]
 		expect(message).toContain("Bearer [redacted]");
 		expect(message).not.toContain("discarded first line");
 		expect(message).not.toContain("QWxpY2U6c3VwZXItc2VjcmV0");
+		expect(message).not.toContain("oauth-client-secret");
+		expect(message).not.toContain("oauth-refresh-token");
 		expect(message).not.toContain("pypi-secret-token");
 		expect(message).not.toContain("x".repeat(100));
 	});

@@ -393,10 +393,16 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 function sanitizeBootstrapDiagnostic(value: string): string {
 	return value
 		.replace(/\b(Authorization\s*:\s*)(Basic|Bearer|Token)\s+\S+/gi, "$1$2 [redacted]")
-		.replace(/\b(Bearer|Token)\s+\S+/gi, "$1 [redacted]")
+		.replace(/(^|\r?\n)(\s*)(Bearer|Token)\s+\S+/gim, "$1$2$3 [redacted]")
 		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
-		.replace(/([?&](?:access_token|api[_-]?key|password|secret|token)=)[^&\s]+/gi, "$1[redacted]")
-		.replace(/\b((?:api[_-]?key|password|secret|token)\s*[=:]\s*)\S+/gi, "$1[redacted]");
+		.replace(
+			/([?&](?:(?:access|refresh|id)[_-]?token|client[_-]?secret|api[_-]?key|password|secret|token)=)[^&\s]+/gi,
+			"$1[redacted]",
+		)
+		.replace(
+			/\b((?:(?:access|refresh|id)[_-]?token|client[_-]?secret|api[_-]?key|password|secret|token)\s*[=:]\s*)\S+/gi,
+			"$1[redacted]",
+		);
 }
 
 function boundedStderrTail(value: string, leadingTokenMayBeTruncated = false): string {
