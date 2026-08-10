@@ -179,6 +179,10 @@ function installFakeUv(): string {
 			"    *) exit 1 ;;",
 			"  esac",
 			"fi",
+			'if [ "$1" = "--prime-test-block" ]; then',
+			'  printf started > "$SPAWN_STARTED_FILE"',
+			'  while [ -e "$SPAWN_BLOCK_FILE" ]; do sleep 0.02; done',
+			"fi",
 			"exit 0",
 			"PY",
 			'  chmod +x "$venv/bin/python"',
@@ -450,34 +454,54 @@ dependencies = ["httpx"]
 		expect(readFileSync(firstPython, "utf8")).toContain("#!/bin/sh");
 	});
 
-	it("surfaces a bounded, redacted stderr tail when bootstrap fails", async () => {
+	it("redacts bootstrap credentials without crossing stderr lines", async () => {
 		installFakeUv();
-		const baseVenv = join(tempDir, "kernel-venv");
-		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = baseVenv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = join(tempDir, "kernel-venv");
 		process.env.UV_FAIL_ARG = "ipykernel";
 		process.env.UV_FAIL_STDERR = [
-			"discarded first line",
-			...Array.from({ length: 20 }, (_, index) => `diagnostic ${index + 1}`),
 			"Authorization: Basic QWxpY2U6c3VwZXItc2VjcmV0",
 			"client_secret=oauth-client-secret refresh_token=oauth-refresh-token",
 			"https://pypi-secret-token@example.test/simple",
+			"error: Bearer sk-live-SUPERSECRET",
+			"warning: Token abc-INLINE-SECRET failed",
+			"Bearer",
+			"https://user@example.test/simple",
 			`Bearer ${"x".repeat(2_100)}`,
 		].join("\n");
 
 		const error = await ensureKernelPython().catch((reason: unknown) => reason);
-
 		expect(error).toBeInstanceOf(Error);
 		const message = error instanceof Error ? error.message : String(error);
-		expect(message).toContain("stderr (tail):");
 		expect(message).toContain("Authorization: Basic [redacted]");
 		expect(message).toContain("https://[redacted]@example.test/simple");
-		expect(message).toContain("Bearer [redacted]");
-		expect(message).not.toContain("discarded first line");
+		expect(message).toContain("error: Bearer [redacted]");
+		expect(message).toContain("warning: Token [redacted] failed");
+		expect(message).toContain("Bearer\nhttps://[redacted]@example.test/simple");
 		expect(message).not.toContain("QWxpY2U6c3VwZXItc2VjcmV0");
 		expect(message).not.toContain("oauth-client-secret");
 		expect(message).not.toContain("oauth-refresh-token");
 		expect(message).not.toContain("pypi-secret-token");
+		expect(message).not.toContain("sk-live-SUPERSECRET");
+		expect(message).not.toContain("abc-INLINE-SECRET");
 		expect(message).not.toContain("x".repeat(100));
+	});
+
+	it("bounds a long bootstrap stderr tail independently of redaction coverage", async () => {
+		installFakeUv();
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = join(tempDir, "kernel-venv");
+		process.env.UV_FAIL_ARG = "ipykernel";
+		process.env.UV_FAIL_STDERR = [
+			"Authorization: Basic raw-secret-before-tail",
+			...Array.from({ length: 40 }, (_, index) => `diagnostic ${index + 1} ${"z".repeat(120)}`),
+		].join("\n");
+
+		const error = await ensureKernelPython().catch((reason: unknown) => reason);
+		const message = error instanceof Error ? error.message : String(error);
+		const tail = message.split("stderr (tail):\n")[1]?.split("\nFirst-time setup")[0] ?? "";
+		expect(tail.length).toBeLessThanOrEqual(2_000);
+		expect(tail.split("\n").length).toBeLessThanOrEqual(20);
+		expect(message).not.toContain("raw-secret-before-tail");
+		expect(tail).toContain("diagnostic 40");
 	});
 
 	it("reuses a partial generation after an unchanged optional skill install failure", async () => {
@@ -549,6 +573,8 @@ dependencies = ["httpx"]
 		await Promise.all([waitForChild(first), waitForChild(second)]);
 
 		expect(readFileSync(firstResult, "utf8")).toBe(readFileSync(secondResult, "utf8"));
+		const resolvedVenv = venvFromPython(readFileSync(firstResult, "utf8"));
+		expect(readdirSync(join(resolvedVenv, ".leases")).filter((name) => name.endsWith(".json"))).toHaveLength(0);
 		const builds = readFileSync(logPath, "utf8")
 			.split("\n")
 			.filter((line) => line.startsWith("venv "));
@@ -611,6 +637,52 @@ dependencies = ["httpx"]
 		await waitForChild(second);
 		expect(readFileSync(secondResult, "utf8")).not.toBe(firstPython);
 		expect(existsSync(firstPython)).toBe(true);
+	});
+
+	it("does not reclaim a generation during the spawn-to-lease window", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		const skill = createPythonSkill("spawn-window-skill");
+		const markLeasesDead = (venv: string): void => {
+			for (const leaseName of readdirSync(join(venv, ".leases"))) {
+				if (!leaseName.endsWith(".json")) continue;
+				writeFileSync(
+					join(venv, ".leases", leaseName),
+					`${JSON.stringify({
+						version: 1,
+						pid: 2_147_483_647,
+						processStartId: "proc:dead",
+						updatedAt: new Date().toISOString(),
+					})}\n`,
+				);
+			}
+		};
+
+		const firstPython = await ensureKernelPython({ pythonSkills: [skill] });
+		const firstVenv = venvFromPython(firstPython);
+		markLeasesDead(firstVenv);
+		const blockFile = join(tempDir, "spawn.block");
+		const startedFile = join(tempDir, "spawn.started");
+		writeFileSync(blockFile, "block");
+		const unleasedKernel = spawn(firstPython, ["--prime-test-block"], {
+			env: { ...process.env, SPAWN_BLOCK_FILE: blockFile, SPAWN_STARTED_FILE: startedFile },
+			stdio: "ignore",
+		});
+		await waitForFileText(startedFile, (text) => text === "started");
+
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
+		const secondPython = await ensureKernelPython({ pythonSkills: [skill] });
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
+		const thirdPython = await ensureKernelPython({ pythonSkills: [skill] });
+		expect(existsSync(firstPython)).toBe(true);
+
+		rmSync(blockFile);
+		await waitForChild(unleasedKernel);
+		for (const python of [firstPython, secondPython, thirdPython]) markLeasesDead(venvFromPython(python));
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity four\n`);
+		await ensureKernelPython({ pythonSkills: [skill] });
+		expect(existsSync(firstVenv)).toBe(false);
 	});
 
 	it("reclaims dead leased generations before publishing a third identity", async () => {

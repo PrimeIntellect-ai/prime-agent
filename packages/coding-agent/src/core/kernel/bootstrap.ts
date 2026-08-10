@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, type Dirent, existsSync, readdirSync, readFileSync } from "node:fs";
+import { constants, type Dirent, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { access, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -68,6 +68,8 @@ const KERNEL_GENERATION_LEASE_DIR = ".leases";
 const KERNEL_GENERATION_PUBLISHED_FILE = ".generation-published";
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
+const hostGenerationLeasePaths = new Set<string>();
+let hostGenerationLeaseCleanupInstalled = false;
 
 export type KernelPythonSkill = PythonSkillRuntimeInfo;
 export type KernelBootstrapProgressHandler = (message: string) => void;
@@ -393,7 +395,7 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 function sanitizeBootstrapDiagnostic(value: string): string {
 	return value
 		.replace(/\b(Authorization\s*:\s*)(Basic|Bearer|Token)\s+\S+/gi, "$1$2 [redacted]")
-		.replace(/(^|\r?\n)(\s*)(Bearer|Token)\s+\S+/gim, "$1$2$3 [redacted]")
+		.replace(/\b(Bearer|Token)[ \t]+\S+/gi, "$1 [redacted]")
 		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
 		.replace(
 			/([?&](?:(?:access|refresh|id)[_-]?token|client[_-]?secret|api[_-]?key|password|secret|token)=)[^&\s]+/gi,
@@ -814,6 +816,11 @@ export async function resolveKernelVenvDir(): Promise<string> {
 	return process.env.PRIME_AGENT_KERNEL_VENV ? baseVenv : kernelGenerationRoot(baseVenv);
 }
 
+function kernelGenerationTimestamp(name: string): number {
+	const match = name.match(/^generation-[a-f0-9]{20}-(\d+)-/);
+	return match ? Number.parseInt(match[1], 10) : 0;
+}
+
 async function findReadyKernelVenv(
 	generationRoot: string,
 	runtimeIdentity: string,
@@ -829,7 +836,7 @@ async function findReadyKernelVenv(
 	const generationNames = entries
 		.filter((entry) => entry.isDirectory() && entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX))
 		.map((entry) => entry.name)
-		.sort((a, b) => b.localeCompare(a));
+		.sort((a, b) => kernelGenerationTimestamp(b) - kernelGenerationTimestamp(a));
 	for (const generationName of generationNames) {
 		const venv = path.join(generationRoot, generationName);
 		const leaseDirExists = await exists(path.join(venv, KERNEL_GENERATION_LEASE_DIR));
@@ -855,7 +862,7 @@ function parseKernelGenerationLease(value: unknown): KernelGenerationLease | nul
 	return value as unknown as KernelGenerationLease;
 }
 
-async function writeKernelGenerationLease(venv: string, pid: number): Promise<void> {
+async function writeKernelGenerationLease(venv: string, pid: number): Promise<string> {
 	const leaseDir = path.join(venv, KERNEL_GENERATION_LEASE_DIR);
 	await mkdir(leaseDir, { recursive: true });
 	const lease: KernelGenerationLease = {
@@ -876,17 +883,42 @@ async function writeKernelGenerationLease(venv: string, pid: number): Promise<vo
 		{ encoding: "utf8", mode: 0o600 },
 	);
 	await rename(temporary, destination);
+	return destination;
 }
 
-export async function registerKernelPythonLease(python: string, pid: number): Promise<void> {
+function registerHostGenerationLeasePath(leasePath: string): void {
+	hostGenerationLeasePaths.add(leasePath);
+	if (hostGenerationLeaseCleanupInstalled) return;
+	hostGenerationLeaseCleanupInstalled = true;
+	process.once("exit", () => {
+		for (const registeredPath of hostGenerationLeasePaths) {
+			rmSync(registeredPath, { force: true });
+		}
+		hostGenerationLeasePaths.clear();
+	});
+}
+
+export async function registerKernelPythonLease(python: string, pid: number): Promise<() => void> {
 	if (!Number.isInteger(pid) || pid <= 0) throw new Error(`invalid kernel pid for environment lease: ${pid}`);
 	const venv = path.dirname(path.dirname(python));
-	if (!path.basename(venv).startsWith(KERNEL_VENV_GENERATION_PREFIX)) return;
-	if (!(await exists(path.join(venv, BOOTSTRAP_VERSION_FILE)))) return;
-	await writeKernelGenerationLease(venv, pid);
+	if (!path.basename(venv).startsWith(KERNEL_VENV_GENERATION_PREFIX)) return () => undefined;
+	if (!(await exists(path.join(venv, BOOTSTRAP_VERSION_FILE)))) return () => undefined;
+	const leasePath = await writeKernelGenerationLease(venv, pid);
+	return () => rmSync(leasePath, { force: true });
+}
+
+function generationHasRunningInterpreter(generation: string): boolean | null {
+	const interpreter = path.join(generation, "bin", "python");
+	const result = spawnSync("ps", ["-axo", "command="], { encoding: "utf8" });
+	if (result.error || result.status !== 0 || typeof result.stdout !== "string") return null;
+	return result.stdout.split(/\r?\n/).some((command) => command.includes(interpreter));
 }
 
 async function generationHasOnlyDeadLeases(generation: string): Promise<boolean> {
+	// The process-table check closes the spawn-to-lease window: a freshly exec'd
+	// interpreter protects its generation even if the host dies before recording
+	// the child PID. Failure to inspect the process table is conservative.
+	if (generationHasRunningInterpreter(generation) !== false) return false;
 	const leaseDir = path.join(generation, KERNEL_GENERATION_LEASE_DIR);
 	let entries: Dirent[];
 	try {
@@ -897,6 +929,7 @@ async function generationHasOnlyDeadLeases(generation: string): Promise<boolean>
 		return false;
 	}
 	for (const entry of entries) {
+		if (entry.name.startsWith(".") && entry.name.endsWith(".tmp")) continue;
 		if (!entry.isFile()) return false;
 		let lease: KernelGenerationLease | null = null;
 		try {
@@ -917,7 +950,7 @@ async function prepareGenerationSlot(generationRoot: string): Promise<void> {
 	await mkdir(generationRoot, { recursive: true });
 	const entries = (await readdir(generationRoot, { withFileTypes: true }))
 		.filter((entry) => entry.isDirectory() && entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX))
-		.sort((a, b) => a.name.localeCompare(b.name));
+		.sort((a, b) => kernelGenerationTimestamp(a.name) - kernelGenerationTimestamp(b.name));
 	const reclaimable: string[] = [];
 	for (const entry of entries) {
 		const generation = path.join(generationRoot, entry.name);
@@ -1188,7 +1221,8 @@ async function ensureKernelPythonUncached(
 		const concurrentlyBuiltVenv = await findReadyKernelVenv(generationRoot, runtimeIdentity, pythonSkills);
 		if (concurrentlyBuiltVenv) {
 			await writeFile(path.join(concurrentlyBuiltVenv, KERNEL_GENERATION_PUBLISHED_FILE), "1\n", "utf8");
-			await writeKernelGenerationLease(concurrentlyBuiltVenv, process.pid);
+			const hostLeasePath = await writeKernelGenerationLease(concurrentlyBuiltVenv, process.pid);
+			registerHostGenerationLeasePath(hostLeasePath);
 			await prepareGenerationSlot(generationRoot);
 			return path.join(concurrentlyBuiltVenv, "bin", "python");
 		}
@@ -1196,7 +1230,8 @@ async function ensureKernelPythonUncached(
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
 		buildingVenv = await createKernelVenvGeneration(generationRoot, runtimeIdentity, pythonSkills);
 		await bootstrapVenv(buildingVenv, pythonSkills, options);
-		await writeKernelGenerationLease(buildingVenv, process.pid);
+		const hostLeasePath = await writeKernelGenerationLease(buildingVenv, process.pid);
+		registerHostGenerationLeasePath(hostLeasePath);
 		await writeFile(path.join(buildingVenv, KERNEL_GENERATION_PUBLISHED_FILE), "1\n", "utf8");
 		const python = path.join(buildingVenv, "bin", "python");
 		buildingVenv = null;
