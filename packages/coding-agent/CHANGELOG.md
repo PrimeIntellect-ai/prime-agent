@@ -11,6 +11,14 @@
 - Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade prime-agent` ([#844](https://github.com/PrimeIntellect-ai/prime-agent/issues/844))
 - Fixed the agents view collapsing expanded subagent lists when returning from an opened agent ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
 - Kept the subagent summary row visible and selectable while its list is expanded in the agents view, so pressing enter on it collapses the list again ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
+- Fixed active goals repeatedly starting provider turns while waiting on external input by adding model-callable pause and resume controls.
+- Fixed live daemon supervisors, workers, and session leases being treated as stale when upgrading across process-start identity token formats.
+- Fixed interrupted IPython cells leaving child processes running and the kernel busy by isolating each Unix kernel process group and signaling the full tree.
+- Fixed slow daemon startup dropping resident sessions by waiting for the catalog and revalidating supervisors before replacement ([#911](https://github.com/PrimeIntellect-ai/prime-agent/pull/911) by [@traditio](https://github.com/traditio)).
+- Fixed long or concurrent daemon shutdown checks aborting cleanup when their lease refresh was delayed or self-contended.
+- Added project trust controls with global `defaultProjectTrust`, one-run `--approve`/`--no-approve` overrides, and fail-closed project resource loading.
+- Added the macOS reliability monitor service with a one-minute scheduler and 180-second stale/failure reporting.
+- Changed reliability monitoring to use exact operation kinds, human-only deadline extensions, bounded checkpointed journals, and 1/2/4/8/15-minute notification retries with 15-minute reminders.
 
 ## [0.7.1] - 2026-08-07
 

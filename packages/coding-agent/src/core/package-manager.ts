@@ -789,6 +789,7 @@ export class DefaultPackageManager implements PackageManager {
 
 	addSourceToSettings(source: string, options?: { local?: boolean }): boolean {
 		const scope: SourceScope = options?.local ? "project" : "user";
+		this.assertProjectTrustedForScope(scope);
 		const currentSettings =
 			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
 		const currentPackages = currentSettings.packages ?? [];
@@ -808,6 +809,7 @@ export class DefaultPackageManager implements PackageManager {
 
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean {
 		const scope: SourceScope = options?.local ? "project" : "user";
+		this.assertProjectTrustedForScope(scope);
 		const currentSettings =
 			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
 		const currentPackages = currentSettings.packages ?? [];
@@ -825,6 +827,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined {
+		this.assertProjectTrustedForScope(scope);
 		const parsed = this.parseSource(source);
 		if (parsed.type === "npm") {
 			const path = this.getNpmInstallPath(parsed, scope);
@@ -923,6 +926,7 @@ export class DefaultPackageManager implements PackageManager {
 	): Promise<ResolvedPaths> {
 		const accumulator = this.createAccumulator();
 		const scope: SourceScope = options?.temporary ? "temporary" : options?.local ? "project" : "user";
+		this.assertProjectTrustedForScope(scope);
 		const packageSources = sources.map((source) => ({ pkg: source as PackageSource, scope }));
 		await this.resolvePackageSources(packageSources, accumulator);
 		return this.toResolvedPaths(accumulator);
@@ -959,6 +963,7 @@ export class DefaultPackageManager implements PackageManager {
 	async install(source: string, options?: { local?: boolean }): Promise<void> {
 		const parsed = this.parseSource(source);
 		const scope: SourceScope = options?.local ? "project" : "user";
+		this.assertProjectTrustedForScope(scope);
 		await this.withProgress("install", source, `Installing ${source}...`, async () => {
 			if (parsed.type === "npm") {
 				await this.installNpm(parsed, scope, false);
@@ -987,6 +992,7 @@ export class DefaultPackageManager implements PackageManager {
 	async remove(source: string, options?: { local?: boolean }): Promise<void> {
 		const parsed = this.parseSource(source);
 		const scope: SourceScope = options?.local ? "project" : "user";
+		this.assertProjectTrustedForScope(scope);
 		await this.withProgress("remove", source, `Removing ${source}...`, async () => {
 			if (parsed.type === "npm") {
 				await this.uninstallNpm(parsed, scope);
@@ -1671,6 +1677,12 @@ export class DefaultPackageManager implements PackageManager {
 		return { name, version };
 	}
 
+	private assertProjectTrustedForScope(scope: SourceScope): void {
+		if (scope === "project" && !this.settingsManager.isProjectTrusted()) {
+			throw new Error("Project resources require a trusted project");
+		}
+	}
+
 	private getNpmCommand(): { command: string; args: string[] } {
 		const configuredCommand = this.settingsManager.getNpmCommand();
 		if (!configuredCommand || configuredCommand.length === 0) {
@@ -2140,6 +2152,7 @@ export class DefaultPackageManager implements PackageManager {
 		globalBaseDir: string,
 		projectBaseDir: string,
 	): void {
+		const projectTrusted = this.settingsManager.isProjectTrusted();
 		const userMetadata: PathMetadata = {
 			source: "auto",
 			scope: "user",
@@ -2179,9 +2192,9 @@ export class DefaultPackageManager implements PackageManager {
 			themes: join(projectBaseDir, "themes"),
 		};
 		const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
-		const projectAgentsSkillDirs = collectAncestorAgentsSkillDirs(this.cwd).filter(
-			(dir) => resolve(dir) !== resolve(userAgentsSkillsDir),
-		);
+		const projectAgentsSkillDirs = projectTrusted
+			? collectAncestorAgentsSkillDirs(this.cwd).filter((dir) => resolve(dir) !== resolve(userAgentsSkillsDir))
+			: [];
 
 		const addResources = (
 			resourceType: ResourceType,
@@ -2197,37 +2210,39 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		};
 
-		addResources(
-			"extensions",
-			collectAutoExtensionEntries(projectDirs.extensions),
-			projectMetadata,
-			projectOverrides.extensions,
-			projectBaseDir,
-		);
-		addResources(
-			"skills",
-			[
-				...collectAutoSkillEntries(projectDirs.skills, "pi"),
-				...projectAgentsSkillDirs.flatMap((dir) => collectAutoSkillEntries(dir, "agents")),
-			],
-			projectMetadata,
-			projectOverrides.skills,
-			projectBaseDir,
-		);
-		addResources(
-			"prompts",
-			collectAutoPromptEntries(projectDirs.prompts),
-			projectMetadata,
-			projectOverrides.prompts,
-			projectBaseDir,
-		);
-		addResources(
-			"themes",
-			collectAutoThemeEntries(projectDirs.themes),
-			projectMetadata,
-			projectOverrides.themes,
-			projectBaseDir,
-		);
+		if (projectTrusted) {
+			addResources(
+				"extensions",
+				collectAutoExtensionEntries(projectDirs.extensions),
+				projectMetadata,
+				projectOverrides.extensions,
+				projectBaseDir,
+			);
+			addResources(
+				"skills",
+				[
+					...collectAutoSkillEntries(projectDirs.skills, "pi"),
+					...projectAgentsSkillDirs.flatMap((dir) => collectAutoSkillEntries(dir, "agents")),
+				],
+				projectMetadata,
+				projectOverrides.skills,
+				projectBaseDir,
+			);
+			addResources(
+				"prompts",
+				collectAutoPromptEntries(projectDirs.prompts),
+				projectMetadata,
+				projectOverrides.prompts,
+				projectBaseDir,
+			);
+			addResources(
+				"themes",
+				collectAutoThemeEntries(projectDirs.themes),
+				projectMetadata,
+				projectOverrides.themes,
+				projectBaseDir,
+			);
+		}
 
 		addResources(
 			"extensions",

@@ -24,6 +24,8 @@ interface FakeDaemonOptions {
 	respondToShutdown?: boolean;
 	protocolVersion?: number;
 	appVersion?: string;
+	firstHelloDelayMs?: number;
+	firstSchemaId?: string;
 	schemaId?: string;
 	serverCapabilities?: string[];
 	onCommand?: (command: { type: string }) => void;
@@ -41,17 +43,34 @@ function send(socket: Socket, message: unknown): void {
 async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDaemon> {
 	const dir = mkdtempSync(join(tmpdir(), "pa-launch-"));
 	const socketPath = join(dir, "d.sock");
+	const helloTimers = new Set<ReturnType<typeof setTimeout>>();
+	let connectionIndex = 0;
 	const server: Server = createServer((socket) => {
+		const currentConnectionIndex = connectionIndex++;
 		socket.on("error", () => undefined);
-		send(socket, {
-			type: "daemon_hello",
-			socketPath,
-			protocol: { name: "prime-agent.daemon", version: options.protocolVersion ?? DAEMON_PROTOCOL_VERSION },
-			appVersion: options.appVersion,
-			schemaId: options.schemaId ?? DAEMON_SCHEMA_ID,
-			clientId: "fake-client",
-			serverCapabilities: options.serverCapabilities ?? [],
-		});
+		const sendHello = () =>
+			send(socket, {
+				type: "daemon_hello",
+				socketPath,
+				protocol: { name: "prime-agent.daemon", version: options.protocolVersion ?? DAEMON_PROTOCOL_VERSION },
+				appVersion: options.appVersion,
+				schemaId:
+					currentConnectionIndex === 0 && options.firstSchemaId
+						? options.firstSchemaId
+						: (options.schemaId ?? DAEMON_SCHEMA_ID),
+				clientId: "fake-client",
+				serverCapabilities: options.serverCapabilities ?? [],
+			});
+		const helloDelayMs = currentConnectionIndex === 0 ? (options.firstHelloDelayMs ?? 0) : 0;
+		if (helloDelayMs > 0) {
+			const timer = setTimeout(() => {
+				helloTimers.delete(timer);
+				sendHello();
+			}, helloDelayMs);
+			helloTimers.add(timer);
+		} else {
+			sendHello();
+		}
 		let buffer = "";
 		socket.on("data", (chunk) => {
 			buffer += chunk.toString();
@@ -101,6 +120,8 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 		socketPath,
 		close: () =>
 			new Promise<void>((resolve) => {
+				for (const timer of helloTimers) clearTimeout(timer);
+				helloTimers.clear();
 				server.close(() => resolve());
 				rmSync(dir, { recursive: true, force: true });
 			}),
@@ -271,6 +292,38 @@ describe("ensureInteractiveDaemonRunning", () => {
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
 
 		await expect(probe).resolves.toMatchObject({ status: "current" });
+	});
+
+	it("waits for a current daemon that accepts connections before its hello is ready", async () => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			firstHelloDelayMs: 2500,
+			schemaId: DAEMON_SCHEMA_ID,
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).resolves.toBeUndefined();
+		expect(commands).not.toContain("list");
+		expect(commands).not.toContain("shutdown");
+	});
+
+	it("reuses a daemon that becomes current while a stale verdict is being checked", async () => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			firstSchemaId: "stale-schema",
+			schemaId: DAEMON_SCHEMA_ID,
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).resolves.toBeUndefined();
+		expect(commands).toContain("list");
+		expect(commands).not.toContain("shutdown");
 	});
 
 	it("fails fast with the daemon log tail when the spawned daemon exits during startup", async () => {

@@ -6,6 +6,7 @@ export const GOAL_CONTEXT_CUSTOM_TYPE = "goal_context";
 export const GOAL_CONTEXT_PREVIEW_LABEL = "Goal context";
 export const GOAL_SKILL_NAME = "goal";
 export const MAX_THREAD_GOAL_OBJECTIVE_CHARS = 4000;
+export const MAX_THREAD_GOAL_PAUSE_REASON_CHARS = 1000;
 
 export type GoalStatus = "idle" | "active" | "paused" | "budget_limited" | "complete" | "error";
 export type GoalContextKind = "continuation" | "budget_limit" | "objective_updated";
@@ -81,6 +82,17 @@ export function validateGoalObjective(value: string): string {
 		throw new Error(`Goal objective must be at most ${MAX_THREAD_GOAL_OBJECTIVE_CHARS} characters.`);
 	}
 	return objective;
+}
+
+export function validateGoalPauseReason(value: string): string {
+	const reason = value.trim();
+	if (!reason) {
+		throw new Error("Goal pause reason must not be empty.");
+	}
+	if ([...reason].length > MAX_THREAD_GOAL_PAUSE_REASON_CHARS) {
+		throw new Error(`Goal pause reason must be at most ${MAX_THREAD_GOAL_PAUSE_REASON_CHARS} characters.`);
+	}
+	return reason;
 }
 
 export function validateGoalBudget(value: number | undefined): number | undefined {
@@ -225,6 +237,8 @@ Goal state:
 The goal persists across turns. Ending one turn does not reduce or redefine the objective. If the goal is not complete yet, make concrete progress toward the full objective.
 
 Before marking the goal complete, audit the current state against every requirement in the objective. Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. If the objective is achieved, run \`await goal.complete()\` in ipython so usage accounting is preserved.
+
+If no concrete action is possible because progress depends only on an external actor or event, run \`await goal.pause("waiting for …")\` in ipython. Do not keep emitting holding updates. After new input resolves the blocker, run \`await goal.resume()\` before continuing the goal.
 
 Do not call \`goal.complete()\` unless the goal is complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.`;
 }

@@ -1,5 +1,5 @@
 import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { getProcessStartId } from "./session-lease.js";
+import { compareProcessStartIds, getProcessStartId } from "./session-lease.js";
 
 export const ORPHAN_PROCESS_JOURNAL_ENV = "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL";
 
@@ -17,12 +17,25 @@ export interface ActiveOrphanProcess {
 	processStartId: string;
 }
 
-export function recordOrphanProcessState(pid: number, active: boolean): void {
+export interface OrphanProcessOwnershipResult {
+	status: "owned" | "released" | "untracked" | "uncertain";
+	pid: number;
+	processStartId?: string;
+	error?: string;
+}
+
+export function recordOrphanProcessState(pid: number, active: boolean): OrphanProcessOwnershipResult {
 	const path = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
-	if (!path || !Number.isInteger(pid) || pid <= 0) {
-		return;
+	if (!Number.isInteger(pid) || pid <= 0) {
+		return { status: "uncertain", pid, error: "invalid pid" };
+	}
+	if (!path) {
+		return { status: "untracked", pid };
 	}
 	const processStartId = active ? getProcessStartId(pid) : undefined;
+	if (active && !processStartId) {
+		return { status: "uncertain", pid, error: "process start identity unavailable" };
+	}
 	const record: OrphanProcessRecord = {
 		version: 1,
 		pid,
@@ -39,8 +52,14 @@ export function recordOrphanProcessState(pid: number, active: boolean): void {
 		} finally {
 			closeSync(descriptor);
 		}
-	} catch {
-		// Process tracking must not make a successfully spawned command fail.
+		return { status: active ? "owned" : "released", pid, processStartId };
+	} catch (error) {
+		return {
+			status: "uncertain",
+			pid,
+			processStartId,
+			error: error instanceof Error ? error.message : String(error),
+		};
 	}
 }
 
@@ -84,7 +103,7 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 }
 
 export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boolean {
-	return getProcessStartId(orphan.pid) === orphan.processStartId;
+	return compareProcessStartIds(orphan.processStartId, getProcessStartId(orphan.pid)) === "match";
 }
 
 export function clearOrphanProcessJournal(path: string): void {

@@ -34,7 +34,9 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import { describeRepetition, isRepetitionGuardDisabled, RepetitionGuard } from "../utils/repetition-guard.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { recordStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -174,6 +176,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
 			const blocks = output.content as StreamingBlock[];
+			// Reasoning only. The text channel is left unguarded on purpose: a
+			// long legitimate answer can contain generated tables or code that
+			// look repetitive, and a false abort there destroys real work.
+			const reasoningGuard = isRepetitionGuardDisabled() ? undefined : new RepetitionGuard();
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
 			const finishBlock = (block: StreamingBlock) => {
 				const contentIndex = getContentIndex(block);
@@ -338,6 +344,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 								delta,
 								partial: output,
 							});
+							// A degenerate thinking loop burns the whole output budget
+							// and never emits a tool call, so nothing downstream ever
+							// sees it as a failure. Abort here instead. See #1029.
+							const finding = reasoningGuard?.push(delta);
+							if (finding) {
+								throw new StreamFailureError(
+									`Model stopped making progress and repeated itself: ${describeRepetition(finding)}`,
+									{ kind: "degenerate_output", providerErrorType: `repetition:${finding.kind}` },
+								);
+							}
 						}
 					}
 
@@ -411,6 +427,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			// Some providers via OpenRouter give additional information in this field.
 			const rawMetadata = (error as any)?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
+			// Every other provider records a structured failure here; this one
+			// did not, so openai-completions failures reached the session with
+			// no classification at all.
+			recordStreamFailure(model, output, error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
