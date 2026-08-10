@@ -24,7 +24,10 @@
 
 - After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
 - Note: `npm run check` does not run tests.
-- NEVER run: `npm run dev`, `npm run build`, `npm test`
+- NEVER run: `npm run dev`, `npm test`
+- Do not run `npm run build` for routine work. It is permitted only for these two audited purposes, and the receipt must say which applied:
+  1. **Installing** — the deliverable is that a locally installed agent runs current code. `packages/agent` resolves through `main: ./dist/index.js`, and `pi-ai`/`pi-tui`/`pi-agent-core` resolve via `node_modules/@earendil-works/*` symlinks into `packages/*`, so BOTH `--dist` and source (`tsx`) modes load built artifacts. A changed package whose `dist` predates its `src` is stale in either mode.
+  2. **Verifying a clean install** — the full suite cannot pass from a fresh `npm ci` without it. Extension loading fails with `Cannot find package '.../pi-agent-core/dist/index.js'`, which is designed behaviour: every CI workflow runs `npm ci` → `npm run build` → `npm run check`. Confirm the failures are environmental by reproducing them at the pristine pre-merge tip in the same worktree before blaming a change.
 - Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
 - Run tests from the package root, not the repo root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
