@@ -4800,12 +4800,14 @@ export class DaemonSupervisor {
 			if (!killed && stoppedCanSignal && Date.now() >= sigkillDeadline) {
 				// Fresh, unthrottled identity check right before signalling: the
 				// cached verdict may be up to 500ms old, long enough for the pid
-				// to be recycled by an unrelated process.
+				// to be recycled by an unrelated process. A transiently
+				// unobservable identity skips this attempt but keeps escalation
+				// armed so a wedged worker is still killed on a later pass.
 				const observedNow = processStartId === undefined ? undefined : getProcessStartId(pid);
 				if (processStartId === undefined || observedNow === processStartId) {
 					signalProcessGroupOrProcess(pid, "SIGKILL");
+					killed = true;
 				}
-				killed = true;
 			}
 			await unrefDelay(STOP_FINALIZATION_RECHECK_MS);
 		}

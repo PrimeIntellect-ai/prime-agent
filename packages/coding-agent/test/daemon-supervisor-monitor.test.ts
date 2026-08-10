@@ -2009,6 +2009,67 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("retries SIGKILL after a transient identity outage at the deadline", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-kill-retry",
+				pid: 111_119,
+				processStartId: "proc:original",
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			intentionalStop: true,
+			stopRevision: 0,
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const stopWorker = vi.fn(async () => {
+			workers.delete(worker.descriptor.workerId);
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			shuttingDown: false,
+			stopWorker,
+			persistWorker: vi.fn(),
+			log: vi.fn(),
+			reportCleanupFailure: vi.fn(),
+		}) as {
+			scheduleWorkerStopFinalization(target: object): void;
+		};
+		const childProcessModule = await import("../src/utils/child-process.js");
+		const sessionLeaseModule = await import("../src/core/session-lease.js");
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
+		let alive = true;
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockImplementation(() => alive);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation((_pid, signal) => {
+			if (signal === "SIGKILL") {
+				alive = false;
+			}
+		});
+		// Identity observation is down when the SIGKILL deadline passes...
+		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue(undefined);
+		try {
+			supervisor.scheduleWorkerStopFinalization(worker);
+			const finalization = worker.stopFinalization;
+
+			await vi.advanceTimersByTimeAsync(8000);
+			expect(killSpy).not.toHaveBeenCalled();
+
+			// ...but once identity is observable again, escalation still fires.
+			startIdSpy.mockReturnValue("proc:original");
+			await vi.advanceTimersByTimeAsync(5000);
+			await finalization;
+			expect(killSpy).toHaveBeenCalledWith(worker.descriptor.pid, "SIGKILL");
+			expect(stopWorker).toHaveBeenCalled();
+		} finally {
+			existsSpy.mockRestore();
+			aliveSpy.mockRestore();
+			killSpy.mockRestore();
+			startIdSpy.mockRestore();
+		}
+	});
+
 	it("keeps waiting when process identity is transiently unobservable", async () => {
 		vi.useFakeTimers();
 		const worker = {
