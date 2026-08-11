@@ -588,6 +588,7 @@ export class DaemonSupervisor {
 	private ownership?: Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 	private cleanupPromise?: Promise<void>;
 	private shuttingDown = false;
+	private finalizeWorkerStopsDuringShutdown = false;
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
 	private readonly mutationDrain = new MutationDrainLatch();
 	private readonly clients = new Set<DaemonSocketClient>();
@@ -2382,9 +2383,6 @@ export class DaemonSupervisor {
 		await this.assertRecoveryAllowed();
 		if (worker.descriptor.stopRequestedAt) {
 			try {
-				// A tombstoned worker must not run long enough to elect another
-				// supervisor while its intentional stop is being adopted.
-				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Completed intentional stop for worker ${worker.descriptor.workerId} during supervisor adoption`);
 			} catch (error) {
@@ -4795,7 +4793,8 @@ export class DaemonSupervisor {
 		};
 		const sigkillDeadline = Date.now() + STOP_FINALIZATION_SIGKILL_GRACE_MS;
 		let killed = false;
-		while (!this.shuttingDown) {
+		const shouldContinue = () => !this.shuttingDown || this.finalizeWorkerStopsDuringShutdown;
+		while (shouldContinue()) {
 			if (!isStopGenerationCurrent()) {
 				return;
 			}
@@ -4824,7 +4823,7 @@ export class DaemonSupervisor {
 			this.workers.get(worker.descriptor.workerId) === worker &&
 			worker.descriptor.stopRequestedAt !== undefined &&
 			worker.descriptor.pid === pid;
-		while (!this.shuttingDown && isCleanupStillWanted()) {
+		while (shouldContinue() && isCleanupStillWanted()) {
 			try {
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Finalized timed-out stop for worker ${worker.descriptor.workerId}`);
@@ -5046,8 +5045,22 @@ export class DaemonSupervisor {
 			cleanup();
 		}
 		if (stopWorkers) {
+			this.finalizeWorkerStopsDuringShutdown = true;
 			await Promise.all(
-				[...this.workers.values()].map((worker) => this.stopWorker(worker, true, forceWorkers, true)),
+				[...this.workers.values()].map(async (worker) => {
+					try {
+						await this.stopWorker(worker, true, forceWorkers, true);
+					} catch (error) {
+						const finalization = worker.stopFinalization;
+						if (!finalization) {
+							throw error;
+						}
+						await finalization;
+						if (this.workers.get(worker.descriptor.workerId) === worker) {
+							throw error;
+						}
+					}
+				}),
 			);
 			if (!this.hasPersistedWorkerDescriptors()) {
 				rmSync(this.supervisorConfigPath, { force: true });

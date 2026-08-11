@@ -963,6 +963,62 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("waits for timed-out worker finalization before completing shutdown", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-shutdown-finalization-test-"));
+		supervisorRegistryDirs.add(root);
+		const worker = {
+			descriptor: { workerId: "worker-shutdown-finalization" },
+			stopFinalization: undefined as Promise<void> | undefined,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		let finishFinalization = () => {};
+		const finalization = new Promise<void>((resolve) => {
+			finishFinalization = resolve;
+		}).then(() => {
+			workers.delete(worker.descriptor.workerId);
+		});
+		const stopError = new Error("worker stop timed out");
+		const stopWorker = vi.fn(async () => {
+			worker.stopFinalization = finalization;
+			throw stopError;
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
+			throw new Error(`exit ${code}`);
+		}) as typeof process.exit);
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			shuttingDown: false,
+			finalizeWorkerStopsDuringShutdown: false,
+			signalCleanupHandlers: [],
+			workers,
+			clients: new Set(),
+			stopWorker,
+			hasPersistedWorkerDescriptors: vi.fn(() => true),
+			catalog: { stop: vi.fn(async () => undefined) },
+			cleanupSocket: vi.fn(),
+			snapshotCacheRoot: join(root, "cache"),
+			log: vi.fn(),
+		}) as {
+			finalizeWorkerStopsDuringShutdown: boolean;
+			shutdown(exitCode: number, stopWorkers: boolean): Promise<never>;
+		};
+
+		try {
+			const shutdown = supervisor.shutdown(0, true).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			await vi.waitFor(() => expect(stopWorker).toHaveBeenCalledOnce());
+			expect(exit).not.toHaveBeenCalled();
+			expect(supervisor.finalizeWorkerStopsDuringShutdown).toBe(true);
+
+			finishFinalization();
+			await expect(shutdown).resolves.toEqual(new Error("exit 0"));
+			expect(exit).toHaveBeenCalledWith(0);
+		} finally {
+			exit.mockRestore();
+		}
+	});
+
 	it("does not poll a healthy supervisor after the startup check", async () => {
 		vi.useFakeTimers();
 		let resolveProbe: () => void = () => undefined;
@@ -1707,6 +1763,35 @@ describe("daemon worker supervisor monitoring", () => {
 		]);
 	});
 
+	it("adopts a tombstoned worker through identity-aware stop handling", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-adopted-stop",
+				pid: 111_123,
+				processStartId: "proc:original",
+				stopRequestedAt: new Date().toISOString(),
+				archiveOnStop: true,
+			},
+		};
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+			stopWorker,
+			log: vi.fn(),
+		}) as {
+			adoptOrRecoverWorker(target: object): Promise<void>;
+		};
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		try {
+			await supervisor.adoptOrRecoverWorker(worker);
+
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(stopWorker).toHaveBeenCalledWith(worker, true, true, true);
+		} finally {
+			killSpy.mockRestore();
+		}
+	});
+
 	it("finalizes a timed-out stop once the worker process dies", async () => {
 		vi.useFakeTimers();
 		const worker = {
@@ -1753,7 +1838,7 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("escalates a stuck stop to SIGKILL before finalizing", async () => {
+	it("escalates a stuck stop during shutdown before finalizing", async () => {
 		vi.useFakeTimers();
 		const processStartId = getProcessStartId(process.pid);
 		if (processStartId === undefined) {
@@ -1776,7 +1861,8 @@ describe("daemon worker supervisor monitoring", () => {
 		const stopWorker = vi.fn(async () => {});
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
-			shuttingDown: false,
+			shuttingDown: true,
+			finalizeWorkerStopsDuringShutdown: true,
 			stopWorker,
 			persistWorker: vi.fn(),
 			log: vi.fn(),
