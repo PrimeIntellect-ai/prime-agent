@@ -169,6 +169,7 @@ describe("KernelManager abort handling", () => {
 		const secondExecutePromise = manager.execute("x = 1");
 		await Promise.resolve();
 		expect(shellSend).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(200);
 
 		internals.handleExecutionMessage({
 			header: { msg_type: "status" },
@@ -184,13 +185,19 @@ describe("KernelManager abort handling", () => {
 		if (!secondExecution) {
 			throw new Error("Expected second execution to start after previous cell went idle");
 		}
+		await vi.advanceTimersByTimeAsync(50);
 		internals.handleExecutionMessage({
 			header: { msg_type: "status" },
 			parent_header: { msg_id: secondExecution.requestMsgId },
 			metadata: {},
 			content: { execution_state: "idle" },
 		});
-		await expect(secondExecutePromise).resolves.toMatchObject({ status: "ok" });
+		await expect(secondExecutePromise).resolves.toMatchObject({
+			status: "ok",
+			durationMs: 250,
+			queueWaitMs: 200,
+			kernelExecutionMs: 50,
+		});
 
 		manager.disposeSync();
 		expect(kernelKill).toHaveBeenCalledWith("SIGTERM");
@@ -312,5 +319,38 @@ describe("KernelManager abort handling", () => {
 		expect(shellSend).toHaveBeenCalledTimes(1);
 		expect(controlSend).toHaveBeenCalled();
 		manager.disposeSync();
+	});
+
+	it("bounds automatic snapshot execution so it cannot monopolize the queue", async () => {
+		vi.useFakeTimers();
+		const manager = new KernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		const enqueueExecute = vi.fn(
+			async (_code: string, opts: { signal?: AbortSignal }) =>
+				await new Promise<{
+					stdout: string;
+					stderr: string;
+					status: "aborted";
+					durationMs: number;
+				}>((resolve) => {
+					opts.signal?.addEventListener(
+						"abort",
+						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
+						{ once: true },
+					);
+				}),
+		);
+		Object.assign(manager as unknown as { state: "running"; enqueueExecute: typeof enqueueExecute }, {
+			state: "running",
+			enqueueExecute,
+		});
+
+		const snapshot = manager.snapshotState();
+		await vi.advanceTimersByTimeAsync(5000);
+
+		await expect(snapshot).resolves.toBeNull();
+		expect(enqueueExecute.mock.calls[0]?.[1].signal?.aborted).toBe(true);
 	});
 });

@@ -77,6 +77,32 @@ def _prime_agent_snapshot_state():
     # never snapshot them.
     always_skip = {"rlm", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
 
+    def approximate_size(value, limit):
+        # Reject obviously oversized builtin object graphs before dill builds a
+        # same-sized temporary bytes object. This deliberately stays shallow for
+        # arbitrary user classes; the execution timeout remains the final guard.
+        seen = _b.set()
+        stack = [value]
+        size = 0
+        while stack:
+            item = stack.pop()
+            item_id = _b.id(item)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            try:
+                size += sys.getsizeof(item)
+            except _b.Exception:
+                pass
+            if size > limit:
+                return size
+            if _b.isinstance(item, _b.dict):
+                stack.extend(item.keys())
+                stack.extend(item.values())
+            elif _b.isinstance(item, (_b.list, _b.tuple, _b.set, _b.frozenset)):
+                stack.extend(item)
+        return size
+
     payload = {}
     skipped = []
     total = 0
@@ -87,6 +113,10 @@ def _prime_agent_snapshot_state():
         if name.startswith("_") or name in hidden or name in always_skip:
             continue
         value = ns[name]
+        remaining = ${maxBytes} - total
+        if approximate_size(value, remaining) > remaining:
+            skipped.append({"name": name, "reason": "estimated object graph exceeds snapshot size cap"})
+            continue
         # Modules are pickled by reference and re-imported on restore.
         try:
             blob = dill.dumps(value)

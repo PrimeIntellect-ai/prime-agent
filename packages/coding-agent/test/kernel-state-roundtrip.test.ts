@@ -174,4 +174,36 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 			rmSync(autoDir, { recursive: true, force: true });
 		}
 	}, 60_000);
+
+	it("bounds oversized snapshots and queued cancellation", async () => {
+		const testDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-bounds-"));
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: testDir,
+			snapshot: {
+				path: join(testDir, "state.dill"),
+				manifestPath: join(testDir, "state.json"),
+				maxBytes: 1024 * 1024,
+			},
+		});
+		try {
+			await manager.execute("large_records = [{'text': f'{i:08d}' + 'x' * 4088} for i in range(2048)]");
+			expect((await manager.snapshotState())?.skipped.map(({ name }) => name)).toContain("large_records");
+
+			const first = manager.execute("import time; time.sleep(0.5); first_done = True");
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			const controller = new AbortController();
+			const queued = manager.execute("should_not_run = True", { signal: controller.signal });
+			controller.abort();
+			expect(await queued).toMatchObject({ status: "aborted", kernelExecutionMs: 0 });
+
+			const third = manager.execute("print(first_done, 'responsive')");
+			await first;
+			expect((await third).stdout.trim()).toBe("True responsive");
+			expect(await manager.listNamespaceNames()).not.toContain("should_not_run");
+		} finally {
+			await manager.dispose();
+			rmSync(testDir, { recursive: true, force: true });
+		}
+	}, 60_000);
 });
