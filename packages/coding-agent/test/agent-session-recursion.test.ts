@@ -255,6 +255,7 @@ describe("AgentSession rlm recursion", () => {
 			subagentRuntimeHost?: SubagentRuntimeHost;
 			customTools?: ConstructorParameters<typeof AgentSession>[0]["customTools"];
 			rlmSessionDir?: string;
+			rlmParentNodeId?: string;
 			sessionManager?: SessionManager;
 			settingsManager?: SettingsManager;
 			extensionsResult?: LoadExtensionsResult;
@@ -310,6 +311,7 @@ describe("AgentSession rlm recursion", () => {
 			rlmDepth: options.depth,
 			rlmMaxDepth: options.maxDepth,
 			rlmSessionDir: options.rlmSessionDir,
+			rlmParentNodeId: options.rlmParentNodeId,
 		});
 		return session;
 	}
@@ -1388,6 +1390,135 @@ describe("AgentSession rlm recursion", () => {
 		expect((await root.listRlmSubagents()).subagents).toContainEqual(
 			expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "completed" }),
 		);
+	});
+
+	it("reports a retained child follow-up that completes without a reply", async () => {
+		let releaseFollowUp: () => void = () => {};
+		const followUpGate = new Promise<void>((resolve) => {
+			releaseFollowUp = resolve;
+		});
+		const sendAgentMessage = vi.fn(async () => ({
+			id: "agentmsg-follow-up-notice",
+			source: "agent_message" as const,
+			target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			message: "notice",
+			deliveryStatus: "delivered" as const,
+		}));
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "silent-followup-child"),
+			rlmParentNodeId: "silent-followup-child",
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				void followUpGate.then(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: {
+							role: "assistant",
+							content: [{ type: "thinking", thinking: "deliberating silently" }],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: usage(),
+							stopReason: "stop",
+							timestamp: Date.now(),
+						},
+					});
+				});
+				return stream;
+			},
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				sendAgentMessage,
+			},
+		});
+		child.setSessionName("followup-worker");
+		const message = createAgentSessionMessage({
+			id: "agentmsg-parent-follow-up",
+			source: "agent_message",
+			message: "continue work",
+			from: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			fromRelationship: "parent",
+			target: { activeSessionId: "child-active", sessionId: child.sessionId },
+		});
+
+		const admission = child.acceptAgentMessagePrompt(message.content as string, { customMessage: message });
+		// Admission must return while the follow-up turn is still running.
+		await expectSettlesWithin(admission, 250);
+		expect(sendAgentMessage).not.toHaveBeenCalled();
+		releaseFollowUp();
+		await vi.waitFor(() => {
+			expect(sendAgentMessage).toHaveBeenCalledTimes(1);
+		});
+		expect(sendAgentMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				target: "parent-session",
+				message: "RLM child followup-worker (silent-followup-child) completed without sending a reply",
+			}),
+		);
+	});
+
+	it("does not send a terminal notice when a retained child replies during a follow-up", async () => {
+		let releaseFollowUp: () => void = () => {};
+		const followUpGate = new Promise<void>((resolve) => {
+			releaseFollowUp = resolve;
+		});
+		let child: AgentSession;
+		const sendAgentMessage = vi.fn(async () => ({
+			id: "agentmsg-follow-up-reply",
+			source: "agent_message" as const,
+			target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			message: "done",
+			deliveryStatus: "delivered" as const,
+		}));
+		child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "replying-followup-child"),
+			rlmParentNodeId: "replying-followup-child",
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				void followUpGate.then(async () => {
+					const handlers = (child as unknown as InspectableRlmSession)._createKernelHostHandlers();
+					const send = handlers["agent_message.send"];
+					if (!send) throw new Error("Missing agent_message.send host handler");
+					await send({ message: "done", receiver_role: "parent" });
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("follow-up answer") });
+				});
+				return stream;
+			},
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				roster: () => ({
+					current: { name: "followup-worker", id: child.sessionId, depth: 1 },
+					entries: [{ relationship: "parent", name: "parent", id: "parent-session", depth: 0, status: "idle" }],
+				}),
+				sendAgentMessage,
+			},
+		});
+		child.setSessionName("followup-worker");
+		const message = createAgentSessionMessage({
+			id: "agentmsg-parent-follow-up-reply",
+			source: "agent_message",
+			message: "continue work",
+			from: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			fromRelationship: "parent",
+			target: { activeSessionId: "child-active", sessionId: child.sessionId },
+		});
+
+		const admission = child.acceptAgentMessagePrompt(message.content as string, { customMessage: message });
+		await expectSettlesWithin(admission, 250);
+		expect(sendAgentMessage).not.toHaveBeenCalled();
+		releaseFollowUp();
+		await vi.waitFor(() => {
+			expect(sendAgentMessage).toHaveBeenCalledTimes(1);
+		});
+		expect(sendAgentMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ target: "parent-session", message: "done" }),
+		);
+		// No automatic terminal notice may follow the explicit reply.
+		await sleep(50);
+		expect(sendAgentMessage).toHaveBeenCalledTimes(1);
 	});
 
 	it("projects retained child follow-up turns into parent child-update activity", async () => {

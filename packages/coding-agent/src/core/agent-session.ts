@@ -4479,15 +4479,43 @@ export class AgentSession {
 	async acceptAgentMessagePrompt(text: string, options?: PromptOptions): Promise<void> {
 		const customMessage =
 			options?.customMessage && isAgentSessionMessage(options.customMessage) ? options.customMessage : undefined;
-		await this._prompt(text, {
-			...options,
-			expandPromptTemplates: false,
-			skipInputHandlers: true,
-			skipPrePromptWork: true,
-			returnAfterAccepted: true,
-			agentMessageId: options?.agentMessageId ?? customMessage?.details.id ?? parseAgentSessionMessagePromptId(text),
-			customMessage,
-		});
+		const agentMessageId =
+			options?.agentMessageId ?? customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
+		// A direct parent message defines a follow-up task for an idle RLM child: its
+		// completion must produce either an explicit child reply or a host notice.
+		const parentTarget =
+			customMessage?.details.fromRelationship === "parent" && this._rlmDepth > 0 && this._agentMessageController
+				? (customMessage.details.from?.sessionId ?? customMessage.details.from?.activeSessionId)
+				: undefined;
+		if (parentTarget && agentMessageId) {
+			if (this._agentMessageOutcomes.get(agentMessageId)?.completion) {
+				throw new Error(`Prompt completion id is already in use: ${agentMessageId}`);
+			}
+			const parentReplyCountBefore = this._parentReplyCount;
+			const outcome = this._agentMessageOutcome(agentMessageId);
+			const completion = createAgentMessageDeferred();
+			outcome.completion = completion;
+			void completion.promise
+				.then(
+					() => this._reportRetainedFollowUpCompletion(parentTarget, parentReplyCountBefore),
+					(error: Error) => this._reportRetainedFollowUpFailure(parentTarget, parentReplyCountBefore, error),
+				)
+				.catch(() => undefined);
+		}
+		try {
+			await this._prompt(text, {
+				...options,
+				expandPromptTemplates: false,
+				skipInputHandlers: true,
+				skipPrePromptWork: true,
+				returnAfterAccepted: true,
+				agentMessageId,
+				customMessage,
+			});
+		} catch (error) {
+			if (agentMessageId) this._settleAgentMessage(agentMessageId, "completion", this._asError(error));
+			throw error;
+		}
 		if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 	}
 
@@ -4511,6 +4539,46 @@ export class AgentSession {
 		});
 		if (queued && customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 		return queued;
+	}
+
+	private _reportRetainedFollowUpCompletion(targetSessionId: string, parentReplyCountBefore: number): void {
+		if (this._parentReplyCount !== parentReplyCountBefore) return;
+		const lastAssistantText = this.getLastAssistantText();
+		this._deliverRetainedFollowUpNotice(
+			targetSessionId,
+			createRlmChildTerminalNoticeMessage({
+				kind: "completed_without_reply",
+				childId: this._rlmNoticeChildId(),
+				sessionName: this.sessionName ?? this.sessionId,
+				lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
+			}).content as string,
+		);
+	}
+
+	private _reportRetainedFollowUpFailure(targetSessionId: string, parentReplyCountBefore: number, error: Error): void {
+		if (this._parentReplyCount !== parentReplyCountBefore) return;
+		this._deliverRetainedFollowUpNotice(
+			targetSessionId,
+			createRlmChildFailureMessage({
+				childId: this._rlmNoticeChildId(),
+				sessionName: this.sessionName ?? this.sessionId,
+				error: error instanceof Error ? error.message : String(error),
+			}).content as string,
+		);
+	}
+
+	private _rlmNoticeChildId(): string {
+		return this._rlmParentNodeId ?? this.sessionId;
+	}
+
+	private _deliverRetainedFollowUpNotice(targetSessionId: string, message: string): void {
+		const controller = this._agentMessageController;
+		if (!controller) return;
+		try {
+			void Promise.resolve(controller.sendAgentMessage({ target: targetSessionId, message })).catch(() => undefined);
+		} catch {
+			// A failed notice delivery must not surface as an unhandled rejection.
+		}
 	}
 
 	async promptHeartbeat(job: AgentCronJob, options?: PromptOptions): Promise<void> {
