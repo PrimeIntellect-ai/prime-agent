@@ -4555,7 +4555,7 @@ export class DaemonSupervisor {
 			return "gone";
 		}
 		if (processStartId === undefined) {
-			return "current";
+			return "unknown";
 		}
 		const observed = getProcessStartId(pid);
 		if (observed === undefined) {

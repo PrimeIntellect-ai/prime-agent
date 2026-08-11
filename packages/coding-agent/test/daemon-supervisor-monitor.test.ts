@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getProcessStartId } from "../src/core/session-lease.js";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { CommandRecoveryJournal } from "../src/modes/daemon/command-recovery-journal.js";
 import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
@@ -27,6 +28,7 @@ import {
 import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
 import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
 import type { PrivateFrame } from "../src/modes/session-worker/private-framing.js";
+import * as childProcessModule from "../src/utils/child-process.js";
 import { createDeferred } from "./suite/scheduling.js";
 
 const workerLaunchTestState = vi.hoisted(() => ({
@@ -188,6 +190,7 @@ function createExistingLaunchWorker(root: string, descriptorDir: string) {
 			version: 1 as const,
 			workerId,
 			pid: 999_999,
+			processStartId: undefined as string | undefined,
 			socketPath: join(root, `${workerId}.sock`),
 			recoveryJournalPath: join(descriptorDir, `${workerId}.recovery.jsonl`),
 			orphanProcessJournalPath: join(descriptorDir, `${workerId}.orphans.jsonl`),
@@ -898,6 +901,11 @@ describe("daemon worker supervisor monitoring", () => {
 			);
 		await rollbackStarted;
 		supervisor.shuttingDown = true;
+		workerLaunchTestState.forceMissingProcessStartId = false;
+		existing.descriptor.processStartId = getProcessStartId(existing.descriptor.pid);
+		if (existing.descriptor.processStartId === undefined) {
+			throw new Error("Could not identify launched worker before shutdown");
+		}
 		await supervisor.stopWorker(existing, true, true);
 		releaseRollback();
 
@@ -1817,7 +1825,6 @@ describe("daemon worker supervisor monitoring", () => {
 		}) as {
 			scheduleWorkerStopFinalization(target: object): void;
 		};
-		const childProcessModule = await import("../src/utils/child-process.js");
 		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
 		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
 		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
@@ -2013,6 +2020,55 @@ describe("daemon worker supervisor monitoring", () => {
 		} finally {
 			existsSpy.mockRestore();
 			aliveSpy.mockRestore();
+		}
+	});
+
+	it("never signals an identity-less worker pid during a forced stop", async () => {
+		vi.useFakeTimers();
+		const worker = {
+			descriptor: {
+				workerId: "worker-force-missing-identity",
+				pid: 111_122,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+			},
+			client: undefined,
+			summaries: new Map(),
+			snapshotCache: new Map(),
+			transcriptCaches: new Map(),
+			snapshotGenerations: new Map(),
+			snapshotLoads: new Map(),
+			intentionalStop: true,
+			stopRevision: 0,
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			persistWorker: vi.fn(),
+			persistWorkerStopTombstone: vi.fn(),
+			scheduleWorkerStopFinalization: vi.fn(),
+			syncAgentPeers: vi.fn(async () => {}),
+			broadcastHeartbeatsChanged: vi.fn(),
+		}) as unknown as {
+			stopWorker(target: object, removeDescriptor: boolean, force?: boolean): Promise<void>;
+			scheduleWorkerStopFinalization: ReturnType<typeof vi.fn>;
+		};
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		try {
+			const stopping = expect(supervisor.stopWorker(worker, true, true)).rejects.toThrow(
+				"did not stop after SIGKILL",
+			);
+			await vi.advanceTimersByTimeAsync(2000);
+
+			await stopping;
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(supervisor.scheduleWorkerStopFinalization).toHaveBeenCalledWith(worker);
+		} finally {
+			existsSpy.mockRestore();
+			aliveSpy.mockRestore();
+			killSpy.mockRestore();
 		}
 	});
 
