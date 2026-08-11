@@ -298,9 +298,9 @@ describe("IPythonCellComponent diff rendering", () => {
 
 		// Top line is unchanged through the duration; only the trailing hint flips
 		// "to expand" → "to collapse", so nothing before it can shift.
-		expect(stripAnsi(collapsed[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · .*to expand$/);
-		expect(stripAnsi(expanded[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · .*to collapse$/);
-		const upToHint = (line: string) => stripAnsi(line).replace(/· [^·]*to (expand|collapse)$/, "");
+		expect(stripAnsi(collapsed[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · \(.*to expand\)$/);
+		expect(stripAnsi(expanded[0])).toMatch(/^ ✓ python · .* · ↑ 1 ↓ 1 lines · 780\.0s · \(.*to collapse\)$/);
+		const upToHint = (line: string) => stripAnsi(line).replace(/· \([^·]*to (expand|collapse)\)$/, "");
 		expect(upToHint(expanded[0])).toBe(upToHint(collapsed[0]));
 
 		// No separate "python · done · 780.0s" header line below the top line.

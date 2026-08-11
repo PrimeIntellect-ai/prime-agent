@@ -482,8 +482,9 @@ describe("ENG-4531 agent message UI", () => {
 
 		component.setExpanded(true);
 		const expanded = render(component);
+		expect(expanded).toContain("to collapse");
 		const expandedLines = expanded.split("\n");
-		expect(expandedLines[1]?.trimEnd()).toBe(" ◆ Agent message received · from Planner");
+		expect(expandedLines[1]?.trimEnd()).toMatch(/^ ◆ Agent message received · from Planner \(.*to collapse\)$/);
 		expect(expandedLines.slice(2)).toEqual([
 			" ╰─ Reply to your parent with exactly: hi",
 			"    Then wait for more work.",
