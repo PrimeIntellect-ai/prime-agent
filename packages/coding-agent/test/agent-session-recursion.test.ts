@@ -1884,7 +1884,8 @@ describe("AgentSession rlm recursion", () => {
 			config: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
 			source: "chat",
 			depth: 0,
-			allowanceTokens: 500,
+			// The full grant is spendable until it is delegated; 500 of it may be handed to children.
+			allowanceTokens: 1000,
 			subtreePoolTokens: 500,
 		});
 		expect(root.messages).toEqual(originalMessages);
@@ -2455,13 +2456,13 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.systemPrompt).toContain("500");
 	});
 
-	it("rejects a floor no child could actually spend, at configuration time", async () => {
+	it("rejects a floor larger than the grant each child would receive", async () => {
 		const root = createSession({ maxDepth: 3 });
 
-		// grant 250 -> the funded child keeps only 125, below a 200 floor.
+		// pool 500 split between 2 children grants 250 each, below a 300 floor.
 		await expect(
-			root.setRlmTokenBudget({ totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2, minTokens: 200 }),
-		).rejects.toThrow(/worth 125 spendable tokens/);
+			root.setRlmTokenBudget({ totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2, minTokens: 300 }),
+		).rejects.toThrow(/grants each of 2 children 250 tokens/);
 	});
 
 	it("tells the model to budget each delegation by default", () => {
@@ -2491,6 +2492,41 @@ describe("AgentSession rlm recursion", () => {
 
 		// No global or chat budget needed: the grant governs that child's whole subtree.
 		expect(captured[0]).toEqual({ allowance: 200_000, total: 200_000 });
+	});
+
+	it("lets a child spend its whole grant when it delegates nothing", async () => {
+		const child = createSession({
+			depth: 1,
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 200_000, schedule: "split", factor: 0.5, fanout: 3 },
+			tokenAllowance: 200_000,
+		});
+
+		// A grant is one pot: nothing is stranded on a session that never delegates.
+		expect(child.getRlmTokenBudgetStatus().allowanceTokens).toBe(200_000);
+	});
+
+	it("reduces what a session may spend by exactly what it delegates", async () => {
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
+			tokenAllowance: 1000,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					throw new Error("stop after the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+		expect(root.getRlmTokenBudgetStatus().allowanceTokens).toBe(1000);
+
+		await root.runRlmChild("first");
+		await vi.waitFor(() => expect(root.getRlmTokenBudgetStatus().allowanceTokens).toBe(750));
+
+		await root.runRlmChild("second");
+		await vi.waitFor(() => expect(root.getRlmTokenBudgetStatus().allowanceTokens).toBe(500));
+		// Delegation is capped by factor, so the parent keeps half of its own grant.
+		await expect(root.runRlmChild("third")).rejects.toThrow(/subtree pool exhausted/);
 	});
 
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {

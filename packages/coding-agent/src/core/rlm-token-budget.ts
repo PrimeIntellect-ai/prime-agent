@@ -127,12 +127,9 @@ function rlmTokenBudgetConfigError(value: unknown): string | undefined {
 	if (schedule === "split" && minTokens !== undefined) {
 		const probe: RlmTokenBudgetConfig = { totalTokens, schedule, factor, fanout, minTokens };
 		const share = childAllowanceFromPool(probe, subtreePool(probe, totalTokens) ?? 0);
-		// The floor promises what a child may SPEND, and a funded child keeps only `1 - factor` of
-		// its grant, so the feasibility check must use the spendable amount rather than the grant.
-		const spendable = ownAllowance(probe, 1, share);
-		if (spendable < minTokens) {
+		if (share < minTokens) {
 			return (
-				`RLM token budget floor ${minTokens} cannot be funded: the "split" schedule gives each of ${fanout} children a ${share}-token grant worth ${spendable} spendable tokens. ` +
+				`RLM token budget floor ${minTokens} cannot be funded: the "split" schedule grants each of ${fanout} children ${share} tokens. ` +
 				"Lower the floor, raise the total, reduce --fanout, or raise --factor."
 			);
 		}
@@ -202,16 +199,16 @@ export function ownAllowance(config: RlmTokenBudgetConfig, depth: number, inheri
 				Math.max(1, Math.floor(config.totalTokens * config.factor ** Math.max(0, depth))),
 			);
 		case "split": {
+			// A grant is a single pot: the session may spend all of it or hand parts to children.
+			// The caller subtracts what it has already granted, so nothing is stranded on a
+			// session that never delegates while the subtree stays bounded by the grant.
 			const allowance = inheritedAllowance ?? config.totalTokens;
-			// The floor is deliberately not applied here: raising a split allowance would break the
-			// subtree bound. Under-funded children are refused at spawn instead.
-			const own = Math.max(1, Math.floor(allowance * (1 - config.factor)));
-			return config.maxTokens === undefined ? own : Math.min(own, config.maxTokens);
+			return config.maxTokens === undefined ? allowance : Math.min(allowance, config.maxTokens);
 		}
 	}
 }
 
-/** Tokens reserved for descendants of a session holding `allowance`; null when the schedule does not pool. */
+/** Tokens of a grant a session may hand to descendants; null when the schedule does not pool. */
 export function subtreePool(config: RlmTokenBudgetConfig, allowance: number): number | null {
 	if (config.schedule !== "split") return null;
 	return Math.max(0, Math.floor(allowance * config.factor));

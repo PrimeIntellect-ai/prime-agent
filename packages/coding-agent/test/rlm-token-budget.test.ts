@@ -29,15 +29,18 @@ function simulateTree(cfg: RlmTokenBudgetConfig, maxDepth: number, fanout: numbe
 	for (let depth = 0; depth <= maxDepth; depth++) {
 		const next: number[] = [];
 		for (const allowance of layer) {
-			total += ownAllowance(cfg, depth, allowance);
+			let handedOut = 0;
 			const initialPool = subtreePool(cfg, allowance) ?? 0;
 			const share = childAllowance(cfg, depth + 1, initialPool);
 			let pool = initialPool;
 			for (let child = 0; child < fanout; child++) {
 				if (share <= 0 || pool < share) break;
 				pool -= share;
+				handedOut += share;
 				next.push(share);
 			}
+			// One pot per subtree: a session spends whatever it did not hand to children.
+			total += Math.max(0, ownAllowance(cfg, depth, allowance) - handedOut);
 		}
 		layer = next;
 	}
@@ -62,10 +65,11 @@ describe("rlm token budget schedules", () => {
 		expect(childAllowance(cfg, 2, null)).toBe(62_500);
 	});
 
-	test("split reserves the factor share for descendants and keeps the rest", () => {
+	test("split makes a grant one pot the session may spend or delegate", () => {
 		const cfg = config({ schedule: "split", factor: 0.5, fanout: 2 });
 
-		expect(ownAllowance(cfg, 0, 1_000_000)).toBe(500_000);
+		// The whole grant is spendable; delegating is what reduces it, not the schedule.
+		expect(ownAllowance(cfg, 0, 1_000_000)).toBe(1_000_000);
 		expect(subtreePool(cfg, 1_000_000)).toBe(500_000);
 		expect(childAllowance(cfg, 1, 500_000)).toBe(250_000);
 		// siblings receive identical shares of the pool the parent started with
@@ -270,7 +274,7 @@ describe("rlm token budget misconfiguration guards", () => {
 				fanout: 3,
 				minTokens: 200_000,
 			}),
-		).toThrow(/gives each of 3 children a 100000-token grant worth 50000 spendable tokens/);
+		).toThrow(/grants each of 3 children 100000 tokens/);
 	});
 
 	test("accepts a split floor the schedule can fund", () => {

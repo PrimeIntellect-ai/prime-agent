@@ -189,9 +189,11 @@ Three schedules distribute a total allowance across depths:
 | --- | --- | --- |
 | `flat` | `total` | unbounded in fan-out |
 | `geometric` | `total * factor^d` | unbounded in fan-out |
-| `split` | parent keeps `1 - factor`, reserving `factor` to divide equally between `fanout` children | bounded by `total` plus one turn per node |
+| `split` | a grant is one pot: spend it directly, or hand up to `factor` of it to `fanout` children | bounded by `total` plus one turn per node |
 
-Only `split` bounds the whole tree: node count grows as `fanout^depth`, so a fixed per-depth allowance still lets total spend grow without limit. Under `split` a parent funds at most `fanout` children out of its own reservation, so grants across the tree never exceed the root total regardless of depth or fan-out. A parent may fund fewer than `fanout` children when flooring the share leaves a remainder too small for a full share; that remainder is refused rather than spent on a subagent that could not finish a turn.
+Only `split` bounds the whole tree: node count grows as `fanout^depth`, so a fixed per-depth allowance still lets total spend grow without limit.
+
+Under `split` a grant is a single pot. A session may spend the whole grant itself, or hand parts of it to children; every token a child receives is one the parent can no longer spend. Nothing is stranded on a session that never delegates, and because child grants come out of the same pot the subtree total never exceeds the grant regardless of depth or fan-out. `factor` caps how much of a grant may be delegated, so a session always keeps something for its own work, and `fanout` sets how many equal shares that delegable slice is divided into. A parent may fund fewer than `fanout` children when flooring the share leaves a remainder too small for a full share; that remainder is refused rather than spent on a subagent that could not finish a turn.
 
 Enforcement is per turn, not per token. Usage is charged when an assistant turn ends, so a session stops at the first turn boundary after its allowance is spent rather than mid-turn. Actual spend is therefore bounded by the granted total plus at most one turn per participating session, and an allowance smaller than a single turn does not prevent that turn from running.
 
@@ -208,7 +210,7 @@ A budget may be a range instead of a single ceiling, which keeps every depth ins
 /rlm-token-budget 1m --floor 50k --ceiling 400k
 ```
 
-A scheduled allowance is clamped into `[floor, ceiling]`. Under `flat` and `geometric` both bounds apply directly. Under `split` the floor is a promise about what a funded child may actually spend, so it is compared against the allowance a grant yields after that child reserves its own descendant pool, not against the grant itself. A configuration whose per-child share cannot meet the floor is rejected when it is set, and the error reports both the grant and the spendable amount it is worth.
+A scheduled allowance is clamped into `[floor, ceiling]`. Under `flat` and `geometric` both bounds apply directly. Under `split` the floor is compared against the grant a child receives, which is also what that child may spend. A configuration whose per-child share cannot meet the floor is rejected when it is set, reporting the share the schedule actually grants.
 
 Because `split` refuses children it cannot fund at the floor, a floor above the per-child share would reject every spawn. That combination is rejected when the budget is set rather than silently disabling delegation, and the error reports the share the schedule actually provides. The positional range and the `--floor`/`--ceiling` flags are alternative spellings of the same bounds, so supplying both is an error rather than one silently overriding the other.
 
