@@ -181,6 +181,9 @@ describe("AgentSession goals", () => {
 		]);
 		expect(goalContextMessages(harness)).toHaveLength(3);
 		expect(getMessageText(goalContextMessages(harness)[0])).toContain("<goal_context>");
+		expect(getMessageText(goalContextMessages(harness)[0])).toContain(
+			"pause the goal instead of repeatedly polling the subagent",
+		);
 		expect(harness.session.goalState).toMatchObject({
 			active: false,
 			status: "complete",

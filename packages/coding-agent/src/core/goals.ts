@@ -238,7 +238,7 @@ A thread goal persists across individual turns until its host state changes. If 
 
 Before completing the goal, compare the current result with every requirement in the objective. Completion requires the requested deliverable and the material evidence needed to support its completion claims. Intent, partial progress, earlier plans, and a plausible final response are not completion evidence. When the objective is complete, run \`await goal.complete()\` in ipython so usage accounting is preserved.
 
-When no concrete action is possible because progress depends only on an external actor or event, run \`await goal.pause("waiting for …")\` in ipython. State the exact dependency. Do not emit repeated holding updates. After new input resolves the dependency, run \`await goal.resume()\` before continuing.
+When no concrete action is possible because progress depends only on an external actor or event, run \`await goal.pause("waiting for …")\` in ipython. A delegated subagent's reply counts as an external dependency: pause the goal instead of repeatedly polling the subagent. State the exact dependency. After new input resolves it, run \`await goal.resume()\` before continuing.
 
 Do not call \`goal.complete()\` for an incomplete goal, because budget is low, or merely because the current turn is ending.`;
 }
