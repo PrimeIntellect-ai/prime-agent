@@ -2518,7 +2518,18 @@ export class InteractiveMode {
 	}
 
 	private async refreshConnectionQueue(): Promise<void> {
-		this.connectionQueue = await this.agentConnection.getQueue();
+		this.replaceConnectionQueue(await this.agentConnection.getQueue());
+	}
+
+	private replaceConnectionQueue(queue: AgentConnectionQueueState): void {
+		this.connectionQueue = {
+			steering: [...queue.steering],
+			followUp: [...queue.followUp],
+		};
+		const dropped = this.queueSelection.sync(this.connectionQueue);
+		if (dropped !== undefined && this.editor.getText() === dropped) {
+			this.setEditorTextFromQueueSelection(this.queueSelection.reset());
+		}
 		this.updatePendingMessagesDisplay();
 	}
 
@@ -5337,17 +5348,10 @@ export class InteractiveMode {
 				break;
 
 			case "session_action_update": {
-				this.connectionQueue = {
+				this.replaceConnectionQueue({
 					steering: [...event.actions.steering],
 					followUp: [...event.actions.followUps],
-				};
-				const dropped = this.queueSelection.sync(this.connectionQueue);
-				// When the browsed item was consumed or removed, put the stashed
-				// draft back so Enter cannot resubmit the stale queued text.
-				if (dropped !== undefined && this.editor.getText() === dropped) {
-					this.setEditorTextFromQueueSelection(this.queueSelection.reset());
-				}
-				this.updatePendingMessagesDisplay();
+				});
 				this.ui.requestRender();
 				break;
 			}
@@ -6974,11 +6978,21 @@ export class InteractiveMode {
 	}
 
 	private moveQueueSelection(direction: -1 | 1): void {
+		const submittedSelection = this.queueSelection.selected;
+		if (!submittedSelection) return;
 		const sessionGeneration = this.sessionEventGeneration;
 		void this.enqueueQueueMutation(async () => {
 			if (sessionGeneration !== this.sessionEventGeneration) return;
-			const selected = this.queueSelection.selected;
-			if (!selected) return;
+			const lane = this.connectionQueue[submittedSelection.lane];
+			const resolvedIndex =
+				lane[submittedSelection.index] === submittedSelection.text
+					? submittedSelection.index
+					: lane.indexOf(submittedSelection.text);
+			if (resolvedIndex < 0) {
+				this.showStatus("Queue changed; reorder not applied");
+				return;
+			}
+			const selected = { ...submittedSelection, index: resolvedIndex };
 			const queueBefore = this.connectionQueue;
 			const status = await this.agentConnection.mutateQueuedMessage(selected.lane, selected.index, selected.text, {
 				type: "move",
@@ -7018,26 +7032,40 @@ export class InteractiveMode {
 	 * Empty text deletes; otherwise replaces, moving the item to `targetLane`.
 	 */
 	private applyQueueSelection(text: string, targetLane: "steering" | "followUp"): Promise<boolean> {
-		if (!this.queueSelection.isBrowsing) return Promise.resolve(false);
+		const submittedSelection = this.queueSelection.selected;
+		if (!submittedSelection) return Promise.resolve(false);
 		const sessionGeneration = this.sessionEventGeneration;
+		const submissionGeneration = this.inputSubmissionGeneration;
+		const draft = this.queueSelection.reset();
+		const trimmed = text.trim();
+		const mutation =
+			trimmed.length === 0
+				? ({ type: "delete" } as const)
+				: ({
+						type: "replace",
+						text: trimmed,
+						images: this.collectQueueReplaceImages(trimmed),
+						lane: targetLane,
+					} as const);
+		const editorTextBefore = this.editor.getText();
 		return this.enqueueQueueMutation(async () => {
 			if (sessionGeneration !== this.sessionEventGeneration) return true;
-			// Re-read inside the serialized task: an earlier mutation may have
-			// resolved or retargeted the selection while this one waited.
-			const selected = this.queueSelection.selected;
-			if (!selected) return true;
-			const trimmed = text.trim();
-			const mutation =
-				trimmed.length === 0
-					? ({ type: "delete" } as const)
-					: ({
-							type: "replace",
-							text: trimmed,
-							images: this.collectQueueReplaceImages(trimmed),
-							lane: targetLane,
-						} as const);
-			// Only write the editor back if the user has not typed meanwhile.
-			const editorTextBefore = this.editor.getText();
+			// Earlier serialized moves may have changed the selected item's index.
+			const lane = this.connectionQueue[submittedSelection.lane];
+			const resolvedIndex =
+				lane[submittedSelection.index] === submittedSelection.text
+					? submittedSelection.index
+					: lane.indexOf(submittedSelection.text);
+			if (resolvedIndex < 0) {
+				if (submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore) {
+					this.setEditorTextFromQueueSelection(text);
+				}
+				this.showStatus("Queue changed; edit kept in the editor");
+				this.updatePendingMessagesDisplay();
+				this.ui.requestRender();
+				return true;
+			}
+			const selected = { ...submittedSelection, index: resolvedIndex };
 			const queueBefore = this.connectionQueue;
 			let status: AgentConnectionQueuedMessageMutationStatus;
 			try {
@@ -7050,11 +7078,14 @@ export class InteractiveMode {
 			} catch (error) {
 				if (sessionGeneration !== this.sessionEventGeneration) return true;
 				// The editor was already cleared by Enter; restore the edit before surfacing the error.
-				if (this.editor.getText() === editorTextBefore) this.setEditorTextFromQueueSelection(text);
+				if (submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore) {
+					this.setEditorTextFromQueueSelection(text);
+				}
 				throw error;
 			}
 			if (sessionGeneration !== this.sessionEventGeneration) return true;
-			const editorUntouched = this.editor.getText() === editorTextBefore;
+			const editorUntouched =
+				submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
 			if (status === "applied") {
 				// Same optimistic patch as moveQueueSelection, and the same guard:
 				// skip when a queue event already replaced the mirror.
@@ -7068,7 +7099,6 @@ export class InteractiveMode {
 					}
 				}
 				if (trimmed) this.editor.addToHistory?.(trimmed);
-				const draft = this.queueSelection.reset();
 				if (editorUntouched) this.setEditorTextFromQueueSelection(draft);
 			} else {
 				// Enter submissions clear the editor before onSubmit runs; restore the

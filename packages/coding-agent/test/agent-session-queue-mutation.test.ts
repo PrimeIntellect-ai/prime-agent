@@ -228,6 +228,20 @@ describe("AgentSession queue mutation", () => {
 		await session.abort();
 	});
 
+	it("resumes suspended queued work after a successful delete", async () => {
+		createSession();
+		const { running } = await blockSession();
+		await session.followUp("kept");
+		await session.followUp("deleted");
+		await session.abort();
+		await running.catch(() => {});
+		expect(session.isQueuedWorkSuspended).toBe(true);
+		expect(mutate("followUp", 1, "deleted", { type: "delete" })).toBe("applied");
+		expect(session.isQueuedWorkSuspended).toBe(false);
+		expect(queue().followUp).toEqual(["kept"]);
+		await session.abort();
+	});
+
 	it("settles the completion of a deleted promptAndWait turn", async () => {
 		createSession();
 		const { running } = await blockSession();

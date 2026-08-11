@@ -6127,6 +6127,7 @@ export class AgentSession {
 			this._rejectAgentMessage(item.agentMessageId, error);
 			this._cancelSessionActions((candidate) => candidate === item, error);
 			this._emitQueueUpdate();
+			this.resumeQueuedWork();
 			return "applied";
 		}
 		if (mutation.type === "move") {
