@@ -15089,7 +15089,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 384000,
+			maxTokens: 393216,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"google/gemini-2.5-flash": {
@@ -15306,7 +15306,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 16384,
+			maxTokens: 8192,
 		} satisfies Model<"openai-completions">,
 		"minimax/minimax-m2.5": {
 			id: "minimax/minimax-m2.5",
@@ -15544,7 +15544,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 262144,
+			maxTokens: 228000,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-super-120b-a12b": {
@@ -15764,7 +15764,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 128000,
-			maxTokens: 16384,
+			maxTokens: 32000,
 		} satisfies Model<"openai-completions">,
 		"openai/gpt-5.2-pro": {
 			id: "openai/gpt-5.2-pro",
@@ -16382,6 +16382,25 @@ export const MODELS = {
 			},
 			contextWindow: 1000000,
 			maxTokens: 65536,
+		} satisfies Model<"openai-completions">,
+		"qwen/qwen3.8-max": {
+			id: "qwen/qwen3.8-max",
+			name: "QWEN3.8 MAX",
+			api: "openai-completions",
+			provider: "prime-inference",
+			baseUrl: "https://api.pinference.ai/api/v1",
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 6,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 131072,
+			featured: true,
 		} satisfies Model<"openai-completions">,
 		"x-ai/grok-4.20": {
 			id: "x-ai/grok-4.20",

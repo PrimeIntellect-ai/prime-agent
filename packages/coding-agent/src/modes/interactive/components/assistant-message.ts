@@ -203,9 +203,9 @@ export class AssistantMessageComponent extends Container {
 		const parts: string[] = [];
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text") {
+			if (content?.type === "text") {
 				parts.push(`${i}:text:${content.text.trim() ? 1 : 0}`);
-			} else if (content.type === "thinking") {
+			} else if (content?.type === "thinking") {
 				parts.push(`${i}:thinking:${content.thinking.trim() ? 1 : 0}`);
 				if (this.hideThinkingBlock && content.thinking.trim()) {
 					// The collapsed row bakes the recap into a static line, so a recap
@@ -214,7 +214,7 @@ export class AssistantMessageComponent extends Container {
 					parts.push(`${i}:recap:${JSON.stringify(thinkingRecap(content.thinking, this.hiddenThinkingLabel))}`);
 				}
 			} else {
-				parts.push(`${i}:${content.type}`);
+				parts.push(`${i}:${content?.type ?? "invalid"}`);
 			}
 		}
 		parts.push(
@@ -244,7 +244,11 @@ export class AssistantMessageComponent extends Container {
 			}
 			const content = message.content[i];
 			const text =
-				content.type === "text" ? content.text.trim() : content.type === "thinking" ? content.thinking.trim() : "";
+				content?.type === "text"
+					? content.text.trim()
+					: content?.type === "thinking"
+						? content.thinking.trim()
+						: "";
 			if (this.lastBlockTexts.get(i) !== text) {
 				markdown.setText(text);
 				this.lastBlockTexts.set(i, text);
@@ -259,7 +263,7 @@ export class AssistantMessageComponent extends Container {
 		this.lastBlockTexts.clear();
 
 		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
+			(c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()),
 		);
 
 		if (hasVisibleContent) {
@@ -269,19 +273,19 @@ export class AssistantMessageComponent extends Container {
 		// Render content in order
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text" && content.text.trim()) {
+			if (content?.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme);
 				this.blockMarkdowns.set(i, markdown);
 				this.lastBlockTexts.set(i, content.text.trim());
 				this.contentContainer.addChild(markdown);
-			} else if (content.type === "thinking" && content.thinking.trim()) {
+			} else if (content?.type === "thinking" && content.thinking.trim()) {
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
 				const hasVisibleContentAfter = message.content
 					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+					.some((c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()));
 
 				const thinkingLabel = theme.bold(theme.fg("thinkingText", this.hiddenThinkingLabel));
 				if (this.hideThinkingBlock) {
@@ -320,7 +324,7 @@ export class AssistantMessageComponent extends Container {
 			}
 		}
 
-		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
+		const hasToolCalls = message.content.some((c) => c?.type === "toolCall");
 		this.hasToolCalls = hasToolCalls;
 		if (message.stopReason === "aborted") {
 			const abortMessage =
