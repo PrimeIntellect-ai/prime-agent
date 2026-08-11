@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 - Added xAI OAuth device-code authentication for SuperGrok and X Premium subscriptions, with Grok 4.5 routed through the Responses API ([#754](https://github.com/PrimeIntellect-ai/prime-agent/pull/754) by [@mwijanarko1](https://github.com/mwijanarko1)).
-- Fixed xAI device-code polling to always increase the interval by at least 5 seconds on `slow_down` (RFC 8628 §3.5), even when the server echoes the current interval ([#754](https://github.com/PrimeIntellect-ai/prime-agent/pull/754)).
+- Fixed xAI device-code polling to always increase the interval by at least 5 seconds on `slow_down` (RFC 8628 §3.5), even when the server echoes the current interval ([#754](https://github.com/PrimeIntellect-ai/prime-agent/pull/754) by [@mwijanarko1](https://github.com/mwijanarko1)).
 
 ## [0.7.1] - 2026-08-07
 
