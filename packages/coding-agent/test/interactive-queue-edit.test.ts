@@ -165,6 +165,34 @@ describe("interactive queued-message editing", () => {
 		expect(harness.editor.getText()).toBe("newer typing");
 	});
 
+	it.each([
+		["replace", "queued edited"],
+		["delete", "   "],
+	])("restores the stashed draft when a %s queue event lands before the response", async (_operation, text) => {
+		let resolveMutation: (status: string) => void = () => {};
+		const harness = createHarness({ steering: ["queued"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveMutation = resolve;
+				}),
+		);
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.editor.setText("");
+		const pending = harness.applyQueueSelection(text, "steering");
+		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce());
+
+		harness.replaceConnectionQueue({
+			steering: text.trim() ? [text.trim()] : [],
+			followUp: [],
+		});
+		resolveMutation("applied");
+		await pending;
+
+		expect(harness.editor.getText()).toBe("draft");
+	});
+
 	it("routes another submission as new while a queue edit is pending", async () => {
 		let resolveMutation: (status: string) => void = () => {};
 		const harness = createHarness({ steering: ["queued"], followUp: [] });

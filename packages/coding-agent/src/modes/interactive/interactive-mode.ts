@@ -2532,7 +2532,7 @@ export class InteractiveMode {
 			const editorText = this.editor.getText();
 			if (editorText === dropped) {
 				this.setEditorTextFromQueueSelection(this.queueSelection.reset());
-			} else {
+			} else if (!this.pendingQueueEdit) {
 				this.queueSelection.replaceDraft(editorText);
 			}
 		}
