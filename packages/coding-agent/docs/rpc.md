@@ -74,6 +74,27 @@ Response:
 
 `success: true` means the prompt was accepted, queued, or handled immediately. `success: false` means the prompt was rejected before acceptance. Failures after acceptance are reported through the normal event and message stream, not as a second `response` for the same request id.
 
+**Waiting for completion**: The `response` for a `prompt` is admission-only; it does not mean the agent has finished processing. A common mistake is sending the next `prompt` immediately after the previous `response` while the agent is still streaming or executing tools, which fails with `Agent is already processing`. To wait until the agent is idle, poll `get_state` until `isStreaming` is `false`, `unfinishedActionCount` is `0`, and `sessionActions.queuedCount` is `0`:
+
+```json
+{"type": "get_state"}
+```
+
+```json
+{
+  "type": "response",
+  "command": "get_state",
+  "success": true,
+  "data": {
+    "isStreaming": false,
+    "unfinishedActionCount": 0,
+    "sessionActions": {"queuedCount": 0, "steering": [], "followUps": []}
+  }
+}
+```
+
+Alternatively, send the next prompt with `"streamingBehavior": "followUp"` so it is queued and delivered only after the agent finishes. See [steer](#steer) and [follow_up](#follow_up) for the delivery semantics of queued messages.
+
 The `images` field is optional. Each image uses `ImageContent` format: `{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}`.
 
 #### steer
