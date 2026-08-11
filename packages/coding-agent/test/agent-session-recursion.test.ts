@@ -26,6 +26,7 @@ import { type HostRequestHandlers, KernelManager } from "../src/core/kernel/inde
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import {
+	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
 	createRlmRunHostHandler,
@@ -230,6 +231,17 @@ function findLastMessage(
 		if (message && predicate(message)) return message;
 	}
 	return undefined;
+}
+
+/** Capture the grants a parent hands out, aborting each spawn before any child runtime exists. */
+function grantCapturingHost(record: (options: CreateRlmSubagentRuntimeOptions) => void): SubagentRuntimeHost {
+	return {
+		createRlmSubagentRuntime: async (options) => {
+			record(options);
+			throw new Error("stop after capturing the grant");
+		},
+		deleteRlmSubagentRuntime: async () => undefined,
+	};
 }
 
 describe("AgentSession rlm recursion", () => {
@@ -1999,13 +2011,7 @@ describe("AgentSession rlm recursion", () => {
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
 			tokenAllowance: 1000,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push(options.rlmTokenAllowance);
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost((options) => captured.push(options.rlmTokenAllowance)),
 		});
 
 		await root.runRlmChild("first");
@@ -2023,13 +2029,7 @@ describe("AgentSession rlm recursion", () => {
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
 			tokenAllowance: 1000,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push(options.rlmTokenAllowance);
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost((options) => captured.push(options.rlmTokenAllowance)),
 		});
 
 		// pool is 500; an explicit request overrides the 250 equal share.
@@ -2060,26 +2060,6 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("bad", { token_budget: "lots" })).rejects.toThrow(/positive integer/);
 	});
 
-	it("starts a budget for the child subtree when no budget is active", async () => {
-		const captured: Array<{ allowance?: number; total?: number }> = [];
-		const root = createSession({
-			maxDepth: 3,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push({ allowance: options.rlmTokenAllowance, total: options.rlmTokenBudget?.totalTokens });
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
-		});
-
-		expect(root.getRlmTokenBudgetStatus().config).toBeNull();
-		await root.runRlmChild("capped delegation", { token_budget: 50_000 });
-		await vi.waitFor(() => expect(captured).toHaveLength(1));
-
-		expect(captured[0]).toEqual({ allowance: 50_000, total: 50_000 });
-	});
-
 	it("publishes the child allowance on subagent snapshots", async () => {
 		const snapshots: Array<{ tokenAllowance?: number }> = [];
 		const root = createSession({
@@ -2103,13 +2083,7 @@ describe("AgentSession rlm recursion", () => {
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
 			tokenAllowance: 1000,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push(options.rlmTokenAllowance);
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost((options) => captured.push(options.rlmTokenAllowance)),
 		});
 
 		// pool is 500: the first child takes its full ceiling.
@@ -2146,13 +2120,7 @@ describe("AgentSession rlm recursion", () => {
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 1000, schedule: "geometric", factor: 0.5, fanout: 2 },
 			tokenAllowance: 1000,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push(options.rlmTokenAllowance);
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost((options) => captured.push(options.rlmTokenAllowance)),
 		});
 
 		await root.runRlmChild("flexible", { token_budget: [100, 900] });
@@ -2283,13 +2251,7 @@ describe("AgentSession rlm recursion", () => {
 			// The documented default: 1m split 0.5 fanout 3 leaves a 2-token remainder.
 			tokenBudget: { totalTokens: 1_000_000, schedule: "split", factor: 0.5, fanout: 3 },
 			tokenAllowance: 1_000_000,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push(options.rlmTokenAllowance);
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost((options) => captured.push(options.rlmTokenAllowance)),
 		});
 
 		for (let i = 0; i < 3; i++) await root.runRlmChild(`child ${i}`);
@@ -2306,13 +2268,7 @@ describe("AgentSession rlm recursion", () => {
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
 			tokenAllowance: 1000,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push(options.rlmTokenAllowance);
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost((options) => captured.push(options.rlmTokenAllowance)),
 		});
 
 		await root.runRlmChild("first");
@@ -2386,8 +2342,9 @@ describe("AgentSession rlm recursion", () => {
 		expect(resumed.getRlmTokenBudgetStatus().tokensUsed).toBe(spent);
 	});
 
-	it("stops before running another turn once the allowance is spent", async () => {
+	it("refuses later prompts once the allowance is spent, and says so each time", async () => {
 		let turns = 0;
+		const events: number[] = [];
 		const root = createSession({
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 50, schedule: "flat", factor: 0.5, fanout: 2 },
@@ -2401,51 +2358,26 @@ describe("AgentSession rlm recursion", () => {
 				return stream;
 			},
 		});
+		root.subscribe((event) => {
+			if (event.type === "rlm_token_budget_exhausted") events.push(event.allowanceTokens);
+		});
 
 		await root.prompt("first");
 		await root.agent.waitForIdle();
 		const turnsAfterFirst = turns;
 		expect(root.getRlmTokenBudgetStatus().exhausted).toBe(true);
-
-		// A later prompt must not burn another fully charged turn.
-		await root.prompt("second");
-		await root.agent.waitForIdle();
-
-		expect(turns).toBe(turnsAfterFirst);
-	});
-
-	it("re-signals exhaustion so a refused prompt is never silent", async () => {
-		const events: Array<{ tokensUsed: number; allowanceTokens: number }> = [];
-		const root = createSession({
-			maxDepth: 3,
-			tokenBudget: { totalTokens: 50, schedule: "flat", factor: 0.5, fanout: 2 },
-			tokenAllowance: 50,
-			streamFn: () => {
-				const stream = createAssistantMessageEventStream();
-				queueMicrotask(() =>
-					stream.push({ type: "done", reason: "stop", message: assistantMessage("spend", usage(80, 80)) }),
-				);
-				return stream;
-			},
-		});
-		root.subscribe((event) => {
-			if (event.type === "rlm_token_budget_exhausted") {
-				events.push({ tokensUsed: event.tokensUsed, allowanceTokens: event.allowanceTokens });
-			}
-		});
-
-		await root.prompt("first");
-		await root.agent.waitForIdle();
 		expect(events).toHaveLength(1);
 
 		await root.prompt("second");
 		await root.agent.waitForIdle();
 
+		// A later prompt neither burns a charged turn nor fails silently.
+		expect(turns).toBe(turnsAfterFirst);
 		expect(events.length).toBeGreaterThanOrEqual(2);
-		expect(events.at(-1)?.allowanceTokens).toBe(50);
+		expect(events.at(-1)).toBe(50);
 	});
 
-	it("tells the model its allowance in the system prompt", () => {
+	it("states the allowance and the budgeting doctrine in the system prompt", () => {
 		const root = createSession({
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
@@ -2453,7 +2385,10 @@ describe("AgentSession rlm recursion", () => {
 		});
 
 		expect(root.systemPrompt).toContain("An RLM token budget is active");
-		expect(root.systemPrompt).toContain("500");
+		expect(root.systemPrompt).toContain("1000");
+		// The capability has to be in the prompt or the model cannot make it default behaviour.
+		expect(root.systemPrompt).toContain("token_budget=200000");
+		expect(root.systemPrompt).toContain("bounds that child and every descendant it spawns");
 	});
 
 	it("rejects a floor larger than the grant each child would receive", async () => {
@@ -2465,25 +2400,13 @@ describe("AgentSession rlm recursion", () => {
 		).rejects.toThrow(/grants each of 2 children 250 tokens/);
 	});
 
-	it("tells the model to budget each delegation by default", () => {
-		const root = createSession({ maxDepth: 3 });
-
-		// The capability has to be in the prompt or the model cannot make it default behaviour.
-		expect(root.systemPrompt).toContain("token_budget=200000");
-		expect(root.systemPrompt).toContain("bounds that child and every descendant it spawns");
-	});
-
 	it("budgets a child from a bare rlm.run call with no configured budget", async () => {
 		const captured: Array<{ allowance?: number; total?: number }> = [];
 		const root = createSession({
 			maxDepth: 3,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async (options) => {
-					captured.push({ allowance: options.rlmTokenAllowance, total: options.rlmTokenBudget?.totalTokens });
-					throw new Error("stop after capturing the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost((options) =>
+				captured.push({ allowance: options.rlmTokenAllowance, total: options.rlmTokenBudget?.totalTokens }),
+			),
 		});
 		expect(root.getRlmTokenBudgetStatus().config).toBeNull();
 
@@ -2494,37 +2417,29 @@ describe("AgentSession rlm recursion", () => {
 		expect(captured[0]).toEqual({ allowance: 200_000, total: 200_000 });
 	});
 
-	it("lets a child spend its whole grant when it delegates nothing", async () => {
+	it("makes a grant one pot: spendable in full, reduced only by what is delegated", async () => {
 		const child = createSession({
 			depth: 1,
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 200_000, schedule: "split", factor: 0.5, fanout: 3 },
 			tokenAllowance: 200_000,
 		});
-
-		// A grant is one pot: nothing is stranded on a session that never delegates.
+		// Nothing is stranded on a session that never delegates.
 		expect(child.getRlmTokenBudgetStatus().allowanceTokens).toBe(200_000);
-	});
 
-	it("reduces what a session may spend by exactly what it delegates", async () => {
 		const root = createSession({
 			maxDepth: 3,
 			tokenBudget: { totalTokens: 1000, schedule: "split", factor: 0.5, fanout: 2 },
 			tokenAllowance: 1000,
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async () => {
-					throw new Error("stop after the grant");
-				},
-				deleteRlmSubagentRuntime: async () => undefined,
-			},
+			subagentRuntimeHost: grantCapturingHost(() => {}),
 		});
 		expect(root.getRlmTokenBudgetStatus().allowanceTokens).toBe(1000);
 
 		await root.runRlmChild("first");
 		await vi.waitFor(() => expect(root.getRlmTokenBudgetStatus().allowanceTokens).toBe(750));
-
 		await root.runRlmChild("second");
 		await vi.waitFor(() => expect(root.getRlmTokenBudgetStatus().allowanceTokens).toBe(500));
+
 		// Delegation is capped by factor, so the parent keeps half of its own grant.
 		await expect(root.runRlmChild("third")).rejects.toThrow(/subtree pool exhausted/);
 	});

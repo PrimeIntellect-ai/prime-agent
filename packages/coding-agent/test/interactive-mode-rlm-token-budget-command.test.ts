@@ -21,7 +21,6 @@ type Context = {
 	ui: { requestRender: () => void };
 	showWarning: (message: string) => void;
 	showError: (message: string) => void;
-	formatRlmTokenBudgetStatus: (status: RlmTokenBudgetStatus) => string;
 };
 
 /** Minimum surface `handleEvent` touches before the switch it dispatches on. */
@@ -70,7 +69,8 @@ const activeStatus: RlmTokenBudgetStatus = {
 };
 
 function makeContext(overrides: Partial<Context["agentConnection"]> = {}): Context {
-	return {
+	// Built on the prototype so shared render helpers resolve exactly as they do in the real class.
+	return Object.assign(Object.create(InteractiveMode.prototype) as Context, {
 		agentConnection: {
 			getRlmTokenBudgetStatus: vi.fn(async () => activeStatus),
 			setRlmTokenBudget: vi.fn(async (config, options) => ({
@@ -84,8 +84,7 @@ function makeContext(overrides: Partial<Context["agentConnection"]> = {}): Conte
 		ui: { requestRender: vi.fn() },
 		showWarning: vi.fn(),
 		showError: vi.fn(),
-		formatRlmTokenBudgetStatus: (status) => prototype.formatRlmTokenBudgetStatus.call({} as Context, status),
-	};
+	});
 }
 
 describe("InteractiveMode /rlm-token-budget", () => {

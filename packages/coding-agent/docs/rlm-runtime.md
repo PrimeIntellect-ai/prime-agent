@@ -215,8 +215,6 @@ A scheduled allowance is clamped into `[floor, ceiling]`. Under `flat` and `geom
 
 Because `split` refuses children it cannot fund at the floor, a floor above the per-child share would reject every spawn. That combination is rejected when the budget is set rather than silently disabling delegation, and the error reports the share the schedule actually provides. The positional range and the `--floor`/`--ceiling` flags are alternative spellings of the same bounds, so supplying both is an error rather than one silently overriding the other.
 
-A spawning model may set a child's allowance explicitly with `rlm.run(..., token_budget=N)`, or as a range with `rlm.run(..., token_budget=(floor, ceiling))`. With a range the parent funds as much of it as the reservation affords and refuses only when it cannot reach the floor. The request is bounded by what the parent may grant: under `split` it draws from the same subtree reservation (so an uneven split is allowed but the subtree bound holds), and under the depth-indexed schedules it may not exceed what the schedule funds at that depth. When no budget is active, an explicit `token_budget` starts one for that child's subtree alone, which makes budgeting opt-in per delegation.
-
 Budget state flows downward as a value snapshot taken at spawn time. A running child never re-reads its parent, so changing a budget mid-run affects only sessions spawned afterwards. A child that persists its own per-chat override can lower its allowance but never raise it above the grant it was spawned with.
 
 ### Budgeting a delegation
@@ -228,9 +226,9 @@ await rlm("audit the retry logic", token_budget=200_000)
 await rlm("quick lookup", token_budget=(50_000, 150_000))
 ```
 
-The grant bounds that child and every descendant it spawns. With no active budget the grant starts one for that subtree alone, so delegation is bounded even when the session itself is not. The model is told this in its system prompt, so budgeting each delegation is doctrine rather than an advanced option.
+The grant bounds that child and every descendant it spawns, and with no active budget it starts one for that subtree alone, so delegation is bounded even when the session is not. The model is told this in its system prompt, so budgeting each delegation is doctrine rather than an advanced option.
 
-An explicit `token_budget` may deliberately take more than an equal share of a parent's reservation; allocating unevenly is the point of the override, and the parent's reservation remains the bound that holds.
+A request is bounded by what the parent may grant: under `split` it draws from the same reservation, so it may deliberately take more than an equal share without breaking the subtree bound, and under the depth-indexed schedules it may not exceed what the schedule funds at that depth. A range is funded as far as the reservation allows and refused only when it cannot reach the floor.
 
 Kernel env exposes `RLM_TOKEN_ALLOWANCE` and `RLM_TOKEN_SUBTREE_POOL` at provisioning time; as with `RLM_MAX_DEPTH`, the TypeScript-side check is authoritative.
 

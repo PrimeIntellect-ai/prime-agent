@@ -9155,6 +9155,13 @@ export class InteractiveMode {
 		}
 	}
 
+	/** Dim, unobtrusive one-off notice in the chat transcript. */
+	private showDimNotice(text: string): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("dim", text), 1, 0));
+		this.ui.requestRender();
+	}
+
 	/**
 	 * The loop ends at a turn boundary once the allowance is spent, which is otherwise
 	 * indistinguishable from the model deciding it is done.
@@ -9168,9 +9175,7 @@ export class InteractiveMode {
 			"This run stopped at the end of the turn; later turns stop the same way until the budget changes.",
 			"Raise it with /rlm-token-budget <tokens> or turn it off with /rlm-token-budget off.",
 		].join("\n");
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("dim", notice), 1, 0));
-		this.ui.requestRender();
+		this.showDimNotice(notice);
 	}
 
 	private formatRlmTokenBudgetStatus(status: RlmTokenBudgetStatus): string {
@@ -9201,9 +9206,7 @@ export class InteractiveMode {
 		if (command.kind === "status") {
 			try {
 				const status = await this.agentConnection.getRlmTokenBudgetStatus();
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(new Text(theme.fg("dim", this.formatRlmTokenBudgetStatus(status)), 1, 0));
-				this.ui.requestRender();
+				this.showDimNotice(this.formatRlmTokenBudgetStatus(status));
 			} catch (error) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
@@ -9223,15 +9226,7 @@ export class InteractiveMode {
 					].join(", ")
 				: "RLM token budget disabled";
 			const applied = config ? `\n  ${formatRlmTokenBudgetSession(result)}` : "";
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
-				new Text(
-					theme.fg("dim", `${summary}${result.globalSaved ? " and saved as global default" : ""}${applied}`),
-					1,
-					0,
-				),
-			);
-			this.ui.requestRender();
+			this.showDimNotice(`${summary}${result.globalSaved ? " and saved as global default" : ""}${applied}`);
 			if (result.globalError) {
 				this.showError(
 					`RLM token budget set for this chat, but the global default was not saved: ${result.globalError}`,
