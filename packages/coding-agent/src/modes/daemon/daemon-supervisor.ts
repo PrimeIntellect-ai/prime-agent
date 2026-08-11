@@ -4778,7 +4778,7 @@ export class DaemonSupervisor {
 		// unobservable identity counts as alive (never clean up a possibly-live
 		// worker). kill(0) probes every poll; ps-backed checks are throttled.
 		let stoppedVerdict = true;
-		let stoppedCanSignal = true;
+		let stoppedCanSignal = processStartId !== undefined;
 		let stoppedCheckedAt = 0;
 		const isStoppedProcessAlive = () => {
 			if (!processIdExists(pid)) {
@@ -4793,7 +4793,10 @@ export class DaemonSupervisor {
 				stoppedVerdict = false;
 			} else if (processStartId === undefined) {
 				stoppedVerdict = true;
-				stoppedCanSignal = true;
+				// Without an identity captured while the original worker was known
+				// alive, this pid may now belong to an unrelated process. Keep
+				// waiting for it to disappear, but never escalate by pid alone.
+				stoppedCanSignal = false;
 			} else {
 				const observed = getProcessStartId(pid);
 				stoppedVerdict = observed !== processStartId ? observed === undefined : true;
