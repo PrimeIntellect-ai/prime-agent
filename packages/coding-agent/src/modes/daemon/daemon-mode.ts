@@ -1026,11 +1026,10 @@ export class AgentDaemon {
 					typeof entry.sessionFile !== "string" ||
 					(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
 					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
-					(entry.rlmMaxDepth !== undefined &&
-						(!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0)) ||
 					(entry.rlmTokenBudget !== undefined && !isRlmTokenBudgetConfig(entry.rlmTokenBudget)) ||
 					(entry.rlmTokenAllowance !== undefined &&
-						(!Number.isSafeInteger(entry.rlmTokenAllowance) || entry.rlmTokenAllowance <= 0))
+						(!Number.isSafeInteger(entry.rlmTokenAllowance) || entry.rlmTokenAllowance <= 0)) ||
+					(entry.rlmMaxDepth !== undefined && (!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0))
 				) {
 					continue;
 				}

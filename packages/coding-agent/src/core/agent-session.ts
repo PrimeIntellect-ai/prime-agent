@@ -1704,20 +1704,16 @@ export class AgentSession {
 			);
 		}
 		const childDepth = this._rlmDepth + 1;
-		// The floor is a promise about what a child may actually spend, so it is compared against the
-		// allowance a grant yields after that child reserves its own descendant pool, not the grant.
-		const spendable = (grant: number): number => ownAllowance(config, childDepth, grant);
-		// Two distinct floors: the model's request bounds the GRANT it will accept, while the
-		// configured floor is a policy about what the funded child may actually spend.
-		const requestFloor = requested?.minTokens ?? 0;
-		const spendFloor = config.minTokens ?? 0;
+		// A grant is what the child may spend, so the model's requested floor and the configured
+		// floor are both bounds on the same number.
+		const floor = Math.max(requested?.minTokens ?? 0, config.minTokens ?? 0);
 
 		if (config.schedule !== "split") {
 			const fundable = childAllowance(config, childDepth, null);
 			if (requested === undefined) return fundable;
-			if (requestFloor > fundable) {
+			if (floor > fundable) {
 				throw new Error(
-					`rlm.run token_budget floor ${requested.minTokens} exceeds the ${fundable} tokens the "${config.schedule}" schedule funds at depth ${childDepth}`,
+					`rlm.run token_budget floor ${floor} exceeds the ${fundable} tokens the "${config.schedule}" schedule funds at depth ${childDepth}`,
 				);
 			}
 			return Math.min(requested.maxTokens, fundable);
@@ -1725,16 +1721,14 @@ export class AgentSession {
 
 		const remaining = this._rlmSubtreePool ?? 0;
 		const share = this._rlmChildAllowanceShare ?? 0;
-		// An explicit request may deliberately take more than an equal share: allocating unevenly is
-		// the point of `rlm.run(token_budget=...)`. The pool, not the share, is the bound that holds.
 		const ceiling = config.maxTokens ?? Number.MAX_SAFE_INTEGER;
-		const desired = requested === undefined ? share : requested.maxTokens;
-		const granted = Math.min(desired, remaining, ceiling);
-		// Without an explicit request a child must receive its whole share: flooring the share leaves
-		// a remainder smaller than one child, and a subagent funded from that sliver cannot finish a turn.
-		const minimum = requested === undefined ? Math.min(desired, ceiling) : Math.max(requestFloor, 1);
-		if (granted <= 0 || granted < minimum || spendable(granted) < spendFloor) {
-			throw new Error(this._describeUnfundableChild(config, remaining, granted, minimum, spendFloor));
+		// An explicit request may deliberately take more than an equal share; allocating unevenly is
+		// the point of `token_budget=`. A request-less child takes its whole share, because the
+		// remainder left by flooring cannot fund a subagent that finishes a turn.
+		const granted = Math.min(requested === undefined ? share : requested.maxTokens, remaining, ceiling);
+		const needed = Math.max(requested === undefined ? Math.min(share, ceiling) : 1, floor);
+		if (granted <= 0 || granted < needed) {
+			throw new Error(this._describeUnfundableChild(config, remaining, needed));
 		}
 		this._rlmSubtreeGranted += granted;
 		// Recompute rather than adjusting the pool alone: under the single-pot model the grant also
@@ -1744,22 +1738,13 @@ export class AgentSession {
 		return granted;
 	}
 
-	/** Explain why a `split` reservation cannot fund a child, distinguishing the three causes. */
-	private _describeUnfundableChild(
-		config: RlmTokenBudgetConfig,
-		poolRemaining: number,
-		granted: number,
-		minimum: number,
-		floor: number,
-	): string {
+	/** Explain why a `split` reservation cannot fund a child at the size the schedule requires. */
+	private _describeUnfundableChild(config: RlmTokenBudgetConfig, poolRemaining: number, needed: number): string {
 		const where = `depth ${this._rlmDepth + 1}`;
 		if ((this._rlmChildAllowanceShare ?? 0) <= 0) {
 			return `RLM token budget cannot fund a subagent at ${where}: fanout ${config.fanout} divides the ${poolRemaining}-token pool into nothing. Lower --fanout or raise the budget.`;
 		}
-		if (granted > 0 && floor > 0 && ownAllowance(config, this._rlmDepth + 1, granted) < floor) {
-			return `RLM token budget cannot fund a subagent at ${where}: a ${granted}-token grant leaves it ${ownAllowance(config, this._rlmDepth + 1, granted)} spendable tokens, below the ${floor}-token floor.`;
-		}
-		return `RLM token budget subtree pool exhausted at ${where}: ${poolRemaining} tokens left, ${minimum} needed. Raise the budget with /rlm-token-budget or disable it with /rlm-token-budget off.`;
+		return `RLM token budget subtree pool exhausted at ${where}: ${poolRemaining} tokens left, ${needed} needed. Raise the budget with /rlm-token-budget or disable it with /rlm-token-budget off.`;
 	}
 
 	private _emitRlmTokenBudgetExhausted(): void {
@@ -1837,20 +1822,17 @@ export class AgentSession {
 		const grantedAllowance = this._configuredRlmTokenAllowance ?? config.totalTokens;
 		const allowance = ownAllowance(config, this._rlmDepth, grantedAllowance);
 		const pool = subtreePool(config, grantedAllowance) ?? undefined;
-		// A per-chat override must never let a funded child raise its own ceiling above the
-		// grant it was spawned with, which would break the subtree bound its parent reserved.
-		// One pot per subtree: whatever has been handed to children is no longer spendable here,
-		// but an undelegated grant stays fully usable by this session.
+		// One pot per subtree: an undelegated grant stays fully spendable here, minus whatever has
+		// been handed to children. A per-chat override cannot raise the ceiling above the grant this
+		// session was spawned with, which would break the bound its parent reserved.
 		const ceiling =
 			this._configuredRlmTokenAllowance === undefined
 				? allowance
 				: Math.min(allowance, this._configuredRlmTokenAllowance);
 		this._rlmTokenAllowance = Math.max(0, ceiling - this._rlmSubtreeGranted);
-		// Grants already handed out stay spent. Recomputing the pool happens on every
-		// /rlm-token-budget call and on branch navigation, and refilling it there would let a
-		// parent fund unlimited children by re-issuing the command.
-		// The pool is the delegable slice of the same pot, capped by `factor` so a session cannot
-		// give away everything it was granted.
+		// The delegable slice of the same pot, capped by `factor`. Recomputing happens on every
+		// /rlm-token-budget call and on branch navigation, so grants stay spent: refilling here would
+		// let a parent fund unlimited children by re-issuing the command.
 		this._rlmSubtreePool = pool === undefined ? undefined : Math.max(0, pool - this._rlmSubtreeGranted);
 		// The share is derived from the pool before any grants, so siblings receive equal
 		// allowances no matter when they are spawned or how often the budget is re-applied.

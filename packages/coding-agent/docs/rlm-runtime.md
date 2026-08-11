@@ -160,14 +160,15 @@ Unknown options fail instead of being ignored. Model search is bounded to active
 `AgentSession.runRlmChild()` performs the following sequence:
 
 1. Check `RLM_DEPTH < RLM_MAX_DEPTH`.
-2. Reserve the child's token allowance from the active budget schedule, refusing the spawn when the schedule cannot fund it.
-3. Resolve the requested model or inherit the parent model.
-4. Create a `sub-xxxxxxxx` child directory under the parent artifact directory.
-5. Admit the task into the parent registry and return its `RLMSpawnHandle`.
-6. In detached work, create a child `SessionManager`, `Agent`, and `AgentSession`.
-7. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and thinking configuration.
-8. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
-9. Attribute child usage to the parent assistant turn and persist the attribution.
+2. Resolve the requested model or inherit the parent model.
+3. Create a `sub-xxxxxxxx` child directory under the parent artifact directory.
+4. Admit the task into the parent registry and return its `RLMSpawnHandle`.
+5. In detached work, create a child `SessionManager`, `Agent`, and `AgentSession`.
+6. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and thinking configuration.
+7. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
+8. Attribute child usage to the parent assistant turn and persist the attribution.
+
+When a token budget is active, the child's allowance is reserved between steps 2 and 3, once the spawn can no longer fail and before any session state exists; a schedule that cannot fund the child fails the spawn there.
 
 Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their own `RLM_SESSION_DIR`. The default maximum depth is 1, so root sessions may create children and those children may not create grandchildren unless the limit is configured higher.
 
