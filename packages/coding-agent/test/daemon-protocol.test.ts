@@ -68,6 +68,10 @@ describe("daemon protocol helpers", () => {
 		);
 	});
 
+	it("capability-gates session-only model selection", () => {
+		expect(DAEMON_SCHEMA_REVISION).toBe(17);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("session_model_selection");
+	});
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
 			minProtocol: 7,

@@ -4285,6 +4285,7 @@ export class AgentDaemon {
 				}
 				await session.setModel(model, {
 					waitForExtensions: !(session.isStreaming || session.isCompacting),
+					persistDefault: command.persistDefault,
 				});
 				return success(command.id, "set_model", model);
 			}
