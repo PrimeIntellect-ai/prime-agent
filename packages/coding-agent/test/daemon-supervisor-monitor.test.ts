@@ -1755,10 +1755,15 @@ describe("daemon worker supervisor monitoring", () => {
 
 	it("escalates a stuck stop to SIGKILL before finalizing", async () => {
 		vi.useFakeTimers();
+		const processStartId = getProcessStartId(process.pid);
+		if (processStartId === undefined) {
+			throw new Error("Could not identify test process");
+		}
 		const worker = {
 			descriptor: {
 				workerId: "worker-stuck-stop",
 				pid: process.pid,
+				processStartId,
 				rootActiveSessionId: "active-1",
 				stopRequestedAt: new Date().toISOString(),
 				archiveOnStop: true,
@@ -2057,12 +2062,15 @@ describe("daemon worker supervisor monitoring", () => {
 		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
 		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
 		try {
-			const stopping = expect(supervisor.stopWorker(worker, true, true)).rejects.toThrow(
-				"did not stop after SIGKILL",
+			const stopping = supervisor.stopWorker(worker, true, true).then(
+				() => undefined,
+				(error: unknown) => error,
 			);
 			await vi.advanceTimersByTimeAsync(2000);
 
-			await stopping;
+			const error = await stopping;
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toBe("Session worker worker-force-missing-identity did not stop");
 			expect(killSpy).not.toHaveBeenCalled();
 			expect(supervisor.scheduleWorkerStopFinalization).toHaveBeenCalledWith(worker);
 		} finally {
@@ -2263,7 +2271,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
 		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
 		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
-		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue(undefined);
+		const startIdSpy = vi.spyOn(sessionLeaseModule, "getProcessStartId").mockReturnValue("proc:unrelated");
 		try {
 			supervisor.scheduleWorkerStopFinalization(worker);
 

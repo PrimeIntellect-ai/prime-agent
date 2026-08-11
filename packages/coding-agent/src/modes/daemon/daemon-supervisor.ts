@@ -4692,13 +4692,15 @@ export class DaemonSupervisor {
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
 		}
+		let sigkillSent = false;
 		if (force && isWorkerProcessAlive()) {
 			if (directChild) {
-				directChild.child.kill("SIGKILL");
+				sigkillSent = directChild.child.kill("SIGKILL");
 			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
 				// Fresh, unthrottled check: the cached verdict may be up to 500ms
 				// old, long enough for the pid to be recycled.
 				signalProcessGroupOrProcess(entryPid, "SIGKILL");
+				sigkillSent = true;
 			}
 			const forceDeadline = Date.now() + 1000;
 			while (isWorkerProcessAlive() && Date.now() < forceDeadline) {
@@ -4710,7 +4712,9 @@ export class DaemonSupervisor {
 			if (removeDescriptor) {
 				this.scheduleWorkerStopFinalization(worker);
 			}
-			throw new Error(`Session worker ${worker.descriptor.workerId} did not stop${force ? " after SIGKILL" : ""}`);
+			throw new Error(
+				`Session worker ${worker.descriptor.workerId} did not stop${sigkillSent ? " after SIGKILL" : ""}`,
+			);
 		}
 		if (directChild) {
 			await directChild.closed;
@@ -4752,22 +4756,7 @@ export class DaemonSupervisor {
 		// the stop and relaunch with a new pid, and the OS can recycle the old
 		// pid. The finalizer must never follow either successor.
 		const pid = worker.descriptor.pid;
-		let processStartId = worker.descriptor.processStartId;
-		if (processStartId === undefined) {
-			// The stop timed out because the process was still alive moments ago,
-			// so an identity observed now can be trusted and recorded. It lets the
-			// eventual stopWorker call fail closed on a recycled pid too.
-			const observed = getProcessStartId(pid);
-			if (observed !== undefined && isProcessAlive(pid)) {
-				processStartId = observed;
-				worker.descriptor.processStartId = observed;
-				try {
-					this.persistWorker(worker);
-				} catch (error) {
-					this.reportCleanupFailure(`worker identity record ${worker.descriptor.workerId}`, error);
-				}
-			}
-		}
+		const processStartId = worker.descriptor.processStartId;
 		const stopRevision = worker.stopRevision;
 		const isStopGenerationCurrent = () =>
 			this.workers.get(worker.descriptor.workerId) === worker &&
