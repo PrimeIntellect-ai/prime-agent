@@ -46,6 +46,7 @@ import {
 	isContextOverflow,
 	modelsAreEqual,
 	resetApiProviders,
+	supportsAnthropicFastMode,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
@@ -6883,7 +6884,7 @@ export class AgentSession {
 		this._serviceTierPreference = effectiveServiceTier;
 		if (preferenceChanged) {
 			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			if (this.model && supportsFastMode(this.model)) {
+			if (this.model && (supportsFastMode(this.model) || supportsAnthropicFastMode(this.model))) {
 				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
 			}
 		}
@@ -6897,7 +6898,10 @@ export class AgentSession {
 	}
 
 	private _getEffectiveServiceTier(serviceTier: ServiceTier): ServiceTier {
-		return serviceTier === "priority" && (!this.model || !supportsFastMode(this.model)) ? "default" : serviceTier;
+		return serviceTier === "priority" &&
+			(!this.model || (!supportsFastMode(this.model) && !supportsAnthropicFastMode(this.model)))
+			? "default"
+			: serviceTier;
 	}
 
 	private _getServiceTierForModelSwitch(): ServiceTier {
@@ -9024,7 +9028,11 @@ export class AgentSession {
 			model: options.model,
 			thinkingLevel: clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel,
 			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+				this.serviceTier === "priority" &&
+				!supportsFastMode(options.model) &&
+				!supportsAnthropicFastMode(options.model)
+					? "default"
+					: this.serviceTier,
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
