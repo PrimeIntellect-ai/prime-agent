@@ -1027,8 +1027,10 @@ export class AgentDaemon {
 					(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
 					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
 					(entry.rlmTokenBudget !== undefined && !isRlmTokenBudgetConfig(entry.rlmTokenBudget)) ||
+					// A fully delegated child legitimately reaches an allowance of 0, so only a negative or
+					// non-integer value is malformed. Rejecting 0 dropped completed children from the tree.
 					(entry.rlmTokenAllowance !== undefined &&
-						(!Number.isSafeInteger(entry.rlmTokenAllowance) || entry.rlmTokenAllowance <= 0)) ||
+						(!Number.isSafeInteger(entry.rlmTokenAllowance) || entry.rlmTokenAllowance < 0)) ||
 					(entry.rlmMaxDepth !== undefined && (!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0))
 				) {
 					continue;
@@ -2245,7 +2247,10 @@ export class AgentDaemon {
 					rlmDepth: session.rlmDepth,
 					rlmMaxDepth: session.rlmMaxDepth,
 					rlmTokenBudget: budget.config ?? undefined,
-					rlmTokenAllowance: budget.allowanceTokens ?? undefined,
+					// The grant the parent reserved, not what is left of it. Recording the remainder made
+					// rehydration subtract the same delegations twice, shrinking a resumed child's budget.
+					rlmTokenAllowance:
+						budget.allowanceTokens === null ? undefined : budget.allowanceTokens + budget.delegatedTokens,
 					rlmParentNodeId: metadata.rlmParentNodeId,
 					prompt: metadata.prompt && metadata.prompt.length <= 4096 ? metadata.prompt : undefined,
 					spawnCode: metadata.spawnCode,

@@ -1685,8 +1685,10 @@ export class AgentSession {
 	 */
 	private _reserveRlmChildAllowance(requested?: RlmTokenBudgetRange): number | undefined {
 		const config = this._rlmTokenBudget;
-		if (!config) {
-			// No active budget: an explicit request starts one for that child's subtree only.
+		// A grant from a parent stays in force even when no config is active here, so the pool rather
+		// than the config decides whether this session may still fund a child.
+		if (!config && this._rlmSubtreePool === undefined) {
+			// No budget anywhere: an explicit request starts one for that child's subtree only.
 			return requested?.maxTokens;
 		}
 		if (this._rlmTokenBudgetExhausted()) {
@@ -1697,8 +1699,8 @@ export class AgentSession {
 		const remaining = this._rlmSubtreePool ?? 0;
 		// A grant is what the child may spend, so the caller's floor and the configured floor are both
 		// bounds on the same number.
-		const floor = Math.max(requested?.minTokens ?? 0, config.minTokens ?? 0);
-		const ceiling = config.maxTokens ?? Number.MAX_SAFE_INTEGER;
+		const floor = Math.max(requested?.minTokens ?? 0, config?.minTokens ?? 0);
+		const ceiling = config?.maxTokens ?? Number.MAX_SAFE_INTEGER;
 		// The caller decides how much of its remaining pool a child is worth. Without a request the
 		// child takes what is left, capped by the ceiling.
 		const granted = Math.min(requested?.maxTokens ?? remaining, remaining, ceiling);
@@ -1711,6 +1713,19 @@ export class AgentSession {
 		this._applyRlmTokenBudgetAllowance();
 		this._persistRlmTokenBudgetSpend();
 		return granted;
+	}
+
+	/**
+	 * Return a reservation whose child never started, so a transient spawn failure does not burn
+	 * budget. Only safe when no runtime was created: a child that ran may already have spent.
+	 */
+	private _releaseRlmChildAllowance(granted: number | undefined): void {
+		if (granted === undefined || granted <= 0) return;
+		// Mirrors the guard in _reserveRlmChildAllowance: without a pool in force nothing was debited.
+		if (!this._rlmTokenBudget && this._rlmSubtreePool === undefined) return;
+		this._rlmSubtreeGranted = Math.max(0, this._rlmSubtreeGranted - granted);
+		this._applyRlmTokenBudgetAllowance();
+		this._persistRlmTokenBudgetSpend();
 	}
 
 	/** Explain why the remaining pool cannot fund a child at the size requested. */
@@ -1777,6 +1792,15 @@ export class AgentSession {
 	private _applyRlmTokenBudgetAllowance(): void {
 		const config = this._rlmTokenBudget;
 		if (!config) {
+			if (this._rlmDepth > 0 && this._configuredRlmTokenAllowance !== undefined) {
+				// Turning the budget off must not lift a cap this session did not impose on itself.
+				// The parent reserved this grant out of its own pool and is accountable for it, so the
+				// grant keeps applying even with no config in force here.
+				const grant = this._configuredRlmTokenAllowance;
+				this._rlmTokenAllowance = Math.max(0, grant - this._rlmSubtreeGranted);
+				this._rlmSubtreePool = Math.max(0, grant - this._rlmSubtreeGranted - this._rlmTokensUsed);
+				return;
+			}
 			this._rlmTokenAllowance = undefined;
 			this._rlmSubtreePool = undefined;
 			return;
@@ -1812,7 +1836,11 @@ export class AgentSession {
 		if (this._rlmTokenBudgetAccountedMessages.has(message)) return false;
 		const wasExhausted = this._rlmTokenBudgetExhausted();
 		this._rlmTokenBudgetAccountedMessages.add(message);
-		this._rlmTokensUsed += rlmTokenDeltaForUsage(message.usage);
+		const delta = rlmTokenDeltaForUsage(message.usage);
+		if (Number.isFinite(delta)) this._rlmTokensUsed += delta;
+		// Spending shrinks what this session may still delegate, so the pool has to be recomputed here.
+		// Without this a subagent keeps granting against the pool it had before it did any work.
+		this._applyRlmTokenBudgetAllowance();
 		this._persistRlmTokenBudgetSpend();
 		return !wasExhausted && this._rlmTokenBudgetExhausted();
 	}
@@ -1932,9 +1960,13 @@ export class AgentSession {
 		const resolved = this._resolveRlmTokenBudget();
 		this._rlmTokenBudget = resolved.config;
 		this._rlmTokenBudgetSource = resolved.source;
+		// Tokens already spent and grants already handed out are facts about work that happened, not
+		// per-branch state: the subagents exist whichever branch is being viewed. Navigation may raise
+		// these from disk on first load but must never lower them, or switching branches would refund
+		// live grants and un-exhaust a spent session.
 		const spend = this._loadPersistedRlmTokenBudgetSpend();
-		this._rlmTokensUsed = spend?.tokensUsed ?? 0;
-		this._rlmSubtreeGranted = spend?.subtreeGranted ?? 0;
+		this._rlmTokensUsed = Math.max(this._rlmTokensUsed, spend?.tokensUsed ?? 0);
+		this._rlmSubtreeGranted = Math.max(this._rlmSubtreeGranted, spend?.subtreeGranted ?? 0);
 		this._applyRlmTokenBudgetAllowance();
 	}
 
@@ -10079,19 +10111,19 @@ export class AgentSession {
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
 
+		const childSessionDir = this._createChildRlmSessionDir();
+		const childNodeId = basename(childSessionDir);
+		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
+		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+
 		// Debit the reservation only after every failure path above has been cleared. Reserving
-		// earlier leaked the grant permanently whenever a name clash, an unknown model selector or
-		// a failed auth preflight aborted the spawn.
+		// earlier leaked the grant permanently whenever a name clash, an unknown model selector, a
+		// failed auth preflight or a session-directory error aborted the spawn.
 		const childTokenAllowance = this._reserveRlmChildAllowance(requestedTokenBudget);
 		// With no active budget, a model-supplied allowance still needs a config so the
 		// child (and its own descendants) are governed by that grant.
 		const childTokenBudget =
 			this._rlmTokenBudget ?? (childTokenAllowance === undefined ? undefined : { totalTokens: childTokenAllowance });
-
-		const childSessionDir = this._createChildRlmSessionDir();
-		const childNodeId = basename(childSessionDir);
-		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
-		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		const label = rlmChildLabel(prompt);

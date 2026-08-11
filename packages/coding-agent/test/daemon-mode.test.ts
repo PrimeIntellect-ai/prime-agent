@@ -61,6 +61,41 @@ function idleRlmTokenBudgetStatus(): RlmTokenBudgetStatus {
 }
 
 describe("daemon mode helpers", () => {
+	it("keeps registry entries whose grant is fully delegated", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-registry-zero-allowance-"));
+		const daemon = new AgentDaemon(join(tempDir, "probe.sock"), {
+			defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+			createRuntime: (async () => {
+				throw new Error("unused");
+			}) as never,
+		});
+		const internals = daemon as unknown as {
+			readLatestRlmSubagentRegistryPath(path: string): Promise<Array<{ childId: string; status: string }>>;
+		};
+		const registry = join(tempDir, "rlm-subagents.jsonl");
+		// A child that delegated its whole grant legitimately ends on an allowance of 0.
+		writeFileSync(
+			registry,
+			`${JSON.stringify({
+				type: "rlm_subagent",
+				childId: "child-1",
+				sessionName: "worker",
+				sessionDir: join(tempDir, "child"),
+				sessionFile: join(tempDir, "child", "session.jsonl"),
+				rlmDepth: 1,
+				rlmTokenAllowance: 0,
+				status: "completed",
+				createdAt: 1,
+				updatedAt: "2026-01-01T00:00:00.000Z",
+			})}\n`,
+		);
+
+		const entries = await internals.readLatestRlmSubagentRegistryPath(registry);
+
+		expect(entries).toHaveLength(1);
+		expect(entries[0]?.status).toBe("completed");
+	});
+
 	it("preserves envelope client identity while registering prompt admission", () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },

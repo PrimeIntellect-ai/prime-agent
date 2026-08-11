@@ -2140,6 +2140,75 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.getRlmTokenBudgetStatus().exhausted).toBe(false);
 	});
 
+	it("does not grant against a pool it has already spent", async () => {
+		const captured: number[] = [];
+		const burn = () => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() =>
+				stream.push({ type: "done", reason: "stop", message: assistantMessage("work", usage(45_000, 45_000)) }),
+			);
+			return stream;
+		};
+		const child = createSession({
+			depth: 1,
+			maxDepth: 8,
+			tokenBudget: { totalTokens: 100_000 },
+			tokenAllowance: 100_000,
+			streamFn: burn,
+			subagentRuntimeHost: grantCapturingHost((o) => captured.push(o.rlmTokenAllowance as number)),
+		});
+
+		await child.prompt("do the work");
+		await child.agent.waitForIdle();
+		expect(child.getRlmTokenBudgetStatus().tokensUsed).toBe(90_000);
+
+		// The pool has to shrink as tokens are spent, or a subagent keeps delegating a budget it no
+		// longer holds and the overspend compounds at every depth.
+		expect(child.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(10_000);
+		await child.runRlmChild("grandchild");
+		await vi.waitFor(() => expect(captured).toHaveLength(1));
+		expect(captured[0]).toBe(10_000);
+		child.dispose();
+	});
+
+	it("does not refund live grants when navigating branches", async () => {
+		const captured: number[] = [];
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000 },
+			subagentRuntimeHost: grantCapturingHost((o) => captured.push(o.rlmTokenAllowance as number)),
+		});
+		await root.runRlmChild("first", { token_budget: 1000 });
+		await vi.waitFor(() => expect(captured).toHaveLength(1));
+		expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(0);
+
+		// Grants are facts about children that exist, not per-branch state, so navigation must not
+		// hand the same tokens out twice.
+		(root as unknown as { _reloadRlmTokenBudgetFromBranch(): void })._reloadRlmTokenBudgetFromBranch();
+
+		expect(root.getRlmTokenBudgetStatus().delegatedTokens).toBe(1000);
+		expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(0);
+		await expect(root.runRlmChild("second", { token_budget: 1000 })).rejects.toThrow(/exhausted/);
+		root.dispose();
+	});
+
+	it("keeps a parent's grant in force when a subagent turns budgeting off", async () => {
+		const child = createSession({
+			depth: 1,
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000 },
+			tokenAllowance: 100,
+			subagentRuntimeHost: grantCapturingHost(() => {}),
+		});
+
+		await child.setRlmTokenBudget(undefined);
+
+		// The parent reserved these tokens out of its own pool, so a subagent cannot vote itself more.
+		expect(child.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(100);
+		await expect(child.runRlmChild("grandchild", { token_budget: 5_000_000 })).rejects.toThrow(/exhausted/);
+		child.dispose();
+	});
+
 	it("keeps the kernel env free of budget variables when budgeting is off", () => {
 		const root = createSession({ maxDepth: 3, rlmSessionDir: tempDir });
 
