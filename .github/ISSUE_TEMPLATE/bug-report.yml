@@ -1,0 +1,76 @@
+---
+name: Bug report
+description: Report something that isn't working as expected
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Which package is affected? A maintainer will apply the matching `pkg:*` label.
+      options:
+        - agent
+        - ai
+        - coding-agent
+        - tui
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Steps to reliably reproduce the issue.
+      placeholder: |
+        1. Run `prime-agent ...`
+        2. ...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened. Include error messages, logs, or screenshots if possible. Redact API keys, tokens, and other secrets before pasting.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Prime Agent version
+      description: Output of `prime-agent --version`.
+      placeholder: "e.g. 0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any other context, configuration, or environment details. Redact secrets before sharing.
+    validations:
+      required: false
