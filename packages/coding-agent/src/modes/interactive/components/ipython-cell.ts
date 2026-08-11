@@ -13,9 +13,10 @@ import { parseIpythonBashCell } from "../../../core/tools/ipython-cell-code.js";
 import { shortenPath } from "../../../core/tools/render-utils.js";
 import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../theme/working-icon.js";
+import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } from "./agent-message.js";
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
-import { keyHint } from "./keybinding-hints.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 
 export interface IPythonCellContentBlock {
 	type: string;
@@ -238,6 +239,23 @@ function isEditConfirmation(text: string | undefined, diffs: readonly DiffDispla
 	return diffs.some((diff) => stripped === `Edited ${diff.path}`);
 }
 
+/**
+ * True when `text` is the `agent_message.send` receipt dict for one of the sent
+ * messages already summarized above the output, so the raw receipt isn't shown.
+ * Matches only a single-receipt repr — the receipt dict always starts with its
+ * `id` key — so broadcast `{'receipts': [...]}` results (which can carry error
+ * entries with no summary line) and results that merely mention an ID still render.
+ */
+function isAgentMessageReceipt(text: string | undefined, messages: readonly SentAgentMessageDisplay[]): boolean {
+	if (!text || messages.length === 0) {
+		return false;
+	}
+	const stripped = stripReprQuotes(text);
+	return messages.some(
+		(message) => stripped.startsWith(`{'id': '${message.id}'`) || stripped.startsWith(`{"id": "${message.id}"`),
+	);
+}
+
 function readErrorDetails(value: unknown): IpythonErrorDetails | undefined {
 	if (!value || typeof value !== "object") {
 		return undefined;
@@ -408,7 +426,7 @@ export class IPythonCellComponent implements Component {
 		}
 
 		if (this.state.showExpandHint !== false) {
-			parts.push(keyHint("app.tools.expand", this.state.expanded ? "to collapse" : "to expand"));
+			parts.push(expandCollapseHint("app.tools.expand", this.state.expanded === true));
 		}
 		return parts.join(theme.fg("dim", " · "));
 	}
@@ -437,10 +455,14 @@ export class IPythonCellComponent implements Component {
 		const input = body.filter((line) => line.trim().length > 0).length;
 
 		const hasDiffs = (details.diffs?.length ?? 0) > 0;
-		const structured = [details.stdout, details.stderr, details.result]
+		const sentMessages = details.sentAgentMessages ?? [];
+		const result = isAgentMessageReceipt(details.result, sentMessages) ? undefined : details.result;
+		const structured = [details.stdout, details.stderr, result]
 			.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
 			.join("\n");
-		const outputText = (structured || textFromBlocks(this.state.content)).trim();
+		const blocksText = textFromBlocks(this.state.content);
+		const fallback = isAgentMessageReceipt(blocksText, sentMessages) ? "" : blocksText;
+		const outputText = (structured || fallback).trim();
 		const output = hasDiffs || !outputText ? 0 : outputText.split("\n").length;
 
 		const segments: string[] = [];
@@ -531,6 +553,7 @@ export class IPythonCellComponent implements Component {
 		let renderedTextOutput = false;
 
 		const diffs = details.diffs ?? [];
+		const sentMessages = details.sentAgentMessages ?? [];
 
 		const startOutput = (): void => {
 			if (outputStarted) {
@@ -553,7 +576,11 @@ export class IPythonCellComponent implements Component {
 				renderedTextOutput = true;
 				this.renderOutputText(lines, width, normalizeErrorDetails(details.stderr), "err");
 			}
-			if (details.result?.trim() && !isEditConfirmation(details.result, diffs)) {
+			if (
+				details.result?.trim() &&
+				!isEditConfirmation(details.result, diffs) &&
+				!isAgentMessageReceipt(details.result, sentMessages)
+			) {
 				startOutput();
 				renderedTextOutput = true;
 				this.renderOutputText(lines, width, normalizeErrorDetails(details.result), "out");
@@ -564,7 +591,7 @@ export class IPythonCellComponent implements Component {
 				renderedTextOutput = true;
 				this.renderOutputText(lines, width, traceback.output, "out");
 			}
-		} else if (text.trim()) {
+		} else if (text.trim() && !isAgentMessageReceipt(text, sentMessages)) {
 			startOutput();
 			renderedTextOutput = true;
 			this.renderOutputText(lines, width, normalizeErrorDetails(text), this.state.isError ? "err" : "out");
@@ -610,19 +637,29 @@ export class IPythonCellComponent implements Component {
 		}
 	}
 
+	// Summary line per message; expanding shows the message text in a `╰─` gutter
+	// instead of the collapsed preview, matching received agent-message UI.
 	private renderSentAgentMessages(lines: string[], width: number, messages: readonly SentAgentMessageDisplay[]): void {
 		for (const message of messages) {
 			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
-			const text = message.message.replace(/\s+/g, " ").trim();
-			const line =
-				theme.fg("accent", "◆") +
-				` ${theme.fg("muted", label)}` +
-				theme.fg("dim", " · ") +
-				theme.fg("muted", recipient) +
-				theme.fg("dim", " · ") +
-				theme.fg("muted", text);
-			this.addPlain(lines, truncateToWidth(line, Math.max(1, width - 1), "…"));
+			if (this.state.expanded) {
+				this.addBlank(lines, width);
+				this.addPlain(
+					lines,
+					truncateToWidth(agentMessageSummaryLine(label, recipient), Math.max(1, width - 1), "…"),
+				);
+				for (const bodyLine of agentMessageBodyLines(message.message, width)) {
+					lines.push(bodyLine);
+				}
+				continue;
+			}
+			const prefixWidth = visibleWidth(`◆ ${label} · ${recipient} · `);
+			const preview = agentMessagePreview(prefixWidth, message.message);
+			this.addPlain(
+				lines,
+				truncateToWidth(agentMessageSummaryLine(label, recipient, preview), Math.max(1, width - 1), "…"),
+			);
 		}
 	}
 

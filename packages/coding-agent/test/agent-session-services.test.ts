@@ -2,12 +2,13 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "../src/core/agent-messages.js";
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 
 describe("createAgentSessionFromServices", () => {
@@ -15,6 +16,7 @@ describe("createAgentSessionFromServices", () => {
 	const unregisters: Array<() => void> = [];
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		while (unregisters.length > 0) {
 			unregisters.pop()?.();
 		}
@@ -23,6 +25,81 @@ describe("createAgentSessionFromServices", () => {
 			if (path && existsSync(path)) {
 				rmSync(path, { recursive: true, force: true });
 			}
+		}
+	});
+
+	it("shows the telemetry disclosure independently of the Herdr reporter", async () => {
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		const tempDir = join(tmpdir(), `pi-session-telemetry-notice-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const settingsManager = SettingsManager.inMemory();
+
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			settingsManager,
+			noBuiltinHerdrReporter: true,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+
+		expect(services.diagnostics).toContainEqual(
+			expect.objectContaining({ type: "info", message: expect.stringContaining("pseudonymous usage") }),
+		);
+		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
+	});
+
+	it("honors an explicit daemon-carried telemetry opt-out", async () => {
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		const tempDir = join(tmpdir(), `pi-session-daemon-telemetry-opt-out-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const settingsManager = SettingsManager.inMemory();
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			settingsManager,
+			telemetryDisabled: true,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+
+		expect(services.diagnostics).not.toContainEqual(
+			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
+		);
+		expect(settingsManager.getTelemetryNoticeShown()).toBe(false);
+
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			telemetryDisabled: true,
+		});
+		try {
+			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("does not install top-level telemetry for a resumed child session", async () => {
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		const tempDir = join(tmpdir(), `pi-session-child-telemetry-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			settingsManager: SettingsManager.inMemory({ telemetry: { noticeShown: true } }),
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
+		sessionManager.newSession({ rlmDepth: 1 });
+
+		const { session } = await createAgentSessionFromServices({ services, sessionManager });
+		try {
+			expect(session.rlmDepth).toBe(1);
+			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
+		} finally {
+			session.dispose();
 		}
 	});
 

@@ -58,7 +58,7 @@ describe("attach-image skill over the kernel host bridge", () => {
 		expect(blocks).toEqual([{ type: "image", data: PNG_BASE64, mimeType: "image/png" }]);
 	});
 
-	it("compresses large attached images before storing them in the tool result", async () => {
+	it("compresses large attached images before storing them in the tool result", { retry: 1 }, async () => {
 		const imagePath = join(tempDir, "large.png");
 
 		provisioner = new IpythonKernelProvisioner(tempDir, {

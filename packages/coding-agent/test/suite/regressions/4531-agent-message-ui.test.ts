@@ -482,8 +482,9 @@ describe("ENG-4531 agent message UI", () => {
 
 		component.setExpanded(true);
 		const expanded = render(component);
+		expect(expanded).toContain("to collapse");
 		const expandedLines = expanded.split("\n");
-		expect(expandedLines[1]?.trimEnd()).toBe(" ◆ Agent message received · from Planner");
+		expect(expandedLines[1]?.trimEnd()).toMatch(/^ ◆ Agent message received · from Planner \(.*to collapse\)$/);
 		expect(expandedLines.slice(2)).toEqual([
 			" ╰─ Reply to your parent with exactly: hi",
 			"    Then wait for more work.",
@@ -533,5 +534,146 @@ describe("ENG-4531 agent message UI", () => {
 			" ◆ Agent message sent · to parent Worker · Continue with shard eight.",
 		]);
 		expect(rendered).not.toContain("Agent message received");
+	});
+
+	it("expands sent messages to the message text without the receipt metadata", () => {
+		const receipt =
+			"{'id': 'agentmsg_4531_delivered',\n" +
+			" 'source': 'agent_message',\n" +
+			" 'target': {'activeSessionId': 'worker-active', 'sessionId': 'worker-session'},\n" +
+			" 'message': 'Continue with shard eight.\\nThen report back.',\n" +
+			" 'deliveryStatus': 'delivered',\n" +
+			" 'deliveryMode': 'steer'}";
+		const component = new IPythonCellComponent({
+			code: 'await agent_message.send("Continue with shard eight.", receiver_role="parent")',
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+			details: {
+				status: "ok",
+				result: receipt,
+				sentAgentMessages: [
+					{
+						id: "agentmsg_4531_delivered",
+						message: "Continue with shard eight.\nThen report back.",
+						deliveryStatus: "delivered",
+						receiverRole: "parent",
+						target: {
+							activeSessionId: "worker-active",
+							sessionId: "worker-session",
+							sessionName: "Worker",
+						},
+					},
+				],
+			},
+		});
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		const lines = rendered.split("\n").filter((line) => line.trim().length > 0);
+		expect(lines).toEqual([
+			expect.stringContaining("python"),
+			expect.stringContaining("await agent_message.send"),
+			" ◆ Agent message sent · to parent Worker",
+			" ╰─ Continue with shard eight.",
+			"    Then report back.",
+		]);
+		expect(rendered).not.toContain("deliveryStatus");
+		expect(rendered).not.toContain("agentmsg_4531_delivered");
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("· Continue with shard eight.");
+	});
+
+	it("keeps broadcast receipt lists with failed deliveries visible next to sent messages", () => {
+		const receipts =
+			"{'receipts': [{'id': 'agentmsg_4531_broadcast',\n" +
+			"   'deliveryStatus': 'delivered',\n" +
+			"   'message': 'Status check.'},\n" +
+			"  {'target': 'worker-two', 'error': 'session is inactive'}]}";
+		const component = new IPythonCellComponent({
+			code: 'await agent_message.send("all", "Status check.")',
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+			details: {
+				status: "ok",
+				result: receipts,
+				sentAgentMessages: [
+					{
+						id: "agentmsg_4531_broadcast",
+						message: "Status check.",
+						deliveryStatus: "delivered",
+						receiverRole: "child",
+						target: {
+							activeSessionId: "worker-active",
+							sessionId: "worker-session",
+							sessionName: "Worker",
+						},
+					},
+				],
+			},
+		});
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain(" ◆ Agent message sent · to child Worker");
+		expect(rendered).toContain("'error': 'session is inactive'");
+	});
+
+	it("keeps results that merely mention a sent-message id visible", () => {
+		const component = new IPythonCellComponent({
+			code: "record_reply()",
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+			details: {
+				status: "ok",
+				result: "{'referenced_message': 'agentmsg_4531_ref', 'answer': 42}",
+				sentAgentMessages: [
+					{
+						id: "agentmsg_4531_ref",
+						message: "Ping.",
+						deliveryStatus: "delivered",
+						receiverRole: "parent",
+						target: {
+							activeSessionId: "worker-active",
+							sessionId: "worker-session",
+							sessionName: "Worker",
+						},
+					},
+				],
+			},
+		});
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("'answer': 42");
+	});
+
+	it("keeps unrelated results visible next to sent messages", () => {
+		const component = new IPythonCellComponent({
+			code: 'await agent_message.send("Ping.", receiver_role="parent")\n"done"',
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+			details: {
+				status: "ok",
+				result: "'done'",
+				sentAgentMessages: [
+					{
+						id: "agentmsg_4531_result",
+						message: "Ping.",
+						deliveryStatus: "delivered",
+						receiverRole: "parent",
+						target: {
+							activeSessionId: "worker-active",
+							sessionId: "worker-session",
+							sessionName: "Worker",
+						},
+					},
+				],
+			},
+		});
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain(" ◆ Agent message sent · to parent Worker");
+		expect(rendered).toContain(" ╰─ Ping.");
+		expect(rendered).toContain("done");
 	});
 });

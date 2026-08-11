@@ -238,6 +238,10 @@ import {
 	canSelectSessionAction,
 	type DeliveryPolicy,
 	type DeliveryRecord,
+	type QueuedMessageLane,
+	type QueuedMessageMutation,
+	type QueuedMessageMutationStatus,
+	queuedMessageLaneDeliveryPolicy,
 	type RuntimeActivity,
 	type SessionAction,
 	type SessionActionSnapshot,
@@ -1189,7 +1193,8 @@ export class AgentSession {
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
 	private _disposed = false;
-	private readonly _disposeCallbacks = new Set<() => void>();
+	private readonly _disposeCallbacks = new Set<() => void | Promise<void>>();
+	private _disposeCallbacksPromise?: Promise<void>;
 	// Set at the start of async teardown so a child finishing mid-disposeAsync doesn't
 	// re-populate the retained map after it's been cleared.
 	private _disposing = false;
@@ -3769,7 +3774,7 @@ export class AgentSession {
 	 */
 	async disposeAsync(): Promise<void> {
 		if (this._disposed) {
-			return;
+			return this._disposeCallbacksPromise;
 		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
 		// the kernel snapshot flush finishes.
@@ -3781,7 +3786,7 @@ export class AgentSession {
 			// agent_end completes instead of being aborted by dispose().
 			await this._drainPendingRefinementForDisposal();
 			if (this._disposed) {
-				return;
+				return this._disposeCallbacksPromise;
 			}
 			this._disposing = true;
 			this._sessionActionCommitDisposeAbortController.abort();
@@ -3945,6 +3950,27 @@ export class AgentSession {
 			// a failed kernel startup already cleaned up after itself
 		}
 		this.dispose();
+		await this._disposeCallbacksPromise;
+	}
+
+	private _startDisposeCallbacks(): Promise<void> {
+		if (this._disposeCallbacksPromise) {
+			return this._disposeCallbacksPromise;
+		}
+		const pending: Promise<void>[] = [];
+		for (const callback of this._disposeCallbacks) {
+			try {
+				const result = callback();
+				if (result) {
+					pending.push(result.catch(() => undefined));
+				}
+			} catch {
+				// Disposal remains best-effort; one owner must not block the rest.
+			}
+		}
+		this._disposeCallbacks.clear();
+		this._disposeCallbacksPromise = Promise.all(pending).then(() => undefined);
+		return this._disposeCallbacksPromise;
 	}
 
 	dispose(): void {
@@ -3995,20 +4021,18 @@ export class AgentSession {
 			this._eventListeners = [];
 			cleanupSessionResources(this.sessionId);
 		} finally {
-			for (const callback of this._disposeCallbacks) {
-				try {
-					callback();
-				} catch {
-					// Disposal remains best-effort; one owner must not block the rest.
-				}
-			}
-			this._disposeCallbacks.clear();
+			void this._startDisposeCallbacks();
 		}
 	}
 
-	registerDisposeCallback(callback: () => void): void {
+	registerDisposeCallback(callback: () => void | Promise<void>): void {
 		if (this._disposed) {
-			callback();
+			try {
+				const result = callback();
+				if (result) void result.catch(() => undefined);
+			} catch {
+				// Late registration follows the same best-effort disposal contract.
+			}
 			return;
 		}
 		this._disposeCallbacks.add(callback);
@@ -6083,12 +6107,88 @@ export class AgentSession {
 		return { steering: removedSteering, followUp: removedFollowUp };
 	}
 
+	/**
+	 * Mutate a single visible queued message, addressed by its position in the same
+	 * projection the session-action snapshot publishes. expectedText must match the
+	 * item's current preview so clients never edit a shifted queue by accident.
+	 */
+	mutateQueuedMessage(
+		lane: QueuedMessageLane,
+		index: number,
+		expectedText: string,
+		mutation: QueuedMessageMutation,
+	): QueuedMessageMutationStatus {
+		const policy = queuedMessageLaneDeliveryPolicy(lane);
+		const projection = visibleSessionActionProjection(this._actionStore.queuedActions(policy));
+		const item = projection[index];
+		if (!item || queuedAgentMessagePreview(item) !== expectedText) return "rejected";
+		if (mutation.type === "delete") {
+			const error = new Error("Queued prompt was deleted before delivery.");
+			this._rejectAgentMessage(item.agentMessageId, error);
+			this._cancelSessionActions((candidate) => candidate === item, error);
+			this._emitQueueUpdate();
+			this.resumeQueuedWork();
+			return "applied";
+		}
+		if (mutation.type === "move") {
+			const neighbor = projection[index + mutation.direction];
+			if (!neighbor) return "rejected";
+			this._actionStore.swapQueued(item, neighbor);
+			this._emitQueueUpdate();
+			return "applied";
+		}
+		if (
+			item.payload.kind === "turn" &&
+			(item.payload.acceptedAgentMessage ||
+				item.payload.records.some((record) => record.role === "primary" && record.message.role !== "user"))
+		) {
+			return "rejected";
+		}
+		const images = mutation.images?.map((image) => ({ ...image }));
+		if (item.payload.kind === "session_command") {
+			const command = parseSessionSlashCommand(mutation.text);
+			if (!command) return "invalid";
+			item.payload.text = mutation.text;
+			item.payload.command = command;
+			if (mutation.images !== undefined) item.payload.images = images?.length ? images : undefined;
+		} else {
+			item.payload.text = mutation.text;
+			const text = { type: "text" as const, text: mutation.text };
+			if (mutation.images !== undefined) {
+				item.payload.images = images?.length ? images : undefined;
+				item.payload.content = [text, ...(images?.map((image) => ({ ...image })) ?? [])];
+			} else if (item.payload.content) {
+				item.payload.content = [text, ...item.payload.content.filter((block) => block.type !== "text")];
+			}
+			item.payload.preview = undefined;
+			item.payload.prepared = undefined;
+			for (const record of item.payload.records) {
+				if (record.role === "primary" && record.message.role === "user") {
+					record.message.content = item.payload.content?.map((block) => ({ ...block })) ?? mutation.text;
+				}
+			}
+		}
+		const targetPolicy = queuedMessageLaneDeliveryPolicy(mutation.lane);
+		if (targetPolicy !== policy) {
+			item.queueKey = undefined;
+			item.wake = mutation.lane === "steering" ? "on_lower_boundary" : "external_resume";
+			this._actionStore.moveQueued(item, targetPolicy, this._actionStore.queuedActions(targetPolicy).length);
+		}
+		this.resumeQueuedWork();
+		this._emitQueueUpdate();
+		return "applied";
+	}
+
 	get queuedActionCount(): number {
 		return visibleSessionActionProjection(this._actionStore.queuedActions()).length;
 	}
 
 	get unfinishedActionCount(): number {
 		return this._actionStore.unfinishedActions().length;
+	}
+
+	get isQueuedWorkSuspended(): boolean {
+		return this._sessionInputPumpSuspended;
 	}
 
 	get isSessionActive(): boolean {

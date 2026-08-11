@@ -614,4 +614,28 @@ describe("parseKey", () => {
 			assert.strictEqual(parseKey("\x1b[[5~"), "pageUp");
 		});
 	});
+
+	describe("combined modified arrows", () => {
+		// xterm encodes modifiers as a 1-based parameter: 1 + shift(1) + alt(2) + ctrl(4).
+		// Ctrl+Alt is therefore parameter 7, and parameter 8 is Shift+Ctrl+Alt.
+		it("matches xterm and Kitty Ctrl+Alt arrows", () => {
+			assert.equal(matchesKey("\x1b[1;7A", "ctrl+alt+up"), true);
+			assert.equal(matchesKey("\x1b[1;7B", "ctrl+alt+down"), true);
+			assert.equal(matchesKey("\x1b[57419;7u", "ctrl+alt+up"), true);
+			assert.equal(matchesKey("\x1b[57420;7u", "ctrl+alt+down"), true);
+		});
+
+		it("does not alias Shift+Ctrl+Alt arrows onto Ctrl+Alt", () => {
+			assert.equal(matchesKey("\x1b[1;8A", "shift+ctrl+alt+up"), true);
+			assert.equal(matchesKey("\x1b[1;8A", "ctrl+alt+up"), false);
+			assert.equal(matchesKey("\x1b[1;8B", "ctrl+alt+down"), false);
+		});
+
+		it("matches legacy Option-as-Meta wrapped Ctrl arrows", () => {
+			assert.equal(matchesKey("\x1b\x1b[1;5A", "ctrl+alt+up"), true);
+			assert.equal(matchesKey("\x1b\x1b[1;5B", "ctrl+alt+down"), true);
+			assert.equal(matchesKey("\x1b\x1bOa", "ctrl+alt+up"), true);
+			assert.equal(matchesKey("\x1b\x1bOb", "ctrl+alt+down"), true);
+		});
+	});
 });

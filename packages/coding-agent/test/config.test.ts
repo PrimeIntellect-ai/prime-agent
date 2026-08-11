@@ -70,6 +70,16 @@ function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; pack
 	return { prefix, packageDir };
 }
 
+function createHomebrewInstall(): { packageDir: string } {
+	const prefix = mkdtempSync(join(tmpdir(), "pi-homebrew-"));
+	const packageDir = join(prefix, "Cellar", "prime-agent", "0.7.0", "libexec", "lib", "node_modules", "prime-agent");
+	mkdirSync(packageDir, { recursive: true });
+	tempDir = prefix;
+	process.env.PI_PACKAGE_DIR = packageDir;
+	setExecPath(join(packageDir, "dist", "cli.js"));
+	return { packageDir };
+}
+
 function createPnpmGlobalInstall(): { root: string; packageDir: string } {
 	const temp = mkdtempSync(join(tmpdir(), "pi-pnpm-"));
 	const binDir = join(temp, "bin");
@@ -175,6 +185,15 @@ describe("detectInstallMethod", () => {
 		expect(getUpdateInstruction("@earendil-works/pi-coding-agent")).toBe(
 			"Update @earendil-works/pi-coding-agent using the package manager, wrapper, or source checkout that provides this installation.",
 		);
+	});
+
+	test("leaves Homebrew installs under Homebrew ownership", () => {
+		createHomebrewInstall();
+
+		expect(detectInstallMethod()).toBe("homebrew");
+		expect(getSelfUpdateCommand("prime-agent")).toBeUndefined();
+		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
+		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {

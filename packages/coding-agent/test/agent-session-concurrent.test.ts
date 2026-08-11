@@ -15,7 +15,7 @@ import {
 	type TextContent,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -126,6 +126,71 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		return session;
 	}
+
+	it("awaits asynchronous dispose callbacks during graceful disposal", async () => {
+		createSession();
+		let releaseCallback: () => void = () => {};
+		const callbackGate = new Promise<void>((resolve) => {
+			releaseCallback = resolve;
+		});
+		let callbackStarted = false;
+		session.registerDisposeCallback(async () => {
+			callbackStarted = true;
+			await callbackGate;
+		});
+
+		let disposed = false;
+		const disposal = session.disposeAsync().then(() => {
+			disposed = true;
+		});
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		expect(callbackStarted).toBe(true);
+		expect(disposed).toBe(false);
+		releaseCallback();
+		await disposal;
+		expect(disposed).toBe(true);
+	});
+
+	it("awaits dispose callbacks when synchronous disposal wins during the refinement drain", async () => {
+		createSession();
+		let releaseDrain: () => void = () => {};
+		const drainGate = new Promise<void>((resolve) => {
+			releaseDrain = resolve;
+		});
+		let drainStarted = false;
+		const internals = session as unknown as {
+			_drainPendingRefinementForDisposal: () => Promise<void>;
+		};
+		vi.spyOn(internals, "_drainPendingRefinementForDisposal").mockImplementation(async () => {
+			drainStarted = true;
+			await drainGate;
+		});
+
+		let releaseCallback: () => void = () => {};
+		const callbackGate = new Promise<void>((resolve) => {
+			releaseCallback = resolve;
+		});
+		let callbackStarted = false;
+		session.registerDisposeCallback(async () => {
+			callbackStarted = true;
+			await callbackGate;
+		});
+
+		let disposed = false;
+		const disposal = session.disposeAsync().then(() => {
+			disposed = true;
+		});
+		await vi.waitFor(() => expect(drainStarted).toBe(true));
+		session.dispose();
+		expect(callbackStarted).toBe(true);
+
+		releaseDrain();
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		expect(disposed).toBe(false);
+		releaseCallback();
+		await disposal;
+		expect(disposed).toBe(true);
+	});
 
 	it("should throw when prompt() called while streaming", async () => {
 		createSession();

@@ -35,6 +35,7 @@ import {
 } from "./cli/session-resolver.js";
 import { APP_NAME, expandTildePath, getAgentDir, getSessionDirEnvOverride, VERSION } from "./config.js";
 import {
+	type AgentExecutionMode,
 	type AgentSessionRuntimeConfig,
 	mergeAgentSessionRuntimeConfig,
 	mergeAutonomousConfig,
@@ -69,6 +70,7 @@ import {
 import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
 import { SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
+import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
@@ -156,7 +158,7 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
-export type ClientMode = "interactive" | "print" | "json" | "rpc" | "acp";
+export type ClientMode = AgentExecutionMode;
 /** Compatibility view of the CLI's internal daemon process entrypoint. */
 export type AppMode = ClientMode | "daemon";
 
@@ -632,6 +634,7 @@ function runtimeConfigFromArgs(
 	agentDir: string,
 	sessionDir: string | undefined,
 	appMode: AppMode,
+	telemetryDisabled?: true,
 ): AgentSessionRuntimeConfig {
 	return {
 		cwd,
@@ -658,6 +661,8 @@ function runtimeConfigFromArgs(
 		noContextFiles: parsed.noContextFiles,
 		autonomous: runtimeAutonomousConfigFromArgs(parsed),
 		extensionFlagValues: parsed.unknownFlags.size > 0 ? Object.fromEntries(parsed.unknownFlags.entries()) : undefined,
+		executionMode: appMode === "daemon" ? undefined : appMode,
+		telemetryDisabled,
 		// Serialized refine for print/json/rpc: the client's appMode is NOT
 		// "daemon" here — it's "print", "json", or "rpc". The daemon worker
 		// receives this flag via AgentSessionRuntimeConfig and uses it
@@ -732,6 +737,7 @@ async function prepareRuntimeServices(options: {
 		// Subagents share the parent's Herdr pane; their own reporter would race
 		// the parent's and a subagent quit would release the still-active pane.
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
+		telemetryDisabled: config.telemetryDisabled,
 		resourceLoaderOptions: {
 			additionalExtensionPaths: config.extensions,
 			additionalSkillPaths: config.skills,
@@ -956,6 +962,7 @@ async function createDaemonClientConnection(options: {
 				ownedSession: options.clientOwned,
 				supportsExtensionUi: options.supportsExtensionUi,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
+				telemetryDisabled: options.config.telemetryDisabled,
 			});
 			return { connection, summary };
 		};
@@ -1064,7 +1071,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("parseArgs");
-	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
+	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
 
 	if (shouldRejectNonInteractiveAttach(publicCommand.attachAgent, appMode)) {
 		console.error(chalk.red("Error: attach requires an interactive terminal"));
@@ -1235,7 +1242,19 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
-	const defaultSessionConfig = runtimeConfigFromArgs(parsed, sessionManager.getCwd(), agentDir, sessionDir, appMode);
+	const telemetrySettingsManager =
+		sessionManager.getCwd() === cwd
+			? startupSettingsManager
+			: SettingsManager.create(sessionManager.getCwd(), agentDir);
+	const telemetryDisabled = isTelemetryEnabled(telemetrySettingsManager) ? undefined : true;
+	const defaultSessionConfig = runtimeConfigFromArgs(
+		parsed,
+		sessionManager.getCwd(),
+		agentDir,
+		sessionDir,
+		appMode,
+		telemetryDisabled,
+	);
 	// Verifier/headless clients pass initialGoal in each create request. The long-lived
 	// daemon fallback must not seed that goal into unrelated future sessions.
 	const daemonDefaultSessionConfig = daemonServerDefaultSessionConfig(defaultSessionConfig);
@@ -1272,6 +1291,8 @@ export async function main(args: string[], options?: MainOptions) {
 			// from the JSON/print client through AgentSessionRuntimeConfig)
 			// so it survives the daemon worker's appMode="daemon" context.
 			serializedRefine: config.serializedRefine ?? false,
+			executionMode: config.executionMode,
+			telemetryDisabled: config.telemetryDisabled,
 			// Only seed initial goal for top-level sessions (rlmDepth 0).
 			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
 		});
@@ -1324,12 +1345,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 		const startupModel = await resolvePreparedStartupModel({ prepared, sessionManager });
 
-		// ACP holds stdin open as a long-lived NDJSON request stream, so reading
-		// piped stdin here would block until EOF and never return.
-		let stdinContent: string | undefined;
-		if (appMode !== "acp") {
-			stdinContent = await readPipedStdin();
-		}
+		const stdinContent = await readPipedStdin();
 		time("readPipedStdin");
 
 		const { initialMessage, initialImages } = await prepareInitialMessage(
@@ -1587,9 +1603,6 @@ export async function main(args: string[], options?: MainOptions) {
 	let stdinContent: string | undefined;
 	if (appMode !== "rpc" && appMode !== "acp" && appMode !== "daemon") {
 		stdinContent = await readPipedStdin();
-		if (stdinContent !== undefined && appMode === "interactive") {
-			appMode = "print";
-		}
 	}
 	time("readPipedStdin");
 

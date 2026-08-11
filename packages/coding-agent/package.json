@@ -44,7 +44,7 @@
 		"postinstall": "node postinstall.cjs",
 		"prepublishOnly": "npm run clean && npm run build",
 		"bundle": "node scripts/bundle.mjs",
-		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-state-roundtrip.test.ts"
+		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/kernel-state-roundtrip.test.ts"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^1.3.0",

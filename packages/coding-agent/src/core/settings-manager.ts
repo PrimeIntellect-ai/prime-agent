@@ -136,6 +136,7 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
+	telemetry?: TelemetrySettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -167,6 +168,11 @@ export interface Settings {
 
 export interface AgentTracesSettings {
 	enabled?: boolean;
+}
+
+export interface TelemetrySettings {
+	enabled?: boolean;
+	noticeShown?: boolean;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -300,6 +306,7 @@ export class SettingsManager {
 	private globalSettings: Settings;
 	private projectSettings: Settings;
 	private settings: Settings;
+	private runtimeOverrides: Settings = {};
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
@@ -446,6 +453,15 @@ export class SettingsManager {
 			delete retrySettings.maxDelayMs;
 		}
 
+		if (typeof settings.telemetry === "boolean") {
+			settings.telemetry = { enabled: settings.telemetry };
+		} else if (
+			settings.telemetry !== undefined &&
+			(typeof settings.telemetry !== "object" || settings.telemetry === null || Array.isArray(settings.telemetry))
+		) {
+			delete settings.telemetry;
+		}
+
 		return settings as Settings;
 	}
 
@@ -487,6 +503,7 @@ export class SettingsManager {
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
+		this.runtimeOverrides = deepMergeSettings(this.runtimeOverrides, overrides);
 		this.settings = deepMergeSettings(this.settings, overrides);
 	}
 
@@ -809,6 +826,37 @@ export class SettingsManager {
 		}
 		this.globalSettings.agentTraces.enabled = enabled;
 		this.markModified("agentTraces", "enabled");
+		this.save();
+	}
+
+	getTelemetryEnabled(): boolean {
+		const globalEnabled = this.globalSettings.telemetry?.enabled ?? true;
+		const projectEnabled = this.projectSettings.telemetry?.enabled ?? true;
+		const runtimeEnabled = this.runtimeOverrides.telemetry?.enabled ?? true;
+		return globalEnabled && projectEnabled && runtimeEnabled;
+	}
+
+	private getOrCreateGlobalTelemetrySettings(): TelemetrySettings {
+		const telemetry = this.globalSettings.telemetry;
+		if (typeof telemetry !== "object" || telemetry === null || Array.isArray(telemetry)) {
+			this.globalSettings.telemetry = {};
+		}
+		return this.globalSettings.telemetry!;
+	}
+
+	setTelemetryEnabled(enabled: boolean): void {
+		this.getOrCreateGlobalTelemetrySettings().enabled = enabled;
+		this.markModified("telemetry", "enabled");
+		this.save();
+	}
+
+	getTelemetryNoticeShown(): boolean {
+		return this.runtimeOverrides.telemetry?.noticeShown ?? this.globalSettings.telemetry?.noticeShown ?? false;
+	}
+
+	setTelemetryNoticeShown(shown: boolean): void {
+		this.getOrCreateGlobalTelemetrySettings().noticeShown = shown;
+		this.markModified("telemetry", "noticeShown");
 		this.save();
 	}
 

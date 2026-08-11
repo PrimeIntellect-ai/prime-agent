@@ -3,6 +3,7 @@ import { describe, expect, it, type Mock, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { ClientPromptStashStore, type PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
+import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
 
 type FakePasteSnapshot = {
 	pastes: readonly (readonly [number, string])[];
@@ -55,6 +56,7 @@ type SharedPromptStashHarness = PromptStashHarness & {
 };
 
 type ResetHarness = PromptStashLiveMarkerHarness & {
+	queueSelection: QueueSelection;
 	chatContainer: { clear: Mock };
 	shortcutGuideContainer: { clear: Mock };
 	pendingMessagesContainer: { clear: Mock };
@@ -81,6 +83,7 @@ type ResetHarness = PromptStashLiveMarkerHarness & {
 
 type SubmitHarness = PromptStashHarness & {
 	defaultEditor: { onSubmit?: (text: string) => void | Promise<void> };
+	uiServices: { settingsManager: { getTelemetryEnabled: Mock<() => boolean> } };
 	sideQuestionContainer: { clear: Mock };
 	isAgentCompacting: () => boolean;
 	isAgentStreaming: () => boolean;
@@ -186,6 +189,7 @@ function createSubmitHarness(
 	const mode: SubmitHarness = {
 		...createPromptStashHarness(options),
 		defaultEditor: {},
+		uiServices: { settingsManager: { getTelemetryEnabled: vi.fn(() => false) } },
 		sideQuestionContainer: { clear: vi.fn() },
 		isAgentCompacting: () => false,
 		isAgentStreaming: () => false,
@@ -537,6 +541,7 @@ describe("InteractiveMode prompt stash", () => {
 		const mode: ResetHarness = {
 			...base,
 			defaultEditor: base.editor,
+			queueSelection: new QueueSelection(),
 			connectionQueue: { steering: ["old [image #2]"], followUp: [] },
 			chatContainer: { clear: vi.fn() },
 			shortcutGuideContainer: { clear: vi.fn() },
@@ -575,6 +580,7 @@ describe("InteractiveMode prompt stash", () => {
 		const mode: ResetHarness = {
 			...base,
 			defaultEditor: base.editor,
+			queueSelection: new QueueSelection(),
 			connectionQueue: { steering: [], followUp: [] },
 			chatContainer: { clear: vi.fn() },
 			shortcutGuideContainer: { clear: vi.fn() },

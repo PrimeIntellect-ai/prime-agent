@@ -526,4 +526,56 @@ describe("SettingsManager", () => {
 			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).idleEvictionMinutes).toBe("off");
 		});
 	});
+
+	describe("telemetry privacy controls", () => {
+		it("does not let project settings override a global opt-out or disclosure state", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ telemetry: { enabled: false, noticeShown: false } }),
+			);
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ telemetry: { enabled: true, noticeShown: true } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTelemetryEnabled()).toBe(false);
+			expect(manager.getTelemetryNoticeShown()).toBe(false);
+		});
+
+		it("allows project settings to further disable globally enabled telemetry", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ telemetry: { enabled: true } }));
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({ telemetry: { enabled: false } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTelemetryEnabled()).toBe(false);
+		});
+
+		it("allows runtime overrides to further disable telemetry and control disclosure", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ telemetry: { enabled: true, noticeShown: true } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.applyOverrides({ telemetry: { enabled: false, noticeShown: false } });
+
+			expect(manager.getTelemetryEnabled()).toBe(false);
+			expect(manager.getTelemetryNoticeShown()).toBe(false);
+		});
+
+		it("does not let a runtime override re-enable a global opt-out", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ telemetry: { enabled: false } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.applyOverrides({ telemetry: { enabled: true } });
+
+			expect(manager.getTelemetryEnabled()).toBe(false);
+		});
+	});
 });
