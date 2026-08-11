@@ -1803,6 +1803,72 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("captures the live process identity before an adoption stop when the descriptor has none", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-adopted-legacy",
+				pid: process.pid,
+				stopRequestedAt: new Date().toISOString(),
+				archiveOnStop: false,
+			} as { processStartId?: string },
+		};
+		const stopOrder: string[] = [];
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+			connectWorker: vi.fn(async () => {
+				stopOrder.push("connect");
+			}),
+			persistWorker: vi.fn(() => {
+				stopOrder.push("persist");
+			}),
+			stopWorker: vi.fn(async () => {
+				stopOrder.push("stop");
+			}),
+			log: vi.fn(),
+		}) as {
+			adoptOrRecoverWorker(target: object): Promise<void>;
+		};
+
+		await supervisor.adoptOrRecoverWorker(worker);
+
+		// Identity is captured and persisted before the stop runs, so stopWorker
+		// and its finalizer can signal the live process instead of waiting forever.
+		expect(worker.descriptor.processStartId).toBe(getProcessStartId(process.pid));
+		expect(stopOrder).toEqual(["connect", "persist", "stop"]);
+	});
+
+	it("keeps an unverifiable identity untrusted when the adoption connect fails", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-adopted-unverified",
+				pid: process.pid,
+				stopRequestedAt: new Date().toISOString(),
+				archiveOnStop: false,
+			} as { processStartId?: string },
+		};
+		const persistWorker = vi.fn();
+		const stopWorker = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+			connectWorker: vi.fn(async () => {
+				throw new Error("connect refused");
+			}),
+			persistWorker,
+			stopWorker,
+			log: vi.fn(),
+		}) as {
+			adoptOrRecoverWorker(target: object): Promise<void>;
+		};
+
+		await supervisor.adoptOrRecoverWorker(worker);
+
+		// The pid could belong to anything; never adopt an identity the socket
+		// handshake did not confirm.
+		expect(worker.descriptor.processStartId).toBeUndefined();
+		expect(persistWorker).not.toHaveBeenCalled();
+		expect(stopWorker).toHaveBeenCalledWith(worker, true, true, false);
+	});
+
 	it("finalizes a timed-out stop once the worker process dies", async () => {
 		vi.useFakeTimers();
 		const worker = {

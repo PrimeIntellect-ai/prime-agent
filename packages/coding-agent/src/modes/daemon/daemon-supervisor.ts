@@ -2425,6 +2425,26 @@ export class DaemonSupervisor {
 		await this.assertRecoveryAllowed();
 		if (worker.descriptor.stopRequestedAt) {
 			try {
+				// A descriptor persisted before identity tracking has no
+				// processStartId, so stopWorker could neither signal the live
+				// process nor let the finalizer escalate. Authenticating on the
+				// worker's socket proves the pid still belongs to our worker, so
+				// the start id observed while it was alive can be persisted (and
+				// the connected client gives stopWorker its graceful IPC path).
+				if (worker.descriptor.processStartId === undefined && isProcessAlive(worker.descriptor.pid)) {
+					const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
+					try {
+						await this.connectWorker(worker, 2000);
+						if (observedProcessStartId) {
+							worker.descriptor.processStartId = observedProcessStartId;
+							this.persistWorker(worker);
+						}
+					} catch {
+						// Unverifiable identity stays untrusted; the stop below
+						// still runs its graceful path and the finalizer keeps
+						// waiting rather than signalling a possibly-recycled pid.
+					}
+				}
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Completed intentional stop for worker ${worker.descriptor.workerId} during supervisor adoption`);
 			} catch (error) {
