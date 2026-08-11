@@ -8,6 +8,7 @@ import {
 	DEFAULT_RLM_EXTRA_UV_ARGS,
 	ensureKernelPython,
 	getKernelVenvDir,
+	getKernelVenvPythonPath,
 	type KernelPythonSkill,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
@@ -172,6 +173,13 @@ describe("kernel bootstrap", () => {
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
 		expect(getKernelVenvDir()).toBe(venv);
+	});
+
+	it("resolves the kernel venv interpreter for Windows and POSIX layouts", () => {
+		const venv = join(tempDir, "kernel-venv");
+
+		expect(getKernelVenvPythonPath(venv, "win32")).toBe(join(venv, "Scripts", "python.exe"));
+		expect(getKernelVenvPythonPath(venv, "linux")).toBe(join(venv, "bin", "python"));
 	});
 
 	it("bootstraps a missing venv with uv, ipykernel, prime-agent-runtime, and default extra packages", async () => {
