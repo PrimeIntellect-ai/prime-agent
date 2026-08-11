@@ -229,7 +229,7 @@ The grant bounds that child and every descendant it spawns, and with no active b
 
 A request is bounded only by what the parent has left to grant, so a caller may weight one child far above its siblings; the pool remains the bound. A range is funded as far as the pool allows and refused only when it cannot reach the floor.
 
-Kernel env exposes `RLM_TOKEN_ALLOWANCE` and `RLM_TOKEN_SUBTREE_POOL` at provisioning time; as with `RLM_MAX_DEPTH`, the TypeScript-side check is authoritative.
+Kernel env exposes `RLM_TOKEN_ALLOWANCE`, the grant the session was funded with, at provisioning time; as with `RLM_MAX_DEPTH`, the TypeScript-side check is authoritative. No remaining-pool variable is published, because it would be absent whenever a budget was set after the kernel started and wrong after the first grant. The system prompt states the configured budget rather than a live balance for the same reason, and a spawn the pool cannot fund reports the exact remainder in its error.
 
 ## Independent Delegation
 

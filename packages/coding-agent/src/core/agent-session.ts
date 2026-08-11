@@ -4641,8 +4641,17 @@ export class AgentSession {
 				this._rlmTokenBudget === undefined
 					? undefined
 					: {
-							allowanceTokens: this._rlmTokenAllowance ?? null,
-							subtreePoolTokens: this._rlmSubtreePool ?? null,
+							// Configured figures, never live counters: grants happen mid-turn, so a remaining
+							// balance here would be stale as soon as it was written, and refreshing it would
+							// invalidate the cached prompt prefix on every spawn.
+							budgetTokens: this._rlmTokenBudget.totalTokens,
+							grantTokens:
+								this._rlmDepth === 0
+									? null
+									: Math.min(
+											this._configuredRlmTokenAllowance ?? this._rlmTokenBudget.totalTokens,
+											this._rlmTokenBudget.totalTokens,
+										),
 						},
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
@@ -9249,10 +9258,10 @@ export class AgentSession {
 			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
 		};
 		if (this._rlmTokenAllowance !== undefined) {
+			// The grant this session was funded with. No remaining-pool variable is published: it would
+			// be absent whenever a budget was set after the kernel started, and wrong after the first
+			// grant. `rlm.run` reports the exact remainder when a spawn cannot be funded.
 			env.RLM_TOKEN_ALLOWANCE = String(this._rlmTokenAllowance);
-		}
-		if (this._rlmSubtreePool !== undefined) {
-			env.RLM_TOKEN_SUBTREE_POOL = String(this._rlmSubtreePool);
 		}
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {

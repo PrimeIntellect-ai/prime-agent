@@ -8,7 +8,7 @@ export interface RlmPromptOptions {
 	allowRecursion?: boolean;
 	depth?: number;
 	/** Tokens this session may still generate before its RLM budget stops the run. */
-	tokenBudget?: { allowanceTokens: number | null; subtreePoolTokens: number | null };
+	tokenBudget?: { budgetTokens: number; grantTokens: number | null };
 	parentAgent?: string;
 	activeTools?: string[];
 }
@@ -127,19 +127,18 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 
 	const tokenBudget = options.tokenBudget;
 	if (tokenBudget) {
-		// Deliberately no live counter: the prompt is a per-build snapshot and a stale "used" number
-		// would be worse than none.
-		const pool = tokenBudget.subtreePoolTokens;
-		if (tokenBudget.allowanceTokens === null) {
+		// Configured totals only. A live remaining balance would be stale the moment this session
+		// spawned anything, and refreshing it per grant would invalidate the cached prompt prefix.
+		if (tokenBudget.grantTokens === null) {
 			parts.push(
 				"",
-				`An RLM token budget is active: you may grant up to ${pool ?? "an unlimited number of"} tokens across the subagents you spawn. Your own work in this thread is not capped.`,
-				"Size each `token_budget=` out of that pool. Once it is spent, spawning fails until the budget is raised.",
+				`An RLM token budget is active: ${tokenBudget.budgetTokens} tokens are available for the subagents you spawn, and your own work in this thread is not capped.`,
+				"Every `token_budget=` you pass is drawn from that pool and is never returned, so subtract what you have already granted rather than assuming the full budget is still available. A spawn that the pool cannot fund fails and reports the exact number of tokens left.",
 			);
 		} else {
 			parts.push(
 				"",
-				`An RLM token budget is active: about ${tokenBudget.allowanceTokens} tokens are left for this session, covering both your own turns and anything you delegate.`,
+				`An RLM token budget is active: you were granted ${tokenBudget.grantTokens} tokens, covering both your own turns and anything you delegate.`,
 				"When it is spent the host stops your run at the next turn boundary, so prefer finishing and reporting partial results over starting new work as you approach it.",
 			);
 		}

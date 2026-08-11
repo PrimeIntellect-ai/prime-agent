@@ -2147,7 +2147,27 @@ describe("AgentSession rlm recursion", () => {
 
 		expect(env.RLM_MAX_DEPTH).toBe("3");
 		expect(env.RLM_TOKEN_ALLOWANCE).toBeUndefined();
-		expect(env.RLM_TOKEN_SUBTREE_POOL).toBeUndefined();
+	});
+
+	it("publishes a funded subagent's grant but never a remaining-pool variable", () => {
+		const budgeted = createSession({
+			depth: 1,
+			maxDepth: 3,
+			rlmSessionDir: tempDir,
+			tokenBudget: { totalTokens: 60_000 },
+			tokenAllowance: 20_000,
+		});
+		const root = createSession({ maxDepth: 3, rlmSessionDir: tempDir, tokenBudget: { totalTokens: 60_000 } });
+
+		const childEnv = (budgeted as unknown as { _rlmKernelEnv(): Record<string, string> })._rlmKernelEnv();
+		const rootEnv = (root as unknown as { _rlmKernelEnv(): Record<string, string> })._rlmKernelEnv();
+
+		expect(childEnv.RLM_TOKEN_ALLOWANCE).toBe("20000");
+		// A remaining pool would be absent whenever the budget was set after the kernel started, and
+		// wrong after the first grant, so it is deliberately not published.
+		expect(childEnv.RLM_TOKEN_SUBTREE_POOL).toBeUndefined();
+		expect(rootEnv.RLM_TOKEN_ALLOWANCE).toBeUndefined();
+		expect(rootEnv.RLM_TOKEN_SUBTREE_POOL).toBeUndefined();
 	});
 
 	it("rolls back token-budget state when chat persistence fails", async () => {
@@ -2359,6 +2379,37 @@ describe("AgentSession rlm recursion", () => {
 		// The capability has to be in the prompt or the model cannot make it default behaviour.
 		expect(root.systemPrompt).toContain("token_budget=200000");
 		expect(root.systemPrompt).toContain("bounds that child and every descendant it spawns");
+	});
+
+	it("states the configured budget rather than a balance that grants would leave stale", async () => {
+		const root = createSession({
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000 },
+			subagentRuntimeHost: grantCapturingHost(() => {}),
+		});
+		const before = root.systemPrompt;
+		expect(before).toContain("1000 tokens are available for the subagents you spawn");
+
+		await root.runRlmChild("child", { token_budget: 600 });
+		await vi.waitFor(() => expect(root.getRlmTokenBudgetStatus().subtreePoolTokens).toBe(400));
+
+		// Grants land mid-turn, so a balance printed here would already be wrong; the prompt keeps the
+		// configured figure and tells the model to subtract what it has granted.
+		expect(root.systemPrompt).toBe(before);
+		expect(root.systemPrompt).toContain("subtract what you have already granted");
+		expect(root.systemPrompt).not.toContain("400 tokens are available");
+	});
+
+	it("tells a funded subagent the grant it was given", () => {
+		const child = createSession({
+			depth: 1,
+			maxDepth: 3,
+			tokenBudget: { totalTokens: 1000 },
+			tokenAllowance: 250,
+		});
+
+		expect(child.systemPrompt).toContain("you were granted 250 tokens");
+		expect(child.systemPrompt).toContain("stops your run at the next turn boundary");
 	});
 
 	it("rejects a floor no child could ever be funded at", async () => {
