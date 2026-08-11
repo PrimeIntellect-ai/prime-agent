@@ -137,6 +137,46 @@ class DaemonSupervisorOwnership {
 		}
 	}
 
+	/**
+	 * Rewrite this owner's durable registry entry after an external removal.
+	 *
+	 * A long-running supervisor's owner.json lives under the OS temporary
+	 * directory, where system cleaners (for example the macOS /var/folders
+	 * reaper) can delete files out from under a live process. Losing the record
+	 * must not permanently poison the supervisor: it still holds the socket and
+	 * greets clients as current, so nothing would ever replace it.
+	 *
+	 * The record is restored only when it is genuinely gone and no other live
+	 * supervisor owns a conflicting scope, so a superseded generation can never
+	 * resurrect itself past its successor. Returns whether the durable record
+	 * once again matches this ownership.
+	 */
+	async restoreIfUnowned(): Promise<boolean> {
+		if (this.released || !matchesExactProcessIdentity(this.record)) {
+			return false;
+		}
+		return withDaemonSupervisorRegistryGuard(this.registryDir, () => {
+			const current = readOwnerRecord(this.ownerDirectory);
+			if (current) {
+				return sameOwnerRecord(current, this.record);
+			}
+			for (const directory of listOwnerDirectories(this.registryDir)) {
+				if (directory === this.ownerDirectory) {
+					continue;
+				}
+				const owner = readOwnerRecordForScope(directory, (scope) => ownerConflicts(scope, this.record));
+				if (owner && ownerConflicts(owner, this.record) && isProcessIdentityAlive(owner)) {
+					return false;
+				}
+			}
+			this.record.updatedAt = new Date().toISOString();
+			mkdirSync(this.ownerDirectory, { recursive: true, mode: 0o700 });
+			writeOwnerScope(this.ownerDirectory, this.record);
+			writeOwnerRecord(this.ownerDirectory, this.record);
+			return true;
+		});
+	}
+
 	async updatePhase(phase: DaemonSupervisorOwnerPhase): Promise<void> {
 		if (this.released) {
 			return;

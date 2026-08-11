@@ -590,6 +590,7 @@ export class DaemonSupervisor {
 	private socketLease?: DaemonSocketPathLease;
 	private ownership?: Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 	private cleanupPromise?: Promise<void>;
+	private ownershipRestore?: Promise<boolean>;
 	private shuttingDown = false;
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
 	private readonly mutationDrain = new MutationDrainLatch();
@@ -792,6 +793,10 @@ export class DaemonSupervisor {
 
 	private async runIdleEvictionSweep(now = Date.now()): Promise<void> {
 		if (this.shuttingDown || this.updateRestartPhase !== undefined || this.idleEvictionFence) return;
+		// Piggyback an ownership self-check on the periodic sweep so an idle
+		// supervisor whose owner record was externally removed heals without
+		// waiting for the next client command.
+		await this.assertCurrentOwnership().catch(() => undefined);
 		await this.settingsManager.reload();
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		const idleEvictionMinutes = this.settingsManager.getIdleEvictionMinutes();
@@ -889,7 +894,46 @@ export class DaemonSupervisor {
 			Object.assign(error, { code: "supervisor_generation_stale" as const });
 			throw error;
 		}
-		await ownership.assertCurrent();
+		try {
+			await ownership.assertCurrent();
+		} catch (error) {
+			// An external cleaner (for example the macOS /var/folders reaper) can
+			// delete the durable owner record out from under a long-running
+			// supervisor. Without repair the supervisor keeps its socket and
+			// current-version hello while refusing every command, so clients can
+			// neither use it nor replace it. Restore the record when no live
+			// successor owns the scope; otherwise surface the original error.
+			if (!isSupervisorGenerationStale(error) || this.shuttingDown || !(await this.restoreOwnershipRecord())) {
+				throw error;
+			}
+			await ownership.assertCurrent();
+		}
+	}
+
+	/** Single-flight so a burst of concurrent commands shares one guarded restore. */
+	private restoreOwnershipRecord(): Promise<boolean> {
+		const ownership = this.ownership;
+		if (!ownership) {
+			return Promise.resolve(false);
+		}
+		this.ownershipRestore ??= ownership
+			.restoreIfUnowned()
+			.then((restored) => {
+				if (restored) {
+					this.log(`Restored supervisor owner record for generation ${this.generation} after external removal`);
+				}
+				return restored;
+			})
+			.catch((restoreError) => {
+				this.log(
+					`Could not restore supervisor owner record for generation ${this.generation}: ${String(restoreError)}`,
+				);
+				return false;
+			})
+			.finally(() => {
+				this.ownershipRestore = undefined;
+			});
+		return this.ownershipRestore;
 	}
 
 	private async assertRecoveryAllowed(): Promise<void> {

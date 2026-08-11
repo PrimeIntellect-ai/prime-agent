@@ -1148,6 +1148,95 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		rmSync(join(paths.registryDir, `${ownership.record.generation}.owner`), { recursive: true, force: true });
 	});
 
+	it("restores an externally deleted owner record when no live conflicting owner exists", async () => {
+		const paths = await createPaths();
+		const ownership = await acquireDaemonSupervisorOwnership({
+			agentDir: paths.agentDir,
+			appVersion: "test",
+			descriptorDir: paths.descriptorDir,
+			generation: "externally-reaped-owner",
+			registryDir: paths.registryDir,
+			socketPath: paths.socketPath,
+		});
+
+		// System temp cleaners delete the files in place and leave the directory.
+		rmSync(ownerRecordPath(paths.registryDir, ownership.record.generation), { force: true });
+		rmSync(ownerScopePath(paths.registryDir, ownership.record.generation), { force: true });
+		await expect(ownership.assertCurrent()).rejects.toThrow(/no longer owns its registry entry/);
+		expect(await ownership.restoreIfUnowned()).toBe(true);
+		await ownership.assertCurrent();
+		expect(readOwnerRecord(paths.registryDir, ownership.record.generation)?.token).toBe(ownership.record.token);
+
+		// A cleaner may also remove the emptied owner directory itself.
+		rmSync(join(paths.registryDir, `${ownership.record.generation}.owner`), { recursive: true, force: true });
+		expect(await ownership.restoreIfUnowned()).toBe(true);
+		await ownership.assertCurrent();
+
+		await ownership.release();
+		expect(await ownership.restoreIfUnowned()).toBe(false);
+		expect(listOwnerRecords(paths.registryDir)).toEqual([]);
+	});
+
+	it("does not resurrect a reaped generation over a live successor", async () => {
+		const paths = await createPaths();
+		const predecessor = await acquireDaemonSupervisorOwnership({
+			agentDir: paths.agentDir,
+			appVersion: "test",
+			descriptorDir: paths.descriptorDir,
+			generation: "reaped-predecessor",
+			registryDir: paths.registryDir,
+			socketPath: paths.socketPath,
+		});
+		rmSync(join(paths.registryDir, `${predecessor.record.generation}.owner`), { recursive: true, force: true });
+		const successor = await acquireDaemonSupervisorOwnership({
+			agentDir: join(paths.agentDir, "successor-agent"),
+			appVersion: "test",
+			descriptorDir: join(paths.agentDir, "successor-workers"),
+			generation: "live-successor",
+			registryDir: paths.registryDir,
+			socketPath: paths.socketPath,
+		});
+		try {
+			expect(await predecessor.restoreIfUnowned()).toBe(false);
+			await expect(predecessor.assertCurrent()).rejects.toThrow(/no longer owns its registry entry/);
+			expect(readOwnerRecord(paths.registryDir, successor.record.generation)?.token).toBe(successor.record.token);
+		} finally {
+			await successor.release();
+		}
+	});
+
+	it("keeps serving daemon commands after the owner record is externally reaped", async () => {
+		const paths = await createPaths();
+		const supervisor = spawnRealSupervisor(paths, {});
+		cleanupRegistryDirs.add(paths.registryDir);
+		cleanupSupervisorSockets.add(paths.socketPath);
+		const client = await connectEventually(paths.socketPath);
+		try {
+			const before = await client.request({ type: "list" }, 20_000);
+			if (!before.success) {
+				throw new Error(`${before.error}\nfixture stderr:\n${supervisor.diagnostics.stderr}`);
+			}
+			const [owner] = await waitForOwnerCount(paths.registryDir, 1);
+			if (!owner) {
+				throw new Error("Supervisor did not publish an owner record");
+			}
+
+			rmSync(ownerRecordPath(paths.registryDir, owner.generation), { force: true });
+			rmSync(ownerScopePath(paths.registryDir, owner.generation), { force: true });
+
+			const after = await client.request({ type: "list" }, 20_000);
+			if (!after.success) {
+				throw new Error(`${after.error}\nfixture stderr:\n${supervisor.diagnostics.stderr}`);
+			}
+			const restored = readOwnerRecord(paths.registryDir, owner.generation);
+			expect(restored?.token).toBe(owner.token);
+			expect(restored?.generation).toBe(owner.generation);
+		} finally {
+			client.close();
+		}
+		await stopSupervisor(supervisor, paths.socketPath);
+	}, 90_000);
+
 	it("unwinds real pre-bind and post-bind startup failures before retry", async () => {
 		const paths = await createPaths();
 		writeFileSync(paths.socketPath, "not a socket");
