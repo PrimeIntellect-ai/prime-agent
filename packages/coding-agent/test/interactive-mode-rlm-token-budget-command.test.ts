@@ -59,7 +59,7 @@ function renderAll(container: Container, width = 120): string {
 }
 
 const activeStatus: RlmTokenBudgetStatus = {
-	config: { totalTokens: 1_000_000, schedule: "split", factor: 0.5, fanout: 3 },
+	config: { totalTokens: 1_000_000 },
 	source: "chat",
 	depth: 0,
 	allowanceTokens: 500_000,
@@ -99,8 +99,7 @@ describe("InteractiveMode /rlm-token-budget", () => {
 		expect(context.agentConnection.getRlmTokenBudgetStatus).toHaveBeenCalledOnce();
 		expect(context.agentConnection.setRlmTokenBudget).not.toHaveBeenCalled();
 		const rendered = renderAll(context.chatContainer);
-		expect(rendered).toContain("RLM token budget: 1000000 tokens");
-		expect(rendered).toContain("schedule=split");
+		expect(rendered).toContain("RLM token budget: 1000000 tokens for subagents");
 		expect(rendered).toContain("12000/500000 used at depth 0");
 	});
 
@@ -120,17 +119,17 @@ describe("InteractiveMode /rlm-token-budget", () => {
 		expect(renderAll(context.chatContainer)).toContain("RLM token budget: off (default)");
 	});
 
-	it("sets a budget with schedule knobs and saves it globally", async () => {
+	it("sets a budget with range knobs and saves it globally", async () => {
 		const context = makeContext();
 
-		await prototype.handleRlmTokenBudgetCommand.call(context, "800k --schedule geometric --factor 0.25 --global");
+		await prototype.handleRlmTokenBudgetCommand.call(context, "800k --ceiling 200k --global");
 
 		expect(context.agentConnection.setRlmTokenBudget).toHaveBeenCalledWith(
-			{ totalTokens: 800_000, schedule: "geometric", factor: 0.25, fanout: 3 },
+			{ totalTokens: 800_000, maxTokens: 200_000 },
 			{ global: true },
 		);
 		expect(renderAll(context.chatContainer)).toContain(
-			"RLM token budget set: 800000 tokens, schedule=geometric, factor=0.25, fanout=3 and saved as global default",
+			"RLM token budget set: 800000 tokens for subagents, ceiling=200000 and saved as global default",
 		);
 	});
 
@@ -146,9 +145,9 @@ describe("InteractiveMode /rlm-token-budget", () => {
 	it("warns on malformed input without calling the connection", async () => {
 		const context = makeContext();
 
-		await prototype.handleRlmTokenBudgetCommand.call(context, "1000 --schedule bogus");
+		await prototype.handleRlmTokenBudgetCommand.call(context, "1000 --ceiling bogus");
 
-		expect(context.showWarning).toHaveBeenCalledWith(expect.stringContaining("Unknown schedule"));
+		expect(context.showWarning).toHaveBeenCalledWith(expect.stringContaining("Invalid token count"));
 		expect(context.agentConnection.setRlmTokenBudget).not.toHaveBeenCalled();
 	});
 
@@ -183,13 +182,11 @@ describe("InteractiveMode /rlm-token-budget", () => {
 		await prototype.handleRlmTokenBudgetCommand.call(context, "600k --floor 50k");
 
 		expect(context.agentConnection.setRlmTokenBudget).toHaveBeenCalledWith(
-			{ totalTokens: 600_000, schedule: "split", factor: 0.5, fanout: 3, minTokens: 50_000 },
+			{ totalTokens: 600_000, minTokens: 50_000 },
 			{ global: false },
 		);
 		const rendered = renderAll(context.chatContainer, 200);
-		expect(rendered).toContain(
-			"RLM token budget set: 600000 tokens, schedule=split, factor=0.5, fanout=3, floor=50000",
-		);
+		expect(rendered).toContain("RLM token budget set: 600000 tokens for subagents, floor=50000");
 		expect(rendered).toContain("this subagent: 12000/300000 used at depth 0; 0 granted to subagents, 300000 left");
 		expect(rendered).not.toContain("ceiling=");
 	});
@@ -199,9 +196,6 @@ describe("InteractiveMode /rlm-token-budget", () => {
 			...activeStatus,
 			config: {
 				totalTokens: 600_000,
-				schedule: "split",
-				factor: 0.5,
-				fanout: 3,
 				minTokens: 50_000,
 				maxTokens: 600_000,
 			},
@@ -210,7 +204,7 @@ describe("InteractiveMode /rlm-token-budget", () => {
 		expect(bounded).not.toContain("range=");
 
 		const unbounded = prototype.formatRlmTokenBudgetStatus.call({} as Context, activeStatus);
-		expect(unbounded).toContain("RLM token budget: 1000000 tokens schedule=split factor=0.5 fanout=3 (chat)");
+		expect(unbounded).toContain("RLM token budget: 1000000 tokens for subagents (chat)");
 		expect(unbounded).not.toContain("floor=");
 		expect(unbounded).not.toContain("ceiling=");
 		expect(unbounded).not.toContain("range=");

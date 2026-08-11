@@ -181,9 +181,8 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "rlm-token-budget",
 		description:
-			"Set/view the per-chat persistent RLM token budget and depth schedule; never interrupts or queues the running turn",
-		argumentHint:
-			"[off|<tokens>|<floor>-<ceiling> [--schedule flat|geometric|split] [--factor <0-1>] [--fanout <int>] [--floor <tokens>] [--ceiling <tokens>] [--global]]",
+			"Set/view the per-chat persistent token budget this chat may spend on subagents; never interrupts or queues the running turn",
+		argumentHint: "[off|<tokens>|<floor>-<ceiling> [--floor <tokens>] [--ceiling <tokens>] [--global]]",
 		takesArgument: true,
 	},
 	{

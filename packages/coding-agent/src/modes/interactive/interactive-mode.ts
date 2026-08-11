@@ -9185,12 +9185,8 @@ export class InteractiveMode {
 		if (!status.config) {
 			return `RLM token budget: off (${status.source})`;
 		}
-		const { totalTokens, schedule, factor, fanout } = status.config;
 		const parts = [
-			`RLM token budget: ${totalTokens} tokens`,
-			`schedule=${schedule}`,
-			`factor=${factor}`,
-			`fanout=${fanout}`,
+			`RLM token budget: ${status.config.totalTokens} tokens for subagents`,
 			...formatRlmTokenBudgetBounds(status.config),
 			`(${status.source})`,
 		];
@@ -9221,10 +9217,7 @@ export class InteractiveMode {
 			const result = await this.agentConnection.setRlmTokenBudget(config, { global: command.global });
 			const summary = config
 				? [
-						`RLM token budget set: ${config.totalTokens} tokens`,
-						`schedule=${config.schedule}`,
-						`factor=${config.factor}`,
-						`fanout=${config.fanout}`,
+						`RLM token budget set: ${config.totalTokens} tokens for subagents`,
 						...formatRlmTokenBudgetBounds(config),
 					].join(", ")
 				: "RLM token budget disabled";

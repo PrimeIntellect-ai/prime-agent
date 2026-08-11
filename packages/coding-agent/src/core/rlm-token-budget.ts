@@ -1,37 +1,13 @@
-/** Wire-safe types and schedule math for the /rlm-token-budget state APIs. */
+/** Wire-safe types, validation, and command parsing for the /rlm-token-budget state APIs. */
 
 export type RlmTokenBudgetSource = "default" | "env" | "global" | "inherited" | "chat";
 
-/**
- * How a total token allowance is distributed across RLM recursion depths.
- *
- * - `flat`: every depth receives the full per-agent allowance.
- * - `geometric`: each successive depth receives `factor` of the previous depth's per-agent allowance.
- * - `split`: a parent reserves `factor` of its own allowance for descendants and divides it between them,
- *   which bounds the whole subtree by the root allowance regardless of depth or fan-out.
- */
-export type RlmTokenBudgetSchedule = "flat" | "geometric" | "split";
-
-const RLM_TOKEN_BUDGET_SCHEDULES: readonly RlmTokenBudgetSchedule[] = ["flat", "geometric", "split"];
-
-export const DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE: RlmTokenBudgetSchedule = "split";
-export const DEFAULT_RLM_TOKEN_BUDGET_FACTOR = 0.5;
-export const DEFAULT_RLM_TOKEN_BUDGET_FANOUT = 3;
-
 export interface RlmTokenBudgetConfig {
-	/** Token allowance granted to the root session and, through the schedule, to its descendants. */
+	/** Tokens the root session may hand to subagents. Every grant is drawn from it. */
 	totalTokens: number;
-	schedule: RlmTokenBudgetSchedule;
-	/** Share in (0, 1] applied per depth by the `geometric` and `split` schedules. */
-	factor: number;
-	/** Number of children a `split` allowance is divided between. */
-	fanout: number;
-	/**
-	 * Smallest allowance a depth may receive. A depth the schedule would starve is raised to this
-	 * floor; under `split`, where raising would break the subtree bound, the spawn is refused instead.
-	 */
+	/** Smallest grant worth making. A child the pool cannot fund this far is refused instead. */
 	minTokens?: number;
-	/** Largest allowance any single depth may receive, applied after the schedule. */
+	/** Largest grant any single child may receive, applied after the caller's request. */
 	maxTokens?: number;
 }
 
@@ -49,7 +25,7 @@ export interface RlmTokenBudgetStatus {
 	/** Tokens this session may generate, or null when it is unbounded (always so at depth 0). */
 	allowanceTokens: number | null;
 	tokensUsed: number;
-	/** Tokens still grantable to subagents, or null for the schedules that do not pool. */
+	/** Tokens still grantable to subagents, or null when budgeting is off. */
 	subtreePoolTokens: number | null;
 	/** Tokens already handed to subagents out of this session's budget. */
 	delegatedTokens: number;
@@ -75,10 +51,6 @@ export function rlmTokenDeltaForUsage(
 	return Math.max(0, usage.input) + Math.max(0, usage.output) + Math.max(0, usage.cacheWrite);
 }
 
-function isRlmTokenBudgetSchedule(value: unknown): value is RlmTokenBudgetSchedule {
-	return typeof value === "string" && RLM_TOKEN_BUDGET_SCHEDULES.includes(value as RlmTokenBudgetSchedule);
-}
-
 function isPositiveInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
@@ -91,29 +63,9 @@ function isPositiveInteger(value: unknown): value is number {
 function rlmTokenBudgetConfigError(value: unknown): string | undefined {
 	if (typeof value !== "object" || value === null) return "RLM token budget must be an object.";
 	const candidate = value as Partial<RlmTokenBudgetConfig>;
-	const totalTokens = candidate.totalTokens;
-	const schedule = candidate.schedule;
-	const factor = candidate.factor;
-	const fanout = candidate.fanout;
-	const minTokens = candidate.minTokens;
-	const maxTokens = candidate.maxTokens;
+	const { totalTokens, minTokens, maxTokens } = candidate;
 	if (!isPositiveInteger(totalTokens)) {
 		return "RLM token budget must be a positive integer.";
-	}
-	if (!isRlmTokenBudgetSchedule(schedule)) {
-		return `RLM token budget schedule must be one of: ${RLM_TOKEN_BUDGET_SCHEDULES.join(", ")}.`;
-	}
-	if (typeof factor !== "number" || !Number.isFinite(factor) || factor <= 0 || factor > 1) {
-		return "RLM token budget factor must be greater than 0 and at most 1.";
-	}
-	if (schedule === "split" && factor === 1) {
-		return (
-			'RLM token budget factor must be less than 1 for the "split" schedule: a factor of 1 reserves the entire ' +
-			"allowance for descendants and leaves every session 1 token. Lower --factor, or use --schedule geometric."
-		);
-	}
-	if (!isPositiveInteger(fanout)) {
-		return "RLM token budget fanout must be a positive integer.";
 	}
 	if (minTokens !== undefined && !isPositiveInteger(minTokens)) {
 		return "RLM token budget floor must be a positive integer.";
@@ -124,17 +76,8 @@ function rlmTokenBudgetConfigError(value: unknown): string | undefined {
 	if (minTokens !== undefined && maxTokens !== undefined && minTokens > maxTokens) {
 		return `RLM token budget floor ${minTokens} exceeds its ceiling ${maxTokens}.`;
 	}
-	// `split` refuses children it cannot fund at the floor, so a floor above the per-child share would
-	// reject every spawn. Reject the configuration instead of silently disabling delegation.
-	if (schedule === "split" && minTokens !== undefined) {
-		const probe: RlmTokenBudgetConfig = { totalTokens, schedule, factor, fanout, minTokens };
-		const share = childAllowanceFromPool(probe, subtreePool(probe, totalTokens) ?? 0);
-		if (share < minTokens) {
-			return (
-				`RLM token budget floor ${minTokens} cannot be funded: the "split" schedule grants each of ${fanout} children ${share} tokens. ` +
-				"Lower the floor, raise the total, reduce --fanout, or raise --factor."
-			);
-		}
+	if (minTokens !== undefined && minTokens > totalTokens) {
+		return `RLM token budget floor ${minTokens} exceeds the ${totalTokens}-token budget, so no child could be funded.`;
 	}
 	return undefined;
 }
@@ -182,63 +125,12 @@ export function validateRlmTokenBudgetConfig(config: RlmTokenBudgetConfig): RlmT
 	return { ...config };
 }
 
-/** Clamp a scheduled allowance into the configured [floor, ceiling] range. */
-function clampToBudgetRange(config: RlmTokenBudgetConfig, tokens: number): number {
+/** Clamp a requested grant into the configured [floor, ceiling] range. */
+export function clampToBudgetRange(config: RlmTokenBudgetConfig, tokens: number): number {
 	let clamped = tokens;
 	if (config.maxTokens !== undefined) clamped = Math.min(clamped, config.maxTokens);
 	if (config.minTokens !== undefined) clamped = Math.max(clamped, config.minTokens);
 	return clamped;
-}
-
-/** Tokens the session at `depth` may generate itself under the given allowance. */
-export function ownAllowance(config: RlmTokenBudgetConfig, depth: number, inheritedAllowance?: number): number {
-	switch (config.schedule) {
-		case "flat":
-			return clampToBudgetRange(config, config.totalTokens);
-		case "geometric":
-			return clampToBudgetRange(
-				config,
-				Math.max(1, Math.floor(config.totalTokens * config.factor ** Math.max(0, depth))),
-			);
-		case "split": {
-			// A grant is a single pot: the session may spend all of it or hand parts to children.
-			// The caller subtracts what it has already granted, so nothing is stranded on a
-			// session that never delegates while the subtree stays bounded by the grant.
-			const allowance = inheritedAllowance ?? config.totalTokens;
-			return config.maxTokens === undefined ? allowance : Math.min(allowance, config.maxTokens);
-		}
-	}
-}
-
-/** Tokens of a grant a session may hand to descendants; null when the schedule does not pool. */
-export function subtreePool(config: RlmTokenBudgetConfig, allowance: number): number | null {
-	if (config.schedule !== "split") return null;
-	return Math.max(0, Math.floor(allowance * config.factor));
-}
-
-/**
- * Equal share of a `split` subtree pool handed to each child.
- *
- * The share is derived from the pool the parent started with, so siblings receive identical
- * allowances and the parent can fund exactly `fanout` children before spawns are refused.
- */
-function childAllowanceFromPool(config: RlmTokenBudgetConfig, initialPool: number): number {
-	return Math.max(0, Math.floor(initialPool / config.fanout));
-}
-
-/**
- * Allowance a child inherits. `split` draws an equal share of the parent's pool; the depth-indexed
- * schedules ignore the pool and derive the child allowance from its depth alone.
- */
-export function childAllowance(
-	config: RlmTokenBudgetConfig,
-	childDepth: number,
-	parentInitialPool: number | null,
-): number {
-	if (config.schedule === "split") {
-		return childAllowanceFromPool(config, parentInitialPool ?? 0);
-	}
-	return ownAllowance(config, childDepth);
 }
 
 /** A parsed `/rlm-token-budget` invocation. */
@@ -248,7 +140,7 @@ export type RlmTokenBudgetCommand =
 	| { kind: "set"; config: RlmTokenBudgetConfig; global: boolean };
 
 const RLM_TOKEN_BUDGET_USAGE =
-	"Usage: /rlm-token-budget [off|<tokens>|<floor>-<ceiling> [--schedule flat|geometric|split] [--factor <0-1>] [--fanout <int>] [--floor <tokens>] [--ceiling <tokens>] [--global]]";
+	"Usage: /rlm-token-budget [off|<tokens>|<floor>-<ceiling> [--floor <tokens>] [--ceiling <tokens>] [--global]]";
 
 /** Parse a token count, accepting `_` separators and `k`/`m` suffixes (e.g. `500k`, `1_000_000`, `2m`). */
 export function parseRlmTokenBudgetTokens(value: string): number {
@@ -266,26 +158,6 @@ export function parseRlmTokenBudgetTokens(value: string): number {
 	return total;
 }
 
-/** Parse a `--factor` value, quoting the offending input the way `parseRlmTokenBudgetTokens` does. */
-function parseRlmTokenBudgetFactor(value: string): number {
-	const factor = Number(value);
-	if (!Number.isFinite(factor) || factor <= 0 || factor > 1) {
-		throw new Error(
-			`Invalid factor "${value}". Expected a number greater than 0 and at most 1. ${RLM_TOKEN_BUDGET_USAGE}`,
-		);
-	}
-	return factor;
-}
-
-/** Parse a `--fanout` value, quoting the offending input the way `parseRlmTokenBudgetTokens` does. */
-function parseRlmTokenBudgetFanout(value: string): number {
-	const fanout = Number(value);
-	if (!isPositiveInteger(fanout)) {
-		throw new Error(`Invalid fanout "${value}". Expected a positive integer. ${RLM_TOKEN_BUDGET_USAGE}`);
-	}
-	return fanout;
-}
-
 function takeFlagValue(tokens: string[], index: number, flag: string): { value: string; nextIndex: number } {
 	const token = tokens[index];
 	const inline = token.startsWith(`${flag}=`) ? token.slice(flag.length + 1) : undefined;
@@ -298,15 +170,15 @@ function takeFlagValue(tokens: string[], index: number, flag: string): { value: 
 	return { value: next, nextIndex: index + 2 };
 }
 
-const RLM_TOKEN_BUDGET_VALUE_FLAGS = ["--schedule", "--factor", "--fanout", "--floor", "--ceiling"] as const;
+const RLM_TOKEN_BUDGET_VALUE_FLAGS = ["--floor", "--ceiling"] as const;
 
 function matchValueFlag(token: string): string | undefined {
 	return RLM_TOKEN_BUDGET_VALUE_FLAGS.find((flag) => token === flag || token.startsWith(`${flag}=`));
 }
 
 /**
- * `off` only takes `--global`. The schedule flags are consumed without validation because they shape a
- * budget that is being removed, while an unrecognized token (a misspelled `--global`) still errors.
+ * `off` only takes `--global`. Range flags are consumed without validation because they shape a budget
+ * that is being removed, while an unrecognized token (a misspelled `--global`) still errors.
  */
 function parseRlmTokenBudgetOffFlags(tokens: string[]): boolean {
 	let global = false;
@@ -338,9 +210,6 @@ export function parseRlmTokenBudgetCommand(args: string): RlmTokenBudgetCommand 
 	}
 
 	let global = false;
-	let schedule = DEFAULT_RLM_TOKEN_BUDGET_SCHEDULE;
-	let factor = DEFAULT_RLM_TOKEN_BUDGET_FACTOR;
-	let fanout = DEFAULT_RLM_TOKEN_BUDGET_FANOUT;
 	let minTokens: number | undefined;
 	let maxTokens: number | undefined;
 
@@ -350,21 +219,6 @@ export function parseRlmTokenBudgetCommand(args: string): RlmTokenBudgetCommand 
 		if (token === "--global") {
 			global = true;
 			index += 1;
-		} else if (token === "--schedule" || token.startsWith("--schedule=")) {
-			const { value, nextIndex } = takeFlagValue(tokens, index, "--schedule");
-			if (!isRlmTokenBudgetSchedule(value)) {
-				throw new Error(`Unknown schedule "${value}". Expected one of: ${RLM_TOKEN_BUDGET_SCHEDULES.join(", ")}.`);
-			}
-			schedule = value;
-			index = nextIndex;
-		} else if (token === "--factor" || token.startsWith("--factor=")) {
-			const { value, nextIndex } = takeFlagValue(tokens, index, "--factor");
-			factor = parseRlmTokenBudgetFactor(value);
-			index = nextIndex;
-		} else if (token === "--fanout" || token.startsWith("--fanout=")) {
-			const { value, nextIndex } = takeFlagValue(tokens, index, "--fanout");
-			fanout = parseRlmTokenBudgetFanout(value);
-			index = nextIndex;
 		} else if (token === "--floor" || token.startsWith("--floor=")) {
 			const { value, nextIndex } = takeFlagValue(tokens, index, "--floor");
 			minTokens = parseRlmTokenBudgetTokens(value);
@@ -392,9 +246,6 @@ export function parseRlmTokenBudgetCommand(args: string): RlmTokenBudgetCommand 
 		kind: "set",
 		config: validateRlmTokenBudgetConfig({
 			totalTokens,
-			schedule,
-			factor,
-			fanout,
 			...(minTokens === undefined ? {} : { minTokens }),
 			...(maxTokens === undefined ? {} : { maxTokens }),
 		}),

@@ -2327,7 +2327,7 @@ describe("DaemonAgentConnection", () => {
 			exhausted: false,
 		});
 
-		const config: RlmTokenBudgetConfig = { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 };
+		const config: RlmTokenBudgetConfig = { totalTokens: 500_000 };
 		await expect(connection.setRlmTokenBudget(config, { global: true })).resolves.toMatchObject({
 			config,
 			globalSaved: true,

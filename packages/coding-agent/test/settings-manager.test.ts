@@ -584,15 +584,12 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 			expect(manager.getRlmTokenBudget()).toBeUndefined();
 
-			manager.setRlmTokenBudget({ totalTokens: 1_000_000, schedule: "split", factor: 0.5, fanout: 3 });
+			manager.setRlmTokenBudget({ totalTokens: 1_000_000 });
 			await manager.flush();
 
 			const reloaded = SettingsManager.create(projectDir, agentDir);
 			expect(reloaded.getRlmTokenBudget()).toEqual({
 				totalTokens: 1_000_000,
-				schedule: "split",
-				factor: 0.5,
-				fanout: 3,
 			});
 		});
 
@@ -600,9 +597,6 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 			manager.setRlmTokenBudget({
 				totalTokens: 600_000,
-				schedule: "geometric",
-				factor: 0.25,
-				fanout: 2,
 				minTokens: 50_000,
 				maxTokens: 600_000,
 			});
@@ -616,7 +610,7 @@ describe("SettingsManager", () => {
 
 		it("clears the budget when set to undefined", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
-			manager.setRlmTokenBudget({ totalTokens: 1000, schedule: "flat", factor: 0.5, fanout: 3 });
+			manager.setRlmTokenBudget({ totalTokens: 1000 });
 			await manager.flush();
 
 			manager.setRlmTokenBudget(undefined);

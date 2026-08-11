@@ -8395,7 +8395,7 @@ describe("daemon mode helpers", () => {
 				throw new Error("unexpected runtime creation");
 			},
 		});
-		const config: RlmTokenBudgetConfig = { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 };
+		const config: RlmTokenBudgetConfig = { totalTokens: 500_000 };
 		const status: RlmTokenBudgetStatus = {
 			config,
 			source: "chat",

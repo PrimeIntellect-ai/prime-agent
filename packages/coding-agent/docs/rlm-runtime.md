@@ -168,7 +168,7 @@ Unknown options fail instead of being ignored. Model search is bounded to active
 7. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
 8. Attribute child usage to the parent assistant turn and persist the attribution.
 
-When a token budget is active, the child's allowance is reserved between steps 2 and 3, once the spawn can no longer fail and before any session state exists; a schedule that cannot fund the child fails the spawn there.
+When a token budget is active, the child's allowance is reserved between steps 2 and 3, once the spawn can no longer fail and before any session state exists; a pool that cannot fund the child fails the spawn there.
 
 Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their own `RLM_SESSION_DIR`. The default maximum depth is 1, so root sessions may create children and those children may not create grandchildren unless the limit is configured higher.
 
@@ -178,44 +178,41 @@ Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their
 
 A budget is resolved per session with the same precedence as max depth (chat > inherited > global > env > default off), except that a subagent stops at `inherited`: a child is funded entirely by its parent, and falling through to the global default would re-seed every child with a full root-sized budget, multiplying spend instead of bounding it.
 
+There is one allocation rule. A session holds a pool and decides for itself how much of it each child is worth:
+
+```python
+await rlm("audit the retry logic", token_budget=200_000)
+await rlm("quick lookup", token_budget=(50_000, 150_000))
+```
+
+A grant is drawn from the pool and never returned, so the sum of everything a subtree receives is bounded by the budget however unevenly the caller allocates it. A range grants as much of the ceiling as the pool affords and refuses the child if even the floor cannot be met. A child spawned without `token_budget=` receives whatever is left, which is why the recursion prompt instructs the model to size every delegation.
+
+A funded subagent holds one pot covering both its own turns and anything it delegates: every token it hands to a child is one it can no longer spend itself. Nothing is stranded on a subagent that never delegates. `--floor` and `--ceiling` bound any single grant, so a floor larger than the whole budget is rejected when the budget is set rather than at the first spawn.
+
 Enforcement happens in three places:
 
 - Between turns: once a funded subagent has generated its grant, `shouldStopAfterTurn` ends its agent loop. The turn that crossed the allowance is preserved; the loop simply does not start another. Aborting is deliberately not used, because an aborted turn reports `stopReason: "aborted"` and would not be charged.
 - At prompt admission: the agent loop always runs at least one turn per prompt, so an exhausted subagent refuses new prompts instead of burning a fully charged turn per message. Each refusal re-emits `rlm_token_budget_exhausted`, which the interactive client renders with the usage and the recovery command.
-- At spawn time: `runRlmChild` reserves the child's allowance once the spawn can no longer fail, and throws when the schedule cannot fund another child.
+- At spawn time: `runRlmChild` reserves the child's grant once the spawn can no longer fail, and throws when the pool cannot fund it.
 
 The active budget is stated in the system prompt: the main thread is told how much it may grant to subagents, and a funded subagent is told what it may spend, so it can wrap up rather than being cut off mid-thought.
 
-Three schedules distribute a total allowance across depths:
+Enforcement is per turn, not per token. Usage is charged when an assistant turn ends, so a subagent stops at the first turn boundary after its grant is spent rather than mid-turn. Actual spend is therefore bounded by the granted total plus at most one turn per participating session, and a grant smaller than a single turn does not prevent that turn from running.
 
-| Schedule | Per-agent allowance at depth `d` | Total tree spend |
-| --- | --- | --- |
-| `flat` | `total` | unbounded in fan-out |
-| `geometric` | `total * factor^d` | unbounded in fan-out |
-| `split` | a grant is one pot: spend it directly, or hand up to `factor` of it to `fanout` children | bounded by `total` plus one turn per node |
+Grants are deducted permanently: re-issuing `/rlm-token-budget` or navigating the message tree recomputes the pool minus everything already handed out, so a parent cannot refund live children by re-applying its budget.
 
-Only `split` bounds the whole tree: node count grows as `fanout^depth`, so a fixed per-depth allowance still lets total spend grow without limit.
-
-Under `split` a grant is a single pot. A funded subagent may spend the whole grant itself, or hand parts of it to its own children; every token a child receives is one the parent can no longer spend. Nothing is stranded on a subagent that never delegates, and because child grants come out of the same pot the subtree total never exceeds the grant regardless of depth or fan-out. `factor` caps how much of a grant may be re-delegated, so a funded subagent always keeps something for its own work, and `fanout` sets how many equal shares that delegable slice is divided into. At depth 0 the whole budget is delegable, since the thread itself is not being capped. A parent may fund fewer than `fanout` children when flooring the share leaves a remainder too small for a full share; that remainder is refused rather than spent on a subagent that could not finish a turn.
-
-Enforcement is per turn, not per token. Usage is charged when an assistant turn ends, so a session stops at the first turn boundary after its allowance is spent rather than mid-turn. Actual spend is therefore bounded by the granted total plus at most one turn per participating session, and an allowance smaller than a single turn does not prevent that turn from running.
-
-Grants are deducted from the reservation permanently: re-issuing `/rlm-token-budget` or navigating the message tree recomputes the pool minus everything already handed out, so a parent cannot refund live children by re-applying its budget. Per-child shares are derived from the pool before any grants, so siblings receive equal allowances however often the budget is re-applied.
-
-Spend is persisted with the session, so resuming a chat resumes its remaining allowance rather than restoring a full one, and a subagent rehydrated after a daemon restart keeps the grant it was spawned with.
+Spend is persisted with the session, so resuming a chat resumes its remaining pool rather than restoring a full one, and a subagent rehydrated after a daemon restart keeps the grant it was spawned with.
 
 ### Ranges
 
-A budget may be a range instead of a single ceiling, which keeps every depth inside a band rather than letting a schedule starve deep levels:
+A budget may be a range instead of a single ceiling, which lets a caller state a band rather than one number:
 
 ```
-/rlm-token-budget 50k-600k
+/rlm-token-budget 200k-600k
 /rlm-token-budget 1m --floor 50k --ceiling 400k
 ```
 
-A scheduled allowance is clamped into `[floor, ceiling]`. Under `flat` and `geometric` both bounds apply directly. Under `split` the floor is compared against the grant a child receives, which is also what that child may spend. A configuration whose per-child share cannot meet the floor is rejected when it is set, reporting the share the schedule actually grants.
-
-Because `split` refuses children it cannot fund at the floor, a floor above the per-child share would reject every spawn. That combination is rejected when the budget is set rather than silently disabling delegation, and the error reports the share the schedule actually provides. The positional range and the `--floor`/`--ceiling` flags are alternative spellings of the same bounds, so supplying both is an error rather than one silently overriding the other.
+`--floor` and `--ceiling` bound any single grant. A request is granted as much of its ceiling as the pool affords, and refused when even the floor cannot be met, so a child is never funded below the point where it could finish. A floor larger than the whole budget is rejected when the budget is set rather than at the first spawn. The positional range and the `--floor`/`--ceiling` flags are alternative spellings of the same bounds, so supplying both is an error rather than one silently overriding the other.
 
 Budget state flows downward as a value snapshot taken at spawn time. A running child never re-reads its parent, so changing a budget mid-run affects only sessions spawned afterwards. A child that persists its own per-chat override can lower its allowance but never raise it above the grant it was spawned with.
 
@@ -230,7 +227,7 @@ await rlm("quick lookup", token_budget=(50_000, 150_000))
 
 The grant bounds that child and every descendant it spawns, and with no active budget it starts one for that subtree alone, so delegation is bounded even when the session is not. The model is told this in its system prompt, so budgeting each delegation is doctrine rather than an advanced option.
 
-A request is bounded by what the parent may grant: under `split` it draws from the same reservation, so it may deliberately take more than an equal share without breaking the subtree bound, and under the depth-indexed schedules it may not exceed what the schedule funds at that depth. A range is funded as far as the reservation allows and refused only when it cannot reach the floor.
+A request is bounded only by what the parent has left to grant, so a caller may weight one child far above its siblings; the pool remains the bound. A range is funded as far as the pool allows and refused only when it cannot reach the floor.
 
 Kernel env exposes `RLM_TOKEN_ALLOWANCE` and `RLM_TOKEN_SUBTREE_POOL` at provisioning time; as with `RLM_MAX_DEPTH`, the TypeScript-side check is authoritative.
 

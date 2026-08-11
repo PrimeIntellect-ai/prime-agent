@@ -340,7 +340,7 @@ describe("DaemonClient", () => {
 		const update = client.request({
 			type: "set_rlm_token_budget",
 			activeSessionId: "active-1",
-			config: { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 },
+			config: { totalTokens: 500_000 },
 		});
 		await expect(update).rejects.toBeInstanceOf(DaemonCapabilityUnavailableError);
 		await expect(update).rejects.toThrow("does not support set_rlm_token_budget");
@@ -358,7 +358,7 @@ describe("DaemonClient", () => {
 		const compatibility = DAEMON_COMMAND_COMPATIBILITY.set_rlm_token_budget;
 		emitHello(socket, compatibility.minProtocol, ["session_input_admission"], compatibility.minSchemaRevision);
 
-		const config: RlmTokenBudgetConfig = { totalTokens: 500_000, schedule: "split", factor: 0.5, fanout: 3 };
+		const config: RlmTokenBudgetConfig = { totalTokens: 500_000 };
 		const status = client.request({ type: "get_rlm_token_budget_status", activeSessionId: "active-1" });
 		const update = client.request({
 			type: "set_rlm_token_budget",

@@ -137,10 +137,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 				"Size each `token_budget=` out of that pool. Once it is spent, spawning fails until the budget is raised.",
 			);
 		} else {
-			const grantable = pool === null ? "" : ` A further ${pool} of it may be granted to subagents you spawn.`;
 			parts.push(
 				"",
-				`An RLM token budget is active: you may generate about ${tokenBudget.allowanceTokens} tokens in this session.${grantable}`,
+				`An RLM token budget is active: about ${tokenBudget.allowanceTokens} tokens are left for this session, covering both your own turns and anything you delegate.`,
 				"When it is spent the host stops your run at the next turn boundary, so prefer finishing and reporting partial results over starting new work as you approach it.",
 			);
 		}
@@ -152,7 +151,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
 			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
 			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`.",
-			"Give every child a token budget sized to its task: `await rlm('sub-task', token_budget=200000)`, or `token_budget=(100000, 300000)` to accept any grant in that range. The number bounds that child and every descendant it spawns, so delegation cannot run away. Prefer a budget you can justify from the task's size over omitting one; omit it only when the work is genuinely open-ended.",
+			"Give every child a token budget sized to its task: `await rlm('sub-task', token_budget=200000)`, or `token_budget=(100000, 300000)` to accept any grant in that range. The number is taken from your remaining pool and bounds that child and every descendant it spawns, so delegation cannot run away. Omitting it hands the child everything you have left, which is rarely what you want.",
 		);
 		if (hasAgentMessage) {
 			parts.push(

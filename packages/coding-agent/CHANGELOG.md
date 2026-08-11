@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added RLM token budgets: agents bound each delegation with `rlm.run(..., token_budget=N)`, and `/rlm-token-budget` sets a tree-wide budget with `flat`, `geometric`, and `split` depth schedules and optional `<floor>-<ceiling>` ranges. ([#1192](https://github.com/PrimeIntellect-ai/prime-agent/pull/1192))
+- Added `/rlm-token-budget`, a per-chat and global token budget for RLM subagents. The budget is the pool a chat may spend on delegation: the thread itself is never capped, each `rlm.run(token_budget=N)` grant is drawn from that pool, and a subagent that spends its grant stops at the turn boundary and refuses further prompts. ([#1192](https://github.com/PrimeIntellect-ai/prime-agent/pull/1192))
 - Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.
 - Added a `ctrl+t` expand hint to collapsed thinking blocks, matching the tool output hint.
 - Changed expand/collapse hints to a consistent bracketed `(Ctrl+O to expand)` style across tool, message, summary, and error rows.
@@ -711,4 +711,4 @@
 
 ### Added
 
-- Initial Prime Agent release, forked from pi-mono: a persistent `ipython` tool backed by a Jupyter kernel as the default tool set, recursive RLM subagents via `rlm.run`, `/goal` for long-running objectives, an auto-bootstrapped uv-managed kernel runtime, Prime-branded TUI, and an R2-backed tarball release pipeline with a pi-style installer.
+- Initial Prime Agent release, forked from pi-mono: a persistent `ipython` tool backed by a Jupyter kernel as the default tool set, recursive RLM subagents via `rlm.run`, `/goal` for long-running objectives, an auto-bootstrapped uv-managed kernel runtime, Prime-branded TUI, and an R2-backed tarball release pipeline with a pi-style installer.- Added `/rlm-token-budget`, a per-chat and global token budget for RLM subagents. The budget is the pool a chat may spend on delegation: the thread itself is never capped, each `rlm.run(token_budget=N)` grant is drawn from that pool, and a subagent that spends its grant stops at the turn boundary and refuses further prompts. ([#1192](https://github.com/PrimeIntellect-ai/prime-agent/pull/1192))
