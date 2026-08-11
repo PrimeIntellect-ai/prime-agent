@@ -130,6 +130,14 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("prompt_admission_cancellation");
 	});
 
+	it("gates honest worker-state reporting at its introducing schema revision", () => {
+		// Revision 16 adds the "stopping" workerState and stops reporting
+		// disconnected workers as "ready". The field is optional and old clients
+		// ignore unknown values, so no capability gate is needed; the revision
+		// lets version probes distinguish daemons with the old semantics.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
+	});
+
 	it("keeps refine failure events backward-compatible on the existing session event channel", () => {
 		const event: DaemonOutbound = {
 			type: "session_event",

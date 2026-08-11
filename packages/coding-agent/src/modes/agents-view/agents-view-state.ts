@@ -108,7 +108,7 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 	if (manuallyInactive) {
 		return false;
 	}
-	return summary.lifecycle === "live";
+	return summary.lifecycle === "live" && (summary.workerState === undefined || summary.workerState === "ready");
 }
 
 export function sectionTitle(section: AgentsViewSection): string {
