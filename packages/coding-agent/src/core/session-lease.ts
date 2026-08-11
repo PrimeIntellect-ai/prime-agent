@@ -112,10 +112,11 @@ function isProcessAlive(pid: number): boolean {
 
 type ProcessQuery = (command: string, args: string[]) => string;
 
-function runProcessQuery(command: string, args: string[]): string {
+function runProcessQuery(command: string, args: string[], env?: NodeJS.ProcessEnv): string {
 	return execFileSync(command, args, {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
+		...(env ? { env } : {}),
 	});
 }
 
@@ -137,7 +138,13 @@ export function getWindowsProcessStartId(pid: number, query: ProcessQuery = runP
 	}
 }
 
-export function getProcessStartId(pid: number): string | undefined {
+type PosixProcessQuery = (command: string, args: string[], env: NodeJS.ProcessEnv) => string;
+
+// `ps -o lstart` formats start times in the active locale, so an identity recorded
+// under one locale can read as "replaced" under another. Pin a stable C locale.
+const POSIX_PROCESS_QUERY_ENV: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C", LC_TIME: "C", LANG: "C" };
+
+export function getProcessStartId(pid: number, query: PosixProcessQuery = runProcessQuery): string | undefined {
 	if (!Number.isInteger(pid) || pid <= 0) {
 		return undefined;
 	}
@@ -156,7 +163,7 @@ export function getProcessStartId(pid: number): string | undefined {
 		// Fall through to the portable process listing used on macOS and BSD.
 	}
 	try {
-		const startTime = runProcessQuery("ps", ["-p", String(pid), "-o", "lstart="]).trim();
+		const startTime = query("ps", ["-p", String(pid), "-o", "lstart="], POSIX_PROCESS_QUERY_ENV).trim();
 		return startTime ? `ps:${startTime}` : undefined;
 	} catch {
 		return undefined;

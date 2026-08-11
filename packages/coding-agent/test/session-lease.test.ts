@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
+	getProcessStartId,
 	getWindowsProcessStartId,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
@@ -67,6 +68,22 @@ describe("session leases", () => {
 		expect(getWindowsProcessStartId(42, query)).toBeUndefined();
 		expect(getWindowsProcessStartId(0, query)).toBeUndefined();
 		expect(queryCount).toBe(1);
+	});
+
+	it.skipIf(process.platform === "win32")("records a locale-stable POSIX process start identity", () => {
+		const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+		const processStartId = getProcessStartId(2_147_483_647, (command, args, env) => {
+			calls.push({ command, args, env });
+			return "Sun Aug  9 00:00:00 2026\n";
+		});
+
+		expect(processStartId).toBe("ps:Sun Aug  9 00:00:00 2026");
+		expect(calls).toHaveLength(1);
+		expect(calls[0].command).toBe("ps");
+		expect(calls[0].args).toEqual(["-p", "2147483647", "-o", "lstart="]);
+		expect(calls[0].env.LC_ALL).toBe("C");
+		expect(calls[0].env.LC_TIME).toBe("C");
+		expect(calls[0].env.LANG).toBe("C");
 	});
 
 	it("rejects a second live owner with a typed active-session error", () => {
