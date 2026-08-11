@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added `/rlm-token-budget` to bound the tokens a session and its recursive subagents may generate, with `flat`, `geometric`, and `split` depth schedules and optional `<floor>-<ceiling>` ranges.
+- Added RLM token budgets: agents bound each delegation with `rlm.run(..., token_budget=N)`, and `/rlm-token-budget` sets a tree-wide budget with `flat`, `geometric`, and `split` depth schedules and optional `<floor>-<ceiling>` ranges.
 - Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.
 - Added a `ctrl+t` expand hint to collapsed thinking blocks, matching the tool output hint.
 - Changed expand/collapse hints to a consistent bracketed `(Ctrl+O to expand)` style across tool, message, summary, and error rows.

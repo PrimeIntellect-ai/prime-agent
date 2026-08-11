@@ -216,7 +216,18 @@ A spawning model may set a child's allowance explicitly with `rlm.run(..., token
 
 Budget state flows downward as a value snapshot taken at spawn time. A running child never re-reads its parent, so changing a budget mid-run affects only sessions spawned afterwards. A child that persists its own per-chat override can lower its allowance but never raise it above the grant it was spawned with.
 
-An explicit `token_budget` may deliberately take more than an equal share; allocating unevenly is the point of the override, and the parent's reservation remains the bound that holds.
+### Budgeting a delegation
+
+Setting a budget when spawning is the default way to use this feature, and it needs no tree-wide configuration:
+
+```python
+await rlm("audit the retry logic", token_budget=200_000)
+await rlm("quick lookup", token_budget=(50_000, 150_000))
+```
+
+The grant bounds that child and every descendant it spawns. With no active budget the grant starts one for that subtree alone, so delegation is bounded even when the session itself is not. The model is told this in its system prompt, so budgeting each delegation is doctrine rather than an advanced option.
+
+An explicit `token_budget` may deliberately take more than an equal share of a parent's reservation; allocating unevenly is the point of the override, and the parent's reservation remains the bound that holds.
 
 Kernel env exposes `RLM_TOKEN_ALLOWANCE` and `RLM_TOKEN_SUBTREE_POOL` at provisioning time; as with `RLM_MAX_DEPTH`, the TypeScript-side check is authoritative.
 

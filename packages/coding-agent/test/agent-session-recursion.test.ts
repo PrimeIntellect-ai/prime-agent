@@ -2464,6 +2464,35 @@ describe("AgentSession rlm recursion", () => {
 		).rejects.toThrow(/worth 125 spendable tokens/);
 	});
 
+	it("tells the model to budget each delegation by default", () => {
+		const root = createSession({ maxDepth: 3 });
+
+		// The capability has to be in the prompt or the model cannot make it default behaviour.
+		expect(root.systemPrompt).toContain("token_budget=200000");
+		expect(root.systemPrompt).toContain("bounds that child and every descendant it spawns");
+	});
+
+	it("budgets a child from a bare rlm.run call with no configured budget", async () => {
+		const captured: Array<{ allowance?: number; total?: number }> = [];
+		const root = createSession({
+			maxDepth: 3,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					captured.push({ allowance: options.rlmTokenAllowance, total: options.rlmTokenBudget?.totalTokens });
+					throw new Error("stop after capturing the grant");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+		expect(root.getRlmTokenBudgetStatus().config).toBeNull();
+
+		await root.runRlmChild("scoped delegation", { token_budget: 200_000 });
+		await vi.waitFor(() => expect(captured).toHaveLength(1));
+
+		// No global or chat budget needed: the grant governs that child's whole subtree.
+		expect(captured[0]).toEqual({ allowance: 200_000, total: 200_000 });
+	});
+
 	it("applies max-depth immediately while a turn streams without aborting or entering the transcript", async () => {
 		let releaseTurn!: () => void;
 		const release = new Promise<void>((resolve) => {
