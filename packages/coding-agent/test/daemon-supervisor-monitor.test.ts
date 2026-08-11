@@ -1464,10 +1464,7 @@ describe("daemon worker supervisor monitoring", () => {
 				lifecycle: "ready" as const,
 			},
 			summaries: new Map<string, SessionSummary>([
-				[
-					"root-active",
-					{ id: "root-active", sessionId: "root-session", activeSessionId: "root-active" } as SessionSummary,
-				],
+				["root-active", { id: "root-active", sessionId: "root-session", activeSessionId: "root-active" } as SessionSummary],
 			]),
 			snapshotCache: new Map(),
 			transcriptCaches: new Map(),
@@ -1515,16 +1512,13 @@ describe("daemon worker supervisor monitoring", () => {
 		}) as {
 			workers: typeof workers;
 			workerStopCounts: Map<typeof worker, number>;
-			handleCommand(
-				client: DaemonSocketClient,
-				command: { type: "kill"; activeSessionId: string },
-			): Promise<unknown>;
+			handleCommand(client: DaemonSocketClient, command: { type: "kill"; activeSessionId: string }): Promise<unknown>;
 			handleWorkerFrame(target: typeof worker, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
 
-		await expect(
-			supervisor.handleCommand({} as DaemonSocketClient, { type: "kill", activeSessionId: "root-active" }),
-		).resolves.toEqual(success(undefined, "kill"));
+		await expect(supervisor.handleCommand({} as DaemonSocketClient, { type: "kill", activeSessionId: "root-active" })).resolves.toEqual(
+			success(undefined, "kill"),
+		);
 		expect(stopWorkerUntracked).toHaveBeenCalledWith(worker, true, false, true, false, undefined);
 		expect(workers.has(worker.descriptor.workerId)).toBe(false);
 		expect(deleteWorkerDescriptor).toHaveBeenCalledWith(worker);
