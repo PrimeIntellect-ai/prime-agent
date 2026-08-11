@@ -711,4 +711,4 @@
 
 ### Added
 
-- Initial Prime Agent release, forked from pi-mono: a persistent `ipython` tool backed by a Jupyter kernel as the default tool set, recursive RLM subagents via `rlm.run`, `/goal` for long-running objectives, an auto-bootstrapped uv-managed kernel runtime, Prime-branded TUI, and an R2-backed tarball release pipeline with a pi-style installer.- Added `/rlm-token-budget`, a per-chat and global token budget for RLM subagents. The budget is the pool a chat may spend on delegation: the thread itself is never capped, each `rlm.run(token_budget=N)` grant is drawn from that pool, and a subagent that spends its grant stops at the turn boundary and refuses further prompts. ([#1192](https://github.com/PrimeIntellect-ai/prime-agent/pull/1192))
+- Initial Prime Agent release, forked from pi-mono: a persistent `ipython` tool backed by a Jupyter kernel as the default tool set, recursive RLM subagents via `rlm.run`, `/goal` for long-running objectives, an auto-bootstrapped uv-managed kernel runtime, Prime-branded TUI, and an R2-backed tarball release pipeline with a pi-style installer.

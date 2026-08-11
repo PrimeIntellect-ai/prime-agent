@@ -490,7 +490,7 @@ export interface AgentSessionConfig {
 	rlmMaxDepth?: number;
 	/** RLM token budget inherited from a parent session. Unset falls through to the global setting. */
 	rlmTokenBudget?: RlmTokenBudgetConfig;
-	/** Token allowance granted to this session by its parent under the active schedule. */
+	/** Token grant this session was funded with by its parent. */
 	rlmTokenAllowance?: number;
 	/** Directory exposed to the kernel as RLM_SESSION_DIR. */
 	rlmSessionDir?: string;
@@ -1270,13 +1270,12 @@ export class AgentSession {
 	private readonly _configuredRlmTokenAllowance: number | undefined;
 	private _rlmTokenBudget: RlmTokenBudgetConfig | undefined;
 	private _rlmTokenBudgetSource: RlmTokenBudgetSource;
-	/** Tokens this session may generate before the budget hard-stops its agent loop. */
+	/** Tokens this session may generate before the budget stops its loop; undefined at depth 0. */
 	private _rlmTokenAllowance: number | undefined;
 	private _rlmTokensUsed = 0;
-	/** Tokens still grantable to descendants under the `split` schedule. */
+	/** Tokens still grantable to subagents. */
 	private _rlmSubtreePool: number | undefined;
-	/** Equal per-child share of the initial `split` pool. */
-	/** Tokens already handed to descendants, so a recomputed pool cannot refund live grants. */
+	/** Tokens already handed to subagents, so a recomputed pool cannot refund live grants. */
 	private _rlmSubtreeGranted = 0;
 	private _rlmTokenBudgetAccountedMessages = new WeakSet<AssistantMessage>();
 	private _rlmSessionDir?: string;
@@ -1682,7 +1681,7 @@ export class AgentSession {
 
 	/**
 	 * Draw a child's allowance from this session's budget, refusing the spawn when the
-	 * schedule cannot fund another child. Returns undefined when budgeting is disabled.
+	 * pool cannot fund another child. Returns undefined when budgeting is disabled.
 	 */
 	private _reserveRlmChildAllowance(requested?: RlmTokenBudgetRange): number | undefined {
 		const config = this._rlmTokenBudget;
@@ -1704,7 +1703,7 @@ export class AgentSession {
 		// child takes what is left, capped by the ceiling.
 		const granted = Math.min(requested?.maxTokens ?? remaining, remaining, ceiling);
 		if (granted <= 0 || granted < floor) {
-			throw new Error(this._describeUnfundableChild(config, remaining, Math.max(floor, 1)));
+			throw new Error(this._describeUnfundableChild(remaining, Math.max(floor, 1)));
 		}
 		this._rlmSubtreeGranted += granted;
 		// Recompute rather than adjusting the pool alone: the grant also reduces what this session may
@@ -1714,8 +1713,8 @@ export class AgentSession {
 		return granted;
 	}
 
-	/** Explain why a `split` reservation cannot fund a child at the size the schedule requires. */
-	private _describeUnfundableChild(_config: RlmTokenBudgetConfig, poolRemaining: number, needed: number): string {
+	/** Explain why the remaining pool cannot fund a child at the size requested. */
+	private _describeUnfundableChild(poolRemaining: number, needed: number): string {
 		return `RLM token budget exhausted at depth ${this._rlmDepth + 1}: ${poolRemaining} tokens left to grant, ${needed} needed. Raise the budget with /rlm-token-budget or disable it with /rlm-token-budget off.`;
 	}
 
@@ -1756,7 +1755,7 @@ export class AgentSession {
 		}
 		// A subagent is funded entirely by its parent. Falling through to the global default here
 		// would re-seed every child with a full root-sized budget, so a parent that opted out would
-		// multiply spend by fanout^depth instead of disabling it.
+		// multiply spend at every depth instead of bounding it.
 		if (this._rlmDepth > 0) {
 			return { config: undefined, source: "inherited" };
 		}
@@ -10085,7 +10084,7 @@ export class AgentSession {
 		// a failed auth preflight aborted the spawn.
 		const childTokenAllowance = this._reserveRlmChildAllowance(requestedTokenBudget);
 		// With no active budget, a model-supplied allowance still needs a config so the
-		// child (and its own descendants) are governed by a schedule.
+		// child (and its own descendants) are governed by that grant.
 		const childTokenBudget =
 			this._rlmTokenBudget ?? (childTokenAllowance === undefined ? undefined : { totalTokens: childTokenAllowance });
 

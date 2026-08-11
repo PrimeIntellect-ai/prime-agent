@@ -125,14 +125,6 @@ export function validateRlmTokenBudgetConfig(config: RlmTokenBudgetConfig): RlmT
 	return { ...config };
 }
 
-/** Clamp a requested grant into the configured [floor, ceiling] range. */
-export function clampToBudgetRange(config: RlmTokenBudgetConfig, tokens: number): number {
-	let clamped = tokens;
-	if (config.maxTokens !== undefined) clamped = Math.min(clamped, config.maxTokens);
-	if (config.minTokens !== undefined) clamped = Math.max(clamped, config.minTokens);
-	return clamped;
-}
-
 /** A parsed `/rlm-token-budget` invocation. */
 export type RlmTokenBudgetCommand =
 	| { kind: "status" }

@@ -7,7 +7,7 @@ export interface RlmPromptOptions {
 	messagesPath: string;
 	allowRecursion?: boolean;
 	depth?: number;
-	/** Tokens this session may still generate before its RLM budget stops the run. */
+	/** Configured budget figures; never a live balance, which would be stale mid-turn. */
 	tokenBudget?: { budgetTokens: number; grantTokens: number | null };
 	parentAgent?: string;
 	activeTools?: string[];

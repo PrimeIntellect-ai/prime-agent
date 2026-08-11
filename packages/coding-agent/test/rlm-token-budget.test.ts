@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import {
-	clampToBudgetRange,
 	isRlmTokenBudgetConfig,
 	normalizeRlmTokenBudgetRequest,
 	parseRlmTokenBudgetCommand,
@@ -90,13 +89,6 @@ describe("rlm token budget command parsing", () => {
 });
 
 describe("rlm token budget ranges", () => {
-	test("clamps a requested grant into the configured range", () => {
-		const cfg = config({ minTokens: 1000, maxTokens: 5000 });
-		expect(clampToBudgetRange(cfg, 10_000)).toBe(5000);
-		expect(clampToBudgetRange(cfg, 500)).toBe(1000);
-		expect(clampToBudgetRange(cfg, 3000)).toBe(3000);
-	});
-
 	test("parses the <floor>-<ceiling> command form", () => {
 		expect(parseRlmTokenBudgetCommand("200k-600k")).toEqual({
 			kind: "set",
