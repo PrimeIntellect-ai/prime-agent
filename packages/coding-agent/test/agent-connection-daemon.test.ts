@@ -63,6 +63,7 @@ class FakeDaemonClient {
 		allowanceTokens: null,
 		tokensUsed: 0,
 		subtreePoolTokens: null,
+		delegatedTokens: 0,
 		exhausted: false,
 	};
 	hello: DaemonHello | undefined = {
@@ -2322,6 +2323,7 @@ describe("DaemonAgentConnection", () => {
 			allowanceTokens: null,
 			tokensUsed: 0,
 			subtreePoolTokens: null,
+			delegatedTokens: 0,
 			exhausted: false,
 		});
 

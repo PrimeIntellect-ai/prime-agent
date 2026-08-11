@@ -46,11 +46,13 @@ export interface RlmTokenBudgetStatus {
 	config: RlmTokenBudgetConfig | null;
 	source: RlmTokenBudgetSource;
 	depth: number;
-	/** Tokens this session may generate, or null when unbounded. */
+	/** Tokens this session may generate, or null when it is unbounded (always so at depth 0). */
 	allowanceTokens: number | null;
 	tokensUsed: number;
-	/** Tokens still available to descendants under `split`, or null for the other schedules. */
+	/** Tokens still grantable to subagents, or null for the schedules that do not pool. */
 	subtreePoolTokens: number | null;
+	/** Tokens already handed to subagents out of this session's budget. */
+	delegatedTokens: number;
 	exhausted: boolean;
 }
 

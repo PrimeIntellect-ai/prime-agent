@@ -174,15 +174,17 @@ Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their
 
 ## Token Budgets
 
-`/rlm-token-budget` bounds token spend across a recursion tree. A budget is resolved per session with the same precedence as max depth (chat > inherited > global > env > default off), except that a subagent stops at `inherited`: a child is funded entirely by its parent, and falling through to the global default would re-seed every child with a full root-sized budget, multiplying spend instead of bounding it.
+`/rlm-token-budget` bounds what a session delegates, not the session itself. The thread the user is talking to is never stopped by a budget; the budget is the pool of tokens it may hand to subagents, and each grant bounds that subagent and everything below it.
+
+A budget is resolved per session with the same precedence as max depth (chat > inherited > global > env > default off), except that a subagent stops at `inherited`: a child is funded entirely by its parent, and falling through to the global default would re-seed every child with a full root-sized budget, multiplying spend instead of bounding it.
 
 Enforcement happens in three places:
 
-- Between turns: once a session has generated its allowance, `shouldStopAfterTurn` ends the agent loop. The turn that crossed the allowance is preserved; the loop simply does not start another. Aborting is deliberately not used, because an aborted turn reports `stopReason: "aborted"` and would not be charged.
-- At prompt admission: the agent loop always runs at least one turn per prompt, so an exhausted session refuses new prompts instead of burning a fully charged turn per message. Each refusal re-emits `rlm_token_budget_exhausted`, which the interactive client renders with the usage and the recovery command.
+- Between turns: once a funded subagent has generated its grant, `shouldStopAfterTurn` ends its agent loop. The turn that crossed the allowance is preserved; the loop simply does not start another. Aborting is deliberately not used, because an aborted turn reports `stopReason: "aborted"` and would not be charged.
+- At prompt admission: the agent loop always runs at least one turn per prompt, so an exhausted subagent refuses new prompts instead of burning a fully charged turn per message. Each refusal re-emits `rlm_token_budget_exhausted`, which the interactive client renders with the usage and the recovery command.
 - At spawn time: `runRlmChild` reserves the child's allowance once the spawn can no longer fail, and throws when the schedule cannot fund another child.
 
-The active allowance is stated in the system prompt so the model can pace itself and wrap up rather than being cut off mid-thought.
+The active budget is stated in the system prompt: the main thread is told how much it may grant to subagents, and a funded subagent is told what it may spend, so it can wrap up rather than being cut off mid-thought.
 
 Three schedules distribute a total allowance across depths:
 
@@ -194,7 +196,7 @@ Three schedules distribute a total allowance across depths:
 
 Only `split` bounds the whole tree: node count grows as `fanout^depth`, so a fixed per-depth allowance still lets total spend grow without limit.
 
-Under `split` a grant is a single pot. A session may spend the whole grant itself, or hand parts of it to children; every token a child receives is one the parent can no longer spend. Nothing is stranded on a session that never delegates, and because child grants come out of the same pot the subtree total never exceeds the grant regardless of depth or fan-out. `factor` caps how much of a grant may be delegated, so a session always keeps something for its own work, and `fanout` sets how many equal shares that delegable slice is divided into. A parent may fund fewer than `fanout` children when flooring the share leaves a remainder too small for a full share; that remainder is refused rather than spent on a subagent that could not finish a turn.
+Under `split` a grant is a single pot. A funded subagent may spend the whole grant itself, or hand parts of it to its own children; every token a child receives is one the parent can no longer spend. Nothing is stranded on a subagent that never delegates, and because child grants come out of the same pot the subtree total never exceeds the grant regardless of depth or fan-out. `factor` caps how much of a grant may be re-delegated, so a funded subagent always keeps something for its own work, and `fanout` sets how many equal shares that delegable slice is divided into. At depth 0 the whole budget is delegable, since the thread itself is not being capped. A parent may fund fewer than `fanout` children when flooring the share leaves a remainder too small for a full share; that remainder is refused rather than spent on a subagent that could not finish a turn.
 
 Enforcement is per turn, not per token. Usage is charged when an assistant turn ends, so a session stops at the first turn boundary after its allowance is spent rather than mid-turn. Actual spend is therefore bounded by the granted total plus at most one turn per participating session, and an allowance smaller than a single turn does not prevent that turn from running.
 

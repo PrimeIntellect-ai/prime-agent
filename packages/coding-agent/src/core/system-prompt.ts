@@ -30,7 +30,7 @@ export interface BuildSystemPromptOptions {
 	/** Fixed recursive-agent depth for this session. */
 	rlmDepth?: number;
 	/** Active RLM token budget for this session, so the model can pace itself against it. */
-	rlmTokenBudget?: { allowanceTokens: number; subtreePoolTokens: number | null };
+	rlmTokenBudget?: { allowanceTokens: number | null; subtreePoolTokens: number | null };
 	/** Human-readable parent name or id for child communication doctrine. */
 	rlmParentAgent?: string;
 	/** Global harness state to inject as compact persistent context. */

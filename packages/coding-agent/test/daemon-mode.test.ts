@@ -55,6 +55,7 @@ function idleRlmTokenBudgetStatus(): RlmTokenBudgetStatus {
 		allowanceTokens: null,
 		tokensUsed: 0,
 		subtreePoolTokens: null,
+		delegatedTokens: 0,
 		exhausted: false,
 	};
 }
@@ -8402,6 +8403,7 @@ describe("daemon mode helpers", () => {
 			allowanceTokens: 250_000,
 			tokensUsed: 1_000,
 			subtreePoolTokens: 250_000,
+			delegatedTokens: 0,
 			exhausted: false,
 		};
 		const getRlmTokenBudgetStatus = vi.fn(() => status);

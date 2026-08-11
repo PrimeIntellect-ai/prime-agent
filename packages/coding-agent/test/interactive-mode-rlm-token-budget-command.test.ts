@@ -65,6 +65,7 @@ const activeStatus: RlmTokenBudgetStatus = {
 	allowanceTokens: 500_000,
 	tokensUsed: 12_000,
 	subtreePoolTokens: 500_000,
+	delegatedTokens: 0,
 	exhausted: false,
 };
 
@@ -189,7 +190,7 @@ describe("InteractiveMode /rlm-token-budget", () => {
 		expect(rendered).toContain(
 			"RLM token budget set: 600000 tokens, schedule=split, factor=0.5, fanout=3, floor=50000",
 		);
-		expect(rendered).toContain("this session: 12000/300000 used at depth 0; subtree pool 300000");
+		expect(rendered).toContain("this subagent: 12000/300000 used at depth 0; 0 granted to subagents, 300000 left");
 		expect(rendered).not.toContain("ceiling=");
 	});
 
@@ -219,21 +220,22 @@ describe("InteractiveMode /rlm-token-budget", () => {
 describe("InteractiveMode RLM token budget exhaustion notice", () => {
 	beforeAll(() => initTheme("dark"));
 
-	it("explains the stop with the used/allowance numbers and both recoveries", async () => {
+	it("explains the stop with the granted numbers and both recoveries", async () => {
 		const context = makeEventContext();
 
 		await prototype.handleEvent.call(context, {
 			type: "rlm_token_budget_exhausted",
-			depth: 0,
+			depth: 1,
 			tokensUsed: 512_345,
 			allowanceTokens: 500_000,
 		});
 
 		const rendered = renderAll(context.chatContainer, 200);
-		expect(rendered).toContain("RLM token budget spent: 512345 of 500000 tokens used.");
-		expect(rendered).toContain("This run stopped at the end of the turn");
-		expect(rendered).toContain("Raise it with /rlm-token-budget <tokens> or turn it off with /rlm-token-budget off.");
-		expect(rendered).not.toContain("at depth");
+		expect(rendered).toContain("Subagent at depth 1 spent its token budget: 512345 of 500000 granted.");
+		expect(rendered).toContain("It stopped at the end of its turn and will not start further work.");
+		expect(rendered).toContain(
+			"Grant more with /rlm-token-budget <tokens> or turn budgeting off with /rlm-token-budget off.",
+		);
 		expect(context.ui.requestRender).toHaveBeenCalled();
 	});
 
@@ -249,7 +251,7 @@ describe("InteractiveMode RLM token budget exhaustion notice", () => {
 		await prototype.handleEvent.call(context, event);
 
 		expect(renderAll(context.chatContainer, 200)).toContain(
-			"RLM token budget spent at depth 2: 61000 of 60000 tokens used.",
+			"Subagent at depth 2 spent its token budget: 61000 of 60000 granted.",
 		);
 	});
 });

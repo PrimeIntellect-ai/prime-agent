@@ -830,12 +830,16 @@ function formatRlmTokenBudgetBounds(config: RlmTokenBudgetConfig): string[] {
 
 /** The depth-local half of a budget report: what this session may spend, and what it has spent. */
 function formatRlmTokenBudgetSession(status: RlmTokenBudgetStatus): string {
-	const allowance =
-		status.allowanceTokens === null
-			? "unbounded"
-			: `${status.tokensUsed}/${status.allowanceTokens} used at depth ${status.depth}`;
-	const pool = status.subtreePoolTokens === null ? "" : `; subtree pool ${status.subtreePoolTokens}`;
-	return `this session: ${allowance}${pool}${status.exhausted ? " (exhausted)" : ""}`;
+	const remaining = status.subtreePoolTokens;
+	if (status.allowanceTokens === null) {
+		// Depth 0: the thread itself is never capped, so report only what is left to delegate.
+		const left = remaining === null ? "unlimited" : `${remaining} left to grant`;
+		return `subagents: ${status.delegatedTokens} granted, ${left}`;
+	}
+	const pool = remaining === null ? "" : `; ${status.delegatedTokens} granted to subagents, ${remaining} left`;
+	return `this subagent: ${status.tokensUsed}/${status.allowanceTokens} used at depth ${status.depth}${pool}${
+		status.exhausted ? " (exhausted)" : ""
+	}`;
 }
 
 export class InteractiveMode {
@@ -9169,11 +9173,10 @@ export class InteractiveMode {
 	private showRlmTokenBudgetExhausted(
 		event: Extract<AgentConnectionSessionEvent, { type: "rlm_token_budget_exhausted" }>,
 	): void {
-		const where = event.depth > 0 ? ` at depth ${event.depth}` : "";
 		const notice = [
-			`RLM token budget spent${where}: ${event.tokensUsed} of ${event.allowanceTokens} tokens used.`,
-			"This run stopped at the end of the turn; later turns stop the same way until the budget changes.",
-			"Raise it with /rlm-token-budget <tokens> or turn it off with /rlm-token-budget off.",
+			`Subagent at depth ${event.depth} spent its token budget: ${event.tokensUsed} of ${event.allowanceTokens} granted.`,
+			"It stopped at the end of its turn and will not start further work.",
+			"Grant more with /rlm-token-budget <tokens> or turn budgeting off with /rlm-token-budget off.",
 		].join("\n");
 		this.showDimNotice(notice);
 	}

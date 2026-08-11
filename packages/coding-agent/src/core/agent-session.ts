@@ -1816,26 +1816,27 @@ export class AgentSession {
 		if (!config) {
 			this._rlmTokenAllowance = undefined;
 			this._rlmSubtreePool = undefined;
+			this._rlmChildAllowanceShare = undefined;
 			return;
 		}
-		// A child is funded by its parent; a root derives its allowance from the total.
-		const grantedAllowance = this._configuredRlmTokenAllowance ?? config.totalTokens;
-		const allowance = ownAllowance(config, this._rlmDepth, grantedAllowance);
-		const pool = subtreePool(config, grantedAllowance) ?? undefined;
-		// One pot per subtree: an undelegated grant stays fully spendable here, minus whatever has
-		// been handed to children. A per-chat override cannot raise the ceiling above the grant this
-		// session was spawned with, which would break the bound its parent reserved.
-		const ceiling =
-			this._configuredRlmTokenAllowance === undefined
-				? allowance
-				: Math.min(allowance, this._configuredRlmTokenAllowance);
+		if (this._rlmDepth === 0) {
+			// A budget governs delegation, not the thread the user is talking to. The root is never
+			// stopped by it; the whole budget is the pool it may hand to subagents.
+			this._rlmTokenAllowance = undefined;
+			this._rlmSubtreePool = Math.max(0, config.totalTokens - this._rlmSubtreeGranted);
+			this._rlmChildAllowanceShare = childAllowance(config, 1, config.totalTokens);
+			return;
+		}
+		// A funded subagent holds one pot: it may spend the grant itself or hand parts to its own
+		// children, and a per-chat override cannot raise it above what its parent reserved.
+		const grant = this._configuredRlmTokenAllowance ?? config.totalTokens;
+		const ceiling = Math.min(ownAllowance(config, this._rlmDepth, grant), grant);
 		this._rlmTokenAllowance = Math.max(0, ceiling - this._rlmSubtreeGranted);
-		// The delegable slice of the same pot, capped by `factor`. Recomputing happens on every
-		// /rlm-token-budget call and on branch navigation, so grants stay spent: refilling here would
-		// let a parent fund unlimited children by re-issuing the command.
+		const pool = subtreePool(config, grant) ?? undefined;
+		// Grants stay spent across recomputation, which happens on every /rlm-token-budget call and
+		// on branch navigation; refilling would let a parent fund unlimited children.
 		this._rlmSubtreePool = pool === undefined ? undefined : Math.max(0, pool - this._rlmSubtreeGranted);
-		// The share is derived from the pool before any grants, so siblings receive equal
-		// allowances no matter when they are spawned or how often the budget is re-applied.
+		// Derived from the pool before any grants so siblings receive equal allowances.
 		this._rlmChildAllowanceShare = pool === undefined ? undefined : childAllowance(config, this._rlmDepth + 1, pool);
 	}
 
@@ -1868,6 +1869,7 @@ export class AgentSession {
 			allowanceTokens: this._rlmTokenAllowance ?? null,
 			tokensUsed: this._rlmTokensUsed,
 			subtreePoolTokens: this._rlmSubtreePool ?? null,
+			delegatedTokens: this._rlmSubtreeGranted,
 			exhausted: this._rlmTokenBudgetExhausted(),
 		};
 	}
@@ -4678,10 +4680,10 @@ export class AgentSession {
 			promptGuidelines,
 			allowRecursion: this._rlmDepth < this._rlmMaxDepth,
 			rlmTokenBudget:
-				this._rlmTokenAllowance === undefined
+				this._rlmTokenBudget === undefined
 					? undefined
 					: {
-							allowanceTokens: this._rlmTokenAllowance,
+							allowanceTokens: this._rlmTokenAllowance ?? null,
 							subtreePoolTokens: this._rlmSubtreePool ?? null,
 						},
 			rlmDepth: this._rlmDepth,

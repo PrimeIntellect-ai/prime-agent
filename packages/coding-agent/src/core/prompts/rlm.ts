@@ -8,7 +8,7 @@ export interface RlmPromptOptions {
 	allowRecursion?: boolean;
 	depth?: number;
 	/** Tokens this session may still generate before its RLM budget stops the run. */
-	tokenBudget?: { allowanceTokens: number; subtreePoolTokens: number | null };
+	tokenBudget?: { allowanceTokens: number | null; subtreePoolTokens: number | null };
 	parentAgent?: string;
 	activeTools?: string[];
 }
@@ -127,17 +127,23 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 
 	const tokenBudget = options.tokenBudget;
 	if (tokenBudget) {
-		// Deliberately no live counter: the prompt is a per-build snapshot, and a stale "used" number
-		// would be worse than none. The allowance and the stopping rule are what the model must plan against.
-		const pool =
-			tokenBudget.subtreePoolTokens === null
-				? ""
-				: ` A further ${tokenBudget.subtreePoolTokens} tokens are reserved for subagents you spawn.`;
-		parts.push(
-			"",
-			`An RLM token budget is active: you may generate about ${tokenBudget.allowanceTokens} tokens in this session.${pool}`,
-			"When it is spent the host stops your run at the next turn boundary, so prefer finishing and reporting partial results over starting new work as you approach it.",
-		);
+		// Deliberately no live counter: the prompt is a per-build snapshot and a stale "used" number
+		// would be worse than none.
+		const pool = tokenBudget.subtreePoolTokens;
+		if (tokenBudget.allowanceTokens === null) {
+			parts.push(
+				"",
+				`An RLM token budget is active: you may grant up to ${pool ?? "an unlimited number of"} tokens across the subagents you spawn. Your own work in this thread is not capped.`,
+				"Size each `token_budget=` out of that pool. Once it is spent, spawning fails until the budget is raised.",
+			);
+		} else {
+			const grantable = pool === null ? "" : ` A further ${pool} of it may be granted to subagents you spawn.`;
+			parts.push(
+				"",
+				`An RLM token budget is active: you may generate about ${tokenBudget.allowanceTokens} tokens in this session.${grantable}`,
+				"When it is spent the host stops your run at the next turn boundary, so prefer finishing and reporting partial results over starting new work as you approach it.",
+			);
+		}
 	}
 
 	if (allowRecursion && hasIpython) {
