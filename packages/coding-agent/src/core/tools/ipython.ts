@@ -362,9 +362,19 @@ export class IpythonKernelProvisioner {
 		return this._lastRestore;
 	}
 
-	/** Start the kernel in the background. Failures are swallowed here and surface on the next ensure(). */
+	/**
+	 * Start the kernel in the background. Foreground admission prevents the first root turn from
+	 * overtaking bootstrap and then waiting on it. Failures surface on the next ensure().
+	 */
 	prewarm(): void {
-		void this.ensure().catch(() => {});
+		const foreground = this.options?.foregroundLease;
+		if (!foreground) {
+			void this.ensure().catch(() => {});
+			return;
+		}
+		void foreground
+			.run("root-cell", () => this.ensure(undefined, this.disposeController.signal), this.disposeController.signal)
+			.catch(() => {});
 	}
 
 	/** Whether a kernel has finished starting and is currently running. */

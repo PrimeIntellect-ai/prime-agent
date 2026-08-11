@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { ExtensionContext } from "../src/core/extensions/types.js";
 import type { KernelBootstrapProgressHandler } from "../src/core/kernel/bootstrap.js";
 import { type ExecuteResult, KernelBusyAfterInterruptError, KernelManager } from "../src/core/kernel/index.js";
+import { RootForegroundLease } from "../src/core/root-foreground-lease.js";
 import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
 let tempDir = "";
@@ -114,6 +115,29 @@ describe("IpythonKernelProvisioner", () => {
 			await expect(provisioner.ensure()).rejects.toThrow();
 			expect(countRuns()).toBeGreaterThanOrEqual(2);
 		});
+	});
+
+	it("admits prewarm before an immediately following root turn", async () => {
+		const { python } = writeFakePython();
+		const foregroundLease = new RootForegroundLease();
+		let releaseBoot: () => void = () => {};
+		const readyGate = new Promise<void>((resolve) => {
+			releaseBoot = resolve;
+		});
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, foregroundLease, readyGate });
+		const events: string[] = [];
+
+		provisioner.prewarm();
+		const rootTurn = foregroundLease.run("root-turn", async () => {
+			events.push("root-turn");
+		});
+
+		expect(foregroundLease.busy).toBe(true);
+		expect(foregroundLease.pendingCount).toBe(1);
+		expect(events).toEqual([]);
+		releaseBoot();
+		await rootTurn;
+		expect(events).toEqual(["root-turn"]);
 	});
 
 	it("replays the current startup stage to listeners attaching mid-flight", async () => {
