@@ -13,6 +13,7 @@ import { AgentSession } from "../../src/core/agent-session.js";
 import type { HostRequestChannel } from "../../src/core/kernel/index.js";
 import type { CustomMessage } from "../../src/core/messages.js";
 import type { RootForegroundLease } from "../../src/core/root-foreground-lease.js";
+import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness } from "./harness.js";
 
 const provider = "faux-act-lane";
@@ -39,11 +40,12 @@ function usage(input: number, output: number, cost: number): Usage {
 }
 
 class TestActChannel implements HostRequestChannel {
-	readonly outerToolCallId = "test-root-ipython";
 	readonly controller = new AbortController();
 	readonly signal = this.controller.signal;
 	readonly cells: string[] = [];
 	private readonly responses: Record<string, unknown>[] = [];
+
+	constructor(readonly outerToolCallId = "test-root-ipython") {}
 
 	async send(event: Record<string, unknown>): Promise<void> {
 		if (event.type !== "cell" || typeof event.code !== "string") throw new Error("invalid cell event");
@@ -523,6 +525,10 @@ describe("AgentSession Act lane", () => {
 				await queued;
 				expect(admitted, testCase.name).toBe(1);
 				expect(internals._rootForeground.busy, testCase.name).toBe(false);
+				if (testCase.name !== "done") {
+					const privateMessages = internals._actLanes?.get(1)?.session?.messages ?? [];
+					expect(JSON.stringify(privateMessages), testCase.name).not.toContain(testCase.name);
+				}
 			} finally {
 				harness.cleanup();
 			}
@@ -604,6 +610,120 @@ describe("AgentSession Act lane", () => {
 			expect(actEvents.every((event) => event.outerToolCallId === "test-root-ipython")).toBe(true);
 			harness.session.dispose();
 			expect((laneSession as unknown as { _disposed: boolean })._disposed).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("discards an unfinished private branch before the next retained Act", async () => {
+		const harness = await createHarness({
+			provider,
+			persistSession: true,
+			models: [{ id: "sol-model" }, { id: "luna-model" }],
+			settings: { rlmActDefaultModel: "@luna", modelRoles: { luna: `${provider}/luna-model` } },
+		});
+		try {
+			let secondActSawAbandonedScope = true;
+			harness.setResponses([
+				fauxAssistantMessage("stopped without done"),
+				(context) => {
+					secondActSawAbandonedScope = context.messages.some(
+						(message) => message.role === "user" && JSON.stringify(message.content).includes("abandoned task"),
+					);
+					return fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(9)" }), {
+						stopReason: "toolUse",
+					});
+				},
+			]);
+			const internals = harness.session as unknown as ActSessionInternals;
+
+			await expect(
+				internals._runAct({ prompt: "abandoned task" }, undefined, new TestActChannel()),
+			).resolves.toEqual({
+				outcome: "text",
+				text: "stopped without done",
+			});
+			const privateManager = internals._actLanes?.get(1)?.session?.sessionManager;
+			const privateFile = privateManager?.getSessionFile();
+			if (!privateManager || !privateFile) throw new Error("retained Act session was not persisted");
+			const reopened = SessionManager.open(privateFile, privateManager.getSessionDir(), harness.tempDir);
+			expect(JSON.stringify(reopened.buildSessionContext().messages)).not.toContain("abandoned task");
+
+			await expect(internals._runAct({ prompt: "current task" }, undefined, new TestActChannel())).resolves.toEqual({
+				outcome: "done",
+			});
+			expect(secondActSawAbandonedScope).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("attaches the caller message delta to the next vision-capable Act", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "sol-model" }, { id: "luna-model", input: ["text", "image"] }],
+			settings: { rlmActDefaultModel: "@luna", modelRoles: { luna: `${provider}/luna-model` } },
+		});
+		try {
+			let attachedImages = 0;
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(1)" }), { stopReason: "toolUse" }),
+				(context) => {
+					const user = context.messages.filter((message) => message.role === "user").at(-1);
+					attachedImages =
+						user && Array.isArray(user.content)
+							? user.content.filter((content) => content.type === "image" && content.mimeType === "image/png")
+									.length
+							: 0;
+					return fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(2)" }), {
+						stopReason: "toolUse",
+					});
+				},
+			]);
+			const internals = harness.session as unknown as ActSessionInternals;
+			harness.sessionManager.appendMessage(
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "first" }, { id: "first-root-call" })),
+			);
+			await internals._runAct({ prompt: "first task" }, undefined, new TestActChannel("first-root-call"));
+			harness.sessionManager.appendMessage({ role: "user", content: "caller delta marker", timestamp: Date.now() });
+			harness.sessionManager.appendMessage(
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "second" }, { id: "second-root-call" })),
+			);
+
+			await expect(
+				internals._runAct({ prompt: "second task" }, undefined, new TestActChannel("second-root-call")),
+			).resolves.toEqual({ outcome: "done" });
+			expect(attachedImages).toBeGreaterThan(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects caller-history transfer to a text-only Act model", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "sol-model" }, { id: "luna-model", input: ["text"] }],
+			settings: { rlmActDefaultModel: "@luna", modelRoles: { luna: `${provider}/luna-model` } },
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(1)" }), { stopReason: "toolUse" }),
+			]);
+			const internals = harness.session as unknown as ActSessionInternals;
+			harness.sessionManager.appendMessage(
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "first" }, { id: "first-root-call" })),
+			);
+			await internals._runAct({ prompt: "first task" }, undefined, new TestActChannel("first-root-call"));
+			harness.sessionManager.appendMessage({ role: "user", content: "caller delta marker", timestamp: Date.now() });
+			harness.sessionManager.appendMessage(
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "second" }, { id: "second-root-call" })),
+			);
+
+			await expect(
+				internals._runAct({ prompt: "second task" }, undefined, new TestActChannel("second-root-call")),
+			).rejects.toThrow(
+				"rlm.act caller-history transfer requires an image-capable model after the first call at a depth",
+			);
 		} finally {
 			harness.cleanup();
 		}

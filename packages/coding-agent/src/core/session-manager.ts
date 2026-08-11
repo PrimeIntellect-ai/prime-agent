@@ -179,6 +179,10 @@ export interface ChildUsageAttributionEntry extends SessionEntryBase {
 export interface ActStartEntry extends SessionEntryBase {
 	type: "act_start";
 	actId: string;
+	depth?: number;
+	parentActId?: string;
+	sessionKey?: string;
+	outerToolCallId?: string;
 	usageBaseline: Usage;
 }
 
@@ -188,6 +192,9 @@ export type ActTerminalStatus = "done" | "cancelled" | "error" | "interrupted";
 export interface ActTerminalEntry extends SessionEntryBase {
 	type: "act_terminal";
 	actId: string;
+	depth?: number;
+	parentActId?: string;
+	sessionKey?: string;
 	status: ActTerminalStatus;
 	usage: Usage;
 	model?: { provider: string; id: string };
@@ -1577,13 +1584,21 @@ export class SessionManager {
 	}
 
 	/** Append a retained-lane Act start fact. Returns entry id. */
-	appendActStart(actId: string, usageBaseline: Usage): string {
+	appendActStart(
+		actId: string,
+		usageBaseline: Usage,
+		options?: { depth?: number; parentActId?: string; sessionKey?: string; outerToolCallId?: string },
+	): string {
 		const entry: ActStartEntry = {
 			type: "act_start",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			actId,
+			depth: options?.depth ?? 1,
+			...(options?.parentActId ? { parentActId: options.parentActId } : {}),
+			...(options?.sessionKey ? { sessionKey: options.sessionKey } : {}),
+			...(options?.outerToolCallId ? { outerToolCallId: options.outerToolCallId } : {}),
 			usageBaseline: cloneUsage(usageBaseline),
 		};
 		this._appendEntry(entry);
@@ -1595,7 +1610,13 @@ export class SessionManager {
 		actId: string,
 		status: ActTerminalStatus,
 		usage: Usage,
-		options?: { model?: { provider: string; id: string }; error?: string },
+		options?: {
+			model?: { provider: string; id: string };
+			error?: string;
+			depth?: number;
+			parentActId?: string;
+			sessionKey?: string;
+		},
 	): string {
 		const entry: ActTerminalEntry = {
 			type: "act_terminal",
@@ -1603,6 +1624,9 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			actId,
+			depth: options?.depth ?? 1,
+			...(options?.parentActId ? { parentActId: options.parentActId } : {}),
+			...(options?.sessionKey ? { sessionKey: options.sessionKey } : {}),
 			status,
 			usage: cloneUsage(usage),
 			...(options?.model ? { model: { ...options.model } } : {}),
@@ -1887,6 +1911,23 @@ export class SessionManager {
 		return h ? (h as SessionHeader) : null;
 	}
 
+	/**
+	 * Get the earliest finite message timestamp on the current conversation branch.
+	 */
+	getConversationStartedAt(): number | undefined {
+		let earliest: number | undefined;
+		for (const entry of this.getBranch()) {
+			if (entry.type !== "message" || !Number.isFinite(entry.message.timestamp)) continue;
+			earliest = earliest === undefined ? entry.message.timestamp : Math.min(earliest, entry.message.timestamp);
+		}
+		return earliest;
+	}
+
+	/**
+	 * Get all session entries (excludes header). Returns a shallow copy.
+	 * The session is append-only: use appendXXX() to add entries, branch() to
+	 * change the leaf pointer. Entries cannot be modified or deleted.
+	 */
 	getEntries(): SessionEntry[] {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 	}
