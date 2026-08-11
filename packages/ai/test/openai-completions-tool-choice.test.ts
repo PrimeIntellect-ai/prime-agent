@@ -375,6 +375,77 @@ describe("openai-completions tool_choice", () => {
 		expect(response.errorMessage).toBe("Provider finish_reason: network_error");
 	});
 
+	it("fails closed when the stream ends without a terminal finish_reason", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-unterminated",
+				choices: [{ delta: { reasoning_content: "partial thinking" }, finish_reason: null }],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const s = streamSimple(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: "Think quietly",
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{ apiKey: "test" },
+		);
+
+		const eventTypes: string[] = [];
+		for await (const event of s) {
+			eventTypes.push(event.type);
+		}
+
+		expect(eventTypes).not.toContain("done");
+		expect(eventTypes[eventTypes.length - 1]).toBe("error");
+
+		const response = await s.result();
+		expect(response.stopReason).toBe("error");
+		expect(response.errorMessage).toMatch(/finish_reason/);
+		expect(response.content).toEqual([
+			{ type: "thinking", thinking: "partial thinking", thinkingSignature: "reasoning_content" },
+		]);
+	});
+
+	it("accepts a terminal finish_reason from a later choice", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-multiple-choices",
+				choices: [
+					{ delta: { content: "first choice" }, finish_reason: null },
+					{ delta: {}, finish_reason: "stop" },
+				],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const response = await streamSimple(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: "Choose",
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		expect(response.stopReason).toBe("stop");
+		expect(response.content).toEqual([{ type: "text", text: "first choice" }]);
+	});
+
 	it("ignores null stream chunks from openai-compatible providers", async () => {
 		mockState.chunks = [
 			null,

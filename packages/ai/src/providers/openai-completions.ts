@@ -169,6 +169,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			type StreamingBlock = TextContent | ThinkingContent | StreamingToolCallBlock;
 			type StreamingToolCallDelta = NonNullable<ChatCompletionChunk.Choice.Delta["tool_calls"]>[number];
 
+			let sawTerminalFinishReason = false;
 			let textBlock: TextContent | null = null;
 			let thinkingBlock: ThinkingContent | null = null;
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
@@ -279,7 +280,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.usage = parseChunkUsage(chunk.usage, model, cacheWriteCost);
 				}
 
-				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+				if (
+					choices.some((candidate) => candidate.finish_reason !== null && candidate.finish_reason !== undefined)
+				) {
+					sawTerminalFinishReason = true;
+				}
+				const choice = choices[0];
 				if (!choice) continue;
 
 				// Fallback: some providers (e.g., Moonshot) return usage
@@ -395,6 +402,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			}
 			if (output.stopReason === "error") {
 				throw new Error(output.errorMessage || "Provider returned an error stop reason");
+			}
+			if (!sawTerminalFinishReason) {
+				throw new Error("OpenAI-compatible stream ended without a terminal finish_reason");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
