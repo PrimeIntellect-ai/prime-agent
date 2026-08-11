@@ -19,6 +19,7 @@ type Harness = {
 	};
 	sessionEventGeneration: number;
 	inputSubmissionGeneration: number;
+	pendingQueueEdit: symbol | undefined;
 	queueMutationChain: Promise<void>;
 	enqueueQueueMutation: <T>(run: () => Promise<T>) => Promise<T>;
 	applyQueueSelection: (text: string, targetLane: "steering" | "followUp") => Promise<boolean>;
@@ -57,6 +58,7 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		},
 		sessionEventGeneration: 0,
 		inputSubmissionGeneration: 0,
+		pendingQueueEdit: undefined,
 		queueMutationChain: Promise.resolve(),
 		enqueueQueueMutation: proto.enqueueQueueMutation,
 		applyQueueSelection: proto.applyQueueSelection,
@@ -163,7 +165,7 @@ describe("interactive queued-message editing", () => {
 		expect(harness.editor.getText()).toBe("newer typing");
 	});
 
-	it("ends browsing synchronously so another submission is not consumed by the pending edit", async () => {
+	it("routes another submission as new while a queue edit is pending", async () => {
 		let resolveMutation: (status: string) => void = () => {};
 		const harness = createHarness({ steering: ["queued"], followUp: [] });
 		harness.agentConnection.mutateQueuedMessage.mockImplementation(
@@ -175,7 +177,7 @@ describe("interactive queued-message editing", () => {
 		harness.browseQueueSelection(-1);
 		harness.editor.setText("");
 		const pending = harness.applyQueueSelection("edited", "steering");
-		expect(harness.queueSelection.isBrowsing).toBe(false);
+		expect(harness.queueSelection.isBrowsing).toBe(true);
 		await expect(harness.applyQueueSelection("new prompt", "steering")).resolves.toBe(false);
 		harness.inputSubmissionGeneration++;
 		harness.editor.setText("");
@@ -184,20 +186,53 @@ describe("interactive queued-message editing", () => {
 		expect(harness.editor.getText()).toBe("");
 	});
 
+	it.each(["rejected", "invalid", "unsupported"])(
+		"keeps the selection and stashed draft when a queue edit is %s",
+		async (status) => {
+			const harness = createHarness({ steering: ["queued"], followUp: [] }, status);
+			harness.editor.setText("draft");
+			harness.browseQueueSelection(-1);
+			harness.editor.setText("");
+
+			await harness.applyQueueSelection("edited", "steering");
+
+			expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "queued" });
+			expect(harness.queueSelection.hasDraft).toBe(true);
+			expect(harness.editor.getText()).toBe("edited");
+		},
+	);
+
+	it("keeps the selection and stashed draft when a queue edit request fails", async () => {
+		const harness = createHarness({ steering: ["queued"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockRejectedValue(new Error("connection lost"));
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.editor.setText("");
+
+		await expect(harness.applyQueueSelection("edited", "steering")).rejects.toThrow("connection lost");
+
+		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "queued" });
+		expect(harness.queueSelection.hasDraft).toBe(true);
+		expect(harness.editor.getText()).toBe("edited");
+	});
+
 	it("restores the submitted edit when its queue item vanishes before the mutation starts", async () => {
 		let releaseMutationChain: () => void = () => {};
 		const harness = createHarness({ steering: ["queued"], followUp: [] });
 		harness.queueMutationChain = new Promise<void>((resolve) => {
 			releaseMutationChain = resolve;
 		});
+		harness.editor.setText("draft");
 		harness.browseQueueSelection(-1);
 		harness.editor.setText("");
 		const pending = harness.applyQueueSelection("edited", "steering");
-		harness.connectionQueue = { steering: [], followUp: [] };
+		harness.replaceConnectionQueue({ steering: [], followUp: [] });
 		releaseMutationChain();
 		await pending;
 		expect(harness.agentConnection.mutateQueuedMessage).not.toHaveBeenCalled();
 		expect(harness.editor.getText()).toBe("edited");
+		expect(harness.queueSelection.hasDraft).toBe(true);
+		expect(harness.queueSelection.reset()).toBe("draft");
 		expect(harness.showStatus).toHaveBeenCalledWith("Queue changed; edit kept in the editor");
 	});
 
@@ -219,6 +254,7 @@ describe("interactive queued-message editing", () => {
 		// A session replacement resets queue state, then the user starts browsing
 		// the replacement session before the old daemon response arrives.
 		harness.sessionEventGeneration++;
+		harness.pendingQueueEdit = undefined;
 		harness.queueSelection.reset();
 		harness.connectionQueue = { steering: ["new queued"], followUp: [] };
 		harness.editor.setText("new draft");

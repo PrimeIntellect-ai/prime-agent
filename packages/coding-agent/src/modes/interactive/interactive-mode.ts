@@ -998,6 +998,7 @@ export class InteractiveMode {
 	private readonly queueSelection = new QueueSelection();
 	private isApplyingQueueSelectionText = false;
 	private queueMutationChain: Promise<void> = Promise.resolve();
+	private pendingQueueEdit: symbol | undefined;
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -2832,6 +2833,7 @@ export class InteractiveMode {
 		this.pendingMessagesContainer.clear();
 		this.queuedMessagesContainer.clear();
 		this.connectionQueue = { steering: [], followUp: [] };
+		this.pendingQueueEdit = undefined;
 		// The selection and its stashed draft belong to the previous session;
 		// every editor draft is cleared below, so discard rather than restore.
 		this.queueSelection.reset();
@@ -4595,7 +4597,7 @@ export class InteractiveMode {
 		this.defaultEditor.onSubmit = async (text: string) => {
 			const streamingBehavior = this.submittedInputBehavior;
 			this.submittedInputBehavior = "steer";
-			if (this.queueSelection?.isBrowsing) {
+			if (this.queueSelection?.isBrowsing && !this.pendingQueueEdit) {
 				const targetLane = streamingBehavior === "followUp" ? "followUp" : "steering";
 				try {
 					if (await this.applyQueueSelection(text, targetLane)) return;
@@ -6931,7 +6933,7 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const editorText = this.editor.getText();
 		const text = (this.editor.getExpandedText?.() ?? editorText).trim();
-		if (this.queueSelection?.isBrowsing) {
+		if (this.queueSelection?.isBrowsing && !this.pendingQueueEdit) {
 			await this.applyQueueSelection(text, "followUp").catch((error) =>
 				this.showError(error instanceof Error ? error.message : String(error)),
 			);
@@ -6961,6 +6963,7 @@ export class InteractiveMode {
 	}
 
 	private browseQueueSelection(direction: -1 | 1): void {
+		if (this.pendingQueueEdit) return;
 		const text = this.queueSelection.move(this.connectionQueue, this.editor.getText(), direction);
 		if (text === undefined) return;
 		this.setEditorTextFromQueueSelection(text);
@@ -6978,6 +6981,7 @@ export class InteractiveMode {
 	}
 
 	private moveQueueSelection(direction: -1 | 1): void {
+		if (this.pendingQueueEdit) return;
 		const submittedSelection = this.queueSelection.selected;
 		if (!submittedSelection) return;
 		const sessionGeneration = this.sessionEventGeneration;
@@ -7032,11 +7036,13 @@ export class InteractiveMode {
 	 * Empty text deletes; otherwise replaces, moving the item to `targetLane`.
 	 */
 	private applyQueueSelection(text: string, targetLane: "steering" | "followUp"): Promise<boolean> {
+		if (this.pendingQueueEdit) return Promise.resolve(false);
 		const submittedSelection = this.queueSelection.selected;
 		if (!submittedSelection) return Promise.resolve(false);
+		const pendingQueueEdit = Symbol("pending-queue-edit");
+		this.pendingQueueEdit = pendingQueueEdit;
 		const sessionGeneration = this.sessionEventGeneration;
 		const submissionGeneration = this.inputSubmissionGeneration;
-		const draft = this.queueSelection.reset();
 		const trimmed = text.trim();
 		const mutation =
 			trimmed.length === 0
@@ -7057,6 +7063,7 @@ export class InteractiveMode {
 					? submittedSelection.index
 					: lane.indexOf(submittedSelection.text);
 			if (resolvedIndex < 0) {
+				this.queueSelection.sync(this.connectionQueue);
 				if (submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore) {
 					this.setEditorTextFromQueueSelection(text);
 				}
@@ -7099,8 +7106,10 @@ export class InteractiveMode {
 					}
 				}
 				if (trimmed) this.editor.addToHistory?.(trimmed);
+				const draft = this.queueSelection.reset();
 				if (editorUntouched) this.setEditorTextFromQueueSelection(draft);
 			} else {
+				this.queueSelection.sync(this.connectionQueue);
 				// Enter submissions clear the editor before onSubmit runs; restore the
 				// edit so a failed mutation never swallows it.
 				if (editorUntouched) this.setEditorTextFromQueueSelection(text);
@@ -7112,6 +7121,8 @@ export class InteractiveMode {
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 			return true;
+		}).finally(() => {
+			if (this.pendingQueueEdit === pendingQueueEdit) this.pendingQueueEdit = undefined;
 		});
 	}
 
@@ -7323,7 +7334,7 @@ export class InteractiveMode {
 		this.clearCtrlCExitHint({ render: false });
 		// Leaving browse mode restores the stashed draft instead of arming an
 		// accidental empty-submit delete of the selected queued message.
-		this.editor.setText(this.queueSelection.isBrowsing ? this.queueSelection.reset() : "");
+		this.editor.setText(this.queueSelection.hasDraft ? this.queueSelection.reset() : "");
 		this.ui.requestRender();
 	}
 
