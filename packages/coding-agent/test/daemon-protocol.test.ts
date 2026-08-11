@@ -16,6 +16,7 @@ import {
 	DAEMON_SCHEMA_REVISION,
 	type DaemonCommand,
 	type DaemonOutbound,
+	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
 	salvageDaemonCommandId,
@@ -83,9 +84,41 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("model_catalog");
 	});
 
+	it("capability- and schema-gates queued message mutation at its introducing revision", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.mutate_queued_message).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 15,
+			capability: "queue_message_mutation",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("queue_message_mutation");
+	});
+
 	it("schema-gates the RLM max depth commands at their introducing revision", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_max_depth_status).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
 		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
+	});
+
+	it("schema-gates session commands that carry the telemetry policy", () => {
+		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual([
+			{ minProtocol: 7 },
+		]);
+		expect(
+			getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } }),
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
+		expect(getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1" })).toEqual([
+			{ minProtocol: 7 },
+		]);
+		expect(
+			getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1", telemetryDisabled: true }),
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
+		expect(
+			getDaemonCommandCompatibilities({
+				type: "reattach",
+				activeSessionId: "active-1",
+				targetActiveSessionId: "active-2",
+				telemetryDisabled: true,
+			}),
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
 	});
 
 	it("version- and capability-gates prompt admission cancellation", () => {
@@ -95,6 +128,14 @@ describe("daemon protocol helpers", () => {
 			capability: "prompt_admission_cancellation",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("prompt_admission_cancellation");
+	});
+
+	it("gates honest worker-state reporting at its introducing schema revision", () => {
+		// Revision 16 adds the "stopping" workerState and stops reporting
+		// disconnected workers as "ready". The field is optional and old clients
+		// ignore unknown values, so no capability gate is needed; the revision
+		// lets version probes distinguish daemons with the old semantics.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
 	});
 
 	it("keeps refine failure events backward-compatible on the existing session event channel", () => {

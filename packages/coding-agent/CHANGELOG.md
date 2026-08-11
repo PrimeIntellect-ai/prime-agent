@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+- Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.
+- Added a `ctrl+t` expand hint to collapsed thinking blocks, matching the tool output hint.
+- Changed expand/collapse hints to a consistent bracketed `(Ctrl+O to expand)` style across tool, message, summary, and error rows.
+- Added a configurable copy action to login dialogs so raw sign-in URLs can be copied without selecting wrapped text ([#643](https://github.com/PrimeIntellect-ai/prime-agent/issues/643)).
+- Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).
+- Changed sent agent messages in the IPython cell UI to show only the message text with a `╰─` gutter when expanded, matching received messages, and hid the raw `agent_message.send` receipt dictionary.
+- Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade prime-agent` ([#844](https://github.com/PrimeIntellect-ai/prime-agent/issues/844))
+- Fixed the agents view collapsing expanded subagent lists when returning from an opened agent ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
+- Kept the subagent summary row visible and selectable while its list is expanded in the agents view, so pressing enter on it collapses the list again ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
+
+## [0.7.1] - 2026-08-07
+
+- Fixed the bundled `websearch` skill description and missing-key guidance omitting the `/login` → **MCP Connections** step required to configure Serper.
+- Fixed `retry_worker` cancelling its own recovery when a stopped session worker left a saved stop marker behind, leaving the session stuck at "Session worker is not connected".
+
+## [0.7.0] - 2026-08-05
+
+### Breaking Changes
+
+- Changed agent messages to always use steering delivery and removed delivery-mode options from the Python, CLI, RPC, and connection APIs. Code passing `mode` to `agent_message.send`, or a delivery mode over the CLI/RPC, must drop it.
+
+### Changed
+
+- Changed self-updates to report the previous and new Prime Agent versions.
+
+### Fixed
+
+- Fixed the subagent summary showing retained children as idle while they run follow-up work.
+
 ## [0.6.1] - 2026-08-05
 
 - Added reverse tab navigation to the `/login` configuration menu and moved the model scope shortcut to `Alt+S`.

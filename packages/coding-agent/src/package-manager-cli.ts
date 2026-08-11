@@ -428,6 +428,7 @@ interface SelfUpdatePlan {
 	installSpec: string;
 	packageName: string;
 	shouldRun: boolean;
+	targetVersion?: string;
 }
 
 function setSelfUpdateNoChangeExitCode(): void {
@@ -447,7 +448,7 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 			packageRenameRequiresUpdate ||
 			isNewerPackageVersion(latestRelease.version, VERSION)
 		) {
-			return { installSpec, packageName, shouldRun: true };
+			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}
 	} catch {
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
@@ -1605,7 +1606,10 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						process.exitCode = 1;
 						return true;
 					}
-					console.log(chalk.green(`Updated ${APP_NAME}`));
+					const versionChange = selfUpdatePlan.targetVersion
+						? ` from v${VERSION} to v${selfUpdatePlan.targetVersion}`
+						: "";
+					console.log(chalk.green(`Updated ${APP_NAME}${versionChange}`));
 					if (process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1") {
 						return true;
 					}

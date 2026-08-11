@@ -1,11 +1,7 @@
 import { resolve } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
-import type {
-	AgentSessionMessageDeliveryMode,
-	AgentSessionMessageReceipt,
-	AgentSessionMessageSafetyStatus,
-} from "../../core/agent-messages.js";
+import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
@@ -47,6 +43,9 @@ import type {
 	AgentConnectionNavigateTreeResult,
 	AgentConnectionNewSessionOptions,
 	AgentConnectionPromptOptions,
+	AgentConnectionQueuedMessageLane,
+	AgentConnectionQueuedMessageMutation,
+	AgentConnectionQueuedMessageMutationStatus,
 	AgentConnectionQueueMode,
 	AgentConnectionQueueState,
 	AgentConnectionResourceSnapshot,
@@ -192,6 +191,15 @@ export class InProcessAgentConnection implements AgentConnection {
 		};
 	}
 
+	async mutateQueuedMessage(
+		lane: AgentConnectionQueuedMessageLane,
+		index: number,
+		expectedText: string,
+		mutation: AgentConnectionQueuedMessageMutation,
+	): Promise<AgentConnectionQueuedMessageMutationStatus> {
+		return this.session.mutateQueuedMessage(lane, index, expectedText, mutation);
+	}
+
 	async clearQueue(): Promise<AgentConnectionQueueState> {
 		return this.session.clearQueue();
 	}
@@ -242,11 +250,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		throw new Error("Heartbeats require daemon mode");
 	}
 
-	async sendAgentMessage(
-		_targetActiveSessionId: string,
-		_message: string,
-		_deliveryMode?: AgentSessionMessageDeliveryMode,
-	): Promise<AgentSessionMessageReceipt> {
+	async sendAgentMessage(_targetActiveSessionId: string, _message: string): Promise<AgentSessionMessageReceipt> {
 		throw new Error("Agent messaging requires daemon mode");
 	}
 

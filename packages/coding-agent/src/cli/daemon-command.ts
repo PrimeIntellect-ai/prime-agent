@@ -899,7 +899,6 @@ async function runSend(client: DaemonClient, args: string[], json: boolean): Pro
 		type: "send_message",
 		targetActiveSessionId: parsed.targetActiveSessionId,
 		fromActiveSessionId: parsed.fromActiveSessionId,
-		deliveryMode: parsed.deliveryMode,
 		message: parsed.message,
 	});
 	const data = requireSuccess(response);
@@ -918,13 +917,11 @@ async function runSend(client: DaemonClient, args: string[], json: boolean): Pro
 interface ParsedSendArgs {
 	targetActiveSessionId: string;
 	fromActiveSessionId?: string;
-	deliveryMode?: "auto" | "steer" | "follow_up";
 	message: string;
 }
 
 function parseSendArgs(args: string[]): ParsedSendArgs {
 	let fromActiveSessionId: string | undefined;
-	let deliveryMode: "auto" | "steer" | "follow_up" | undefined;
 	let targetActiveSessionId: string | undefined;
 	let explicitMessage: string | undefined;
 	const messageParts: string[] = [];
@@ -943,27 +940,6 @@ function parseSendArgs(args: string[]): ParsedSendArgs {
 			}
 			fromActiveSessionId = value;
 			index++;
-			continue;
-		}
-		if (parseOptions && arg === "--steer") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "steer";
-			continue;
-		}
-		if (parseOptions && arg === "--follow-up") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "follow_up";
-			continue;
-		}
-		if (parseOptions && arg === "--auto") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "auto";
 			continue;
 		}
 		if (parseOptions && arg === "--message") {
@@ -990,20 +966,15 @@ function parseSendArgs(args: string[]): ParsedSendArgs {
 	}
 
 	if (explicitMessage !== undefined && messageParts.length > 0) {
-		throw new Error(
-			"Usage: prime-agent send [--from <agent>] [--steer|--follow-up] <agent> [--message <message>|<message>]",
-		);
+		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
 	}
 	const message = (explicitMessage ?? messageParts.join(" ")).trim();
 	if (!targetActiveSessionId || !message) {
-		throw new Error(
-			"Usage: prime-agent send [--from <agent>] [--steer|--follow-up] <agent> [--message <message>|<message>]",
-		);
+		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
 	}
 	return {
 		targetActiveSessionId,
 		fromActiveSessionId,
-		deliveryMode,
 		message,
 	};
 }

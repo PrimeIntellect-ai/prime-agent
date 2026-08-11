@@ -1,6 +1,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 
+export type AgentExecutionMode = "interactive" | "print" | "json" | "rpc" | "acp";
+
 export interface AgentSessionRuntimeConfig {
 	cwd?: string;
 	agentDir?: string;
@@ -33,6 +35,10 @@ export interface AgentSessionRuntimeConfig {
 	 * so it survives the appMode="daemon" context switch.
 	 */
 	serializedRefine?: boolean;
+	/** User-facing client mode that created this session. The daemon is transport, not an execution mode. */
+	executionMode?: AgentExecutionMode;
+	/** Opt-out-only policy carried across daemon process boundaries. */
+	telemetryDisabled?: true;
 	/**
 	 * Initial goal to seed when creating a new top-level session (rlmDepth 0).
 	 * Ignored for subagent sessions and when the branch already has a persisted
@@ -77,6 +83,8 @@ export function mergeAgentSessionRuntimeConfig(
 				? { ...(base.extensionFlagValues ?? {}), ...(override.extensionFlagValues ?? {}) }
 				: undefined,
 		serializedRefine: override.serializedRefine ?? base.serializedRefine,
+		executionMode: override.executionMode ?? base.executionMode,
+		telemetryDisabled: base.telemetryDisabled || override.telemetryDisabled ? true : undefined,
 		initialGoal: override.initialGoal ?? base.initialGoal,
 	};
 }
@@ -94,6 +102,8 @@ function cloneAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): Agen
 		autonomous: mergeAutonomousConfig(undefined, config.autonomous),
 		extensionFlagValues: config.extensionFlagValues ? { ...config.extensionFlagValues } : undefined,
 		serializedRefine: config.serializedRefine,
+		executionMode: config.executionMode,
+		telemetryDisabled: config.telemetryDisabled,
 		initialGoal: config.initialGoal ? { ...config.initialGoal } : undefined,
 	};
 }

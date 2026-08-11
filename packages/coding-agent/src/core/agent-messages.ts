@@ -14,6 +14,7 @@ export const DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION = 20;
 export const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY = 3;
 export const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS = 1000;
 
+/** Legacy daemon wire input accepted and ignored for compatibility. */
 export type AgentSessionMessageDeliveryMode = "auto" | "steer" | "follow_up";
 export type AgentSessionMessageDeliveryStatus = "delivered" | "queued";
 export type AgentSessionMessageRuntimeKind = "top-level" | "subagent";
@@ -116,7 +117,6 @@ export interface AgentSessionMessagePayload {
 	/** Sender relationship from the receiver's point of view. */
 	fromRelationship?: AgentFamilyRelationship;
 	target: AgentSessionMessageEndpoint;
-	deliveryMode: AgentSessionMessageDeliveryMode;
 }
 
 export interface AgentSessionMessageDetails {
@@ -145,13 +145,12 @@ export interface AgentSessionMessageReceipt {
 	deliveredAt?: string;
 	/** Present when deliveryStatus is "queued": the message waits behind the target's current work. */
 	queuedAt?: string;
-	deliveryMode: AgentSessionMessageDeliveryMode;
+	deliveryMode?: "steer";
 }
 
 export interface AgentSessionMessageSendInput {
 	target: string;
 	message: string;
-	deliveryMode?: AgentSessionMessageDeliveryMode;
 	receiverRole?: AgentFamilyRelationship;
 }
 
@@ -343,16 +342,6 @@ export function normalizeAgentSessionMessage(message: string, maxChars = DEFAULT
 	return trimmed;
 }
 
-export function normalizeAgentSessionMessageDeliveryMode(value: unknown): AgentSessionMessageDeliveryMode | undefined {
-	if (value === undefined || value === null) {
-		return undefined;
-	}
-	if (value === "auto" || value === "steer" || value === "follow_up") {
-		return value;
-	}
-	throw new Error('agent_message.send mode must be "auto", "steer", or "follow_up"');
-}
-
 export function assertDirectAgentMessageTarget(target: string): string {
 	const normalized = target.trim();
 	if (!normalized) {
@@ -373,23 +362,6 @@ export function assertAgentMessageQueueCapacity(
 			`Target session has too many pending messages: ${unfinishedActionCount} unfinished, limit is ${maxPending}`,
 		);
 	}
-}
-
-export function resolveAgentSessionMessageStreamingBehavior(
-	isTargetStreaming: boolean,
-	deliveryMode: AgentSessionMessageDeliveryMode | undefined,
-): "steer" | "followUp" | undefined {
-	const mode = deliveryMode ?? "auto";
-	if (!isTargetStreaming) {
-		return undefined;
-	}
-	if (mode === "steer") {
-		return "steer";
-	}
-	if (mode === "follow_up") {
-		return "followUp";
-	}
-	return "steer";
 }
 
 export function parseAgentSessionMessagePromptId(text: string): string | undefined {
@@ -478,7 +450,7 @@ export function createAgentSessionMessageReceipt(
 		message: payload.message,
 		deliveryStatus: status,
 		...(status === "delivered" ? { deliveredAt: at } : { queuedAt: at }),
-		deliveryMode: payload.deliveryMode,
+		deliveryMode: "steer",
 	};
 }
 
@@ -579,7 +551,6 @@ export function createAgentMessageHostHandlers(
 						controller.sendAgentMessage({
 							target: entry.id,
 							message: payload.message as string,
-							deliveryMode: normalizeAgentSessionMessageDeliveryMode(payload.mode),
 							receiverRole: entry.relationship,
 						}),
 					),
@@ -629,7 +600,6 @@ export function createAgentMessageHostHandlers(
 			return (await controller.sendAgentMessage({
 				target,
 				message: payload.message,
-				deliveryMode: normalizeAgentSessionMessageDeliveryMode(payload.mode),
 				receiverRole: payload.receiver_role as AgentFamilyRelationship,
 			})) as unknown as Record<string, unknown>;
 		},

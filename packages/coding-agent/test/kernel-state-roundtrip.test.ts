@@ -22,7 +22,7 @@ function resolveKernelPython(): string | null {
 const python = resolveKernelPython();
 const describeIfKernel = python ? describe : describe.skip;
 
-describeIfKernel("kernel state snapshot round-trip (real kernel)", () => {
+describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["kernel-heavy"] }, () => {
 	let dir = "";
 	let snapshotPath = "";
 	let manifestPath = "";

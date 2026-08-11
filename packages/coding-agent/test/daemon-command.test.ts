@@ -282,31 +282,6 @@ describe("daemon command", () => {
 		});
 	});
 
-	it("honors send delivery-mode flags after the target", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"send",
-				"worker",
-				"--steer",
-				"stop",
-				"and",
-				"re-plan",
-			]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toEqual({
-			type: "send_message",
-			targetActiveSessionId: "worker",
-			fromActiveSessionId: undefined,
-			deliveryMode: "steer",
-			message: "stop and re-plan",
-		});
-	});
-
 	it("rejects unknown send options instead of folding them into the message", async () => {
 		await expect(
 			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "send", "worker", "--bogus", "hello"]),
@@ -327,7 +302,6 @@ describe("daemon command", () => {
 				"--socket",
 				"/tmp/prime-agent.sock",
 				"send",
-				"--follow-up",
 				"worker",
 				"--",
 				"--from",
@@ -341,7 +315,6 @@ describe("daemon command", () => {
 			type: "send_message",
 			targetActiveSessionId: "worker",
 			fromActiveSessionId: undefined,
-			deliveryMode: "follow_up",
 			message: "--from literal --steer",
 		});
 	});
@@ -366,28 +339,6 @@ describe("daemon command", () => {
 			targetActiveSessionId: "--target-like",
 			message: "--from literal",
 		});
-	});
-
-	it("rejects conflicting send delivery modes", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"send",
-				"--steer",
-				"--follow-up",
-				"worker",
-				"hello",
-			]),
-		).resolves.toBe(true);
-
-		expect(daemonClientMock.instances[0]?.requests).toEqual([]);
-		expect(
-			consoleErrorMessages.some(
-				(message) => typeof message === "string" && message.includes("Only one send delivery mode"),
-			),
-		).toBe(true);
 	});
 
 	it("rejects extra agent-messages status arguments", async () => {
@@ -423,7 +374,6 @@ describe("daemon command", () => {
 			type: "send_message",
 			targetActiveSessionId: "worker",
 			fromActiveSessionId: "planner",
-			deliveryMode: undefined,
 			message: "please keep --from literal --steer",
 		});
 	});

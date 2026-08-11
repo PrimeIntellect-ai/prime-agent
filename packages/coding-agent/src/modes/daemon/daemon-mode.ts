@@ -63,7 +63,6 @@ import {
 	formatAgentSessionNameUnavailable,
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
-	resolveAgentSessionMessageStreamingBehavior,
 	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
 import {
@@ -281,6 +280,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_model_catalog",
 	"get_available_models",
 	"get_queue",
+	"mutate_queued_message",
 	"clear_queue",
 	"abort_and_clear_queue",
 	"cron_list",
@@ -2839,7 +2839,6 @@ export class AgentDaemon {
 					targetSelector: input.target,
 					message: input.message,
 					fromState: requireCurrentState(),
-					deliveryMode: input.deliveryMode,
 					origin: "agent",
 				}),
 		};
@@ -3380,7 +3379,6 @@ export class AgentDaemon {
 						message: command.message,
 						sender: command.sender,
 						senderKey: command.sender.activeSessionId ?? `client:${command.sender.clientId}`,
-						deliveryMode: command.deliveryMode,
 						origin: "agent",
 					});
 					this.writeWorkerSuccess(client, command, receipt);
@@ -3945,7 +3943,6 @@ export class AgentDaemon {
 					fromState,
 					clientId: client.id,
 					senderKey: this.createCliAgentMessageSenderKey(),
-					deliveryMode: command.deliveryMode,
 					origin: command.agentOrigin === true ? "agent" : "cli",
 				});
 				return success(command.id, "send_message", receipt);
@@ -4183,6 +4180,17 @@ export class AgentDaemon {
 					steering: [...state.runtime.session.getSteeringMessagePreviews()],
 					followUp: [...state.runtime.session.getFollowUpMessagePreviews()],
 				});
+			}
+
+			case "mutate_queued_message": {
+				const state = this.getSessionState(command.activeSessionId);
+				const status = state.runtime.session.mutateQueuedMessage(
+					command.lane,
+					command.index,
+					command.expectedText,
+					command.mutation,
+				);
+				return success(command.id, "mutate_queued_message", { status });
 			}
 
 			case "clear_queue": {
@@ -5343,7 +5351,6 @@ export class AgentDaemon {
 		sender?: AgentSessionMessageSender;
 		clientId?: string;
 		senderKey?: string;
-		deliveryMode?: AgentSessionMessagePayload["deliveryMode"];
 		origin: "agent" | "cli";
 	}): Promise<AgentSessionMessageReceipt> {
 		if (this.agentMessagesPaused) {
@@ -5386,12 +5393,7 @@ export class AgentDaemon {
 						} else if (this.options.worker && options.fromState) {
 							// The supervisor can resolve and wake a saved worker even when it is no longer
 							// present in this worker's resident peer snapshot.
-							return this.sendRemoteAgentSessionMessage(
-								options.fromState,
-								targetSelector,
-								message,
-								options.deliveryMode,
-							);
+							return this.sendRemoteAgentSessionMessage(options.fromState, targetSelector, message);
 						} else {
 							throw error;
 						}
@@ -5423,7 +5425,6 @@ export class AgentDaemon {
 				this.createAgentSessionMessageSender(options.fromState, options.clientId ?? options.origin),
 			fromRelationship: this.agentMessageRelationship(options.fromState, targetState),
 			target: this.createAgentSessionMessageEndpoint(targetState),
-			deliveryMode: options.deliveryMode ?? "auto",
 		};
 		try {
 			const { status } = await this.withAgentMessageTargetLock(targetState.activeSessionId, async () => {
@@ -5455,7 +5456,6 @@ export class AgentDaemon {
 		fromState: ActiveSessionState,
 		targetSelector: string,
 		message: string,
-		deliveryMode?: AgentSessionMessagePayload["deliveryMode"],
 	): Promise<AgentSessionMessageReceipt> {
 		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 		if (!supervisorSocketPath) {
@@ -5476,7 +5476,6 @@ export class AgentDaemon {
 						message,
 						fromActiveSessionId: fromState.activeSessionId,
 						agentOrigin: true,
-						deliveryMode,
 					},
 					30_000,
 				);
@@ -5521,9 +5520,7 @@ export class AgentDaemon {
 			session.isRetrying ||
 			session.isBashRunning ||
 			session.unfinishedActionCount > 0;
-		const streamingBehavior =
-			resolveAgentSessionMessageStreamingBehavior(shouldQueue, payload.deliveryMode) ??
-			(payload.deliveryMode === "follow_up" ? "followUp" : "steer");
+		const streamingBehavior = "steer";
 		const message = createAgentSessionMessage(payload);
 		const prompt = message.content;
 

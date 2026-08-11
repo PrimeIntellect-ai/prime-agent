@@ -7,11 +7,7 @@
 
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type {
-	AgentSessionMessageDeliveryMode,
-	AgentSessionMessageReceipt,
-	AgentSessionMessageSafetyStatus,
-} from "../../core/agent-messages.js";
+import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
 import type {
@@ -84,7 +80,6 @@ export type RpcCommand =
 			type: "send_message";
 			targetActiveSessionId: string;
 			message: string;
-			deliveryMode?: AgentSessionMessageDeliveryMode;
 	  }
 	| { id?: string; type: "agent_messages_status" }
 	| { id?: string; type: "agent_messages_pause" }

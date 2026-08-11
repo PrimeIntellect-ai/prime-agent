@@ -1979,7 +1979,6 @@ describe("AgentSession queue characterization", () => {
 			id: "agentmsg_same_object",
 			source: AGENT_MESSAGE_SOURCE,
 			message: "same object",
-			deliveryMode: "follow_up" as const,
 			target: { activeSessionId: "worker-active", sessionId: "worker-session" },
 		};
 		const message = createAgentSessionMessage(payload);

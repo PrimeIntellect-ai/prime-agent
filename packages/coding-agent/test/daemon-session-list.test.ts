@@ -589,6 +589,28 @@ describe("buildRlmChildSnapshots", () => {
 		expect(snapshots.map((snapshot) => [snapshot.id, snapshot.status])).toEqual([["sub-aaa", "running"]]);
 	});
 
+	it("keeps terminal run status while projecting a retained child's active follow-up", () => {
+		const parent = makeState({
+			activeSessionId: "parent",
+			childRunStatuses: { "sub-aaa": "done" },
+		});
+		const activeRetainedChild = makeState({
+			activeSessionId: "child",
+			isStreaming: true,
+			metadata: {
+				kind: "subagent",
+				createdAt: 1,
+				parentActiveSessionId: "parent",
+				rlmChildId: "sub-aaa",
+			},
+		});
+
+		expect(buildRlmChildSnapshots("parent", [parent, activeRetainedChild])[0]).toMatchObject({
+			status: "done",
+			activity: { kind: "writing" },
+		});
+	});
+
 	it("includes in-flight assistant output in child snapshots", () => {
 		const parent = makeState({ activeSessionId: "parent" });
 		const child = makeState({

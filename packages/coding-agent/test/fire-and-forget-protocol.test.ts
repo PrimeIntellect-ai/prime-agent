@@ -12,7 +12,6 @@ describe("fire-and-forget agent protocol", () => {
 			from: { activeSessionId: "active-child", sessionId: "child-id", sessionName: "worker" },
 			fromRelationship: "child",
 			target: endpoint,
-			deliveryMode: "auto",
 		});
 		expect(prompt).toContain("[from child:worker]");
 		expect(parseAgentSessionMessagePromptId(prompt)).toBe("agentmsg_reply");
@@ -30,7 +29,6 @@ describe("fire-and-forget agent protocol", () => {
 			},
 			fromRelationship: "sibling",
 			target: endpoint,
-			deliveryMode: "auto",
 		});
 
 		expect(prompt.startsWith("[from sibling:worker from parent]\n")).toBe(true);
@@ -46,7 +44,6 @@ describe("fire-and-forget agent protocol", () => {
 			from: { activeSessionId: "active-child", sessionId: "child-id", sessionName: "child\nextra" },
 			fromRelationship: "child",
 			target: endpoint,
-			deliveryMode: "auto",
 		});
 
 		expect(prompt.startsWith("[from child:child extra]\nAgent-to-agent message received.")).toBe(true);
@@ -60,7 +57,6 @@ describe("fire-and-forget agent protocol", () => {
 			message: "continue",
 			fromRelationship: "parent",
 			target: endpoint,
-			deliveryMode: "auto",
 		});
 		expect(prompt.startsWith("[from parent]\n")).toBe(true);
 	});

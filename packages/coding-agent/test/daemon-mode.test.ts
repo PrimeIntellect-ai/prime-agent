@@ -1385,12 +1385,7 @@ describe("daemon mode helpers", () => {
 				origin: "agent",
 			}),
 		).resolves.toEqual(receipt);
-		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(
-			source,
-			remoteSelector,
-			"continue remotely",
-			undefined,
-		);
+		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, remoteSelector, "continue remotely");
 	});
 
 	it("routes nonresident agent-message targets through the supervisor wake path", async () => {
@@ -1436,7 +1431,7 @@ describe("daemon mode helpers", () => {
 				origin: "agent",
 			}),
 		).rejects.toThrow("Unknown active session: deleted-child");
-		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "deleted-child", "continue", undefined);
+		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "deleted-child", "continue");
 	});
 
 	it("rejects invalid nonresident agent messages before remote fallback", async () => {
@@ -1731,7 +1726,6 @@ describe("daemon mode helpers", () => {
 				targetSelector: string;
 				message: string;
 				fromState?: ActiveSessionState;
-				deliveryMode?: "auto" | "steer" | "follow_up";
 				origin: "agent" | "cli";
 			}): Promise<unknown>;
 		};
@@ -1750,21 +1744,50 @@ describe("daemon mode helpers", () => {
 			target: { activeSessionId: targetState.activeSessionId },
 		});
 		expect(acceptAgentMessagePrompt.mock.calls[0]?.[1]).toMatchObject({ streamingBehavior: "steer" });
+	});
 
-		acceptAgentMessagePrompt.mockClear();
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "please continue later",
-				fromState,
-				deliveryMode: "follow_up",
-				origin: "agent",
-			}),
-		).resolves.toMatchObject({
-			deliveryStatus: "queued",
-			target: { activeSessionId: targetState.activeSessionId },
+	it("ignores a legacy follow-up mode and always steers agent messages", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
 		});
-		expect(acceptAgentMessagePrompt.mock.calls[0]?.[1]).toMatchObject({ streamingBehavior: "followUp" });
+		const targetState = makeState("target");
+		const queueAgentMessagePrompt = vi.fn(async () => true);
+		targetState.runtime = {
+			...targetState.runtime,
+			cwd: "/tmp",
+			session: {
+				sessionId: "session-target",
+				sessionName: "Target",
+				isStreaming: true,
+				isCompacting: false,
+				isRetrying: false,
+				isBashRunning: false,
+				unfinishedActionCount: 0,
+				queueAgentMessagePrompt,
+			},
+		} as never;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(targetState.activeSessionId, targetState);
+
+		const response = await internals.handleCommand(makeClient("legacy-client", targetState.activeSessionId), {
+			type: "send_message",
+			targetActiveSessionId: targetState.activeSessionId,
+			message: "do not defer",
+			deliveryMode: "follow_up",
+		});
+
+		expect(response).toMatchObject({ data: { deliveryStatus: "queued", deliveryMode: "steer" } });
+		expect(queueAgentMessagePrompt).toHaveBeenCalledWith(
+			expect.stringContaining("do not defer"),
+			"steer",
+			expect.objectContaining({ customType: "agent_message" }),
+		);
 	});
 
 	it("rate limits agent messages per sender and target pair", async () => {
@@ -8274,6 +8297,36 @@ describe("daemon mode helpers", () => {
 			rollbackId: undefined,
 			global: undefined,
 		});
+	});
+
+	it("routes queued message mutation to the active session", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const mutateQueuedMessage = vi.fn(() => "applied" as const);
+		const state = makeState("active-1") as ActiveSessionState;
+		(state.runtime as { session: unknown }).session = { mutateQueuedMessage };
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		const client = makeClient("client-1", state.activeSessionId);
+		const mutation = { type: "replace", text: "edited", lane: "followUp" } as const;
+		await expect(
+			internals.handleCommand(client, {
+				type: "mutate_queued_message",
+				activeSessionId: state.activeSessionId,
+				lane: "followUp",
+				index: 0,
+				expectedText: "edited",
+				mutation,
+			}),
+		).resolves.toMatchObject({ success: true, data: { status: "applied" } });
+		expect(mutateQueuedMessage).toHaveBeenCalledWith("followUp", 0, "edited", mutation);
 	});
 
 	it("gets and sets RLM max depth directly on the active session", async () => {

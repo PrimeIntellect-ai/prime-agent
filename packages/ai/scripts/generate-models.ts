@@ -135,27 +135,24 @@ interface PrimeInferenceModelMetadata {
 }
 
 // The full Prime Inference catalog is registered (minus raw/duplicate variants).
-// The /models endpoint publishes pricing only, so context/output limits and
-// modalities come from the OpenRouter catalog, which Prime routes most models
-// through. Entries here override OpenRouter where the Prime route enforces a
-// different limit (verified against the live API) or fill gaps for models
-// OpenRouter does not list or leaves incomplete.
+// Prime's /models endpoint publishes pricing only, so context/output limits and
+// modalities are read from OpenRouter's public catalog, used here purely as a
+// published spec sheet for the same upstream models — requests always go to
+// Prime's own baseUrl. Entries below override those specs where the Prime route
+// enforces a different limit (verified against the live API) or fill gaps for
+// models OpenRouter does not list or leaves incomplete.
 const PRIME_INFERENCE_MODEL_METADATA: Record<string, PrimeInferenceModelMetadata> = {
-	// Verified 2026-07-08: these routes reject prompts above 200k tokens even
-	// though OpenRouter reports 1M. Every other Claude route accepted a >200k
-	// prompt (opus-4.7/4.8, sonnet-4.6/5, fable-5 verified individually).
+	// These routes accept 200k, checked against the live API 2026-07-08. The
+	// other Claude routes take the full window their spec lists.
 	"anthropic/claude-sonnet-4": { contextWindow: 200000 },
 	"anthropic/claude-sonnet-4.5": { contextWindow: 200000 },
-	// Enforced windows measured against the live gateway 2026-07-08 where they
-	// are SMALLER than OpenRouter's listing — over-declaring breaks context
-	// tracking. (Measured by binary-searching the max_tokens reject boundary.)
+	// Windows confirmed against the live API 2026-07-08 where they are SMALLER
+	// than the published spec — over-declaring breaks context tracking.
 	"meta-llama/llama-3.2-1b-instruct": { contextWindow: 60000 },
 	"meta-llama/llama-3.2-3b-instruct": { contextWindow: 80000 },
 	"minimax/minimax-m3": { contextWindow: 524288 },
 	"moonshotai/kimi-k2-0905": { contextWindow: 98304 },
 	"nvidia/nemotron-3-super-120b-a12b": { contextWindow: 262144, maxTokens: 4096 },
-	// Preserve the existing output cap when OpenRouter leaves it unspecified.
-	"nvidia/nvidia-nemotron-3-ultra-550b-a55b": { contextWindow: 131072, maxTokens: 16384 },
 	// Enforced window is LARGER than OpenRouter's listing.
 	"qwen/qwen3-30b-a3b-instruct-2507": { contextWindow: 262144 },
 	// OpenRouter has no max_completion_tokens for the rest of these.
@@ -206,10 +203,10 @@ const PRIME_INFERENCE_FEATURED_MODELS = new Set([
 	"z-ai/glm-5.2",
 ]);
 
-// Prime ids whose OpenRouter listing uses a different id.
-const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {
-	"nvidia/nvidia-nemotron-3-ultra-550b-a55b": "nvidia/nemotron-3-ultra-550b-a55b",
-};
+// Prime ids whose OpenRouter listing uses a different id. Empty today — Prime
+// currently publishes ids that match OpenRouter's, but HF-style ids show up
+// whenever a new route is added, so the mapping stays.
+const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {};
 
 // Conservative fallbacks for catalog models with no OpenRouter match and no
 // override above: an under-declared window degrades gracefully, an

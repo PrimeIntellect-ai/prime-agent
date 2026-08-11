@@ -78,7 +78,7 @@ export interface SessionSummary {
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
 	/** Resident session-host process state, populated by the global supervisor. */
-	workerState?: "starting" | "ready" | "recovering" | "failed";
+	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
 	workerPid?: number;
 }
@@ -394,6 +394,7 @@ function rlmChildSnapshotForActiveSession(
 		? parent?.runtime.session.getRlmChildRunStatus(metadata.rlmChildId)
 		: undefined;
 	const status = runStatus ?? (session.isSessionActive ? "running" : "done");
+	const isActive = status === "running" || session.isSessionActive;
 	return {
 		id: metadata.rlmChildId ?? activeSession.activeSessionId,
 		parentId: parentNodeId,
@@ -407,7 +408,7 @@ function rlmChildSnapshotForActiveSession(
 		tokenCount: session._contextTokensForCurrentMessages(),
 		recap: session.getCurrentRecap(),
 		sessionDir: metadata.sessionDir ?? session.sessionManager.getSessionDir(),
-		activity: status === "running" ? { kind: session.isStreaming ? "writing" : "waiting" } : undefined,
+		activity: isActive ? { kind: session.isStreaming ? "writing" : "waiting" } : undefined,
 	};
 }
 

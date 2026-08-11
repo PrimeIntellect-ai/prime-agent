@@ -338,7 +338,7 @@ async function runRpcModeWithConnectionInternal(
 				return success(
 					id,
 					command.type,
-					await connection.sendAgentMessage(command.targetActiveSessionId, command.message, command.deliveryMode),
+					await connection.sendAgentMessage(command.targetActiveSessionId, command.message),
 				);
 			case "agent_messages_status":
 				return success(id, command.type, await connection.getAgentMessageStatus());
