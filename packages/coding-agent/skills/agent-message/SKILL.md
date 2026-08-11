@@ -47,6 +47,28 @@ if child is not None:
   the target's current work allows (`send` does not block waiting for that).
   Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
 
+## Judging message age
+
+A queued message waits for the target's current work and can arrive many turns
+after it was written. Every delivered message therefore carries the time the
+sender composed it, on a `Composed:` line in the message header:
+
+```text
+[from parent]
+Agent-to-agent message received.
+Source: agent_message
+From: lead, active active-parent, session parent-id
+To: worker, active active-child, session child-id
+Message id: agentmsg_demo
+Composed: 2026-08-11T10:15:00.000Z
+
+Please inspect the latest result.
+```
+
+Compare it against the current time before acting. When a message is old, re-read
+the artifact it names instead of assuming a phrase like "the latest result" still
+refers to what the sender meant, and check whether a later message supersedes it.
+
 ## Safety
 
 - Do not delete a child immediately after `send`: delivered follow-ups may still

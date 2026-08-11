@@ -117,11 +117,22 @@ export interface AgentSessionMessagePayload {
 	/** Sender relationship from the receiver's point of view. */
 	fromRelationship?: AgentFamilyRelationship;
 	target: AgentSessionMessageEndpoint;
+	/**
+	 * ISO 8601 time the sender composed the message.
+	 *
+	 * A steered message can wait an unbounded number of turns behind the target's
+	 * own work, so the recipient needs the origination time to judge staleness.
+	 * This mirrors the mandatory `Date:` origination header of RFC 5322 3.6.1: the
+	 * transport stamps when the message was written, and the reader decides how old
+	 * is too old.
+	 */
+	composedAt?: string;
 }
 
 export interface AgentSessionMessageDetails {
 	id: string;
 	message: string;
+	composedAt?: string;
 	from?: AgentSessionMessageSender;
 	fromRelationship?: AgentFamilyRelationship;
 	target?: AgentSessionMessageEndpoint;
@@ -399,6 +410,11 @@ export function createAgentSessionMessagePrompt(payload: AgentSessionMessagePayl
 	}
 	lines.push(`To: ${formatAgentSessionMessageEndpoint(payload.target)}`);
 	lines.push(`Message id: ${payload.id}`);
+	// Strictly after the id line: parseAgentSessionMessagePromptId reads the header
+	// by fixed offsets and stops there, so appended metadata cannot shift it.
+	if (payload.composedAt) {
+		lines.push(`Composed: ${payload.composedAt}`);
+	}
 	lines.push("");
 	lines.push(payload.message);
 	return lines.join("\n");
@@ -416,6 +432,7 @@ export function createAgentSessionMessage(
 		details: {
 			id: payload.id,
 			message: payload.message,
+			...(payload.composedAt ? { composedAt: payload.composedAt } : {}),
 			from: payload.from,
 			fromRelationship: payload.fromRelationship,
 			target: payload.target,
