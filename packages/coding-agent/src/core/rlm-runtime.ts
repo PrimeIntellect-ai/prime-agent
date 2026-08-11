@@ -91,6 +91,34 @@ export function normalizeRequestedRlmSubagentModel(value: unknown): string | und
 	return model;
 }
 
+const RLM_SUBAGENT_THINKING_LEVELS: readonly ThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
+/** Validate and normalize an orchestrator-supplied subagent thinking level. */
+export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run thinking_level must be a string");
+	}
+	const level = value.trim().toLowerCase();
+	if (!level) {
+		throw new Error("rlm.run thinking_level must not be empty");
+	}
+	if (!RLM_SUBAGENT_THINKING_LEVELS.includes(level as ThinkingLevel)) {
+		throw new Error(`rlm.run thinking_level must be one of: ${RLM_SUBAGENT_THINKING_LEVELS.join(", ")}`);
+	}
+	return level as ThinkingLevel;
+}
+
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
 export function createDefaultRlmSubagentSessionName(prompt: string, childId: string): string {
 	const promptSlug = prompt

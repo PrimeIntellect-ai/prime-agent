@@ -150,10 +150,22 @@ await rlm.run("subtask")
 
 Supported `rlm.run` options are:
 
-- `name`: a unique readable child session name; and
-- `model`: an exact `provider/model` selector from `rlm.find_models()`.
+- `name`: a unique readable child session name;
+- `model`: an exact `provider/model` selector from `rlm.find_models()`; and
+- `thinking_level`: an exact cross-provider thinking level from `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
 Unknown options fail instead of being ignored. Model search is bounded to active, non-expired credentials. If an exact selection is unavailable or fails auth preflight, spawn fails instead of silently falling back to another model. A child otherwise inherits the parent model.
+
+`thinking_level` pins the child's thinking level exactly. When omitted, behavior is unchanged: the child inherits the parent's current level, clamped to the selected model. When supplied, selection is exact and fail-closed: the value is validated against the supported global set and then against the selected model's supported levels before admission, and a malformed value or an unsupported level fails the spawn instead of being silently clamped. This lets an orchestrator guarantee policies such as "Luna must run at max":
+
+```python
+handle = await rlm(
+    "implement the parser",
+    name="parser-worker",
+    model="openai-codex/gpt-5.6-luna",
+    thinking_level="max",
+)
+```
 
 ## Child Execution
 
@@ -161,12 +173,13 @@ Unknown options fail instead of being ignored. Model search is bounded to active
 
 1. Check `RLM_DEPTH < RLM_MAX_DEPTH`.
 2. Resolve the requested model or inherit the parent model.
-3. Create a `sub-xxxxxxxx` child directory under the parent artifact directory.
-4. Admit the task into the parent registry and return its `RLMSpawnHandle`.
-5. In detached work, create a child `SessionManager`, `Agent`, and `AgentSession`.
-6. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and thinking configuration.
-7. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
-8. Attribute child usage to the parent assistant turn and persist the attribution.
+3. Resolve the thinking level: an explicit `thinking_level` is validated against the selected model's supported levels and applied exactly, failing admission when unsupported; when omitted, the parent's current level is clamped to the selected model.
+4. Create a `sub-xxxxxxxx` child directory under the parent artifact directory.
+5. Admit the task into the parent registry and return its `RLMSpawnHandle`.
+6. In detached work, create a child `SessionManager`, `Agent`, and `AgentSession`.
+7. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and thinking configuration.
+8. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
+9. Attribute child usage to the parent assistant turn and persist the attribution.
 
 Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their own `RLM_SESSION_DIR`. The default maximum depth is 1, so root sessions may create children and those children may not create grandchildren unless the limit is configured higher.
 
@@ -260,6 +273,7 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 | Depth limit reached | Python raises before opening a comm; the host checks again. |
 | Unsupported options | Host rejects the request. |
 | Requested model unavailable | Spawn fails instead of substituting another model. |
+| Invalid or model-unsupported `thinking_level` | Spawn fails before admission; no child directory or registry entry is created. |
 | Shell-channel comm reply | Deadlock risk; current replies use control. |
 | Child cancellation | Host aborts the child and removes failed/cancelled registry entries. |
 | Parent teardown | Active descendants are cancelled and their runtimes are closed. |

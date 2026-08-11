@@ -61,38 +61,40 @@ class RlmSubagentRegistryTest(unittest.TestCase):
 
         self.assertEqual(subagents[0].status, "error")
 
-    def test_forwards_orchestrator_chosen_name_and_model_to_host(self) -> None:
+    def test_forwards_orchestrator_chosen_name_model_and_thinking_level_to_host(self) -> None:
         host_request = AsyncMock(
             return_value={
                 "rlm_child_id": "sub-a1b2c3d4",
-                "name": "api-reviewer",
+                "name": "parser-worker",
                 "session_dir": "/tmp/parent/sub-a1b2c3d4",
-                "model": "deepseek/deepseek-v4-flash",
+                "model": "openai-codex/gpt-5.6-luna",
             }
         )
 
         with patch.object(rlm_module, "host_request", host_request):
             result = asyncio.run(
                 rlm_module.rlm(
-                    "check the API",
-                    name="api-reviewer",
-                    model="deepseek/deepseek-v4-flash",
+                    "implement the parser",
+                    name="parser-worker",
+                    model="openai-codex/gpt-5.6-luna",
+                    thinking_level="max",
                 )
             )
 
         host_request.assert_awaited_once_with(
             "rlm.run",
             {
-                "prompt": "check the API",
+                "prompt": "implement the parser",
                 "kwargs": {
-                    "name": "api-reviewer",
-                    "model": "deepseek/deepseek-v4-flash",
+                    "name": "parser-worker",
+                    "model": "openai-codex/gpt-5.6-luna",
+                    "thinking_level": "max",
                 },
             },
         )
         self.assertEqual(result.rlm_child_id, "sub-a1b2c3d4")
-        self.assertEqual(result.name, "api-reviewer")
-        self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
+        self.assertEqual(result.name, "parser-worker")
+        self.assertEqual(result.model, "openai-codex/gpt-5.6-luna")
 
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(

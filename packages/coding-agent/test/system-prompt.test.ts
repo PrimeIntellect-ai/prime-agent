@@ -114,6 +114,19 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).not.toContain("model choices for subagents");
 	});
 
+	test("documents exact per-subagent thinking level selection", () => {
+		const prompt = buildRlmPrompt({
+			cwd: "/repo",
+			messagesPath: "/repo/.pi/sessions/session.jsonl",
+			activeTools: ["ipython"],
+		});
+
+		expect(prompt).toContain("thinking_level='max'");
+		expect(prompt).toContain("off, minimal, low, medium, high, xhigh, and max");
+		expect(prompt).toContain("inherits your thinking level");
+		expect(prompt).toContain("fails spawn rather than silently clamping");
+	});
+
 	test("only documents ipython shell prefixes when ipython is active", () => {
 		const prompt = buildRlmPrompt({
 			cwd: "/repo",

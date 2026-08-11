@@ -7306,7 +7306,7 @@ describe("daemon mode helpers", () => {
 				sessionName: childSessionName,
 				sessionDir: join(tempDir, "child"),
 				model: {} as Model<Api>,
-				thinkingLevel: "off",
+				thinkingLevel: "max",
 				serviceTier: null,
 				scopedModels: [],
 				activeToolNames: [],
@@ -7327,6 +7327,7 @@ describe("daemon mode helpers", () => {
 			expect(publishedWhileBinding).toBe(true);
 
 			const childOptions = createRuntime.mock.calls[1]?.[0];
+			expect(childOptions?.sessionOptions?.thinkingLevel).toBe("max");
 			const childController = childOptions?.sessionOptions?.agentMessageController;
 			expect(childController).toBeDefined();
 			const currentChild = (await childController?.listAgents())?.current;

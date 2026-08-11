@@ -144,6 +144,14 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
     ``model`` selects a child with an exact ``provider/model`` selector.
+
+    ``thinking_level`` optionally pins the child's cross-provider thinking
+    level to one of ``off``, ``minimal``, ``low``, ``medium``, ``high``,
+    ``xhigh``, or ``max``. When omitted, the child inherits the parent's level
+    clamped to the selected model. When supplied, selection is exact and
+    fail-closed: spawn admission fails if the value is malformed or the
+    selected model does not support it, so an explicit request is never
+    silently clamped.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")

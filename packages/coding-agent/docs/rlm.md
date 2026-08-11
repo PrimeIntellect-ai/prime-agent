@@ -61,6 +61,19 @@ print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 
 The call returns immediately after task admission with a child handle; it never waits for or returns the child's answer. The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model.
 
+Pick a model and pin its thinking level exactly with `thinking_level`:
+
+```python
+handle = await rlm(
+    "Implement the parser",
+    name="parser-worker",
+    model="openai-codex/gpt-5.6-luna",
+    thinking_level="max",
+)
+```
+
+`thinking_level` accepts Prime Agent's cross-provider levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. When omitted, behavior is unchanged: the child inherits the parent's current level, clamped to the selected model. When supplied, selection is exact and fail-closed: spawn admission fails if the value is malformed or the selected model does not support it, rather than silently clamping — so an orchestrator can guarantee policies such as "Luna must run at max."
+
 Spawn independent children in separate calls and end the turn instead of awaiting completion:
 
 ```python

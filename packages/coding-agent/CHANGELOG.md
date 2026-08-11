@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added an optional `thinking_level` option to `rlm(...)` for exact, fail-closed per-child thinking-level selection (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); omitting it keeps the child inheriting the parent's level clamped to the selected model.
 - Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.
 - Added a `ctrl+t` expand hint to collapsed thinking blocks, matching the tool output hint.
 - Changed expand/collapse hints to a consistent bracketed `(Ctrl+O to expand)` style across tool, message, summary, and error rows.

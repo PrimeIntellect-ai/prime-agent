@@ -247,6 +247,64 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
+	it("uses an explicitly requested child thinking level without changing the parent", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "parent-model", reasoning: true }],
+		});
+		try {
+			const parentModel = harness.getModel("parent-model")!;
+			parentModel.thinkingLevelMap = { max: "max" };
+			harness.session.setThinkingLevel("low");
+			harness.setResponses([fauxAssistantMessage("max-effort child answer")]);
+
+			const result = await harness.session.runRlmChild("use max effort", {
+				thinking_level: "max",
+			});
+
+			await vi.waitFor(async () => {
+				expect((await harness.session.listRlmSubagents()).subagents[0]?.status).toBe("completed");
+			});
+			const child = harness.session.getRlmChildSession(result.rlm_child_id);
+			expect(child?.thinkingLevel).toBe("max");
+			expect(harness.session.thinkingLevel).toBe("low");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("rejects malformed or model-unsupported explicit child thinking levels before admission", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [
+				{ id: "parent-model", reasoning: true },
+				{ id: "child-model", reasoning: false },
+			],
+		});
+		try {
+			await expect(harness.session.runRlmChild("bad type", { thinking_level: 42 })).rejects.toThrow(
+				"rlm.run thinking_level must be a string",
+			);
+			await expect(harness.session.runRlmChild("empty level", { thinking_level: "   " })).rejects.toThrow(
+				"rlm.run thinking_level must not be empty",
+			);
+			await expect(harness.session.runRlmChild("unknown level", { thinking_level: "extreme" })).rejects.toThrow(
+				"rlm.run thinking_level must be one of: off, minimal, low, medium, high, xhigh, max",
+			);
+			await expect(
+				harness.session.runRlmChild("unsupported exact level", {
+					model: `${provider}/child-model`,
+					thinking_level: "high",
+				}),
+			).rejects.toThrow(
+				`Requested subagent thinking level "high" is unsupported by model "${provider}/child-model". Available: off`,
+			);
+			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("runs and retains a child on an explicitly selected model", async () => {
 		const harness = await createHarness({
 			provider,
