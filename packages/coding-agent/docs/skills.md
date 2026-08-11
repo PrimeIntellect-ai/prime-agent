@@ -165,7 +165,11 @@ await web_search.run("prime agent skills")
 help(web_search)
 ```
 
-Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.prime/agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Prime Agent rebuilds the kernel venv so dependency changes are picked up.
+Python skills are installed editable into the kernel venv during kernel setup. Prime Agent first reuses a compatible legacy venv at `~/.prime/agent/kernel-venv`; otherwise it publishes immutable environments under `~/.prime/agent/kernel-venv.generations`. Set `PRIME_AGENT_KERNEL_VENV_ROOT` to move that generation root.
+
+`PRIME_AGENT_KERNEL_VENV` remains an exact venv-directory override: the returned interpreter is `<value>/bin/python`, not a generated sibling. Prime Agent creates a missing exact override atomically, but it will not replace a stale one because another kernel may still be using its files. Stop dependent sessions and remove or move the stale directory, choose a new override path, or use `PRIME_AGENT_KERNEL_PYTHON`.
+
+Prime Agent retains at most one inactive published environment. Each resolver and spawned kernel records a PID plus process-start identity lease; older environments are reclaimed only after every well-formed lease is provably dead, while malformed or unreadable leases are conservatively protected. Live generations are exempt from the inactive-retention target so an update never blocks startup; after their processes exit, the next bootstrap reclaims them. A `pyproject.toml` change selects a new immutable environment, while an unchanged optional-skill installation failure reuses its partial environment instead of retrying and consuming disk on every launch.
 
 If you set `PRIME_AGENT_KERNEL_PYTHON`, Prime Agent does not install packages into that environment. The Python must already have `ipykernel`, `prime-agent-runtime`, and the default runtime packages installed. Missing Python skill imports are disabled with a warning and calling the skill raises a `RuntimeError`.
 

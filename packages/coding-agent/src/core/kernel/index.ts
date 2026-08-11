@@ -8,7 +8,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
-import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
+import {
+	ensureKernelPython,
+	type KernelBootstrapProgressHandler,
+	type KernelPythonSkill,
+	registerKernelPythonLease,
+} from "./bootstrap.js";
 import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
 	buildListNamesCode,
@@ -521,6 +526,7 @@ export class KernelManager {
 	// Set instead of `kernel` when the kernel was forked from the forkserver: it is
 	// not a direct child, so it has no ChildProcess handle and is killed by pid.
 	private kernelPid?: number;
+	private readonly kernelEnvironmentLeaseReleases = new Map<number, () => void>();
 	/** Polls a forked kernel's pid for death (no "exit" event on a non-child). */
 	private forkedLivenessTimer?: ReturnType<typeof globalThis.setInterval>;
 	private shell?: Dealer;
@@ -665,6 +671,10 @@ export class KernelManager {
 			});
 
 			kernel.on("exit", (code, signal) => {
+				if (kernel.pid) {
+					this.kernelEnvironmentLeaseReleases.get(kernel.pid)?.();
+					this.kernelEnvironmentLeaseReleases.delete(kernel.pid);
+				}
 				if (this.kernel !== kernel) return;
 				if (this.state !== "shutdown") {
 					this.appendKernelDiagnostic(`unexpected exit code=${code} signal=${signal}`);
@@ -673,6 +683,23 @@ export class KernelManager {
 				liveKernels.delete(this);
 				this.cleanupResources();
 			});
+		}
+
+		const launchedKernelPid = forked ? this.kernelPid : this.kernel?.pid;
+		if (launchedKernelPid) {
+			try {
+				const releaseLease = await registerKernelPythonLease(python, launchedKernelPid);
+				this.kernelEnvironmentLeaseReleases.set(launchedKernelPid, releaseLease);
+				const alreadyExited = forked ? this.forkedKernelDied() : this.kernel?.exitCode !== null;
+				if (alreadyExited) {
+					releaseLease();
+					this.kernelEnvironmentLeaseReleases.delete(launchedKernelPid);
+				}
+			} catch (error) {
+				this.appendKernelDiagnostic(`environment lease failed: ${errorMessage(error)}`);
+				await this.kill();
+				throw error;
+			}
 		}
 
 		const connectionPath = connection.path;
@@ -720,6 +747,10 @@ export class KernelManager {
 		this.forkedLivenessTimer = globalThis.setInterval(() => {
 			if (this.state !== "running") return;
 			if (!this.forkedKernelDied()) return;
+			if (this.kernelPid !== undefined) {
+				this.kernelEnvironmentLeaseReleases.get(this.kernelPid)?.();
+				this.kernelEnvironmentLeaseReleases.delete(this.kernelPid);
+			}
 			this.appendKernelDiagnostic("forked kernel exited unexpectedly");
 			this.state = "shutdown";
 			liveKernels.delete(this);
@@ -1285,6 +1316,25 @@ export class KernelManager {
 		await this.control.send(encode(msg, this.connection.key));
 	}
 
+	private releaseForkedKernelLeaseWhenDead(pid: number): void {
+		const release = (): boolean => {
+			try {
+				process.kill(pid, 0);
+				return false;
+			} catch (error) {
+				if (error instanceof Error && (error as NodeJS.ErrnoException).code === "EPERM") return false;
+				this.kernelEnvironmentLeaseReleases.get(pid)?.();
+				this.kernelEnvironmentLeaseReleases.delete(pid);
+				return true;
+			}
+		};
+		if (release()) return;
+		const timer = globalThis.setInterval(() => {
+			if (release()) globalThis.clearInterval(timer);
+		}, FORKED_LIVENESS_POLL_MS);
+		timer.unref?.();
+	}
+
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
@@ -1300,6 +1350,7 @@ export class KernelManager {
 		this.iopub = undefined;
 		this.control = undefined;
 		this.iopubPumpPromise = undefined;
+		const forkedPidToRelease = this.kernel ? undefined : this.kernelPid;
 		try {
 			if (this.kernel) {
 				this.kernel.kill(killSignal);
@@ -1311,6 +1362,7 @@ export class KernelManager {
 		} catch {
 			// Kernel already exited.
 		}
+		if (forkedPidToRelease !== undefined) this.releaseForkedKernelLeaseWhenDead(forkedPidToRelease);
 		this.kernel = undefined;
 		this.kernelPid = undefined;
 		this.connection = undefined;

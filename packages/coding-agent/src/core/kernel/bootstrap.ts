@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { constants, type Dirent, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { access, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
@@ -9,6 +9,8 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../../config.js";
+import { isOrphanProcessIdentityCurrent } from "../orphan-process-journal.js";
+import { compareProcessStartIds, getProcessStartId } from "../session-lease.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 8;
@@ -56,8 +58,18 @@ const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
+const BOOTSTRAP_STDERR_MAX_CHARS = 2_000;
+const BOOTSTRAP_STDERR_MAX_LINES = 20;
+const BOOTSTRAP_STDERR_BUFFER_CHARS = 8_000;
+const KERNEL_VENV_IDENTITY_CHARS = 20;
+const KERNEL_VENV_GENERATION_PREFIX = "generation-";
+const MAX_RETAINED_INACTIVE_KERNEL_GENERATIONS = 1;
+const KERNEL_GENERATION_LEASE_DIR = ".leases";
+const KERNEL_GENERATION_PUBLISHED_FILE = ".generation-published";
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
+const hostGenerationLeasePaths = new Set<string>();
+let hostGenerationLeaseCleanupInstalled = false;
 
 export type KernelPythonSkill = PythonSkillRuntimeInfo;
 export type KernelBootstrapProgressHandler = (message: string) => void;
@@ -81,6 +93,14 @@ interface BootstrapVersion {
 	snapshot?: string;
 	extraUvArgs?: string[];
 	pythonSkills?: BootstrapPythonSkill[];
+	requestedPythonSkills?: BootstrapPythonSkill[];
+}
+
+interface KernelGenerationLease {
+	version: 1;
+	pid: number;
+	processStartId: string;
+	updatedAt: string;
 }
 
 function errorMessage(error: unknown): string {
@@ -330,6 +350,7 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 	return [
 		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
 		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT ?? "",
 		process.env.HOME ?? "",
 		process.env.XDG_DATA_HOME ?? "",
 		JSON.stringify(pythonSkills),
@@ -371,20 +392,63 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 	}
 }
 
+function sanitizeBootstrapDiagnostic(value: string): string {
+	return value
+		.replace(/\b(Authorization\s*:\s*)(Basic|Bearer|Token)\s+\S+/gi, "$1$2 [redacted]")
+		.replace(/\b(Bearer|Token)[ \t]+\S+/gi, "$1 [redacted]")
+		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
+		.replace(
+			/([?&](?:(?:access|refresh|id)[_-]?token|client[_-]?secret|api[_-]?key|password|secret|token)=)[^&\s]+/gi,
+			"$1[redacted]",
+		)
+		.replace(
+			/\b((?:(?:access|refresh|id)[_-]?token|client[_-]?secret|api[_-]?key|password|secret|token)\s*[=:]\s*)\S+/gi,
+			"$1[redacted]",
+		);
+}
+
+function boundedStderrTail(value: string, leadingTokenMayBeTruncated = false): string {
+	// Sanitize while the authorization marker and URL userinfo are still present;
+	// truncating the raw tail first can retain a token after discarding its marker.
+	let sanitized = sanitizeBootstrapDiagnostic(value);
+	if (leadingTokenMayBeTruncated) sanitized = sanitized.replace(/^\S+/, "[redacted]");
+	const lines = sanitized.trimEnd().split(/\r?\n/).slice(-BOOTSTRAP_STDERR_MAX_LINES);
+	return lines.join("\n").slice(-BOOTSTRAP_STDERR_MAX_CHARS);
+}
+
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
+		const stdio = options.stdio ?? "pipe";
 		const child = spawn(command, args, {
 			env: process.env,
-			stdio: options.stdio ?? "ignore",
+			stdio,
 		});
+		let stderrBuffer = "";
+		let stderrLeadingTokenMayBeTruncated = false;
+		if (stdio === "pipe") {
+			child.stdout?.resume();
+			child.stderr?.setEncoding("utf8");
+			child.stderr?.on("data", (chunk: string) => {
+				const combined = `${stderrBuffer}${chunk}`;
+				if (combined.length > BOOTSTRAP_STDERR_BUFFER_CHARS) stderrLeadingTokenMayBeTruncated = true;
+				stderrBuffer = combined.slice(-BOOTSTRAP_STDERR_BUFFER_CHARS);
+			});
+		}
 		child.on("error", reject);
-		child.on("exit", (code, signal) => {
+		child.on("close", (code, signal) => {
 			if (code === 0) {
 				resolve();
 				return;
 			}
 			const reason = signal ? `signal ${signal}` : `exit code ${code}`;
-			reject(new Error(`${command} ${args.join(" ")} failed with ${reason}`));
+			const stderrTail = boundedStderrTail(stderrBuffer, stderrLeadingTokenMayBeTruncated);
+			const diagnostic = stderrTail
+				? `
+stderr (tail):
+${stderrTail}`
+				: "";
+			const renderedCommand = sanitizeBootstrapDiagnostic(`${command} ${args.join(" ")}`);
+			reject(new Error(`${renderedCommand} failed with ${reason}${diagnostic}`));
 		});
 	});
 }
@@ -486,6 +550,9 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 		} catch (error) {
 			if (!isNodeError(error, "EEXIST")) throw error;
 
+			// Besides making lock contention inspectable, this marker gives process
+			// tests a deterministic rendezvous at the filesystem-lock boundary.
+			await writeFile(path.join(lockDir, `waiter-${process.pid}`), "", "utf8").catch(() => undefined);
 			const pid = await readLockPid(lockDir);
 			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
 				await rm(lockDir, { recursive: true, force: true });
@@ -567,10 +634,11 @@ async function readBootstrapVersion(venv: string): Promise<BootstrapVersion | nu
 			parsed.extraUvArgs.every((v: unknown): v is string => typeof v === "string")
 				? (parsed.extraUvArgs as string[])
 				: undefined;
-		let pythonSkills: BootstrapPythonSkill[] | undefined;
-		if (Array.isArray(parsed.pythonSkills)) {
+		const parsePythonSkills = (value: unknown): BootstrapPythonSkill[] | null | undefined => {
+			if (value === undefined) return undefined;
+			if (!Array.isArray(value)) return null;
 			if (
-				!parsed.pythonSkills.every((v: unknown): v is BootstrapPythonSkill => {
+				!value.every((v: unknown): v is BootstrapPythonSkill => {
 					if (!isRecord(v)) return false;
 					return (
 						typeof v.importName === "string" &&
@@ -582,8 +650,11 @@ async function readBootstrapVersion(venv: string): Promise<BootstrapVersion | nu
 			) {
 				return null;
 			}
-			pythonSkills = parsed.pythonSkills as BootstrapPythonSkill[];
-		}
+			return value;
+		};
+		const pythonSkills = parsePythonSkills(parsed.pythonSkills);
+		const requestedPythonSkills = parsePythonSkills(parsed.requestedPythonSkills);
+		if (pythonSkills === null || requestedPythonSkills === null) return null;
 		return {
 			schema: parsed.schema,
 			ipykernel: typeof parsed.ipykernel === "string" ? parsed.ipykernel : undefined,
@@ -591,6 +662,7 @@ async function readBootstrapVersion(venv: string): Promise<BootstrapVersion | nu
 			snapshot: typeof parsed.snapshot === "string" ? parsed.snapshot : undefined,
 			extraUvArgs,
 			pythonSkills,
+			requestedPythonSkills,
 		};
 	} catch {
 		return null;
@@ -626,7 +698,7 @@ function bootstrapVersionCurrent(
 	return (
 		version !== null &&
 		bootstrapBaseVersionCurrent(version, runtimeIdentity) &&
-		pythonSkillsMatch(version.pythonSkills, pythonSkills)
+		pythonSkillsMatch(version.requestedPythonSkills ?? version.pythonSkills, pythonSkills)
 	);
 }
 
@@ -643,7 +715,8 @@ function bootstrapBaseVersionCurrent(version: BootstrapVersion | null, runtimeId
 async function writeBootstrapVersion(
 	venv: string,
 	runtimeIdentity: string,
-	pythonSkills: readonly BootstrapPythonSkill[],
+	installedPythonSkills: readonly BootstrapPythonSkill[],
+	requestedPythonSkills: readonly BootstrapPythonSkill[],
 ): Promise<void> {
 	const version: BootstrapVersion = {
 		schema: BOOTSTRAP_SCHEMA,
@@ -651,7 +724,8 @@ async function writeBootstrapVersion(
 		runtime: runtimeIdentity,
 		snapshot: STATE_SNAPSHOT_REQUIREMENT,
 		extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
-		pythonSkills: [...pythonSkills],
+		pythonSkills: [...installedPythonSkills],
+		requestedPythonSkills: [...requestedPythonSkills],
 	};
 	await writeFile(path.join(venv, BOOTSTRAP_VERSION_FILE), `${JSON.stringify(version)}\n`, "utf8");
 }
@@ -716,6 +790,207 @@ async function hashRuntimeSource(sourceDir: string): Promise<string> {
 		hash.update("\0");
 	}
 	return `sha256:${hash.digest("hex")}`;
+}
+
+function kernelEnvironmentIdentity(runtimeIdentity: string, pythonSkills: readonly BootstrapPythonSkill[]): string {
+	const identity = JSON.stringify({
+		schema: BOOTSTRAP_SCHEMA,
+		python: PYTHON_VERSION,
+		ipykernel: IPYKERNEL_REQUIREMENT,
+		runtime: runtimeIdentity,
+		snapshot: STATE_SNAPSHOT_REQUIREMENT,
+		extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
+		pythonSkills,
+	});
+	return createHash("sha256").update(identity).digest("hex").slice(0, KERNEL_VENV_IDENTITY_CHARS);
+}
+
+function kernelGenerationRoot(baseVenv: string): string {
+	const override = process.env.PRIME_AGENT_KERNEL_VENV_ROOT;
+	if (override) return path.resolve(expandHome(override));
+	return `${baseVenv}.generations`;
+}
+
+export async function resolveKernelVenvDir(): Promise<string> {
+	const baseVenv = await resolveWritableKernelVenvDir();
+	return process.env.PRIME_AGENT_KERNEL_VENV ? baseVenv : kernelGenerationRoot(baseVenv);
+}
+
+function kernelGenerationTimestamp(name: string): number {
+	const match = name.match(/^generation-[a-f0-9]{20}-(\d+)-/);
+	return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+async function findReadyKernelVenv(
+	generationRoot: string,
+	runtimeIdentity: string,
+	pythonSkills: readonly BootstrapPythonSkill[],
+): Promise<string | null> {
+	let entries: Dirent[];
+	try {
+		entries = await readdir(generationRoot, { withFileTypes: true });
+	} catch (error) {
+		if (isNodeError(error, "ENOENT")) return null;
+		throw error;
+	}
+	const generationNames = entries
+		.filter((entry) => entry.isDirectory() && entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX))
+		.map((entry) => entry.name)
+		.sort((a, b) => kernelGenerationTimestamp(b) - kernelGenerationTimestamp(a));
+	for (const generationName of generationNames) {
+		const venv = path.join(generationRoot, generationName);
+		const leaseDirExists = await exists(path.join(venv, KERNEL_GENERATION_LEASE_DIR));
+		if (leaseDirExists && !(await exists(path.join(venv, KERNEL_GENERATION_PUBLISHED_FILE)))) continue;
+		const python = path.join(venv, "bin", "python");
+		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return venv;
+	}
+	return null;
+}
+
+function parseKernelGenerationLease(value: unknown): KernelGenerationLease | null {
+	if (!isRecord(value)) return null;
+	if (
+		value.version !== 1 ||
+		!Number.isInteger(value.pid) ||
+		(value.pid as number) <= 0 ||
+		typeof value.processStartId !== "string" ||
+		value.processStartId.length === 0 ||
+		typeof value.updatedAt !== "string"
+	) {
+		return null;
+	}
+	return value as unknown as KernelGenerationLease;
+}
+
+async function writeKernelGenerationLease(venv: string, pid: number): Promise<string> {
+	const leaseDir = path.join(venv, KERNEL_GENERATION_LEASE_DIR);
+	await mkdir(leaseDir, { recursive: true });
+	const lease: KernelGenerationLease = {
+		version: 1,
+		pid,
+		// An unavailable start id is intentionally unverifiable. The GC still knows
+		// the lease is dead when the PID no longer exists, but cannot mistake PID
+		// reuse for death while that PID is running.
+		processStartId: getProcessStartId(pid) ?? `unverifiable:${pid}`,
+		updatedAt: new Date().toISOString(),
+	};
+	const destination = path.join(leaseDir, `${pid}.json`);
+	const temporary = path.join(leaseDir, `.${pid}-${process.pid}-${Date.now()}.tmp`);
+	await writeFile(
+		temporary,
+		`${JSON.stringify(lease)}
+`,
+		{ encoding: "utf8", mode: 0o600 },
+	);
+	await rename(temporary, destination);
+	return destination;
+}
+
+function registerHostGenerationLeasePath(leasePath: string): void {
+	hostGenerationLeasePaths.add(leasePath);
+	if (hostGenerationLeaseCleanupInstalled) return;
+	hostGenerationLeaseCleanupInstalled = true;
+	process.once("exit", () => {
+		for (const registeredPath of hostGenerationLeasePaths) {
+			rmSync(registeredPath, { force: true });
+		}
+		hostGenerationLeasePaths.clear();
+	});
+}
+
+export async function registerKernelPythonLease(python: string, pid: number): Promise<() => void> {
+	if (!Number.isInteger(pid) || pid <= 0) throw new Error(`invalid kernel pid for environment lease: ${pid}`);
+	const venv = path.dirname(path.dirname(python));
+	if (!path.basename(venv).startsWith(KERNEL_VENV_GENERATION_PREFIX)) return () => undefined;
+	if (!(await exists(path.join(venv, BOOTSTRAP_VERSION_FILE)))) return () => undefined;
+	const leasePath = await writeKernelGenerationLease(venv, pid);
+	return () => rmSync(leasePath, { force: true });
+}
+
+function generationHasRunningInterpreter(generation: string): boolean | null {
+	const interpreter = path.join(generation, "bin", "python");
+	const result = spawnSync("ps", ["-axo", "command="], { encoding: "utf8" });
+	if (result.error || result.status !== 0 || typeof result.stdout !== "string") return null;
+	return result.stdout.split(/\r?\n/).some((command) => command.includes(interpreter));
+}
+
+async function generationHasOnlyDeadLeases(generation: string): Promise<boolean> {
+	// The process-table check closes the spawn-to-lease window: a freshly exec'd
+	// interpreter protects its generation even if the host dies before recording
+	// the child PID. Failure to inspect the process table is conservative.
+	if (generationHasRunningInterpreter(generation) !== false) return false;
+	const leaseDir = path.join(generation, KERNEL_GENERATION_LEASE_DIR);
+	let entries: Dirent[];
+	try {
+		entries = await readdir(leaseDir, { withFileTypes: true });
+	} catch {
+		// Generations published by older binaries, unreadable lease directories,
+		// and other unverifiable states are conservatively protected.
+		return false;
+	}
+	for (const entry of entries) {
+		if (entry.name.startsWith(".") && entry.name.endsWith(".tmp")) continue;
+		if (!entry.isFile()) return false;
+		let lease: KernelGenerationLease | null = null;
+		try {
+			lease = parseKernelGenerationLease(JSON.parse(await readFile(path.join(leaseDir, entry.name), "utf8")));
+		} catch {
+			return false;
+		}
+		if (!lease) return false;
+		if (!processIsRunning(lease.pid)) continue;
+		if (isOrphanProcessIdentityCurrent({ pid: lease.pid, processStartId: lease.processStartId })) return false;
+		const comparison = compareProcessStartIds(lease.processStartId, getProcessStartId(lease.pid));
+		if (comparison !== "mismatch") return false;
+	}
+	return true;
+}
+
+async function prepareGenerationSlot(generationRoot: string): Promise<void> {
+	await mkdir(generationRoot, { recursive: true });
+	const entries = (await readdir(generationRoot, { withFileTypes: true }))
+		.filter((entry) => entry.isDirectory() && entry.name.startsWith(KERNEL_VENV_GENERATION_PREFIX))
+		.sort((a, b) => kernelGenerationTimestamp(a.name) - kernelGenerationTimestamp(b.name));
+	const reclaimable: string[] = [];
+	for (const entry of entries) {
+		const generation = path.join(generationRoot, entry.name);
+		if (!(await exists(path.join(generation, BOOTSTRAP_VERSION_FILE)))) {
+			// The global generation-root lock proves that no same-host builder is
+			// active. A directory without the bootstrap marker was never selectable.
+			await rm(generation, { recursive: true, force: true });
+		} else if (
+			(await exists(path.join(generation, KERNEL_GENERATION_LEASE_DIR))) &&
+			!(await exists(path.join(generation, KERNEL_GENERATION_PUBLISHED_FILE)))
+		) {
+			// New-format builders create the lease directory before bootstrap and
+			// write the publication marker only after the resolver lease is durable.
+			await rm(generation, { recursive: true, force: true });
+		} else if (await generationHasOnlyDeadLeases(generation)) {
+			reclaimable.push(generation);
+		}
+	}
+
+	const deleteCount = Math.max(0, reclaimable.length - MAX_RETAINED_INACTIVE_KERNEL_GENERATIONS);
+	for (const generation of reclaimable.slice(0, deleteCount)) {
+		await rm(generation, { recursive: true, force: true });
+	}
+	// Live and unverifiable generations are exempt from inactive retention so
+	// publication never blocks. Once their leases die, a later resolution pass
+	// reclaims all but the newest inactive rollback generation.
+}
+
+async function createKernelVenvGeneration(
+	generationRoot: string,
+	runtimeIdentity: string,
+	pythonSkills: readonly BootstrapPythonSkill[],
+): Promise<string> {
+	await prepareGenerationSlot(generationRoot);
+	const identity = kernelEnvironmentIdentity(runtimeIdentity, pythonSkills);
+	const generation = await mkdtemp(
+		path.join(generationRoot, `${KERNEL_VENV_GENERATION_PREFIX}${identity}-${Date.now()}-${process.pid}-`),
+	);
+	await mkdir(path.join(generation, KERNEL_GENERATION_LEASE_DIR));
+	return generation;
 }
 
 async function bootstrapVenv(
@@ -820,15 +1095,7 @@ async function syncPythonSkills(
 			);
 		}
 	}
-	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
-}
-
-async function kernelBaseReady(python: string, venv: string, runtimeIdentity: string): Promise<boolean> {
-	return (
-		(await hasIpykernel(python)) &&
-		(await hasPrimeAgentRuntime(python)) &&
-		bootstrapBaseVersionCurrent(await readBootstrapVersion(venv), runtimeIdentity)
-	);
+	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills, pythonSkills);
 }
 
 async function kernelReady(
@@ -850,6 +1117,23 @@ function formatBootstrapFailure(error: unknown): Error {
 			"First-time setup needs internet to install uv, Python, ipykernel, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. " +
 			"Set PRIME_AGENT_KERNEL_PYTHON to a Python with ipykernel, a current prime-agent-runtime, and default Python packages installed to skip auto-bootstrap.",
 	);
+}
+
+async function cleanupAbandonedExactVenvBuilds(baseVenv: string): Promise<void> {
+	const parent = path.dirname(baseVenv);
+	const prefix = `${path.basename(baseVenv)}.building-`;
+	let entries: Dirent[];
+	try {
+		entries = await readdir(parent, { withFileTypes: true });
+	} catch (error) {
+		if (isNodeError(error, "ENOENT")) return;
+		throw error;
+	}
+	for (const entry of entries) {
+		if (entry.isDirectory() && entry.name.startsWith(prefix)) {
+			await rm(path.join(parent, entry.name), { recursive: true, force: true });
+		}
+	}
 }
 
 async function ensureKernelPythonUncached(
@@ -885,35 +1169,80 @@ async function ensureKernelPythonUncached(
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
-	const venv = await resolveWritableKernelVenvDir();
-	const python = path.join(venv, "bin", "python");
+	const baseVenv = await resolveWritableKernelVenvDir();
 	const runtimeIdentity = await resolveRuntimeIdentity();
-	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+	const exactPython = path.join(baseVenv, "bin", "python");
 
-	const releaseLock = await acquireBootstrapLock(venv);
+	// PRIME_AGENT_KERNEL_VENV remains an exact-path contract. Never silently
+	// reinterpret it as a prefix, and never replace a non-current directory that
+	// a live process may still be using.
+	if (process.env.PRIME_AGENT_KERNEL_VENV) {
+		if (await kernelReady(exactPython, baseVenv, runtimeIdentity, pythonSkills)) return exactPython;
+		const releaseLock = await acquireBootstrapLock(baseVenv);
+		let buildingVenv: string | null = null;
+		try {
+			await cleanupAbandonedExactVenvBuilds(baseVenv);
+			if (await kernelReady(exactPython, baseVenv, runtimeIdentity, pythonSkills)) return exactPython;
+			if (await exists(baseVenv)) {
+				throw new Error(
+					`PRIME_AGENT_KERNEL_VENV points to a non-current environment at ${baseVenv}. ` +
+						"Prime Agent will not replace it while another kernel may use it. Stop dependent sessions and remove or move that directory manually, choose a new PRIME_AGENT_KERNEL_VENV, or set PRIME_AGENT_KERNEL_PYTHON.",
+				);
+			}
+			reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
+			await mkdir(path.dirname(baseVenv), { recursive: true });
+			buildingVenv = await mkdtemp(path.join(path.dirname(baseVenv), `${path.basename(baseVenv)}.building-`));
+			await bootstrapVenv(buildingVenv, pythonSkills, options);
+			await rename(buildingVenv, baseVenv);
+			buildingVenv = null;
+			reportProgress(options, "✓ ready");
+			return exactPython;
+		} catch (error) {
+			if (buildingVenv) await rm(buildingVenv, { recursive: true, force: true }).catch(() => undefined);
+			throw formatBootstrapFailure(error);
+		} finally {
+			await releaseLock().catch(() => undefined);
+		}
+	}
+
+	// Compatibility discovery: a current legacy ~/.prime/agent/kernel-venv is
+	// returned in place rather than stranded by the generational layout.
+	if (await kernelReady(exactPython, baseVenv, runtimeIdentity, pythonSkills)) return exactPython;
+
+	const generationRoot = kernelGenerationRoot(baseVenv);
+
+	// One root-wide lock serializes resolution leases, same-identity publication,
+	// and reclamation so a generation cannot disappear between lookup and lease.
+	// Reclamation removes only generations whose recorded process identities are
+	// all provably dead.
+	const releaseLock = await acquireBootstrapLock(generationRoot);
+	let buildingVenv: string | null = null;
 	try {
-		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
-		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
-			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
-			return python;
+		const concurrentlyBuiltVenv = await findReadyKernelVenv(generationRoot, runtimeIdentity, pythonSkills);
+		if (concurrentlyBuiltVenv) {
+			await writeFile(path.join(concurrentlyBuiltVenv, KERNEL_GENERATION_PUBLISHED_FILE), "1\n", "utf8");
+			const hostLeasePath = await writeKernelGenerationLease(concurrentlyBuiltVenv, process.pid);
+			registerHostGenerationLeasePath(hostLeasePath);
+			await prepareGenerationSlot(generationRoot);
+			return path.join(concurrentlyBuiltVenv, "bin", "python");
 		}
 
-		const hadVenv = existsSync(venv);
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
-		if (hadVenv) {
-			reportProgress(options, "rebuilding kernel venv");
-			await rm(venv, { recursive: true, force: true });
-		}
-
-		await bootstrapVenv(venv, pythonSkills, options);
+		buildingVenv = await createKernelVenvGeneration(generationRoot, runtimeIdentity, pythonSkills);
+		await bootstrapVenv(buildingVenv, pythonSkills, options);
+		const hostLeasePath = await writeKernelGenerationLease(buildingVenv, process.pid);
+		registerHostGenerationLeasePath(hostLeasePath);
+		await writeFile(path.join(buildingVenv, KERNEL_GENERATION_PUBLISHED_FILE), "1\n", "utf8");
+		const python = path.join(buildingVenv, "bin", "python");
+		buildingVenv = null;
+		reportProgress(options, "✓ ready");
+		return python;
 	} catch (error) {
+		if (buildingVenv) await rm(buildingVenv, { recursive: true, force: true }).catch(() => undefined);
 		throw formatBootstrapFailure(error);
 	} finally {
 		await releaseLock().catch(() => undefined);
 	}
-
-	reportProgress(options, "✓ ready");
-	return python;
 }
 
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {

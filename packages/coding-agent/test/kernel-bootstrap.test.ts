@@ -1,7 +1,18 @@
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	DEFAULT_RLM_EXTRA_IMPORT_NAMES,
@@ -9,12 +20,40 @@ import {
 	ensureKernelPython,
 	getKernelVenvDir,
 	type KernelPythonSkill,
+	resolveKernelVenvDir,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
 
 let tempDir = "";
 let originalEnv: NodeJS.ProcessEnv;
 let runtimeIdentity = "";
+
+const execFileAsync = promisify(execFile);
+
+async function waitForFileText(filePath: string, predicate: (text: string) => boolean): Promise<string> {
+	const deadline = Date.now() + 10_000;
+	for (;;) {
+		let text = "";
+		try {
+			text = readFileSync(filePath, "utf8");
+		} catch {
+			// The producer has not created the file yet.
+		}
+		if (predicate(text)) return text;
+		if (Date.now() >= deadline) throw new Error(`timed out waiting for ${filePath}`);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
+function waitForChild(child: ChildProcess): Promise<void> {
+	return new Promise((resolve, reject) => {
+		child.once("error", reject);
+		child.once("close", (code, signal) => {
+			if (code === 0) resolve();
+			else reject(new Error(`bootstrap subprocess exited code=${code} signal=${signal}`));
+		});
+	});
+}
 
 function pyprojectHash(pyprojectPath: string): string {
 	return `sha256:${createHash("sha256").update(readFileSync(pyprojectPath)).digest("hex")}`;
@@ -23,6 +62,19 @@ function pyprojectHash(pyprojectPath: string): string {
 function writeExecutable(filePath: string, content: string): void {
 	writeFileSync(filePath, content);
 	chmodSync(filePath, 0o755);
+}
+
+function venvFromPython(python: string): string {
+	return dirname(dirname(python));
+}
+
+async function createWarmVenv(baseVenv: string): Promise<{ python: string; venv: string }> {
+	process.env.PRIME_AGENT_KERNEL_VENV_ROOT = baseVenv;
+	const environmentDir = await resolveKernelVenvDir();
+	const venv = join(environmentDir, "generation-test");
+	const python = join(venv, "bin", "python");
+	mkdirSync(join(venv, "bin"), { recursive: true });
+	return { python, venv };
 }
 
 function writeBootstrapVersion(venv: string, pythonSkills: readonly KernelPythonSkill[] = []): void {
@@ -127,14 +179,24 @@ function installFakeUv(): string {
 			"    *) exit 1 ;;",
 			"  esac",
 			"fi",
+			'if [ "$1" = "--prime-test-block" ]; then',
+			'  printf started > "$SPAWN_STARTED_FILE"',
+			'  while [ -e "$SPAWN_BLOCK_FILE" ]; do sleep 0.02; done',
+			"fi",
 			"exit 0",
 			"PY",
 			'  chmod +x "$venv/bin/python"',
+			'  if [ "$UV_BLOCK_FILE" != "" ]; then',
+			'    printf "%s\n" "$venv" >> "$UV_BLOCK_STARTED"',
+			'    while [ -e "$UV_BLOCK_FILE" ]; do sleep 0.02; done',
+			'    printf "finished %s\n" "$venv" >> "$UV_LOG"',
+			"  fi",
 			"  exit 0",
 			"fi",
 			'if [ "$1" = "pip" ]; then',
 			'  for arg in "$@"; do',
 			'    if [ "$UV_FAIL_ARG" != "" ] && [ "$arg" = "$UV_FAIL_ARG" ]; then',
+			'      if [ "$UV_FAIL_STDERR" != "" ]; then printf "%s\n" "$UV_FAIL_STDERR" >&2; fi',
 			"      exit 1",
 			"    fi",
 			"  done",
@@ -147,6 +209,29 @@ function installFakeUv(): string {
 	return logPath;
 }
 
+function spawnBootstrapSubprocess(resultPath: string, pythonSkill?: KernelPythonSkill): ChildProcess {
+	const helperPath = join(tempDir, `bootstrap-child-${createHash("sha1").update(resultPath).digest("hex")}.mts`);
+	const bootstrapPath = join(process.cwd(), "src", "core", "kernel", "bootstrap.ts");
+	writeFileSync(
+		helperPath,
+		[
+			`import { writeFileSync } from "node:fs";`,
+			`import { ensureKernelPython } from ${JSON.stringify(bootstrapPath)};`,
+			`const pythonSkills = process.env.TEST_PYTHON_SKILL ? [JSON.parse(process.env.TEST_PYTHON_SKILL)] : [];`,
+			`const python = await ensureKernelPython({ pythonSkills });`,
+			`writeFileSync(process.argv[2], python);`,
+		].join("\n"),
+	);
+	return spawn(process.execPath, ["--import", "tsx", helperPath, resultPath], {
+		env: {
+			...process.env,
+			FORCE_COLOR: "0",
+			TEST_PYTHON_SKILL: pythonSkill ? JSON.stringify(pythonSkill) : "",
+		},
+		stdio: "ignore",
+	});
+}
+
 describe("kernel bootstrap", () => {
 	beforeEach(async () => {
 		runtimeIdentity = await resolveRuntimeIdentity();
@@ -156,6 +241,7 @@ describe("kernel bootstrap", () => {
 		process.env.PATH = originalEnv.PATH ?? "";
 		delete process.env.PRIME_AGENT_KERNEL_PYTHON;
 		delete process.env.PRIME_AGENT_KERNEL_VENV;
+		delete process.env.PRIME_AGENT_KERNEL_VENV_ROOT;
 		delete process.env.XDG_DATA_HOME;
 	});
 
@@ -167,23 +253,54 @@ describe("kernel bootstrap", () => {
 		}
 	});
 
-	it("returns the configured kernel venv directory", () => {
+	it("preserves PRIME_AGENT_KERNEL_VENV as an exact directory", async () => {
+		installFakeUv();
 		const venv = join(tempDir, "custom-venv");
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
 		expect(getKernelVenvDir()).toBe(venv);
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+	});
+
+	it("does not replace a stale exact PRIME_AGENT_KERNEL_VENV", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "custom-venv");
+		const python = join(venv, "bin", "python");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeFileSync(join(venv, ".bootstrap-version"), '{"schema":1}\n');
+
+		await expect(ensureKernelPython()).rejects.toThrow(/will not replace it/);
+		expect(readFileSync(python, "utf8")).toContain("#!/bin/sh");
+	});
+
+	it("reuses a compatible legacy default venv without stranding it", async () => {
+		const venv = join(tempDir, ".prime", "agent", "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const resultPath = join(tempDir, "legacy-python.txt");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+
+		const child = spawnBootstrapSubprocess(resultPath);
+		await waitForChild(child);
+		expect(readFileSync(resultPath, "utf8")).toBe(python);
+		expect(existsSync(`${venv}.generations`)).toBe(false);
 	});
 
 	it("bootstraps a missing venv with uv, ipykernel, prime-agent-runtime, and default extra packages", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = venv;
 
-		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+		const python = await ensureKernelPython();
+		const installedVenv = venvFromPython(python);
+		expect(installedVenv).toMatch(new RegExp(`^${venv}/generation-`));
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log).toContain("python install 3.11");
-		expect(log).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(log).toContain(`venv ${installedVenv} --python 3.11 --seed`);
 		expect(log).toContain("pip install --python");
 		expect(log).toContain("ipykernel");
 		expect(log).toContain("prime-agent-runtime");
@@ -191,7 +308,7 @@ describe("kernel bootstrap", () => {
 		for (const uvArg of DEFAULT_RLM_EXTRA_UV_ARGS) {
 			expect(log).toContain(uvArg);
 		}
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		const version = JSON.parse(readFileSync(join(installedVenv, ".bootstrap-version"), "utf8"));
 		expect(version).toEqual({
 			schema: 8,
 			ipykernel: "ipykernel",
@@ -199,6 +316,7 @@ describe("kernel bootstrap", () => {
 			snapshot: "dill",
 			extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
 			pythonSkills: [],
+			requestedPythonSkills: [],
 		});
 		expect(version.runtime).toMatch(/^sha256:/);
 	});
@@ -207,12 +325,12 @@ describe("kernel bootstrap", () => {
 		installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
 		const progress: string[] = [];
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = venv;
 		const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
 		try {
-			await expect(ensureKernelPython({ onProgress: (message) => progress.push(message) })).resolves.toBe(
-				join(venv, "bin", "python"),
+			await expect(ensureKernelPython({ onProgress: (message) => progress.push(message) })).resolves.toContain(
+				`${venv}/generation-`,
 			);
 		} finally {
 			stderrWrite.mockRestore();
@@ -227,13 +345,14 @@ describe("kernel bootstrap", () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
 		const pythonSkill = createPythonSkill();
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = venv;
 
-		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(join(venv, "bin", "python"));
+		const python = await ensureKernelPython({ pythonSkills: [pythonSkill] });
+		const installedVenv = venvFromPython(python);
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log).toContain(`--editable ${pythonSkill.packagePath}`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		const version = JSON.parse(readFileSync(join(installedVenv, ".bootstrap-version"), "utf8"));
 		expect(version.pythonSkills).toEqual([
 			{
 				importName: pythonSkill.importName,
@@ -249,14 +368,15 @@ describe("kernel bootstrap", () => {
 		const venv = join(tempDir, "kernel-venv");
 		const dependencySkill = createPythonSkill("agent-observe");
 		const dependentSkill = createPythonSkillWithDependency("orchestration-heartbeat", "agent-observe");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = venv;
 
-		await expect(ensureKernelPython({ pythonSkills: [dependentSkill] })).resolves.toBe(join(venv, "bin", "python"));
+		const python = await ensureKernelPython({ pythonSkills: [dependentSkill] });
+		const installedVenv = venvFromPython(python);
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log).toContain(`--editable ${dependencySkill.packagePath}`);
 		expect(log).toContain(`--editable ${dependentSkill.packagePath}`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		const version = JSON.parse(readFileSync(join(installedVenv, ".bootstrap-version"), "utf8"));
 		expect(version.pythonSkills).toEqual([
 			{
 				importName: dependencySkill.importName,
@@ -288,9 +408,9 @@ version = "0.1.0"
 			"orchestration-heartbeat",
 			"prime-agent-skill-attach-image",
 		);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = venv;
 
-		await expect(ensureKernelPython({ pythonSkills: [dependentSkill] })).resolves.toBe(join(venv, "bin", "python"));
+		await expect(ensureKernelPython({ pythonSkills: [dependentSkill] })).resolves.toContain(`${venv}/generation-`);
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log).toContain(`--editable ${dependencySkill.packagePath}`);
@@ -302,23 +422,22 @@ version = "0.1.0"
 		const venv = join(tempDir, "kernel-venv");
 		const dependencySkill = createPythonSkill("gidgethub");
 		const dependentSkill = createPythonSkillWithDependency("orchestration-heartbeat", "gidgethub[httpx]>4.0.0");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = venv;
 
-		await expect(ensureKernelPython({ pythonSkills: [dependentSkill] })).resolves.toBe(join(venv, "bin", "python"));
+		await expect(ensureKernelPython({ pythonSkills: [dependentSkill] })).resolves.toContain(`${venv}/generation-`);
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log).toContain(`--editable ${dependencySkill.packagePath}`);
 		expect(log).toContain(`--editable ${dependentSkill.packagePath}`);
 	});
 
-	it("syncs a warm venv when a Python skill pyproject changes", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
+	it("isolates environments when a Python skill pyproject changes", async () => {
+		installFakeUv();
+		const baseVenv = join(tempDir, "kernel-venv");
 		const pythonSkill = createPythonSkill();
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		writeBootstrapVersion(venv, [pythonSkill]);
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = baseVenv;
+
+		const firstPython = await ensureKernelPython({ pythonSkills: [pythonSkill] });
 		writeFileSync(
 			pythonSkill.pyprojectPath,
 			`[project]
@@ -327,33 +446,75 @@ version = "0.1.0"
 dependencies = ["httpx"]
 `,
 		);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const secondPython = await ensureKernelPython({ pythonSkills: [pythonSkill] });
 
-		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(python);
-
-		const log = readFileSync(logPath, "utf8");
-		expect(log).not.toContain(`venv ${venv} --python 3.11 --seed`);
-		expect(log).toContain(`--editable ${pythonSkill.packagePath}`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(pythonSkill.pyprojectPath));
+		expect(secondPython).not.toBe(firstPython);
+		expect(firstPython).toMatch(new RegExp(`^${baseVenv}/generation-`));
+		expect(secondPython).toMatch(new RegExp(`^${baseVenv}/generation-`));
+		expect(readFileSync(firstPython, "utf8")).toContain("#!/bin/sh");
 	});
 
-	it("continues when a Python skill editable install fails and retries it next startup", async () => {
+	it("redacts bootstrap credentials without crossing stderr lines", async () => {
+		installFakeUv();
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = join(tempDir, "kernel-venv");
+		process.env.UV_FAIL_ARG = "ipykernel";
+		process.env.UV_FAIL_STDERR = [
+			"Authorization: Basic QWxpY2U6c3VwZXItc2VjcmV0",
+			"client_secret=oauth-client-secret refresh_token=oauth-refresh-token",
+			"https://pypi-secret-token@example.test/simple",
+			"error: Bearer sk-live-SUPERSECRET",
+			"warning: Token abc-INLINE-SECRET failed",
+			"Bearer",
+			"https://user@example.test/simple",
+			`Bearer ${"x".repeat(2_100)}`,
+		].join("\n");
+
+		const error = await ensureKernelPython().catch((reason: unknown) => reason);
+		expect(error).toBeInstanceOf(Error);
+		const message = error instanceof Error ? error.message : String(error);
+		expect(message).toContain("Authorization: Basic [redacted]");
+		expect(message).toContain("https://[redacted]@example.test/simple");
+		expect(message).toContain("error: Bearer [redacted]");
+		expect(message).toContain("warning: Token [redacted] failed");
+		expect(message).toContain("Bearer\nhttps://[redacted]@example.test/simple");
+		expect(message).not.toContain("QWxpY2U6c3VwZXItc2VjcmV0");
+		expect(message).not.toContain("oauth-client-secret");
+		expect(message).not.toContain("oauth-refresh-token");
+		expect(message).not.toContain("pypi-secret-token");
+		expect(message).not.toContain("sk-live-SUPERSECRET");
+		expect(message).not.toContain("abc-INLINE-SECRET");
+		expect(message).not.toContain("x".repeat(100));
+	});
+
+	it("bounds a long bootstrap stderr tail independently of redaction coverage", async () => {
+		installFakeUv();
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = join(tempDir, "kernel-venv");
+		process.env.UV_FAIL_ARG = "ipykernel";
+		process.env.UV_FAIL_STDERR = [
+			"Authorization: Basic raw-secret-before-tail",
+			...Array.from({ length: 40 }, (_, index) => `diagnostic ${index + 1} ${"z".repeat(120)}`),
+		].join("\n");
+
+		const error = await ensureKernelPython().catch((reason: unknown) => reason);
+		const message = error instanceof Error ? error.message : String(error);
+		const tail = message.split("stderr (tail):\n")[1]?.split("\nFirst-time setup")[0] ?? "";
+		expect(tail.length).toBeLessThanOrEqual(2_000);
+		expect(tail.split("\n").length).toBeLessThanOrEqual(20);
+		expect(message).not.toContain("raw-secret-before-tail");
+		expect(tail).toContain("diagnostic 40");
+	});
+
+	it("reuses a partial generation after an unchanged optional skill install failure", async () => {
 		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
+		const baseVenv = join(tempDir, "kernel-venv");
 		const goodSkill = createPythonSkill("good-skill");
 		const brokenSkill = createPythonSkill("broken-skill");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = baseVenv;
 		process.env.UV_FAIL_ARG = brokenSkill.packagePath;
 
-		await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(
-			join(venv, "bin", "python"),
-		);
-
-		const log = readFileSync(logPath, "utf8");
-		expect(log).toContain(`--editable ${goodSkill.packagePath}`);
-		expect(log).toContain(`--editable ${brokenSkill.packagePath}`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		const firstPython = await ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] });
+		const firstVenv = venvFromPython(firstPython);
+		const version = JSON.parse(readFileSync(join(firstVenv, ".bootstrap-version"), "utf8"));
 		expect(version.pythonSkills).toEqual([
 			{
 				importName: goodSkill.importName,
@@ -363,26 +524,292 @@ dependencies = ["httpx"]
 			},
 		]);
 
-		await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(
-			join(venv, "bin", "python"),
-		);
+		const secondPython = await ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] });
 
+		expect(secondPython).toBe(firstPython);
 		const retryLog = readFileSync(logPath, "utf8");
-		expect(retryLog.split("\n").filter((line) => line.startsWith(`venv ${venv} `))).toHaveLength(1);
 		expect(
 			retryLog.split("\n").filter((line) => line.includes(`--editable ${brokenSkill.packagePath}`)),
-		).toHaveLength(2);
+		).toHaveLength(1);
+		expect(version.requestedPythonSkills).toHaveLength(2);
 	});
 
-	it("rebuilds a warm venv with legacy unhashed Python skill manifest entries", async () => {
+	it("shares concurrent bootstrap work in one process", async () => {
 		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		const pythonSkill = createPythonSkill();
-		mkdirSync(join(venv, "bin"), { recursive: true });
+		const baseVenv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = baseVenv;
+
+		const pythons = await Promise.all([ensureKernelPython(), ensureKernelPython()]);
+
+		expect(pythons[0]).toBe(pythons[1]);
+		const installedVenv = venvFromPython(pythons[0]);
+		const log = readFileSync(logPath, "utf8");
+		expect(log.split("\n").filter((line) => line.startsWith(`venv ${installedVenv} `))).toHaveLength(1);
+	});
+
+	it("serializes the same identity across Node processes", async () => {
+		const logPath = installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		const blockFile = join(tempDir, "uv.block");
+		const startedFile = join(tempDir, "uv.started");
+		const firstResult = join(tempDir, "first-python.txt");
+		const secondResult = join(tempDir, "second-python.txt");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		process.env.UV_BLOCK_FILE = blockFile;
+		process.env.UV_BLOCK_STARTED = startedFile;
+		writeFileSync(blockFile, "block");
+
+		const first = spawnBootstrapSubprocess(firstResult);
+		await waitForFileText(startedFile, (text) => text.trim().length > 0);
+		const second = spawnBootstrapSubprocess(secondResult);
+		const waiterPath = join(`${generationRoot}.bootstrap.lock`, `waiter-${second.pid}`);
+		const rendezvous = await waitForFileText(startedFile, (text) => {
+			const buildsAtBarrier = text.trim().split("\n").filter(Boolean).length;
+			return existsSync(waiterPath) || buildsAtBarrier >= 2;
+		});
+		expect(existsSync(waiterPath)).toBe(true);
+		expect(rendezvous.trim().split("\n").filter(Boolean)).toHaveLength(1);
+		rmSync(blockFile);
+		await Promise.all([waitForChild(first), waitForChild(second)]);
+
+		expect(readFileSync(firstResult, "utf8")).toBe(readFileSync(secondResult, "utf8"));
+		const resolvedVenv = venvFromPython(readFileSync(firstResult, "utf8"));
+		expect(readdirSync(join(resolvedVenv, ".leases")).filter((name) => name.endsWith(".json"))).toHaveLength(0);
+		const builds = readFileSync(logPath, "utf8")
+			.split("\n")
+			.filter((line) => line.startsWith("venv "));
+		expect(builds).toHaveLength(1);
+	});
+
+	it("recovers after a builder crashes without selecting its partial generation", async () => {
+		const logPath = installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		const blockFile = join(tempDir, "uv.block");
+		const startedFile = join(tempDir, "uv.started");
+		const crashedResult = join(tempDir, "crashed-python.txt");
+		const recoveredResult = join(tempDir, "recovered-python.txt");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		process.env.UV_BLOCK_FILE = blockFile;
+		process.env.UV_BLOCK_STARTED = startedFile;
+		writeFileSync(blockFile, "block");
+
+		const crashed = spawnBootstrapSubprocess(crashedResult);
+		const started = await waitForFileText(startedFile, (text) => text.trim().length > 0);
+		const partialVenv = started.trim().split("\n")[0];
+		const crashedExit = new Promise<void>((resolve) => crashed.once("close", () => resolve()));
+		crashed.kill("SIGKILL");
+		await crashedExit;
+		rmSync(blockFile);
+		await waitForFileText(logPath, (text) => text.includes(`finished ${partialVenv}`));
+
+		delete process.env.UV_BLOCK_FILE;
+		const recovered = spawnBootstrapSubprocess(recoveredResult);
+		await waitForChild(recovered);
+		const recoveredPython = readFileSync(recoveredResult, "utf8");
+
+		expect(recoveredPython).not.toBe(join(partialVenv, "bin", "python"));
+		expect(existsSync(partialVenv)).toBe(false);
+		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(1);
+	});
+
+	it("keeps a returned interpreter executable while another identity bootstraps", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		const firstResult = join(tempDir, "first-python.txt");
+		const secondResult = join(tempDir, "second-python.txt");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+
+		const first = spawnBootstrapSubprocess(firstResult);
+		await waitForChild(first);
+		const firstPython = readFileSync(firstResult, "utf8");
+
+		const blockFile = join(tempDir, "uv.block");
+		const startedFile = join(tempDir, "uv.started");
+		process.env.UV_BLOCK_FILE = blockFile;
+		process.env.UV_BLOCK_STARTED = startedFile;
+		writeFileSync(blockFile, "block");
+		const skill = createPythonSkill("other-identity");
+		const second = spawnBootstrapSubprocess(secondResult, skill);
+		await waitForFileText(startedFile, (text) => text.trim().length > 0);
+
+		await expect(execFileAsync(firstPython, ["-c", "import ipykernel"])).resolves.toMatchObject({ stdout: "" });
+		rmSync(blockFile);
+		await waitForChild(second);
+		expect(readFileSync(secondResult, "utf8")).not.toBe(firstPython);
+		expect(existsSync(firstPython)).toBe(true);
+	});
+
+	it("does not reclaim a generation during the spawn-to-lease window", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		const skill = createPythonSkill("spawn-window-skill");
+		const markLeasesDead = (venv: string): void => {
+			for (const leaseName of readdirSync(join(venv, ".leases"))) {
+				if (!leaseName.endsWith(".json")) continue;
+				writeFileSync(
+					join(venv, ".leases", leaseName),
+					`${JSON.stringify({
+						version: 1,
+						pid: 2_147_483_647,
+						processStartId: "proc:dead",
+						updatedAt: new Date().toISOString(),
+					})}\n`,
+				);
+			}
+		};
+
+		const firstPython = await ensureKernelPython({ pythonSkills: [skill] });
+		const firstVenv = venvFromPython(firstPython);
+		markLeasesDead(firstVenv);
+		const blockFile = join(tempDir, "spawn.block");
+		const startedFile = join(tempDir, "spawn.started");
+		writeFileSync(blockFile, "block");
+		const unleasedKernel = spawn(firstPython, ["--prime-test-block"], {
+			env: { ...process.env, SPAWN_BLOCK_FILE: blockFile, SPAWN_STARTED_FILE: startedFile },
+			stdio: "ignore",
+		});
+		await waitForFileText(startedFile, (text) => text === "started");
+
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
+		const secondPython = await ensureKernelPython({ pythonSkills: [skill] });
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
+		const thirdPython = await ensureKernelPython({ pythonSkills: [skill] });
+		expect(existsSync(firstPython)).toBe(true);
+
+		rmSync(blockFile);
+		await waitForChild(unleasedKernel);
+		for (const python of [firstPython, secondPython, thirdPython]) markLeasesDead(venvFromPython(python));
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity four\n`);
+		await ensureKernelPython({ pythonSkills: [skill] });
+		expect(existsSync(firstVenv)).toBe(false);
+	});
+
+	it("reclaims dead leased generations before publishing a third identity", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		const skill = createPythonSkill("bounded-skill");
+		const markAllLeasesDead = (): void => {
+			for (const generationName of readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))) {
+				const leaseDir = join(generationRoot, generationName, ".leases");
+				for (const leaseName of readdirSync(leaseDir)) {
+					writeFileSync(
+						join(leaseDir, leaseName),
+						`${JSON.stringify({
+							version: 1,
+							pid: 2_147_483_647,
+							processStartId: "proc:dead",
+							updatedAt: new Date().toISOString(),
+						})}\n`,
+					);
+				}
+			}
+		};
+
+		await ensureKernelPython({ pythonSkills: [skill] });
+		markAllLeasesDead();
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
+		await ensureKernelPython({ pythonSkills: [skill] });
+		markAllLeasesDead();
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
+
+		await expect(ensureKernelPython({ pythonSkills: [skill] })).resolves.toContain("/bin/python");
+		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(2);
+	});
+
+	it("protects a generation with a malformed lease conservatively", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		const skill = createPythonSkill("conservative-skill");
+
+		const firstPython = await ensureKernelPython({ pythonSkills: [skill] });
+		const firstVenv = venvFromPython(firstPython);
+		const firstLease = readdirSync(join(firstVenv, ".leases"))[0];
+		writeFileSync(join(firstVenv, ".leases", firstLease), "not json\n");
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
+		const secondPython = await ensureKernelPython({ pythonSkills: [skill] });
+		const secondVenv = venvFromPython(secondPython);
+		for (const leaseName of readdirSync(join(secondVenv, ".leases"))) {
+			writeFileSync(
+				join(secondVenv, ".leases", leaseName),
+				`${JSON.stringify({
+					version: 1,
+					pid: 2_147_483_647,
+					processStartId: "proc:dead",
+					updatedAt: new Date().toISOString(),
+				})}\n`,
+			);
+		}
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
+
+		await ensureKernelPython({ pythonSkills: [skill] });
+		expect(existsSync(firstPython)).toBe(true);
+		expect(existsSync(secondPython)).toBe(true);
+		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(3);
+	});
+
+	it("publishes instead of refusing startup when every retained generation is live", async () => {
+		installFakeUv();
+		const generationRoot = join(tempDir, "kernel-generations");
+		process.env.PRIME_AGENT_KERNEL_VENV_ROOT = generationRoot;
+		const skill = createPythonSkill("live-skill");
+
+		const firstPython = await ensureKernelPython({ pythonSkills: [skill] });
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity two\n`);
+		await ensureKernelPython({ pythonSkills: [skill] });
+		writeFileSync(skill.pyprojectPath, `${readFileSync(skill.pyprojectPath, "utf8")}\n# identity three\n`);
+
+		await expect(ensureKernelPython({ pythonSkills: [skill] })).resolves.toContain("/bin/python");
+		expect(readdirSync(generationRoot).filter((name) => name.startsWith("generation-"))).toHaveLength(3);
+		expect(existsSync(firstPython)).toBe(true);
+	});
+
+	it("reuses a current warm venv without invoking uv", async () => {
+		const baseVenv = join(tempDir, "kernel-venv");
+		const { python, venv } = await createWarmVenv(baseVenv);
 		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+
+		await expect(ensureKernelPython()).resolves.toBe(python);
+	});
+
+	it("preserves a stale generation while publishing its replacement", async () => {
+		const logPath = installFakeUv();
+		const baseVenv = join(tempDir, "kernel-venv");
+		const { python: stalePython, venv: staleVenv } = await createWarmVenv(baseVenv);
+		writeFakePython(stalePython, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
 		writeFileSync(
-			join(venv, ".bootstrap-version"),
+			join(staleVenv, ".bootstrap-version"),
+			`${JSON.stringify({
+				schema: 8,
+				ipykernel: "ipykernel",
+				runtime: "sha256:stale",
+				snapshot: "dill",
+				extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
+				pythonSkills: [],
+			})}\n`,
+		);
+
+		const replacementPython = await ensureKernelPython();
+
+		expect(replacementPython).not.toBe(stalePython);
+		expect(readFileSync(stalePython, "utf8")).toContain("#!/bin/sh");
+		const replacementVenv = venvFromPython(replacementPython);
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${replacementVenv} --python 3.11 --seed`);
+		const version = JSON.parse(readFileSync(join(replacementVenv, ".bootstrap-version"), "utf8"));
+		expect(version.runtime).toBe(runtimeIdentity);
+	});
+
+	it("replaces a generation with a legacy unhashed Python skill manifest", async () => {
+		installFakeUv();
+		const baseVenv = join(tempDir, "kernel-venv");
+		const pythonSkill = createPythonSkill();
+		const { python: legacyPython, venv: legacyVenv } = await createWarmVenv(baseVenv);
+		writeFakePython(legacyPython, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeFileSync(
+			join(legacyVenv, ".bootstrap-version"),
 			`${JSON.stringify({
 				schema: 4,
 				ipykernel: "ipykernel",
@@ -397,99 +824,36 @@ dependencies = ["httpx"]
 				],
 			})}\n`,
 		);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
-		await expect(ensureKernelPython()).resolves.toBe(python);
+		const replacementPython = await ensureKernelPython();
 
-		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(replacementPython).not.toBe(legacyPython);
+		expect(readFileSync(legacyPython, "utf8")).toContain("#!/bin/sh");
 	});
 
-	it("shares concurrent bootstrap work in one process", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+	it("replaces a generation with a stale rlm runtime", async () => {
+		installFakeUv();
+		const baseVenv = join(tempDir, "kernel-venv");
+		const { python: stalePython, venv: staleVenv } = await createWarmVenv(baseVenv);
+		writeFakePython(stalePython, ["ipykernel"]);
+		writeBootstrapVersion(staleVenv);
 
-		await expect(Promise.all([ensureKernelPython(), ensureKernelPython()])).resolves.toEqual([python, python]);
+		const replacementPython = await ensureKernelPython();
 
-		const log = readFileSync(logPath, "utf8");
-		expect(log.split("\n").filter((line) => line.startsWith(`venv ${venv} `))).toHaveLength(1);
+		expect(replacementPython).not.toBe(stalePython);
+		expect(readFileSync(stalePython, "utf8")).toContain("#!/bin/sh");
 	});
 
-	it("reuses a current warm venv without invoking uv", async () => {
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		writeBootstrapVersion(venv);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+	it("preserves a broken generation while publishing its replacement", async () => {
+		installFakeUv();
+		const baseVenv = join(tempDir, "kernel-venv");
+		const { python: brokenPython, venv: brokenVenv } = await createWarmVenv(baseVenv);
+		writeBootstrapVersion(brokenVenv);
 
-		await expect(ensureKernelPython()).resolves.toBe(python);
-	});
+		const replacementPython = await ensureKernelPython();
 
-	it("rebuilds a warm venv whose recorded runtime hash no longer matches local source", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		writeFileSync(
-			join(venv, ".bootstrap-version"),
-			`${JSON.stringify({
-				schema: 8,
-				ipykernel: "ipykernel",
-				runtime: "sha256:stale",
-				snapshot: "dill",
-				extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
-				pythonSkills: [],
-			})}\n`,
-		);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		await expect(ensureKernelPython()).resolves.toBe(python);
-
-		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.runtime).toBe(runtimeIdentity);
-	});
-
-	it("rebuilds a warm venv with a stale rlm runtime", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeExecutable(
-			python,
-			[
-				"#!/bin/sh",
-				'if [ "$1" = "-c" ]; then',
-				'  case "$2" in',
-				'    "import ipykernel"|"import rlm") exit 0 ;;',
-				"    *) exit 1 ;;",
-				"  esac",
-				"fi",
-				"exit 0",
-				"",
-			].join("\n"),
-		);
-		writeBootstrapVersion(venv);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		await expect(ensureKernelPython()).resolves.toBe(python);
-
-		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
-	});
-
-	it("rebuilds a broken venv", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeBootstrapVersion(venv);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
-
-		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(replacementPython).not.toBe(brokenPython);
+		expect(readFileSync(join(brokenVenv, ".bootstrap-version"), "utf8")).toContain(runtimeIdentity);
 	});
 
 	it("uses PRIME_AGENT_KERNEL_PYTHON as an override contract", async () => {
