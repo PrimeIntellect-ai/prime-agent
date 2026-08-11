@@ -963,59 +963,70 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("waits for timed-out worker finalization before completing shutdown", async () => {
+	it("completes shutdown without awaiting an unsignalable worker finalizer", async () => {
+		vi.useFakeTimers();
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-shutdown-finalization-test-"));
 		supervisorRegistryDirs.add(root);
 		const worker = {
-			descriptor: { workerId: "worker-shutdown-finalization" },
-			stopFinalization: undefined as Promise<void> | undefined,
+			descriptor: {
+				workerId: "worker-shutdown-finalization",
+				pid: 111_123,
+				rootActiveSessionId: "active-1",
+				stopRequestedAt: new Date().toISOString(),
+				archiveOnStop: true,
+			},
+			client: undefined,
+			summaries: new Map(),
+			snapshotCache: new Map(),
+			transcriptCaches: new Map(),
+			snapshotGenerations: new Map(),
+			snapshotLoads: new Map(),
+			intentionalStop: true,
+			stopRevision: 1,
+			stopFinalization: new Promise<void>(() => {}),
 		};
 		const workers = new Map([[worker.descriptor.workerId, worker]]);
-		let finishFinalization = () => {};
-		const finalization = new Promise<void>((resolve) => {
-			finishFinalization = resolve;
-		}).then(() => {
-			workers.delete(worker.descriptor.workerId);
-		});
-		const stopError = new Error("worker stop timed out");
-		const stopWorker = vi.fn(async () => {
-			worker.stopFinalization = finalization;
-			throw stopError;
-		});
 		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
 			throw new Error(`exit ${code}`);
 		}) as typeof process.exit);
+		const killSpy = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
+		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
+		const catalogStop = vi.fn(async () => undefined);
+		const log = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			shuttingDown: false,
-			finalizeWorkerStopsDuringShutdown: false,
 			signalCleanupHandlers: [],
 			workers,
 			clients: new Set(),
-			stopWorker,
+			persistWorkerStopTombstone: vi.fn(),
 			hasPersistedWorkerDescriptors: vi.fn(() => true),
-			catalog: { stop: vi.fn(async () => undefined) },
+			catalog: { stop: catalogStop },
 			cleanupSocket: vi.fn(),
 			snapshotCacheRoot: join(root, "cache"),
-			log: vi.fn(),
+			log,
 		}) as {
-			finalizeWorkerStopsDuringShutdown: boolean;
-			shutdown(exitCode: number, stopWorkers: boolean): Promise<never>;
+			shutdown(exitCode: number, stopWorkers: boolean, relaunch?: boolean, forceWorkers?: boolean): Promise<never>;
 		};
 
 		try {
-			const shutdown = supervisor.shutdown(0, true).then(
+			const shutdown = supervisor.shutdown(0, true, false, true).then(
 				() => undefined,
 				(error: unknown) => error,
 			);
-			await vi.waitFor(() => expect(stopWorker).toHaveBeenCalledOnce());
-			expect(exit).not.toHaveBeenCalled();
-			expect(supervisor.finalizeWorkerStopsDuringShutdown).toBe(true);
-
-			finishFinalization();
+			await vi.advanceTimersByTimeAsync(2000);
 			await expect(shutdown).resolves.toEqual(new Error("exit 0"));
+
+			expect(workers.has(worker.descriptor.workerId)).toBe(true);
+			expect(killSpy).not.toHaveBeenCalled();
+			expect(catalogStop).toHaveBeenCalledOnce();
+			expect(log).toHaveBeenCalledWith(expect.stringContaining("remains tombstoned for recovery"));
 			expect(exit).toHaveBeenCalledWith(0);
 		} finally {
 			exit.mockRestore();
+			killSpy.mockRestore();
+			existsSpy.mockRestore();
+			aliveSpy.mockRestore();
 		}
 	});
 
@@ -1838,7 +1849,7 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("escalates a stuck stop during shutdown before finalizing", async () => {
+	it("escalates a stuck stop to SIGKILL before finalizing", async () => {
 		vi.useFakeTimers();
 		const processStartId = getProcessStartId(process.pid);
 		if (processStartId === undefined) {
@@ -1861,8 +1872,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const stopWorker = vi.fn(async () => {});
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
-			shuttingDown: true,
-			finalizeWorkerStopsDuringShutdown: true,
+			shuttingDown: false,
 			stopWorker,
 			persistWorker: vi.fn(),
 			log: vi.fn(),

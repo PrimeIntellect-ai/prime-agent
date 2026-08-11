@@ -337,6 +337,8 @@ class SupervisorRecoveryCancelledError extends Error {
 
 class SnapshotLoadInvalidatedError extends Error {}
 
+class WorkerStopTimeoutError extends Error {}
+
 function isSupervisorGenerationStale(error: unknown): boolean {
 	return (
 		typeof error === "object" &&
@@ -588,7 +590,6 @@ export class DaemonSupervisor {
 	private ownership?: Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 	private cleanupPromise?: Promise<void>;
 	private shuttingDown = false;
-	private finalizeWorkerStopsDuringShutdown = false;
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
 	private readonly mutationDrain = new MutationDrainLatch();
 	private readonly clients = new Set<DaemonSocketClient>();
@@ -4710,7 +4711,7 @@ export class DaemonSupervisor {
 			if (removeDescriptor) {
 				this.scheduleWorkerStopFinalization(worker);
 			}
-			throw new Error(
+			throw new WorkerStopTimeoutError(
 				`Session worker ${worker.descriptor.workerId} did not stop${sigkillSent ? " after SIGKILL" : ""}`,
 			);
 		}
@@ -4793,8 +4794,7 @@ export class DaemonSupervisor {
 		};
 		const sigkillDeadline = Date.now() + STOP_FINALIZATION_SIGKILL_GRACE_MS;
 		let killed = false;
-		const shouldContinue = () => !this.shuttingDown || this.finalizeWorkerStopsDuringShutdown;
-		while (shouldContinue()) {
+		while (!this.shuttingDown) {
 			if (!isStopGenerationCurrent()) {
 				return;
 			}
@@ -4823,7 +4823,7 @@ export class DaemonSupervisor {
 			this.workers.get(worker.descriptor.workerId) === worker &&
 			worker.descriptor.stopRequestedAt !== undefined &&
 			worker.descriptor.pid === pid;
-		while (shouldContinue() && isCleanupStillWanted()) {
+		while (!this.shuttingDown && isCleanupStillWanted()) {
 			try {
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Finalized timed-out stop for worker ${worker.descriptor.workerId}`);
@@ -5045,20 +5045,17 @@ export class DaemonSupervisor {
 			cleanup();
 		}
 		if (stopWorkers) {
-			this.finalizeWorkerStopsDuringShutdown = true;
 			await Promise.all(
 				[...this.workers.values()].map(async (worker) => {
 					try {
 						await this.stopWorker(worker, true, forceWorkers, true);
 					} catch (error) {
-						const finalization = worker.stopFinalization;
-						if (!finalization) {
+						if (!(error instanceof WorkerStopTimeoutError)) {
 							throw error;
 						}
-						await finalization;
-						if (this.workers.get(worker.descriptor.workerId) === worker) {
-							throw error;
-						}
+						this.log(
+							`Worker ${worker.descriptor.workerId} remains tombstoned for recovery after shutdown: ${error.message}`,
+						);
 					}
 				}),
 			);
