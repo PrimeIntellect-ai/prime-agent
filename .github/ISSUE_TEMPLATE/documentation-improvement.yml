@@ -7,7 +7,8 @@ body:
     id: package
     attributes:
       label: Package
-      description: Which package's docs are affected? A maintainer will apply the matching `pkg:*` label.
+      multiple: true
+      description: Which package(s) docs are affected? Select all that apply. A maintainer will apply the matching `pkg:*` labels.
       options:
         - agent
         - ai
