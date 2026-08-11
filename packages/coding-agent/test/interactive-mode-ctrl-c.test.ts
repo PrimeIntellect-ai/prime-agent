@@ -39,6 +39,7 @@ type FakeInteractiveMode = {
 	subagentSummaryLine: { invalidate: Mock };
 	ui: { requestRender: Mock; onDebug?: () => void };
 	updatePendingMessagesDisplay: Mock;
+	restoreQueuedMessagesToEditor: Mock;
 	showError: Mock;
 	showTreeSelector: Mock;
 	shutdown: Mock;
@@ -112,6 +113,7 @@ function createInteractiveFake(options: {
 		ui: { requestRender: vi.fn() },
 		queueSelection: { isBrowsing: false, reset: () => "" },
 		updatePendingMessagesDisplay: vi.fn(),
+		restoreQueuedMessagesToEditor: vi.fn(),
 		showError: vi.fn(),
 		showTreeSelector: vi.fn(),
 		shutdown: vi.fn().mockResolvedValue(undefined),
