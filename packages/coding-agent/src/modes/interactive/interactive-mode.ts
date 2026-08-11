@@ -2528,8 +2528,13 @@ export class InteractiveMode {
 			followUp: [...queue.followUp],
 		};
 		const dropped = this.queueSelection.sync(this.connectionQueue);
-		if (dropped !== undefined && this.editor.getText() === dropped) {
-			this.setEditorTextFromQueueSelection(this.queueSelection.reset());
+		if (dropped !== undefined) {
+			const editorText = this.editor.getText();
+			if (editorText === dropped) {
+				this.setEditorTextFromQueueSelection(this.queueSelection.reset());
+			} else {
+				this.queueSelection.replaceDraft(editorText);
+			}
 		}
 		this.updatePendingMessagesDisplay();
 	}
@@ -7054,8 +7059,20 @@ export class InteractiveMode {
 						lane: targetLane,
 					} as const);
 		const editorTextBefore = this.editor.getText();
+		const discardStaleSelection = (): boolean => {
+			if (sessionGeneration === this.sessionEventGeneration) return false;
+			if (this.pendingQueueEdit === pendingQueueEdit) {
+				this.pendingQueueEdit = undefined;
+				this.queueSelection.reset();
+				if (submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore) {
+					this.setEditorTextFromQueueSelection("");
+				}
+				this.ui.requestRender();
+			}
+			return true;
+		};
 		return this.enqueueQueueMutation(async () => {
-			if (sessionGeneration !== this.sessionEventGeneration) return true;
+			if (discardStaleSelection()) return true;
 			// Earlier serialized moves may have changed the selected item's index.
 			const lane = this.connectionQueue[submittedSelection.lane];
 			const resolvedIndex =
@@ -7064,9 +7081,12 @@ export class InteractiveMode {
 					: lane.indexOf(submittedSelection.text);
 			if (resolvedIndex < 0) {
 				this.queueSelection.sync(this.connectionQueue);
-				if (submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore) {
+				const editorUntouched =
+					submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
+				if (editorUntouched) {
 					this.setEditorTextFromQueueSelection(text);
 				}
+				this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
 				this.showStatus("Queue changed; edit kept in the editor");
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
@@ -7083,14 +7103,19 @@ export class InteractiveMode {
 					mutation,
 				);
 			} catch (error) {
-				if (sessionGeneration !== this.sessionEventGeneration) return true;
+				if (discardStaleSelection()) return true;
 				// The editor was already cleared by Enter; restore the edit before surfacing the error.
-				if (submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore) {
+				const editorUntouched =
+					submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
+				if (editorUntouched) {
 					this.setEditorTextFromQueueSelection(text);
+				}
+				if (!this.queueSelection.isBrowsing) {
+					this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
 				}
 				throw error;
 			}
-			if (sessionGeneration !== this.sessionEventGeneration) return true;
+			if (discardStaleSelection()) return true;
 			const editorUntouched =
 				submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
 			if (status === "applied") {
@@ -7113,6 +7138,9 @@ export class InteractiveMode {
 				// Enter submissions clear the editor before onSubmit runs; restore the
 				// edit so a failed mutation never swallows it.
 				if (editorUntouched) this.setEditorTextFromQueueSelection(text);
+				if (!this.queueSelection.isBrowsing) {
+					this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
+				}
 				if (status === "invalid")
 					this.showStatus("Edited command is not a valid session command; edit kept in the editor");
 				else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");

@@ -226,14 +226,18 @@ describe("interactive queued-message editing", () => {
 		harness.browseQueueSelection(-1);
 		harness.editor.setText("");
 		const pending = harness.applyQueueSelection("edited", "steering");
-		harness.replaceConnectionQueue({ steering: [], followUp: [] });
+		harness.replaceConnectionQueue({ steering: ["remaining"], followUp: [] });
 		releaseMutationChain();
 		await pending;
 		expect(harness.agentConnection.mutateQueuedMessage).not.toHaveBeenCalled();
 		expect(harness.editor.getText()).toBe("edited");
 		expect(harness.queueSelection.hasDraft).toBe(true);
-		expect(harness.queueSelection.reset()).toBe("draft");
 		expect(harness.showStatus).toHaveBeenCalledWith("Queue changed; edit kept in the editor");
+
+		harness.browseQueueSelection(-1);
+		expect(harness.editor.getText()).toBe("remaining");
+		harness.browseQueueSelection(1);
+		expect(harness.editor.getText()).toBe("edited");
 	});
 
 	it("does not reset queue browsing in a replacement session when an old mutation completes", async () => {
@@ -264,6 +268,31 @@ describe("interactive queued-message editing", () => {
 		await pending;
 		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "new queued" });
 		expect(harness.editor.getText()).toBe("new queued");
+	});
+
+	it("discards an old queue selection when the session changes before its mutation completes", async () => {
+		let resolveMutation: (status: string) => void = () => {};
+		const harness = createHarness({ steering: ["old queued"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveMutation = resolve;
+				}),
+		);
+		harness.browseQueueSelection(-1);
+		harness.editor.setText("");
+		const pending = harness.applyQueueSelection("old edited", "steering");
+		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce());
+
+		// session_replaced advances the generation before its queued render reset.
+		harness.sessionEventGeneration++;
+		resolveMutation("applied");
+		await pending;
+
+		expect(harness.pendingQueueEdit).toBeUndefined();
+		expect(harness.queueSelection.isBrowsing).toBe(false);
+		await expect(harness.applyQueueSelection("new session prompt", "steering")).resolves.toBe(false);
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce();
 	});
 
 	it("serializes rapid moves and addresses the second with the post-move index before any queue event", async () => {

@@ -33,6 +33,11 @@ export class QueueSelection {
 		return this.hasStashedDraft;
 	}
 
+	replaceDraft(draft: string): void {
+		this.draft = draft;
+		this.hasStashedDraft = true;
+	}
+
 	/** Move the cursor. -1 browses older, +1 newer. Returns the text to show, or undefined for a boundary noop. */
 	move(queue: AgentConnectionQueueState, draft: string, direction: -1 | 1): string | undefined {
 		if (this.cursor < 0) {
