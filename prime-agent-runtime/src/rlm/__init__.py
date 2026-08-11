@@ -23,6 +23,9 @@ except Exception:  # pragma: no cover - only available in kernels
 
 HOST_COMM_TARGET = "host.request"
 
+#: Max seconds to wait for a host reply before failing instead of hanging.
+HOST_REQUEST_TIMEOUT_SECONDS = 30
+
 
 @dataclass(frozen=True)
 class RLMSpawnHandle:
@@ -137,7 +140,18 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
     comm.on_msg(_on_msg)
     # request_type goes last so a payload "type" key cannot reroute the request.
     comm.open(data={**(payload or {}), "type": request_type})
-    return await future
+    try:
+        return await asyncio.wait_for(future, timeout=HOST_REQUEST_TIMEOUT_SECONDS)
+    except TimeoutError as exc:
+        if not future.done():
+            future.cancel()
+        comm.close()
+        raise RuntimeError(
+            f"host request {request_type!r} timed out after "
+            f"{HOST_REQUEST_TIMEOUT_SECONDS}s: no reply from the Prime Agent host. "
+            "This API requires a running Prime Agent session; calling it from a "
+            "standalone Python environment hangs until this timeout."
+        ) from exc
 
 
 async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
