@@ -204,6 +204,36 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		}
 	}
 
+	// Re-read the session identity from the bound session manager right before
+	// each report. `session_start` fires before the session file/id is assigned
+	// (the file is created on first persist), so the resumable ref was never
+	// making it onto a report. Refreshing here means the next report carries
+	// the session path/id once it exists — which is what lets Herdr persist
+	// and later `prime-agent --resume` the session. Herdr's fork treats
+	// (herdr:pi, prime-agent) as an official resumable source.
+	function refreshBoundSessionRef(): void {
+		if (boundSessionManager === undefined) {
+			return;
+		}
+		const mgr = boundSessionManager as {
+			getSessionFile?: () => unknown;
+			getSessionId?: () => unknown;
+		};
+		try {
+			const file = mgr?.getSessionFile?.();
+			currentAgentSessionPath =
+				typeof file === "string" && file.startsWith("/") ? file : undefined;
+		} catch {
+			currentAgentSessionPath = undefined;
+		}
+		try {
+			const id = mgr?.getSessionId?.();
+			currentAgentSessionId = typeof id === "string" && id.length > 0 ? id : undefined;
+		} catch {
+			currentAgentSessionId = undefined;
+		}
+	}
+
 	function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
 		if (currentAgentSessionPath) {
 			return { ...params, agent_session_path: currentAgentSessionPath };
@@ -215,6 +245,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 	}
 
 	function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<void> {
+		refreshBoundSessionRef();
 		return sendRequest({
 			id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
 			method: "pane.report_agent",
