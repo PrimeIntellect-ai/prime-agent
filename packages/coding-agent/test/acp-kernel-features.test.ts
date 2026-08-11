@@ -74,13 +74,14 @@ describe("ACP mode over a real IPython kernel", () => {
 		expect(second.status).toBe("ok");
 		expect(second.stdout.trim()).toBe("42");
 
-		const updates = acpUpdatesForSessionEvent(toolEndEvent("cell-2", second.stdout));
-		expect(updates[0]).toMatchObject({
+		const update = acpUpdatesForSessionEvent(toolEndEvent("cell-2", second.stdout))[0];
+		expect(update).toMatchObject({
 			sessionUpdate: "tool_call_update",
 			toolCallId: "cell-2",
 			status: "completed",
 		});
-		expect(JSON.stringify(updates[0]?.content)).toContain("42");
+		if (update?.sessionUpdate !== "tool_call_update") throw new Error("missing tool call update");
+		expect(JSON.stringify(update.content)).toContain("42");
 	});
 
 	it("runs continual-harness CRUD in the kernel and can represent the result over ACP", {
