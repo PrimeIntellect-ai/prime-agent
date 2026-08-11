@@ -90,6 +90,16 @@ export interface AgentFamilyRosterEntry {
 	id: string;
 	depth: number;
 	status: AgentFamilyStatus;
+	/**
+	 * Whether a child has replied to its parent since the parent's last message.
+	 *
+	 * Three-valued: `true` replied, `false` has not replied, absent unknown. It is
+	 * unknown whenever the daemon cannot read the child's live session — a passive,
+	 * evicted, or otherwise non-resident child, or one resumed in a new process
+	 * whose reply history predates it. Absent is not a synonym for `false`: a child
+	 * that replied and was then evicted reports absent, so a caller that collapses
+	 * the two reports a child that did reply as one that never did.
+	 */
 	repliedSinceTask?: boolean;
 }
 

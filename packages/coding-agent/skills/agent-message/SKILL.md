@@ -30,7 +30,8 @@ if child is not None:
   and family-scoped `entries` (`relationship`, `name`, `id`, `depth`, `status`)
   for the current agent's parent, siblings, and children. It includes inactive
   family members and sorts parent, siblings by name, then children by name; it
-  does not expose a global daemon session list.
+  does not expose a global daemon session list. Child entries additionally carry
+  `repliedSinceTask` (see below).
 - `await agent_message.send(message, receiver_role="parent" | "sibling" | "child", receiver_name=None)` — sends one direct
   text message to an active session. Sending to an idle completed subagent
   starts an ordinary follow-up turn in that same child session and context.
@@ -46,6 +47,45 @@ if child is not None:
   context; `"queued"` means a steering message was accepted and will deliver when
   the target's current work allows (`send` does not block waiting for that).
   Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
+
+## Reading `repliedSinceTask`
+
+Child rows in `list_agents()` report `repliedSinceTask`, and it has three states,
+not two:
+
+| Value | Meaning |
+|---|---|
+| `True` | The child has sent a message addressed to you since your last message to it. |
+| `False` | The child has not replied since your last message to it. |
+| `None` (key absent) | Unknown — the daemon cannot read that child's live session right now. |
+
+Unknown is reported by omitting the key, so `entry.get("repliedSinceTask")`
+returns `None`. It is not a synonym for "has not replied": a child that is not
+resident (passive, evicted, or resumed in a new process whose reply history
+predates it) reports unknown even if it did reply. Code that treats a falsy value
+as "still working" will wait forever on a child that already answered, which is
+why the same child can look like `True` on one poll and "not replied" on the
+next — the child was evicted between the two, not reset.
+
+```python
+roster = await agent_message.list_agents()
+for entry in roster["entries"]:
+    if entry["relationship"] != "child":
+        continue
+    replied = entry.get("repliedSinceTask")
+    if replied is None:
+        pass          # unknown: fall back to agent_observe or the child's output
+    elif replied:
+        pass          # answered since your last message
+    else:
+        pass          # genuinely still owes you a reply
+```
+
+This flag answers "has it replied since I last wrote to it", not "is it done".
+A child that writes an output file without messaging you reports `False`
+forever; pair it with `agent_observe.get_agent(name)` (`status`, and the
+in-flight tool-call fields) or an agreed output artifact when you need
+completion rather than acknowledgement.
 
 ## Safety
 
