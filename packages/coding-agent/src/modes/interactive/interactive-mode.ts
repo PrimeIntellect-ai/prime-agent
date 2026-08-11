@@ -4979,12 +4979,18 @@ export class InteractiveMode {
 					submissionOutcome = "lifecycle-cancelled";
 					return;
 				}
+				const wasStreaming = this.isAgentStreaming();
 				try {
 					await this.agentConnection.prompt(text, {
 						streamingBehavior,
 						queueIfBusy: true,
 						images,
 					});
+					if (wasStreaming) {
+						const kind = streamingBehavior === "steer" ? "Steering" : "Follow-up";
+						const boundary = streamingBehavior === "steer" ? "next model boundary" : "current run finishes";
+						this.showStatus(`${kind} received — queued until the ${boundary}.`);
+					}
 				} catch (error) {
 					// Generation guards editor ownership, not draft durability: a stale
 					// rejection must be retained rather than overwrite newer input or vanish.

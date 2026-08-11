@@ -619,6 +619,8 @@ type SubmitHandlerHarness = {
 	clearShortcutGuide: () => void;
 	showWarning: (message: string) => void;
 	showError: (message: string) => void;
+	showStatus: (message: string) => void;
+	isAgentStreaming: () => boolean;
 	isBashRunning: () => boolean;
 	patchConnectionState: (patch: Record<string, unknown>) => void;
 	requestAgentsView: () => Promise<void>;
@@ -637,6 +639,8 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 		clearShortcutGuide: vi.fn(),
 		showWarning: vi.fn(),
 		showError: vi.fn(),
+		showStatus: vi.fn(),
+		isAgentStreaming: () => false,
 		isBashRunning: () => false,
 		patchConnectionState: vi.fn(),
 		promptStashState: {},
@@ -679,6 +683,31 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 }
 
 describe("InteractiveMode submit handling", () => {
+	test.each([
+		["steer", "Steering received — queued until the next model boundary."],
+		["followUp", "Follow-up received — queued until the current run finishes."],
+	] as const)("acknowledges %s submissions while the agent is streaming", async (behavior, expected) => {
+		const showStatus = vi.fn();
+		const fakeThis = createSubmitHandlerHarness({
+			isAgentStreaming: () => true,
+			showStatus,
+			submittedInputBehavior: behavior,
+		});
+
+		await fakeThis.defaultEditor.onSubmit?.("redirect the active run");
+
+		expect(showStatus).toHaveBeenCalledWith(expected);
+	});
+
+	test("does not describe a new idle prompt as queued steering", async () => {
+		const showStatus = vi.fn();
+		const fakeThis = createSubmitHandlerHarness({ showStatus, isAgentStreaming: () => false });
+
+		await fakeThis.defaultEditor.onSubmit?.("start a new run");
+
+		expect(showStatus).not.toHaveBeenCalled();
+	});
+
 	test.each(["normal Enter", "installed custom editor"])("captures exact rich state for %s", async () => {
 		const image = { type: "image", data: "base64", mimeType: "image/png" };
 		const pasteSnapshot = { pastes: [[1, "expanded paste"]] as const, pasteCounter: 2 };
