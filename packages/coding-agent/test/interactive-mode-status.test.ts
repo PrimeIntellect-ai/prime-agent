@@ -4234,6 +4234,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 
 	test("toggles agent messages separately from tools", () => {
 		const toolChild = { setExpanded: vi.fn() };
+		const ipythonChild = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn() };
 		const messageChild = new AgentMessageComponent({
 			role: "custom",
 			customType: "agent_message",
@@ -4243,7 +4244,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 			timestamp: 123,
 		} as any);
 		const messageSetExpanded = vi.spyOn(messageChild, "setExpanded");
-		const fakeThis = createExpansionFakeThis([toolChild, messageChild]);
+		const fakeThis = createExpansionFakeThis([toolChild, ipythonChild, messageChild]);
 
 		fakeThis.toggleAgentMessageExpansion();
 
@@ -4251,11 +4252,15 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(fakeThis.toolOutputExpanded).toBe(false);
 		expect(messageSetExpanded).toHaveBeenCalledWith(true);
 		expect(toolChild.setExpanded).toHaveBeenCalledWith(false);
+		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(false);
+		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenCalledWith(true);
 
 		fakeThis.setToolsExpanded(true);
 
 		expect(toolChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(messageSetExpanded).toHaveBeenLastCalledWith(true);
+		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(true);
+		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenLastCalledWith(true);
 		expect(fakeThis.agentMessagesExpanded).toBe(true);
 	});
 });
