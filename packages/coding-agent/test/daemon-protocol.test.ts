@@ -21,10 +21,22 @@ import {
 	isDaemonMutatingCommand,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
+import {
+	createArchiveSessionReceipt,
+	createDaemonArchiveOccupancyReceipt,
+	isDaemonArchiveOccupancyReceipt,
+	isDaemonArchiveSessionReceipt,
+	projectDaemonArchiveSummaryOccupancy,
+	registerDaemonArchiveOccupancyMutation,
+} from "../src/modes/daemon/daemon-session-archive.js";
 
 describe("daemon protocol helpers", () => {
 	it("keeps the advertised schema identity synchronized with wire type shapes", () => {
 		const source = readFileSync(resolve(__dirname, "../src/modes/daemon/daemon-protocol.ts"), "utf8");
+		const archiveSource = source.slice(
+			source.indexOf("export interface DaemonArchiveOccupancyReceipt"),
+			source.indexOf("export type DaemonSavedSessionListCommand"),
+		);
 		const commandSource = source.slice(
 			source.indexOf("export type DaemonCommand ="),
 			source.indexOf("type DaemonCommandName"),
@@ -38,7 +50,7 @@ describe("daemon protocol helpers", () => {
 			source.indexOf("export const DAEMON_OUTBOUND_COMPATIBILITY"),
 		);
 		const digest = createHash("sha256")
-			.update(`${commandSource}\n${savedSessionSource}\n${outboundSource}`)
+			.update(`${archiveSource}\n${commandSource}\n${savedSessionSource}\n${outboundSource}`)
 			.digest("hex")
 			.slice(0, 12);
 		expect(DAEMON_SCHEMA_ID).toBe(`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-${digest}`);
@@ -288,5 +300,204 @@ describe("daemon protocol helpers", () => {
 		expect(salvageDaemonCommandId(JSON.stringify({ type: "command", id: 7 }))).toBeUndefined();
 		expect(salvageDaemonCommandId(JSON.stringify("command"))).toBeUndefined();
 		expect(salvageDaemonCommandId("{ not json")).toBeUndefined();
+	});
+	it("capability- and schema-gates atomic session archive without changing the protocol version", () => {
+		expect(DAEMON_PROTOCOL_VERSION).toBe(7);
+		expect(DAEMON_SCHEMA_REVISION).toBe(17);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("atomic_session_archive");
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_archive_occupancy).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 17,
+			capability: "atomic_session_archive",
+		});
+		expect(DAEMON_COMMAND_COMPATIBILITY.archive_session_if_idle).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 17,
+			capability: "atomic_session_archive",
+		});
+		expect(isDaemonMutatingCommand({ type: "get_archive_occupancy" })).toBe(false);
+		expect(isDaemonMutatingCommand({ type: "archive_session_if_idle" })).toBe(true);
+	});
+
+	it("binds archive occupancy digests to every decisive identity and occupancy field", () => {
+		const base = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionPath: "/tmp/sessions/session-1.jsonl",
+			hostGeneration: "worker-1",
+			lifecycle: "live" as const,
+			workerState: "ready" as const,
+			workerRefresh: "current" as const,
+			activeTurn: false,
+			streaming: false,
+			compacting: false,
+			tools: false,
+			bash: false,
+			unfinishedActions: 0,
+			queuedActions: 0,
+			runningChildren: false,
+			attachedClients: 0,
+			heartbeat: false,
+			cron: false,
+			observedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const receipt = createDaemonArchiveOccupancyReceipt(base);
+		expect(receipt).toMatchObject({
+			...base,
+			busy: false,
+			occupancyDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+		});
+		expect(isDaemonArchiveOccupancyReceipt(receipt)).toBe(true);
+
+		const changes = [
+			{ activeSessionId: "active-2" },
+			{ sessionId: "session-2" },
+			{ sessionPath: "/tmp/sessions/session-2.jsonl" },
+			{ hostGeneration: "worker-2" },
+			{ lifecycle: "draft" as const },
+			{ activeTurn: true },
+			{ streaming: true },
+			{ compacting: true },
+			{ tools: true },
+			{ bash: true },
+			{ unfinishedActions: 1 },
+			{ queuedActions: 1 },
+			{ runningChildren: true },
+			{ attachedClients: 1 },
+			{ heartbeat: true },
+			{ cron: true },
+		];
+		for (const change of changes) {
+			const changed = createDaemonArchiveOccupancyReceipt({ ...base, ...change });
+			expect(changed.occupancyDigest).not.toBe(receipt.occupancyDigest);
+		}
+	});
+
+	it("rejects open, malformed, and digest-mismatched archive receipts", () => {
+		const occupancy = createDaemonArchiveOccupancyReceipt({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionPath: "/tmp/session-1.jsonl",
+			hostGeneration: "worker-1",
+			lifecycle: "live",
+			workerState: "ready",
+			workerRefresh: "current",
+			activeTurn: false,
+			streaming: false,
+			compacting: false,
+			tools: false,
+			bash: false,
+			unfinishedActions: 0,
+			queuedActions: 0,
+			runningChildren: false,
+			attachedClients: 0,
+			heartbeat: false,
+			cron: false,
+			observedAt: "2026-08-12T00:00:00.000Z",
+		});
+		const archive = createArchiveSessionReceipt({
+			activeSessionId: occupancy.activeSessionId,
+			sessionId: occupancy.sessionId,
+			sessionPath: occupancy.sessionPath,
+			hostGeneration: occupancy.hostGeneration,
+			beforeOccupancyDigest: occupancy.occupancyDigest,
+			archivedAt: "2026-08-12T00:00:01.000Z",
+			postReadback: { sessionId: occupancy.sessionId, sessionPath: occupancy.sessionPath, state: "archived" },
+		});
+		expect(isDaemonArchiveSessionReceipt(archive)).toBe(true);
+
+		for (const invalid of [
+			{ ...occupancy, extra: true },
+			{ ...occupancy, sessionId: "" },
+			{ ...occupancy, busy: true },
+			{ ...occupancy, occupancyDigest: `sha256:${"0".repeat(64)}` },
+			Object.fromEntries(Object.entries(occupancy).filter(([key]) => key !== "cron")),
+		]) {
+			expect(isDaemonArchiveOccupancyReceipt(invalid)).toBe(false);
+		}
+		for (const invalid of [
+			{ ...archive, extra: true },
+			{ ...archive, state: "deleted" },
+			{ ...archive, archiveReceiptDigest: `sha256:${"0".repeat(64)}` },
+			{ ...archive, postReadback: { ...archive.postReadback, sessionId: "other" } },
+			Object.fromEntries(Object.entries(archive).filter(([key]) => key !== "postReadback")),
+		]) {
+			expect(isDaemonArchiveSessionReceipt(invalid)).toBe(false);
+		}
+	});
+	it("fails closed when a current worker summary omits decisive occupancy metadata", () => {
+		const complete = {
+			id: "active-1",
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session-1.jsonl",
+			lifecycle: "live",
+			isSessionActive: false,
+			isStreaming: false,
+			isCompacting: false,
+			isBashRunning: false,
+			isRunningTools: false,
+			hasRunningRlmChildren: false,
+			unfinishedActionCount: 0,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+		};
+		expect(projectDaemonArchiveSummaryOccupancy(complete)).toEqual({
+			activeTurn: false,
+			streaming: false,
+			compacting: false,
+			tools: false,
+			bash: false,
+			unfinishedActions: 0,
+			queuedActions: 0,
+			runningChildren: false,
+		});
+		for (const missing of [
+			"activeSessionId",
+			"sessionId",
+			"sessionFile",
+			"lifecycle",
+			"isSessionActive",
+			"isStreaming",
+			"isCompacting",
+			"isBashRunning",
+			"isRunningTools",
+			"hasRunningRlmChildren",
+			"unfinishedActionCount",
+			"sessionActions",
+		]) {
+			const incomplete = { ...complete } as Record<string, unknown>;
+			delete incomplete[missing];
+			expect(() => projectDaemonArchiveSummaryOccupancy(incomplete), missing).toThrow(
+				"Archive occupancy summary is incomplete",
+			);
+		}
+	});
+
+	it("rechecks archive admission after yielding to idle eviction before registering a mutation", async () => {
+		let releaseIdle: () => void = () => {};
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		let releaseArchive: () => void = () => {};
+		const archive = new Promise<void>((resolve) => {
+			releaseArchive = resolve;
+		});
+		let archiveFence: Promise<void> | undefined;
+		let began = false;
+		const registration = registerDaemonArchiveOccupancyMutation(
+			() => archiveFence,
+			() => idle,
+			() => {
+				began = true;
+			},
+		);
+		archiveFence = archive;
+		releaseIdle();
+		await Promise.resolve();
+		expect(began).toBe(false);
+		archiveFence = undefined;
+		releaseArchive();
+		await registration;
+		expect(began).toBe(true);
 	});
 });

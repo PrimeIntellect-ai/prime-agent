@@ -26,6 +26,7 @@ import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
+	isHeartbeatCronJob,
 	migrateLegacyCronJobsToSessionArtifacts,
 	SESSION_SCHEDULED_JOBS_FILENAME,
 } from "../../core/cron-jobs.js";
@@ -64,6 +65,7 @@ import {
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
 	DAEMON_UPDATE_RESTART_FORMAT_VERSION,
+	type DaemonArchiveOccupancyReceipt,
 	type DaemonAttachResult,
 	type DaemonClientCapability,
 	type DaemonClosingReason,
@@ -79,6 +81,12 @@ import {
 	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "./daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
+import {
+	createArchiveSessionReceipt,
+	createDaemonArchiveOccupancyReceipt,
+	projectDaemonArchiveSummaryOccupancy,
+	registerDaemonArchiveOccupancyMutation,
+} from "./daemon-session-archive.js";
 import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
 	classifySessionRosterStatus,
@@ -165,6 +173,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"complete_owned_session",
 	"promote_owned_session",
 	"kill",
+	"get_archive_occupancy",
+	"archive_session_if_idle",
 	"rename",
 	"prompt",
 	"cancel_prompt_admission",
@@ -255,8 +265,12 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"shutdown",
 ]);
 
+interface SupervisorWorkerDescriptor extends DaemonWorkerDescriptor {
+	/** Positive archive ACK persisted before waiting for the worker to exit without process signals. */
+}
+
 interface ResidentWorker {
-	descriptor: DaemonWorkerDescriptor;
+	descriptor: SupervisorWorkerDescriptor;
 	descriptorPath: string;
 	client?: DaemonWorkerClient;
 	heartbeatSnapshot?: AgentConnectionHeartbeat[];
@@ -418,7 +432,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
 	);
 }
 
-function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is DaemonWorkerDescriptor {
+function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is SupervisorWorkerDescriptor {
 	if (!value || typeof value !== "object") {
 		return false;
 	}
@@ -619,6 +633,7 @@ export class DaemonSupervisor {
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
+	private archiveAdmissionFence?: Promise<void>;
 
 	constructor(
 		private readonly socketPath: string,
@@ -883,6 +898,32 @@ export class DaemonSupervisor {
 			if (this.idleEvictionFence === fence) this.idleEvictionFence = undefined;
 			releaseFence();
 		}
+	}
+
+	private async acquireArchiveAdmissionFence(): Promise<() => void> {
+		while (this.archiveAdmissionFence) {
+			await this.archiveAdmissionFence;
+		}
+		let releaseFence: () => void = () => {};
+		const fence = new Promise<void>((resolveFence) => {
+			releaseFence = resolveFence;
+		});
+		this.archiveAdmissionFence = fence;
+		try {
+			await this.mutationDrain.waitForDrain(
+				0,
+				AbortSignal.timeout(30_000),
+				"Timed out draining daemon occupancy mutations for session archive",
+			);
+		} catch (error) {
+			if (this.archiveAdmissionFence === fence) this.archiveAdmissionFence = undefined;
+			releaseFence();
+			throw error;
+		}
+		return () => {
+			if (this.archiveAdmissionFence === fence) this.archiveAdmissionFence = undefined;
+			releaseFence();
+		};
 	}
 
 	private async assertCurrentOwnership(): Promise<void> {
@@ -1349,15 +1390,33 @@ export class DaemonSupervisor {
 			}
 		}
 
-		if (mutation && !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)) {
-			const idleEvictionFence = this.idleEvictionFence;
-			if (idleEvictionFence) await idleEvictionFence;
-		}
-		// Attach is intentionally read-only and is not fence-gated. If eviction wins
-		// the race, attach fails cleanly with "Session worker is not connected" and
-		// the client retries through the saved-session path instead of mutating state.
-		if (mutation) this.mutationDrain.begin();
+		const isArchiveCommand = command.type === "archive_session_if_idle";
+		const tracksArchiveOccupancy = mutation || command.type === "attach" || command.type === "reattach";
+		let releaseArchiveFence: (() => void) | undefined;
+		let archiveOccupancyMutationBegun = false;
 		try {
+			if (isArchiveCommand) {
+				releaseArchiveFence = await this.acquireArchiveAdmissionFence();
+				const idleEvictionFence = this.idleEvictionFence;
+				if (idleEvictionFence) await idleEvictionFence;
+				this.mutationDrain.begin();
+				archiveOccupancyMutationBegun = true;
+			} else if (tracksArchiveOccupancy) {
+				await registerDaemonArchiveOccupancyMutation(
+					() => this.archiveAdmissionFence,
+					async () => {
+						if (!mutation || UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)) return;
+						const idleEvictionFence = this.idleEvictionFence;
+						if (idleEvictionFence) await idleEvictionFence;
+					},
+					() => {
+						this.mutationDrain.begin();
+						archiveOccupancyMutationBegun = true;
+					},
+				);
+			}
+			// Attach remains read-only for journaling, but participates in the archive
+			// occupancy drain so no client can attach across compare-and-archive.
 			const response = await this.handleCommand(client, command, cancellationAdmission);
 			if (response) {
 				if (journalIdentity) {
@@ -1379,7 +1438,8 @@ export class DaemonSupervisor {
 			}
 			this.write(client, response);
 		} finally {
-			if (mutation) this.mutationDrain.end();
+			if (archiveOccupancyMutationBegun) this.mutationDrain.end();
+			releaseArchiveFence?.();
 		}
 	}
 
@@ -1550,6 +1610,14 @@ export class DaemonSupervisor {
 				const match = await this.findWorkerForClient(client, command.activeSessionId);
 				await this.promoteOwnedWorker(client, match.worker);
 				return success(command.id, command.type, this.publicSummary(match.worker, match.summary));
+			}
+			case "get_archive_occupancy": {
+				const occupancy = await this.readArchiveOccupancy(client, command.activeSessionId, command.sessionId);
+				return success(command.id, command.type, occupancy);
+			}
+			case "archive_session_if_idle": {
+				const receipt = await this.archiveSessionIfIdle(client, command);
+				return success(command.id, command.type, receipt);
 			}
 			case "retry_worker": {
 				const direct = [...this.workers.values()].find(
@@ -3273,6 +3341,214 @@ export class DaemonSupervisor {
 		};
 	}
 
+	private exactArchiveRoot(client: DaemonSocketClient, activeSessionId: string, sessionId: string): WorkerMatch {
+		const matches: WorkerMatch[] = [];
+		for (const worker of this.workers.values()) {
+			if (!this.isWorkerAccessibleToClient(client, worker)) continue;
+			const summary = worker.summaries.get(worker.descriptor.rootActiveSessionId);
+			if (!summary) continue;
+			const rootActiveSessionId = summary.activeSessionId ?? summary.id;
+			if (rootActiveSessionId === activeSessionId && summary.sessionId === sessionId) {
+				matches.push({ worker, summary });
+			}
+		}
+		if (matches.length !== 1) {
+			throw new Error(`Unknown archive root: ${activeSessionId}/${sessionId}`);
+		}
+		return matches[0]!;
+	}
+
+	private async readArchiveOccupancy(
+		client: DaemonSocketClient,
+		activeSessionId: string,
+		sessionId: string,
+	): Promise<DaemonArchiveOccupancyReceipt> {
+		if (!activeSessionId || !sessionId) throw new Error("Archive identity must not be empty");
+		const initial = this.exactArchiveRoot(client, activeSessionId, sessionId);
+		if (
+			initial.worker.descriptor.lifecycle !== "ready" ||
+			!initial.worker.client ||
+			initial.worker.intentionalStop ||
+			initial.worker.descriptor.stopRequestedAt !== undefined
+		) {
+			throw new Error("Archive occupancy is unknown while the session worker is not current");
+		}
+		const descriptorProcessStartId = initial.worker.descriptor.processStartId;
+		if (!descriptorProcessStartId || getProcessStartId(initial.worker.descriptor.pid) !== descriptorProcessStartId) {
+			throw new Error("Archive occupancy worker incarnation is unknown or stale");
+		}
+		await this.refreshWorkerSummaries(initial.worker);
+		if (
+			this.workers.get(initial.worker.descriptor.workerId) !== initial.worker ||
+			initial.worker.descriptor.processStartId !== descriptorProcessStartId ||
+			getProcessStartId(initial.worker.descriptor.pid) !== descriptorProcessStartId
+		) {
+			throw new Error("Archive occupancy is stale after worker replacement");
+		}
+		const current = this.exactArchiveRoot(client, activeSessionId, sessionId);
+		if (
+			current.worker !== initial.worker ||
+			current.worker.descriptor.lifecycle !== "ready" ||
+			!current.worker.client
+		) {
+			throw new Error("Archive occupancy is stale after worker refresh");
+		}
+		if (current.summary.runtimeKind !== undefined && current.summary.runtimeKind !== "top-level") {
+			throw new Error("Archive target is not a top-level root session");
+		}
+		if (current.summary.lifecycle !== "draft" && current.summary.lifecycle !== "live") {
+			throw new Error(`Archive target has unsupported lifecycle ${current.summary.lifecycle}`);
+		}
+		const sessionFile = current.summary.sessionFile;
+		if (!sessionFile) throw new Error("Archive target has no persisted session path");
+		const sessionPath = canonicalSessionPath(sessionFile);
+		const descriptorPath = current.worker.descriptor.sessionFile;
+		if (
+			current.worker.descriptor.rootSessionId !== current.summary.sessionId ||
+			!descriptorPath ||
+			canonicalSessionPath(descriptorPath) !== sessionPath
+		) {
+			throw new Error("Archive target identity does not match its resident root descriptor");
+		}
+
+		const summaries = [...current.worker.summaries.values()];
+		const projections = summaries.map(projectDaemonArchiveSummaryOccupancy);
+		const attachedClients = summaries.reduce((count, summary) => {
+			const id = summary.activeSessionId;
+			return count + [...this.clients].filter((candidate) => candidate.attachedActiveSessionIds.has(id!)).length;
+		}, 0);
+		const scheduleResponse = await this.forwardToWorker(
+			current.worker,
+			{ type: "cron_list", activeSessionId, includeInactive: true },
+			5000,
+		);
+		if (
+			!scheduleResponse.success ||
+			!scheduleResponse.data ||
+			typeof scheduleResponse.data !== "object" ||
+			!Array.isArray((scheduleResponse.data as { jobs?: unknown }).jobs)
+		) {
+			throw new Error("Archive occupancy schedule snapshot is incomplete");
+		}
+		const jobs = (scheduleResponse.data as { jobs: unknown[] }).jobs;
+		if (
+			!jobs.every(
+				(job): job is AgentCronJob =>
+					!!job &&
+					typeof job === "object" &&
+					typeof (job as { id?: unknown }).id === "string" &&
+					typeof (job as { activeSessionId?: unknown }).activeSessionId === "string" &&
+					typeof (job as { sessionId?: unknown }).sessionId === "string" &&
+					typeof (job as { sessionFile?: unknown }).sessionFile === "string" &&
+					["active", "paused", "completed", "cancelled"].includes(String((job as { status?: unknown }).status)),
+			)
+		) {
+			throw new Error("Archive occupancy schedule snapshot is incomplete");
+		}
+		if (
+			current.worker.descriptor.processStartId !== descriptorProcessStartId ||
+			getProcessStartId(current.worker.descriptor.pid) !== descriptorProcessStartId
+		) {
+			throw new Error("Archive occupancy changed during schedule refresh");
+		}
+		const liveJobs = jobs.filter((job) => job.status === "active" || job.status === "paused");
+		for (const job of liveJobs) {
+			const matchingSummary = summaries.find(
+				(summary) =>
+					summary.sessionId === job.sessionId &&
+					summary.sessionFile !== undefined &&
+					canonicalSessionPath(summary.sessionFile) === canonicalSessionPath(job.sessionFile),
+			);
+			if (!matchingSummary) {
+				throw new Error("Archive occupancy schedule identity is ambiguous");
+			}
+		}
+		return createDaemonArchiveOccupancyReceipt({
+			activeSessionId,
+			sessionId,
+			sessionPath,
+			hostGeneration: `${this.generation}:${descriptorProcessStartId}`,
+			lifecycle: current.summary.lifecycle,
+			workerState: "ready",
+			workerRefresh: "current",
+			activeTurn: projections.some((projection) => projection.activeTurn),
+			streaming: projections.some((projection) => projection.streaming),
+			compacting: projections.some((projection) => projection.compacting),
+			tools: projections.some((projection) => projection.tools),
+			bash: projections.some((projection) => projection.bash),
+			unfinishedActions: projections.reduce((count, projection) => count + projection.unfinishedActions, 0),
+			queuedActions: projections.reduce((count, projection) => count + projection.queuedActions, 0),
+			runningChildren: projections.some((projection) => projection.runningChildren),
+			attachedClients,
+			heartbeat: liveJobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
+			cron: liveJobs.some((job) => !isHeartbeatCronJob(job)),
+			observedAt: new Date().toISOString(),
+		});
+	}
+
+	private async archiveSessionIfIdle(
+		client: DaemonSocketClient,
+		command: Extract<DaemonCommand, { type: "archive_session_if_idle" }>,
+	) {
+		if (!/^sha256:[a-f0-9]{64}$/.test(command.expectedOccupancyDigest)) {
+			throw new Error("Expected archive occupancy digest is malformed");
+		}
+		const occupancy = await this.readArchiveOccupancy(client, command.activeSessionId, command.sessionId);
+		if (occupancy.occupancyDigest !== command.expectedOccupancyDigest) {
+			throw new Error("Archive occupancy changed after observation");
+		}
+		if (occupancy.busy) {
+			throw new Error("Archive target is currently occupied");
+		}
+		if (occupancy.lifecycle !== "live") {
+			throw new Error("Archive target would require delete semantics instead of resumable archive");
+		}
+
+		const match = this.exactArchiveRoot(client, command.activeSessionId, command.sessionId);
+		const nonResumableSummary = [...match.worker.summaries.values()].find(
+			(summary) => summary.lifecycle !== "live" || !summary.sessionFile,
+		);
+		if (nonResumableSummary) {
+			throw new Error(
+				`Archive blocked because co-resident session is not resumable: ${nonResumableSummary.sessionId}`,
+			);
+		}
+		const artifactContext = this.workerSessionArtifactContext(match.worker);
+		if (!artifactContext || canonicalSessionPath(artifactContext.sessionFile) !== occupancy.sessionPath) {
+			throw new Error("Archive target has no matching persisted artifact context");
+		}
+		await this.stopWorker(match.worker, true, false, true);
+
+		const directReadback = await readSessionInfo(occupancy.sessionPath);
+		const catalogReadback = (await this.catalog.list()).find(
+			(session) => canonicalSessionPath(session.path) === occupancy.sessionPath,
+		);
+		if (
+			!directReadback ||
+			directReadback.id !== occupancy.sessionId ||
+			directReadback.state?.status !== "archived" ||
+			!catalogReadback ||
+			catalogReadback.id !== occupancy.sessionId ||
+			catalogReadback.state?.status !== "archived"
+		) {
+			throw new Error("Persisted archived-state readback is unavailable or mismatched");
+		}
+		const archivedAt = new Date().toISOString();
+		return createArchiveSessionReceipt({
+			activeSessionId: occupancy.activeSessionId,
+			sessionId: occupancy.sessionId,
+			sessionPath: occupancy.sessionPath,
+			hostGeneration: occupancy.hostGeneration,
+			beforeOccupancyDigest: occupancy.occupancyDigest,
+			archivedAt,
+			postReadback: {
+				sessionId: catalogReadback.id,
+				sessionPath: canonicalSessionPath(catalogReadback.path),
+				state: "archived",
+			},
+		});
+	}
+
 	private publicSummary(worker: ResidentWorker, summary: SessionSummary): SessionSummary {
 		const activeSessionId = summary.activeSessionId ?? summary.id;
 		return {
@@ -4966,17 +5242,40 @@ export class DaemonSupervisor {
 
 	private async finalizeArchivedWorkerStop(worker: ResidentWorker): Promise<void> {
 		const context = this.workerSessionArtifactContext(worker);
-		if (!context) {
-			return;
+		const rootSessionId = worker.descriptor.rootSessionId;
+		if (!context || !rootSessionId) {
+			throw new Error("Archived worker tombstone has no exact persisted root identity");
 		}
-		if (worker.descriptor.rootSessionId) {
-			const cronStore = AgentCronJobStore.forSessionArtifacts();
-			cronStore.registerSessionArtifact(worker.descriptor.rootSessionId, context.artifactDir);
-			cronStore.cancelJobsForSession({
-				sessionId: worker.descriptor.rootSessionId,
-				sessionFile: context.sessionFile,
-			});
-			await this.catalog.archive(context.sessionFile, worker.descriptor.rootSessionId);
+		const cronStore = AgentCronJobStore.forSessionArtifacts();
+		cronStore.registerSessionArtifact(rootSessionId, context.artifactDir);
+		cronStore.cancelJobsForSession({ sessionId: rootSessionId, sessionFile: context.sessionFile });
+		if (!(await this.catalog.archive(context.sessionFile, rootSessionId))) {
+			throw new Error("Catalog rejected the archived worker root identity");
+		}
+		await this.assertPersistedArchivedWorkerReadback(worker);
+	}
+
+	private async assertPersistedArchivedWorkerReadback(worker: ResidentWorker): Promise<void> {
+		const context = this.workerSessionArtifactContext(worker);
+		const rootSessionId = worker.descriptor.rootSessionId;
+		if (!context || !rootSessionId) {
+			throw new Error("Archived worker tombstone has no exact persisted root identity");
+		}
+		const sessionPath = canonicalSessionPath(context.sessionFile);
+		const directReadback = await readSessionInfo(context.sessionFile);
+		const catalogMatches = (await this.catalog.list()).filter(
+			(session) => canonicalSessionPath(session.path) === sessionPath,
+		);
+		if (
+			!directReadback ||
+			directReadback.id !== rootSessionId ||
+			canonicalSessionPath(directReadback.path) !== sessionPath ||
+			directReadback.state?.status !== "archived" ||
+			catalogMatches.length !== 1 ||
+			catalogMatches[0]?.id !== rootSessionId ||
+			catalogMatches[0].state?.status !== "archived"
+		) {
+			throw new Error("Persisted archived-state readback is unavailable or mismatched for the exact root");
 		}
 	}
 

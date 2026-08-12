@@ -60,8 +60,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-export const DAEMON_SCHEMA_REVISION = 16;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-16-1bcb9e7f1a49";
+// Revision 17 adds optional atomic session archive occupancy and compare-and-archive commands behind the atomic_session_archive capability.
+export const DAEMON_SCHEMA_REVISION = 17;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-e9a97dd90ceb";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -100,7 +101,8 @@ export type DaemonServerCapability =
 	| "transient_bash"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
-	| "queue_message_mutation";
+	| "queue_message_mutation"
+	| "atomic_session_archive";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -139,6 +141,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_admission",
 	"prompt_admission_cancellation",
 	"queue_message_mutation",
+	"atomic_session_archive",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -336,6 +339,48 @@ export interface DaemonUpdateRestartManifest {
 	discardedActiveSessionIds?: string[];
 }
 
+export interface DaemonArchiveOccupancyReceipt {
+	activeSessionId: string;
+	sessionId: string;
+	sessionPath: string;
+	hostGeneration: string;
+	lifecycle: "draft" | "live";
+	workerState: "ready";
+	workerRefresh: "current";
+	activeTurn: boolean;
+	streaming: boolean;
+	compacting: boolean;
+	tools: boolean;
+	bash: boolean;
+	unfinishedActions: number;
+	queuedActions: number;
+	runningChildren: boolean;
+	attachedClients: number;
+	heartbeat: boolean;
+	cron: boolean;
+	busy: boolean;
+	observedAt: string;
+	occupancyDigest: string;
+}
+
+export interface DaemonArchivePostReadback {
+	sessionId: string;
+	sessionPath: string;
+	state: "archived";
+}
+
+export interface DaemonArchiveSessionReceipt {
+	activeSessionId: string;
+	sessionId: string;
+	sessionPath: string;
+	hostGeneration: string;
+	beforeOccupancyDigest: string;
+	archiveReceiptDigest: string;
+	state: "archived";
+	archivedAt: string;
+	postReadback: DaemonArchivePostReadback;
+}
+
 export type DaemonSavedSessionListCommand =
 	| { id?: string; type: "list_saved_sessions"; activeSessionId: string; scope: AgentConnectionSavedSessionScope }
 	| {
@@ -392,6 +437,14 @@ export type DaemonCommand =
 	| { id?: string; type: "complete_owned_session"; activeSessionId: string }
 	| { id?: string; type: "promote_owned_session"; activeSessionId: string }
 	| { id?: string; type: "kill"; activeSessionId: string }
+	| { id?: string; type: "get_archive_occupancy"; activeSessionId: string; sessionId: string }
+	| {
+			id?: string;
+			type: "archive_session_if_idle";
+			activeSessionId: string;
+			sessionId: string;
+			expectedOccupancyDigest: string;
+	  }
 	| { id?: string; type: "rename"; activeSessionId: string; name: string }
 	| {
 			id?: string;
@@ -649,6 +702,11 @@ const DELETE_RLM_SUBAGENT_COMMAND = {
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
 const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const ATOMIC_SESSION_ARCHIVE_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "atomic_session_archive",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -661,6 +719,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	complete_owned_session: CLIENT_OWNED_DAEMON_COMMAND,
 	promote_owned_session: CLIENT_OWNED_DAEMON_COMMAND,
 	kill: LEGACY_DAEMON_COMMAND,
+	get_archive_occupancy: ATOMIC_SESSION_ARCHIVE_COMMAND,
+	archive_session_if_idle: ATOMIC_SESSION_ARCHIVE_COMMAND,
 	rename: LEGACY_DAEMON_COMMAND,
 	prompt: SESSION_INPUT_ADMISSION_COMMAND,
 	cancel_prompt_admission: PROMPT_ADMISSION_CANCELLATION_COMMAND,
@@ -1037,6 +1097,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"agent_messages_status",
 	"wait_for_idle",
 	"get_session_header",
+	"get_archive_occupancy",
 	"get_state",
 	"get_connection_state",
 	"get_messages",

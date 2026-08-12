@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +16,14 @@ import {
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
+import type {
+	DaemonArchiveOccupancyReceipt,
+	DaemonArchiveSessionReceipt,
+} from "../src/modes/daemon/daemon-protocol.js";
+import {
+	isDaemonArchiveOccupancyReceipt,
+	isDaemonArchiveSessionReceipt,
+} from "../src/modes/daemon/daemon-session-archive.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { DaemonWorkerDescriptor } from "../src/modes/daemon/daemon-worker-protocol.js";
 
@@ -145,6 +154,22 @@ function countWorkerDescriptors(agentDir: string): number {
 	}
 }
 
+function readCommandJournalRecords(agentDir: string): Array<Record<string, unknown>> {
+	const workersRoot = join(agentDir, "daemon-workers");
+	try {
+		return readdirSync(workersRoot).flatMap((directory) => {
+			const path = join(workersRoot, directory, "command-journal.jsonl");
+			if (!existsSync(path)) return [];
+			return readFileSync(path, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+		});
+	} catch {
+		return [];
+	}
+}
+
 async function waitForWorkerStopTombstone(agentDir: string): Promise<DaemonWorkerDescriptor> {
 	const deadline = Date.now() + 5000;
 	while (Date.now() < deadline) {
@@ -198,7 +223,11 @@ async function connectEventually(socketPath: string, child?: ChildProcess): Prom
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
 		}
 	}
-	throw new Error(`Timed out waiting for supervisor: ${String(lastError)}`);
+	const diagnostics = child ? childDiagnostics.get(child) : undefined;
+	throw new Error(
+		`Timed out waiting for supervisor: ${String(lastError)}\n` +
+			`stdout:\n${diagnostics?.stdout ?? ""}\nstderr:\n${diagnostics?.stderr ?? ""}`,
+	);
 }
 
 async function waitForSocketGone(socketPath: string): Promise<void> {
@@ -222,6 +251,20 @@ function requireSummary(responseData: unknown): SessionSummary {
 		throw new Error("Missing daemon session summary");
 	}
 	return responseData as SessionSummary;
+}
+
+function requireArchiveOccupancy(responseData: unknown): DaemonArchiveOccupancyReceipt {
+	if (!isDaemonArchiveOccupancyReceipt(responseData)) {
+		throw new Error(`Invalid daemon archive occupancy receipt: ${JSON.stringify(responseData)}`);
+	}
+	return responseData;
+}
+
+function requireArchiveReceipt(responseData: unknown): DaemonArchiveSessionReceipt {
+	if (!isDaemonArchiveSessionReceipt(responseData)) {
+		throw new Error(`Invalid daemon archive receipt: ${JSON.stringify(responseData)}`);
+	}
+	return responseData;
 }
 
 function requireSessionList(responseData: unknown): SessionSummary[] {
@@ -316,6 +359,569 @@ describe("daemon supervisor resident workers", () => {
 		workerPids.delete(summary.workerPid);
 		await waitForSocketGone(socketPath);
 	}, 60_000);
+
+	it("atomically rejects changed occupancy and archives one exact idle root with persisted readback", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-atomic-archive-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const sessionManager = SessionManager.create(projectDir, sessionDir);
+		sessionManager.appendMessage({ role: "user", content: "archive carrier fixture", timestamp: 1 });
+		sessionManager.flushNow();
+		const sessionFile = sessionManager.getSessionFile();
+		const artifactDir = sessionManager.getSessionArtifactDir();
+		if (!sessionFile || !artifactDir) throw new Error("Archive fixture did not persist");
+		mkdirSync(artifactDir, { recursive: true });
+		const artifactPath = join(artifactDir, "evidence.txt");
+		writeFileSync(artifactPath, "preserve me");
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		expect(client.hello?.serverCapabilities).toContain("atomic_session_archive");
+		const created = await client.request({
+			type: "create",
+			sessionPath: sessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid) throw new Error("Archive fixture worker did not expose its pid");
+		workerPids.add(summary.workerPid);
+		const activeSessionId = summary.activeSessionId ?? summary.id;
+
+		const observed = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: summary.sessionId,
+		});
+		if (!observed.success) throw new Error(observed.error);
+		const before = requireArchiveOccupancy(observed.data);
+		expect(before).toMatchObject({ busy: false, attachedClients: 0, lifecycle: "live" });
+
+		const scheduled = await client.request({
+			type: "cron_add",
+			activeSessionId,
+			schedule: "every 1h",
+			prompt: "do not archive scheduled work",
+		});
+		if (!scheduled.success || !scheduled.data || typeof scheduled.data !== "object") {
+			throw new Error(scheduled.success ? "Scheduled archive fixture returned no job" : scheduled.error);
+		}
+		const scheduledJob = (scheduled.data as { job?: { id?: string } }).job;
+		if (!scheduledJob?.id) throw new Error("Scheduled archive fixture returned no job id");
+		const scheduledOccupancyResponse = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: summary.sessionId,
+		});
+		if (!scheduledOccupancyResponse.success) throw new Error(scheduledOccupancyResponse.error);
+		const scheduledOccupancy = requireArchiveOccupancy(scheduledOccupancyResponse.data);
+		expect(scheduledOccupancy).toMatchObject({ busy: true, cron: true });
+		const scheduledArchive = await client.request({
+			type: "archive_session_if_idle",
+			activeSessionId,
+			sessionId: summary.sessionId,
+			expectedOccupancyDigest: scheduledOccupancy.occupancyDigest,
+		});
+		expect(scheduledArchive).toMatchObject({ success: false, error: expect.stringContaining("currently occupied") });
+		const cancelled = await client.request({ type: "cron_cancel", activeSessionId, jobId: scheduledJob.id });
+		if (!cancelled.success) throw new Error(cancelled.error);
+
+		const observer = await connectEventually(socketPath, supervisor);
+		const attached = await observer.request({ type: "attach", activeSessionId });
+		if (!attached.success) throw new Error(attached.error);
+		const raced = await client.request({
+			type: "archive_session_if_idle",
+			activeSessionId,
+			sessionId: summary.sessionId,
+			expectedOccupancyDigest: before.occupancyDigest,
+		});
+		expect(raced).toMatchObject({ success: false, error: expect.stringContaining("occupancy changed") });
+		expect(countWorkerDescriptors(agentDir)).toBe(1);
+		await observer.request({ type: "detach", activeSessionId });
+		observer.close();
+
+		const refreshed = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: summary.sessionId,
+		});
+		if (!refreshed.success) throw new Error(refreshed.error);
+		const idle = requireArchiveOccupancy(refreshed.data);
+		const archived = await client.request(
+			{
+				type: "archive_session_if_idle",
+				activeSessionId,
+				sessionId: summary.sessionId,
+				expectedOccupancyDigest: idle.occupancyDigest,
+			},
+			15_000,
+		);
+		if (!archived.success) throw new Error(archived.error);
+		const receipt = requireArchiveReceipt(archived.data);
+		expect(receipt).toMatchObject({
+			activeSessionId,
+			sessionId: summary.sessionId,
+			sessionPath: idle.sessionPath,
+			beforeOccupancyDigest: idle.occupancyDigest,
+			state: "archived",
+			postReadback: { sessionId: summary.sessionId, sessionPath: idle.sessionPath, state: "archived" },
+		});
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		expect(countWorkerDescriptors(agentDir)).toBe(0);
+		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
+		expect(readFileSync(sessionFile, "utf8")).toContain("archive carrier fixture");
+		expect(readFileSync(artifactPath, "utf8")).toBe("preserve me");
+
+		const repeated = await client.request({
+			type: "archive_session_if_idle",
+			activeSessionId,
+			sessionId: summary.sessionId,
+			expectedOccupancyDigest: idle.occupancyDigest,
+		});
+		expect(repeated).toMatchObject({ success: false, error: expect.stringContaining("Unknown archive root") });
+		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 30_000);
+
+	it("catches and journals an archive admission fence timeout without an unhandled rejection", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-arch-fence-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		const sessionManager = SessionManager.create(projectDir, sessionDir);
+		sessionManager.appendMessage({ role: "user", content: "archive fence fixture", timestamp: 1 });
+		sessionManager.flushNow();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Archive fence fixture did not persist");
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			sessionPath: sessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid) throw new Error("Archive fence worker did not expose its pid");
+		workerPids.add(summary.workerPid);
+		const activeSessionId = summary.activeSessionId ?? summary.id;
+		const observedResponse = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: summary.sessionId,
+		});
+		if (!observedResponse.success) throw new Error(observedResponse.error);
+		const observed = requireArchiveOccupancy(observedResponse.data);
+
+		process.kill(summary.workerPid, "SIGSTOP");
+		const blocker = await connectEventually(socketPath, supervisor);
+		const blockedMutation = blocker
+			.request({ type: "set_session_name", activeSessionId, name: `blocked-${randomUUID()}` }, 45_000)
+			.catch((error: unknown) => error);
+		await waitForCondition(
+			() =>
+				readCommandJournalRecords(agentDir).some(
+					(record) => record.type === "received" && record.commandType === "set_session_name",
+				),
+			"Blocking occupancy mutation was not journaled",
+		);
+
+		const archivePromise = client.request(
+			{
+				type: "archive_session_if_idle",
+				activeSessionId,
+				sessionId: summary.sessionId,
+				expectedOccupancyDigest: observed.occupancyDigest,
+			},
+			40_000,
+		);
+		const archiveSocket = (client as unknown as { socket?: Socket }).socket;
+		if (!archiveSocket) throw new Error("Archive fence client socket was unavailable");
+		(archiveSocket as unknown as { write: (...args: unknown[]) => boolean }).write = () => true;
+		let archiveResult: unknown;
+		try {
+			archiveResult = await archivePromise;
+		} catch (error) {
+			archiveResult = error;
+		} finally {
+			process.kill(summary.workerPid, "SIGCONT");
+		}
+		await blockedMutation;
+		blocker.close();
+
+		expect(archiveResult).toMatchObject({
+			success: false,
+			error: expect.stringContaining("Timed out draining daemon occupancy mutations"),
+		});
+		expect(supervisor.exitCode).toBeNull();
+		const records = readCommandJournalRecords(agentDir);
+		const archiveReceived = records.find(
+			(record) => record.type === "received" && record.commandType === "archive_session_if_idle",
+		);
+		expect(archiveReceived?.key).toEqual(expect.any(String));
+		expect(records).toContainEqual(
+			expect.objectContaining({
+				type: "result",
+				key: archiveReceived?.key,
+				response: expect.objectContaining({
+					success: false,
+					error: expect.stringContaining("Timed out draining daemon occupancy mutations"),
+				}),
+			}),
+		);
+		const diagnostics = childDiagnostics.get(supervisor);
+		expect(diagnostics?.stderr).not.toContain("UnhandledPromiseRejection");
+
+		const recoveryClient = await connectEventually(socketPath, supervisor);
+		expect((await recoveryClient.request({ type: "list" })).success).toBe(true);
+		await recoveryClient.request({ type: "shutdown" });
+		recoveryClient.close();
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+	}, 60_000);
+
+	it("blocks a live root with a co-resident draft child before archive can delete either session", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-arch-draft-child-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		const parentManager = SessionManager.create(projectDir, sessionDir);
+		parentManager.appendMessage({ role: "user", content: "live parent", timestamp: 1 });
+		parentManager.flushNow();
+		const parentSessionFile = parentManager.getSessionFile();
+		const parentArtifactDir = parentManager.getSessionArtifactDir();
+		if (!parentSessionFile || !parentArtifactDir) throw new Error("Archive parent fixture did not persist");
+		const childId = "draft-child";
+		const childSessionDir = join(parentArtifactDir, childId);
+		const childManager = SessionManager.create(projectDir, childSessionDir);
+		childManager.newSession({ parentSession: parentSessionFile });
+		childManager.flushNow();
+		const childSessionFile = childManager.getSessionFile();
+		if (!childSessionFile) throw new Error("Archive child fixture did not persist");
+		writeFileSync(
+			join(parentArtifactDir, "rlm-subagents.jsonl"),
+			`${JSON.stringify({
+				type: "rlm_subagent",
+				childId,
+				sessionName: "draft-child",
+				sessionDir: childSessionDir,
+				sessionFile: childSessionFile,
+				parentSessionId: parentManager.getSessionId(),
+				parentSessionFile,
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				rlmParentNodeId: childId,
+				status: "completed",
+				createdAt: 1,
+				updatedAt: "2026-01-01T00:00:00.000Z",
+			})}
+`,
+		);
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const createdParent = await client.request({
+			type: "create",
+			sessionPath: parentSessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!createdParent.success) throw new Error(createdParent.error);
+		const parent = requireSummary(createdParent.data);
+		if (!parent.workerPid) throw new Error("Archive parent worker did not expose its pid");
+		workerPids.add(parent.workerPid);
+		const createdChild = await client.request({
+			type: "create",
+			sessionPath: childSessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!createdChild.success) throw new Error(createdChild.error);
+		const child = requireSummary(createdChild.data);
+		expect(child.lifecycle).toBe("draft");
+		const activeSessionId = parent.activeSessionId ?? parent.id;
+		const observedResponse = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: parent.sessionId,
+		});
+		if (!observedResponse.success) throw new Error(observedResponse.error);
+		const observed = requireArchiveOccupancy(observedResponse.data);
+		expect(observed).toMatchObject({ busy: false, lifecycle: "live" });
+		const parentBytes = readFileSync(parentSessionFile, "utf8");
+		const childBytes = readFileSync(childSessionFile, "utf8");
+
+		const archived = await client.request({
+			type: "archive_session_if_idle",
+			activeSessionId,
+			sessionId: parent.sessionId,
+			expectedOccupancyDigest: observed.occupancyDigest,
+		});
+		expect(archived).toMatchObject({
+			success: false,
+			error: expect.stringContaining("co-resident session is not resumable"),
+		});
+		expect(readFileSync(parentSessionFile, "utf8")).toBe(parentBytes);
+		expect(readFileSync(childSessionFile, "utf8")).toBe(childBytes);
+		expect(countWorkerDescriptors(agentDir)).toBe(1);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(parent.workerPid);
+		workerPids.delete(parent.workerPid);
+	}, 30_000);
+
+	it("rejects a stale archive digest after the resident worker incarnation recovers", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-arch-inc-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		const sessionManager = SessionManager.create(projectDir, sessionDir);
+		sessionManager.appendMessage({ role: "user", content: "recover before archive", timestamp: 1 });
+		sessionManager.flushNow();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Recovery fixture did not persist");
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			sessionPath: sessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const original = requireSummary(created.data);
+		if (!original.workerPid) throw new Error("Recovery fixture worker did not expose its pid");
+		workerPids.add(original.workerPid);
+		const activeSessionId = original.activeSessionId ?? original.id;
+		const observedResponse = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: original.sessionId,
+		});
+		if (!observedResponse.success) throw new Error(observedResponse.error);
+		const observed = requireArchiveOccupancy(observedResponse.data);
+
+		process.kill(original.workerPid, "SIGKILL");
+		await waitForProcessGone(original.workerPid);
+		workerPids.delete(original.workerPid);
+		let recovered: SessionSummary | undefined;
+		const deadline = Date.now() + 20_000;
+		while (Date.now() < deadline) {
+			const listed = await client.request({ type: "list" });
+			if (listed.success) {
+				recovered = requireSessionList(listed.data).find(
+					(candidate) => (candidate.activeSessionId ?? candidate.id) === activeSessionId,
+				);
+				if (recovered?.workerState === "ready" && recovered.workerPid && recovered.workerPid !== original.workerPid)
+					break;
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+		}
+		if (!recovered?.workerPid || recovered.workerPid === original.workerPid) {
+			throw new Error("Archive fixture worker did not recover with a new incarnation");
+		}
+		workerPids.add(recovered.workerPid);
+		const currentResponse = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: original.sessionId,
+		});
+		if (!currentResponse.success) throw new Error(currentResponse.error);
+		const current = requireArchiveOccupancy(currentResponse.data);
+		expect(current.hostGeneration).not.toBe(observed.hostGeneration);
+		expect(current.occupancyDigest).not.toBe(observed.occupancyDigest);
+		const stale = await client.request({
+			type: "archive_session_if_idle",
+			activeSessionId,
+			sessionId: original.sessionId,
+			expectedOccupancyDigest: observed.occupancyDigest,
+		});
+		expect(stale).toMatchObject({ success: false, error: expect.stringContaining("occupancy changed") });
+		expect(countWorkerDescriptors(agentDir)).toBe(1);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(recovered.workerPid);
+		workerPids.delete(recovered.workerPid);
+	}, 30_000);
+
+	it("replays the original journaled archive receipt after a lost response without repeating the effect", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-arch-replay-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		const sessionManager = SessionManager.create(projectDir, sessionDir);
+		sessionManager.appendMessage({ role: "user", content: "journal archive once", timestamp: 1 });
+		sessionManager.flushNow();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Replay fixture did not persist");
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const setupClient = await connectEventually(socketPath, supervisor);
+		const created = await setupClient.request({
+			type: "create",
+			sessionPath: sessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid) throw new Error("Replay fixture worker did not expose its pid");
+		workerPids.add(summary.workerPid);
+		const activeSessionId = summary.activeSessionId ?? summary.id;
+		const observedResponse = await setupClient.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: summary.sessionId,
+		});
+		if (!observedResponse.success) throw new Error(observedResponse.error);
+		const observed = requireArchiveOccupancy(observedResponse.data);
+		setupClient.close();
+
+		const replayClient = await connectEventually(socketPath, supervisor);
+		replayClient.enableRequestRecovery();
+		const archivePromise = replayClient.request(
+			{
+				type: "archive_session_if_idle",
+				activeSessionId,
+				sessionId: summary.sessionId,
+				expectedOccupancyDigest: observed.occupancyDigest,
+			},
+			15_000,
+		);
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+		const lostSocket = (replayClient as unknown as { socket?: Socket }).socket;
+		if (!lostSocket) throw new Error("Replay client socket was unavailable");
+		lostSocket.destroy();
+		await waitForCondition(
+			() => {
+				try {
+					return readFileSync(sessionFile, "utf8").includes('"status":"archived"');
+				} catch {
+					return false;
+				}
+			},
+			"Lost-response archive did not complete",
+			15_000,
+		);
+		await waitForCondition(
+			() => {
+				try {
+					return readdirSync(join(agentDir, "daemon-workers")).some((directory) => {
+						const path = join(agentDir, "daemon-workers", directory, "command-journal.jsonl");
+						return existsSync(path) && readFileSync(path, "utf8").includes('"type":"result"');
+					});
+				} catch {
+					return false;
+				}
+			},
+			"Lost-response archive result was not journaled",
+			5000,
+		);
+		await replayClient.connect();
+		await replayClient.waitForHello();
+		const replayed = await archivePromise;
+		if (!replayed.success) throw new Error(replayed.error);
+		const receipt = requireArchiveReceipt(replayed.data);
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+
+		const journalRoots = readdirSync(join(agentDir, "daemon-workers"));
+		const journalPath = journalRoots
+			.map((directory) => join(agentDir, "daemon-workers", directory, "command-journal.jsonl"))
+			.find(existsSync);
+		if (!journalPath) throw new Error("Archive command journal was unavailable");
+		const journalEntries = readFileSync(journalPath, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { response?: { data?: unknown } });
+		expect(journalEntries.some((entry) => JSON.stringify(entry.response?.data) === JSON.stringify(receipt))).toBe(
+			true,
+		);
+		const archivedStateCount = readFileSync(sessionFile, "utf8")
+			.split("\n")
+			.filter((line) => line.includes('"type":"session_state"') && line.includes('"status":"archived"')).length;
+		expect(archivedStateCount).toBe(1);
+		expect(countWorkerDescriptors(agentDir)).toBe(0);
+
+		await replayClient.request({ type: "shutdown" });
+		replayClient.close();
+		await waitForSocketGone(socketPath);
+	}, 30_000);
+
+	it("refuses to archive an empty draft because the existing close path would delete it", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-draft-archive-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		const sessionManager = SessionManager.create(projectDir, sessionDir);
+		sessionManager.flushNow();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Draft fixture did not materialize");
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			sessionPath: sessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid) throw new Error("Draft worker did not expose its pid");
+		workerPids.add(summary.workerPid);
+		const activeSessionId = summary.activeSessionId ?? summary.id;
+		const observed = await client.request({
+			type: "get_archive_occupancy",
+			activeSessionId,
+			sessionId: summary.sessionId,
+		});
+		if (!observed.success) throw new Error(observed.error);
+		const occupancy = requireArchiveOccupancy(observed.data);
+		expect(occupancy.lifecycle).toBe("draft");
+		const beforeBytes = readFileSync(sessionFile, "utf8");
+		const archived = await client.request({
+			type: "archive_session_if_idle",
+			activeSessionId,
+			sessionId: summary.sessionId,
+			expectedOccupancyDigest: occupancy.occupancyDigest,
+		});
+		expect(archived).toMatchObject({ success: false, error: expect.stringContaining("delete semantics") });
+		expect(readFileSync(sessionFile, "utf8")).toBe(beforeBytes);
+		expect(countWorkerDescriptors(agentDir)).toBe(1);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+	});
 
 	it("lists, creates, and attaches passive children through their owning worker", async () => {
 		const root = tempDir();

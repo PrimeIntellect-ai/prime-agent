@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added an opt-in `atomic_session_archive` daemon capability with `get_archive_occupancy` and `archive_session_if_idle` commands to archive an idle top-level session and its artifacts atomically.
 - Fixed Shift+Enter no longer inserting a newline in terminals that send a literal `\n` (for example a Ghostty `shift+enter=text:\n` mapping): the byte decoded as `ctrl+j` and triggered the new edit-diff toggle instead of the editor newline.
 - Removed a system prompt paragraph referring to an async `bash()` kernel helper and managed jobs that do not exist in the runtime.
 - Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.

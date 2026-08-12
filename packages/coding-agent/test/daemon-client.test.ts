@@ -215,6 +215,146 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
+	it("degrades atomic archive locally on old daemons without affecting ordinary commands", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, [], DAEMON_SCHEMA_REVISION - 1);
+
+		await expect(
+			client.request({ type: "get_archive_occupancy", activeSessionId: "active-1", sessionId: "session-1" }),
+		).rejects.toThrow("does not support atomic_session_archive");
+		await expect(
+			client.request({
+				type: "archive_session_if_idle",
+				activeSessionId: "active-1",
+				sessionId: "session-1",
+				expectedOccupancyDigest: `sha256:${"0".repeat(64)}`,
+			}),
+		).rejects.toThrow("does not support atomic_session_archive");
+		expect(socket.writes).toEqual([]);
+
+		const list = client.request({ type: "list" });
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		client.close();
+		await expect(list).rejects.toThrow("closed before the operation completed");
+	});
+
+	it("requires the introducing schema revision even when an old daemon advertises atomic archive", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["atomic_session_archive"], DAEMON_SCHEMA_REVISION - 1);
+
+		await expect(
+			client.request({ type: "get_archive_occupancy", activeSessionId: "active-1", sessionId: "session-1" }),
+		).rejects.toThrow("does not support atomic_session_archive");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it("serializes atomic archive commands and returns their structured responses from a capable daemon", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["atomic_session_archive"], DAEMON_SCHEMA_REVISION);
+
+		const occupancyRequest = client.request({
+			type: "get_archive_occupancy",
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+		});
+		const occupancyEnvelope = JSON.parse(socket.writes[0]!) as { id: string; command: unknown };
+		expect(occupancyEnvelope.command).toMatchObject({
+			type: "get_archive_occupancy",
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+		});
+		const occupancy = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionPath: "/tmp/session-1.jsonl",
+			hostGeneration: "supervisor-1:worker-start-1",
+			lifecycle: "live",
+			workerState: "ready",
+			workerRefresh: "current",
+			activeTurn: false,
+			streaming: false,
+			compacting: false,
+			tools: false,
+			bash: false,
+			unfinishedActions: 0,
+			queuedActions: 0,
+			runningChildren: false,
+			attachedClients: 0,
+			heartbeat: false,
+			cron: false,
+			busy: false,
+			observedAt: "2026-08-12T00:00:00.000Z",
+			occupancyDigest: `sha256:${"1".repeat(64)}`,
+		};
+		socket.emit(
+			"data",
+			`${JSON.stringify({ id: occupancyEnvelope.id, type: "response", command: "get_archive_occupancy", success: true, data: occupancy })}\n`,
+		);
+		await expect(occupancyRequest).resolves.toMatchObject({ success: true, data: occupancy });
+
+		const archiveRequest = client.request({
+			type: "archive_session_if_idle",
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			expectedOccupancyDigest: occupancy.occupancyDigest,
+		});
+		const archiveEnvelope = JSON.parse(socket.writes.at(-1)!) as { id: string; command: unknown };
+		expect(archiveEnvelope.command).toMatchObject({
+			type: "archive_session_if_idle",
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			expectedOccupancyDigest: occupancy.occupancyDigest,
+		});
+		const archive = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionPath: "/tmp/session-1.jsonl",
+			hostGeneration: occupancy.hostGeneration,
+			beforeOccupancyDigest: occupancy.occupancyDigest,
+			archiveReceiptDigest: `sha256:${"2".repeat(64)}`,
+			state: "archived",
+			archivedAt: "2026-08-12T00:00:01.000Z",
+			postReadback: { sessionId: "session-1", sessionPath: "/tmp/session-1.jsonl", state: "archived" },
+		};
+		socket.emit(
+			"data",
+			`${JSON.stringify({ id: archiveEnvelope.id, type: "response", command: "archive_session_if_idle", success: true, data: archive })}\n`,
+		);
+		await expect(archiveRequest).resolves.toMatchObject({ success: true, data: archive });
+		client.close();
+	});
+
+	it("keeps an old attach shape usable when a new daemon advertises atomic archive", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["atomic_session_archive"], DAEMON_SCHEMA_REVISION);
+		const attach = client.request({ type: "attach", activeSessionId: "active-1" });
+		const envelope = JSON.parse(socket.writes[0]!) as { id: string; command: unknown };
+		expect(envelope.command).toMatchObject({ type: "attach", activeSessionId: "active-1" });
+		socket.emit(
+			"data",
+			`${JSON.stringify({ id: envelope.id, type: "response", command: "attach", success: false, error: "fixture" })}\n`,
+		);
+		await expect(attach).resolves.toMatchObject({ success: false, error: "fixture" });
+		client.close();
+	});
+
 	it("does not send subagent deletion to an old daemon without the capability", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();
