@@ -11,9 +11,9 @@
  * compiled Bun binary), keyed off the __PI_BUNDLED__ define below, so extension
  * imports of pi packages share the bundle's module instances.
  */
-import { chmodSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
@@ -29,9 +29,18 @@ try {
 	buildId = `release-${JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")).version}`;
 }
 
-rmSync(outdir, { recursive: true, force: true });
+// Deliberately NOT wiping outdir. Provider backends are loaded with a lazy
+// import() of a content-hashed chunk (./anthropic-<hash>.js and friends), which
+// can fire hours into a session. Because the installed bin points straight at
+// dist/bundle/cli.js, wiping the directory mid-session deletes chunks a live
+// process has not imported yet — that process then dies on the next provider
+// call with "Cannot find module .../anthropic-<oldhash>.js", and retrying can
+// never fix it. Superseded chunks are instead left in place so running sessions
+// keep resolving them, then pruned once they age past the grace window.
+// Use `npm run clean` for a pristine dist; prepublishOnly already does.
+const STALE_GRACE_MS = Number(process.env.PI_BUNDLE_STALE_GRACE_MS ?? 7 * 24 * 60 * 60 * 1000);
 
-await build({
+const result = await build({
 	entryPoints: [join(packageDir, "dist", "cli.js")],
 	outdir,
 	bundle: true,
@@ -46,7 +55,23 @@ await build({
 		js: "import { createRequire as __piBundleCreateRequire } from 'node:module'; const require = __piBundleCreateRequire(import.meta.url);",
 	},
 	logLevel: "warning",
+	// Needed to tell this build's outputs from superseded ones during the prune.
+	metafile: true,
 });
 
 chmodSync(join(outdir, "cli.js"), 0o755);
-console.log("bundled dist/cli.js -> dist/bundle/");
+
+// Drop superseded chunks that have outlived the grace window. Content hashing
+// means a stale name is never re-emitted with different contents, so anything
+// left over is either still serving an old process or already unreachable.
+const emitted = new Set(Object.keys(result.metafile.outputs).map((file) => basename(file)));
+let pruned = 0;
+for (const name of readdirSync(outdir)) {
+	if (emitted.has(name)) continue;
+	const stale = join(outdir, name);
+	if (Date.now() - statSync(stale).mtimeMs <= STALE_GRACE_MS) continue;
+	rmSync(stale, { recursive: true, force: true });
+	pruned++;
+}
+
+console.log(`bundled dist/cli.js -> dist/bundle/${pruned ? ` (pruned ${pruned} stale)` : ""}`);
