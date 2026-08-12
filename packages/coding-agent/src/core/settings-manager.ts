@@ -72,6 +72,11 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface OpenRouterSettings {
+	/** Prefer the stateless Responses API for OpenRouter requests. Default: false. */
+	responses?: boolean;
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -128,6 +133,7 @@ export interface Settings {
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 1
+	openRouter?: OpenRouterSettings;
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
@@ -770,6 +776,10 @@ export class SettingsManager {
 
 	getRlmMaxDepth(): number | undefined {
 		return this.globalSettings.rlmMaxDepth;
+	}
+
+	getOpenRouterResponses(): boolean {
+		return this.settings.openRouter?.responses ?? false;
 	}
 
 	setRlmMaxDepth(maxDepth: number): void {

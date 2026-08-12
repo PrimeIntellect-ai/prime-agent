@@ -34,6 +34,24 @@ Edit directly or use `/settings` for common options.
 }
 ```
 
+### OpenRouter Transport
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `openRouter.responses` | boolean | `false` | Prefer OpenRouter's stateless Responses API and fall back to Chat Completions only when the Responses transport is unavailable before streaming starts |
+
+Prime Agent sends its opaque local session UUID as `session_id` on both OpenRouter transports. OpenRouter uses it for dashboard grouping and sticky upstream routing. When prompt caching is enabled, Responses also sends the same value as `prompt_cache_key`. Both transports send the complete conversation context on every request.
+
+```json
+{
+  "openRouter": {
+    "responses": true
+  }
+}
+```
+
+Chat Completions remains the default. When Responses is enabled, cancellation, context overflow, authentication, rate limiting, invalid input, and failures after streaming starts do not cross transports.
+
 ### UI & Display
 
 | Setting | Type | Default | Description |

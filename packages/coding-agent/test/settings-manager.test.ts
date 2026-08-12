@@ -502,6 +502,14 @@ describe("SettingsManager", () => {
 			expect(servers?.shared).toEqual({ type: "http", url: "https://project.shared/mcp" });
 		});
 	});
+
+	describe("OpenRouter Responses transport", () => {
+		it("defaults to Chat Completions and accepts an explicit opt-in", () => {
+			expect(SettingsManager.inMemory().getOpenRouterResponses()).toBe(false);
+			expect(SettingsManager.inMemory({ openRouter: { responses: true } }).getOpenRouterResponses()).toBe(true);
+		});
+	});
+
 	describe("idle worker eviction", () => {
 		it("defaults to 90 minutes and treats none as off", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

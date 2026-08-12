@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Added OpenRouter dashboard grouping and sticky routing through the existing opaque Prime session identifier.
+- Added the hot-reloaded, default-off `openRouter.responses` setting with Chat Completions fallback before streaming starts.
 
 ## [0.7.2] - 2026-08-11
 
