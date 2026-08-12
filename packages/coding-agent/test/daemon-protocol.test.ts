@@ -48,7 +48,7 @@ describe("daemon protocol helpers", () => {
 
 	it("requires compatibility metadata for the heartbeat protocol surface", () => {
 		expect(DAEMON_PROTOCOL_VERSION).toBe(8);
-		expect(DAEMON_SCHEMA_REVISION).toBe(16);
+		expect(DAEMON_SCHEMA_REVISION).toBe(18);
 		expect(DAEMON_SCHEMA_ID).toContain(`protocol-${DAEMON_PROTOCOL_VERSION}`);
 		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeats_list).toEqual({
 			minProtocol: 7,

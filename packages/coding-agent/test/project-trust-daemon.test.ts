@@ -202,10 +202,10 @@ describe("project trust daemon boundary", () => {
 		client.close();
 	});
 
-	it("publishes protocol 8, schema 16, and makes create a protocol-8 command", () => {
+	it("publishes protocol 8, schema 18, and makes create a protocol-8 command", () => {
 		expect(DAEMON_PROTOCOL_VERSION).toBe(8);
-		expect(DAEMON_SCHEMA_REVISION).toBe(16);
-		expect(DAEMON_SCHEMA_ID).toMatch(/^protocol-8-schema-16-[0-9a-f]{12}$/);
+		expect(DAEMON_SCHEMA_REVISION).toBe(18);
+		expect(DAEMON_SCHEMA_ID).toMatch(/^protocol-8-schema-18-[0-9a-f]{12}$/);
 		expect(DAEMON_COMMAND_COMPATIBILITY.create).toEqual({ minProtocol: 8 });
 	});
 

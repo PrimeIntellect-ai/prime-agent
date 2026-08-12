@@ -527,46 +527,6 @@ function looksLikeSessionPath(selector: string): boolean {
 	return isAbsolute(selector) || selector.endsWith(".jsonl") || selector.includes("/") || selector.includes("\\");
 }
 
-/**
- * Whether the process currently holding the descriptor's pid is still the
- * worker that the descriptor was written for. `isProcessAlive` alone cannot
- * answer this: after the worker exits its pid can be reused by an unrelated
- * process (which may answer `EPERM`), and signalling or waiting on that
- * imposter marks a genuinely stopped worker as "failed" forever.
- */
-type ProcessIdentityResult = "match" | "mismatch" | "unverifiable";
-
-function workerDescriptorProcessIdentityCheck(
-	descriptor: Pick<DaemonWorkerDescriptor, "pid" | "processStartId">,
-): ProcessIdentityResult {
-	// Old workers without recorded start ID - trust the pid for backward compat
-	if (!descriptor.processStartId) {
-		return "match";
-	}
-	// Process is dead - signal will fail with ESRCH, harmless to proceed
-	if (!isProcessAlive(descriptor.pid)) {
-		return "match";
-	}
-	// We have a recorded ID - verify it matches the running process
-	const observedProcessStartId = getProcessStartId(descriptor.pid);
-	// If we can't observe the ID (platform limitation), it's unverifiable
-	if (observedProcessStartId === undefined) {
-		return "unverifiable";
-	}
-	return compareProcessStartIds(descriptor.processStartId, observedProcessStartId);
-}
-
-/**
- * Check if the process at the descriptor's pid belongs to the worker.
- * For signaling: returns true for "match", false for "mismatch" or "unverifiable"
- * (refuse to signal when we can't verify - safe default).
- */
-function workerDescriptorProcessIdentityMatches(
-	descriptor: Pick<DaemonWorkerDescriptor, "pid" | "processStartId">,
-): boolean {
-	return workerDescriptorProcessIdentityCheck(descriptor) === "match";
-}
-
 function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
 	return (
 		eventType === "message_end" ||
@@ -1680,7 +1640,9 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter((worker) => this.isLiveWorker(worker));
+				const workers = [...this.workers.values()].filter(
+					(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
+				);
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
 					await Promise.all(
@@ -2487,12 +2449,6 @@ export class DaemonSupervisor {
 						// still runs its graceful path and the finalizer keeps
 						// waiting rather than signalling a possibly-recycled pid.
 					}
-				}
-				// A tombstoned worker must not run long enough to elect another
-				// supervisor while its intentional stop is being adopted. Skip the
-				// pre-kill when the pid is held by an unrelated process.
-				if (workerDescriptorProcessIdentityMatches(worker.descriptor)) {
-					signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 				}
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Completed intentional stop for worker ${worker.descriptor.workerId} during supervisor adoption`);
@@ -4677,7 +4633,15 @@ export class DaemonSupervisor {
 		if (observed === undefined) {
 			return "unknown";
 		}
-		return observed === processStartId ? "current" : "replaced";
+		// Cross-format tokens (legacy ps: vs pinned ps2:) cannot prove PID reuse.
+		const comparison = compareProcessStartIds(processStartId, observed);
+		if (comparison === "match") {
+			return "current";
+		}
+		if (comparison === "mismatch") {
+			return "replaced";
+		}
+		return "unknown";
 	}
 
 	private async stopWorker(

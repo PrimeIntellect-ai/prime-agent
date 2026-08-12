@@ -63,7 +63,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 17 negotiates the additive read-only operation-ledger reliability surface.
 // Revision 18 makes create incompatible with clients that cannot carry project trust.
 export const DAEMON_SCHEMA_REVISION = 18;
-export const DAEMON_SCHEMA_ID = "protocol-8-schema-18-reconcile20260812";
+export const DAEMON_SCHEMA_ID = "protocol-8-schema-18-1bcb9e7f1a49";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
