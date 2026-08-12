@@ -47,6 +47,8 @@ interface SelfUpdateCommandStep {
 	command: string;
 	args: string[];
 	display: string;
+	/** Extra environment for this step only; merged over the current environment when it runs. */
+	env?: Record<string, string>;
 }
 
 export interface SelfUpdateCommand extends SelfUpdateCommandStep {
@@ -73,11 +75,21 @@ function makeSelfUpdateCommand(
 	};
 }
 
-function makeSelfUpdateCommandStep(command: string, args: string[]): SelfUpdateCommandStep {
+function makeSelfUpdateCommandStep(
+	command: string,
+	args: string[],
+	env?: Record<string, string>,
+): SelfUpdateCommandStep {
+	const quote = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
+	// Render the environment into the display so the update log and the
+	// copy-paste fallback describe what actually runs, rather than a command
+	// that fails without the assignment.
+	const envPrefix = Object.entries(env ?? {}).map(([name, value]) => `${name}=${quote(value)}`);
 	return {
 		command,
 		args,
-		display: [command, ...args].map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)).join(" "),
+		...(env ? { env } : {}),
+		display: [...envPrefix, ...[command, ...args].map(quote)].join(" "),
 	};
 }
 
@@ -189,7 +201,18 @@ function getSelfUpdateCommandForMethod(
 			const [command = "npm", ...npmArgs] = npmCommand ?? [];
 			const inferred = npmCommand?.length ? undefined : getInferredNpmInstall();
 			const prefixArgs = [...npmArgs, ...(inferred ? ["--prefix", inferred.prefix] : [])];
-			const installStep = makeSelfUpdateCommandStep(command, [...prefixArgs, "install", "-g", updateSpec]);
+			// npm >= 12 defaults allow-remote to none, so installing a release
+			// artifact by URL fails with EALLOWREMOTE. Grant it for this install
+			// only — never through the user's npmrc — and only when the spec is
+			// such an artifact; registry specs must keep the stricter default.
+			// "root" is not enough: the released tarball itself depends on
+			// further tarball URLs, which npm treats as non-root.
+			const installEnv = isDirectPackageArtifactSpec(updateSpec) ? { npm_config_allow_remote: "all" } : undefined;
+			const installStep = makeSelfUpdateCommandStep(
+				command,
+				[...prefixArgs, "install", "-g", updateSpec],
+				installEnv,
+			);
 			const uninstallStep =
 				updatePackageName === installedPackageName
 					? undefined
