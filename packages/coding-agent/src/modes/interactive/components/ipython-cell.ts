@@ -16,7 +16,7 @@ import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../
 import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } from "./agent-message.js";
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
-import { keyHint } from "./keybinding-hints.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 
 export interface IPythonCellContentBlock {
 	type: string;
@@ -426,7 +426,7 @@ export class IPythonCellComponent implements Component {
 		}
 
 		if (this.state.showExpandHint !== false) {
-			parts.push(keyHint("app.tools.expand", this.state.expanded ? "to collapse" : "to expand"));
+			parts.push(expandCollapseHint("app.tools.expand", this.state.expanded === true));
 		}
 		return parts.join(theme.fg("dim", " · "));
 	}
