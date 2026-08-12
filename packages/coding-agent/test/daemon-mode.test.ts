@@ -4067,6 +4067,73 @@ describe("daemon mode helpers", () => {
 		).toBe(false);
 	});
 
+	it("replays the last extension setStatus to a client attaching after it was set", () => {
+		// Regression test: an extension's session_start handler calling
+		// ctx.ui.setStatus(...) synchronously races the calling client's own
+		// attach — broadcastToSession fans out to state.clients before that
+		// client has been added to it, so the update is dropped with no retry.
+		// replayExtensionStatusToClient (called right after state.clients.add)
+		// is what catches a newly attached client up on the current value.
+		const daemon = new AgentDaemon("/tmp/prime-agent-status-replay-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active-status-replay");
+		state.extensionStatusByKey = new Map([
+			["tokspeed", "🤖 qwen-smart 42 tok/s"],
+			["cleared-key", undefined],
+		]);
+		const client = makeClient("late-client", state.activeSessionId, true);
+		const write = vi.fn((_data: unknown) => true);
+		client.socket = { destroyed: false, write } as unknown as Socket;
+
+		const replay = Reflect.get(daemon, "replayExtensionStatusToClient").bind(daemon);
+		replay(state, client);
+
+		expect(write).toHaveBeenCalledTimes(2);
+		const written = write.mock.calls.map(([line]) => JSON.parse(String(line)));
+		expect(written).toContainEqual(
+			expect.objectContaining({
+				type: "extension_ui_request",
+				activeSessionId: "active-status-replay",
+				method: "setStatus",
+				payload: { statusKey: "tokspeed", statusText: "🤖 qwen-smart 42 tok/s" },
+			}),
+		);
+		// A key an extension explicitly cleared (setStatus(key, undefined)) must
+		// replay as cleared too, not be silently skipped and left showing stale
+		// text to a client that never saw the original value.
+		expect(written).toContainEqual(
+			expect.objectContaining({
+				type: "extension_ui_request",
+				method: "setStatus",
+				payload: { statusKey: "cleared-key", statusText: undefined },
+			}),
+		);
+	});
+
+	it("does not replay status once a rebind (reload/replace) clears it", () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-status-rebind-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active-status-rebind");
+		state.extensionStatusByKey = new Map([["tokspeed", "🤖 old-model 10 tok/s"]]);
+		state.runtime = {
+			...state.runtime,
+			session: {
+				setCurrentRecap: vi.fn(),
+				sessionManager: { getLatestAgentStatus: () => undefined },
+			},
+			metadata: { kind: "root" },
+		} as never;
+
+		const refresh = Reflect.get(daemon, "refreshReplacedSessionState").bind(daemon);
+		refresh(state);
+
+		expect(state.extensionStatusByKey).toBeUndefined();
+	});
+
 	it("delivers session closure while a client is snapshotting and backpressured", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },

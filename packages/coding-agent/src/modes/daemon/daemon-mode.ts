@@ -1279,6 +1279,11 @@ export class AgentDaemon {
 		}
 		this.summarizer.forget(state.activeSessionId);
 		state.summaryState = undefined;
+		// A rebind reloads extensions (bindActiveSessionState re-runs session_start),
+		// so a stale status key from the prior extension instance must not survive
+		// to be replayed to the next client that attaches — the new instance may
+		// never set that key again (renamed, removed, or simply hasn't ticked yet).
+		state.extensionStatusByKey = undefined;
 		state.runtime.session.setCurrentRecap(undefined);
 		this.summarizer.seed(state);
 		if (state.runtime.metadata.kind === "subagent") {
@@ -3344,6 +3349,7 @@ export class AgentDaemon {
 					);
 					state.clients.add(client);
 					client.attachedActiveSessionIds.add(state.activeSessionId);
+					this.replayExtensionStatusToClient(state, client);
 					this.write(client, success(command.id, "attach", summaryForActiveSession(state)));
 					return;
 				}
@@ -3587,6 +3593,7 @@ export class AgentDaemon {
 				}
 				state.clients.add(client);
 				client.attachedActiveSessionIds.add(state.activeSessionId);
+				this.replayExtensionStatusToClient(state, client);
 				if (deferClientEnv && clientEnv) {
 					this.updateRestart?.deferredClientEnv.push({
 						client,
@@ -6510,6 +6517,30 @@ export class AgentDaemon {
 		);
 		state.lastEventSequence = meta.sequence ?? state.lastEventSequence;
 		return { ...message, meta };
+	}
+
+	/**
+	 * Catches a newly attached client up on extension status segments set
+	 * before it connected. A setStatus call made synchronously from
+	 * session_start (the documented pattern — see examples/extensions/
+	 * status-line.ts) races the calling client's own attach and is dropped
+	 * by broadcastToSession's zero-clients fan-out with no retry, so without
+	 * this a status segment set at session start never reaches whichever
+	 * client happens to attach after it, including the one that caused it.
+	 */
+	private replayExtensionStatusToClient(state: ActiveSessionState, client: DaemonSocketClient): void {
+		if (!state.extensionStatusByKey?.size) {
+			return;
+		}
+		for (const [statusKey, statusText] of state.extensionStatusByKey) {
+			this.write(client, {
+				type: "extension_ui_request",
+				activeSessionId: state.activeSessionId,
+				id: randomUUID(),
+				method: "setStatus",
+				payload: { statusKey, statusText },
+			});
+		}
 	}
 
 	private write(client: DaemonSocketClient, message: DaemonOutbound): boolean {

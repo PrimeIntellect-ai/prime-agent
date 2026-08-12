@@ -112,6 +112,53 @@ describe("daemon extension binding", () => {
 		return runtime;
 	}
 
+	it("records ctx.ui.setStatus values on ActiveSessionState for later replay", async () => {
+		const runtime = await createRuntimeForTest(
+			(pi: ExtensionAPI) => {
+				pi.registerCommand("set-status-cmd", {
+					description: "set status",
+					handler: async (_args, ctx) => {
+						ctx.ui.setStatus("tokspeed", "🤖 qwen-smart 42 tok/s");
+					},
+				});
+			},
+			["ack"],
+		);
+
+		const outbound: DaemonOutbound[] = [];
+		const state: ActiveSessionState = {
+			activeSessionId: "active-status",
+			runtime,
+			clients: new Set(),
+			pendingAttaches: 0,
+			extensionUiRequests: new Map(),
+			eventGeneration: "generation-status",
+			lastEventSequence: 0,
+		};
+		await bindActiveSessionState(state, {
+			broadcast: (_state, message) => {
+				outbound.push(message);
+			},
+			shutdown: () => {},
+		});
+
+		await runtime.session.prompt("/set-status-cmd");
+
+		// Recorded even though broadcast fired with zero attached clients — this
+		// is what replayExtensionStatusToClient (daemon-mode.ts) reads to catch
+		// up a client that attaches after the call, closing the session_start
+		// attach race (see daemon-mode.test.ts "replays the last extension
+		// setStatus...").
+		expect(state.extensionStatusByKey?.get("tokspeed")).toBe("🤖 qwen-smart 42 tok/s");
+		expect(outbound).toContainEqual(
+			expect.objectContaining({
+				type: "extension_ui_request",
+				method: "setStatus",
+				payload: { statusKey: "tokspeed", statusText: "🤖 qwen-smart 42 tok/s" },
+			}),
+		);
+	});
+
 	it("strips the duplicated partial message from broadcast message_update events", async () => {
 		const runtime = await createRuntimeForTest(() => {}, ["streamed reply"]);
 

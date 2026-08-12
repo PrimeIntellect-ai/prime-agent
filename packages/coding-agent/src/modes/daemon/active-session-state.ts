@@ -41,6 +41,16 @@ export interface ActiveSessionState {
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
 	unsubscribe?: () => void;
+	/**
+	 * Last value an extension passed to ctx.ui.setStatus(key, text) for this
+	 * session, keyed by status key (undefined entries mark a cleared key so a
+	 * newly attaching client doesn't resurrect it). A setStatus call made
+	 * synchronously from session_start races the calling client's own attach —
+	 * broadcastToSession sees zero clients yet and the update is dropped with
+	 * no retry. Recording it here lets a newly attached client be caught up
+	 * immediately instead of waiting on the extension's next unrelated update.
+	 */
+	extensionStatusByKey?: Map<string, string | undefined>;
 	/** Latest background status summary, surfaced in the agents view. */
 	summaryState?: AgentStatus;
 	/**

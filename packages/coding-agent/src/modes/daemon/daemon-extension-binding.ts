@@ -199,7 +199,13 @@ function createExtensionUIContext(
 			),
 		notify: (message, notifyType) => emitUiRequest("notify", { message, notifyType }),
 		onTerminalInput: () => () => {},
-		setStatus: (key, text) => emitUiRequest("setStatus", { statusKey: key, statusText: text }),
+		setStatus: (key, text) => {
+			if (!state.extensionStatusByKey) {
+				state.extensionStatusByKey = new Map();
+			}
+			state.extensionStatusByKey.set(key, text);
+			return emitUiRequest("setStatus", { statusKey: key, statusText: text });
+		},
 		setWorkingMessage: (message) => emitUiRequest("setWorkingMessage", { message }),
 		setWorkingVisible: (visible) => emitUiRequest("setWorkingVisible", { visible }),
 		setWorkingIndicator: (indicatorOptions?: WorkingIndicatorOptions) =>
