@@ -438,6 +438,11 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
 	let dir = resolvedStartDir;
 	while (true) {
 		skillDirs.push(join(dir, ".agents", "skills"));
+		// Stop at the home directory: nothing above it is a project, and
+		// walking past it would incorrectly scope ~/.agents/skills as project.
+		if (dir === homedir()) {
+			break;
+		}
 		if (gitRepoRoot && dir === gitRepoRoot) {
 			break;
 		}

@@ -4879,7 +4879,7 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (text === "/quit") {
+				if (commandName === "quit") {
 					this.editor.setText("");
 					await this.shutdown();
 					return;
@@ -6667,6 +6667,13 @@ export class InteractiveMode {
 		this.clearEscapeRepeat();
 		if (this.isCtrlCExitHintVisible()) {
 			void this.shutdown();
+			return;
+		}
+		// When the editor has content and nothing is running, Ctrl+C clears
+		// the prompt instead of interrupting. This is a fast way to discard a
+		// draft without deleting line-by-line.
+		if (this.editor.getText().length > 0 && !this.hasInterruptibleWork()) {
+			this.editor.setText("");
 			return;
 		}
 		this.handleInterruptKey();

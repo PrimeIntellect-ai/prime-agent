@@ -104,7 +104,10 @@ Examples:
 			rl.close();
 
 			const index = parseInt(choice, 10) - 1;
-			if (index < 0 || index >= PROVIDERS.length) {
+			// parseInt returns NaN for non-numeric input (e.g. "abc"), and NaN
+			// comparisons are always false, so check Number.isNaN first to avoid
+			// falling through to PROVIDERS[NaN].id (TypeError).
+			if (Number.isNaN(index) || index < 0 || index >= PROVIDERS.length) {
 				console.error("Invalid selection");
 				process.exit(1);
 			}

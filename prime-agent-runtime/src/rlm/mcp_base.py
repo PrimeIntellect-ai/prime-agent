@@ -263,7 +263,9 @@ class McpIntegration:
                     t.name: {
                         "name": t.name,
                         "description": getattr(t, "description", "") or "",
-                        "inputSchema": getattr(t, "inputSchema", None) or {},
+                        # mcp.types.Tool uses snake_case fields with camelCase aliases;
+                        # try both so we work across MCP SDK versions.
+                        "inputSchema": getattr(t, "input_schema", None) or getattr(t, "inputSchema", None) or {},
                     }
                     for t in resp.tools
                 }

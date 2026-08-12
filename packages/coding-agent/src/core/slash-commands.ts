@@ -202,6 +202,8 @@ const BUILTIN_SLASH_COMMAND_ALIASES: ReadonlyArray<BuiltinSlashCommandAlias> = [
 	{ name: "thinking", aliasFor: "effort" },
 	{ name: "rename", aliasFor: "name" },
 	{ name: "side", aliasFor: "btw" },
+	// /exit mirrors standard shell behaviour as a natural alias for /quit.
+	{ name: "exit", aliasFor: "quit" },
 ];
 
 function buildBuiltinSlashCommands(): ReadonlyArray<BuiltinSlashCommand> {
