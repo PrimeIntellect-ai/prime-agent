@@ -13,8 +13,8 @@ issues = await linear.list_issues(team="Engineering")
 ```
 
 The MCP connection runs inside the kernel via the official `mcp` Python SDK. The
-host's only jobs are interactive login (browser OAuth) and minting/refreshing
-credentials in `auth.json`.
+host resolves connection settings and, when needed, handles browser OAuth and
+credential refresh in `auth.json`.
 
 ## Table of Contents
 
@@ -68,7 +68,9 @@ result = await linear.list_issues(team="Engineering")
 - A tool whose name isn't a valid Python identifier (e.g. Notion's `notion-search`)
   is called via the escape hatch: `await notion.call_tool("notion-search", {...})`.
 - A call against an integration with no credentials raises `NotEnabled` (telling
-  the user to `/mcp login`); a tool that returns an error raises `McpToolError`.
+  the user to `/mcp login`). A server explicitly disabled in settings raises
+  `McpDisabled` (tell the user to enable it in settings and run `/reload`); a tool
+  that returns an error raises `McpToolError`.
 
 ## Authoring your own integration
 
@@ -104,7 +106,10 @@ server fields:
 | `oauth` | `true` to use the browser OAuth flow (requires the server to support dynamic client registration) |
 | `bearerTokenEnvVar` | Name of an env var holding a static bearer token, instead of OAuth |
 | `headers` | Extra static HTTP headers sent on every request |
-| `enabled` | Set `false` to force-disable even when credentials exist |
+| `enabled` | Set `false` to force-disable even when credentials exist; calls raise `McpDisabled` until it is enabled and `/reload` runs |
+
+Omit both `oauth` and `bearerTokenEnvVar` for a server that accepts
+unauthenticated requests.
 
 > `stdio` (local-subprocess) servers are not yet wired through to the kernel —
 > the host drops non-HTTP entries — so an integration must target an HTTP endpoint.
@@ -160,13 +165,15 @@ def __getattr__(name):
     return getattr(acme, name)
 ```
 
-The base class connects with the `mcp` SDK, resolves the URL/headers from the host
-(honoring the `mcpServers` config), injects the bearer token from `auth.json`
-(refreshing when expired), and binds the server's tools as async methods. Authoring
-is a few lines — the package above is the whole integration.
+The base class connects with the `mcp` SDK, resolves the URL and headers from the
+host, injects a bearer token when the server requires one, and binds the server's
+tools as async methods. Authoring is a few lines — the package above is the whole
+integration.
 
 ### Authentication
 
+- **None** (omit `oauth` and `bearerTokenEnvVar`): Prime connects without an
+  `Authorization` header. Static `headers` are still included when configured.
 - **OAuth** (`"oauth": true`): the user runs `/login` → MCP Connections → your server (or
   `/mcp login acme`). Works when the server supports OAuth 2.1 dynamic client
   registration (RFC 7591); login discovers the auth server, registers a client,
@@ -198,7 +205,9 @@ Methods:
 
 Exceptions (both importable from `rlm`):
 
-- `NotEnabled` — raised when no usable credentials exist (not logged in).
+- `NotEnabled` — raised when an authenticated server has no usable credentials.
+- `McpDisabled` — raised when the host configuration explicitly sets `enabled: false`;
+  enable it in settings and run `/reload` rather than logging in.
 - `McpToolError` — raised when a tool call returns a result flagged as an error.
 
 ## Enable-by-login lifecycle
@@ -218,10 +227,9 @@ activate the integration.
 
 **User-authored integrations are not auth-gated this way.** A skill you drop into
 a skills directory is loaded like any other skill — visible to the model and
-imported into the kernel immediately, regardless of `auth.json`. It simply fails
-at call time with `NotEnabled` until credentials exist. So make the skill's
-`SKILL.md` tell the model how to connect when a call raises `NotEnabled`, matching
-the auth mode you configured:
+imported into the kernel immediately. Anonymous servers work immediately;
+authenticated servers fail at call time with `NotEnabled` until credentials
+exist. Make the skill's `SKILL.md` explain the configured auth mode:
 
 - **OAuth** (`"oauth": true`): instruct the user to run `/mcp login <server>` (or
   `/login` → MCP Connections). `/mcp login` only works for OAuth servers.
@@ -242,7 +250,8 @@ the auth mode you configured:
   URL. A previously stored official credential is *not* reused for the override, to
   avoid sending the official token to your endpoint. Authenticate such an override
   via `bearerTokenEnvVar` only — OAuth credentials are not honored for a
-  catalog-name override. (Use a name that isn't a built-in to get OAuth.)
+  catalog-name override, or omit authentication for a public endpoint. (Use a
+  name that isn't a built-in to get OAuth.)
 - **Multi-session daemon.** OAuth provider registration is process-global; a
   user-declared server unique to one daemon session is re-registered on that
   session's next reload.

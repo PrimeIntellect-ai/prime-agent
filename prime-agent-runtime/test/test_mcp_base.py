@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from rlm import mcp_base
-from rlm.mcp_base import McpIntegration, McpToolError, NotEnabled
+from rlm.mcp_base import McpDisabled, McpIntegration, McpToolError, NotEnabled
 
 
 def _run(coro):
@@ -192,18 +192,24 @@ class McpIntegrationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Bad()
 
-    def _run_open_session_with_transport(self, transport):
+    def _run_open_session_with_transport(self, transport, *, config=None, write_auth=True):
         """Drive the real _open_session against a fake transport callable.
 
         `transport` must declare its real parameters (headers= or http_client=)
         so the signature inspection in _open_session is exercised faithfully.
         """
-        self._write_auth(
-            {"type": "oauth", "access": "tok-xyz", "refresh": "r", "expires": (time.time() + 3600) * 1000}
-        )
+        if write_auth:
+            self._write_auth(
+                {
+                    "type": "oauth",
+                    "access": "tok-xyz",
+                    "refresh": "r",
+                    "expires": (time.time() + 3600) * 1000,
+                }
+            )
 
         async def fake_host_request(req_type, payload):
-            return {}  # no host URL override; _resolve_url falls back to self.url
+            return config or {}  # no URL override by default; fall back to self.url
 
         with mock.patch.object(mcp_base, "host_request", fake_host_request), \
              mock.patch.object(mcp_base, "_resolve_streamable_http", lambda: transport), \
@@ -235,6 +241,189 @@ class McpIntegrationTest(unittest.TestCase):
         self._run_open_session_with_transport(transport)
         self.assertEqual(captured["headers"], {"Authorization": "Bearer tok-xyz"})
 
+    def _assert_explicit_host_disable_stops_before_auth_or_transport(self, config):
+        calls = []
+
+        async def fake_host_request(req_type, payload):
+            calls.append((req_type, payload))
+            return config
+
+        def unexpected_transport(*args, **kwargs):
+            raise AssertionError("disabled integration must not create a transport")
+
+        with mock.patch.object(mcp_base, "host_request", fake_host_request), \
+             mock.patch.object(mcp_base, "_resolve_streamable_http", unexpected_transport), \
+             mock.patch.object(_Integration, "_resolve_token", side_effect=AssertionError("disabled integration must not resolve a token")):
+            with self.assertRaises(McpDisabled) as ctx:
+                _run(_Integration()._open_session(AsyncExitStack()))
+        self.assertEqual(calls, [("mcp.config", {"server": "demo"})])
+        self.assertIn("settings", str(ctx.exception))
+        self.assertIn("/reload", str(ctx.exception))
+        self.assertNotIn("login", str(ctx.exception).lower())
+        self.assertNotIn("token", str(ctx.exception).lower())
+
+    def test_open_session_disabled_anonymous_server_stops_before_auth_or_transport(self):
+        self._assert_explicit_host_disable_stops_before_auth_or_transport(
+            {"enabled": False, "url": "https://host.test/mcp", "requiresAuth": False}
+        )
+
+    def test_open_session_disabled_server_with_credentials_stops_before_auth_or_transport(self):
+        self._write_auth(
+            {"type": "oauth", "access": "tok", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        self._assert_explicit_host_disable_stops_before_auth_or_transport(
+            {"enabled": False, "url": "https://host.test/mcp", "requiresAuth": True}
+        )
+
+    def test_mcp_disabled_is_lazily_exported_from_rlm(self):
+        from rlm import McpDisabled as lazy_export
+
+        self.assertIs(lazy_export, McpDisabled)
+
+    def test_open_session_missing_enabled_signal_remains_backward_compatible(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return ("read", "write", None)
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        def transport(url, headers=None):
+            captured["headers"] = headers
+            return _CM()
+
+        self._run_open_session_with_transport(transport, config={"requiresAuth": False}, write_auth=False)
+        self.assertEqual(captured["headers"], {})
+
+    def test_open_session_allows_anonymous_server(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return ("read", "write", None)
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        def transport(url, headers=None):
+            captured["headers"] = headers
+            return _CM()
+
+        self._run_open_session_with_transport(
+            transport,
+            config={"requiresAuth": False, "headers": {"X-Extra": "1"}},
+            write_auth=False,
+        )
+        self.assertEqual(captured["headers"], {"X-Extra": "1"})
+
+    def test_open_session_preserves_static_authorization_for_anonymous_server(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return ("read", "write", None)
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        def transport(url, headers=None):
+            captured["headers"] = headers
+            return _CM()
+
+        self._run_open_session_with_transport(
+            transport,
+            config={
+                "requiresAuth": False,
+                "headers": {"Authorization": "Basic explicit", "X-Extra": "1"},
+            },
+            write_auth=False,
+        )
+        self.assertEqual(captured["headers"], {"Authorization": "Basic explicit", "X-Extra": "1"})
+
+    def test_open_session_resolved_bearer_overrides_static_authorization(self):
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return ("read", "write", None)
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        def transport(url, headers=None):
+            captured["headers"] = headers
+            return _CM()
+
+        self._run_open_session_with_transport(
+            transport,
+            config={"headers": {"Authorization": "Basic explicit", "X-Extra": "1"}},
+        )
+        self.assertEqual(
+            captured["headers"], {"Authorization": "Bearer tok-xyz", "X-Extra": "1"}
+        )
+
+    def test_open_session_closes_session_transport_and_client_in_reverse_order(self):
+        self._write_auth(
+            {"type": "oauth", "access": "tok", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        events = []
+
+        class _Context:
+            def __init__(self, name, value):
+                self.name = name
+                self.value = value
+
+            async def __aenter__(self):
+                events.append(f"enter:{self.name}")
+                return self.value
+
+            async def __aexit__(self, *a):
+                events.append(f"exit:{self.name}")
+                return False
+
+        def transport(url, *, http_client=None):
+            events.append("transport-created")
+            return _Context("transport", ("read", "write", None))
+
+        class Session:
+            async def initialize(self):
+                events.append("initialized")
+
+            async def call_tool(self, name, arguments):
+                events.append("called")
+                return type("R", (), {"content": [], "structuredContent": None})()
+
+        def build_client(headers):
+            events.append("client-created")
+            return _Context("client", object())
+
+        async def fake_host_request(req_type, payload):
+            return {}
+
+        with mock.patch.object(mcp_base, "host_request", fake_host_request), \
+             mock.patch.object(mcp_base, "_resolve_streamable_http", lambda: transport), \
+             mock.patch.object(mcp_base, "_build_mcp_http_client", build_client), \
+             mock.patch("mcp.ClientSession", return_value=_Context("session", Session())):
+            _run(_Integration().call_tool("noop", {}))
+
+        self.assertEqual(
+            events,
+            [
+                "client-created",
+                "enter:client",
+                "transport-created",
+                "enter:transport",
+                "enter:session",
+                "initialized",
+                "called",
+                "exit:session",
+                "exit:transport",
+                "exit:client",
+            ],
+        )
+
     def test_open_session_uses_http_client_signature(self):
         # streamable_http_client(url, *, http_client=...) — must NOT pass headers=
         captured = {}
@@ -252,6 +441,36 @@ class McpIntegrationTest(unittest.TestCase):
 
         self._run_open_session_with_transport(transport)
         self.assertIsNotNone(captured["http_client"])
+
+    def test_open_session_http_client_uses_mcp_timeouts(self):
+        # Bare httpx.AsyncClient defaults to a 5s read timeout, which aborts long
+        # MCP tool calls with ReadTimeout. The http_client branch must use the SDK
+        # factory so MCP defaults (30s general / 300s SSE read) apply.
+        captured = {}
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return ("read", "write", None)
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        def transport(url, *, http_client=None):
+            captured["http_client"] = http_client
+            return _CM()
+
+        self._run_open_session_with_transport(transport)
+        client = captured["http_client"]
+        self.assertIsNotNone(client)
+        timeout = client.timeout
+        # Literals (not SDK constants): pin values that keep long tool calls alive.
+        # A 5s read timeout is what the bare-httpx regression used to apply.
+        self.assertEqual(timeout.connect, 30.0)
+        self.assertEqual(timeout.write, 30.0)
+        self.assertEqual(timeout.pool, 30.0)
+        self.assertEqual(timeout.read, 300.0)
+        # Authorization must still be injected on the prebuilt client.
+        self.assertEqual(client.headers.get("Authorization"), "Bearer tok-xyz")
 
     def test_resolve_config_prefers_host_override_and_headers(self):
         async def host_with_override(req_type, payload):

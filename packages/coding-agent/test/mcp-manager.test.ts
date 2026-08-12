@@ -107,9 +107,15 @@ describe("McpManager", () => {
 		const handlers = manager.hostHandlers();
 		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({
 			url: "https://proxy.test/mcp",
+			enabled: true,
+			requiresAuth: true,
 			headers: { "X-Extra": "1" },
 		});
-		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({ url: "https://mcp.notion.com/mcp" });
+		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({
+			url: "https://mcp.notion.com/mcp",
+			enabled: true,
+			requiresAuth: true,
+		});
 	});
 
 	it("does not treat an oauth override of a catalog name as authed via the official stored cred", () => {
@@ -126,6 +132,40 @@ describe("McpManager", () => {
 		});
 		// Must NOT be enabled — else the official token would be sent to the override URL.
 		expect(manager.listStatus().find((s) => s.server === "linear")?.enabled).toBe(false);
+	});
+
+	it("enables anonymous HTTP servers without credentials", async () => {
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				public: { type: "http", url: "https://public.test/mcp" },
+			}),
+		});
+		expect(manager.listStatus().find((s) => s.server === "public")?.enabled).toBe(true);
+		expect(await manager.hostHandlers()["mcp.config"]({ server: "public" })).toEqual({
+			url: "https://public.test/mcp",
+			enabled: true,
+			requiresAuth: false,
+		});
+	});
+
+	it("keeps an anonymous user integration enabled despite stale credentials with its id", () => {
+		// A server may previously have been OAuth-enabled, then deliberately reconfigured
+		// as public. Stale auth.json state must not change that explicit configuration.
+		authStorage.set("mcp:public", {
+			type: "oauth",
+			access: "stale-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				public: { type: "http", url: "https://public.test/mcp" },
+			}),
+		});
+
+		expect(manager.listStatus().find((s) => s.server === "public")?.enabled).toBe(true);
 	});
 
 	it("honors a bearer-token env var for user-declared servers", () => {
@@ -175,5 +215,20 @@ describe("McpManager", () => {
 		servers = {};
 		manager.refresh();
 		expect(getOAuthProvider("mcp:acme")).toBeUndefined();
+	});
+	it("reports a disabled anonymous user integration as disabled in status and config", async () => {
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				public: { type: "http", url: "https://public.test/mcp", enabled: false },
+			}),
+		});
+
+		expect(manager.listStatus().find((s) => s.server === "public")?.enabled).toBe(false);
+		expect(await manager.hostHandlers()["mcp.config"]({ server: "public" })).toEqual({
+			url: "https://public.test/mcp",
+			enabled: false,
+			requiresAuth: false,
+		});
 	});
 });

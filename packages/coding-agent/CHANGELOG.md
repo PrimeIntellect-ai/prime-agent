@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added anonymous HTTP MCP server support ([#745](https://github.com/PrimeIntellect-ai/prime-agent/pull/745) by [@tanvesh01](https://github.com/tanvesh01)).
+
 ## [0.7.2] - 2026-08-11
 
 - Fixed Down Arrow focusing the Agents View entry before moving a nonempty prompt cursor to the end ([ENG-5147](https://linear.app/primeintellect/issue/ENG-5147/keep-down-arrow-in-the-prompt-until-the-cursor-reaches-the-end)).

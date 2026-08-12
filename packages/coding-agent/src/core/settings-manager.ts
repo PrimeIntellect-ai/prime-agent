@@ -102,7 +102,7 @@ export type McpServerConfig =
 			headers?: Record<string, string>;
 			/** Env var holding a static bearer token (skips OAuth). */
 			bearerTokenEnvVar?: string;
-			/** Use the generic OAuth login flow for this server. */
+			/** Use generic OAuth login; omit for bearer-token or anonymous access. */
 			oauth?: boolean;
 			/** Force-disable even when credentials exist. */
 			enabled?: boolean;
