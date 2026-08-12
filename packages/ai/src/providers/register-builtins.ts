@@ -5,6 +5,8 @@ import type {
 	AssistantMessageEvent,
 	Context,
 	Model,
+	ProviderNativeCompactionFunction,
+	ProviderNativeCompactionOptions,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -31,6 +33,7 @@ interface LazyProviderModule<
 		context: Context,
 		options?: TSimpleOptions,
 	) => AsyncIterable<AssistantMessageEvent>;
+	compact?: ProviderNativeCompactionFunction<TApi>;
 }
 
 interface AnthropicProviderModule {
@@ -61,6 +64,7 @@ interface MistralProviderModule {
 interface OpenAICodexResponsesProviderModule {
 	streamOpenAICodexResponses: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions>;
 	streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
+	compactOpenAICodexResponses: ProviderNativeCompactionFunction<"openai-codex-responses">;
 }
 
 interface OpenAICompletionsProviderModule {
@@ -200,6 +204,20 @@ function createLazySimpleStream<
 	};
 }
 
+function createLazyNativeCompaction<
+	TApi extends Api,
+	TOptions extends StreamOptions,
+	TSimpleOptions extends SimpleStreamOptions,
+>(
+	loadModule: () => Promise<LazyProviderModule<TApi, TOptions, TSimpleOptions>>,
+): ProviderNativeCompactionFunction<TApi> {
+	return async (model, context, options: ProviderNativeCompactionOptions) => {
+		const module = await loadModule();
+		if (!module.compact) throw new Error(`API provider does not support native compaction: ${model.api}`);
+		return module.compact(model, context, options);
+	};
+}
+
 function loadAnthropicProviderModule(): Promise<
 	LazyProviderModule<"anthropic-messages", AnthropicOptions, SimpleStreamOptions>
 > {
@@ -273,6 +291,7 @@ function loadOpenAICodexResponsesProviderModule(): Promise<
 		return {
 			stream: provider.streamOpenAICodexResponses,
 			streamSimple: provider.streamSimpleOpenAICodexResponses,
+			compact: provider.compactOpenAICodexResponses,
 		};
 	});
 	return openAICodexResponsesProviderModulePromise;
@@ -332,6 +351,7 @@ export const streamMistral = createLazyStream(loadMistralProviderModule);
 export const streamSimpleMistral = createLazySimpleStream(loadMistralProviderModule);
 export const streamOpenAICodexResponses = createLazyStream(loadOpenAICodexResponsesProviderModule);
 export const streamSimpleOpenAICodexResponses = createLazySimpleStream(loadOpenAICodexResponsesProviderModule);
+export const compactOpenAICodexResponses = createLazyNativeCompaction(loadOpenAICodexResponsesProviderModule);
 export const streamOpenAICompletions = createLazyStream(loadOpenAICompletionsProviderModule);
 export const streamSimpleOpenAICompletions = createLazySimpleStream(loadOpenAICompletionsProviderModule);
 export const streamOpenAIResponses = createLazyStream(loadOpenAIResponsesProviderModule);
@@ -374,6 +394,7 @@ export function registerBuiltInApiProviders(): void {
 		api: "openai-codex-responses",
 		stream: streamOpenAICodexResponses,
 		streamSimple: streamSimpleOpenAICodexResponses,
+		compact: compactOpenAICodexResponses,
 	});
 
 	registerApiProvider({

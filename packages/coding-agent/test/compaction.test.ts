@@ -16,6 +16,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.js";
+import { convertToLlm } from "../src/core/messages.js";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -256,6 +257,7 @@ describe("shouldCompact", () => {
 	it("should return true when context exceeds threshold", () => {
 		const settings: CompactionSettings = {
 			enabled: true,
+			native: true,
 			reserveTokens: 10000,
 			keepRecentTokens: 20000,
 		};
@@ -267,6 +269,7 @@ describe("shouldCompact", () => {
 	it("should return false when disabled", () => {
 		const settings: CompactionSettings = {
 			enabled: false,
+			native: true,
 			reserveTokens: 10000,
 			keepRecentTokens: 20000,
 		};
@@ -277,6 +280,7 @@ describe("shouldCompact", () => {
 	it("should return false when context window is unknown", () => {
 		const settings: CompactionSettings = {
 			enabled: true,
+			native: true,
 			reserveTokens: 10000,
 			keepRecentTokens: 20000,
 		};
@@ -434,6 +438,87 @@ describe("buildSessionContext", () => {
 		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
 		expect(loaded.thinkingLevel).toBe("high");
 	});
+
+	it("replays compatible provider-native history through the compaction summary", () => {
+		const u1 = createMessageEntry(createUserMessage("original prefix"));
+		const a1 = createMessageEntry(createAssistantMessage("original answer"));
+		const u2 = createMessageEntry(createUserMessage("retained suffix"));
+		const compaction = createCompactionEntry("Native compaction", u2.id);
+		compaction.providerNativeCompaction = {
+			provider: "anthropic",
+			replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+			compactionItem: { type: "compaction", encrypted_content: "opaque" },
+		};
+
+		const loaded = buildSessionContext([u1, a1, u2, compaction]);
+		const summary = loaded.messages[0];
+		expect(summary).toMatchObject({
+			role: "compactionSummary",
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "anthropic",
+				items: [{ type: "compaction", encrypted_content: "opaque" }],
+			},
+		});
+		const llmSummary = convertToLlm([summary]);
+		expect(llmSummary[0]).toMatchObject({
+			role: "user",
+			providerPayload: { type: "openaiResponsesHistory", provider: "anthropic" },
+		});
+	});
+
+	it("re-expands original entries when provider-native history is incompatible", () => {
+		const u1 = createMessageEntry(createUserMessage("original prefix"));
+		const a1 = createMessageEntry(createAssistantMessage("original answer"));
+		const u2 = createMessageEntry(createUserMessage("retained suffix"));
+		const compaction = createCompactionEntry("Native compaction", u2.id);
+		compaction.providerNativeCompaction = {
+			provider: "openai-codex",
+			replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+			compactionItem: { type: "compaction", encrypted_content: "opaque" },
+		};
+
+		const loaded = buildSessionContext([u1, a1, u2, compaction]);
+		expect(loaded.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
+		expect(extractText(loaded.messages)).toContain("original prefix");
+		expect(extractText(loaded.messages)).not.toContain("Native compaction");
+	});
+
+	it("uses the newest portable boundary when later native history is incompatible", () => {
+		const oldUser = createMessageEntry(createUserMessage("old raw prefix"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("old raw answer"));
+		const portableUser = createMessageEntry(createUserMessage("portable retained user"));
+		const portableAssistant = createMessageEntry(createAssistantMessage("portable retained answer"));
+		const portableCompaction = createCompactionEntry("Portable summary", portableUser.id);
+		const nativeUser = createMessageEntry(createUserMessage("native retained user"));
+		const nativeAssistant = createMessageEntry(createAssistantMessage("native retained answer"));
+		const nativeCompaction = createCompactionEntry("Native summary", nativeUser.id);
+		nativeCompaction.providerNativeCompaction = {
+			provider: "openai-codex",
+			replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+			compactionItem: { type: "compaction", encrypted_content: "opaque" },
+		};
+		const recentUser = createMessageEntry(createUserMessage("recent user"));
+		const recentAssistant = createMessageEntry(createAssistantMessage("recent answer"));
+		const entries = [
+			oldUser,
+			oldAssistant,
+			portableUser,
+			portableAssistant,
+			portableCompaction,
+			nativeUser,
+			nativeAssistant,
+			nativeCompaction,
+			recentUser,
+			recentAssistant,
+		];
+
+		const loaded = buildSessionContext(entries, undefined, undefined, "anthropic");
+		expect(loaded.messages[0]).toMatchObject({ role: "compactionSummary", summary: "Portable summary" });
+		expect(extractText(loaded.messages)).not.toContain("old raw prefix");
+		expect(extractText(loaded.messages)).toContain("native retained user");
+		expect((loaded.messages[0] as { providerPayload?: unknown }).providerPayload).toBeUndefined();
+	});
 });
 
 describe("prepareCompaction with small sessions", () => {
@@ -488,6 +573,70 @@ describe("prepareCompaction with previous compaction", () => {
 
 		expect(contextAfterText).toContain("user msg 2 - kept by compaction1");
 		expect(contextAfterText).toContain("user msg 3 - kept by compaction1");
+	});
+
+	it("carries compatible native history and re-expands it for local fallback", () => {
+		const u1 = createMessageEntry(createUserMessage("old original prefix ".repeat(20)));
+		const a1 = createMessageEntry(createAssistantMessage("old original answer ".repeat(20)));
+		const u2 = createMessageEntry(createUserMessage("previously retained suffix ".repeat(20)));
+		const compaction = createCompactionEntry("Native compaction", u2.id);
+		compaction.providerNativeCompaction = {
+			provider: "anthropic",
+			replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+			compactionItem: { type: "compaction", encrypted_content: "opaque" },
+		};
+		const u3 = createMessageEntry(createUserMessage("new turn ".repeat(20)));
+		const a3 = createMessageEntry(createAssistantMessage("new answer ".repeat(20), createMockUsage(1000, 100)));
+		const entries = [u1, a1, u2, compaction, u3, a3];
+		const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
+
+		const nativePreparation = prepareCompaction(entries, settings, "anthropic");
+		expect(nativePreparation?.previousNativeCompaction).toEqual(compaction.providerNativeCompaction);
+		expect(extractText(nativePreparation?.messagesToSummarize ?? [])).not.toContain("old original prefix");
+
+		const localPreparation = prepareCompaction(entries, settings);
+		expect(localPreparation?.previousNativeCompaction).toBeUndefined();
+		expect(extractText(localPreparation?.messagesToSummarize ?? [])).toContain("old original prefix");
+	});
+
+	it("uses an older portable boundary when local fallback cannot replay the latest native boundary", () => {
+		const oldUser = createMessageEntry(createUserMessage("old raw prefix ".repeat(20)));
+		const oldAssistant = createMessageEntry(createAssistantMessage("old raw answer ".repeat(20)));
+		const portableUser = createMessageEntry(createUserMessage("portable retained user ".repeat(20)));
+		const portableAssistant = createMessageEntry(createAssistantMessage("portable retained answer ".repeat(20)));
+		const portableCompaction = createCompactionEntry("Portable summary", portableUser.id);
+		const nativeUser = createMessageEntry(createUserMessage("native retained user ".repeat(20)));
+		const nativeAssistant = createMessageEntry(createAssistantMessage("native retained answer ".repeat(20)));
+		const nativeCompaction = createCompactionEntry("Native summary", nativeUser.id);
+		nativeCompaction.providerNativeCompaction = {
+			provider: "openai-codex",
+			replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+			compactionItem: { type: "compaction", encrypted_content: "opaque" },
+		};
+		const recentUser = createMessageEntry(createUserMessage("recent user ".repeat(20)));
+		const recentAssistant = createMessageEntry(
+			createAssistantMessage("recent answer ".repeat(20), createMockUsage(1000, 100)),
+		);
+		const entries = [
+			oldUser,
+			oldAssistant,
+			portableUser,
+			portableAssistant,
+			portableCompaction,
+			nativeUser,
+			nativeAssistant,
+			nativeCompaction,
+			recentUser,
+			recentAssistant,
+		];
+		const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
+
+		const preparation = prepareCompaction(entries, settings);
+
+		expect(preparation?.previousSummary).toBe("Portable summary");
+		expect(preparation?.previousNativeCompaction).toBeUndefined();
+		expect(extractText(preparation?.messagesToSummarize ?? [])).not.toContain("old raw prefix");
+		expect(extractText(preparation?.messagesToSummarize ?? [])).toContain("native retained user");
 	});
 
 	it("should re-summarize previously kept messages when the recent window moves past them", () => {

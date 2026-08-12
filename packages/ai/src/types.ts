@@ -141,6 +141,38 @@ export interface StreamOptions {
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
 
+/** Options for a provider-native conversation compaction request. */
+export interface ProviderNativeCompactionOptions extends StreamOptions {
+	instructions: string;
+}
+
+/** An opaque provider-native compaction item suitable for replay by the same provider. */
+export type ProviderNativeCompactionItem = Record<string, unknown> & {
+	type: "compaction" | "compaction_summary";
+};
+
+/** Replacement provider-native history returned by a compaction operation. */
+export interface ProviderNativeCompactionResult {
+	provider: Provider;
+	replacementHistory: Array<Record<string, unknown>>;
+	compactionItem: ProviderNativeCompactionItem;
+}
+
+/** Provider-native OpenAI Responses history replayed before ordinary context messages. */
+export interface OpenAIResponsesHistoryPayload {
+	type: "openaiResponsesHistory";
+	provider: Provider;
+	items: Array<Record<string, unknown>>;
+}
+
+export type ProviderPayload = OpenAIResponsesHistoryPayload;
+
+/** Optional provider operation for replacing a context with provider-native compacted history. */
+export type ProviderNativeCompactionFunction<
+	TApi extends Api = Api,
+	TOptions extends ProviderNativeCompactionOptions = ProviderNativeCompactionOptions,
+> = (model: Model<TApi>, context: Context, options: TOptions) => Promise<ProviderNativeCompactionResult>;
+
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
 	/** Explicit model reasoning selection. Omit to preserve the provider default. */
@@ -219,6 +251,8 @@ export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Opaque provider-native history used only when the active provider matches. */
+	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

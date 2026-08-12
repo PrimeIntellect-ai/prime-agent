@@ -3,6 +3,9 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Model,
+	ProviderNativeCompactionFunction,
+	ProviderNativeCompactionOptions,
+	ProviderNativeCompactionResult,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -20,16 +23,28 @@ export type ApiStreamSimpleFunction = (
 	options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
-export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> {
+export type ApiNativeCompactionFunction = (
+	model: Model<Api>,
+	context: Context,
+	options: ProviderNativeCompactionOptions,
+) => Promise<ProviderNativeCompactionResult>;
+
+export interface ApiProvider<
+	TApi extends Api = Api,
+	TOptions extends StreamOptions = StreamOptions,
+	TCompactionOptions extends ProviderNativeCompactionOptions = ProviderNativeCompactionOptions,
+> {
 	api: TApi;
 	stream: StreamFunction<TApi, TOptions>;
 	streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+	compact?: ProviderNativeCompactionFunction<TApi, TCompactionOptions>;
 }
 
 interface ApiProviderInternal {
 	api: Api;
 	stream: ApiStreamFunction;
 	streamSimple: ApiStreamSimpleFunction;
+	compact?: ApiNativeCompactionFunction;
 }
 
 type RegisteredApiProvider = {
@@ -63,15 +78,29 @@ function wrapStreamSimple<TApi extends Api>(
 	};
 }
 
-export function registerApiProvider<TApi extends Api, TOptions extends StreamOptions>(
-	provider: ApiProvider<TApi, TOptions>,
-	sourceId?: string,
-): void {
+function wrapNativeCompaction<TApi extends Api, TOptions extends ProviderNativeCompactionOptions>(
+	api: TApi,
+	compact: ProviderNativeCompactionFunction<TApi, TOptions>,
+): ApiNativeCompactionFunction {
+	return (model, context, options) => {
+		if (model.api !== api) {
+			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
+		}
+		return compact(model as Model<TApi>, context, options as TOptions);
+	};
+}
+
+export function registerApiProvider<
+	TApi extends Api,
+	TOptions extends StreamOptions,
+	TCompactionOptions extends ProviderNativeCompactionOptions,
+>(provider: ApiProvider<TApi, TOptions, TCompactionOptions>, sourceId?: string): void {
 	apiProviderRegistry.set(provider.api, {
 		provider: {
 			api: provider.api,
 			stream: wrapStream(provider.api, provider.stream),
 			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
+			compact: provider.compact ? wrapNativeCompaction(provider.api, provider.compact) : undefined,
 		},
 		sourceId,
 	});

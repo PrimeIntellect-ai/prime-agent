@@ -7,6 +7,8 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Model,
+	ProviderNativeCompactionOptions,
+	ProviderNativeCompactionResult,
 	ProviderStreamOptions,
 	SimpleStreamOptions,
 	StreamOptions,
@@ -38,6 +40,18 @@ export async function complete<TApi extends Api>(
 ): Promise<AssistantMessage> {
 	const s = stream(model, context, options);
 	return s.result();
+}
+
+export function compact<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options: ProviderNativeCompactionOptions,
+): Promise<ProviderNativeCompactionResult> {
+	const provider = resolveApiProvider(model.api);
+	if (!provider.compact) {
+		throw new Error(`API provider does not support native compaction: ${model.api}`);
+	}
+	return provider.compact(model, context, options);
 }
 
 export function streamSimple<TApi extends Api>(

@@ -135,6 +135,13 @@ export function convertResponsesMessages<TApi extends Api>(
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
+			if (
+				msg.providerPayload?.type === "openaiResponsesHistory" &&
+				msg.providerPayload.provider === model.provider
+			) {
+				messages.push(...(msg.providerPayload.items as unknown as ResponseInput));
+				continue;
+			}
 			if (typeof msg.content === "string") {
 				messages.push({
 					role: "user",

@@ -351,7 +351,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
-		agent.state.messages = existingSession.messages;
+		agent.state.messages = sessionManager.buildSessionContext(model?.provider).messages;
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}

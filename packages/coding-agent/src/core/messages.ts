@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, Message, ProviderPayload, TextContent } from "@earendil-works/pi-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
 
@@ -180,6 +180,8 @@ export interface CompactionSummaryMessage {
 	tokensBefore: number;
 	/** Number of retained messages that precede this summary in transcript presentation. */
 	retainedMessageCount?: number;
+	/** Provider-native history replayed instead of the display summary by a matching provider. */
+	providerPayload?: ProviderPayload;
 	/** User instructions that guided the summary (from `/compact <instructions>`) */
 	customInstructions?: string;
 	timestamp: number;
@@ -248,12 +250,14 @@ export function createCompactionSummaryMessage(
 	timestamp: string,
 	customInstructions?: string,
 	retainedMessageCount?: number,
+	providerPayload?: ProviderPayload,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
 		summary,
 		tokensBefore,
 		retainedMessageCount,
+		providerPayload,
 		customInstructions,
 		timestamp: new Date(timestamp).getTime(),
 	};
@@ -468,6 +472,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						content: [
 							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
 						],
+						providerPayload: m.providerPayload,
 						timestamp: m.timestamp,
 					};
 				case "user":

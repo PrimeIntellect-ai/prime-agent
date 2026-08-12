@@ -6,15 +6,22 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model, ProviderNativeCompactionResult, Usage } from "@earendil-works/pi-ai";
+import { compact as compactProvider, completeSimple } from "@earendil-works/pi-ai";
 import {
+	COMPACTION_SUMMARY_PREFIX,
+	COMPACTION_SUMMARY_SUFFIX,
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
-import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
+import {
+	buildSessionContext,
+	type CompactionEntry,
+	canReplayCompactionWithProvider,
+	type SessionEntry,
+} from "../session-manager.js";
 import {
 	computeFileLists,
 	createFileOps,
@@ -109,6 +116,8 @@ export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Opaque history returned by a provider-native compaction operation. */
+	providerNativeCompaction?: ProviderNativeCompactionResult;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 }
@@ -123,12 +132,14 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	native: boolean;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
+	native: true,
 };
 
 // ============================================================================
@@ -627,6 +638,8 @@ export interface CompactionPreparation {
 	tokensBefore: number;
 	/** Summary from previous compaction, for iterative update */
 	previousSummary?: string;
+	/** Provider-native history from the previous compatible compaction. */
+	previousNativeCompaction?: ProviderNativeCompactionResult;
 	/** File operations extracted from messagesToSummarize */
 	fileOps: FileOperations;
 	/** Compaction settions from settings.jsonl	*/
@@ -636,6 +649,7 @@ export interface CompactionPreparation {
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	nativeProvider?: string,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -643,23 +657,28 @@ export function prepareCompaction(
 
 	let prevCompactionIndex = -1;
 	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
+		const entry = pathEntries[i];
+		if (entry.type === "compaction" && canReplayCompactionWithProvider(entry, nativeProvider)) {
 			prevCompactionIndex = i;
 			break;
 		}
 	}
 
 	let previousSummary: string | undefined;
+	let previousNativeCompaction: ProviderNativeCompactionResult | undefined;
 	let boundaryStart = 0;
 	if (prevCompactionIndex >= 0) {
 		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
 		previousSummary = prevCompaction.summary;
+		previousNativeCompaction = prevCompaction.providerNativeCompaction;
 		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
 		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
 	}
 	const boundaryEnd = pathEntries.length;
 
-	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
+	const tokensBefore = estimateContextTokens(
+		buildSessionContext(pathEntries, undefined, undefined, nativeProvider ?? null).messages,
+	).tokens;
 
 	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
 
@@ -711,6 +730,7 @@ export function prepareCompaction(
 		isSplitTurn: cutPoint.isSplitTurn,
 		tokensBefore,
 		previousSummary,
+		previousNativeCompaction,
 		fileOps,
 		settings,
 	};
@@ -734,6 +754,79 @@ Summarize the prefix to provide context for the retained suffix:
 - [Information needed to understand the retained recent work]
 
 Be concise. Focus on what's needed to understand the kept suffix.`;
+
+export const PROVIDER_NATIVE_COMPACTION_SUMMARY =
+	"Provider-native compaction preserved opaque history for this session.";
+
+function buildProviderNativeCompactionInstructions(customInstructions?: string): string {
+	if (!customInstructions) return SUMMARIZATION_SYSTEM_PROMPT;
+	return `${SUMMARIZATION_SYSTEM_PROMPT}
+
+Additional user instructions:
+${customInstructions}`;
+}
+
+/**
+ * Replace the prepared prefix with provider-native history. The caller decides
+ * whether the active API supports this operation and owns local fallback policy.
+ */
+export async function compactNative(
+	preparation: CompactionPreparation,
+	model: Model<any>,
+	apiKey: string,
+	headers?: Record<string, string>,
+	customInstructions?: string,
+	signal?: AbortSignal,
+	sessionId?: string,
+): Promise<CompactionResult> {
+	const nativeMessages: AgentMessage[] = [];
+	if (preparation.previousNativeCompaction) {
+		nativeMessages.push({
+			role: "user",
+			content: PROVIDER_NATIVE_COMPACTION_SUMMARY,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: preparation.previousNativeCompaction.provider,
+				items: preparation.previousNativeCompaction.replacementHistory,
+			},
+			timestamp: Date.now(),
+		});
+	} else if (preparation.previousSummary) {
+		nativeMessages.push({
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: COMPACTION_SUMMARY_PREFIX + preparation.previousSummary + COMPACTION_SUMMARY_SUFFIX,
+				},
+			],
+			timestamp: Date.now(),
+		});
+	}
+	nativeMessages.push(...preparation.messagesToSummarize, ...preparation.turnPrefixMessages);
+
+	const providerNativeCompaction = await compactProvider(
+		model,
+		{ messages: convertToLlm(nativeMessages) },
+		{
+			apiKey,
+			headers,
+			signal,
+			sessionId,
+			instructions: buildProviderNativeCompactionInstructions(customInstructions),
+		},
+	);
+	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
+	const summary = PROVIDER_NATIVE_COMPACTION_SUMMARY + formatFileOperations(readFiles, modifiedFiles);
+
+	return {
+		summary,
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+		providerNativeCompaction,
+		details: { readFiles, modifiedFiles } as CompactionDetails,
+	};
+}
 
 /**
  * Generate summaries for compaction using prepared data.

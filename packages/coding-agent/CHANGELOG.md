@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Added provider-native OpenAI Codex compaction through the Codex V2 Responses stream, with opaque history persistence, same-provider replay, legacy endpoint fallback, cancellation and timeout bounds, and automatic local-summary fallback. Native compaction is enabled by default.
 
 ## [0.7.2] - 2026-08-11
 
