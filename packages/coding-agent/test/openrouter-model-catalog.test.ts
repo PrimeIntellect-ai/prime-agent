@@ -15,13 +15,13 @@ const model: Model<Api> = {
 	maxTokens: 1000,
 };
 
-const okResponse = (): Partial<Response> => ({
+const okResponse = (id = "vendor/live-new"): Partial<Response> => ({
 	ok: true,
 	status: 200,
 	json: async () => ({
 		data: [
 			{
-				id: "vendor/live-new",
+				id,
 				name: "Live New",
 				supported_parameters: ["tools"],
 				architecture: { modality: "text->text", input_modalities: ["text"], output_modalities: ["text"] },
@@ -91,5 +91,29 @@ describe("getOpenRouterModels", () => {
 	test("treats a zero-valid-model payload as a failure", async () => {
 		const fetchMock = vi.fn(async () => ({ ...okResponse(), json: async () => ({ data: [{}] }) }) as Response);
 		expect(await getOpenRouterModels(fetchMock as typeof fetch)).toBeUndefined();
+	});
+
+	test("refetches when requireId is missing from a fresh cache", async () => {
+		vi.useFakeTimers();
+		const start = Date.now();
+		const fetchMock = vi
+			.fn(async () => okResponse() as Response)
+			.mockResolvedValueOnce(okResponse() as Response)
+			.mockResolvedValueOnce(okResponse("vendor/later") as Response);
+		await getOpenRouterModels(fetchMock as typeof fetch);
+		vi.setSystemTime(start + 60_000);
+		expect((await getOpenRouterModels(fetchMock as typeof fetch, "vendor/later"))?.[0].id).toBe("vendor/later");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		vi.useRealTimers();
+	});
+
+	test("retries a cold failure when requireId is missing", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) } as Response)
+			.mockResolvedValueOnce(okResponse() as Response);
+		expect(await getOpenRouterModels(fetchMock as typeof fetch)).toBeUndefined();
+		expect(await getOpenRouterModels(fetchMock as typeof fetch, "vendor/live-new")).toEqual([model]);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 });

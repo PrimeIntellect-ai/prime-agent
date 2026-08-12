@@ -160,4 +160,18 @@ describe("ModelRegistry live OpenRouter catalog", () => {
 		expect(live?.contextWindow).toBe(snapshot.contextWindow);
 		expect(live?.thinkingLevelMap).toEqual(snapshot.thinkingLevelMap);
 	});
+
+	test("findOrFetch refetches when a fresh cache omitted the restored id", async () => {
+		const fetchMock = vi.mocked(fetch);
+		fetchMock.mockResolvedValueOnce({
+			ok: true,
+			status: 200,
+			json: async () => ({ data: rawEntries.filter((entry) => entry.id !== "test/live-new-model") }),
+		} as Response);
+		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+		await registry.refreshModelCatalog();
+		expect(registry.find("openrouter", "test/live-new-model")).toBeUndefined();
+		expect((await registry.findOrFetch("openrouter", "test/live-new-model"))?.id).toBe("test/live-new-model");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
 });

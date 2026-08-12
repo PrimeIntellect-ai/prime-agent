@@ -763,6 +763,10 @@ async function prepareRuntimeServices(options: {
 		})),
 	];
 
+	if (config.provider === "openrouter" || config.model?.toLowerCase().startsWith("openrouter/")) {
+		await modelRegistry.refreshOpenRouterModels();
+	}
+
 	const modelPatterns = config.models ?? settingsManager.getEnabledModels();
 	const scopedModels =
 		modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];

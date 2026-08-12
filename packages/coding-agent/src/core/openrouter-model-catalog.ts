@@ -1,5 +1,4 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
-import { parseOpenRouterModels } from "@earendil-works/pi-ai";
+import { type Api, type Model, parseOpenRouterModels } from "@earendil-works/pi-ai";
 
 const URL = "https://openrouter.ai/api/v1/models?output_modalities=text";
 const TTL_MS = 5 * 60_000;
@@ -10,26 +9,25 @@ let cached: { models: Model<Api>[]; fetchedAt: number } | undefined;
 let inFlight: Promise<Model<Api>[] | undefined> | undefined;
 let lastAttemptAt = 0;
 
-/** Reset the process-wide cache (exported for tests). */
 export function resetOpenRouterModelCache(): void {
 	cached = undefined;
 	inFlight = undefined;
 	lastAttemptAt = 0;
 }
 
-/**
- * Fetch the live OpenRouter catalog with a bounded timeout. Returns the last
- * known-good catalog on a failed or backed-off refresh, `undefined` on a cold
- * miss, and deduplicates concurrent callers. Offline handling is left to the
- * caller, which never makes a request in offline mode.
- */
+function catalogHasId(models: Model<Api>[] | undefined, id: string | undefined): boolean {
+	return !id || (models?.some((model) => model.id === id) ?? false);
+}
+
+/** Live OpenRouter catalog with TTL, in-flight dedupe, and failure backoff. */
 export async function getOpenRouterModels(
 	fetchImpl: typeof fetch = globalThis.fetch,
+	requireId?: string,
 ): Promise<Model<Api>[] | undefined> {
 	const now = Date.now();
-	if (cached && now - cached.fetchedAt < TTL_MS) return cached.models;
+	if (cached && now - cached.fetchedAt < TTL_MS && catalogHasId(cached.models, requireId)) return cached.models;
 	if (inFlight) return inFlight;
-	if (now - lastAttemptAt < BACKOFF_MS) return cached?.models;
+	if (now - lastAttemptAt < BACKOFF_MS && catalogHasId(cached?.models, requireId)) return cached?.models;
 	lastAttemptAt = now;
 
 	const run = async (): Promise<Model<Api>[] | undefined> => {

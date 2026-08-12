@@ -579,6 +579,9 @@ export async function findInitialModel(options: {
 			fallbackMessage: undefined,
 		};
 	}
+	if (defaultProvider === "openrouter" && defaultModelId) {
+		await modelRegistry.findOrFetch(defaultProvider, defaultModelId);
+	}
 	const availableModels = await getAvailableModels();
 
 	// 3. Try saved default from settings

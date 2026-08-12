@@ -819,28 +819,23 @@ export class ModelRegistry {
 		return this.getAvailable();
 	}
 
-	/** Refresh the live OpenRouter catalog. Catalog queries and OpenRouter restore call this. */
-	async refreshOpenRouterModels(): Promise<void> {
+	async refreshOpenRouterModels(requireId?: string): Promise<void> {
 		if (isOfflineModeEnabled()) return;
 		try {
-			const models = await getOpenRouterModels();
+			const models = await getOpenRouterModels(globalThis.fetch, requireId);
 			if (!models) return;
 			this.liveOpenRouterModels = models;
 			this.loadModels();
 		} catch {
-			// Keep the previous live catalog (or none, falling back to the snapshot).
+			// Keep the previous live catalog, or the snapshot if none was loaded.
 		}
 	}
 
-	/**
-	 * Like find(), but fetches the live OpenRouter catalog when an OpenRouter id
-	 * is missing from the snapshot so session restore can resolve a model picked
-	 * from a previous live catalog.
-	 */
+	/** Resolve an OpenRouter id from the live catalog when it is missing from the snapshot. */
 	async findOrFetch(provider: string, modelId: string): Promise<Model<Api> | undefined> {
 		const existing = this.find(provider, modelId);
 		if (existing || provider !== "openrouter") return existing;
-		await this.refreshOpenRouterModels();
+		await this.refreshOpenRouterModels(modelId);
 		return this.find(provider, modelId);
 	}
 

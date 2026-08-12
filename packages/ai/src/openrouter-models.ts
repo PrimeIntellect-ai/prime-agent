@@ -3,7 +3,6 @@ import type { Model } from "./types.js";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
-/** Transport overlay matching `generate-models.ts` for DeepSeek V4 OpenRouter routes. */
 const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	minimal: null,
 	low: null,
@@ -13,12 +12,6 @@ const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	max: null,
 } as const;
 
-/**
- * Parse a page of the OpenRouter model catalog into normalized models.
- * Skips malformed entries, drops `:batch` routes, and keeps tool-capable text
- * routes. Throws on a malformed top-level payload. Reasoning levels come from
- * {@link getOpenRouterReasoningCapabilities}.
- */
 export function parseOpenRouterModels(payload: unknown): Model<"openai-completions">[] {
 	const data = catalogEntries(payload);
 	const models: Model<"openai-completions">[] = [];
