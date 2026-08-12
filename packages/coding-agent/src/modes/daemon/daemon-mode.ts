@@ -2704,7 +2704,7 @@ export class AgentDaemon {
 			const modelRegistry = parentState.runtime.services.modelRegistry;
 			let rehydratedModel: Model<Api> | undefined;
 			if (entry.model) {
-				const resolved = modelRegistry.find(entry.model.provider, entry.model.modelId);
+				const resolved = await modelRegistry.findOrFetch(entry.model.provider, entry.model.modelId);
 				if (resolved && (await modelRegistry.canUseModel(resolved))) {
 					rehydratedModel = resolved;
 				}

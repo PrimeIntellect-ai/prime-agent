@@ -437,6 +437,10 @@ function resolveOpenRouterCatalog(staticModels: Model<Api>[], live: Model<Api>[]
 			compat: mergeCompat(snapshot.compat, model.compat),
 			featured: snapshot.featured,
 			headers: snapshot.headers,
+			cost: snapshot.cost,
+			maxTokens: snapshot.maxTokens,
+			contextWindow: snapshot.contextWindow,
+			thinkingLevelMap: snapshot.thinkingLevelMap ?? model.thinkingLevelMap,
 		};
 	});
 	const liveIds = new Set(live.map((m) => m.id));
@@ -815,15 +819,29 @@ export class ModelRegistry {
 		return this.getAvailable();
 	}
 
-	/** Refresh the live OpenRouter catalog. Only explicit catalog queries call this. */
+	/** Refresh the live OpenRouter catalog. Catalog queries and OpenRouter restore call this. */
 	async refreshOpenRouterModels(): Promise<void> {
 		if (isOfflineModeEnabled()) return;
 		try {
 			const models = await getOpenRouterModels();
-			if (models) this.liveOpenRouterModels = models;
+			if (!models) return;
+			this.liveOpenRouterModels = models;
+			this.loadModels();
 		} catch {
 			// Keep the previous live catalog (or none, falling back to the snapshot).
 		}
+	}
+
+	/**
+	 * Like find(), but fetches the live OpenRouter catalog when an OpenRouter id
+	 * is missing from the snapshot so session restore can resolve a model picked
+	 * from a previous live catalog.
+	 */
+	async findOrFetch(provider: string, modelId: string): Promise<Model<Api> | undefined> {
+		const existing = this.find(provider, modelId);
+		if (existing || provider !== "openrouter") return existing;
+		await this.refreshOpenRouterModels();
+		return this.find(provider, modelId);
 	}
 
 	private async refreshPrivatePrimeInferenceAuthorization(

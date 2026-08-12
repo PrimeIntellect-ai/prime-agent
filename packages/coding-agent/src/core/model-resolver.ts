@@ -626,6 +626,7 @@ export async function restoreModelFromSession(
 	shouldPrintMessages: boolean,
 	modelRegistry: ModelRegistry,
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
+	await modelRegistry.findOrFetch(savedProvider, savedModelId);
 	const availableModels = await modelRegistry.refreshAvailableModels();
 	const restoredModel = availableModels.find(
 		(candidate) => candidate.provider === savedProvider && candidate.id === savedModelId,

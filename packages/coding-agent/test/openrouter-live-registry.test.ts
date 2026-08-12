@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -34,6 +35,16 @@ const rawEntries = [
 		top_provider: { max_completion_tokens: 8192 },
 		context_length: 32768,
 		reasoning: { mandatory: false, supported_efforts: ["high", "xhigh"] },
+	},
+	{
+		id: "moonshotai/kimi-k2.5",
+		name: "MoonshotAI: Kimi K2.5",
+		supported_parameters: ["tools", "reasoning"],
+		architecture: { modality: "text+image->text", input_modalities: ["text", "image"], output_modalities: ["text"] },
+		pricing: { prompt: "0.000999", completion: "0.000999", input_cache_read: "0.000999" },
+		top_provider: { max_completion_tokens: 999999 },
+		context_length: 262144,
+		reasoning: { mandatory: false },
 	},
 ];
 
@@ -129,5 +140,24 @@ describe("ModelRegistry live OpenRouter catalog", () => {
 		await registry.refreshModelCatalog();
 		await registry.refreshModelCatalog();
 		expect(registry.find("openrouter", "test/live-new-model")).toBeDefined();
+	});
+
+	test("findOrFetch loads a live-only OpenRouter model for session restore", async () => {
+		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+		expect(registry.find("openrouter", "test/live-new-model")).toBeUndefined();
+		const restored = await registry.findOrFetch("openrouter", "test/live-new-model");
+		expect(restored?.id).toBe("test/live-new-model");
+		expect(registry.find("openrouter", "test/live-new-model")).toBeDefined();
+	});
+
+	test("keeps snapshot cost and output caps for known OpenRouter ids", async () => {
+		const snapshot = getModel("openrouter", "moonshotai/kimi-k2.5");
+		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+		await registry.refreshModelCatalog();
+		const live = registry.find("openrouter", "moonshotai/kimi-k2.5");
+		expect(live?.maxTokens).toBe(snapshot.maxTokens);
+		expect(live?.cost).toEqual(snapshot.cost);
+		expect(live?.contextWindow).toBe(snapshot.contextWindow);
+		expect(live?.thinkingLevelMap).toEqual(snapshot.thinkingLevelMap);
 	});
 });

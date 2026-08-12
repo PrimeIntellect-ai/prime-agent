@@ -813,7 +813,10 @@ async function resolvePreparedStartupModel(options: {
 	let modelFallbackMessage: string | undefined;
 
 	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
+		const restoredModel = await modelRegistry.findOrFetch(
+			existingSession.model.provider,
+			existingSession.model.modelId,
+		);
 		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
 			model = restoredModel;
 		}
