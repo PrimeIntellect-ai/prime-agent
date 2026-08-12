@@ -103,8 +103,8 @@ Examples:
 			const choice = await prompt(rl, `Enter number (1-${PROVIDERS.length}): `);
 			rl.close();
 
-			const index = parseInt(choice, 10) - 1;
-			if (index < 0 || index >= PROVIDERS.length) {
+			const index = Number(choice) - 1;
+			if (!Number.isInteger(index) || index < 0 || index >= PROVIDERS.length) {
 				console.error("Invalid selection");
 				process.exit(1);
 			}

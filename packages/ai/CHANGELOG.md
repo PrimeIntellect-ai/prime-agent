@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed interactive OAuth provider selection crashing on non-numeric input ([#1271](https://github.com/PrimeIntellect-ai/prime-agent/issues/1271)).
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07
