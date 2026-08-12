@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import {
 	DEFAULT_RLM_EXTRA_UV_ARGS,
 	ensureKernelPython,
 	getKernelVenvDir,
+	getKernelVenvPython,
 	type KernelPythonSkill,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
@@ -160,6 +161,7 @@ describe("kernel bootstrap", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		process.env = originalEnv;
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -172,6 +174,31 @@ describe("kernel bootstrap", () => {
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
 		expect(getKernelVenvDir()).toBe(venv);
+	});
+
+	it("resolves the venv interpreter with the platform layout", () => {
+		const venv = join(tempDir, "kernel-venv");
+
+		vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+		expect(getKernelVenvPython(venv)).toBe(join(venv, "bin", "python"));
+
+		vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		expect(getKernelVenvPython(venv)).toBe(join(venv, "Scripts", "python.exe"));
+	});
+
+	it("reuses a warm venv built with the Windows layout", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "Scripts", "python.exe");
+		mkdirSync(join(venv, "Scripts"), { recursive: true });
+		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		expect(existsSync(logPath)).toBe(false);
 	});
 
 	it("bootstraps a missing venv with uv, ipykernel, prime-agent-runtime, and default extra packages", async () => {
