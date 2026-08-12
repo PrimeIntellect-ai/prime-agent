@@ -9833,6 +9833,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 | \`${viewportFollow}\` | Scroll to bottom and follow output |
 | mouse wheel | Scroll transcript |
 | mouse drag | Select and copy text |
+| mouse click on link | Open link in browser |
 `;
 
 		const shortcuts = this.bindLocalSessionExtensions

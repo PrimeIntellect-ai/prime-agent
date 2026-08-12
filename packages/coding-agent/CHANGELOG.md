@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Restored bare `prime-agent --resume` opening the agents view and the `/resume [id|path]` slash command (bare opens the agents view; with an argument resumes that session in place) ([ENG-5173](https://linear.app/primeintellect/issue/ENG-5173/bring-back-raw-resume-commands-in-prime-agent)).
+- Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
 
