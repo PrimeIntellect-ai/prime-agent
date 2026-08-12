@@ -6673,6 +6673,23 @@ export const MODELS = {
 			contextWindow: 204800,
 			maxTokens: 131072,
 		} satisfies Model<"anthropic-messages">,
+		"MiniMax-M3": {
+			id: "MiniMax-M3",
+			name: "MiniMax-M3",
+			api: "anthropic-messages",
+			provider: "minimax",
+			baseUrl: "https://api.minimax.io/anthropic",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 0.3,
+				output: 1.2,
+				cacheRead: 0.06,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		} satisfies Model<"anthropic-messages">,
 	},
 	"minimax-cn": {
 		"MiniMax-M2.7": {
@@ -6708,6 +6725,23 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+		} satisfies Model<"anthropic-messages">,
+		"MiniMax-M3": {
+			id: "MiniMax-M3",
+			name: "MiniMax-M3",
+			api: "anthropic-messages",
+			provider: "minimax-cn",
+			baseUrl: "https://api.minimaxi.com/anthropic",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 0.3,
+				output: 1.2,
+				cacheRead: 0.06,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
 		} satisfies Model<"anthropic-messages">,
 	},
 	"mistral": {

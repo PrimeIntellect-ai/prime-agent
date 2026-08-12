@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added direct MiniMax-M3 model registrations for the `minimax` and `minimax-cn` providers.
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07
