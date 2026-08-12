@@ -7,7 +7,7 @@
 
 import type { TableCellSelectionRegion } from "./selection-metadata.js";
 import { isImageLine } from "./terminal-image.js";
-import { hyperlinkAtColumn, sliceByColumn, stripAnsi, visibleWidth } from "./utils.js";
+import { sliceByColumn, stripAnsi, urlAtColumn, visibleWidth } from "./utils.js";
 
 export const FULLSCREEN_MIN_TRANSCRIPT_ROWS = 3;
 
@@ -635,7 +635,7 @@ export class FullscreenViewport {
 		if (screenRow >= this.lastFrameVisibleHeight) return null;
 		const line = this.lastFrame[this.lastFrameVisibleStart + screenRow];
 		if (line === undefined || isImageLine(line)) return null;
-		return hyperlinkAtColumn(line, screenCol);
+		return urlAtColumn(line, screenCol);
 	}
 
 	/** Row-diff a composed frame against the previous one with absolute addressing. */

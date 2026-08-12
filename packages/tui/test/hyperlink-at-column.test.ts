@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { hyperlinkAtColumn } from "../src/utils.js";
+import { hyperlinkAtColumn, urlAtColumn } from "../src/utils.js";
 
 const ST = "\x1b\\";
 
@@ -30,6 +30,31 @@ describe("hyperlinkAtColumn", () => {
 		assert.strictEqual(hyperlinkAtColumn(line, 1), "https://a.example");
 		assert.strictEqual(hyperlinkAtColumn(line, 2), null);
 		assert.strictEqual(hyperlinkAtColumn(line, 3), "https://b.example");
+	});
+
+	it("detects bare http URLs when OSC 8 metadata is absent", () => {
+		const line = "visit https://example.com/docs, then continue";
+		assert.strictEqual(urlAtColumn(line, 6), "https://example.com/docs");
+		assert.strictEqual(urlAtColumn(line, 29), "https://example.com/docs");
+		assert.strictEqual(urlAtColumn(line, 30), null);
+	});
+
+	it("does not include trailing prose punctuation in bare URLs", () => {
+		const line = "open (https://example.com/path).";
+		assert.strictEqual(urlAtColumn(line, 7), "https://example.com/path");
+		assert.strictEqual(urlAtColumn(line, 30), null);
+	});
+
+	it("prefers an OSC 8 target over a URL-like label", () => {
+		const line = link("https://target.example", "https://label.example");
+		assert.strictEqual(urlAtColumn(line, 10), "https://target.example");
+	});
+
+	it("resolves a link after its painted tab expansion", () => {
+		const line = `   ${link("https://example.com", "docs")}`;
+		assert.strictEqual(hyperlinkAtColumn(line, 2), null);
+		assert.strictEqual(hyperlinkAtColumn(line, 3), "https://example.com");
+		assert.strictEqual(hyperlinkAtColumn(line, 6), "https://example.com");
 	});
 
 	it("counts wide graphemes as two columns", () => {
