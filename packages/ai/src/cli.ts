@@ -104,7 +104,7 @@ Examples:
 			rl.close();
 
 			const index = parseInt(choice, 10) - 1;
-			if (index < 0 || index >= PROVIDERS.length) {
+			if (!Number.isInteger(index) || index < 0 || index >= PROVIDERS.length) {
 				console.error("Invalid selection");
 				process.exit(1);
 			}
