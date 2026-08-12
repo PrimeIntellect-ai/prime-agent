@@ -1161,7 +1161,11 @@ export class SettingsManager {
 		// the application to reproduce that gesture. Preserve native link clicks
 		// by default; users can explicitly enable fullscreen mouse capture.
 		const termProgram = process.env.TERM_PROGRAM?.toLowerCase();
-		const isGhostty = termProgram === "ghostty" || (termProgram === undefined && !!process.env.GHOSTTY_RESOURCES_DIR);
+		const term = process.env.TERM?.toLowerCase();
+		const isGhostty =
+			termProgram === "ghostty" ||
+			term?.includes("ghostty") === true ||
+			(termProgram === undefined && !!process.env.GHOSTTY_RESOURCES_DIR);
 		return !isGhostty;
 	}
 

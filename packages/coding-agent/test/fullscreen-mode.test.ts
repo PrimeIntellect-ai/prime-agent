@@ -10,6 +10,7 @@ describe("fullscreen mode settings", () => {
 	const projectDir = join(testDir, "project");
 	let savedEnv: string | undefined;
 	let savedTermProgram: string | undefined;
+	let savedTerm: string | undefined;
 	let savedGhosttyResourcesDir: string | undefined;
 
 	beforeEach(() => {
@@ -20,9 +21,11 @@ describe("fullscreen mode settings", () => {
 		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
 		savedEnv = process.env.PI_FULLSCREEN;
 		savedTermProgram = process.env.TERM_PROGRAM;
+		savedTerm = process.env.TERM;
 		savedGhosttyResourcesDir = process.env.GHOSTTY_RESOURCES_DIR;
 		delete process.env.PI_FULLSCREEN;
 		delete process.env.TERM_PROGRAM;
+		delete process.env.TERM;
 		delete process.env.GHOSTTY_RESOURCES_DIR;
 	});
 
@@ -37,6 +40,8 @@ describe("fullscreen mode settings", () => {
 		}
 		if (savedTermProgram === undefined) delete process.env.TERM_PROGRAM;
 		else process.env.TERM_PROGRAM = savedTermProgram;
+		if (savedTerm === undefined) delete process.env.TERM;
+		else process.env.TERM = savedTerm;
 		if (savedGhosttyResourcesDir === undefined) delete process.env.GHOSTTY_RESOURCES_DIR;
 		else process.env.GHOSTTY_RESOURCES_DIR = savedGhosttyResourcesDir;
 	});
@@ -51,6 +56,19 @@ describe("fullscreen mode settings", () => {
 		process.env.TERM_PROGRAM = "ghostty";
 		const manager = SettingsManager.create(projectDir, agentDir);
 		expect(manager.getFullscreenMouse()).toBe(false);
+	});
+
+	it("detects Ghostty through TERM in SSH sessions", () => {
+		process.env.TERM = "xterm-ghostty";
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getFullscreenMouse()).toBe(false);
+	});
+
+	it("honors explicit mouse capture when TERM identifies Ghostty", () => {
+		process.env.TERM = "xterm-ghostty";
+		const manager = SettingsManager.create(projectDir, agentDir);
+		manager.setFullscreenMouse(true);
+		expect(manager.getFullscreenMouse()).toBe(true);
 	});
 
 	it("does not mistake an integrated terminal inheriting Ghostty variables for Ghostty", () => {
