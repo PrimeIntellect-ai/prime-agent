@@ -353,26 +353,56 @@ export const compactOpenAICodexResponses = async (
 	}
 
 	const accountId = extractAccountId(apiKey);
-	let body: unknown = {
+	const input = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+		includeSystemPrompt: false,
+	});
+	let v2Body: unknown = {
 		model: model.id,
-		input: convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
-			includeSystemPrompt: false,
-		}),
+		input: [...input, { type: "compaction_trigger" }],
 		instructions: options.instructions,
+		store: false,
+		stream: true,
 	};
-	const nextBody = await options.onPayload?.(body, model);
-	if (nextBody !== undefined) body = nextBody;
+	const nextV2Body = await options.onPayload?.(v2Body, model);
+	if (nextV2Body !== undefined) v2Body = nextV2Body;
 
 	const headers = buildSSEHeaders(model.headers, options.headers, accountId, apiKey, options.sessionId);
-	headers.delete("accept");
 	const requestTimeout = createRequestTimeout(options.signal, options.timeoutMs);
-
 	try {
 		requestTimeout.signal.throwIfAborted();
+		try {
+			const response = await fetch(resolveCodexUrl(model.baseUrl), {
+				method: "POST",
+				headers,
+				body: JSON.stringify(v2Body),
+				signal: requestTimeout.signal,
+			});
+			await options.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+
+			if (!response.ok) {
+				const responseBody = await response.text().catch(() => "");
+				throw new OpenAICodexCompactionHttpError(response.status, response.statusText, responseBody);
+			}
+
+			return await parseCodexCompactionV2Stream(response, model.provider, input);
+		} catch (error) {
+			if (requestTimeout.signal.aborted) throw error;
+		}
+
+		let v1Body: unknown = {
+			model: model.id,
+			input,
+			instructions: options.instructions,
+		};
+		const nextV1Body = await options.onPayload?.(v1Body, model);
+		if (nextV1Body !== undefined) v1Body = nextV1Body;
+
+		const v1Headers = new Headers(headers);
+		v1Headers.delete("accept");
 		const response = await fetch(resolveCodexCompactionUrl(model.baseUrl), {
 			method: "POST",
-			headers,
-			body: JSON.stringify(body),
+			headers: v1Headers,
+			body: JSON.stringify(v1Body),
 			signal: requestTimeout.signal,
 		});
 		await options.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
@@ -523,6 +553,103 @@ function isOpenAICodexReplacementHistoryItem(item: unknown): item is Record<stri
 	const candidate = item as Record<string, unknown>;
 	if (isOpenAICodexCompactionItem(candidate)) return true;
 	return candidate.type === "message" && (candidate.role === "user" || candidate.role === "assistant");
+}
+
+async function parseCodexCompactionV2Stream(
+	response: Response,
+	provider: OpenAICodexCompactionResult["provider"],
+	input: ResponseInput,
+): Promise<OpenAICodexCompactionResult> {
+	const compactionItems: OpenAICodexCompactionItem[] = [];
+	let completed = false;
+
+	for await (const event of parseSSE(response)) {
+		const type = typeof event.type === "string" ? event.type : "";
+		if (type === "error") {
+			const message = typeof event.message === "string" ? event.message : "";
+			throw new Error(`OpenAI Codex compaction stream failed${message ? `: ${message}` : ""}`);
+		}
+		if (type === "response.failed" || type === "response.incomplete") {
+			const message = (event.response as { error?: { message?: unknown } } | undefined)?.error?.message;
+			throw new Error(`OpenAI Codex compaction stream failed${typeof message === "string" ? `: ${message}` : ""}`);
+		}
+		if (type === "response.completed" || type === "response.done") {
+			completed = true;
+			break;
+		}
+		if (type === "response.output_item.done" && isOpenAICodexCompactionItem(event.item)) {
+			compactionItems.push(event.item);
+		}
+	}
+
+	if (!completed) {
+		throw new Error("OpenAI Codex compaction stream closed before response.completed");
+	}
+	if (compactionItems.length !== 1) {
+		throw new Error(`OpenAI Codex compaction expected one output item, received ${compactionItems.length}`);
+	}
+
+	const compactionItem = compactionItems[0];
+	return {
+		provider,
+		replacementHistory: [...retainCodexCompactionV2Messages(input), compactionItem],
+		compactionItem,
+	};
+}
+
+function retainCodexCompactionV2Messages(input: ResponseInput): Array<Record<string, unknown>> {
+	const retained: Array<Record<string, unknown>> = [];
+	for (const item of input) {
+		if (!item || typeof item !== "object") continue;
+		const candidate = item as unknown as Record<string, unknown>;
+		if ((candidate.type === undefined || candidate.type === "message") && candidate.role === "user") {
+			retained.push(candidate);
+		}
+	}
+
+	let remainingTextCharacters = 64_000 * 4;
+	const result: Array<Record<string, unknown>> = [];
+	for (let index = retained.length - 1; index >= 0 && remainingTextCharacters > 0; index--) {
+		const item = retained[index];
+		const textCharacters = codexCompactionV2MessageTextCharacters(item);
+		const budgetCharacters = Math.max(4, textCharacters);
+		if (budgetCharacters <= remainingTextCharacters) {
+			result.unshift(item);
+			remainingTextCharacters -= budgetCharacters;
+			continue;
+		}
+		result.unshift(truncateCodexCompactionV2MessageText(item, remainingTextCharacters));
+		remainingTextCharacters = 0;
+	}
+	return result;
+}
+
+function codexCompactionV2MessageTextCharacters(item: Record<string, unknown>): number {
+	if (!Array.isArray(item.content)) return 0;
+	return item.content.reduce((total, part) => {
+		if (!part || typeof part !== "object") return total;
+		const text = (part as Record<string, unknown>).text;
+		return total + (typeof text === "string" ? text.length : 0);
+	}, 0);
+}
+
+function truncateCodexCompactionV2MessageText(
+	item: Record<string, unknown>,
+	maxTextCharacters: number,
+): Record<string, unknown> {
+	const copy = JSON.parse(JSON.stringify(item)) as Record<string, unknown>;
+	if (!Array.isArray(copy.content)) return copy;
+	let remainingTextCharacters = maxTextCharacters;
+	copy.content = copy.content.flatMap((part) => {
+		if (!part || typeof part !== "object") return [part];
+		const candidate = part as Record<string, unknown>;
+		if (typeof candidate.text !== "string") return [part];
+		if (remainingTextCharacters === 0) return [];
+		const text = candidate.text.slice(0, remainingTextCharacters);
+		remainingTextCharacters -= text.length;
+		return text.length > 0 ? [{ ...candidate, text }] : [];
+	});
+	return copy;
 }
 
 function createRequestTimeout(
