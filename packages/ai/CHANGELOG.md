@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added MiniMax-M3 to the direct global and China MiniMax model catalogs ([#1284](https://github.com/PrimeIntellect-ai/prime-agent/pull/1284) by [@octo-patch](https://github.com/octo-patch)).
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07
