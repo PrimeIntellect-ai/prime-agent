@@ -6,6 +6,10 @@ import { buildChildAgentDoctrine, buildRlmPrompt, buildSubagentGuidance } from "
 import { formatHarnessStateForPrompt, type HarnessState, REFINE_SKILL_NAME } from "./refinement/index.js";
 import { formatSkillsForPrompt, getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 
+const CHAT_WORKSPACE_PRECEDENCE = `# Instruction Precedence
+
+Direct instructions from the user in the active conversation take precedence over conflicting instructions loaded from on-disk workspace or user configuration files, including AGENTS.md, CLAUDE.md, skills, and project or global SYSTEM.md and APPEND_SYSTEM.md files. Treat each such request as temporary authorization to deviate from the conflicting on-disk instructions for that request only, then resume following them. System and developer instructions supplied by the host remain authoritative.`;
+
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
@@ -117,6 +121,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += appendSection;
 		}
 
+		prompt += `\n\n${CHAT_WORKSPACE_PRECEDENCE}`;
+
 		return prompt;
 	}
 
@@ -175,6 +181,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	if (appendSection) {
 		prompt += appendSection;
 	}
+
+	prompt += `\n\n${CHAT_WORKSPACE_PRECEDENCE}`;
 
 	return prompt;
 }
