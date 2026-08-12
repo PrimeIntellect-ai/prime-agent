@@ -33,6 +33,7 @@ function parseOpenRouterModel(raw: unknown): Model<"openai-completions"> | undef
 	const id = typeof raw.id === "string" ? raw.id : undefined;
 	if (!id) return undefined;
 	const parameters = stringArray(raw.supported_parameters);
+	// :batch routes are asynchronous batch variants, not streaming models
 	if (!parameters.includes("tools") || id.endsWith(":batch")) return undefined;
 
 	const architecture = isRecord(raw.architecture) ? raw.architecture : {};
@@ -97,5 +98,7 @@ function finitePositive(value: unknown): number | undefined {
 
 function toCost(value: unknown): number {
 	const n = typeof value === "number" ? value : parseFloat(String(value ?? ""));
+	// Convert $/token to $/million tokens. OpenRouter uses negative values as a
+	// placeholder for unknown pricing (e.g. auto-beta).
 	return Number.isFinite(n) && n > 0 ? n * 1_000_000 : 0;
 }
