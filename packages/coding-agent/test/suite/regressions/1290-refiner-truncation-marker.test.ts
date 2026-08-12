@@ -117,4 +117,24 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		// from a complete entry will silently drop everything it was not shown.
 		expect(entryLine).toMatch(/\.\.\.|not shown|truncated/);
 	});
+
+	it("tells the refiner that an update replaces the entry and what the truncation marker means", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		completeSimpleMock.mockResolvedValueOnce(
+			assistantText(JSON.stringify({ summary: "no-op", rationale: "none", expectedOutcome: "none", edits: [] })),
+		);
+
+		await planRefinement(
+			[{ role: "user", content: "anything", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{},
+		);
+
+		const request = completeSimpleMock.mock.calls[0][1];
+		expect(request.systemPrompt).toContain("replaces the entry's entire");
+		expect(request.systemPrompt).toContain("chars not shown");
+	});
 });

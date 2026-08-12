@@ -149,6 +149,9 @@ Scope and persistence policy:
 - Create or update the smallest relevant component: repeated delegation roles should become subagent specs, repeated procedures should become skills, durable facts/preferences should become memories, and narrow behavioral policies should become prompt addendums.
 - When an edit is persisted, include metadata such as \`{"scope":"local"}\` or \`{"scope":"global"}\` when that helps future review understand the intended blast radius.
 
+An \`update\` edit replaces the entry's entire \`content\`; text you do not reproduce is removed.
+Entries in the continual harness state above are truncated, and \`... (+N chars not shown)\`
+marks text you were not given.
 Use the trajectory, current continual harness state, and prior refinement history. Prefer
 small evidence-backed edits. If prior refinements caused issues, rollback or
 replace the faulty editable entries. Never edit source files directly. Output
