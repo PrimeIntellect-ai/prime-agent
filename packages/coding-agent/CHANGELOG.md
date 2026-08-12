@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added an ACP `available_commands_update` after `session/new`, so ACP clients can complete the session commands, skills, prompt templates, and extension commands a prompt turn actually executes.
+- Added an ACP `available_commands_update` after `session/new`, so ACP clients can complete the session commands, skills, prompt templates, and extension commands a prompt turn actually executes ([#1308](https://github.com/PrimeIntellect-ai/prime-agent/pull/1308) by [@AndriyPytel](https://github.com/AndriyPytel)).
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
