@@ -207,6 +207,9 @@ describe("InteractiveMode refinement status", () => {
 			updateWorkingLoaderMessage: vi.fn(),
 			updatePendingMessagesDisplay: vi.fn(),
 			syncWorkingLoader,
+			// replaceConnectionQueue syncs the queue selection; returning undefined
+			// is the "nothing dropped" path, which keeps this test on the loader.
+			queueSelection: { sync: vi.fn(() => undefined) },
 			ui: { requestRender: vi.fn() },
 		} as unknown as InteractiveMode;
 		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);

@@ -1642,7 +1642,11 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter((worker) => this.isLiveWorker(worker));
+				// isLiveWorker excludes stopping workers; failed ones must be skipped
+				// too, or one poisoned worker fails the whole global listing (#1045).
+				const workers = [...this.workers.values()].filter(
+					(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
+				);
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
 					await Promise.all(
@@ -4634,7 +4638,20 @@ export class DaemonSupervisor {
 		if (observed === undefined) {
 			return "unknown";
 		}
-		return observed === processStartId ? "current" : "replaced";
+		// Compare through compareProcessStartIds rather than raw string equality:
+		// a descriptor written by an older build can carry a legacy start-id
+		// rendering (e.g. an unpinned ambient timezone), and inequality against
+		// today's format proves nothing about pid reuse. Treating that as
+		// "replaced" would reap a live worker, so it maps to "unknown" and the
+		// descriptor survives for a later sweep with better evidence.
+		switch (compareProcessStartIds(processStartId, observed)) {
+			case "match":
+				return "current";
+			case "mismatch":
+				return "replaced";
+			default:
+				return "unknown";
+		}
 	}
 
 	private async stopWorker(
