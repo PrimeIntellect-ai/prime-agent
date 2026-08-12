@@ -9912,6 +9912,81 @@ function makeAgentFamilyState(
 	return { state, acceptAgentMessagePrompt };
 }
 
+it("queues an agent message when the target is busy without blocking the sender", async () => {
+	const daemon = new AgentDaemon("/tmp/prime-agent-queue-test.sock", {
+		defaultSessionConfig: { agentDir: "/tmp/prime-agent-queue-agent", cwd: "/tmp" },
+		createRuntime: async () => {
+			throw new Error("unexpected runtime creation");
+		},
+	});
+	const fromState = makeState("source");
+	const targetState = makeState("target") as ActiveSessionState & {
+		runtime: ActiveSessionState["runtime"] & {
+			session: {
+				sessionId: string;
+				sessionName: string;
+				isStreaming: boolean;
+				unfinishedActionCount: number;
+				sessionActions: { queuedCount: number; steering: string[]; followUps: string[] };
+				acceptAgentMessagePrompt: ReturnType<typeof vi.fn>;
+			};
+		};
+	};
+	// Busy target: preflight rejects because the session is mid-turn.
+	const acceptAgentMessagePrompt = vi.fn(
+		(_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
+			options?.preflightResult?.(false);
+			return Promise.resolve();
+		},
+	);
+	targetState.runtime = {
+		...targetState.runtime,
+		cwd: "/tmp",
+		session: {
+			sessionId: "session-target",
+			sessionName: "Target",
+			isStreaming: true,
+			unfinishedActionCount: 1,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			acceptAgentMessagePrompt,
+		},
+	} as never;
+	fromState.runtime = {
+		...fromState.runtime,
+		session: {
+			sessionId: "session-source",
+			sessionName: "Source",
+			isStreaming: false,
+			unfinishedActionCount: 0,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			acceptAgentMessagePrompt: vi.fn(),
+		},
+	} as never;
+	const internals = daemon as unknown as {
+		sessions: Map<string, ActiveSessionState>;
+		sendAgentSessionMessage(options: {
+			targetSelector: string;
+			message: string;
+			fromState?: ActiveSessionState;
+			origin: "agent" | "cli";
+		}): Promise<unknown>;
+	};
+	internals.sessions.set(fromState.activeSessionId, fromState);
+	internals.sessions.set(targetState.activeSessionId, targetState);
+
+	const send = internals.sendAgentSessionMessage({
+		targetSelector: targetState.activeSessionId,
+		message: "queued while busy",
+		fromState,
+		origin: "agent",
+	});
+
+	// The send must resolve promptly even though the target is streaming.
+	await expect(Promise.race([send, Promise.resolve("pending")])).resolves.toBeDefined();
+	// The busy target must not have accepted the prompt synchronously.
+	expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
+});
+
 function makeState(activeSessionId: string, parentActiveSessionId?: string): ActiveSessionState {
 	return {
 		activeSessionId,
