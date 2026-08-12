@@ -142,18 +142,34 @@ prime-agent --provider ollama --model <id> --no-session -p "hi"  # round-trip th
   "api": "openai-completions",
   "apiKey": "mlx",
   "compat": { "supportsDeveloperRole": false, "supportsReasoningEffort": false },
-  "models": [{ "id": "mlx-community/Qwen3-14B-4bit", "contextWindow": 40960 }]
+  "models": [{ "id": "mlx-community/Qwen3-14B-4bit", "contextWindow": 32768 }]
 }
 ```
 
-Unlike Ollama, MLX applies no artificial context cap — it serves the model's own `max_position_embeddings`, so declare exactly that value. Read it from the model's `config.json` in the HuggingFace cache rather than probing the server, which does not advertise a window over `/v1/models`:
+MLX applies no artificial context cap the way Ollama does — it serves the model's own `max_position_embeddings`, which is not advertised over `/v1/models` and has to be read from the model's `config.json` in the HuggingFace cache:
 
 ```bash
 find ~/.cache/huggingface/hub -path "*<model>*/config.json" -exec \
   python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['max_position_embeddings'])" {} \;
 ```
 
-Declaring less than the ceiling only wastes context; the truncation risk that applies to Ollama does not exist here. KV cache is allocated as the conversation grows rather than reserved up front, so a larger window costs nothing while sessions stay short.
+**Declare the lower of the model ceiling and what the machine can hold.** Qwen3-14B reports 40960, but on a 24 GB M4 a prompt in that range exhausts GPU memory and kills the server (see below), so 32768 is the value that actually works. The model's limit and the machine's limit are different numbers and the smaller one governs.
+
+#### MLX has no detectable context overflow
+
+`packages/ai/src/utils/overflow.ts` carries per-backend overflow regexes, and MLX cannot have one. Given a prompt beyond its context it does not reject, error, or truncate — it processes the whole thing past `max_position_embeddings` until the GPU runs out of memory, then the process aborts:
+
+```
+Prompt processing progress: 40960/50013
+"POST /v1/chat/completions HTTP/1.1" 200
+libc++abi: terminating due to uncaught exception of type std::runtime_error:
+[METAL] Command buffer execution failed: Insufficient Memory
+(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+```
+
+The client sees a dropped connection, not an error message, so none of the three detection paths in `isContextOverflow` apply — there is no `errorMessage` to match, no `usage` to compare against the window, and no length-stop. MLX belongs with Ollama's silent truncation under "unreliable detection", not in `OVERFLOW_PATTERNS`.
+
+The mitigation is entirely in configuration: declare a `contextWindow` the machine can hold and let compaction run before the limit is reached. A `KeepAlive` launchd agent also restarts the server after such a crash, which makes the failure easy to miss.
 
 `models.json` is read at session start, so a changed `contextWindow` needs a restart — `/context` in a running session keeps reporting the old figure until then.
 
