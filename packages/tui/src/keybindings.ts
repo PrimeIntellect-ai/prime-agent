@@ -27,6 +27,10 @@ export interface Keybindings {
 	"tui.editor.yank": true;
 	"tui.editor.yankPop": true;
 	"tui.editor.undo": true;
+	"tui.editor.moveLineUp": true;
+	"tui.editor.moveLineDown": true;
+	"tui.editor.swapWordBackward": true;
+	"tui.editor.swapWordForward": true;
 	// Generic input actions
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
@@ -135,6 +139,26 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.yank": { defaultKeys: "ctrl+y", description: "Yank", defaultKeyScope: "editor" },
 	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop", defaultKeyScope: "editor" },
 	"tui.editor.undo": { defaultKeys: "ctrl+-", description: "Undo", defaultKeyScope: "editor" },
+	"tui.editor.moveLineUp": {
+		defaultKeys: "ctrl+up",
+		description: "Move line up",
+		defaultKeyScope: "editor",
+	},
+	"tui.editor.moveLineDown": {
+		defaultKeys: "ctrl+down",
+		description: "Move line down",
+		defaultKeyScope: "editor",
+	},
+	"tui.editor.swapWordBackward": {
+		defaultKeys: "alt+shift+left",
+		description: "Swap word backward",
+		defaultKeyScope: "editor",
+	},
+	"tui.editor.swapWordForward": {
+		defaultKeys: "alt+shift+right",
+		description: "Swap word forward",
+		defaultKeyScope: "editor",
+	},
 	"tui.input.newLine": {
 		defaultKeys: "shift+enter",
 		description: "Insert newline",

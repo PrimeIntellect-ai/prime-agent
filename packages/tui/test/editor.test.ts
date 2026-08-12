@@ -4085,4 +4085,76 @@ describe("Editor component", () => {
 			assert.strictEqual(submitted, pastedText);
 		});
 	});
+
+	describe("Line, word and segment moves", () => {
+		function editorWithCursorBefore(text: string, stepsFromEnd: number): Editor {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText(text);
+			for (let i = 0; i < stepsFromEnd; i++) {
+				editor.handleInput("\x1b[D");
+			}
+			return editor;
+		}
+
+		it("swaps a word backward across whitespace", () => {
+			const editor = editorWithCursorBefore("foo bar", 2);
+			editor.handleInput("\x1b[1;4D");
+			assert.strictEqual(editor.getText(), "bar foo");
+		});
+
+		it("swaps a word forward across whitespace", () => {
+			const editor = editorWithCursorBefore("foo bar", 6);
+			editor.handleInput("\x1b[1;4C");
+			assert.strictEqual(editor.getText(), "bar foo");
+		});
+
+		it("swaps words separated by punctuation instead of freezing", () => {
+			const editor = editorWithCursorBefore("std::vec", 2);
+			editor.handleInput("\x1b[1;4D");
+			assert.strictEqual(editor.getText(), "vec::std");
+		});
+
+		it("swaps words separated by an arrow instead of freezing", () => {
+			const editor = editorWithCursorBefore("foo->bar", 2);
+			editor.handleInput("\x1b[1;4D");
+			assert.strictEqual(editor.getText(), "bar->foo");
+		});
+
+		it("keeps the cursor on the moved word so repeated swaps drag it", () => {
+			const editor = editorWithCursorBefore("one two three", 3);
+			editor.handleInput("\x1b[1;4D");
+			assert.strictEqual(editor.getText(), "one three two");
+			editor.handleInput("\x1b[1;4D");
+			assert.strictEqual(editor.getText(), "three one two");
+		});
+
+		it("drags a word forward with repeated swaps", () => {
+			const editor = editorWithCursorBefore("one two three", 11);
+			editor.handleInput("\x1b[1;4C");
+			assert.strictEqual(editor.getText(), "two one three");
+			editor.handleInput("\x1b[1;4C");
+			assert.strictEqual(editor.getText(), "two three one");
+		});
+
+		it("swaps the word the cursor sits in front of", () => {
+			const editor = editorWithCursorBefore("foo bar", 3);
+			editor.handleInput("\x1b[1;4D");
+			assert.strictEqual(editor.getText(), "bar foo");
+		});
+
+		it("swaps the word the cursor sits behind", () => {
+			const editor = editorWithCursorBefore("foo bar", 4);
+			editor.handleInput("\x1b[1;4C");
+			assert.strictEqual(editor.getText(), "bar foo");
+		});
+
+		it("moves a line up and down", () => {
+			const editor = editorWithCursorBefore("first\nsecond", 3);
+			editor.handleInput("\x1b[1;5A");
+			assert.strictEqual(editor.getText(), "second\nfirst");
+			editor.handleInput("\x1b[1;5B");
+			assert.strictEqual(editor.getText(), "first\nsecond");
+		});
+
+	});
 });

@@ -32,6 +32,10 @@ function isAtomicMarker(segment: string): boolean {
 	return segment.length >= 10 && (PASTE_MARKER_SINGLE.test(segment) || IMAGE_MARKER_SINGLE.test(segment));
 }
 
+function isWordSegment(segment: string): boolean {
+	return !isWhitespaceChar(segment) && !isPunctuationChar(segment) && !isAtomicMarker(segment);
+}
+
 /**
  * A segmenter that wraps Intl.Segmenter and merges graphemes that fall
  * within paste or image markers into single atomic segments. This makes cursor
@@ -892,6 +896,23 @@ export class Editor implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.editor.cursorWordRight")) {
 			this.moveWordForwards();
+			return;
+		}
+
+		if (kb.matches(data, "tui.editor.moveLineUp")) {
+			this.moveLineUp();
+			return;
+		}
+		if (kb.matches(data, "tui.editor.moveLineDown")) {
+			this.moveLineDown();
+			return;
+		}
+		if (kb.matches(data, "tui.editor.swapWordBackward")) {
+			this.swapWordBackward();
+			return;
+		}
+		if (kb.matches(data, "tui.editor.swapWordForward")) {
+			this.swapWordForward();
 			return;
 		}
 
@@ -1774,6 +1795,128 @@ export class Editor implements Component, Focusable {
 		}
 		this.refreshAutocompleteAfterEdit();
 	}
+
+	private moveLineUp(): void {
+		if (this.state.cursorLine <= 0) return;
+		this.pushUndoSnapshot();
+		const line = this.state.lines[this.state.cursorLine];
+		const above = this.state.lines[this.state.cursorLine - 1];
+		if (line === undefined || above === undefined) return;
+		this.state.lines[this.state.cursorLine - 1] = line;
+		this.state.lines[this.state.cursorLine] = above;
+		this.state.cursorLine--;
+		this.setCursorCol(Math.min(this.state.cursorCol, (this.state.lines[this.state.cursorLine] || "").length));
+		if (this.onChange) this.onChange(this.getText());
+		this.refreshAutocompleteAfterEdit();
+	}
+
+	private moveLineDown(): void {
+		if (this.state.cursorLine >= this.state.lines.length - 1) return;
+		this.pushUndoSnapshot();
+		const line = this.state.lines[this.state.cursorLine];
+		const below = this.state.lines[this.state.cursorLine + 1];
+		if (line === undefined || below === undefined) return;
+		this.state.lines[this.state.cursorLine + 1] = line;
+		this.state.lines[this.state.cursorLine] = below;
+		this.state.cursorLine++;
+		this.setCursorCol(Math.min(this.state.cursorCol, (this.state.lines[this.state.cursorLine] || "").length));
+		if (this.onChange) this.onChange(this.getText());
+		this.refreshAutocompleteAfterEdit();
+	}
+
+	private wordRangeAt(line: string, col: number): { start: number; end: number } | null {
+		if (col < 0 || col > line.length) return null;
+		const graphemes = [...this.segment(line)];
+		const starts: number[] = [];
+		let acc = 0;
+		for (const g of graphemes) {
+			starts.push(acc);
+			acc += g.segment.length;
+		}
+		const indexAt = (offset: number): number =>
+			graphemes.findIndex((g, i) => offset >= (starts[i] ?? 0) && offset < (starts[i] ?? 0) + g.segment.length);
+
+		let idx = indexAt(col);
+		if (idx === -1 || !isWordSegment(graphemes[idx]?.segment || "")) {
+			const before = indexAt(col - 1);
+			if (before === -1 || !isWordSegment(graphemes[before]?.segment || "")) return null;
+			idx = before;
+		}
+
+		let start = idx;
+		while (start > 0 && isWordSegment(graphemes[start - 1]?.segment || "")) {
+			start--;
+		}
+		let end = idx;
+		while (end < graphemes.length - 1 && isWordSegment(graphemes[end + 1]?.segment || "")) {
+			end++;
+		}
+		const offset = starts[start] ?? 0;
+		const len = (starts[end] ?? 0) + (graphemes[end]?.segment.length ?? 0) - offset;
+		return { start: offset, end: offset + len };
+	}
+
+	private swapWordBackward(): void {
+		const currentLine = this.state.lines[this.state.cursorLine];
+		if (currentLine === undefined) return;
+		const col = Math.min(this.state.cursorCol, currentLine.length);
+		const word = this.wordRangeAt(currentLine, col);
+		if (!word) return;
+		const beforeGraphemes = [...this.segment(currentLine.slice(0, word.start))];
+		let prevWordEnd = word.start;
+		while (beforeGraphemes.length > 0) {
+			const seg = beforeGraphemes[beforeGraphemes.length - 1]?.segment || "";
+			if (isWordSegment(seg)) break;
+			if (isAtomicMarker(seg)) return;
+			prevWordEnd -= beforeGraphemes.pop()!.segment.length;
+		}
+		const prev = prevWordEnd > 0 ? this.wordRangeAt(currentLine, prevWordEnd - 1) : null;
+		if (!prev) return;
+		const gap = currentLine.slice(prev.end, word.start);
+		const movedWord = currentLine.slice(word.start, word.end);
+		const displacedWord = currentLine.slice(prev.start, prev.end);
+		this.pushUndoSnapshot();
+		this.state.lines[this.state.cursorLine] =
+			currentLine.slice(0, prev.start) + movedWord + gap + displacedWord + currentLine.slice(word.end);
+		this.setCursorCol(prev.start + (col - word.start));
+		if (this.onChange) this.onChange(this.getText());
+		this.refreshAutocompleteAfterEdit();
+	}
+
+	private swapWordForward(): void {
+		const currentLine = this.state.lines[this.state.cursorLine];
+		if (currentLine === undefined) return;
+		const col = Math.min(this.state.cursorCol, currentLine.length);
+		const word = this.wordRangeAt(currentLine, col);
+		if (!word) return;
+		const afterGraphemes = [...this.segment(currentLine.slice(word.end))];
+		let gapLength = 0;
+		let idx = 0;
+		while (idx < afterGraphemes.length) {
+			const seg = afterGraphemes[idx]?.segment || "";
+			if (isWordSegment(seg)) break;
+			if (isAtomicMarker(seg)) return;
+			gapLength += seg.length;
+			idx++;
+		}
+		if (idx >= afterGraphemes.length) return;
+		const nextStart = word.end + gapLength;
+		let nextEnd = nextStart;
+		while (idx < afterGraphemes.length && isWordSegment(afterGraphemes[idx]?.segment || "")) {
+			nextEnd += (afterGraphemes[idx]?.segment || "").length;
+			idx++;
+		}
+		const gap = currentLine.slice(word.end, nextStart);
+		const movedWord = currentLine.slice(word.start, word.end);
+		const displacedWord = currentLine.slice(nextStart, nextEnd);
+		this.pushUndoSnapshot();
+		this.state.lines[this.state.cursorLine] =
+			currentLine.slice(0, word.start) + displacedWord + gap + movedWord + currentLine.slice(nextEnd);
+		this.setCursorCol(col + (nextEnd - word.end));
+		if (this.onChange) this.onChange(this.getText());
+		this.refreshAutocompleteAfterEdit();
+	}
+
 
 	private handleForwardDelete(): void {
 		this.historyIndex = -1; // Exit history browsing mode

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed hyperlinks not being clickable in fullscreen mode on terminals that gate native link handling while mouse reporting is active (e.g. Ghostty); left-clicking a link now opens it directly.
+- Added editor motions to reorder text without retyping it: `ctrl+up`/`ctrl+down` move the current line, and `alt+shift+left`/`alt+shift+right` swap the word under the cursor with its neighbor ([#1295](https://github.com/PrimeIntellect-ai/prime-agent/pull/1295) by [@porky11](https://github.com/porky11)).
 
 ## [0.7.2] - 2026-08-11
 
