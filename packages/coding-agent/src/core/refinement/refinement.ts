@@ -26,6 +26,8 @@ const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
+const REFINER_ENTRY_LIMIT = 40;
+const REFINER_ENTRY_CONTENT_LIMIT = 240;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
@@ -524,8 +526,15 @@ function overviewForPrompt(state: HarnessState): string {
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const entries = Object.values(state.entries[kind]);
 		lines.push(`${kind}: ${entries.length}`);
-		for (const entry of entries.slice(0, 40)) {
-			const content = entry.content.replace(/\s+/g, " ").slice(0, 240);
+		for (const entry of entries.slice(0, REFINER_ENTRY_LIMIT)) {
+			const flattened = entry.content.replace(/\s+/g, " ");
+			const hidden = flattened.length - REFINER_ENTRY_CONTENT_LIMIT;
+			// An update replaces the entry, so a refiner that cannot tell a truncated
+			// entry from a complete one drops everything it was never shown.
+			const content =
+				hidden > 0
+					? `${flattened.slice(0, REFINER_ENTRY_CONTENT_LIMIT)}... (+${hidden} chars not shown)`
+					: flattened;
 			const argumentsText =
 				entry.kind === "skill" && Object.keys(entry.arguments).length > 0
 					? ` args=${JSON.stringify(entry.arguments).slice(0, 240)}`
@@ -538,8 +547,8 @@ function overviewForPrompt(state: HarnessState): string {
 				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${content}`,
 			);
 		}
-		if (entries.length > 40) {
-			lines.push(`- +${entries.length - 40} more ${kind} entries`);
+		if (entries.length > REFINER_ENTRY_LIMIT) {
+			lines.push(`- +${entries.length - REFINER_ENTRY_LIMIT} more ${kind} entries`);
 		}
 	}
 	return lines.join("\n");
