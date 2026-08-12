@@ -18,6 +18,7 @@ Use `/login` in interactive mode, then select a provider:
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
+- xAI Grok (SuperGrok / X Premium+)
 
 Use `/logout` to clear credentials. Tokens are stored in `~/.prime/agent/auth.json` and auto-refresh when expired.
 
@@ -45,6 +46,10 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
 - If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
+
+### xAI Grok
+
+Select **xAI Grok (SuperGrok / X Premium+)** to sign in with xAI's device flow. Open the displayed URL, enter the code if prompted, and approve access. Prime Agent stores and refreshes the OAuth tokens automatically and routes xAI models through the Responses API while this login is active. The separate API-key option continues to use `XAI_API_KEY`.
 
 ## API Keys
 

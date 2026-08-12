@@ -33,6 +33,7 @@
 - Added a working hint that recommends sharing traces with Prime Intellect to help train open-source LLMs.
 - Restored bare `prime-agent --resume` opening the agents view and the `/resume [id|path]` slash command; bare commands open the agents view and an argument resumes that session in place.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Added xAI Grok subscription login alongside the existing xAI API-key option.
 - Added Codex V2 native compaction through the normal Responses stream, with legacy endpoint fallback.
 - Changed direct user instructions in the active conversation to override conflicting workspace-file rules for that request.
 - Fixed retained `rlm.act` sessions resuming abandoned work, and added bounded caller-history bitmap frames between Act calls.

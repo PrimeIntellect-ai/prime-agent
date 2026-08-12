@@ -923,6 +923,39 @@ describe("AuthStorage", () => {
 		});
 	});
 
+	describe("OAuth refresh persistence", () => {
+		test("persists a rotated xAI refresh token without refreshing every lookup", async () => {
+			writeAuthJson({
+				xai: {
+					type: "oauth",
+					access: "expired-access",
+					refresh: "old-refresh",
+					expires: Date.now() - 1,
+					tokenEndpoint: "https://auth.x.ai/oauth2/token",
+				},
+			});
+			const fetchSpy = vi
+				.spyOn(globalThis, "fetch")
+				.mockResolvedValue(
+					new Response(
+						JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 900 }),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					),
+				);
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(await authStorage.getApiKey("xai")).toBe("new-access");
+			expect(await authStorage.getApiKey("xai")).toBe("new-access");
+			expect(fetchSpy).toHaveBeenCalledOnce();
+
+			const stored = JSON.parse(readFileSync(authJsonPath, "utf-8")) as {
+				xai: { access: string; refresh: string; expires: number };
+			};
+			expect(stored.xai).toMatchObject({ access: "new-access", refresh: "new-refresh" });
+			expect(stored.xai.expires).toBeGreaterThan(Date.now());
+		});
+	});
+
 	describe("oauth lock compromise handling", () => {
 		test("returns undefined on compromised lock and allows a later retry", async () => {
 			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
