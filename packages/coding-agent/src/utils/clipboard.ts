@@ -19,8 +19,8 @@ function copyToX11Clipboard(options: NativeClipboardExecOptions): void {
 
 const MAX_OSC52_ENCODED_LENGTH = 100_000;
 
-function isRemoteSession(env: NodeJS.ProcessEnv = process.env): boolean {
-	return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.MOSH_CONNECTION);
+function needsTerminalClipboardRelay(env: NodeJS.ProcessEnv = process.env): boolean {
+	return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.MOSH_CONNECTION || env.WMUX_PANE_ID);
 }
 
 function emitOsc52(text: string): boolean {
@@ -28,7 +28,15 @@ function emitOsc52(text: string): boolean {
 	if (encoded.length > MAX_OSC52_ENCODED_LENGTH) {
 		return false;
 	}
-	process.stdout.write(`\x1b]52;c;${encoded}\x07`);
+
+	const sequence = `\x1b]52;c;${encoded}\x07`;
+	if (process.env.TMUX && process.env.WMUX_PANE_ID) {
+		// wmux enables tmux passthrough for managed panes, allowing the request to
+		// reach its browser terminal instead of being consumed by tmux.
+		process.stdout.write(`\x1bPtmux;${sequence.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`);
+	} else {
+		process.stdout.write(sequence);
+	}
 	return true;
 }
 
@@ -56,8 +64,8 @@ export async function copyToClipboard(text: string): Promise<void> {
 		// Fall through to platform-specific clipboard tools.
 	}
 
-	const remote = isRemoteSession();
-	if (copied && !remote) {
+	const needsRelay = needsTerminalClipboardRelay();
+	if (copied && !needsRelay) {
 		return;
 	}
 
@@ -116,7 +124,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 		}
 	}
 
-	if (remote || !copied) {
+	if (needsRelay || !copied) {
 		const osc52Copied = emitOsc52(text);
 		copied = copied || osc52Copied;
 	}

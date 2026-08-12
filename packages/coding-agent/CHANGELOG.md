@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed login-link and other clipboard actions in wmux-managed panes by relaying OSC 52 requests through tmux to the browser instead of copying only on the session host.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11

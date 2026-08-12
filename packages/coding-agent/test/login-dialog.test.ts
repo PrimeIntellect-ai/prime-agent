@@ -76,6 +76,23 @@ describe("LoginDialogComponent", () => {
 		expect(stripAnsi(dialog.render(48).join("\n"))).toContain("Copied sign-in link");
 	});
 
+	it("uses Alt+C without consuming text in callback-server input", async () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "openai-codex", () => {}, "ChatGPT");
+		const url =
+			"https://auth.openai.com/oauth/authorize?client_id=test&redirect_uri=http%3A%2F%2Flocalhost%2Fcallback";
+
+		dialog.showAuth(url);
+		const manualInput = dialog.showManualInput("Paste redirect URL below, or complete login in browser:");
+		dialog.handleInput("c");
+		expect(mocks.copyToClipboard).not.toHaveBeenCalled();
+		expect(stripAnsi(dialog.render(88).join("\n"))).toContain("Alt+C copy");
+
+		dialog.handleInput("\x1bc");
+		await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(url));
+		dialog.handleInput("\r");
+		await expect(manualInput).resolves.toBe("c");
+	});
+
 	it("honors a customized login URL copy shortcut", async () => {
 		setKeybindings(new KeybindingsManager({ "app.clipboard.copyLoginUrl": "ctrl+y" }));
 		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");

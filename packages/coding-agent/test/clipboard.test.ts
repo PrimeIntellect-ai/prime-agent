@@ -49,7 +49,7 @@ let stdoutWrites: string[];
 let nativeResolved = false;
 
 function osc52Writes(): string[] {
-	return stdoutWrites.filter((write) => write.startsWith("\x1b]52;c;"));
+	return stdoutWrites.filter((write) => write.includes("]52;c;"));
 }
 
 beforeEach(() => {
@@ -57,6 +57,8 @@ beforeEach(() => {
 	vi.stubEnv("SSH_CONNECTION", "");
 	vi.stubEnv("SSH_CLIENT", "");
 	vi.stubEnv("MOSH_CONNECTION", "");
+	vi.stubEnv("WMUX_PANE_ID", "");
+	vi.stubEnv("TMUX", "");
 	stdoutWrites = [];
 	nativeResolved = false;
 	mocks.clipboard.setText.mockReset();
@@ -73,7 +75,7 @@ beforeEach(() => {
 	originalWrite = process.stdout.write.bind(process.stdout);
 	process.stdout.write = ((...args: Parameters<typeof process.stdout.write>) => {
 		const [chunk] = args;
-		if (typeof chunk === "string" && chunk.startsWith("\x1b]52;c;")) {
+		if (typeof chunk === "string" && chunk.includes("]52;c;")) {
 			stdoutWrites.push(chunk);
 			return true;
 		}
@@ -109,6 +111,35 @@ describe("copyToClipboard", () => {
 		expect(nativeResolved).toBe(true);
 		expect(osc52Writes()).toHaveLength(1);
 		expect(mockedExecSync).not.toHaveBeenCalled();
+	});
+
+	test("wmux native success also emits OSC 52 for the browser terminal", async () => {
+		vi.stubEnv("WMUX_PANE_ID", "pane-test");
+
+		await copyToClipboard("hello");
+
+		expect(nativeResolved).toBe(true);
+		expect(osc52Writes()).toEqual(["\x1b]52;c;aGVsbG8=\x07"]);
+		expect(mockedExecSync).not.toHaveBeenCalled();
+	});
+
+	test("keeps plain OSC 52 for non-wmux tmux sessions", async () => {
+		vi.stubEnv("SSH_CONNECTION", "client server");
+		vi.stubEnv("TMUX", "/tmp/tmux/default,1,0");
+
+		await copyToClipboard("hello");
+
+		expect(osc52Writes()).toEqual(["\x1b]52;c;aGVsbG8=\x07"]);
+	});
+
+	test("wraps OSC 52 in tmux passthrough for wmux panes", async () => {
+		vi.stubEnv("SSH_CONNECTION", "client server");
+		vi.stubEnv("WMUX_PANE_ID", "pane-test");
+		vi.stubEnv("TMUX", "/tmp/tmux/default,1,0");
+
+		await copyToClipboard("hello");
+
+		expect(osc52Writes()).toEqual(["\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\"]);
 	});
 
 	test("local shell fallback success skips OSC 52", async () => {
