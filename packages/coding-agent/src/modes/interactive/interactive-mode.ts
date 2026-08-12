@@ -6085,8 +6085,10 @@ export class InteractiveMode {
 	private getTrayGoalLabel(): string | undefined {
 		const goal = this.getGoalState();
 		switch (goal.status) {
-			case "active":
-				return `Pursuing goal (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
+			case "active": {
+				const wakeLabel = `${goal.continuationsUsed} wake${goal.continuationsUsed === 1 ? "" : "s"}`;
+				return `Pursuing goal (${this.formatGoalElapsed(goal.timeUsedSeconds)} · ${wakeLabel})`;
+			}
 			case "paused":
 				return `Goal paused (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
 			case "budget_limited":

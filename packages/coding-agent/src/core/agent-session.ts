@@ -3195,11 +3195,23 @@ export class AgentSession {
 		}
 	}
 
+	private _isQuiescentGoalBoundary(message: AssistantMessage): boolean {
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
+			return false;
+		}
+		return !message.content.some(
+			(content) => (content.type === "text" && content.text.trim().length > 0) || content.type === "toolCall",
+		);
+	}
+
 	private async _getContinuationMessages(
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
 		if (this.queuedActionCount > 0) {
+			return [];
+		}
+		if (this._goalState.status === "active" && this._isQuiescentGoalBoundary(context.message)) {
 			return [];
 		}
 		const arrivalEpoch = this._sessionInputArrivalEpoch;

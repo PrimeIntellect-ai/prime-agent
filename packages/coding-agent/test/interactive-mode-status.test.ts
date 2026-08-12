@@ -3980,7 +3980,7 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s · 1 wake)");
 	});
 
 	test("combines active goals with token/context usage in one lower-tray label", () => {
@@ -3993,13 +3993,13 @@ describe("InteractiveMode tray goal label", () => {
 				objective: "finish the task",
 				tokensUsed: 0,
 				timeUsedSeconds: 65,
-				continuationsUsed: 1,
+				continuationsUsed: 2,
 			} satisfies GoalState,
 			contextUsage: { contextWindow: 100_000, tokens: 75_000, percent: 75 },
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 75k (75%)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s · 2 wakes) · 75k (75%)");
 	});
 
 	test("combines active goals, active heartbeats, and context usage in one lower-tray label", () => {
@@ -4019,7 +4019,7 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat · 75k (75%)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s · 1 wake) · 1 heartbeat · 75k (75%)");
 	});
 
 	test("omits the usage segment when token count is unknown", () => {
@@ -4038,7 +4038,7 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s · 1 wake)");
 	});
 });
 

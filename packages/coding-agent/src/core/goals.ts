@@ -167,7 +167,7 @@ export function createGoalContextMessage(
 		role: "custom",
 		customType: GOAL_CONTEXT_CUSTOM_TYPE,
 		content,
-		display: true,
+		display: kind !== "continuation",
 		details: {
 			kind,
 			goalId: goal.goalId,

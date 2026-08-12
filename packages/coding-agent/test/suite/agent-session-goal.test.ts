@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
-import type { GoalHostResponse } from "../../src/core/goals.js";
+import { createGoalContextMessage, type GoalHostResponse, type GoalState } from "../../src/core/goals.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
@@ -185,6 +185,55 @@ describe("AgentSession goals", () => {
 			continuationsUsed: 2,
 			lastReason: "Goal achieved",
 		});
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
+	it("hides continuation contexts but keeps actionable goal contexts visible", () => {
+		const goal = {
+			active: true,
+			status: "active",
+			goalId: "goal-1",
+			objective: "finish the task",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 1,
+		} satisfies GoalState;
+
+		expect(createGoalContextMessage(goal, "continuation").display).toBe(false);
+		expect(
+			createGoalContextMessage({ ...goal, status: "budget_limited", active: false }, "budget_limit").display,
+		).toBe(true);
+		expect(createGoalContextMessage(goal, "objective_updated").display).toBe(true);
+	});
+
+	it("parks an active goal after an empty assistant turn and resumes on new input", async () => {
+		const harness = await createGoalHarness();
+		harness.setResponses([
+			fauxAssistantMessage("Made progress."),
+			fauxAssistantMessage(""),
+			fauxAssistantMessage(fauxToolCall("ipython", COMPLETE_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Goal complete."),
+		]);
+
+		await harness.session.prompt("/goal finish the task");
+
+		expect(visibleAssistantTexts(harness)).toEqual(["Made progress."]);
+		expect(harness.session.goalState).toMatchObject({
+			active: true,
+			status: "active",
+			continuationsUsed: 1,
+		});
+		expect(harness.getPendingResponseCount()).toBe(2);
+		const contextsBeforeResume = goalContextMessages(harness);
+		expect(contextsBeforeResume).toHaveLength(2);
+		expect(contextsBeforeResume.every((message) => message.role === "custom" && message.display === false)).toBe(
+			true,
+		);
+
+		await harness.session.prompt("Continue now.");
+
+		expect(visibleAssistantTexts(harness)).toEqual(["Made progress.", "Goal complete."]);
+		expect(harness.session.goalState).toMatchObject({ active: false, status: "complete" });
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
