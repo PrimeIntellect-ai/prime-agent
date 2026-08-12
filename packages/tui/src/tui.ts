@@ -994,6 +994,10 @@ export class TUI extends Container {
 
 		if (overlayFocused || !fullscreen.viewportControls) return false;
 
+		// A key release repeats the same binding under the Kitty protocol and would
+		// scroll a second time for one keypress.
+		if (isKeyRelease(data)) return false;
+
 		const keybindings = getKeybindings();
 		if (keybindings.matches(data, "tui.viewport.pageUp")) {
 			this.scrollBy(-fullscreen.viewport.pageSize());

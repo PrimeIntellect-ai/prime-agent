@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed hyperlinks not being clickable in fullscreen mode on terminals that gate native link handling while mouse reporting is active (e.g. Ghostty); left-clicking a link now opens it directly.
+- Fixed the transcript scrolling twice for a single PageUp or PageDown press on terminals using the Kitty keyboard protocol.
 
 ## [0.7.2] - 2026-08-11
 

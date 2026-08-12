@@ -65,6 +65,7 @@ class LoggingVirtualTerminal extends VirtualTerminal {
 const WHEEL_UP = "\x1b[<64;5;5M";
 const WHEEL_DOWN = "\x1b[<65;5;5M";
 const PAGE_UP = "\x1b[5~";
+const PAGE_UP_RELEASE = "\x1b[5;1:3~";
 const VIEWPORT_TOP = "\x1b[1;4A"; // shift+alt+up
 const FOLLOW = "\x1b[1;6B"; // ctrl+shift+down
 
@@ -289,6 +290,25 @@ describe("TUI fullscreen mode", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 		assert.strictEqual(terminal.getViewport()[7], "Line 21");
+
+		tui.stop();
+	});
+
+	it("scrolls once per keypress, ignoring the kitty release event", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(30));
+		const editor = new TestComponent();
+		tui.setFocus(editor);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput(PAGE_UP);
+		await terminal.waitForRender();
+		assert.strictEqual(terminal.getViewport()[0], "Line 15");
+
+		// Releasing the key must not scroll a second time.
+		terminal.sendInput(PAGE_UP_RELEASE);
+		await terminal.waitForRender();
+		assert.strictEqual(terminal.getViewport()[0], "Line 15");
 
 		tui.stop();
 	});
