@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added built-in xAI Grok OAuth with device authorization, rotating token refresh, and Responses API routing for SuperGrok and X Premium+ subscriptions.
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Added xAI Grok subscription login alongside the existing xAI API-key option.
 
 ## [0.7.2] - 2026-08-11
 
