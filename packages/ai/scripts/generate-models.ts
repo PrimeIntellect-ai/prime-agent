@@ -1923,15 +1923,17 @@ async function generateModels() {
 		}
 	}
 
-	const minimaxDirectSupportedIds = new Set(["MiniMax-M2.7", "MiniMax-M2.7-highspeed"]);
+	const minimaxDirectModelLimits = new Map<string, { contextWindow: number; maxTokens: number }>([
+		["MiniMax-M2.7", { contextWindow: 204800, maxTokens: 131072 }],
+		["MiniMax-M2.7-highspeed", { contextWindow: 204800, maxTokens: 131072 }],
+		["MiniMax-M3", { contextWindow: 1000000, maxTokens: 128000 }],
+	]);
 
 	for (const candidate of allModels) {
-		if (
-			(candidate.provider === "minimax" || candidate.provider === "minimax-cn") &&
-			minimaxDirectSupportedIds.has(candidate.id)
-		) {
-			candidate.contextWindow = 204800;
-			candidate.maxTokens = 131072;
+		const limits = minimaxDirectModelLimits.get(candidate.id);
+		if ((candidate.provider === "minimax" || candidate.provider === "minimax-cn") && limits) {
+			candidate.contextWindow = limits.contextWindow;
+			candidate.maxTokens = limits.maxTokens;
 		}
 	}
 
@@ -1939,7 +1941,7 @@ async function generateModels() {
 		const candidate = allModels[i];
 		if (
 			(candidate.provider === "minimax" || candidate.provider === "minimax-cn") &&
-			!minimaxDirectSupportedIds.has(candidate.id)
+			!minimaxDirectModelLimits.has(candidate.id)
 		) {
 			allModels.splice(i, 1);
 		}
