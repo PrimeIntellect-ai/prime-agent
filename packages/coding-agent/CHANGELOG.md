@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Changed ACP IPython tool calls to be titled by their cell and to carry the cell source as content, so a client no longer shows a column of identical "IPython cell" rows with nothing in them.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11

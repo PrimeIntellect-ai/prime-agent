@@ -64,6 +64,32 @@ function assistantDeltaUpdates(event: AssistantMessageEvent): AcpSessionUpdate[]
 	return [];
 }
 
+const CELL_TITLE_MAX_LENGTH = 120;
+
+/**
+ * One-line label for an IPython cell.
+ *
+ * Every IPython call otherwise carries the same constant title, which leaves an
+ * ACP client rendering a column of identical rows with no way to tell one cell
+ * from the next.
+ */
+function ipythonCellTitle(code: string): string {
+	const lines = code.split("\n").filter((line) => line.trim().length > 0);
+	let title = lines[0]?.trim() ?? "";
+	// A cell magic names the interpreter, not the work, so it needs the first
+	// real line beside it to stay distinguishable from the next magic cell.
+	if (title.startsWith("%%") && lines[1]) title = `${title} \u00b7 ${lines[1].trim()}`;
+	if (!title) return "IPython cell";
+	if (title.length > CELL_TITLE_MAX_LENGTH) title = `${title.slice(0, CELL_TITLE_MAX_LENGTH - 1)}\u2026`;
+	const remaining = lines.length - 1;
+	return remaining > 0 ? `${title} \u00b7 +${remaining} lines` : title;
+}
+
+/** The cell source as a content block, for clients that render no `rawInput`. */
+function ipythonCellContent(code: string): { type: "content"; content: { type: "text"; text: string } } {
+	return { type: "content", content: textContent(["```python", code, "```"].join("\n")) };
+}
+
 /** Extract the IPython cell source so a client can show what is executing. */
 function ipythonCellSource(args: unknown): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
@@ -130,6 +156,8 @@ function ipythonRichOutput(result: unknown): PrimeAgentIpythonMeta | undefined {
  */
 export interface AcpEventMappingState {
 	activeBashRunId?: string;
+	/** Cell source per in-flight IPython call, keyed by tool call id. */
+	ipythonCells?: Map<string, string>;
 }
 
 export function acpUpdatesForSessionEvent(
@@ -143,13 +171,18 @@ export function acpUpdatesForSessionEvent(
 
 		case "tool_execution_start": {
 			const cell = event.toolName === IPYTHON_TOOL_NAME ? ipythonCellSource(event.args) : undefined;
+			if (cell !== undefined) {
+				state.ipythonCells ??= new Map();
+				state.ipythonCells.set(event.toolCallId, cell);
+			}
 			return [
 				{
 					sessionUpdate: "tool_call",
 					toolCallId: event.toolCallId,
-					title: event.toolName === IPYTHON_TOOL_NAME ? "IPython cell" : event.toolName,
+					title: cell !== undefined ? ipythonCellTitle(cell) : event.toolName,
 					kind: acpToolKind(event.toolName),
 					status: "in_progress" satisfies AcpToolStatus,
+					...(cell !== undefined ? { content: [ipythonCellContent(cell)] } : {}),
 					rawInput: cell !== undefined ? { code: cell } : event.args,
 				},
 			];
@@ -158,12 +191,21 @@ export function acpUpdatesForSessionEvent(
 		case "tool_execution_end": {
 			const text = toolResultText(event.result);
 			const rich = event.toolName === IPYTHON_TOOL_NAME ? ipythonRichOutput(event.result) : undefined;
+			// A client replaces a tool call's content on update rather than
+			// appending to it, so the cell has to be repeated here or it vanishes
+			// the moment the call completes.
+			const cell = state.ipythonCells?.get(event.toolCallId);
+			state.ipythonCells?.delete(event.toolCallId);
+			const content = [
+				...(cell !== undefined ? [ipythonCellContent(cell)] : []),
+				...(text ? [{ type: "content", content: textContent(text) }] : []),
+			];
 			return [
 				{
 					sessionUpdate: "tool_call_update",
 					toolCallId: event.toolCallId,
 					status: (event.isError ? "failed" : "completed") satisfies AcpToolStatus,
-					...(text ? { content: [{ type: "content", content: textContent(text) }] } : {}),
+					...(content.length > 0 ? { content } : {}),
 					...(rich ? { _meta: primeAgentMeta({ ipython: rich }) } : {}),
 				},
 			];

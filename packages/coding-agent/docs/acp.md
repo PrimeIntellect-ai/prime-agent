@@ -40,7 +40,7 @@ Session activity arrives as `session/update` notifications:
 | tool finishes | `tool_call_update` (`completed` / `failed`) |
 | shell output | `tool_call` plus incremental `tool_call_update` |
 
-IPython is Prime Agent's model-facing tool, so a cell is a `tool_call` of kind `execute` whose `rawInput` carries the cell source.
+IPython is Prime Agent's model-facing tool, so a cell is a `tool_call` of kind `execute` whose `rawInput` carries the cell source. The call is titled by the cell's first meaningful line, and the source also travels as a fenced content block for clients that render content rather than `rawInput`.
 
 ## Prime Agent extensions
 

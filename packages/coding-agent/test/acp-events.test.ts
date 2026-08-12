@@ -51,12 +51,58 @@ describe("ACP session event mapping", () => {
 			{
 				sessionUpdate: "tool_call",
 				toolCallId: "call-1",
-				title: "IPython cell",
+				title: "print(1)",
 				kind: "execute",
 				status: "in_progress",
+				content: [{ type: "content", content: { type: "text", text: "```python\nprint(1)\n```" } }],
 				rawInput: { code: "print(1)" },
 			},
 		]);
+	});
+
+	it("titles an IPython call by its cell so two calls are distinguishable", () => {
+		const title = (code: string) =>
+			acpUpdatesForSessionEvent({
+				type: "tool_execution_start",
+				toolCallId: "call-1",
+				toolName: "ipython",
+				args: { code },
+			} as AgentConnectionSessionEvent)[0]?.title;
+
+		expect(title("import os\nos.getcwd()")).toBe("import os \u00b7 +1 lines");
+		// A bare cell magic names the interpreter, not the work being done.
+		expect(title("%%bash\ngit status --short")).toBe("%%bash \u00b7 git status --short \u00b7 +1 lines");
+		expect(title("   ")).toBe("IPython cell");
+		expect(title(`${"x".repeat(200)}`)).toBe(`${"x".repeat(119)}\u2026`);
+	});
+
+	it("repeats the cell on completion, which replaces rather than appends content", () => {
+		const state: AcpEventMappingState = {};
+		acpUpdatesForSessionEvent(
+			{
+				type: "tool_execution_start",
+				toolCallId: "call-1",
+				toolName: "ipython",
+				args: { code: "print(1)" },
+			} as AgentConnectionSessionEvent,
+			state,
+		);
+		const updates = acpUpdatesForSessionEvent(
+			{
+				type: "tool_execution_end",
+				toolCallId: "call-1",
+				toolName: "ipython",
+				result: "1",
+				isError: false,
+			} as AgentConnectionSessionEvent,
+			state,
+		);
+		expect(updates[0]?.content).toEqual([
+			{ type: "content", content: { type: "text", text: "```python\nprint(1)\n```" } },
+			{ type: "content", content: { type: "text", text: "1" } },
+		]);
+		// The entry is dropped once the call ends, so state cannot grow unbounded.
+		expect(state.ipythonCells?.size).toBe(0);
 	});
 
 	it("carries rich IPython output from the fields the tool actually reports", () => {
