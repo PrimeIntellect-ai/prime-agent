@@ -104,11 +104,11 @@ export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 
 export {
-	withFileMutationQueue,
-	// Tool factories (for custom cwd)
-	createIpythonTool,
 	createBashTool,
 	createEditTool,
+	// Tool factories (for custom cwd)
+	createIpythonTool,
+	withFileMutationQueue,
 };
 
 // Helper Functions

@@ -21,7 +21,7 @@ import {
 	type RlmChildTerminalNoticeDetails,
 } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { keyText } from "./keybinding-hints.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 
 type InjectedPromptDetails =
 	| GoalContextDetails
@@ -134,14 +134,14 @@ export class InjectedPromptMessageComponent extends Container {
 			this.message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE ||
 			this.message.customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE
 		) {
-			const hint = this.expanded ? "" : ` (${keyText("app.tools.expand")} to expand)`;
+			const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
 			return theme.fg("muted", "RLM child status") + theme.fg("dim", hint);
 		}
 
 		const details = this.message.details;
 		const title = goalLabel(details as GoalContextDetails | undefined);
 		const meta = this.metaText();
-		const hint = this.expanded ? "" : ` (${keyText("app.tools.expand")} to expand)`;
+		const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
 		return theme.fg("muted", title) + meta + theme.fg("dim", hint);
 	}
 
@@ -149,7 +149,7 @@ export class InjectedPromptMessageComponent extends Container {
 		const details = this.message.details as HeartbeatPromptDetails | undefined;
 		const pulse = theme.fg("error", "♥");
 		const schedule = theme.fg("muted", heartbeatPromptSchedule(details?.schedule));
-		const hint = this.expanded ? "" : ` (${keyText("app.tools.expand")} to expand)`;
+		const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
 		return `${pulse} ${theme.fg("muted", "Heartbeat prompt")}${theme.fg("dim", " · ")}${schedule}${theme.fg("dim", hint)}`;
 	}
 
