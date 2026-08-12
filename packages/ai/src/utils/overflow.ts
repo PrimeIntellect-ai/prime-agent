@@ -27,6 +27,9 @@ import type { AssistantMessage } from "../types.js";
  *   with output=0 (no room left to generate). Detected via stopReason "length" + zero output +
  *   input filling the context window.
  * - Ollama: Some deployments truncate silently, others return errors like "prompt too long; exceeded max context length by X tokens"
+ * - MLX (mlx_lm.server): Does NOT reject, error, or truncate. It prefills the entire prompt past
+ *   the model's max_position_embeddings until the GPU runs out of memory, then the server process
+ *   aborts. There is no error message to match - see the note below.
  */
 const OVERFLOW_PATTERNS = [
 	/prompt is too long/i, // Anthropic token overflow
@@ -98,6 +101,20 @@ const NON_OVERFLOW_PATTERNS = [
  * - Ollama: May truncate input silently for some setups, but may also return explicit
  *   overflow errors that match the patterns above. Silent truncation still cannot be
  *   detected here because we do not know the expected token count.
+ * - MLX (mlx_lm.server): Not detectable at all. An oversized prompt is prefilled in full,
+ *   past the model's own position limit, until Metal reports insufficient memory and the
+ *   server aborts mid-request:
+ *
+ *     Prompt processing progress: 40960/50013
+ *     libc++abi: terminating due to uncaught exception of type std::runtime_error:
+ *     [METAL] Command buffer execution failed: Insufficient Memory
+ *
+ *   The client observes a dropped connection, so none of the three cases below apply: there
+ *   is no errorMessage to match, no usage to compare against the context window, and no
+ *   length stop. Do not add a transport-error pattern to work around this - a dropped socket
+ *   is not evidence of overflow, and matching one would misclassify every server crash and
+ *   network fault. The mitigation belongs in configuration: declare a contextWindow the host
+ *   can actually hold so compaction runs before the limit is reached.
  *
  * ## Custom Providers
  *

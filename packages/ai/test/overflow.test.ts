@@ -96,4 +96,18 @@ describe("isContextOverflow", () => {
 		const message = createLengthStopMessage(100, 0, 0);
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
+
+	// mlx_lm.server aborts the whole process when a prompt exhausts GPU memory, so an
+	// oversized request surfaces as a dropped connection rather than a provider error.
+	// A transport failure is not evidence of overflow - it is equally consistent with a
+	// crash or a network fault - so these must stay unclassified.
+	it.each([
+		"fetch failed",
+		"terminated",
+		"socket hang up",
+		"read ECONNRESET",
+		"Error: connect ECONNREFUSED 127.0.0.1:8080",
+	])("does not treat transport failure %j as overflow", (errorMessage) => {
+		expect(isContextOverflow(createErrorMessage(errorMessage), 32768)).toBe(false);
+	});
 });
