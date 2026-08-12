@@ -983,6 +983,61 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
+	it("does not open a link when a drag returns to its press cell", async () => {
+		const transcript = lines(20);
+		transcript[12] = "see \x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\ here";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		const copies: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.onCopy = (text) => copies.push(text);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;5;1M");
+		terminal.sendInput("\x1b[<32;9;1M");
+		terminal.sendInput("\x1b[<32;5;1M");
+		terminal.sendInput("\x1b[<0;5;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copies, []);
+		assert.deepStrictEqual(opened, []);
+
+		tui.stop();
+	});
+
+	it("does not open a link when a focused-overlay drag returns to its press cell", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(20), 80, 10);
+		const opened: string[] = [];
+		const copies: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.onCopy = (text) => copies.push(text);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		const overlay = new InputComponent();
+		overlay.lines = ["\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\"];
+		tui.showOverlay(overlay, { anchor: "center", width: 20 });
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		const row = viewport.findIndex((line) => line.includes("docs"));
+		assert.notStrictEqual(row, -1);
+		const x = viewport[row]!.indexOf("docs") + 1;
+		const y = row + 1;
+		terminal.sendInput(`\x1b[<0;${x};${y}M`);
+		terminal.sendInput(`\x1b[<32;${x + 4};${y}M`);
+		terminal.sendInput(`\x1b[<32;${x};${y}M`);
+		terminal.sendInput(`\x1b[<0;${x};${y}m`);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copies, []);
+		assert.deepStrictEqual(opened, []);
+		assert.deepStrictEqual(overlay.inputs, []);
+
+		tui.stop();
+	});
+
 	it("ignores clicked hyperlinks with non-http schemes", async () => {
 		const transcript = lines(20);
 		transcript[12] = "\x1b]8;;file:///etc/passwd\x1b\\secrets\x1b]8;;\x1b\\";
@@ -994,6 +1049,27 @@ describe("TUI fullscreen mode", () => {
 
 		terminal.sendInput("\x1b[<0;3;1M");
 		terminal.sendInput("\x1b[<0;3;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, []);
+
+		tui.stop();
+	});
+
+	it("rejects malformed or control-character hyperlink URLs", async () => {
+		const transcript = lines(20);
+		transcript[12] =
+			"\x1b]8;;https://example.com/\x00bad\x1b\\nul\x1b]8;;\x1b\\ " +
+			"\x1b]8;;https://[invalid\x1b\\malformed\x1b]8;;\x1b\\";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		terminal.sendInput("\x1b[<0;6;1M");
+		terminal.sendInput("\x1b[<0;6;1m");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(opened, []);
 

@@ -329,6 +329,7 @@ export class TUI extends Container {
 	private fullRedrawCount = 0;
 	private preserveViewportOnNextRender = false; // One-shot: repaint visible viewport in place instead of replaying scrollback
 	private stopped = false;
+	private fullscreenLeftMouseDragged = false;
 	private overlaySelectionRegions: FrameSelectionRegion[] = [];
 
 	// While set, doRender paints fixed frames via the viewport; the inline
@@ -758,21 +759,29 @@ export class TUI extends Container {
 	// (Ghostty only refreshes link hover when reporting is off or shift is held),
 	// so clicks the TUI consumes must open OSC 8 hyperlinks itself.
 	private openHyperlink(url: string): void {
-		if (!/^https?:\/\//i.test(url)) return;
+		if (/[\x00-\x1f\x7f]/.test(url)) return;
+		let href: string;
+		try {
+			const parsed = new URL(url);
+			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+			href = parsed.href;
+		} catch {
+			return;
+		}
 		if (this.onOpenUrl) {
-			this.onOpenUrl(url);
+			this.onOpenUrl(href);
 			return;
 		}
 		const [command, ...args] =
 			process.platform === "darwin"
-				? ["open", url]
+				? ["open", href]
 				: process.platform === "win32"
 					? [
 							path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "rundll32.exe"),
 							"url.dll,FileProtocolHandler",
-							url,
+							href,
 						]
-					: ["xdg-open", url];
+					: ["xdg-open", href];
 		execFile(command, args, () => {});
 	}
 
@@ -917,6 +926,11 @@ export class TUI extends Container {
 		if (isMouseSequence(data)) {
 			// consumed even when disabled — mouse reports are garbage downstream
 			const event = this.terminal.mouseTrackingActive ? parseSgrMouseEvent(data) : null;
+			const leftReleaseWasDrag =
+				event?.button === MOUSE_BUTTON_LEFT && !event.press ? this.fullscreenLeftMouseDragged : false;
+			if (event?.button === MOUSE_BUTTON_LEFT && event.press) {
+				this.fullscreenLeftMouseDragged = event.motion;
+			}
 			if (event && !overlayFocused) {
 				const viewport = fullscreen.viewport;
 				if (isWheelUp(event)) {
@@ -943,7 +957,7 @@ export class TUI extends Container {
 				} else if (!event.press) {
 					this.stopSelectionAutoScroll();
 					viewport.clearSelection();
-					if (event.button === MOUSE_BUTTON_LEFT && !event.motion) {
+					if (event.button === MOUSE_BUTTON_LEFT && !event.motion && !leftReleaseWasDrag) {
 						const url = viewport.hyperlinkAt(event.y - 1, event.x - 1);
 						if (url) this.openHyperlink(url);
 					}
@@ -965,11 +979,14 @@ export class TUI extends Container {
 					this.requestRender();
 				} else if (!event.press) {
 					viewport.clearSelection();
-					if (event.button === MOUSE_BUTTON_LEFT && !event.motion) {
+					if (event.button === MOUSE_BUTTON_LEFT && !event.motion && !leftReleaseWasDrag) {
 						const url = viewport.hyperlinkAt(event.y - 1, event.x - 1);
 						if (url) this.openHyperlink(url);
 					}
 				}
+			}
+			if (event?.button === MOUSE_BUTTON_LEFT && !event.press) {
+				this.fullscreenLeftMouseDragged = false;
 			}
 			return true;
 		}
