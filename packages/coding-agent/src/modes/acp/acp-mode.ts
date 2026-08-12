@@ -9,6 +9,7 @@ import { VERSION } from "../../config.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type { AgentConnection } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
@@ -227,6 +228,34 @@ async function turnFailure(connection: AgentConnection, boundary: TurnBoundary):
 	return undefined;
 }
 
+/**
+ * Commands an ACP client can offer for completion.
+ *
+ * Only commands a prompt actually executes are advertised. The rest of
+ * `BUILTIN_SLASH_COMMANDS` opens a TUI selector (`/model`, `/settings`) and has
+ * no headless behavior, so listing it would complete to plain prompt text.
+ */
+async function acpAvailableCommands(connection: AgentConnection): Promise<acp.AvailableCommand[]> {
+	const sessionCommands = BUILTIN_SLASH_COMMANDS.filter((command) => command.execution === "session").map(
+		(command) => ({
+			name: command.name,
+			description: command.description,
+			...(command.argumentHint ? { input: { hint: command.argumentHint } } : {}),
+		}),
+	);
+	// Skills, prompt templates, and extension commands. A failure here costs
+	// completion, not the session, so it must not reject session/new.
+	const connectionCommands = await connection.getCommands().catch(() => []);
+	return [
+		...sessionCommands,
+		...connectionCommands.map((command) => ({
+			name: command.name,
+			description: command.description ?? "",
+			...(command.argumentHint ? { input: { hint: command.argumentHint } } : {}),
+		})),
+	];
+}
+
 export async function runAcpMode(runtimeHost: AgentSessionRuntime): Promise<never> {
 	const connection = new InProcessAgentConnection(runtimeHost);
 	return runAcpModeWithConnection(connection, {
@@ -324,6 +353,18 @@ export async function runAcpModeWithConnection(
 			// failed subscribe cannot leave the slot occupied and unusable.
 			entry.unsubscribe = unsubscribe;
 			session = entry;
+			// Sent after this handler returns: a client cannot route a session
+			// update for a session id it has not been told about yet.
+			setTimeout(() => {
+				void acpAvailableCommands(connection).then((availableCommands) =>
+					ctx.client
+						.notify(acp.methods.client.session.update, {
+							sessionId,
+							update: { sessionUpdate: "available_commands_update", availableCommands },
+						})
+						.catch(() => undefined),
+				);
+			}, 0);
 			return {
 				sessionId,
 				...(cwdMismatch ? { _meta: primeAgentMeta({ cwd: cwdMismatch }) } : {}),

@@ -40,6 +40,8 @@ Session activity arrives as `session/update` notifications:
 | tool finishes | `tool_call_update` (`completed` / `failed`) |
 | shell output | `tool_call` plus incremental `tool_call_update` |
 
+After `session/new`, one `available_commands_update` lists the commands a prompt turn executes: the session commands (`compact`, `refine`, `goal`, `autonomous`), skills as `skill:<name>`, prompt templates, and extension commands. Commands that open a TUI selector, such as `/model` and `/settings`, are not advertised — outside the TUI they are ordinary prompt text.
+
 IPython is Prime Agent's model-facing tool, so a cell is a `tool_call` of kind `execute` whose `rawInput` carries the cell source.
 
 ## Prime Agent extensions
