@@ -1,7 +1,9 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { describe, expect, test } from "vitest";
-import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
+import { KeybindingsManager } from "../src/core/keybindings.js";
+import { AssistantMessageComponent, thinkingRecap } from "../src/modes/interactive/components/assistant-message.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -38,6 +40,18 @@ describe("AssistantMessageComponent", () => {
 		expect(lines).not.toHaveLength(0);
 		expect(lines[0]).toContain(OSC133_ZONE_START);
 		expect(lines[lines.length - 1].startsWith(OSC133_ZONE_END + OSC133_ZONE_FINAL)).toBe(true);
+	});
+
+	test("ignores null content blocks from malformed provider responses", () => {
+		initTheme("dark");
+
+		const malformedContent = [null, { type: "text", text: "hello" }] as unknown as AssistantMessage["content"];
+		const component = new AssistantMessageComponent(createAssistantMessage(malformedContent));
+		expect(stripAnsi(component.render(40).join("\n"))).toContain("hello");
+
+		const updatedContent = [null, { type: "text", text: "hello again" }] as unknown as AssistantMessage["content"];
+		component.updateContent(createAssistantMessage(updatedContent));
+		expect(stripAnsi(component.render(40).join("\n"))).toContain("hello again");
 	});
 
 	test("does not add OSC 133 zone markers when assistant message contains tool calls", () => {
@@ -200,6 +214,74 @@ describe("AssistantMessageComponent streaming identity", () => {
 			const fresh = new AssistantMessageComponent(message).render(90);
 			expect(incremental).toEqual(fresh);
 		}
+	});
+
+	test("collapsed thinking shows a bold label, recap, and bracketed hint", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		const thinking = [
+			"**Weighing options**",
+			"",
+			"Some detail about the options.",
+			"",
+			"**Deciding the approach**",
+			"",
+			"More detail.",
+		].join("\n");
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking },
+			{ type: "text", text: "Answer." },
+		]);
+		const rendered = stripAnsi(new AssistantMessageComponent(message, true).render(120).join("\n"));
+
+		expect(rendered).toContain("Thinking... · Deciding the approach (Ctrl+T to expand)");
+		expect(rendered).not.toContain("Some detail");
+
+		const expanded = stripAnsi(new AssistantMessageComponent(message, false).render(120).join("\n"));
+		expect(expanded).toContain("Thinking... (Ctrl+T to collapse)");
+		expect(expanded).toContain("Some detail about the options.");
+
+		// A whitespace-only trace falls back to the label instead of an empty recap.
+		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
+	});
+
+	test("recap text with delimiters cannot mask structural changes", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		// Unescaped, the first recap "X|1:text:1" makes this signature identical
+		// to the next structure's (recap "X" plus a real text block), so the
+		// rebuild that renders the new text block would be skipped.
+		const component = new AssistantMessageComponent(undefined, true);
+		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "X|1:text:1" }]));
+		component.render(120);
+
+		component.updateContent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "X" },
+				{ type: "text", text: "Visible answer." },
+			]),
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+
+		expect(rendered).toContain("Visible answer.");
+	});
+
+	test("collapsed thinking row truncates instead of wrapping on narrow widths", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+
+		const thinking = `**${"A deliberately verbose reasoning summary header that keeps going ".repeat(3).trim()}**`;
+		const message = createAssistantMessage([{ type: "thinking", thinking }]);
+		const lines = new AssistantMessageComponent(message, true)
+			.render(60)
+			.map((line) => stripAnsi(line))
+			.filter((line) => line.trim().length > 0);
+
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("Thinking...");
+		expect(lines[0]).toContain("to expand");
 	});
 
 	test("setHideThinkingBlock and setExpanded mid-stream render identically", () => {

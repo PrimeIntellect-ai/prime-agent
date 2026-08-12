@@ -196,6 +196,7 @@ const PRIME_INFERENCE_FEATURED_MODELS = new Set([
 	"qwen/qwen3-coder-next",
 	"qwen/qwen3-max",
 	"qwen/qwen3-vl-235b-a22b-thinking",
+	"qwen/qwen3.8-max",
 	"x-ai/grok-4.20",
 	"x-ai/grok-4.20-multi-agent",
 	"z-ai/glm-5",

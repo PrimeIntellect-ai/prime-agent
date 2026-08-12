@@ -1,7 +1,7 @@
 import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { keyText } from "./keybinding-hints.js";
+import { expandCollapseHint } from "./keybinding-hints.js";
 
 /**
  * Component that renders a compaction message with collapsed/expanded state.
@@ -52,9 +52,7 @@ export class CompactionSummaryMessageComponent extends Box {
 			const focus = instructions ? ` · focus: ${instructions}` : "";
 			this.addChild(
 				new Text(
-					theme.fg("customMessageText", `Compacted from ${tokenStr} tokens${focus} (`) +
-						theme.fg("dim", keyText("app.tools.expand")) +
-						theme.fg("customMessageText", " to expand)"),
+					`${theme.fg("customMessageText", `Compacted from ${tokenStr} tokens${focus}`)} ${expandCollapseHint("app.tools.expand", false)}`,
 					0,
 					0,
 				),
