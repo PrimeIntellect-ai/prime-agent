@@ -857,13 +857,14 @@ export class AuthStorage {
 		const cred = this.data[providerId];
 
 		// Reject unknown credential types with a clear diagnostic so users
-			// who write e.g. "type": "api" instead of "api_key" get a helpful
-			// error rather than a silent "No API key found for <provider>".
-			if (cred && cred.type !== "api_key" && cred.type !== "oauth") {
+		// who write e.g. "type": "api" instead of "api_key" get a helpful
+		// error rather than a silent "No API key found for <provider>".
+		if (cred && cred.type !== "api_key" && cred.type !== "oauth") {
+			const invalidType: string = (cred as { type: string }).type;
 			this.recordError(
 				new Error(
 					`Invalid auth.json entry for provider "${providerId}": ` +
-						`type must be "api_key" or "oauth", got "${String(cred.type)}"`,
+						`type must be "api_key" or "oauth", got "${invalidType}"`,
 				),
 			);
 		}

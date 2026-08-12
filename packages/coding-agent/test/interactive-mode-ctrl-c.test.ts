@@ -197,8 +197,13 @@ describe("InteractiveMode interrupt shortcuts", () => {
 	it("clears the exit hint after two seconds", async () => {
 		const mode = createInteractiveFake({ editorText: "draft" });
 
+		// First Ctrl+C with idle content: clears the prompt (per the Ctrl+C behaviour
+		// matrix: editor has content + idle → clear, no exit hint shown yet).
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
-		expect(mode.editor.getText()).toBe("draft");
+		expect(mode.editor.getText()).toBe("");
+
+		// Second Ctrl+C with empty editor: shows the exit hint.
+		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
 		expect(Reflect.get(InteractiveMode.prototype, "getTrayOverrideLabel").call(mode)).toBe(
 			"Press Ctrl+C again to exit",
 		);
@@ -210,12 +215,12 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		expect(mode.ui.requestRender).toHaveBeenCalled();
 	});
 
-	it("preserves idle draft input on first Ctrl+C", () => {
+	it("clears idle draft input on first Ctrl+C without aborting or shutting down", () => {
 		const mode = createInteractiveFake({ editorText: "draft" });
 
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
 
-		expect(mode.editor.getText()).toBe("draft");
+		expect(mode.editor.getText()).toBe("");
 		expect(mode.agentConnection.abort).not.toHaveBeenCalled();
 		expect(mode.shutdown).not.toHaveBeenCalled();
 	});
