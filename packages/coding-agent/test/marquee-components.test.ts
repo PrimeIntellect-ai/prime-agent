@@ -148,7 +148,7 @@ describe("marquee TUI components", () => {
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
 		expect(collapsed).toContain("cat /tmp/missing-file");
-		expect(collapsed).toContain("CalledProcessError · Ctrl+O to expand");
+		expect(collapsed).toContain("CalledProcessError · (Ctrl+O to expand)");
 		expect(collapsed).not.toContain("No such file or directory");
 		expect(collapsed).not.toContain("returned non-zero exit status 1.");
 		expect(collapsed).not.toContain("traceback collapsed");
@@ -183,7 +183,7 @@ describe("marquee TUI components", () => {
 		const component = new IPythonCellComponent(state);
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
-		expect(collapsed).toContain("RuntimeError · Ctrl+O to expand");
+		expect(collapsed).toContain("RuntimeError · (Ctrl+O to expand)");
 		expect(collapsed).not.toContain("no output");
 		expect(collapsed).not.toContain("/tmp/internal.py");
 		expect(collapsed).not.toContain("line 12");
