@@ -4,7 +4,7 @@ import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
+import { expandCollapseHint } from "../../modes/interactive/components/keybinding-hints.js";
 import type { ToolDefinition } from "../extensions/types.js";
 import {
 	applyEditsToNormalizedContent,
@@ -259,9 +259,7 @@ function buildEditCallComponent(
 	component.clear();
 	const canExpand = component.preview !== undefined && !("error" in component.preview);
 	const expandHint =
-		canExpand && showExpandHint
-			? `${theme.fg("dim", " · ")}${keyHint("app.tools.expand", expanded ? "to collapse" : "to expand")}`
-			: "";
+		canExpand && showExpandHint ? `${theme.fg("dim", " · ")}${expandCollapseHint("app.tools.expand", expanded)}` : "";
 	component.addChild(new Text(`${formatEditCall(args, theme)}${expandHint}`, 0, 0));
 
 	const body =
