@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Fixed interrupted-session worker recovery leaving unresolved tool calls open in the transcript: the latest assistant turn's open tool calls are now closed with synthetic error tool results before marking the session recovered; the results state that the tool result and side effects are unknown and were not replayed, so the agent inspects external side effects before retrying.
 
 ## [0.7.2] - 2026-08-11
 

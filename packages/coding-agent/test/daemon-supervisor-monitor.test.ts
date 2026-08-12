@@ -3192,6 +3192,73 @@ describe("daemon worker supervisor monitoring", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("keeps the recovery journal busy when the catalog mark fails", async () => {
+		type RecoveryWorker = {
+			descriptor: {
+				workerId: string;
+				pid: number;
+				rootActiveSessionId: string;
+				recoveryJournalPath: string;
+				orphanProcessJournalPath: string;
+			};
+		};
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-fail-test-"));
+		const journalPath = join(root, "worker.recovery.jsonl");
+		const orphanJournalPath = join(root, "worker.orphans.jsonl");
+		writeFileSync(
+			orphanJournalPath,
+			`${JSON.stringify({
+				version: 1,
+				pid: 987_654,
+				ownerPid: process.pid,
+				processStartId: "reused-process",
+				active: true,
+				recordedAt: new Date().toISOString(),
+			})}\n`,
+		);
+		const journal = new WorkerRecoveryJournal(journalPath);
+		journal.record({
+			activeSessionId: "root-active",
+			sessionId: "root-session",
+			sessionFile: "/tmp/root.jsonl",
+			busy: true,
+			operation: "tool_execution",
+		});
+		const worker: RecoveryWorker = {
+			descriptor: {
+				workerId: "worker-1",
+				pid: process.pid,
+				rootActiveSessionId: "root-active",
+				recoveryJournalPath: journalPath,
+				orphanProcessJournalPath: orphanJournalPath,
+			},
+		};
+		const markInterrupted = vi.fn(async () => {
+			throw new Error("catalog unavailable");
+		});
+		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			catalog: { markInterrupted },
+			log: vi.fn(),
+			assertRecoveryAllowed: vi.fn(async () => {}),
+		}) as {
+			recoverUncertainWorkerOperations(worker: RecoveryWorker, killWorkerProcess: boolean): Promise<void>;
+		};
+
+		try {
+			await expect(supervisor.recoverUncertainWorkerOperations(worker, false)).rejects.toThrow(
+				"catalog unavailable",
+			);
+			expect(markInterrupted).toHaveBeenCalledOnce();
+			expect(WorkerRecoveryJournal.readLatest(journalPath)).toEqual([
+				expect.objectContaining({ activeSessionId: "root-active", busy: true, operation: "tool_execution" }),
+			]);
+		} finally {
+			kill.mockRestore();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 	it.each([
 		{ name: "malformed data", data: undefined, error: /invalid update manifest/ },
 		{

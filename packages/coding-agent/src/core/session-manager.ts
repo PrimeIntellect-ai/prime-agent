@@ -1,5 +1,13 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	ServiceTier,
+	TextContent,
+	ToolResultMessage,
+	Usage,
+} from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -1499,6 +1507,78 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Append a message, undoing the append if persistence fails. */
+	appendMessageWithRollback(message: Message | CustomMessage | BashExecutionMessage): string {
+		return this._appendEntryWithRollback(() => this.appendMessage(message));
+	}
+
+	/**
+	 * Close unresolved tool calls in the terminal assistant tool-use turn of the
+	 * active branch by appending rollback-capable synthetic error toolResult
+	 * messages. Older turns and already-resolved calls are left untouched.
+	 * Returns the number of tool calls closed.
+	 */
+	closeUnresolvedToolCalls(): number {
+		const branch = this.getBranch();
+		let turnIndex = -1;
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				turnIndex = i;
+				break;
+			}
+		}
+		if (turnIndex === -1) {
+			return 0;
+		}
+		const turn = branch[turnIndex] as SessionMessageEntry;
+		if (
+			turn.message.role !== "assistant" ||
+			turn.message.stopReason !== "toolUse" ||
+			!hasToolCallBlocks(turn.message)
+		) {
+			return 0;
+		}
+		const open: InterruptedToolCall[] = [];
+		const seen = new Set<string>();
+		for (const block of turn.message.content) {
+			if (!block || block.type !== "toolCall") {
+				continue;
+			}
+			if (typeof block.id !== "string" || typeof block.name !== "string") {
+				continue;
+			}
+			if (seen.has(block.id)) {
+				continue;
+			}
+			seen.add(block.id);
+			open.push({ toolCallId: block.id, toolName: block.name });
+		}
+		const resolved = new Set<string>();
+		for (let i = turnIndex + 1; i < branch.length; i++) {
+			const entry = branch[i];
+			if (entry.type !== "message" || entry.message.role !== "toolResult") {
+				continue;
+			}
+			const result = entry.message as ToolResultMessage;
+			if (typeof result.toolCallId === "string") {
+				resolved.add(result.toolCallId);
+			}
+		}
+		const closed = open.filter((call) => !resolved.has(call.toolCallId));
+		for (const call of closed) {
+			this.appendMessageWithRollback({
+				role: "toolResult",
+				toolCallId: call.toolCallId,
+				toolName: call.toolName,
+				content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
+				isError: true,
+				timestamp: Date.now(),
+			});
+		}
+		return closed.length;
+	}
+
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
 	appendThinkingLevelChange(thinkingLevel: string): string {
 		const entry: ThinkingLevelChangeEntry = {
@@ -2321,4 +2401,24 @@ export class SessionManager {
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}
+}
+
+/**
+ * Synthetic toolResult content appended when an interrupted session worker
+ * leaves a terminal assistant tool-use turn unclosed. The wording states
+ * explicitly that whether the tool executed, its result, and any external side
+ * effects are unknown, that recovery did not replay the interrupted execution,
+ * and that the agent must inspect side effects before retrying.
+ */
+const INTERRUPTED_TOOL_RESULT_TEXT =
+	"The tool call was interrupted when the session worker stopped: whether the tool executed, its result, and any external side effects are unknown, and the interrupted execution was not replayed by recovery. Inspect external side effects before retrying this tool call.";
+
+/** A terminal assistant-turn tool call closed by interrupted-tool recovery. */
+interface InterruptedToolCall {
+	toolCallId: string;
+	toolName: string;
+}
+
+function hasToolCallBlocks(message: AssistantMessage): boolean {
+	return message.content.some((block) => block !== null && block.type === "toolCall");
 }

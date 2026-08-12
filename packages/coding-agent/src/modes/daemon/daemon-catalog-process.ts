@@ -266,15 +266,7 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				return;
 			}
 			case "mark_interrupted":
-				SessionManager.open(request.sessionPath).appendCustomMessageEntry(
-					"prime-agent.worker_recovery",
-					"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
-					false,
-					{
-						activeSessionId: request.activeSessionId,
-						operations: request.operations,
-					},
-				);
+				markSessionInterrupted(request.sessionPath, request.activeSessionId, request.operations);
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
 				return;
 			case "shutdown":
@@ -290,6 +282,27 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 			error: error instanceof Error ? error.message : String(error),
 		});
 	}
+}
+
+/**
+ * Persist interrupted-session recovery state for a session file: close every
+ * unresolved tool call in the terminal assistant tool-use turn with synthetic
+ * error toolResult messages, then append the prime-agent.worker_recovery marker.
+ * Synthetic results are appended first so they are persisted before the marker.
+ * Exported for focused daemon catalog tests.
+ */
+export function markSessionInterrupted(sessionPath: string, activeSessionId: string, operations: string[]): void {
+	const session = SessionManager.open(sessionPath);
+	session.closeUnresolvedToolCalls();
+	session.appendCustomMessageEntryWithRollback(
+		"prime-agent.worker_recovery",
+		"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
+		false,
+		{
+			activeSessionId,
+			operations,
+		},
+	);
 }
 
 export class DaemonCatalogClient {
