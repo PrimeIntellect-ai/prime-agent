@@ -567,7 +567,6 @@ function workerDescriptorProcessIdentityMatches(
 	return workerDescriptorProcessIdentityCheck(descriptor) === "match";
 }
 
-
 function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
 	return (
 		eventType === "message_end" ||
@@ -2488,6 +2487,7 @@ export class DaemonSupervisor {
 						// still runs its graceful path and the finalizer keeps
 						// waiting rather than signalling a possibly-recycled pid.
 					}
+				}
 				// A tombstoned worker must not run long enough to elect another
 				// supervisor while its intentional stop is being adopted. Skip the
 				// pre-kill when the pid is held by an unrelated process.
