@@ -623,6 +623,7 @@ type SubmitHandlerHarness = {
 	isBashRunning: () => boolean;
 	patchConnectionState: (patch: Record<string, unknown>) => void;
 	requestAgentsView: () => Promise<void>;
+	handleResumeCommand: (args: string) => Promise<void>;
 	agentConnection: {
 		prompt: (message: string) => Promise<void>;
 		executeBash: (command: string, options?: { excludeFromContext?: boolean }) => Promise<void>;
@@ -642,6 +643,7 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 		patchConnectionState: vi.fn(),
 		promptStashState: {},
 		requestAgentsView: vi.fn(async () => {}),
+		handleResumeCommand: vi.fn(async () => {}),
 		promptStash: undefined,
 		pastedImages: new Map(),
 		getPromptStashImages: vi.fn(() => []),
@@ -1538,13 +1540,14 @@ describe("InteractiveMode connection events", () => {
 		expect(flushPendingBashComponents).toHaveBeenCalledOnce();
 	});
 
-	test("sends /resume as plain prompt text now that the command is retired", async () => {
+	test("routes /resume to the resume command handler", async () => {
 		const fakeThis = createSubmitHandlerHarness();
 
-		await fakeThis.defaultEditor.onSubmit?.("/resume unexpected");
+		await fakeThis.defaultEditor.onSubmit?.("/resume abc123");
 
+		expect(fakeThis.handleResumeCommand).toHaveBeenCalledWith("abc123");
 		expect(fakeThis.showError).not.toHaveBeenCalled();
-		expect(fakeThis.requestAgentsView).not.toHaveBeenCalled();
+		expect(fakeThis.agentConnection.prompt).not.toHaveBeenCalled();
 	});
 
 	test("renderCurrentSessionState waits for replacement handling before rendering", async () => {

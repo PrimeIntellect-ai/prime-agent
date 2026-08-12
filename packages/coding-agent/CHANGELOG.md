@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Restored bare `prime-agent --resume` opening the agents view and the `/resume [id|path]` slash command (bare opens the agents view; with an argument resumes that session in place) ([ENG-5173](https://linear.app/primeintellect/issue/ENG-5173/bring-back-raw-resume-commands-in-prime-agent)).
+
 ## [0.7.2] - 2026-08-11
 
 - Fixed Down Arrow focusing the Agents View entry before moving a nonempty prompt cursor to the end ([ENG-5147](https://linear.app/primeintellect/issue/ENG-5147/keep-down-arrow-in-the-prompt-until-the-cursor-reaches-the-end)).
