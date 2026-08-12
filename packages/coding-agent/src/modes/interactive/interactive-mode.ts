@@ -1086,6 +1086,7 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
+			enableLineSubmit: true,
 			isArgumentCommand: builtinSlashCommandTakesArgument,
 			placeholder: this.startHint,
 			placeholderColor: (text) => theme.fg("dim", text),
@@ -9475,7 +9476,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 		const pageUp = this.getEditorKeyDisplay("tui.editor.pageUp");
 		const pageDown = this.getEditorKeyDisplay("tui.editor.pageDown");
 		const submit = this.getEditorKeyDisplay("tui.input.submit");
-		const slashSubmit = this.getEditorKeyDisplay("tui.input.slashSubmit");
+		const lineSubmit = this.getEditorKeyDisplay("tui.input.lineSubmit");
 		const newLine = this.getEditorKeyDisplay("tui.input.newLine");
 		const deleteWordBackward = this.getEditorKeyDisplay("tui.editor.deleteWordBackward");
 		const deleteWordForward = this.getEditorKeyDisplay("tui.editor.deleteWordForward");
@@ -9521,7 +9522,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 | Key | Action |
 |-----|--------|
 | \`${submit}\` | Send message |
-${slashSubmit ? `| \`${slashSubmit}\` | Send slash command |\n` : ""}| \`${newLine}\` | New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""} |
+${lineSubmit ? `| \`${lineSubmit}\` | Send slash command |\n` : ""}| \`${newLine}\` | New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""} |
 | \`${deleteWordBackward}\` | Delete word backwards |
 | \`${deleteWordForward}\` | Delete word forwards |
 | \`${deleteToLineStart}\` | Delete to start of line |

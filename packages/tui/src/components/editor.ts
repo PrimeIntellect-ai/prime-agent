@@ -240,6 +240,13 @@ export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
 	promptPrefix?: string;
+	/**
+	 * Enable the `tui.input.lineSubmit` keybinding in this editor, which
+	 * submits slash commands (input starting with `/`) at the prompt start.
+	 * Only the main chat input enables this; modals and single-line editors
+	 * keep the binding inert.
+	 */
+	enableLineSubmit?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -341,6 +348,11 @@ export class Editor implements Component, Focusable {
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
 
+	// When true, the `tui.input.lineSubmit` keybinding submits slash commands
+	// (input starting with `/`). Only the main chat input enables this; modals
+	// and single-line editors keep the binding inert.
+	private lineSubmitEnabled: boolean = false;
+
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
 		this.theme = theme;
@@ -348,6 +360,7 @@ export class Editor implements Component, Focusable {
 		this.backgroundColor = theme.backgroundColor;
 		this.autocompleteBackgroundColor = theme.autocompleteBackgroundColor;
 		this.commandColor = theme.commandColor;
+		this.lineSubmitEnabled = options.enableLineSubmit ?? false;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		this.promptPrefix = options.promptPrefix ?? "";
@@ -899,8 +912,12 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// Slash command submit (when input starts with /)
-		if (this.getCurrentSlashCommandContext() !== null && kb.matches(data, "tui.input.slashSubmit")) {
+		// Slash command submit via the lineSubmit key (chat input only, when input starts with /)
+		if (
+			this.lineSubmitEnabled &&
+			kb.matches(data, "tui.input.lineSubmit") &&
+			this.getCurrentSlashCommandContext()?.isAtPromptStart
+		) {
 			if (this.disableSubmit) return;
 			this.submitValue();
 			return;

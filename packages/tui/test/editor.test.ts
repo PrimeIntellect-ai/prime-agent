@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.js";
 import { Editor, wordWrapLine } from "../src/components/editor.js";
+import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.js";
 import { TUI } from "../src/tui.js";
 import { visibleWidth } from "../src/utils.js";
 import { defaultEditorTheme } from "./test-themes.js";
@@ -363,6 +364,68 @@ describe("Editor component", () => {
 			editor.handleInput("\r");
 			// Only the last backslash is removed, newline inserted
 			assert.strictEqual(editor.getText(), "\\\\\n");
+		});
+	});
+
+	describe("Line submit keybinding", () => {
+		// Mirrors a user config where Enter submits slash commands, Ctrl+Enter
+		// submits regular input, and Enter inserts newlines elsewhere.
+		function withLineSubmitBindings(run: () => void): void {
+			const previous = getKeybindings();
+			setKeybindings(
+				new KeybindingsManager(TUI_KEYBINDINGS, {
+					"tui.input.newLine": ["shift+enter", "enter"],
+					"tui.input.submit": ["ctrl+enter"],
+					"tui.input.lineSubmit": ["enter"],
+				}),
+			);
+			try {
+				run();
+			} finally {
+				setKeybindings(previous);
+			}
+		}
+
+		it("submits a slash command with Enter when slash submit is enabled", () => {
+			withLineSubmitBindings(() => {
+				const submitted: string[] = [];
+				const editor = new Editor(createTestTUI(), defaultEditorTheme, { enableLineSubmit: true });
+				editor.onSubmit = (text) => submitted.push(text);
+
+				for (const char of "/help") editor.handleInput(char);
+				editor.handleInput("\r"); // Enter - slash submit
+
+				assert.deepStrictEqual(submitted, ["/help"]);
+				assert.strictEqual(editor.getText(), "");
+			});
+		});
+
+		it("keeps line submit inert in editors that do not enable it", () => {
+			withLineSubmitBindings(() => {
+				const submitted: string[] = [];
+				const editor = new Editor(createTestTUI(), defaultEditorTheme); // enableLineSubmit defaults to false
+				editor.onSubmit = (text) => submitted.push(text);
+
+				for (const char of "/help") editor.handleInput(char);
+				editor.handleInput("\r"); // Enter - newline, not submit
+
+				assert.deepStrictEqual(submitted, []);
+				assert.strictEqual(editor.getText(), "/help\n");
+			});
+		});
+
+		it("does not submit on mid-line slash tokens even when line submit is enabled", () => {
+			withLineSubmitBindings(() => {
+				const submitted: string[] = [];
+				const editor = new Editor(createTestTUI(), defaultEditorTheme, { enableLineSubmit: true });
+				editor.onSubmit = (text) => submitted.push(text);
+
+				for (const char of "see /tmp") editor.handleInput(char);
+				editor.handleInput("\r"); // Enter - newline, not submit
+
+				assert.deepStrictEqual(submitted, []);
+				assert.strictEqual(editor.getText(), "see /tmp\n");
+			});
 		});
 	});
 

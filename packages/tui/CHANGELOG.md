@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added `tui.input.slashSubmit` keybinding for submitting slash commands with a dedicated key.
+- Added `tui.input.lineSubmit` keybinding for submitting single-line inputs and slash commands in the chat input with a dedicated key.
 
 ## [0.7.1] - 2026-08-07
 

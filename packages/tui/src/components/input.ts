@@ -100,8 +100,9 @@ export class Input implements Component, Focusable {
 			return;
 		}
 
-		// Submit
-		if (kb.matches(data, "tui.input.submit") || data === "\n") {
+		// Submit (single-line inputs submit on the lineSubmit key too, so a
+		// binding like Enter keeps working when the regular submit key is remapped)
+		if (kb.matches(data, "tui.input.submit") || kb.matches(data, "tui.input.lineSubmit") || data === "\n") {
 			if (this.onSubmit) this.onSubmit(this.value);
 			return;
 		}

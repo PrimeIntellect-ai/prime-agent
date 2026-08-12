@@ -30,7 +30,7 @@ export interface Keybindings {
 	// Generic input actions
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
-	"tui.input.slashSubmit": true;
+	"tui.input.lineSubmit": true;
 	"tui.input.tab": true;
 	"tui.input.copy": true;
 	// Fullscreen transcript viewport
@@ -123,7 +123,7 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.undo": { defaultKeys: "ctrl+-", description: "Undo" },
 	"tui.input.newLine": { defaultKeys: "shift+enter", description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },
-	"tui.input.slashSubmit": { defaultKeys: [], description: "Submit slash command" },
+	"tui.input.lineSubmit": { defaultKeys: [], description: "Submit single-line input or slash command" },
 	"tui.input.tab": { defaultKeys: "tab", description: "Tab / autocomplete" },
 	"tui.input.copy": { defaultKeys: "ctrl+c", description: "Copy selection" },
 	"tui.viewport.pageUp": {

@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Input } from "../src/components/input.js";
+import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.js";
 import { visibleWidth } from "../src/utils.js";
 
 describe("Input component", () => {
@@ -23,6 +24,33 @@ describe("Input component", () => {
 
 		// Input is single-line, no backslash+Enter workaround
 		assert.strictEqual(submitted, "hello\\");
+	});
+
+	it("submits on the lineSubmit key even when the regular submit key is remapped", () => {
+		// Mirrors a user config where Enter (lineSubmit) submits single-line
+		// inputs while the regular submit key is remapped to Ctrl+Enter.
+		const previous = getKeybindings();
+		setKeybindings(
+			new KeybindingsManager(TUI_KEYBINDINGS, {
+				"tui.input.newLine": ["shift+enter", "enter"],
+				"tui.input.submit": ["ctrl+enter"],
+				"tui.input.lineSubmit": ["enter"],
+			}),
+		);
+		try {
+			const input = new Input();
+			let submitted: string | undefined;
+			input.onSubmit = (value) => {
+				submitted = value;
+			};
+
+			for (const char of "not a slash") input.handleInput(char);
+			input.handleInput("\r"); // Enter - lineSubmit
+
+			assert.strictEqual(submitted, "not a slash");
+		} finally {
+			setKeybindings(previous);
+		}
 	});
 
 	it("inserts backslash as regular character", () => {

@@ -56,7 +56,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 |--------|---------|-------------|
 | `tui.input.newLine` | `shift+enter` | Insert new line |
 | `tui.input.submit` | `enter` | Submit input |
-| `tui.input.slashSubmit` | *(none)* | Submit slash command |
+| `tui.input.lineSubmit` | *(none)* | Submit single-line inputs and slash commands in the chat input |
 | `tui.input.tab` | `tab` | Tab / autocomplete |
 
 ### TUI Kill Ring
