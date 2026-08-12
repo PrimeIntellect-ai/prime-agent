@@ -759,7 +759,7 @@ export class TUI extends Container {
 	// (Ghostty only refreshes link hover when reporting is off or shift is held),
 	// so clicks the TUI consumes must open OSC 8 hyperlinks itself.
 	private openHyperlink(url: string): void {
-		if (/[\x00-\x1f\x7f]/.test(url)) return;
+		if (/\p{Cc}/u.test(url)) return;
 		let href: string;
 		try {
 			const parsed = new URL(url);

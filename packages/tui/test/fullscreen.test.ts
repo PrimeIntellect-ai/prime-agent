@@ -1059,7 +1059,8 @@ describe("TUI fullscreen mode", () => {
 		const transcript = lines(20);
 		transcript[12] =
 			"\x1b]8;;https://example.com/\x00bad\x1b\\nul\x1b]8;;\x1b\\ " +
-			"\x1b]8;;https://[invalid\x1b\\malformed\x1b]8;;\x1b\\";
+			"\x1b]8;;https://[invalid\x1b\\malformed\x1b]8;;\x1b\\ " +
+			"\x1b]8;;https://example.com/\u0085bad\x1b\\c1\x1b]8;;\x1b\\";
 		const { terminal, tui, chat, dock } = setup(transcript);
 		const opened: string[] = [];
 		tui.onOpenUrl = (url) => opened.push(url);
@@ -1070,6 +1071,8 @@ describe("TUI fullscreen mode", () => {
 		terminal.sendInput("\x1b[<0;1;1m");
 		terminal.sendInput("\x1b[<0;6;1M");
 		terminal.sendInput("\x1b[<0;6;1m");
+		terminal.sendInput("\x1b[<0;15;1M");
+		terminal.sendInput("\x1b[<0;15;1m");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(opened, []);
 
