@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed hyperlinks not being clickable in fullscreen mode on terminals that gate native link handling while mouse reporting is active (e.g. Ghostty); left-clicking a link now opens it directly.
+- Added `ctrl+backspace` and `ctrl+delete` as word delete shortcuts, alongside the existing `ctrl+w`, `alt+backspace`, `alt+d` and `alt+delete`.
 
 ## [0.7.2] - 2026-08-11
 

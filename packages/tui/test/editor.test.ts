@@ -1445,6 +1445,23 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "hello SINGLEworld");
 		});
 
+		it("Ctrl+Backspace deletes the word before the cursor", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+
+			editor.handleInput("\x1b[127;5u"); // ctrl+backspace, kitty encoding
+			assert.strictEqual(editor.getText(), "hello ");
+		});
+
+		it("Ctrl+Delete deletes the word after the cursor", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("hello world");
+			editor.handleInput("\x01"); // Ctrl+A - go to start
+
+			editor.handleInput("\x1b[3;5~"); // ctrl+delete
+			assert.strictEqual(editor.getText(), " world");
+		});
+
 		it("Alt+D deletes word forward and saves to kill ring", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

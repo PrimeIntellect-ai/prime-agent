@@ -113,12 +113,12 @@ export const TUI_KEYBINDINGS = {
 		defaultKeyScope: "editor",
 	},
 	"tui.editor.deleteWordBackward": {
-		defaultKeys: ["ctrl+w", "alt+backspace"],
+		defaultKeys: ["ctrl+w", "ctrl+backspace", "alt+backspace"],
 		description: "Delete word backward",
 		defaultKeyScope: "editor",
 	},
 	"tui.editor.deleteWordForward": {
-		defaultKeys: ["alt+d", "alt+delete"],
+		defaultKeys: ["alt+d", "ctrl+delete", "alt+delete"],
 		description: "Delete word forward",
 		defaultKeyScope: "editor",
 	},
