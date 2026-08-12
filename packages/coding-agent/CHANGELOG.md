@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added live OpenRouter model discovery so the model browser reflects OpenRouter’s current catalog, with the generated snapshot retained as an offline/failure fallback.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11

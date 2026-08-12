@@ -32,6 +32,7 @@ export async function listModels(modelRegistry: ModelRegistry, searchPattern?: s
 		console.error(chalk.yellow(`Warning: errors loading models.json:\n${loadError}`));
 	}
 
+	await modelRegistry.refreshOpenRouterModels();
 	const models = await modelRegistry.refreshAvailableModels();
 
 	if (models.length === 0) {

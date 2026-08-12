@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { parseOpenRouterModels } from "../src/openrouter-models.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
@@ -15,7 +16,6 @@ import {
 import {
 	Api,
 	type AnthropicMessagesCompat,
-	KnownProvider,
 	Model,
 	type OpenAICompletionsCompat,
 } from "../src/types.js";
@@ -747,60 +747,7 @@ function fetchOpenRouterCatalog(): Promise<any[]> {
 
 async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 	try {
-		const models: Model<any>[] = [];
-
-		for (const model of await fetchOpenRouterCatalog()) {
-			// Only include models that support tools
-			if (!model.supported_parameters?.includes("tools")) continue;
-			// :batch routes are asynchronous batch variants, not streaming models
-			if (model.id.endsWith(":batch")) continue;
-
-			// Parse provider from model ID
-			let provider: KnownProvider = "openrouter";
-			let modelKey = model.id;
-
-			modelKey = model.id; // Keep full ID for OpenRouter
-
-			// Parse input modalities
-			const input: ("text" | "image")[] = ["text"];
-			if (model.architecture?.modality?.includes("image")) {
-				input.push("image");
-			}
-
-			// Convert pricing from $/token to $/million tokens. OpenRouter uses
-			// negative values as a placeholder for unknown pricing (e.g. auto-beta).
-			const inputCost = Math.max(0, parseFloat(model.pricing?.prompt || "0")) * 1_000_000;
-			const outputCost = Math.max(0, parseFloat(model.pricing?.completion || "0")) * 1_000_000;
-			const cacheReadCost = Math.max(0, parseFloat(model.pricing?.input_cache_read || "0")) * 1_000_000;
-			const cacheWriteCost = Math.max(0, parseFloat(model.pricing?.input_cache_write || "0")) * 1_000_000;
-			const reasoningCapabilities = getOpenRouterReasoningCapabilities(model);
-
-			const normalizedModel: Model<any> = {
-				id: modelKey,
-				name: model.name,
-				api: "openai-completions",
-				baseUrl: "https://openrouter.ai/api/v1",
-				provider,
-				reasoning: model.supported_parameters?.includes("reasoning") || false,
-				...(reasoningCapabilities?.thinkingLevelMap
-					? { thinkingLevelMap: reasoningCapabilities.thinkingLevelMap }
-					: {}),
-				...(reasoningCapabilities?.supportsReasoningEffort === false
-					? { compat: { supportsReasoningEffort: false } }
-					: {}),
-				input,
-				cost: {
-					input: inputCost,
-					output: outputCost,
-					cacheRead: cacheReadCost,
-					cacheWrite: cacheWriteCost,
-				},
-				contextWindow: model.context_length || 4096,
-				maxTokens: model.top_provider?.max_completion_tokens || 4096,
-			};
-			models.push(normalizedModel);
-		}
-
+		const models = parseOpenRouterModels(await fetchOpenRouterCatalog());
 		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
 		return models;
 	} catch (error) {

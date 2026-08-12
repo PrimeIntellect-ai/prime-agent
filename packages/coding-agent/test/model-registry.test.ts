@@ -4,9 +4,10 @@ import { join } from "node:path";
 import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
+import { resetOpenRouterModelCache } from "../src/core/openrouter-model-catalog.js";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -25,6 +26,8 @@ describe("ModelRegistry", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		clearApiKeyCache();
+		resetOpenRouterModelCache();
+		vi.unstubAllGlobals();
 	});
 
 	/** Create minimal provider config  */
@@ -1123,6 +1126,10 @@ describe("ModelRegistry", () => {
 
 	describe("auth refresh across processes", () => {
 		test("model catalog includes unauthenticated public models and hides private Prime routes", async () => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })),
+			);
 			const savedPrimeApiKey = process.env.PRIME_API_KEY;
 			const savedOpenAiApiKey = process.env.OPENAI_API_KEY;
 			delete process.env.PRIME_API_KEY;
