@@ -41,7 +41,7 @@ export function defaultDaemonSocketPath(): string {
 }
 
 export async function acquireDaemonSocketPathLease(socketPath: string): Promise<DaemonSocketPathLease | undefined> {
-	ensureDefaultDaemonSocketDir(socketPath);
+	ensureDaemonSocketDir(socketPath);
 	if (process.platform === "win32") {
 		return undefined;
 	}
@@ -60,7 +60,7 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 }
 
 export async function prepareDaemonSocketPath(socketPath: string, lease?: DaemonSocketPathLease): Promise<void> {
-	ensureDefaultDaemonSocketDir(socketPath);
+	ensureDaemonSocketDir(socketPath);
 
 	if (process.platform === "win32") {
 		return;
@@ -216,25 +216,35 @@ export function defaultDaemonSocketDir(): string {
 	return join(tmpdir(), `prime-agent-${suffix}`);
 }
 
-function ensureDefaultDaemonSocketDir(socketPath: string): void {
-	if (process.platform === "win32" || dirname(socketPath) !== defaultDaemonSocketDir()) {
+function ensureDaemonSocketDir(socketPath: string): void {
+	if (process.platform === "win32") {
 		return;
 	}
 
-	if (!existsSync(defaultDaemonSocketDir())) {
-		mkdirSync(defaultDaemonSocketDir(), { recursive: true, mode: DAEMON_SOCKET_DIR_MODE });
+	const socketDir = dirname(socketPath);
+	const defaultDir = defaultDaemonSocketDir();
+
+	// Custom --daemon-socket paths still need their parent created: proper-lockfile
+	// does a non-recursive mkdir('<socket>.lock') and will ENOENT otherwise.
+	if (socketDir !== defaultDir) {
+		mkdirSync(socketDir, { recursive: true, mode: DAEMON_SOCKET_DIR_MODE });
+		return;
 	}
 
-	const stat = lstatSync(defaultDaemonSocketDir());
+	if (!existsSync(defaultDir)) {
+		mkdirSync(defaultDir, { recursive: true, mode: DAEMON_SOCKET_DIR_MODE });
+	}
+
+	const stat = lstatSync(defaultDir);
 	if (!stat.isDirectory()) {
-		throw new Error(`Daemon socket directory exists and is not a directory: ${defaultDaemonSocketDir()}`);
+		throw new Error(`Daemon socket directory exists and is not a directory: ${defaultDir}`);
 	}
 
 	if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-		throw new Error(`Daemon socket directory is not owned by the current user: ${defaultDaemonSocketDir()}`);
+		throw new Error(`Daemon socket directory is not owned by the current user: ${defaultDir}`);
 	}
 
-	chmodSync(defaultDaemonSocketDir(), DAEMON_SOCKET_DIR_MODE);
+	chmodSync(defaultDir, DAEMON_SOCKET_DIR_MODE);
 }
 
 function canConnectToUnixSocket(socketPath: string): Promise<boolean> {

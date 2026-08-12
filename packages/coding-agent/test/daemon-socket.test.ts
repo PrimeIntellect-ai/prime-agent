@@ -6,7 +6,9 @@ import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { describe, expect, it } from "vitest";
 import {
+	acquireDaemonSocketPathLease,
 	cleanupDaemonSocketPath,
+	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
 	prepareDaemonSocketPath,
@@ -243,6 +245,48 @@ describe("defaultDaemonSocketPath", () => {
 				await new Promise<void>((resolve) => replacementServer.close(() => resolve()));
 			}
 			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("creates a missing parent directory for a custom socket path", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		const outer = mkdtempSync(join(tmpdir(), "pa-socket-custom-outer-"));
+		const missingParent = join(outer, "missing", "nested");
+		const socketPath = join(missingParent, "daemon.sock");
+		let lease: Awaited<ReturnType<typeof acquireDaemonSocketPathLease>>;
+		try {
+			expect(existsSync(missingParent)).toBe(false);
+
+			lease = await acquireDaemonSocketPathLease(socketPath);
+
+			expect(existsSync(missingParent)).toBe(true);
+			expect(lease?.socketPath).toBe(socketPath);
+		} finally {
+			await lease?.release();
+			rmSync(outer, { recursive: true, force: true });
+		}
+	});
+
+	it("still prepares the default daemon socket directory", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		// Unique socket name: a live daemon on the dev machine holds the lock on
+		// daemon.sock itself, which would make this test flaky there.
+		const socketPath = join(defaultDaemonSocketDir(), "test-daemon.sock");
+		const dir = dirname(socketPath);
+		let lease: Awaited<ReturnType<typeof acquireDaemonSocketPathLease>>;
+		try {
+			lease = await acquireDaemonSocketPathLease(socketPath);
+
+			expect(existsSync(dir)).toBe(true);
+			expect(lease?.socketPath).toBe(socketPath);
+		} finally {
+			await lease?.release();
 		}
 	});
 });
