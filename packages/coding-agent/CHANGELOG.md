@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed the builtin herdr reporter never registering a resumable session ref: reports now carry both `agent_session_id` and `agent_session_path`, since herdr only accepts the id for the `prime-agent` label ([#1260](https://github.com/PrimeIntellect-ai/prime-agent/issues/1260)).
+
 ## [0.7.2] - 2026-08-11
 
 - Fixed Down Arrow focusing the Agents View entry before moving a nonempty prompt cursor to the end ([ENG-5147](https://linear.app/primeintellect/issue/ENG-5147/keep-down-arrow-in-the-prompt-until-the-cursor-reaches-the-end)).

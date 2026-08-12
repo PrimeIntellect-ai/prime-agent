@@ -203,6 +203,7 @@ describe("herdrAgentStateExtension", () => {
 		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, parentCtx);
 		await waitForRequests(1);
 		expect(requests[0]?.params.agent_session_path).toBe("/tmp/parent.jsonl");
+		expect(requests[0]?.params.agent_session_id).toBe("parent");
 
 		// Inline RLM children rebind the same handlers with their own ctx; their
 		// events must not flip the pane state or release the parent's pane.
@@ -256,6 +257,7 @@ describe("herdrAgentStateExtension", () => {
 		expect(requests[0]?.params.pane_id).toBe("w1:p1");
 		expect(requests[0]?.params.state).toBe("idle");
 		expect(requests[0]?.params.agent_session_path).toBe("/tmp/session.jsonl");
+		expect(requests[0]?.params.agent_session_id).toBe("session-1");
 
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
 		await waitForRequests(2);

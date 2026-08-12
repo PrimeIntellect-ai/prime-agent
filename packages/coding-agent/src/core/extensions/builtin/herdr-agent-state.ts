@@ -205,13 +205,14 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 	}
 
 	function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
-		if (currentAgentSessionPath) {
-			return { ...params, agent_session_path: currentAgentSessionPath };
-		}
-		if (currentAgentSessionId) {
-			return { ...params, agent_session_id: currentAgentSessionId };
-		}
-		return params;
+		// Report both identity forms. Herdr's report handler only accepts
+		// agent_session_id for the prime-agent label (path acceptance is
+		// pi/omp-only), so a path-only report never registered the session.
+		return {
+			...params,
+			...(currentAgentSessionId ? { agent_session_id: currentAgentSessionId } : {}),
+			...(currentAgentSessionPath ? { agent_session_path: currentAgentSessionPath } : {}),
+		};
 	}
 
 	function sendState(state: AgentState, message?: string, seq = nextReportSeq()): Promise<void> {
