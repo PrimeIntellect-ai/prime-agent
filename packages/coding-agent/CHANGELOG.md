@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed `prime-agent update` failing with `EALLOWREMOTE` on npm 12 when the release is installed from its tarball URL ([#1272](https://github.com/PrimeIntellect-ai/prime-agent/pull/1272) by [@smwbev](https://github.com/smwbev)).
+
 ## [0.7.2] - 2026-08-11
 
 - Fixed Down Arrow focusing the Agents View entry before moving a nonempty prompt cursor to the end ([ENG-5147](https://linear.app/primeintellect/issue/ENG-5147/keep-down-arrow-in-the-prompt-until-the-cursor-reaches-the-end)).
