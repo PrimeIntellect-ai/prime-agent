@@ -26,6 +26,11 @@ type SessionWithCompactionInternals = {
 		message: string,
 	) => void;
 	_handleAgentEvent: (event: AgentEvent) => void;
+	_notifyKernelStateAfterCompaction: () => Promise<void>;
+	_ipythonKernelProvisioner?: {
+		hasRunningKernel: boolean;
+		listNamespaceNames(signal?: AbortSignal): Promise<string[] | null>;
+	};
 };
 
 function createUsage(totalTokens: number) {
@@ -153,6 +158,33 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("two");
 
 		const result = await harness.session.compact();
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		const stablePrefix = [...harness.session.messages];
+		const stableProviderPayload = structuredClone(
+			(harness.session.messages[0] as { providerPayload?: unknown }).providerPayload,
+		);
+		internals._ipythonKernelProvisioner = {
+			hasRunningKernel: true,
+			async listNamespaceNames() {
+				return [
+					"zeta",
+					"name-12",
+					"name-11",
+					"name-10",
+					"name-09",
+					"name-08",
+					"name-07",
+					"name-06",
+					"name-05",
+					"name-04",
+					"name-03",
+					"name-02",
+					"name-01",
+					"alpha",
+				];
+			},
+		};
+		await internals._notifyKernelStateAfterCompaction();
 		const entry = harness.sessionManager.getEntries().find((candidate) => candidate.type === "compaction");
 
 		expect(nativeCompact).toHaveBeenCalledOnce();
@@ -173,6 +205,22 @@ describe("AgentSession compaction characterization", () => {
 				items: [{ type: "compaction", encrypted_content: "opaque-state" }],
 			},
 		});
+		expect(harness.session.messages.slice(0, stablePrefix.length)).toEqual(stablePrefix);
+		for (const [index, message] of stablePrefix.entries()) {
+			expect(harness.session.messages[index]).toBe(message);
+		}
+		expect((harness.session.messages[0] as { providerPayload?: unknown }).providerPayload).toEqual(
+			stableProviderPayload,
+		);
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "custom",
+			customType: "ipython_state",
+			display: false,
+		});
+		expect(getMessageText(harness.session.messages.at(-1)!)).toContain(
+			"These names are still defined: alpha, name-01, name-02, name-03, name-04, name-05, name-06, name-07, name-08, name-09, name-10, name-11 (+2 more).",
+		);
+		expect(getMessageText(harness.session.messages.at(-1)!)).not.toContain("zeta");
 		const reloaded = SessionManager.open(harness.session.sessionFile!);
 		expect(reloaded.buildSessionContext().messages[0]).toMatchObject({
 			role: "compactionSummary",

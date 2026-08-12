@@ -40,7 +40,23 @@ describe("ENG-4530 IPython state restore message", () => {
 		}
 	});
 
-	it("preserves restore context as a custom message when the next prompt is queued", async () => {
+	it("preserves bounded restore context as a custom message when the next prompt is queued", async () => {
+		const restoredNames = [
+			"zeta",
+			"name-12",
+			"name-11",
+			"name-10",
+			"name-09",
+			"name-08",
+			"name-07",
+			"name-06",
+			"name-05",
+			"name-04",
+			"name-03",
+			"name-02",
+			"name-01",
+			"alpha",
+		];
 		let releaseToolExecution = () => {};
 		const toolRelease = new Promise<void>((resolve) => {
 			releaseToolExecution = resolve;
@@ -63,7 +79,9 @@ describe("ENG-4530 IPython state restore message", () => {
 			fauxAssistantMessage("original turn complete"),
 			(context) => {
 				providerSawRestoreContext = context.messages.some((message) =>
-					getMessageText(message).includes("These names are available again: alpha, beta."),
+					getMessageText(message).includes(
+						"These names are available again: alpha, name-01, name-02, name-03, name-04, name-05, name-06, name-07, name-08, name-09, name-10, name-11 (+2 more).",
+					),
 				);
 				return fauxAssistantMessage("queued turn complete");
 			},
@@ -79,13 +97,15 @@ describe("ENG-4530 IPython state restore message", () => {
 
 		const firstPrompt = harness.session.prompt("start");
 		await toolStarted;
+		const stablePrefix = [...harness.session.messages];
 		(harness.session as unknown as StateRestoreHost)._onIpythonStateRestored({
-			restored: ["alpha", "beta"],
+			restored: restoredNames,
 			failed: [],
 			path: "/tmp/kernel-state.dill",
 		});
 		await harness.session.prompt("stop the heartbeat", { streamingBehavior: "followUp" });
 
+		expect(harness.session.messages.slice(0, stablePrefix.length)).toEqual(stablePrefix);
 		const [queued] = harness.session.getSessionActionRecoverySnapshot().actions;
 		expect(queued?.payload.kind === "turn" ? queued.payload.content : undefined).toEqual([
 			{ type: "text", text: "stop the heartbeat" },
