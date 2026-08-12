@@ -9,6 +9,8 @@ describe("fullscreen mode settings", () => {
 	const agentDir = join(testDir, "agent");
 	const projectDir = join(testDir, "project");
 	let savedEnv: string | undefined;
+	let savedTermProgram: string | undefined;
+	let savedGhosttyResourcesDir: string | undefined;
 
 	beforeEach(() => {
 		if (existsSync(testDir)) {
@@ -17,7 +19,11 @@ describe("fullscreen mode settings", () => {
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
 		savedEnv = process.env.PI_FULLSCREEN;
+		savedTermProgram = process.env.TERM_PROGRAM;
+		savedGhosttyResourcesDir = process.env.GHOSTTY_RESOURCES_DIR;
 		delete process.env.PI_FULLSCREEN;
+		delete process.env.TERM_PROGRAM;
+		delete process.env.GHOSTTY_RESOURCES_DIR;
 	});
 
 	afterEach(() => {
@@ -29,11 +35,28 @@ describe("fullscreen mode settings", () => {
 		} else {
 			process.env.PI_FULLSCREEN = savedEnv;
 		}
+		if (savedTermProgram === undefined) delete process.env.TERM_PROGRAM;
+		else process.env.TERM_PROGRAM = savedTermProgram;
+		if (savedGhosttyResourcesDir === undefined) delete process.env.GHOSTTY_RESOURCES_DIR;
+		else process.env.GHOSTTY_RESOURCES_DIR = savedGhosttyResourcesDir;
 	});
 
 	it("defaults to on with mouse enabled", () => {
 		const manager = SettingsManager.create(projectDir, agentDir);
 		expect(manager.getFullscreen()).toBe(true);
+		expect(manager.getFullscreenMouse()).toBe(true);
+	});
+
+	it("preserves native Ghostty link clicks by disabling mouse capture by default", () => {
+		process.env.TERM_PROGRAM = "ghostty";
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getFullscreenMouse()).toBe(false);
+	});
+
+	it("honors an explicit fullscreen mouse setting in Ghostty", () => {
+		process.env.GHOSTTY_RESOURCES_DIR = "/Applications/Ghostty.app/Contents/Resources/ghostty";
+		const manager = SettingsManager.create(projectDir, agentDir);
+		manager.setFullscreenMouse(true);
 		expect(manager.getFullscreenMouse()).toBe(true);
 	});
 
