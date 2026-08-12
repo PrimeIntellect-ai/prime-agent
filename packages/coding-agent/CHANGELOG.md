@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed the kernel state snapshot silently dropping every Python skill that exposes `run()`, and any user variable referencing one, with `cannot pickle '_PrimeAgentCallableSkillModule' object` ([#1211](https://github.com/PrimeIntellect-ai/prime-agent/issues/1211)).
+
 ## [0.7.2] - 2026-08-11
 
 - Fixed Down Arrow focusing the Agents View entry before moving a nonempty prompt cursor to the end ([ENG-5147](https://linear.app/primeintellect/issue/ENG-5147/keep-down-arrow-in-the-prompt-until-the-cursor-reaches-the-end)).

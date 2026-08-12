@@ -88,6 +88,13 @@ class _PrimeAgentCallableSkillModule(_prime_agent_types.ModuleType):
             return await result
         return result
 
+    # dill pickles modules by reference, but its dispatch is keyed on the exact
+    # type, so this subclass would otherwise fall through to the generic reduce
+    # path and raise TypeError - dropping the skill from the kernel state
+    # snapshot along with any user variable that references it.
+    def __reduce__(self):
+        return (_prime_agent_importlib.import_module, (self.__name__,))
+
 class _PrimeAgentUnavailableSkill:
     def __init__(self, name, error):
         self.__name__ = name

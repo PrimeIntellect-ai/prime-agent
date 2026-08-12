@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
+import { buildRlmBootstrapCode } from "../src/core/tools/ipython.js";
 
 /** Find a python that can launch an ipykernel and has dill, or null to skip. */
 function resolveKernelPython(): string | null {
@@ -155,6 +156,61 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		} finally {
 			await manager.dispose();
 			rmSync(listDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	// Python skills that expose run() are wrapped in a ModuleType subclass by the
+	// bootstrap. dill pickles modules by reference, but its dispatch is keyed on
+	// the exact type, so the subclass used to fall through to the generic reduce
+	// path and raise TypeError - dropping the skill and any user variable holding
+	// a reference to it.
+	it("snapshots callable Python skill modules and the user variables referencing them", async () => {
+		const skillDir = mkdtempSync(join(tmpdir(), "prime-agent-state-skill-"));
+		const srcDir = join(skillDir, "src");
+		mkdirSync(srcDir, { recursive: true });
+		writeFileSync(
+			join(srcDir, "demo_skill.py"),
+			'def run(value):\n    """Double a value."""\n    return value * 2\n',
+		);
+		const cfg = { path: join(skillDir, "skill.dill"), manifestPath: join(skillDir, "skill.json") };
+		const bootstrap = buildRlmBootstrapCode([
+			{
+				name: "demo-skill",
+				importName: "demo_skill",
+				packagePath: skillDir,
+				pyprojectPath: join(skillDir, "pyproject.toml"),
+			},
+		]);
+		const newSkillManager = () =>
+			new KernelManager({ python: python as string, cwd: skillDir, env: { PYTHONPATH: srcDir }, snapshot: cfg });
+
+		const writer = newSkillManager();
+		try {
+			expect((await writer.execute(bootstrap)).status).toBe("ok");
+			await writer.execute("tools = {'doubler': demo_skill}");
+
+			const snap = await writer.snapshotState();
+			expect(snap?.skipped.map((s) => s.name)).not.toContain("demo_skill");
+			expect(snap?.skipped.map((s) => s.name)).not.toContain("tools");
+			expect(snap?.saved).toEqual(expect.arrayContaining(["demo_skill", "tools"]));
+		} finally {
+			await writer.dispose();
+		}
+
+		const reader = newSkillManager();
+		try {
+			// Production order: restore revives the namespace, then the bootstrap
+			// overwrites the skill globals with freshly wrapped live handles.
+			const restore = await reader.restoreState();
+			expect(restore?.failed.map((f) => f.name) ?? []).not.toContain("tools");
+			expect(restore?.restored).toEqual(expect.arrayContaining(["demo_skill", "tools"]));
+			expect((await reader.execute(bootstrap)).status).toBe("ok");
+
+			const echo = await reader.execute("print(tools['doubler'].run(21), await demo_skill(3))");
+			expect(echo.stdout.trim()).toBe("42 6");
+		} finally {
+			await reader.dispose();
+			rmSync(skillDir, { recursive: true, force: true });
 		}
 	}, 60_000);
 
