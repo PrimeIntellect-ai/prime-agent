@@ -1214,6 +1214,14 @@ export class AgentSession {
 	private _rlmParentAgent?: string;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
+	/**
+	 * Monotonic epoch of parent-directed work admitted to this session. Every
+	 * accepted direct or queued message from this RLM child's parent (including
+	 * the original rlm() task) binds to the next epoch. A terminal/failure notice
+	 * is emitted only for the latest silent epoch, so a notice belonging to older
+	 * parent work can never fire once newer parent work has been admitted.
+	 */
+	private _parentWorkEpoch = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _pendingRlmSubagentSessionNames = new Set<string>();
@@ -1258,6 +1266,9 @@ export class AgentSession {
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
 	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
+	// Event-driven wakeup for waiters on a timer-scheduled post-compaction
+	// continuation: waitForIdle() alone can return before agent.continue() starts.
+	private _postCompactionContinuationWake?: AgentMessageDeferred;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
@@ -3244,6 +3255,15 @@ export class AgentSession {
 		return outcome;
 	}
 
+	private _registerAgentMessageCompletion(agentMessageId: string): AgentMessageDeferred {
+		if (this._agentMessageOutcomes.get(agentMessageId)?.completion) {
+			throw new Error(`Prompt completion id is already in use: ${agentMessageId}`);
+		}
+		const completion = createAgentMessageDeferred();
+		this._agentMessageOutcome(agentMessageId).completion = completion;
+		return completion;
+	}
+
 	/**
 	 * Register a delivery waiter before submitting the prompt. Delivery outcomes are not retained
 	 * for late lookup, so callers that register after admission may wait for a future use of the id.
@@ -4461,12 +4481,7 @@ export class AgentSession {
 
 	async promptAndWait(text: string, options?: PromptOptions): Promise<void> {
 		const agentMessageId = options?.agentMessageId ?? `prompt-wait:${randomUUID()}`;
-		if (this._agentMessageOutcomes.get(agentMessageId)?.completion) {
-			throw new Error(`Prompt completion id is already in use: ${agentMessageId}`);
-		}
-		const outcome = this._agentMessageOutcome(agentMessageId);
-		outcome.completion = createAgentMessageDeferred();
-		const completion = outcome.completion.promise;
+		const completion = this._registerAgentMessageCompletion(agentMessageId).promise;
 		try {
 			await this.promptUntilAccepted(text, { ...options, agentMessageId });
 			await completion;
@@ -4481,26 +4496,12 @@ export class AgentSession {
 			options?.customMessage && isAgentSessionMessage(options.customMessage) ? options.customMessage : undefined;
 		const agentMessageId =
 			options?.agentMessageId ?? customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
-		// A direct parent message defines a follow-up task for an idle RLM child: its
+		// A direct parent message defines a follow-up task for an RLM child: its
 		// completion must produce either an explicit child reply or a host notice.
-		const parentTarget =
-			customMessage?.details.fromRelationship === "parent" && this._rlmDepth > 0 && this._agentMessageController
-				? (customMessage.details.from?.sessionId ?? customMessage.details.from?.activeSessionId)
-				: undefined;
+		const parentTarget = this._parentMessageTarget(customMessage);
 		if (parentTarget && agentMessageId) {
-			if (this._agentMessageOutcomes.get(agentMessageId)?.completion) {
-				throw new Error(`Prompt completion id is already in use: ${agentMessageId}`);
-			}
-			const parentReplyCountBefore = this._parentReplyCount;
-			const outcome = this._agentMessageOutcome(agentMessageId);
-			const completion = createAgentMessageDeferred();
-			outcome.completion = completion;
-			void completion.promise
-				.then(
-					() => this._reportRetainedFollowUpCompletion(parentTarget, parentReplyCountBefore),
-					(error: Error) => this._reportRetainedFollowUpFailure(parentTarget, parentReplyCountBefore, error),
-				)
-				.catch(() => undefined);
+			const completion = this._registerAgentMessageCompletion(agentMessageId);
+			this._monitorParentWorkCompletion(parentTarget, completion);
 		}
 		try {
 			await this._prompt(text, {
@@ -4525,23 +4526,76 @@ export class AgentSession {
 		customMessage?: AgentSessionMessage,
 	): Promise<boolean> {
 		const agentMessageId = customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
-		if (streamingBehavior === "steer") {
-			await this._queuePreparedPrompt("steer", text, undefined, {
+		const parentTarget = this._parentMessageTarget(customMessage);
+		const parentCompletion =
+			parentTarget && agentMessageId ? this._registerAgentMessageCompletion(agentMessageId) : undefined;
+		void parentCompletion?.promise.catch(() => undefined);
+		try {
+			const queued = await this._queuePreparedPrompt(streamingBehavior, text, undefined, {
 				agentMessageId,
 				message: customMessage,
 			});
+			if (!queued) return false;
+			if (parentTarget && parentCompletion) this._monitorParentWorkCompletion(parentTarget, parentCompletion);
 			if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 			return true;
+		} catch (error) {
+			if (parentCompletion && agentMessageId) {
+				this._settleAgentMessage(agentMessageId, "completion", this._asError(error));
+			}
+			throw error;
 		}
-		const queued = await this._queuePreparedPrompt("followUp", text, undefined, {
-			agentMessageId,
-			message: customMessage,
-		});
-		if (queued && customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
-		return queued;
 	}
 
-	private _reportRetainedFollowUpCompletion(targetSessionId: string, parentReplyCountBefore: number): void {
+	/** Stable parent session target of an agent message, when this session is an RLM child. */
+	private _parentMessageTarget(customMessage: AgentSessionMessage | undefined): string | undefined {
+		return customMessage?.details.fromRelationship === "parent" && this._rlmDepth > 0 && this._agentMessageController
+			? (customMessage.details.from?.sessionId ?? customMessage.details.from?.activeSessionId)
+			: undefined;
+	}
+
+	/**
+	 * Register event-driven completion monitoring for accepted parent-directed
+	 * work. The completion leg settles when the work's action terminates; the
+	 * handler then waits for true session quiescence (including any
+	 * timer-scheduled post-compaction continuation) and re-checks epoch,
+	 * explicit-reply, and disposal state before delivering exactly one
+	 * terminal/failure notice for the latest silent parent-work epoch.
+	 */
+	private _monitorParentWorkCompletion(parentTarget: string, completion: AgentMessageDeferred): void {
+		const parentWorkEpoch = this._bindParentWorkEpoch();
+		const parentReplyCountBefore = this._parentReplyCount;
+		void completion.promise
+			.then(
+				async () => {
+					if (this._disposed || this._disposing) return;
+					await this._waitForRetainedParentQuiescence();
+					this._reportRetainedFollowUpCompletion(parentTarget, parentWorkEpoch, parentReplyCountBefore);
+				},
+				async (error: Error) => {
+					if (this._disposed || this._disposing) return;
+					await this._waitForRetainedParentQuiescence();
+					this._reportRetainedFollowUpFailure(parentTarget, parentWorkEpoch, parentReplyCountBefore, error);
+				},
+			)
+			.catch(() => undefined);
+	}
+
+	/** Bind the next monotonic parent-directed work epoch and return its number. */
+	private _bindParentWorkEpoch(): number {
+		this._parentWorkEpoch += 1;
+		return this._parentWorkEpoch;
+	}
+
+	private _reportRetainedFollowUpCompletion(
+		targetSessionId: string,
+		parentWorkEpoch: number,
+		parentReplyCountBefore: number,
+	): void {
+		if (this._disposed || this._disposing) return;
+		// A newer parent-directed work item supersedes this one: only the latest
+		// silent epoch may emit a terminal notice.
+		if (this._parentWorkEpoch !== parentWorkEpoch) return;
 		if (this._parentReplyCount !== parentReplyCountBefore) return;
 		const lastAssistantText = this.getLastAssistantText();
 		this._deliverRetainedFollowUpNotice(
@@ -4555,7 +4609,14 @@ export class AgentSession {
 		);
 	}
 
-	private _reportRetainedFollowUpFailure(targetSessionId: string, parentReplyCountBefore: number, error: Error): void {
+	private _reportRetainedFollowUpFailure(
+		targetSessionId: string,
+		parentWorkEpoch: number,
+		parentReplyCountBefore: number,
+		error: Error,
+	): void {
+		if (this._disposed || this._disposing) return;
+		if (this._parentWorkEpoch !== parentWorkEpoch) return;
 		if (this._parentReplyCount !== parentReplyCountBefore) return;
 		this._deliverRetainedFollowUpNotice(
 			targetSessionId,
@@ -4579,6 +4640,29 @@ export class AgentSession {
 		} catch {
 			// A failed notice delivery must not surface as an unhandled rejection.
 		}
+	}
+
+	/**
+	 * Event-driven quiescence for retained-parent notices. The public
+	 * waitForIdle() does not cover a timer-scheduled post-compaction continuation
+	 * (agent.continue() starts 100ms later), so also wait for that scheduled
+	 * continuation to start or be cancelled before deciding a silent parent-work
+	 * epoch is terminal. No polling: waiters are woken by the continuation's own
+	 * lifecycle transitions.
+	 */
+	private async _waitForRetainedParentQuiescence(): Promise<void> {
+		while (true) {
+			await this.waitForIdle();
+			if (!this._postCompactionContinuationScheduled) return;
+			this._postCompactionContinuationWake ??= createAgentMessageDeferred();
+			await this._postCompactionContinuationWake.promise;
+		}
+	}
+
+	private _wakePostCompactionContinuationWaiters(): void {
+		const wake = this._postCompactionContinuationWake;
+		this._postCompactionContinuationWake = undefined;
+		wake?.resolve();
 	}
 
 	async promptHeartbeat(job: AgentCronJob, options?: PromptOptions): Promise<void> {
@@ -7348,6 +7432,7 @@ export class AgentSession {
 		}
 		this._postCompactionContinuationScheduled = false;
 		this._scheduledPostCompactionContinuationMessages = [];
+		this._wakePostCompactionContinuationWaiters();
 	}
 
 	private _discardPendingAutoRefine(options: { cancelPostCompactionContinue?: boolean } = {}): void {
@@ -7465,6 +7550,7 @@ export class AgentSession {
 		}
 		if (this.isStreaming || this.isCompacting || this.isRetrying || this._queuedWorkPauses.size > 0) {
 			this._postCompactionContinuationScheduled = false;
+			this._wakePostCompactionContinuationWaiters();
 			this._schedulePostCompactionContinue();
 			return;
 		}
@@ -7481,6 +7567,7 @@ export class AgentSession {
 			await this._sessionInputPump;
 			if (this._postCompactionContinuationScheduled) {
 				this._postCompactionContinuationScheduled = false;
+				this._wakePostCompactionContinuationWaiters();
 				const shouldReschedule =
 					continuationMessages.length === 0
 						? this.unfinishedActionCount > 0
@@ -7496,6 +7583,7 @@ export class AgentSession {
 		}
 
 		this._postCompactionContinuationScheduled = false;
+		this._wakePostCompactionContinuationWaiters();
 		try {
 			await this.agent.continue();
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
@@ -9880,6 +9968,10 @@ export class AgentSession {
 		// retention, cancellation, and late-startup cleanup.
 		void (async () => {
 			let childRuntime: RlmSubagentRuntime | undefined;
+			// Bound when the spawn task is admitted; undefined when the runtime failed
+			// to start (in which case no child session ever existed to accept newer
+			// parent work, so the failure notice still applies).
+			let parentWorkEpochAtRun: number | undefined;
 			try {
 				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
 				const child = childRuntime.session;
@@ -9973,6 +10065,7 @@ export class AgentSession {
 				};
 				throwIfCancelled();
 				const parentReplyCountBeforeRun = child._parentReplyCount;
+				parentWorkEpochAtRun = child._bindParentWorkEpoch();
 				await child.promptAndWait(content, {
 					expandPromptTemplates: false,
 					source: "extension",
@@ -9983,16 +10076,26 @@ export class AgentSession {
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
 				emitChildUpdate();
-				if (!run.detachedDeletion && child._parentReplyCount === parentReplyCountBeforeRun) {
-					const lastAssistantText = child.getLastAssistantText();
-					await deliverTerminalMessageToParent(
-						createRlmChildTerminalNoticeMessage({
-							kind: "completed_without_reply",
-							childId: run.id,
-							sessionName,
-							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
-						}),
-					);
+				if (!run.detachedDeletion) {
+					// A turn action settling is not quiescence: queued session input and
+					// timer-scheduled post-compaction continuations can still restart the
+					// agent. Wait for true idle, then re-check that no newer parent work
+					// was admitted and no explicit reply arrived before noticing.
+					await child._waitForRetainedParentQuiescence();
+					if (
+						child._parentWorkEpoch === parentWorkEpochAtRun &&
+						child._parentReplyCount === parentReplyCountBeforeRun
+					) {
+						const lastAssistantText = child.getLastAssistantText();
+						await deliverTerminalMessageToParent(
+							createRlmChildTerminalNoticeMessage({
+								kind: "completed_without_reply",
+								childId: run.id,
+								sessionName,
+								lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
+							}),
+						);
+					}
 				}
 				if (!this.registerRlmChildSession(run.id, child)) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
@@ -10015,13 +10118,17 @@ export class AgentSession {
 				emitChildUpdate();
 				if (!run.detachedDeletion) {
 					if (run.status === "error") {
-						await deliverTerminalMessageToParent(
-							createRlmChildFailureMessage({
-								childId: run.id,
-								sessionName,
-								error: run.error ?? "unknown error",
-							}),
-						);
+						const parentWorkEpochUnchanged =
+							childSession === undefined || childSession._parentWorkEpoch === parentWorkEpochAtRun;
+						if (parentWorkEpochUnchanged) {
+							await deliverTerminalMessageToParent(
+								createRlmChildFailureMessage({
+									childId: run.id,
+									sessionName,
+									error: run.error ?? "unknown error",
+								}),
+							);
+						}
 					} else if (run.status === "cancelled") {
 						await deliverTerminalMessageToParent(
 							createRlmChildTerminalNoticeMessage({

@@ -11,6 +11,7 @@ import {
 	getModel,
 	type TextContent,
 	type Usage,
+	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -133,6 +134,8 @@ interface InspectableRlmSession {
 	_rlmChildUnsubscribes: Map<string, () => void>;
 	_createKernelHostHandlers(): HostRequestHandlers;
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
+	_schedulePostCompactionContinue(): void;
+	_postCompactionContinuationMessages: AgentMessage[];
 }
 
 interface KernelPumpTestApi {
@@ -1457,6 +1460,257 @@ describe("AgentSession rlm recursion", () => {
 				message: "RLM child followup-worker (silent-followup-child) completed without sending a reply",
 			}),
 		);
+	});
+
+	it("defers a silent child notice until newer queued parent work is idle", async () => {
+		let releaseInitial: () => void = () => {};
+		const initialGate = new Promise<void>((resolve) => {
+			releaseInitial = resolve;
+		});
+		let releaseFollowUp: () => void = () => {};
+		const followUpGate = new Promise<void>((resolve) => {
+			releaseFollowUp = resolve;
+		});
+		let initialStarted = false;
+		let followUpStarted = false;
+		const sendAgentMessage = vi.fn(async () => ({
+			id: "agentmsg-quiescent-notice",
+			source: "agent_message" as const,
+			target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			message: "notice",
+			deliveryStatus: "delivered" as const,
+		}));
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "quiescent-child"),
+			rlmParentNodeId: "quiescent-child",
+			streamFn: (_model, context) => {
+				const stream = createAssistantMessageEventStream();
+				if (userText(context) === "initial task") {
+					initialStarted = true;
+					void initialGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("") });
+					});
+				} else {
+					followUpStarted = true;
+					void followUpGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("") });
+					});
+				}
+				return stream;
+			},
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				sendAgentMessage,
+			},
+		});
+		child.setSessionName("quiescent-worker");
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		await root.runRlmChild("initial task", { name: "quiescent-worker" });
+		await waitFor(() => initialStarted);
+		const followUp = createAgentSessionMessage({
+			id: "agentmsg-newer-parent-work",
+			source: "agent_message",
+			message: "additional review requirement",
+			from: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			fromRelationship: "parent",
+			target: { activeSessionId: "child-active", sessionId: child.sessionId },
+		});
+		await child.queueAgentMessagePrompt(followUp.content as string, "steer", followUp);
+		releaseInitial();
+		await waitFor(() => followUpStarted);
+
+		expect(child.isStreaming).toBe(true);
+		expect(sendAgentMessage).not.toHaveBeenCalled();
+		releaseFollowUp();
+		await child.waitForIdle();
+		await vi.waitFor(() => expect(sendAgentMessage).toHaveBeenCalledTimes(1));
+		expect(sendAgentMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				target: "parent-session",
+				message: "RLM child quiescent-worker (quiescent-child) completed without sending a reply",
+			}),
+		);
+		await sleep(50);
+		expect(sendAgentMessage).toHaveBeenCalledTimes(1);
+	});
+
+	it("emits one notice for the latest of multiple queued parent messages", async () => {
+		let releaseInitial: () => void = () => {};
+		const initialGate = new Promise<void>((resolve) => {
+			releaseInitial = resolve;
+		});
+		let releaseQueuedWork: () => void = () => {};
+		const queuedWorkGate = new Promise<void>((resolve) => {
+			releaseQueuedWork = resolve;
+		});
+		let initialStarted = false;
+		let queuedWorkStarted = false;
+		const sendAgentMessage = vi.fn(async () => ({
+			id: "agentmsg-latest-queued-notice",
+			source: "agent_message" as const,
+			target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			message: "notice",
+			deliveryStatus: "delivered" as const,
+		}));
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "multiple-queued-child"),
+			rlmParentNodeId: "multiple-queued-child",
+			streamFn: (_model, context) => {
+				const stream = createAssistantMessageEventStream();
+				if (userText(context) === "initial task") {
+					initialStarted = true;
+					void initialGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("") });
+					});
+				} else {
+					queuedWorkStarted = true;
+					void queuedWorkGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("") });
+					});
+				}
+				return stream;
+			},
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				sendAgentMessage,
+			},
+		});
+		child.setSessionName("multiple-queued-worker");
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		await root.runRlmChild("initial task", { name: "multiple-queued-worker" });
+		await waitFor(() => initialStarted);
+		for (const [id, message] of [
+			["agentmsg-queued-first", "first queued requirement"],
+			["agentmsg-queued-latest", "latest queued requirement"],
+		] as const) {
+			const parentMessage = createAgentSessionMessage({
+				id,
+				source: "agent_message",
+				message,
+				from: { activeSessionId: "parent-active", sessionId: "parent-session" },
+				fromRelationship: "parent",
+				target: { activeSessionId: "child-active", sessionId: child.sessionId },
+			});
+			await child.queueAgentMessagePrompt(parentMessage.content as string, "steer", parentMessage);
+		}
+		releaseInitial();
+		await waitFor(() => queuedWorkStarted);
+		expect(sendAgentMessage).not.toHaveBeenCalled();
+		releaseQueuedWork();
+		await child.waitForIdle();
+		await vi.waitFor(() => expect(sendAgentMessage).toHaveBeenCalledTimes(1));
+		await sleep(50);
+		expect(sendAgentMessage).toHaveBeenCalledTimes(1);
+	});
+
+	it("defers a silent notice across a scheduled post-compaction continuation", async () => {
+		let releaseInitial: () => void = () => {};
+		const initialGate = new Promise<void>((resolve) => {
+			releaseInitial = resolve;
+		});
+		let releaseContinuation: () => void = () => {};
+		const continuationGate = new Promise<void>((resolve) => {
+			releaseContinuation = resolve;
+		});
+		let run = 0;
+		const sendAgentMessage = vi.fn(async () => ({
+			id: "agentmsg-post-compaction-notice",
+			source: "agent_message" as const,
+			target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			message: "notice",
+			deliveryStatus: "delivered" as const,
+		}));
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "post-compaction-child"),
+			rlmParentNodeId: "post-compaction-child",
+			streamFn: () => {
+				run += 1;
+				const stream = createAssistantMessageEventStream();
+				void (run === 1 ? initialGate : continuationGate).then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("") });
+				});
+				return stream;
+			},
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				sendAgentMessage,
+			},
+		});
+		child.setSessionName("post-compaction-worker");
+		const message = createAgentSessionMessage({
+			id: "agentmsg-post-compaction-parent-work",
+			source: "agent_message",
+			message: "continue through compaction",
+			from: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			fromRelationship: "parent",
+			target: { activeSessionId: "child-active", sessionId: child.sessionId },
+		});
+
+		const admission = child.acceptAgentMessagePrompt(message.content as string, { customMessage: message });
+		await expectSettlesWithin(admission, 250);
+		const continuation = {
+			role: "user",
+			content: "resume after compaction",
+			timestamp: Date.now(),
+		} satisfies UserMessage;
+		child.agent.followUp(continuation);
+		const internals = child as unknown as InspectableRlmSession;
+		internals._postCompactionContinuationMessages = [continuation];
+		internals._schedulePostCompactionContinue();
+		releaseInitial();
+		await waitFor(() => run === 2);
+		expect(child.isStreaming).toBe(true);
+		expect(sendAgentMessage).not.toHaveBeenCalled();
+		releaseContinuation();
+		await child.waitForIdle();
+		await vi.waitFor(() => expect(sendAgentMessage).toHaveBeenCalledTimes(1));
+	});
+
+	it("monitors queued parent work before an immediate completion can settle", async () => {
+		const sendAgentMessage = vi.fn(async () => ({
+			id: "agentmsg-immediate-queue-notice",
+			source: "agent_message" as const,
+			target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			message: "notice",
+			deliveryStatus: "delivered" as const,
+		}));
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "immediate-queue-child"),
+			rlmParentNodeId: "immediate-queue-child",
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				sendAgentMessage,
+			},
+		});
+		child.setSessionName("immediate-queue-worker");
+		const message = createAgentSessionMessage({
+			id: "agentmsg-immediate-queue-parent-work",
+			source: "agent_message",
+			message: "finish immediately",
+			from: { activeSessionId: "parent-active", sessionId: "parent-session" },
+			fromRelationship: "parent",
+			target: { activeSessionId: "child-active", sessionId: child.sessionId },
+		});
+
+		await child.queueAgentMessagePrompt(message.content as string, "steer", message);
+		await child.waitForIdle();
+		await vi.waitFor(() => expect(sendAgentMessage).toHaveBeenCalledTimes(1));
 	});
 
 	it("does not send a terminal notice when a retained child replies during a follow-up", async () => {
