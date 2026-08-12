@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -57,6 +57,14 @@ describe("fullscreen mode settings", () => {
 		process.env.GHOSTTY_RESOURCES_DIR = "/Applications/Ghostty.app/Contents/Resources/ghostty";
 		const manager = SettingsManager.create(projectDir, agentDir);
 		manager.setFullscreenMouse(true);
+		expect(manager.getFullscreenMouse()).toBe(true);
+	});
+
+	it("ignores a malformed null fullscreen mouse setting", () => {
+		process.env.TERM_PROGRAM = "xterm";
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ terminal: { fullscreenMouse: null } }));
+		const manager = SettingsManager.create(projectDir, agentDir);
 		expect(manager.getFullscreenMouse()).toBe(true);
 	});
 

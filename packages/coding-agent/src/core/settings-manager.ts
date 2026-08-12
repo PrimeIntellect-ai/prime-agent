@@ -1155,7 +1155,7 @@ export class SettingsManager {
 
 	getFullscreenMouse(): boolean {
 		const configured = this.settings.terminal?.fullscreenMouse;
-		if (configured !== undefined) return configured;
+		if (typeof configured === "boolean") return configured;
 		// Ghostty's native Cmd-click URL handling is suppressed while an
 		// application enables mouse reporting, and SGR cannot encode Command for
 		// the application to reproduce that gesture. Preserve native link clicks
