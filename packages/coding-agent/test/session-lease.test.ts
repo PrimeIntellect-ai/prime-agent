@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
+	compareProcessStartIds,
 	getWindowsProcessStartId,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
@@ -67,6 +68,38 @@ describe("session leases", () => {
 		expect(getWindowsProcessStartId(42, query)).toBeUndefined();
 		expect(getWindowsProcessStartId(0, query)).toBeUndefined();
 		expect(queryCount).toBe(1);
+	});
+
+	it("treats cross-format process identities as unverifiable instead of reused", () => {
+		expect(compareProcessStartIds("ps:legacy-local-time", "ps2:invariant-utc-time")).toBe("unverifiable");
+		expect(compareProcessStartIds("ps2:start-a", "ps2:start-a")).toBe("match");
+		expect(compareProcessStartIds("ps2:start-a", "ps2:start-b")).toBe("mismatch");
+		expect(compareProcessStartIds("unversioned", "ps2:start-a")).toBe("mismatch");
+		expect(compareProcessStartIds(undefined, "ps2:start-a")).toBe("unverifiable");
+	});
+
+	it("does not reclaim a live lease recorded with the legacy portable format", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "legacy-owner.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(
+			join(lockDirectory, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				token: "legacy-live",
+				pid: process.pid,
+				processStartId: "ps:legacy-local-time",
+				activeSessionId: "legacy-owner",
+				sessionPath,
+				createdAt: new Date(0).toISOString(),
+			}),
+		);
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow(
+			SessionAlreadyActiveError,
+		);
 	});
 
 	it("rejects a second live owner with a typed active-session error", () => {

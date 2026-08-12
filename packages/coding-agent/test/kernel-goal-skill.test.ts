@@ -31,7 +31,7 @@ describe("goal skill over the kernel host bridge", { tags: ["kernel-heavy"] }, (
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("round-trips goal.create and goal.complete through a live kernel", async () => {
+	it("round-trips the goal lifecycle through a live kernel", async () => {
 		const requests: Array<{ type: string; payload: Record<string, unknown> }> = [];
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [bundledGoalSkill()],
@@ -41,6 +41,22 @@ describe("goal skill over the kernel host bridge", { tags: ["kernel-heavy"] }, (
 					return {
 						goal: { objective: payload.objective, status: "active", tokens_used: 0 },
 						remaining_tokens: payload.token_budget ?? null,
+						completion_budget_report: null,
+					};
+				},
+				"goal.pause": async (payload) => {
+					requests.push({ type: "goal.pause", payload });
+					return {
+						goal: { objective: "ship it", status: "paused", tokens_used: 3 },
+						remaining_tokens: 7,
+						completion_budget_report: null,
+					};
+				},
+				"goal.resume": async (payload) => {
+					requests.push({ type: "goal.resume", payload });
+					return {
+						goal: { objective: "ship it", status: "active", tokens_used: 3 },
+						remaining_tokens: 7,
 						completion_budget_report: null,
 					};
 				},
@@ -69,6 +85,20 @@ print(json.dumps(_created, sort_keys=True))
 			completion_budget_report: null,
 		});
 
+		const paused = await manager.execute(`
+_paused = await goal.pause("waiting for approval")
+print(_paused["goal"]["status"])
+`);
+		expect(paused.status).toBe("ok");
+		expect(paused.stdout.trim()).toBe("paused");
+
+		const resumed = await manager.execute(`
+_resumed = await goal.resume()
+print(_resumed["goal"]["status"])
+`);
+		expect(resumed.status).toBe("ok");
+		expect(resumed.stdout.trim()).toBe("active");
+
 		const completed = await manager.execute(`
 _completed = await goal.complete()
 print(_completed["goal"]["status"], _completed["completion_budget_report"])
@@ -78,8 +108,14 @@ print(_completed["goal"]["status"], _completed["completion_budget_report"])
 			"complete Goal achieved. Report final budget usage to the user: tokens used: 7 of 10.",
 		);
 
-		expect(requests.map((request) => request.type)).toEqual(["goal.create", "goal.complete"]);
+		expect(requests.map((request) => request.type)).toEqual([
+			"goal.create",
+			"goal.pause",
+			"goal.resume",
+			"goal.complete",
+		]);
 		expect(requests[0].payload).toMatchObject({ type: "goal.create", objective: "ship it", token_budget: 10 });
+		expect(requests[1].payload).toMatchObject({ type: "goal.pause", reason: "waiting for approval" });
 	});
 
 	it("surfaces host errors and missing handlers as Python exceptions", async () => {

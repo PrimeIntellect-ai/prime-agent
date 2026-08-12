@@ -28,7 +28,7 @@ import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir, VERSION } from "../config.js";
-import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
+import type { AuthLookupOptions, AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
 	fetchAuthorizedPrivatePrimeInferenceModelIds,
@@ -36,12 +36,7 @@ import {
 	isPrivatePrimeInferenceModel,
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
-import {
-	clearConfigValueCache,
-	resolveConfigValueOrThrow,
-	resolveConfigValueUncached,
-	resolveHeadersOrThrow,
-} from "./resolve-config-value.js";
+import { clearConfigValueCache, resolveConfigValueUncached } from "./resolve-config-value.js";
 
 // Schema for OpenRouter routing preferences
 const PercentileCutoffsSchema = Type.Object({
@@ -415,8 +410,8 @@ function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): s
 	return createHash("sha256").update(apiKey).update("\0").update(teamId).digest("hex");
 }
 
-function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
+function isOfflineModeEnabled(environment: NodeJS.ProcessEnv): boolean {
+	const value = environment.PI_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
@@ -429,6 +424,7 @@ export class ModelRegistry {
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private staleProviderRequestAuthSources: Map<string, AuthSourceToken[]> = new Map();
 	private lastProviderAuthSourceTokens: Map<string, AuthSourceToken> = new Map();
+	private readonly authStorageLookupOptions: AuthLookupOptions;
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private authorizedPrivatePrimeInferenceModelIds = new Set<string>();
@@ -444,7 +440,9 @@ export class ModelRegistry {
 	private constructor(
 		readonly authStorage: AuthStorage,
 		private modelsJsonPath: string | undefined,
+		private environment: NodeJS.ProcessEnv,
 	) {
+		this.authStorageLookupOptions = { includeFallback: false, environment };
 		this.loadModels();
 	}
 
@@ -452,12 +450,16 @@ export class ModelRegistry {
 		this.onOAuthProvidersReset = hook;
 	}
 
-	static create(authStorage: AuthStorage, modelsJsonPath: string = join(getAgentDir(), "models.json")): ModelRegistry {
-		return new ModelRegistry(authStorage, modelsJsonPath);
+	static create(
+		authStorage: AuthStorage,
+		modelsJsonPath: string = join(getAgentDir(), "models.json"),
+		environment: NodeJS.ProcessEnv = process.env,
+	): ModelRegistry {
+		return new ModelRegistry(authStorage, modelsJsonPath, environment);
 	}
 
-	static inMemory(authStorage: AuthStorage): ModelRegistry {
-		return new ModelRegistry(authStorage, undefined);
+	static inMemory(authStorage: AuthStorage, environment: NodeJS.ProcessEnv = process.env): ModelRegistry {
+		return new ModelRegistry(authStorage, undefined, environment);
 	}
 
 	/**
@@ -790,8 +792,11 @@ export class ModelRegistry {
 		previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds),
 		previousTeamId = this.authorizedPrivatePrimeInferenceTeamId,
 	): Promise<void> {
-		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
-		const teamHeaders = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
+		const apiKey = await this.getApiKeyForProvider(PRIME_INFERENCE_PROVIDER_ID);
+		const teamHeaders = this.authStorage.getProviderHeaders(
+			PRIME_INFERENCE_PROVIDER_ID,
+			this.authStorageLookupOptions,
+		);
 		const teamId = teamHeaders?.["X-Prime-Team-ID"];
 		if (!apiKey || !teamHeaders || !teamId) {
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
@@ -808,13 +813,13 @@ export class ModelRegistry {
 			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.modelIds);
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
 			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-			if (cacheIsFresh || isOfflineModeEnabled()) {
+			if (cacheIsFresh || isOfflineModeEnabled(this.environment)) {
 				return;
 			}
 			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
 			return;
 		}
-		if (isOfflineModeEnabled()) {
+		if (isOfflineModeEnabled(this.environment)) {
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
 			this.authorizedPrivatePrimeInferenceTeamId = undefined;
 			return;
@@ -887,8 +892,10 @@ export class ModelRegistry {
 	}
 
 	private async currentPrivatePrimeAuthorizationFingerprint(): Promise<string | undefined> {
-		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
-		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
+		const apiKey = await this.getApiKeyForProvider(PRIME_INFERENCE_PROVIDER_ID);
+		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID, this.authStorageLookupOptions)?.[
+			"X-Prime-Team-ID"
+		];
 		return apiKey && teamId ? privatePrimeAuthorizationFingerprint(apiKey, teamId) : undefined;
 	}
 
@@ -1024,7 +1031,10 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		return this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider);
+		return (
+			this.authStorage.hasAuth(model.provider, this.authStorageLookupOptions) ||
+			this.hasConfiguredProviderRequestAuth(model.provider)
+		);
 	}
 
 	private fingerprintProviderRequestAuthSource(source: ProviderRequestAuthSource["source"], material: string): string {
@@ -1071,6 +1081,35 @@ export class ModelRegistry {
 		};
 	}
 
+	private resolveProviderConfigValueUncached(config: string): string | undefined {
+		return config.startsWith("!") ? resolveConfigValueUncached(config) : this.environment[config] || config;
+	}
+
+	private resolveProviderConfigValueOrThrow(config: string, description: string): string {
+		const resolvedValue = this.resolveProviderConfigValueUncached(config);
+		if (resolvedValue !== undefined) {
+			return resolvedValue;
+		}
+		if (config.startsWith("!")) {
+			throw new Error(`Failed to resolve ${description} from shell command: ${config.slice(1)}`);
+		}
+		throw new Error(`Failed to resolve ${description}`);
+	}
+
+	private resolveProviderHeadersOrThrow(
+		headers: Record<string, string> | undefined,
+		description: string,
+	): Record<string, string> | undefined {
+		if (!headers) {
+			return undefined;
+		}
+		const resolved: Record<string, string> = {};
+		for (const [key, value] of Object.entries(headers)) {
+			resolved[key] = this.resolveProviderConfigValueOrThrow(value, `${description} header "${key}"`);
+		}
+		return Object.keys(resolved).length > 0 ? resolved : undefined;
+	}
+
 	private getProviderRequestAuthSource(
 		provider: string,
 		options?: { resolvedApiKey?: string },
@@ -1087,13 +1126,13 @@ export class ModelRegistry {
 				valueMaterial:
 					options?.resolvedApiKey === undefined ? undefined : `${providerApiKey}\0${options.resolvedApiKey}`,
 				resolveValueMaterial: () => {
-					const resolved = resolveConfigValueUncached(providerApiKey);
+					const resolved = this.resolveProviderConfigValueUncached(providerApiKey);
 					return resolved === undefined ? undefined : `${providerApiKey}\0${resolved}`;
 				},
 			});
 		}
 
-		const envValue = process.env[providerApiKey];
+		const envValue = this.environment[providerApiKey];
 		if (envValue) {
 			return this.createProviderRequestAuthSource({
 				source: "environment",
@@ -1192,7 +1231,7 @@ export class ModelRegistry {
 	}
 
 	markProviderAuthStale(provider: string): boolean {
-		if (this.authStorage.markAuthStale(provider)) {
+		if (this.authStorage.markAuthStale(provider, this.authStorageLookupOptions)) {
 			return true;
 		}
 
@@ -1206,7 +1245,7 @@ export class ModelRegistry {
 			return lastRequestToken;
 		}
 
-		const authStorageToken = this.authStorage.getCurrentAuthSourceToken(provider);
+		const authStorageToken = this.authStorage.getCurrentAuthSourceToken(provider, this.authStorageLookupOptions);
 		if (authStorageToken) {
 			return authStorageToken;
 		}
@@ -1215,7 +1254,7 @@ export class ModelRegistry {
 		if (!providerApiKey) {
 			return undefined;
 		}
-		const resolvedApiKey = resolveConfigValueUncached(providerApiKey);
+		const resolvedApiKey = this.resolveProviderConfigValueUncached(providerApiKey);
 		const source = this.getProviderRequestAuthSource(provider, { resolvedApiKey });
 		const valueFingerprint = source?.valueFingerprint ?? source?.resolveValueFingerprint?.();
 		if (!source || !valueFingerprint || this.isProviderRequestAuthStale(provider, source)) {
@@ -1297,13 +1336,14 @@ export class ModelRegistry {
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
-			const authStorageAuth = await this.authStorage.getApiKeyWithSourceToken(model.provider, {
-				includeFallback: false,
-			});
+			const authStorageAuth = await this.authStorage.getApiKeyWithSourceToken(
+				model.provider,
+				this.authStorageLookupOptions,
+			);
 			let apiKey = authStorageAuth.apiKey;
 			let authSourceToken = authStorageAuth.sourceToken;
 			if (apiKey === undefined && providerConfig?.apiKey) {
-				const resolvedApiKey = resolveConfigValueOrThrow(
+				const resolvedApiKey = this.resolveProviderConfigValueOrThrow(
 					providerConfig.apiKey,
 					`API key for provider "${model.provider}"`,
 				);
@@ -1319,9 +1359,12 @@ export class ModelRegistry {
 			}
 			this.setLastProviderAuthSourceToken(model.provider, apiKey === undefined ? undefined : authSourceToken);
 
-			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
-			const authStorageHeaders = this.authStorage.getProviderHeaders(model.provider);
-			const modelHeaders = resolveHeadersOrThrow(
+			const providerHeaders = this.resolveProviderHeadersOrThrow(
+				providerConfig?.headers,
+				`provider "${model.provider}"`,
+			);
+			const authStorageHeaders = this.authStorage.getProviderHeaders(model.provider, this.authStorageLookupOptions);
+			const modelHeaders = this.resolveProviderHeadersOrThrow(
 				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
 				`model "${model.provider}/${model.id}"`,
 			);
@@ -1356,7 +1399,7 @@ export class ModelRegistry {
 	 * This intentionally does not execute command-backed config values.
 	 */
 	getProviderAuthStatus(provider: string): AuthStatus {
-		const authStatus = this.authStorage.getAuthStatus(provider);
+		const authStatus = this.authStorage.getAuthStatus(provider, this.authStorageLookupOptions);
 		if (authStatus.source && authStatus.source !== "stale") {
 			return authStatus;
 		}
@@ -1397,7 +1440,7 @@ export class ModelRegistry {
 	 * Get API key for a provider.
 	 */
 	async getApiKeyForProvider(provider: string): Promise<string | undefined> {
-		const authStorageAuth = await this.authStorage.getApiKeyWithSourceToken(provider, { includeFallback: false });
+		const authStorageAuth = await this.authStorage.getApiKeyWithSourceToken(provider, this.authStorageLookupOptions);
 		if (authStorageAuth.apiKey !== undefined) {
 			this.setLastProviderAuthSourceToken(provider, authStorageAuth.sourceToken);
 			return authStorageAuth.apiKey;
@@ -1409,7 +1452,7 @@ export class ModelRegistry {
 			return undefined;
 		}
 
-		const resolvedApiKey = resolveConfigValueUncached(providerApiKey);
+		const resolvedApiKey = this.resolveProviderConfigValueUncached(providerApiKey);
 		if (resolvedApiKey === undefined) {
 			this.setLastProviderAuthSourceToken(provider, undefined);
 			return undefined;

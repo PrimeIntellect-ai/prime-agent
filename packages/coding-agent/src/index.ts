@@ -148,6 +148,12 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.js";
 export { DefaultPackageManager } from "./core/package-manager.js";
+export {
+	type DefaultProjectTrust,
+	type ProjectTrustSelection,
+	parseDefaultProjectTrust,
+	resolveProjectTrusted,
+} from "./core/project-trust.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
 // SDK for programmatic usage
@@ -264,6 +270,11 @@ export {
 	truncateTail,
 	withFileMutationQueue,
 } from "./core/tools/index.js";
+export {
+	hasTrustRequiringProjectResources,
+	type ProjectTrustDecision,
+	ProjectTrustStore,
+} from "./core/trust-manager.js";
 // Main entry point
 export { type MainOptions, main } from "./main.js";
 export {

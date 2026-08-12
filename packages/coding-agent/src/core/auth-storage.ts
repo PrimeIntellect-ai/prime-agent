@@ -72,6 +72,15 @@ export type AuthStorageOptions = {
 	usePrimeCliConfig?: boolean;
 };
 
+export type AuthLookupOptions = {
+	includeFallback?: boolean;
+	/**
+	 * When provided, ambient environment auth is accepted only when the same
+	 * credential is represented in this map.
+	 */
+	environment?: NodeJS.ProcessEnv;
+};
+
 type LockResult<T> = {
 	result: T;
 	next?: string;
@@ -420,7 +429,7 @@ export class AuthStorage {
 		});
 	}
 
-	private getEnvironmentAuthCandidate(provider: string): AuthSourceCandidate | undefined {
+	private getEnvironmentAuthCandidate(provider: string, options?: AuthLookupOptions): AuthSourceCandidate | undefined {
 		const envKeys = findEnvKeys(provider);
 		const envKey = envKeys?.[0];
 		const apiKey = getEnvApiKey(provider);
@@ -429,6 +438,15 @@ export class AuthStorage {
 		}
 		const label = envKey ?? "ambient credentials";
 		const identityMaterial = envKey ?? this.getAmbientEnvironmentIdentityMaterial(provider);
+		if (
+			options?.environment &&
+			options.environment !== process.env &&
+			(envKey
+				? options.environment[envKey] !== apiKey
+				: this.getAmbientEnvironmentIdentityMaterial(provider, options.environment) !== identityMaterial)
+		) {
+			return undefined;
+		}
 		return this.createAuthSourceCandidate({
 			configured: false,
 			source: "environment",
@@ -438,29 +456,32 @@ export class AuthStorage {
 		});
 	}
 
-	private getAmbientEnvironmentIdentityMaterial(provider: string): string {
+	private getAmbientEnvironmentIdentityMaterial(
+		provider: string,
+		environment: NodeJS.ProcessEnv = process.env,
+	): string {
 		if (provider === "amazon-bedrock") {
-			if (process.env.AWS_PROFILE) return `amazon-bedrock:profile:${process.env.AWS_PROFILE}`;
-			if (process.env.AWS_ACCESS_KEY_ID) {
-				return `amazon-bedrock:access-key:${process.env.AWS_ACCESS_KEY_ID}:${process.env.AWS_SECRET_ACCESS_KEY ?? ""}:${process.env.AWS_SESSION_TOKEN ?? ""}`;
+			if (environment.AWS_PROFILE) return `amazon-bedrock:profile:${environment.AWS_PROFILE}`;
+			if (environment.AWS_ACCESS_KEY_ID) {
+				return `amazon-bedrock:access-key:${environment.AWS_ACCESS_KEY_ID}:${environment.AWS_SECRET_ACCESS_KEY ?? ""}:${environment.AWS_SESSION_TOKEN ?? ""}`;
 			}
-			if (process.env.AWS_BEARER_TOKEN_BEDROCK) {
-				return `amazon-bedrock:bearer:${process.env.AWS_BEARER_TOKEN_BEDROCK}`;
+			if (environment.AWS_BEARER_TOKEN_BEDROCK) {
+				return `amazon-bedrock:bearer:${environment.AWS_BEARER_TOKEN_BEDROCK}`;
 			}
-			if (process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI) {
-				return `amazon-bedrock:ecs-relative:${process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}`;
+			if (environment.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI) {
+				return `amazon-bedrock:ecs-relative:${environment.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}`;
 			}
-			if (process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI) {
-				return `amazon-bedrock:ecs-full:${process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI}`;
+			if (environment.AWS_CONTAINER_CREDENTIALS_FULL_URI) {
+				return `amazon-bedrock:ecs-full:${environment.AWS_CONTAINER_CREDENTIALS_FULL_URI}`;
 			}
-			if (process.env.AWS_WEB_IDENTITY_TOKEN_FILE) {
-				return `amazon-bedrock:web-identity:${process.env.AWS_WEB_IDENTITY_TOKEN_FILE}`;
+			if (environment.AWS_WEB_IDENTITY_TOKEN_FILE) {
+				return `amazon-bedrock:web-identity:${environment.AWS_WEB_IDENTITY_TOKEN_FILE}`;
 			}
 		}
 		if (provider === "google-vertex") {
-			const project = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT ?? "";
-			const location = process.env.GOOGLE_CLOUD_LOCATION ?? "";
-			const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS ?? "application-default";
+			const project = environment.GOOGLE_CLOUD_PROJECT ?? environment.GCLOUD_PROJECT ?? "";
+			const location = environment.GOOGLE_CLOUD_LOCATION ?? "";
+			const credentialsPath = environment.GOOGLE_APPLICATION_CREDENTIALS ?? "application-default";
 			return `google-vertex:${project}:${location}:${credentialsPath}`;
 		}
 		return provider;
@@ -480,14 +501,14 @@ export class AuthStorage {
 		});
 	}
 
-	private getAuthSourceCandidates(provider: string, options?: { includeFallback?: boolean }): AuthSourceCandidate[] {
+	private getAuthSourceCandidates(provider: string, options?: AuthLookupOptions): AuthSourceCandidate[] {
 		const fallbackCandidate =
 			options?.includeFallback === false ? undefined : this.getFallbackAuthCandidate(provider);
 		const candidates =
 			provider === PRIME_INFERENCE_PROVIDER_ID
 				? [
 						this.getRuntimeAuthCandidate(provider),
-						this.getEnvironmentAuthCandidate(provider),
+						this.getEnvironmentAuthCandidate(provider, options),
 						this.getPrimeCliAuthCandidate(provider),
 						this.getStoredAuthCandidate(provider),
 						fallbackCandidate,
@@ -495,7 +516,7 @@ export class AuthStorage {
 				: [
 						this.getRuntimeAuthCandidate(provider),
 						this.getStoredAuthCandidate(provider),
-						this.getEnvironmentAuthCandidate(provider),
+						this.getEnvironmentAuthCandidate(provider, options),
 						fallbackCandidate,
 					];
 		return candidates.filter((candidate): candidate is AuthSourceCandidate => candidate !== undefined);
@@ -522,7 +543,7 @@ export class AuthStorage {
 
 	private getAvailableAuthCandidate(
 		provider: string,
-		options?: { includeFallback?: boolean },
+		options?: AuthLookupOptions,
 	): { candidate?: AuthSourceCandidate; hasStaleCandidate: boolean } {
 		let hasStaleCandidate = false;
 		for (const candidate of this.getAuthSourceCandidates(provider, options)) {
@@ -543,8 +564,8 @@ export class AuthStorage {
 		};
 	}
 
-	private getAuthStatusFromCandidates(provider: string): AuthStatus {
-		const { candidate, hasStaleCandidate } = this.getAvailableAuthCandidate(provider);
+	private getAuthStatusFromCandidates(provider: string, options?: AuthLookupOptions): AuthStatus {
+		const { candidate, hasStaleCandidate } = this.getAvailableAuthCandidate(provider, options);
 		if (candidate) {
 			return this.toAuthStatus(candidate);
 		}
@@ -554,8 +575,8 @@ export class AuthStorage {
 		return { configured: false };
 	}
 
-	markAuthStale(provider: string): boolean {
-		const token = this.getCurrentAuthSourceToken(provider);
+	markAuthStale(provider: string, options?: AuthLookupOptions): boolean {
+		const token = this.getCurrentAuthSourceToken(provider, options);
 		return token ? this.markAuthSourceStale(token) : false;
 	}
 
@@ -575,8 +596,8 @@ export class AuthStorage {
 		};
 	}
 
-	getCurrentAuthSourceToken(provider: string): AuthSourceToken | undefined {
-		const { candidate } = this.getAvailableAuthCandidate(provider);
+	getCurrentAuthSourceToken(provider: string, options?: AuthLookupOptions): AuthSourceToken | undefined {
+		const { candidate } = this.getAvailableAuthCandidate(provider, options);
 		if (!candidate) {
 			return undefined;
 		}
@@ -704,15 +725,15 @@ export class AuthStorage {
 	 * Check if any form of auth is configured for a provider.
 	 * Unlike getApiKey(), this doesn't refresh OAuth tokens.
 	 */
-	hasAuth(provider: string): boolean {
-		return this.getAvailableAuthCandidate(provider).candidate !== undefined;
+	hasAuth(provider: string, options?: AuthLookupOptions): boolean {
+		return this.getAvailableAuthCandidate(provider, options).candidate !== undefined;
 	}
 
 	/**
 	 * Return auth status without exposing credential values or refreshing tokens.
 	 */
-	getAuthStatus(provider: string): AuthStatus {
-		return this.getAuthStatusFromCandidates(provider);
+	getAuthStatus(provider: string, options?: AuthLookupOptions): AuthStatus {
+		return this.getAuthStatusFromCandidates(provider, options);
 	}
 
 	/**
@@ -815,10 +836,7 @@ export class AuthStorage {
 	 * 3. Other providers: auth.json, environment variable
 	 * 4. Fallback resolver (models.json custom providers)
 	 */
-	async getApiKeyWithSourceToken(
-		providerId: string,
-		options?: { includeFallback?: boolean },
-	): Promise<AuthApiKeyResult> {
+	async getApiKeyWithSourceToken(providerId: string, options?: AuthLookupOptions): Promise<AuthApiKeyResult> {
 		// Runtime override takes highest priority
 		const runtimeCandidate = this.getRuntimeAuthCandidate(providerId);
 		const runtimeKey = this.runtimeOverrides.get(providerId);
@@ -829,7 +847,7 @@ export class AuthStorage {
 			};
 		}
 
-		const envCandidate = this.getEnvironmentAuthCandidate(providerId);
+		const envCandidate = this.getEnvironmentAuthCandidate(providerId, options);
 		const envKey = getEnvApiKey(providerId);
 		if (
 			providerId === PRIME_INFERENCE_PROVIDER_ID &&
@@ -961,7 +979,7 @@ export class AuthStorage {
 		return {};
 	}
 
-	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
+	async getApiKey(providerId: string, options?: AuthLookupOptions): Promise<string | undefined> {
 		const result = await this.getApiKeyWithSourceToken(providerId, options);
 		return result.apiKey;
 	}
@@ -1026,7 +1044,7 @@ export class AuthStorage {
 		});
 	}
 
-	getPrimeInferenceTeamSelection(): PrimeTeamCredential | null | undefined {
+	getPrimeInferenceTeamSelection(options?: AuthLookupOptions): PrimeTeamCredential | null | undefined {
 		let config: PrimeCliConfig | undefined;
 		if (this.isPrimeCliConfigEnabled()) {
 			config = this.getPrimeCliConfig(PRIME_INFERENCE_PROVIDER_ID);
@@ -1036,7 +1054,7 @@ export class AuthStorage {
 		}
 
 		const credential = this.data[PRIME_INFERENCE_PROVIDER_ID];
-		const authSource = this.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source;
+		const authSource = this.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID, options).source;
 		if (authSource === "runtime" || authSource === "environment") {
 			return undefined;
 		}
@@ -1069,7 +1087,7 @@ export class AuthStorage {
 		return undefined;
 	}
 
-	getProviderHeaders(providerId: string): Record<string, string> | undefined {
+	getProviderHeaders(providerId: string, options?: AuthLookupOptions): Record<string, string> | undefined {
 		if (providerId !== PRIME_INFERENCE_PROVIDER_ID) {
 			return undefined;
 		}
@@ -1079,7 +1097,7 @@ export class AuthStorage {
 			return primeCliConfig.teamId ? { "X-Prime-Team-ID": primeCliConfig.teamId } : undefined;
 		}
 
-		const teamId = this.getPrimeInferenceTeamSelection()?.teamId;
+		const teamId = this.getPrimeInferenceTeamSelection(options)?.teamId;
 		return teamId ? { "X-Prime-Team-ID": teamId } : undefined;
 	}
 

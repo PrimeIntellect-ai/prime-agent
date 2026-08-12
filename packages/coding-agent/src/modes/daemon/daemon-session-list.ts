@@ -1,4 +1,3 @@
-import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -10,14 +9,14 @@ import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
+import type { OperationRecord } from "./operation-ledger.js";
 
 // Durable lifecycle; decides agents-view visibility. Only "live" is shown.
 // "draft" = no message sent yet (discarded on close); "archived" = ctrl+x'd,
 // reachable only via --resume <selector>.
 export type SessionLifecycle = "draft" | "live" | "archived";
 
-// Heuristic activity of a live session. Classification-in-flight counts as
-// "working" so the view never sees an unlabeled idle session.
+// Runtime activity of a live session. Advisory classification does not alter it.
 export type SessionActivity = "working" | "idle";
 export type SessionRosterStatus = "running" | "idle" | "inactive";
 
@@ -77,6 +76,22 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	/** Recursive root + descendant quiescence; completion must not be inferred when this is false or uncertain. */
+	treeQuiescence?: "quiescent" | "working" | "uncertain";
+	treeQuiescent?: boolean;
+	/** Authoritative completion gate: completed only when the root verdict and recursive tree agree. */
+	completionState?: "completed" | "not_completed" | "uncertain";
+	nonQuiescentDescendantCount?: number;
+	uncertainDescendantCount?: number;
+	/** Persisted registry truth for a saved-only RLM child. */
+	passiveRegistryStatus?: "running" | "completed" | "deleted";
+	/** Negotiated reliability surface. Runtime truth is separate from advisory classification. */
+	reliability?: {
+		classifier?: ActiveSessionState["summaryClassifierState"];
+		openOperationCount: number;
+		lastMeaningfulProgressAt?: string;
+		openOperations: OperationRecord[];
+	};
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
@@ -200,14 +215,10 @@ export function summaryForActiveSession(
 ): SessionSummary {
 	const session = activeSession.runtime.session;
 	const metadata = activeSession.runtime.metadata ?? { kind: "top-level" as const };
-	let modified = savedSession?.modified.toISOString();
-	if (!modified && session.sessionFile) {
-		try {
-			modified = statSync(session.sessionFile).mtime.toISOString();
-		} catch {
-			// Leave age blank when the active session has not flushed a jsonl yet.
-		}
-	}
+	const meaningfulMessageAt = latestMessageActivityAt(session.messages);
+	const modified =
+		meaningfulMessageAt ?? savedSession?.modified.toISOString() ?? session.sessionManager.getHeader?.()?.timestamp;
+	const operationSummary = activeSession.operationTracker?.summary();
 
 	return {
 		id: activeSession.activeSessionId,
@@ -217,8 +228,7 @@ export function summaryForActiveSession(
 		hasActiveHeartbeat: hasActiveHeartbeat || undefined,
 		hasRegisteredHeartbeat: hasRegisteredHeartbeat || undefined,
 		hasRegisteredCronJob: hasRegisteredCronJob || undefined,
-		lastActivityAt:
-			latestMessageActivityAt(session.messages) ?? modified ?? session.sessionManager.getHeader?.()?.timestamp,
+		lastActivityAt: modified,
 		runtimeKind: metadata.kind,
 		rlmDepth: session.rlmDepth,
 		activeSessionId: activeSession.activeSessionId,
@@ -267,6 +277,16 @@ export function summaryForActiveSession(
 		// that is active again.
 		summary: activeSession.summaryState?.summary,
 		...(isSummaryCurrent(activeSession) ? { taskState: activeSession.summaryState?.taskState } : {}),
+		...(operationSummary || activeSession.summaryClassifierState
+			? {
+					reliability: {
+						classifier: activeSession.summaryClassifierState,
+						openOperationCount: operationSummary?.openOperationCount ?? 0,
+						lastMeaningfulProgressAt: operationSummary?.lastMeaningfulProgressAt,
+						openOperations: operationSummary?.operations.filter((operation) => operation.status === "open") ?? [],
+					},
+				}
+			: {}),
 	};
 }
 
@@ -460,9 +480,9 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
 	if (activeSession.runtime.metadata?.kind === "subagent") {
 		return "idle";
 	}
-	// Hold at "working" until the idle verdict is current, so the view never
-	// buckets an unlabeled idle session.
-	return isSummaryCurrent(activeSession) ? "idle" : "working";
+	// Classification is advisory. A quiescent runtime is idle even when the
+	// classifier is unavailable or has not produced a current verdict.
+	return "idle";
 }
 
 /**
