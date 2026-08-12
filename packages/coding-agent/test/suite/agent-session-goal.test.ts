@@ -237,6 +237,65 @@ describe("AgentSession goals", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
+	it("processes queued input before parking an empty goal boundary", async () => {
+		let releaseMessageEnd: (() => void) | undefined;
+		const blockedMessageEnd = new Promise<void>((resolve) => {
+			releaseMessageEnd = resolve;
+		});
+		let didBlock = false;
+		const extension: ExtensionFactory = (pi) => {
+			pi.on("message_end", async (event) => {
+				if (event.message.role === "assistant" && !didBlock) {
+					didBlock = true;
+					await blockedMessageEnd;
+				}
+			});
+		};
+		const sessionRef: { current?: AgentSession } = {};
+		const harness = await createHarness({
+			tools: [createFauxIpythonTool(sessionRef)],
+			extensionFactories: [extension],
+		});
+		sessionRef.current = harness.session;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(""),
+			fauxAssistantMessage("Answered the follow-up."),
+			fauxAssistantMessage(fauxToolCall("ipython", COMPLETE_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Goal complete."),
+		]);
+
+		const promptPromise = harness.session.prompt("/goal finish the task");
+		await waitForCondition(() => didBlock);
+		const followUpPromise = harness.session.prompt("Use this new information.", { streamingBehavior: "followUp" });
+		releaseMessageEnd?.();
+		await Promise.all([promptPromise, followUpPromise]);
+
+		expect(visibleAssistantTexts(harness)).toEqual(["Answered the follow-up.", "Goal complete."]);
+		expect(harness.session.goalState).toMatchObject({ active: false, status: "complete", continuationsUsed: 1 });
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
+	it("parks thinking-only goal output without falling through to autonomous continuation", async () => {
+		const sessionRef: { current?: AgentSession } = {};
+		const harness = await createHarness({
+			tools: [createFauxIpythonTool(sessionRef)],
+			autonomous: { enabled: true, maxContinuations: 1 },
+		});
+		sessionRef.current = harness.session;
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([{ type: "thinking", thinking: "Waiting for external input." }]),
+			fauxAssistantMessage("Should remain unused."),
+		]);
+
+		await harness.session.prompt("/goal finish the task");
+
+		expect(harness.session.goalState).toMatchObject({ active: true, status: "active", continuationsUsed: 0 });
+		expect(harness.session.getAutonomousStatus()).toMatchObject({ continuationsUsed: 0 });
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
 	it("counts tokens from the goal completion turn", async () => {
 		const harness = await createGoalHarness();
 		harness.setResponses([
