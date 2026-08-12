@@ -115,6 +115,32 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		}
 	}, 60_000);
 
+	it("restores the short-lived version 2 envelope without exposing envelope fields", async () => {
+		const compatDir = mkdtempSync(join(tmpdir(), "prime-agent-state-v2-envelope-"));
+		const compatPath = join(compatDir, "compat.dill");
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: compatDir,
+			snapshot: { path: compatPath, manifestPath: join(compatDir, "compat.json") },
+		});
+		try {
+			await manager.execute(
+				`import dill
+payload = {"version": 2, "values": {"alpha": dill.dumps(42)}, "pinnedNames": ["alpha"]}
+open(${JSON.stringify(compatPath)}, "wb").write(dill.dumps(payload))
+del payload`,
+			);
+			const restore = await manager.restoreState();
+			expect(restore).toMatchObject({ restored: ["alpha"], failed: [] });
+			const echo = await manager.execute("print(alpha)");
+			expect(echo.stdout.trim()).toBe("42");
+			expect(restore?.restored).not.toEqual(expect.arrayContaining(["version", "values", "pinnedNames"]));
+		} finally {
+			await manager.dispose();
+			rmSync(compatDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
 	it("treats a corrupt (non-dict) snapshot as no restore without throwing", async () => {
 		const badDir = mkdtempSync(join(tmpdir(), "prime-agent-state-corrupt-"));
 		const badPath = join(badDir, "corrupt.dill");

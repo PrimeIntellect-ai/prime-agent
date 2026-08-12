@@ -38,6 +38,7 @@
 - Changed direct user instructions in the active conversation to override conflicting workspace-file rules for that request.
 - Fixed retained `rlm.act` sessions resuming abandoned work, and added bounded caller-history bitmap frames between Act calls.
 - Bounded and sorted IPython namespace names in recovery notices without changing provider-native compaction history.
+- Fixed short-lived version 2 IPython snapshots failing recovery after returning to the stable snapshot format.
 
 ## [0.7.2] - 2026-08-11
 

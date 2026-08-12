@@ -224,6 +224,15 @@ def _prime_agent_restore_state():
     if not _b.isinstance(payload, _b.dict):
         _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"restored": [], "failed": [], "error": "corrupt snapshot: not a dict"}))
         return
+    # A short-lived development build wrote a versioned envelope. Read it once
+    # without retaining its pin metadata or changing the current write format.
+    if (
+        payload.get("version") == 2
+        and _b.isinstance(payload.get("values"), _b.dict)
+        and _b.isinstance(payload.get("pinnedNames"), _b.list)
+        and _b.set(payload) <= {"version", "values", "pinnedNames"}
+    ):
+        payload = payload["values"]
 
     ip = None
     try:
