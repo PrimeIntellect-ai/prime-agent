@@ -53,6 +53,13 @@ describe("fullscreen mode settings", () => {
 		expect(manager.getFullscreenMouse()).toBe(false);
 	});
 
+	it("does not mistake an integrated terminal inheriting Ghostty variables for Ghostty", () => {
+		process.env.TERM_PROGRAM = "vscode";
+		process.env.GHOSTTY_RESOURCES_DIR = "/Applications/Ghostty.app/Contents/Resources/ghostty";
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getFullscreenMouse()).toBe(true);
+	});
+
 	it("honors an explicit fullscreen mouse setting in Ghostty", () => {
 		process.env.GHOSTTY_RESOURCES_DIR = "/Applications/Ghostty.app/Contents/Resources/ghostty";
 		const manager = SettingsManager.create(projectDir, agentDir);
