@@ -67,6 +67,14 @@ function assistantDeltaUpdates(event: AssistantMessageEvent): AcpSessionUpdate[]
 const CELL_TITLE_MAX_LENGTH = 120;
 
 /**
+ * Cell source is untrusted text, and a title is rendered as a single UI line.
+ *
+ * Control characters and bidi overrides survive the line split, so without this
+ * a cell can reorder or blank out the row that claims to describe it.
+ */
+const TITLE_UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
  * One-line label for an IPython cell.
  *
  * Every IPython call otherwise carries the same constant title, which leaves an
@@ -74,7 +82,10 @@ const CELL_TITLE_MAX_LENGTH = 120;
  * from the next.
  */
 function ipythonCellTitle(code: string): string {
-	const lines = code.split("\n").filter((line) => line.trim().length > 0);
+	const lines = code
+		.replace(TITLE_UNSAFE, "")
+		.split("\n")
+		.filter((line) => line.trim().length > 0);
 	let title = lines[0]?.trim() ?? "";
 	// A cell magic names the interpreter, not the work, so it needs the first
 	// real line beside it to stay distinguishable from the next magic cell.
@@ -85,9 +96,17 @@ function ipythonCellTitle(code: string): string {
 	return remaining > 0 ? `${title} \u00b7 +${remaining} lines` : title;
 }
 
-/** The cell source as a content block, for clients that render no `rawInput`. */
+/**
+ * The cell source as a content block, for clients that render no `rawInput`.
+ *
+ * A cell may legally contain a backtick fence of its own, so the fence has to
+ * outrun the longest run in the source: a fixed three would let the rest of the
+ * cell escape the code block and render as arbitrary Markdown.
+ */
 function ipythonCellContent(code: string): { type: "content"; content: { type: "text"; text: string } } {
-	return { type: "content", content: textContent(["```python", code, "```"].join("\n")) };
+	const longestRun = Math.max(0, ...[...code.matchAll(/`+/g)].map((match) => match[0].length));
+	const fence = "`".repeat(Math.max(3, longestRun + 1));
+	return { type: "content", content: textContent([`${fence}python`, code, fence].join("\n")) };
 }
 
 /** Extract the IPython cell source so a client can show what is executing. */
@@ -168,6 +187,12 @@ export function acpUpdatesForSessionEvent(
 		case "message_update":
 			if (event.message.role !== "assistant") return [];
 			return assistantDeltaUpdates(event.assistantMessageEvent);
+
+		// A cancelled or interrupted call never reports an end, so the run ending
+		// is the point at which a still-held cell is known to be unreachable.
+		case "agent_end":
+			state.ipythonCells?.clear();
+			return [];
 
 		case "tool_execution_start": {
 			const cell = event.toolName === IPYTHON_TOOL_NAME ? ipythonCellSource(event.args) : undefined;

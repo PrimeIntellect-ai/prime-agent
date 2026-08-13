@@ -74,6 +74,28 @@ describe("ACP session event mapping", () => {
 		expect(title("%%bash\ngit status --short")).toBe("%%bash \u00b7 git status --short \u00b7 +1 lines");
 		expect(title("   ")).toBe("IPython cell");
 		expect(title(`${"x".repeat(200)}`)).toBe(`${"x".repeat(119)}\u2026`);
+		// Cell source is untrusted: a title is one rendered line, and these
+		// characters reorder or blank it out.
+		expect(title("\u202eprint(1)\u0007")).toBe("print(1)");
+	});
+
+	it("fences the cell so its own backticks cannot escape the code block", () => {
+		const content = (code: string) =>
+			(
+				acpUpdatesForSessionEvent({
+					type: "tool_execution_start",
+					toolCallId: "call-1",
+					toolName: "ipython",
+					args: { code },
+				} as AgentConnectionSessionEvent)[0]?.content as { content: { text: string } }[]
+			)[0]?.content.text;
+
+		const fenced = content('print("""```""")');
+		expect(fenced).toBe('````python\nprint("""```""")\n````');
+		// A cell carrying a longer run still has to be outrun, not matched.
+		expect(content("x = '`````'")).toBe("``````python\nx = '`````'\n``````");
+		// Tildes and markup are inert inside a backtick fence.
+		expect(content("~~~\n<script>alert(1)</script>")).toBe("```python\n~~~\n<script>alert(1)</script>\n```");
 	});
 
 	it("repeats the cell on completion, which replaces rather than appends content", () => {
@@ -102,6 +124,25 @@ describe("ACP session event mapping", () => {
 			{ type: "content", content: { type: "text", text: "1" } },
 		]);
 		// The entry is dropped once the call ends, so state cannot grow unbounded.
+		expect(state.ipythonCells?.size).toBe(0);
+	});
+
+	it("releases a cell whose call never reported an end", () => {
+		const state: AcpEventMappingState = {};
+		acpUpdatesForSessionEvent(
+			{
+				type: "tool_execution_start",
+				toolCallId: "cancelled-1",
+				toolName: "ipython",
+				args: { code: "print(1)" },
+			} as AgentConnectionSessionEvent,
+			state,
+		);
+		expect(state.ipythonCells?.size).toBe(1);
+		// A cancelled call reports no end, so the run ending is what releases it.
+		expect(
+			acpUpdatesForSessionEvent({ type: "agent_end", messages: [] } as AgentConnectionSessionEvent, state),
+		).toEqual([]);
 		expect(state.ipythonCells?.size).toBe(0);
 	});
 
