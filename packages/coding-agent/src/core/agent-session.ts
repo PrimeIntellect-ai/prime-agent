@@ -7926,6 +7926,7 @@ export class AgentSession {
 				rollbackOf: plan.rollbackOf,
 				scope: targetScope,
 				baselineState: plan.baselineState,
+				fullyVisibleIds: plan.fullyVisibleIds,
 			});
 			result.harnessStatePath = saveHarnessState(targetHarnessStateDir, state);
 			if (targetScope === "global") {

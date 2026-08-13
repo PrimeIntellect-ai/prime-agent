@@ -5,7 +5,12 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type * as PiAi from "@earendil-works/pi-ai";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyRefinementProposal, loadHarnessState, planRefinement } from "../../../src/core/refinement/index.js";
+import {
+	applyRefinementProposal,
+	type HarnessEntryIdentity,
+	loadHarnessState,
+	planRefinement,
+} from "../../../src/core/refinement/index.js";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
@@ -107,7 +112,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		);
 
 		const userPrompt: string = completeSimpleMock.mock.calls[0][1].messages[0].content[0].text;
-		const entryLine = userPrompt.split("\n").find((line: string) => line.includes("[local:long_note]"));
+		const entryLine = userPrompt.split("\n").find((line: string) => line.includes("[local:prompt:long_note]"));
 
 		expect(entryLine).toBeDefined();
 		expect(entryLine).toContain(visibleHead);
@@ -158,7 +163,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		};
 
 		completeSimpleMock
-			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["long_note"] })))
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["local:prompt:long_note"] })))
 			.mockResolvedValueOnce(
 				assistantText(
 					JSON.stringify({
@@ -193,7 +198,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		expect(second.messages).toHaveLength(3);
 		expect(second.messages[1].role).toBe("assistant");
 		expect(second.messages[2].content[0].text).toContain(tail);
-		expect(plan.fullyVisibleIds?.has("long_note")).toBe(true);
+		expect(plan.fullyVisibleIds?.has("local:prompt:long_note")).toBe(true);
 
 		const result = applyRefinementProposal(state, plan.proposal, { id: "r1", fullyVisibleIds: plan.fullyVisibleIds });
 		expect(result.appliedEdits[0].applied).toBe(true);
@@ -226,7 +231,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 				expectedOutcome: "e",
 				edits: [{ action: "update", kind: "prompt", id: "long_note", title: "Long note", content: "short delta" }],
 			},
-			{ id: "r2", fullyVisibleIds: new Set<string>() },
+			{ id: "r2", fullyVisibleIds: new Set<HarnessEntryIdentity>() },
 		);
 
 		expect(result.appliedEdits[0]).toMatchObject({
@@ -275,7 +280,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		);
 
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		expect(plan.fullyVisibleIds?.has("card")).toBe(true);
+		expect(plan.fullyVisibleIds?.has("local:memory:card")).toBe(true);
 		const result = applyRefinementProposal(state, plan.proposal, { id: "r3", fullyVisibleIds: plan.fullyVisibleIds });
 		expect(result.appliedEdits[0].applied).toBe(true);
 	});
@@ -301,8 +306,8 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		}
 
 		completeSimpleMock
-			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["alpha", "beta"] })))
-			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["gamma"] })))
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["local:prompt:alpha", "local:prompt:beta"] })))
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["local:prompt:gamma"] })))
 			.mockResolvedValueOnce(
 				assistantText(
 					JSON.stringify({
@@ -332,13 +337,17 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		expect(round2).toContain("beta-tail");
 		const round3 = completeSimpleMock.mock.calls[2][1].messages[4].content[0].text;
 		expect(round3).toContain("gamma-tail");
-		expect([...(plan.fullyVisibleIds ?? [])].sort()).toEqual(["alpha", "beta", "gamma"]);
+		expect([...(plan.fullyVisibleIds ?? [])].sort()).toEqual([
+			"local:prompt:alpha",
+			"local:prompt:beta",
+			"local:prompt:gamma",
+		]);
 
 		const result = applyRefinementProposal(state, plan.proposal, { id: "r4", fullyVisibleIds: plan.fullyVisibleIds });
 		expect(result.appliedEdits.every((edit) => edit.applied)).toBe(true);
 	});
 
-	it("accepts the display-prefixed id form the overview renders", async () => {
+	it("accepts the canonical identifier form the overview renders", async () => {
 		const state = loadHarnessState(makeTempDir(), "local");
 		state.entries.prompt.note = {
 			id: "note",
@@ -357,7 +366,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		};
 
 		completeSimpleMock
-			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["local:note"] })))
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["local:prompt:note"] })))
 			.mockResolvedValueOnce(
 				assistantText(
 					JSON.stringify({
@@ -379,7 +388,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		);
 
 		expect(completeSimpleMock.mock.calls[1][1].messages[2].content[0].text).toContain("note-tail");
-		expect(plan.fullyVisibleIds?.has("note")).toBe(true);
+		expect(plan.fullyVisibleIds?.has("local:prompt:note")).toBe(true);
 	});
 
 	it("stops expanding after the round limit and still returns a proposal", async () => {
@@ -400,7 +409,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 			version: 1,
 		};
 		// A refiner that only ever asks to expand, never proposing edits.
-		completeSimpleMock.mockResolvedValue(assistantText(JSON.stringify({ expand: ["note"] })));
+		completeSimpleMock.mockResolvedValue(assistantText(JSON.stringify({ expand: ["local:prompt:note"] })));
 
 		const plan = await planRefinement(
 			[{ role: "user", content: "go", timestamp: Date.now() } satisfies AgentMessage],
@@ -435,7 +444,9 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 			version: 1,
 		};
 		completeSimpleMock
-			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["huge", "missing"] })))
+			.mockResolvedValueOnce(
+				assistantText(JSON.stringify({ expand: ["local:prompt:huge", "local:prompt:missing"] })),
+			)
 			.mockResolvedValueOnce(
 				assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "e", edits: [] })),
 			);
@@ -451,7 +462,7 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 
 		const injected = completeSimpleMock.mock.calls[1][1].messages[2].content[0].text;
 		expect(injected).toContain("expansion budget exhausted");
-		expect(injected).toContain("missing: not found");
-		expect(plan.fullyVisibleIds?.has("huge")).toBe(false);
+		expect(injected).toContain("local:prompt:missing: not found");
+		expect(plan.fullyVisibleIds?.has("local:prompt:huge")).toBe(false);
 	});
 });

@@ -34,6 +34,7 @@ const REFINER_EXPANSION_BUDGET = 80_000;
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
 export type HarnessScope = "local" | "global";
+export type HarnessEntryIdentity = `${HarnessScope}:${RefinementKind}:${string}`;
 
 export interface HarnessEntry {
 	id: string;
@@ -144,12 +145,12 @@ Continual harness components:
 Editing model:
 - An \`update\` replaces the entry's entire \`content\`; text you do not reproduce is removed.
 - \`... (+N chars not shown)\` marks an entry you were not shown in full; an update to one is refused.
-- To see entries in full, reply with \`{"expand": ["id", ...]}\` and nothing else. List every entry you need; you may expand again in a later reply.
+- Each overview entry has a canonical \`scope:kind:id\` identifier. To see entries in full, reply with \`{"expand": ["scope:kind:id", ...]}\` and nothing else. Copy each identifier exactly; you may expand again in a later reply.
 
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
 - A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.
-- Entry ids in the harness overview may carry a display-only \`local:\` or \`global:\` prefix. Always use the bare id (no prefix) in edits.
+- Expansion requests use the exact canonical \`scope:kind:id\` identifier shown in the harness overview. Edits already carry \`kind\` and apply to the requested scope. Always use the bare id (no prefix) in edits.
 - All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.
 - Project/workspace-specific lessons may be persisted globally only when the title, path, or content explicitly names the project/workspace and the lesson is likely to be reused in future sessions for that project. Prefer local edits when the lesson only belongs in the current conversation.
 - Use memory for declarative facts and preferences, skill for repeatable procedures exposed as Python calls, prompt for narrow behavioral policy addendums, and subagent for reusable delegation roles.
@@ -253,6 +254,10 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
 	return value === "global" || value === "local" ? value : fallback;
+}
+
+function harnessEntryIdentity(scope: HarnessScope, kind: RefinementKind, id: string): HarnessEntryIdentity {
+	return `${scope}:${kind}:${id}`;
 }
 
 export function inferRefinementResultScope(result: RefinementResult): HarnessScope | undefined {
@@ -528,13 +533,36 @@ export function formatHarnessStateForPrompt(
 	return lines.join("\n").trim();
 }
 
-function overviewForPrompt(state: HarnessState): { text: string; fullyVisible: Set<string> } {
+interface BaselineHarnessEntry {
+	identity: HarnessEntryIdentity;
+	kind: RefinementKind;
+	scope: HarnessScope;
+	entry: HarnessEntry;
+}
+
+function overviewForPrompt(state: HarnessState): {
+	text: string;
+	fullyVisible: Set<HarnessEntryIdentity>;
+	baselineEntries: Map<string, BaselineHarnessEntry>;
+} {
 	const lines: string[] = [];
-	const fullyVisible = new Set<string>();
+	const fullyVisible = new Set<HarnessEntryIdentity>();
+	const baselineEntries = new Map<string, BaselineHarnessEntry>();
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const entries = Object.values(state.entries[kind]);
 		lines.push(`${kind}: ${entries.length}`);
 		for (const entry of entries.slice(0, REFINER_ENTRY_LIMIT)) {
+			const scope = normalizeHarnessScope(entry.scope, "global");
+			const identity = harnessEntryIdentity(scope, kind, entry.id);
+			if (baselineEntries.has(identity)) {
+				throw new Error(`Duplicate canonical harness entry identity: ${identity}`);
+			}
+			baselineEntries.set(identity, {
+				identity,
+				kind,
+				scope,
+				entry: cloneEntry(entry)!,
+			});
 			const flattened = entry.content.replace(/\s+/g, " ");
 			const hidden = flattened.length - REFINER_ENTRY_CONTENT_LIMIT;
 			// An update replaces the entry, so a refiner that cannot tell a truncated
@@ -545,31 +573,31 @@ function overviewForPrompt(state: HarnessState): { text: string; fullyVisible: S
 					: flattened;
 			// An entry short enough to render whole needs no expansion round-trip.
 			if (hidden <= 0) {
-				fullyVisible.add(entry.id);
+				fullyVisible.add(identity);
 			}
 			const argumentsText =
-				entry.kind === "skill" && Object.keys(entry.arguments).length > 0
+				kind === "skill" && Object.keys(entry.arguments).length > 0
 					? ` args=${JSON.stringify(entry.arguments).slice(0, 240)}`
 					: "";
 			const referenceText =
-				entry.kind === "skill" && Object.keys(entry.reference).length > 0
+				kind === "skill" && Object.keys(entry.reference).length > 0
 					? ` ref=${JSON.stringify(entry.reference).slice(0, 240)}`
 					: "";
 			lines.push(
-				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${content}`,
+				`- [${identity}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${content}`,
 			);
 		}
 		if (entries.length > REFINER_ENTRY_LIMIT) {
 			lines.push(`- +${entries.length - REFINER_ENTRY_LIMIT} more ${kind} entries`);
 		}
 	}
-	return { text: lines.join("\n"), fullyVisible };
+	return { text: lines.join("\n"), fullyVisible, baselineEntries };
 }
 
 /**
- * A refiner may answer with `{"expand": ["id", ...]}` instead of edits when an entry it
- * needs is truncated in the overview. Returns the requested ids, or undefined when the
- * reply is a normal proposal.
+ * A refiner may answer with `{"expand": ["scope:kind:id", ...]}` instead of edits when
+ * an entry it needs is truncated in the overview. Returns the requested canonical
+ * identifiers, or undefined when the reply is a normal proposal.
  */
 function parseExpandRequest(text: string): string[] | undefined {
 	let value: unknown;
@@ -591,44 +619,34 @@ function parseExpandRequest(text: string): string[] | undefined {
 	const ids = record.expand.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
 	return ids.length > 0 ? ids : undefined;
 }
-
-/** Entry ids are rendered with a display-only scope prefix, so accept either form. */
-function findEntryById(state: HarnessState, id: string): HarnessEntry | undefined {
-	const bare = id.replace(/^(local|global):/, "");
-	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
-		const records = state.entries[kind];
-		const match = records[id] ?? records[bare];
-		if (match) {
-			return match;
-		}
-	}
-	return undefined;
-}
-
 /**
- * Render requested entries in full, within a character budget. Withheld and unknown ids
- * are reported so the refiner knows it is still working without them.
+ * Render baseline entries requested by exact canonical identity, within a character
+ * budget. Withheld and unknown identities are reported so the refiner knows it is still
+ * working without them.
  */
 function expansionForPrompt(
-	state: HarnessState,
-	ids: string[],
-	expanded: Set<string>,
+	baselineEntries: ReadonlyMap<string, BaselineHarnessEntry>,
+	identities: string[],
+	expanded: Set<HarnessEntryIdentity>,
 	budget: number,
 ): { text: string; budget: number } {
 	const lines: string[] = [];
-	for (const id of ids) {
-		const entry = findEntryById(state, id);
-		if (!entry) {
-			lines.push(`- ${id}: not found`);
+	for (const identity of identities) {
+		const baseline = baselineEntries.get(identity);
+		if (!baseline) {
+			lines.push(`- ${identity}: not found`);
 			continue;
 		}
+		const { entry } = baseline;
 		if (entry.content.length > budget) {
-			lines.push(`- ${entry.id}: withheld, expansion budget exhausted (${entry.content.length} chars)`);
+			lines.push(`- ${identity}: withheld, expansion budget exhausted (${entry.content.length} chars)`);
 			continue;
 		}
 		budget -= entry.content.length;
-		expanded.add(entry.id);
-		lines.push(`<entry id="${entry.id}" kind="${entry.kind}" title="${entry.title}">\n${entry.content}\n</entry>`);
+		expanded.add(baseline.identity);
+		lines.push(
+			`<entry identifier="${baseline.identity}" id="${entry.id}" kind="${baseline.kind}" scope="${baseline.scope}" title="${entry.title}">\n${entry.content}\n</entry>`,
+		);
 	}
 	return { text: lines.join("\n\n"), budget };
 }
@@ -800,8 +818,8 @@ export function applyRefinementProposal(
 		rollbackOf?: string;
 		scope?: HarnessScope;
 		baselineState?: HarnessState;
-		/** Ids the refiner saw in full. When provided, updates to any other id are refused. */
-		fullyVisibleIds?: Set<string>;
+		/** Canonical entry identities the refiner saw in full. Other updates are refused. */
+		fullyVisibleIds?: ReadonlySet<HarnessEntryIdentity>;
 	},
 ): RefinementResult {
 	const appliedEdits: AppliedRefinementEdit[] = [];
@@ -851,7 +869,14 @@ export function applyRefinementProposal(
 			appliedEdits.push({ ...edit, id, applied: false, error: "entry not found" });
 			continue;
 		}
-		if (edit.action === "update" && options.fullyVisibleIds && !options.fullyVisibleIds.has(id)) {
+		const visibilityIdentity = before
+			? harnessEntryIdentity(normalizeHarnessScope(before.scope, options.scope ?? "global"), edit.kind, before.id)
+			: undefined;
+		if (
+			edit.action === "update" &&
+			options.fullyVisibleIds &&
+			(!visibilityIdentity || !options.fullyVisibleIds.has(visibilityIdentity))
+		) {
 			// An update replaces the entry, so it may only be applied when the refiner
 			// was shown the entry in full.
 			appliedEdits.push({
@@ -954,8 +979,8 @@ export function getRefinementHistory(entries: readonly CustomEntry[]): Refinemen
 export interface RefinementPlan {
 	proposal: RefinementProposal;
 	id: string;
-	/** Entry ids the refiner saw in full, either untruncated or via an expansion round. */
-	fullyVisibleIds?: Set<string>;
+	/** Canonical entry identities seen in full, either initially or through expansion. */
+	fullyVisibleIds?: Set<HarnessEntryIdentity>;
 	rollbackOf?: string;
 	rollbackScope?: HarnessScope;
 	/** Target-scope state captured before planning, used to reject conflicting edits at apply time. */
@@ -1050,7 +1075,7 @@ export async function planRefinement(
 			return { proposal: parseProposal(text), id, fullyVisibleIds: fullyVisible };
 		}
 
-		const expansion = expansionForPrompt(state, requested, fullyVisible, budget);
+		const expansion = expansionForPrompt(overview.baselineEntries, requested, fullyVisible, budget);
 		budget = expansion.budget;
 		const isFinalRound = round + 1 >= REFINER_MAX_EXPANSION_ROUNDS;
 		conversation.push(response, {
