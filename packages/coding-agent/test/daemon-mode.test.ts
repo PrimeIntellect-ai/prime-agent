@@ -8299,6 +8299,36 @@ describe("daemon mode helpers", () => {
 		});
 	});
 
+	it("routes queued message mutation to the active session", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const mutateQueuedMessage = vi.fn(() => "applied" as const);
+		const state = makeState("active-1") as ActiveSessionState;
+		(state.runtime as { session: unknown }).session = { mutateQueuedMessage };
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		const client = makeClient("client-1", state.activeSessionId);
+		const mutation = { type: "replace", text: "edited", lane: "followUp" } as const;
+		await expect(
+			internals.handleCommand(client, {
+				type: "mutate_queued_message",
+				activeSessionId: state.activeSessionId,
+				lane: "followUp",
+				index: 0,
+				expectedText: "edited",
+				mutation,
+			}),
+		).resolves.toMatchObject({ success: true, data: { status: "applied" } });
+		expect(mutateQueuedMessage).toHaveBeenCalledWith("followUp", 0, "edited", mutation);
+	});
+
 	it("gets and sets RLM max depth directly on the active session", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
