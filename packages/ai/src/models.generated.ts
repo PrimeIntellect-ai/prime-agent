@@ -9910,7 +9910,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.7999999999999999,
@@ -9927,7 +9929,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 3,
@@ -9944,7 +9948,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.7,
@@ -9961,7 +9967,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -10064,7 +10072,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -10081,7 +10089,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -10098,7 +10108,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 15,
@@ -10115,7 +10127,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 15,
@@ -10132,7 +10146,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -10150,7 +10166,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -10168,7 +10184,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -10186,7 +10202,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 30,
@@ -10204,7 +10220,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -10222,7 +10238,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -10240,7 +10256,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -10258,7 +10274,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -10275,7 +10291,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -10292,7 +10310,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -10310,7 +10330,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -10328,7 +10348,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -10345,7 +10365,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.22,
@@ -10396,7 +10418,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -10413,7 +10437,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.075,
@@ -10431,6 +10457,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -10448,6 +10475,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.09999999999999999,
@@ -10498,7 +10526,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -10549,7 +10579,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.25,
@@ -10566,7 +10598,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.7,
@@ -10583,7 +10617,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.5,
@@ -10600,7 +10636,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.27,
@@ -10617,7 +10655,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.26899999999999996,
@@ -10634,7 +10674,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.27,
@@ -10653,7 +10695,7 @@ export const MODELS = {
 			baseUrl: "https://openrouter.ai/api/v1",
 			compat: {"requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek"},
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max"},
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
 				input: 0.14,
@@ -10672,7 +10714,7 @@ export const MODELS = {
 			baseUrl: "https://openrouter.ai/api/v1",
 			compat: {"requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek"},
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max"},
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
 				input: 0.09,
@@ -10691,7 +10733,7 @@ export const MODELS = {
 			baseUrl: "https://openrouter.ai/api/v1",
 			compat: {"requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek"},
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max"},
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
 				input: 0.435,
@@ -10708,7 +10750,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -10725,7 +10769,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.09999999999999999,
@@ -10742,7 +10788,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -10759,7 +10807,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -10776,7 +10826,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -10794,6 +10846,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.5,
@@ -10810,7 +10863,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -10828,6 +10883,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -10845,6 +10901,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -10862,6 +10919,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -10879,6 +10937,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -10896,6 +10955,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
@@ -10913,6 +10973,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -10930,6 +10991,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
@@ -10980,7 +11042,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.07,
@@ -10997,7 +11061,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -11014,7 +11080,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.09999999999999999,
@@ -11031,7 +11099,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -11066,6 +11136,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.25,
@@ -11134,6 +11205,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"xhigh","max":null},
 			input: ["text"],
 			cost: {
 				input: 0.075,
@@ -11201,7 +11273,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.3,
@@ -11304,6 +11378,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -11320,7 +11395,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.55,
@@ -11337,7 +11414,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.255,
@@ -11354,7 +11433,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.3,
@@ -11371,7 +11452,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.15,
@@ -11388,7 +11471,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.25,
@@ -11405,7 +11490,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -11559,6 +11646,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
@@ -11627,6 +11715,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.15,
@@ -11728,7 +11817,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -11745,7 +11836,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.41,
@@ -11762,7 +11855,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.6,
@@ -11779,7 +11874,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.73,
@@ -11797,7 +11894,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -11814,7 +11911,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.024999999999999998,
@@ -11831,7 +11930,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -11848,7 +11949,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.049999999999999996,
@@ -11865,7 +11968,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -11882,7 +11987,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -11900,6 +12007,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":null,"xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.08499999999999999,
@@ -11917,6 +12025,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":null,"xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -11934,6 +12043,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -11951,6 +12061,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -11967,7 +12078,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -11984,7 +12097,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -12257,6 +12372,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -12274,6 +12390,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -12291,6 +12408,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.049999999999999996,
@@ -12308,6 +12426,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 15,
@@ -12325,6 +12444,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -12342,6 +12462,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -12359,6 +12480,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -12376,6 +12498,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -12393,7 +12516,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -12429,7 +12552,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -12447,7 +12570,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 21,
@@ -12483,7 +12606,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -12501,7 +12624,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -12519,7 +12642,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.75,
@@ -12537,7 +12660,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.19999999999999998,
@@ -12555,7 +12678,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 30,
@@ -12573,7 +12696,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -12591,7 +12714,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 30,
@@ -12609,7 +12732,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 0.09999999999999999,
@@ -12627,7 +12750,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 0.09999999999999999,
@@ -12645,7 +12768,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -12663,7 +12786,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -12681,7 +12804,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 1.0000000000000002,
@@ -12699,7 +12822,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 1.0000000000000002,
@@ -12768,6 +12891,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.037,
@@ -12785,6 +12909,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.03,
@@ -12802,6 +12927,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -12818,7 +12944,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.075,
@@ -12835,7 +12963,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 15,
@@ -12852,7 +12982,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -12869,7 +13001,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1.1,
@@ -12887,6 +13021,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1.1,
@@ -12903,7 +13038,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 20,
@@ -12920,7 +13057,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.1,
@@ -12938,6 +13077,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.1,
@@ -13005,7 +13145,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.09,
@@ -13022,7 +13164,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -13039,7 +13183,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.06,
@@ -13056,7 +13202,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -13141,7 +13289,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.39999999999999997,
@@ -13158,7 +13308,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.22749999999999998,
@@ -13175,7 +13327,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.45499999999999996,
@@ -13209,7 +13363,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.22999999999999998,
@@ -13226,7 +13382,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.12,
@@ -13260,7 +13418,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.19999999999999998,
@@ -13277,7 +13437,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.08,
@@ -13294,7 +13456,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.117,
@@ -13413,7 +13577,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.78,
@@ -13447,7 +13613,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.15,
@@ -13481,7 +13649,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.39999999999999997,
@@ -13515,7 +13685,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.19999999999999998,
@@ -13566,7 +13738,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.18,
@@ -13583,7 +13757,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.26,
@@ -13600,7 +13776,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.195,
@@ -13617,7 +13795,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.14,
@@ -13634,7 +13814,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.39,
@@ -13651,7 +13833,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.09999999999999999,
@@ -13668,7 +13852,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.065,
@@ -13685,7 +13871,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.26,
@@ -13702,7 +13890,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -13719,7 +13909,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -13736,7 +13928,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.14,
@@ -13753,7 +13947,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.1875,
@@ -13770,7 +13966,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1.0270000000000001,
@@ -13787,7 +13985,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.325,
@@ -13804,7 +14004,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.03,
@@ -13821,7 +14023,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1.475,
@@ -13838,7 +14042,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.32,
@@ -13890,6 +14096,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -13923,7 +14130,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.09999999999999999,
@@ -13941,6 +14150,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.19999999999999998,
@@ -13958,6 +14168,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.13199999999999998,
@@ -13975,6 +14186,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.063,
@@ -14009,6 +14221,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -14026,6 +14239,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 0.5,
@@ -14042,7 +14256,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.15,
@@ -14059,7 +14275,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -14077,6 +14295,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -14094,6 +14313,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -14110,7 +14330,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -14127,7 +14349,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.14,
@@ -14144,7 +14368,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.435,
@@ -14161,7 +14387,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -14178,7 +14406,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.13,
@@ -14195,7 +14425,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.6,
@@ -14212,7 +14444,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.5,
@@ -14229,7 +14463,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -14246,7 +14482,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.39999999999999997,
@@ -14263,7 +14501,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.06,
@@ -14280,7 +14520,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -14297,7 +14539,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1.2,
@@ -14314,7 +14558,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.966,
@@ -14332,6 +14578,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"xhigh","max":null},
 			input: ["text"],
 			cost: {
 				input: 0.2842,
@@ -14348,7 +14595,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.2,
@@ -14366,6 +14615,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -14382,7 +14632,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -14400,6 +14652,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -14417,6 +14670,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -14435,7 +14689,7 @@ export const MODELS = {
 			baseUrl: "https://openrouter.ai/api/v1",
 			compat: {"requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek"},
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max"},
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
 				input: 0.09,
@@ -14453,6 +14707,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
@@ -14470,6 +14725,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -14487,6 +14743,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 2.9000000000000004,
@@ -14504,6 +14761,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -14521,6 +14779,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.75,
@@ -14538,6 +14797,7 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -14558,7 +14818,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -14576,8 +14836,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -14595,8 +14856,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 15,
@@ -14613,8 +14875,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -14633,7 +14896,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -14653,7 +14916,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -14673,7 +14936,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -14693,7 +14956,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -14710,8 +14973,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -14728,8 +14992,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -14749,7 +15014,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -14769,7 +15034,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -14823,8 +15088,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.56,
@@ -14841,8 +15107,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.45,
@@ -14859,8 +15126,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.28,
@@ -14878,8 +15146,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.28,
@@ -14898,7 +15167,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false,"requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek"},
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max"},
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
 				input: 0.14,
@@ -14910,6 +15179,25 @@ export const MODELS = {
 			maxTokens: 393216,
 			featured: true,
 		} satisfies Model<"openai-completions">,
+		"deepseek/deepseek-v4-flash-0731": {
+			id: "deepseek/deepseek-v4-flash-0731",
+			name: "Deepseek V4 Flash 0731",
+			api: "openai-completions",
+			provider: "prime-inference",
+			baseUrl: "https://api.pinference.ai/api/v1",
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false,"requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek"},
+			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
+			input: ["text"],
+			cost: {
+				input: 0.14,
+				output: 0.28,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 384000,
+		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-v4-pro": {
 			id: "deepseek/deepseek-v4-pro",
 			name: "Deepseek V4 PRO",
@@ -14918,7 +15206,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false,"requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek"},
 			reasoning: true,
-			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max"},
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
 				input: 2.1,
@@ -14927,7 +15215,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 384000,
+			maxTokens: 393216,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"google/gemini-2.5-flash": {
@@ -14936,8 +15224,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -14954,8 +15243,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.1,
@@ -14972,8 +15262,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -14992,6 +15283,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.5,
@@ -15000,7 +15292,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 65535,
+			maxTokens: 65536,
 		} satisfies Model<"openai-completions">,
 		"google/gemini-3.1-pro-preview": {
 			id: "google/gemini-3.1-pro-preview",
@@ -15010,6 +15302,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -15028,6 +15321,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
@@ -15046,6 +15340,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.5,
@@ -15126,7 +15421,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 128000,
+			maxTokens: 16384,
 		} satisfies Model<"openai-completions">,
 		"meta-llama/llama-4-maverick": {
 			id: "meta-llama/llama-4-maverick",
@@ -15144,7 +15439,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 16384,
+			maxTokens: 8192,
 		} satisfies Model<"openai-completions">,
 		"minimax/minimax-m2.5": {
 			id: "minimax/minimax-m2.5",
@@ -15152,8 +15447,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.3,
@@ -15170,8 +15466,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -15188,8 +15485,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3,
@@ -15237,24 +15535,6 @@ export const MODELS = {
 			contextWindow: 131072,
 			maxTokens: 16384,
 		} satisfies Model<"openai-completions">,
-		"mistralai/mistral-small-24b-instruct-2501": {
-			id: "mistralai/mistral-small-24b-instruct-2501",
-			name: "Mistral Small 24B Instruct 2501",
-			api: "openai-completions",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
-			reasoning: false,
-			input: ["text"],
-			cost: {
-				input: 0.8,
-				output: 0.8,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 32768,
-			maxTokens: 16384,
-		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-small-2603": {
 			id: "mistralai/mistral-small-2603",
 			name: "Mistral Small 2603",
@@ -15263,6 +15543,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.1875,
@@ -15272,24 +15553,6 @@ export const MODELS = {
 			},
 			contextWindow: 262144,
 			maxTokens: 8192,
-		} satisfies Model<"openai-completions">,
-		"mistralai/mistral-small-3.2-24b-instruct": {
-			id: "mistralai/mistral-small-3.2-24b-instruct",
-			name: "Mistral Small 3.2 24B Instruct",
-			api: "openai-completions",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
-			reasoning: false,
-			input: ["text", "image"],
-			cost: {
-				input: 0.2,
-				output: 0.5,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 256000,
-			maxTokens: 16384,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mixtral-8x22b-instruct": {
 			id: "mistralai/mixtral-8x22b-instruct",
@@ -15333,8 +15596,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.6,
@@ -15351,8 +15615,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.95,
@@ -15369,8 +15634,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.0925,
@@ -15390,7 +15656,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -15402,32 +15668,15 @@ export const MODELS = {
 			maxTokens: 1048576,
 			featured: true,
 		} satisfies Model<"openai-completions">,
-		"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B": {
-			id: "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B",
-			name: "NVIDIA Nemotron 3 Ultra 550B A55B",
-			api: "openai-completions",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
-			reasoning: true,
-			input: ["text"],
-			cost: {
-				input: 1,
-				output: 2.5,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 131072,
-			maxTokens: 16384,
-		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-nano-30b-a3b": {
 			id: "nvidia/nemotron-3-nano-30b-a3b",
 			name: "Nemotron 3 Nano 30B A3B",
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.05,
@@ -15436,7 +15685,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 262144,
+			maxTokens: 228000,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-super-120b-a12b": {
@@ -15447,6 +15696,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":null,"xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.3,
@@ -15556,6 +15806,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -15574,6 +15825,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.25,
@@ -15592,6 +15844,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.05,
@@ -15610,6 +15863,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.25,
@@ -15628,7 +15882,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -15656,7 +15910,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 128000,
-			maxTokens: 16384,
+			maxTokens: 32000,
 		} satisfies Model<"openai-completions">,
 		"openai/gpt-5.2-pro": {
 			id: "openai/gpt-5.2-pro",
@@ -15666,7 +15920,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 21,
@@ -15685,7 +15939,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.75,
@@ -15705,7 +15959,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -15725,7 +15979,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.75,
@@ -15745,7 +15999,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.2,
@@ -15764,7 +16018,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 30,
@@ -15784,7 +16038,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -15823,7 +16077,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -15842,7 +16096,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -15861,7 +16115,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -15880,7 +16134,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -15899,7 +16153,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -15918,7 +16172,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
+			thinkingLevelMap: {"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -15937,6 +16191,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.15,
@@ -15955,6 +16210,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.07,
@@ -15964,6 +16220,44 @@ export const MODELS = {
 			},
 			contextWindow: 131072,
 			maxTokens: 131072,
+		} satisfies Model<"openai-completions">,
+		"poolside/laguna-s-2.1": {
+			id: "poolside/laguna-s-2.1",
+			name: "Laguna S 2.1",
+			api: "openai-completions",
+			provider: "prime-inference",
+			baseUrl: "https://api.pinference.ai/api/v1",
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
+			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
+			input: ["text"],
+			cost: {
+				input: 0.1,
+				output: 0.19,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 131072,
+		} satisfies Model<"openai-completions">,
+		"poolside/laguna-xs-2.1": {
+			id: "poolside/laguna-xs-2.1",
+			name: "Laguna XS 2.1",
+			api: "openai-completions",
+			provider: "prime-inference",
+			baseUrl: "https://api.pinference.ai/api/v1",
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
+			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
+			input: ["text"],
+			cost: {
+				input: 0.065,
+				output: 0.13,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 262144,
+			maxTokens: 32768,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3-235b-a22b-2507": {
 			id: "qwen/qwen3-235b-a22b-2507",
@@ -16008,8 +16302,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.117,
@@ -16100,8 +16395,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -16129,7 +16425,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 32768,
+			maxTokens: 16384,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3-vl-8b-instruct": {
 			id: "qwen/qwen3-vl-8b-instruct",
@@ -16155,8 +16451,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.3125,
@@ -16173,8 +16470,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.6,
@@ -16191,8 +16489,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.6,
@@ -16201,7 +16500,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 65536,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.6-35b-a3b": {
 			id: "qwen/qwen3.6-35b-a3b",
@@ -16209,11 +16508,12 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
-				input: 0.23,
+				input: 0.3,
 				output: 1.8,
 				cacheRead: 0,
 				cacheWrite: 0,
@@ -16227,8 +16527,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.03,
@@ -16239,14 +16540,35 @@ export const MODELS = {
 			contextWindow: 1000000,
 			maxTokens: 65536,
 		} satisfies Model<"openai-completions">,
+		"qwen/qwen3.8-max": {
+			id: "qwen/qwen3.8-max",
+			name: "QWEN3.8 MAX",
+			api: "openai-completions",
+			provider: "prime-inference",
+			baseUrl: "https://api.pinference.ai/api/v1",
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 6,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 131072,
+			featured: true,
+		} satisfies Model<"openai-completions">,
 		"x-ai/grok-4.20": {
 			id: "x-ai/grok-4.20",
 			name: "Grok 4.20",
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -16266,6 +16588,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -16283,8 +16606,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text", "image"],
 			cost: {
 				input: 0.4,
@@ -16301,8 +16625,9 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openrouter"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1,
@@ -16321,6 +16646,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -16339,6 +16665,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.2,
@@ -16357,6 +16684,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -16375,6 +16703,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.6,
@@ -16393,6 +16722,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.1,
@@ -16411,6 +16741,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1.2,
@@ -16430,6 +16761,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 1.75,
@@ -16438,7 +16770,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 204800,
-			maxTokens: 128000,
+			maxTokens: 131072,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5.2": {
@@ -16449,6 +16781,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"zai"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"xhigh","max":null},
 			input: ["text"],
 			cost: {
 				input: 1.68,

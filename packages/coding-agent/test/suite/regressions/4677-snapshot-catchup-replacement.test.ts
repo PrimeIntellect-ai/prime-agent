@@ -133,6 +133,11 @@ function workerHarness(result: DaemonAttachResult, transcript: SnapshotTranscrip
 			lifecycle: "ready",
 			pid: 4677,
 		},
+		client: {
+			request: vi.fn(async () => {
+				throw new Error("unexpected snapshot reload");
+			}),
+		},
 		summaries: new Map([[activeSessionId, result.snapshot.summary]]),
 		snapshotCache: new Map([[activeSessionId, result]]),
 		transcriptCaches: new Map([[activeSessionId, transcript]]),

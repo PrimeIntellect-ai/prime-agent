@@ -1,4 +1,5 @@
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename } from "node:path";
 
@@ -10,6 +11,44 @@ export function shouldUseWindowsShell(command: string): boolean {
 	if (process.platform !== "win32") return false;
 	const commandName = basename(command).toLowerCase();
 	return commandName.endsWith(".cmd") || commandName.endsWith(".bat") || WINDOWS_SHELL_COMMANDS.has(commandName);
+}
+
+/** Cheap kill(0) existence probe; counts zombies as existing. */
+export function processIdExists(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** A zombie has already exited; it only lingers until its parent reaps it. */
+export function isZombieProcess(pid: number): boolean {
+	if (process.platform === "win32") {
+		return false;
+	}
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		const state = stat
+			.slice(stat.lastIndexOf(")") + 2)
+			.trimStart()
+			.charAt(0);
+		return state === "Z";
+	} catch {
+		// Fall through to the portable process listing used on macOS and BSD.
+	}
+	try {
+		const state = execFileSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
+		return state.startsWith("Z");
+	} catch {
+		return false;
+	}
+}
+
+/** True only for a process that is actually running: zombies do not count. */
+export function isProcessAlive(pid: number): boolean {
+	return processIdExists(pid) && !isZombieProcess(pid);
 }
 
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {

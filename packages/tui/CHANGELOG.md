@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Fixed hyperlinks not being clickable in fullscreen mode on terminals that gate native link handling while mouse reporting is active (e.g. Ghostty); left-clicking a link now opens it directly.
+
+## [0.7.2] - 2026-08-11
+
 ## [0.7.1] - 2026-08-07
 
 ## [0.7.0] - 2026-08-05
