@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed OpenAI Codex authentication failures being retried through the whole transport budget: a 401 or 403 now costs one request instead of four, and is no longer re-sent when the error body happens to mention a rate limit ([#1330](https://github.com/PrimeIntellect-ai/prime-agent/issues/1330)).
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07
