@@ -190,20 +190,18 @@ Return JSON only:
  * the trajectory slice), so a constant output cap silently truncates exactly the
  * large multi-edit proposals that matter most. Math.min keeps small models honest.
  */
-export const REFINEMENT_MAX_OUTPUT_TOKENS = 32_000;
-export const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS = 4_096;
+const REFINEMENT_MAX_OUTPUT_TOKENS = 32_000;
+const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS = 4_096;
 
 const TRUNCATED_JSON_ERROR =
 	"the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
-export function refinementMaxOutputTokens(model: Pick<Model<any>, "maxTokens">): number {
-	return model.maxTokens > 0 ? Math.min(model.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : REFINEMENT_MAX_OUTPUT_TOKENS;
+function refinementMaxOutputTokens(model: Model<any>): number {
+	return Math.min(model.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS);
 }
 
-export function autoRefineReviewMaxOutputTokens(model: Pick<Model<any>, "maxTokens">): number {
-	return model.maxTokens > 0
-		? Math.min(model.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS)
-		: AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS;
+function autoRefineReviewMaxOutputTokens(model: Model<any>): number {
+	return Math.min(model.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
 }
 
 function now(): string {

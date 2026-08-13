@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { getModel, getSupportedThinkingLevels } from "../src/models.js";
-import { buildBaseOptions } from "../src/providers/simple-options.js";
 
 describe("xAI models", () => {
 	it("registers Grok 4.6 on the Responses API with published reasoning metadata", () => {
@@ -15,8 +14,7 @@ describe("xAI models", () => {
 		expect(model.reasoning).toBe(true);
 		expect(model.input).toEqual(["text", "image"]);
 		expect(model.contextWindow).toBe(500000);
-		expect(model.maxTokens).toBe(0);
-		expect(buildBaseOptions(model).maxTokens).toBeUndefined();
+		expect(model.maxTokens).toBe(500000);
 		expect(model.cost).toEqual({
 			input: 2,
 			output: 6,

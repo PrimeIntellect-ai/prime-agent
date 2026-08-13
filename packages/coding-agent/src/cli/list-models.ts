@@ -11,10 +11,7 @@ import type { ModelRegistry } from "../core/model-registry.js";
 /**
  * Format a number as human-readable (e.g., 200000 -> "200K", 1000000 -> "1M")
  */
-export function formatTokenCount(count: number): string {
-	if (count <= 0) {
-		return "unbounded";
-	}
+function formatTokenCount(count: number): string {
 	if (count >= 1_000_000) {
 		const millions = count / 1_000_000;
 		return millions % 1 === 0 ? `${millions}M` : `${millions.toFixed(1)}M`;
