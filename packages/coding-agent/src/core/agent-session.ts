@@ -1203,6 +1203,8 @@ export class AgentSession {
 	// Set at the start of async teardown so a child finishing mid-disposeAsync doesn't
 	// re-populate the retained map after it's been cleared.
 	private _disposing = false;
+	/** Set before async teardown awaits so runtime rebuilds cannot replace its owned kernel. */
+	private _asyncTeardownStarted = false;
 	private _disposeAsyncPromise?: Promise<void>;
 	private _ipythonKernelProvisioner?: IpythonKernelProvisioner;
 	/** Artifact dir backing the current provisioner's kernel snapshot, if any. */
@@ -3778,24 +3780,46 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(): Promise<void> {
-		if (this._disposed) {
-			return this._disposeCallbacksPromise;
-		}
-		// Concurrent callers await the same in-flight teardown so none resolves before
-		// the kernel snapshot flush finishes.
+		// Concurrent and late callers await the same async teardown, including its
+		// terminal failure. A purely synchronous dispose has no such promise.
 		if (this._disposeAsyncPromise) {
 			return this._disposeAsyncPromise;
 		}
+		if (this._disposed) {
+			return this._disposeCallbacksPromise;
+		}
+		this._asyncTeardownStarted = true;
 		this._disposeAsyncPromise = (async () => {
-			// Drain before marking _disposing so a refine triggered at the final
-			// agent_end completes instead of being aborted by dispose().
-			await this._drainPendingRefinementForDisposal();
-			if (this._disposed) {
-				return this._disposeCallbacksPromise;
+			// Capture both operations before the first await. allSettled observes either
+			// rejection immediately while allowing the independent operation to finish.
+			const drain = this._drainPendingRefinementForDisposal();
+			const kernelDispose = this._ipythonKernelProvisioner?.dispose() ?? Promise.resolve();
+			const failures: unknown[] = [];
+			for (const result of await Promise.allSettled([kernelDispose, drain])) {
+				if (result.status === "rejected") failures.push(result.reason);
 			}
-			this._disposing = true;
-			this._sessionActionCommitDisposeAbortController.abort();
-			await this._disposeAsyncOnce();
+
+			// Drain before marking _disposing so a refine triggered at the final
+			// agent_end completes instead of being aborted by dispose(). Cleanup remains
+			// authoritative even when the drain or kernel teardown failed.
+			if (this._disposed) {
+				await this._disposeCallbacksPromise;
+			} else {
+				this._disposing = true;
+				this._sessionActionCommitDisposeAbortController.abort();
+				try {
+					await this._disposeAsyncOnce();
+				} catch (error) {
+					failures.push(error);
+				} finally {
+					// _disposeAsyncOnce normally owns finalization. Keep the same authority
+					// boundary if an earlier best-effort child cleanup unexpectedly throws.
+					this.dispose();
+					await this._disposeCallbacksPromise;
+				}
+			}
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) throw new AggregateError(failures, "Session disposal failed.");
 		})();
 		return this._disposeAsyncPromise;
 	}
@@ -3949,11 +3973,6 @@ export class AgentSession {
 		this._rlmChildSessions.clear();
 		this._rlmChildCleanupFailures.clear();
 		this._deletedRlmChildIds.clear();
-		try {
-			await this._ipythonKernelProvisioner?.dispose();
-		} catch {
-			// a failed kernel startup already cleaned up after itself
-		}
 		this.dispose();
 		await this._disposeCallbacksPromise;
 	}
@@ -8640,6 +8659,7 @@ export class AgentSession {
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
+		if (this._asyncTeardownStarted) throw new Error("Cannot rebuild a session during disposal.");
 		const pythonSkills = getPythonSkillRuntimeInfo(this._modelVisibleSkills());
 		let configuredBaseToolDefinitions: Record<string, ToolDefinition>;
 		if (this._baseToolsOverride) {
@@ -8883,6 +8903,7 @@ export class AgentSession {
 	}
 
 	async reload(): Promise<void> {
+		if (this._asyncTeardownStarted) throw new Error("Cannot reload a session during disposal.");
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, {
 			type: "session_shutdown",

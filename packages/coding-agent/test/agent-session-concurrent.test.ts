@@ -192,6 +192,203 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(disposed).toBe(true);
 	});
 
+	it("starts the refinement drain before awaiting a deferred kernel provisioner dispose", async () => {
+		createSession();
+		const order: string[] = [];
+		let releaseKernelDispose: () => void = () => {};
+		const kernelDisposeGate = new Promise<void>((resolve) => {
+			releaseKernelDispose = resolve;
+		});
+		const internals = session as unknown as {
+			_drainPendingRefinementForDisposal: () => Promise<void>;
+			_ipythonKernelProvisioner?: { dispose(): Promise<void> };
+		};
+		vi.spyOn(internals, "_drainPendingRefinementForDisposal").mockImplementation(async () => {
+			order.push("drain");
+		});
+		internals._ipythonKernelProvisioner = {
+			dispose: vi.fn(async () => {
+				order.push("kernel-dispose");
+				await kernelDisposeGate;
+			}),
+		};
+
+		const disposal = session.disposeAsync();
+		expect(order).toEqual(["drain", "kernel-dispose"]);
+		releaseKernelDispose();
+		await disposal;
+	});
+
+	it("observes a rejected refinement drain while kernel disposal is pending", async () => {
+		createSession();
+		const drainFailure = new Error("refinement drain failed");
+		const order: string[] = [];
+		let rejectDrain: (error: Error) => void = () => {};
+		const drainGate = new Promise<void>((_resolve, reject) => {
+			rejectDrain = reject;
+		});
+		let releaseKernelDispose: () => void = () => {};
+		const kernelDisposeGate = new Promise<void>((resolve) => {
+			releaseKernelDispose = resolve;
+		});
+		const internals = session as unknown as {
+			_drainPendingRefinementForDisposal: () => Promise<void>;
+			_ipythonKernelProvisioner?: { dispose(): Promise<void> };
+		};
+		vi.spyOn(internals, "_drainPendingRefinementForDisposal").mockImplementation(() => {
+			order.push("drain");
+			return drainGate;
+		});
+		internals._ipythonKernelProvisioner = {
+			dispose: vi.fn(async () => {
+				order.push("kernel-dispose");
+				await kernelDisposeGate;
+				order.push("kernel-dispose-finished");
+			}),
+		};
+		const unhandledRejections: unknown[] = [];
+		const onUnhandledRejection = (reason: unknown) => {
+			unhandledRejections.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandledRejection);
+
+		try {
+			const disposal = session.disposeAsync();
+			expect(order).toEqual(["drain", "kernel-dispose"]);
+			rejectDrain(drainFailure);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(unhandledRejections).toEqual([]);
+
+			releaseKernelDispose();
+			await expect(disposal).rejects.toBe(drainFailure);
+			expect(order).toEqual(["drain", "kernel-dispose", "kernel-dispose-finished"]);
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+		}
+	});
+
+	it("finalizes exactly once and shares a kernel disposal failure across callers", async () => {
+		createSession();
+		const kernelFailure = new Error("kernel disposal failed");
+		const kernelDispose = vi.fn(async () => {
+			throw kernelFailure;
+		});
+		let releaseCallback: () => void = () => {};
+		const callbackGate = new Promise<void>((resolve) => {
+			releaseCallback = resolve;
+		});
+		const callback = vi.fn(async () => callbackGate);
+		session.registerDisposeCallback(callback);
+		const internals = session as unknown as {
+			_ipythonKernelProvisioner?: { dispose(): Promise<void> };
+			_disposed: boolean;
+		};
+		internals._ipythonKernelProvisioner = { dispose: kernelDispose };
+
+		let settled = false;
+		const first = session.disposeAsync().finally(() => {
+			settled = true;
+		});
+		const second = session.disposeAsync();
+		await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
+		expect(settled).toBe(false);
+		releaseCallback();
+		await expect(first).rejects.toBe(kernelFailure);
+		await expect(second).rejects.toBe(kernelFailure);
+		expect(kernelDispose).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(internals._disposed).toBe(true);
+	});
+
+	it("shares a terminal teardown failure with callers arriving after disposed is set", async () => {
+		createSession();
+		const kernelFailure = new Error("kernel disposal failed");
+		const kernelDispose = vi.fn(async () => {
+			throw kernelFailure;
+		});
+		let releaseCallback: () => void = () => {};
+		const callbackGate = new Promise<void>((resolve) => {
+			releaseCallback = resolve;
+		});
+		let callbackStarted: () => void = () => {};
+		const callbackStartedGate = new Promise<void>((resolve) => {
+			callbackStarted = resolve;
+		});
+		const callback = vi.fn(async () => {
+			callbackStarted();
+			await callbackGate;
+		});
+		session.registerDisposeCallback(callback);
+		const internals = session as unknown as {
+			_ipythonKernelProvisioner?: { dispose(): Promise<void> };
+			_disposed: boolean;
+		};
+		internals._ipythonKernelProvisioner = { dispose: kernelDispose };
+
+		const first = session.disposeAsync();
+		await callbackStartedGate;
+		expect(internals._disposed).toBe(true);
+		expect(callback).toHaveBeenCalledOnce();
+		const late = session.disposeAsync();
+		let lateSettled = false;
+		void late
+			.finally(() => {
+				lateSettled = true;
+			})
+			.catch(() => undefined);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(lateSettled).toBe(false);
+		releaseCallback();
+		await expect(first).rejects.toBe(kernelFailure);
+		await expect(late).rejects.toBe(kernelFailure);
+		expect(kernelDispose).toHaveBeenCalledOnce();
+		expect(callback).toHaveBeenCalledOnce();
+	});
+
+	it("blocks runtime reload from replacing the authoritative kernel during async disposal", async () => {
+		createSession();
+		let releaseKernel: () => void = () => {};
+		const kernelGate = new Promise<void>((resolve) => {
+			releaseKernel = resolve;
+		});
+		const kernelDispose = vi.fn(async () => kernelGate);
+		const internals = session as unknown as {
+			_ipythonKernelProvisioner?: { dispose(): Promise<void> };
+		};
+		internals._ipythonKernelProvisioner = { dispose: kernelDispose };
+
+		const disposal = session.disposeAsync();
+		await expect(session.reload()).rejects.toThrow("Cannot reload a session during disposal.");
+		releaseKernel();
+		await disposal;
+		expect(kernelDispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("runs finalizers and aggregates concurrent drain and kernel disposal failures", async () => {
+		createSession();
+		const kernelFailure = new Error("kernel disposal failed");
+		const drainFailure = new Error("refinement drain failed");
+		const callback = vi.fn();
+		session.registerDisposeCallback(callback);
+		const internals = session as unknown as {
+			_drainPendingRefinementForDisposal: () => Promise<void>;
+			_ipythonKernelProvisioner?: { dispose(): Promise<void> };
+			_disposed: boolean;
+		};
+		vi.spyOn(internals, "_drainPendingRefinementForDisposal").mockRejectedValue(drainFailure);
+		internals._ipythonKernelProvisioner = {
+			dispose: vi.fn(async () => {
+				throw kernelFailure;
+			}),
+		};
+
+		const failure = await session.disposeAsync().catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(AggregateError);
+		expect((failure as AggregateError).errors).toEqual([kernelFailure, drainFailure]);
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(internals._disposed).toBe(true);
+	});
+
 	it("should throw when prompt() called while streaming", async () => {
 		createSession();
 
