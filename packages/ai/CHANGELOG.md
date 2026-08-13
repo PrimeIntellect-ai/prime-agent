@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed a session hanging forever when a provider holds the stream open but stops sending; a started stream that produces no data for `streamStallTimeoutMs` (default 5 minutes, `0` disables) now fails as a retryable server error instead of blocking on a read that never returns ([#1232](https://github.com/PrimeIntellect-ai/prime-agent/issues/1232)).
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07
