@@ -1172,15 +1172,17 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 		const isLetter = key >= "a" && key <= "z";
 		const isDigit = isDigitKey(key);
 
-		if (modifier === MODIFIERS.ctrl + MODIFIERS.alt && !_kittyProtocolActive && rawCtrl) {
+		if (modifier === MODIFIERS.ctrl + MODIFIERS.alt && rawCtrl) {
 			// Legacy: ctrl+alt+key is ESC followed by the control character.
-			// If that legacy form does not match, continue so CSI-u and
-			// modifyOtherKeys sequences from tmux can still be recognized.
+			// Kept even with Kitty protocol active — some terminals (e.g. zellij)
+			// answer the capability probe but still send legacy ESC+char.
 			if (data === `\x1b${rawCtrl}`) return true;
 		}
 
-		if (modifier === MODIFIERS.alt && !_kittyProtocolActive && (isLetter || isDigit)) {
-			// Legacy: alt+letter/digit is ESC followed by the key
+		if (modifier === MODIFIERS.alt && (isLetter || isDigit)) {
+			// Legacy: alt+letter/digit is ESC followed by the key.
+			// Kept even with Kitty protocol active — some terminals answer the
+			// capability probe but still send legacy ESC+char for Alt combos.
 			if (data === `\x1b${key}`) return true;
 		}
 
@@ -1311,12 +1313,14 @@ export function parseKey(data: string): string | undefined {
 	if (data === "\x1b\x7f" || data === "\x1b\b") return "alt+backspace";
 	if (!_kittyProtocolActive && data === "\x1bB") return "alt+left";
 	if (!_kittyProtocolActive && data === "\x1bF") return "alt+right";
-	if (!_kittyProtocolActive && data.length === 2 && data[0] === "\x1b") {
+	if (data.length === 2 && data[0] === "\x1b") {
 		const code = data.charCodeAt(1);
 		if (code >= 1 && code <= 26) {
 			return `ctrl+alt+${String.fromCharCode(code + 96)}`;
 		}
-		// Legacy alt+letter/digit (ESC followed by the key)
+		// Legacy alt+letter/digit (ESC followed by the key).
+		// Kept even with Kitty protocol active — some terminals answer the
+		// capability probe but still send legacy ESC+char for Alt combos.
 		if ((code >= 97 && code <= 122) || (code >= 48 && code <= 57)) {
 			return `alt+${String.fromCharCode(code)}`;
 		}

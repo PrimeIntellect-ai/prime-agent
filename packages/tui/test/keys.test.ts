@@ -415,7 +415,7 @@ describe("matchesKey", () => {
 			);
 		});
 
-		it("should parse legacy alt-prefixed sequences when kitty inactive", () => {
+		it("should parse legacy alt-prefixed sequences regardless of Kitty protocol state", () => {
 			setKittyProtocolActive(false);
 			assert.strictEqual(matchesKey("\x1b ", "alt+space"), true);
 			assert.strictEqual(parseKey("\x1b "), "alt+space");
@@ -437,22 +437,42 @@ describe("matchesKey", () => {
 			assert.strictEqual(parseKey("\x1bz"), "alt+z");
 
 			setKittyProtocolActive(true);
+			// alt+space and alt+arrows remain suppressed in Kitty mode (ambiguous
+			// with other mappings). But alt+letter/digit and ctrl+alt+letter are
+			// kept as fallback: some terminals (e.g. zellij) answer the Kitty
+			// capability probe but still send legacy ESC+char for Alt combos.
 			assert.strictEqual(matchesKey("\x1b ", "alt+space"), false);
 			assert.strictEqual(parseKey("\x1b "), undefined);
 			assert.strictEqual(matchesKey("\x1b\b", "alt+backspace"), true);
 			assert.strictEqual(parseKey("\x1b\b"), "alt+backspace");
-			assert.strictEqual(matchesKey("\x1b\x03", "ctrl+alt+c"), false);
-			assert.strictEqual(parseKey("\x1b\x03"), undefined);
+			assert.strictEqual(matchesKey("\x1b\x03", "ctrl+alt+c"), true);
+			assert.strictEqual(parseKey("\x1b\x03"), "ctrl+alt+c");
 			assert.strictEqual(matchesKey("\x1bB", "alt+left"), false);
 			assert.strictEqual(parseKey("\x1bB"), undefined);
 			assert.strictEqual(matchesKey("\x1bF", "alt+right"), false);
 			assert.strictEqual(parseKey("\x1bF"), undefined);
-			assert.strictEqual(matchesKey("\x1ba", "alt+a"), false);
-			assert.strictEqual(parseKey("\x1ba"), undefined);
-			assert.strictEqual(matchesKey("\x1b1", "alt+1"), false);
-			assert.strictEqual(parseKey("\x1b1"), undefined);
-			assert.strictEqual(matchesKey("\x1by", "alt+y"), false);
-			assert.strictEqual(parseKey("\x1by"), undefined);
+			assert.strictEqual(matchesKey("\x1ba", "alt+a"), true);
+			assert.strictEqual(parseKey("\x1ba"), "alt+a");
+			assert.strictEqual(matchesKey("\x1b1", "alt+1"), true);
+			assert.strictEqual(parseKey("\x1b1"), "alt+1");
+			assert.strictEqual(matchesKey("\x1by", "alt+y"), true);
+			assert.strictEqual(parseKey("\x1by"), "alt+y");
+			setKittyProtocolActive(false);
+		});
+
+		it("should match legacy Alt+letter as fallback when Kitty protocol is active (#1285)", () => {
+			// Terminals like zellij answer the Kitty capability query (causing
+			// Kitty mode to activate) but still send legacy ESC+char for Alt
+			// combinations. Legacy parsing must stay as a fallback so Alt+letter
+			// shortcuts are not dropped.
+			setKittyProtocolActive(true);
+			assert.strictEqual(matchesKey("\x1bt", "alt+t"), true);
+			assert.strictEqual(parseKey("\x1bt"), "alt+t");
+			assert.strictEqual(matchesKey("\x1b5", "alt+5"), true);
+			assert.strictEqual(parseKey("\x1b5"), "alt+5");
+			// Real Kitty terminals send CSI-u — that path is unaffected.
+			assert.strictEqual(matchesKey("\x1b[116;3u", "alt+t"), true);
+			assert.strictEqual(parseKey("\x1b[116;3u"), "alt+t");
 			setKittyProtocolActive(false);
 		});
 
