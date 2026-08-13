@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed the kernel state snapshot silently dropping every Python skill that exposes `run()`, and any user variable referencing one, with `cannot pickle '_PrimeAgentCallableSkillModule' object` ([#1211](https://github.com/PrimeIntellect-ai/prime-agent/issues/1211)).
+- Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
 
