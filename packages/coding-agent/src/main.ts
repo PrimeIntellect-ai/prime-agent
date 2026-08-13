@@ -257,12 +257,8 @@ export function shouldOpenAgentsViewForDaemonInteractive(options: AgentsViewStar
 	const requestsAgentsView = bareResume || (options.explicitAgentsView && !options.needsOnboarding);
 	return (
 		options.useDaemonInteractive &&
-		// `prime-agent` opens a new chat by default; the unified agents view is reached via
-		// left-arrow from a session, requested explicitly (`agents`), or opened by bare `--resume`.
+		// A selector, continuation, or fork must open its target directly rather than the agents view.
 		!!requestsAgentsView &&
-		// Onboarding still owns a normal/`agents` first run. Bare `--resume` is an explicit
-		// request for the unified session view and must not fall through to a new chat.
-		// A selector still resolves and opens its target directly.
 		typeof options.resume !== "string" &&
 		!options.continue &&
 		!options.fork

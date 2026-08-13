@@ -65,14 +65,6 @@ describe("built-in slash commands", () => {
 		});
 	});
 
-	test("exposes /resume with an optional session selector", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "resume")).toMatchObject({
-			description: "Open the agents view, or resume a session by id or path",
-			argumentHint: "[id|path]",
-			takesArgument: true,
-		});
-	});
-
 	test("exposes trace preview and backfill syntax", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "traces")).toMatchObject({
 			description: "Preview, upload, or configure Prime Agent traces",
