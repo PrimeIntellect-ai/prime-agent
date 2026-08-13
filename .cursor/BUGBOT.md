@@ -12,13 +12,6 @@
 - Comments must be short, human-readable, and only where the code cannot say it. Flag comments that restate the code, narrate control flow, or describe deleted mechanisms.
 - Doc comments must describe current behavior, not the history of how it got there.
 
-## Compatibility and hot paths
-
-- Validation over persisted user data must accept everything older versions of this product wrote. Check historical on-disk shapes (absent optional fields, old headers) before rejecting; a validator that throws on data our own older releases produced is a bug, and fail-closed handling multiplies the blast radius.
-- If a function that previously swallowed errors starts throwing (or vice versa), every call site must be audited in the same PR.
-- Flag loops that spawn a subprocess per item, and reads of full file contents where only a prefix or header is consumed. Watch for costs that scale with accumulated user state (session history, logs) on per-message or per-request paths.
-- Side effects guarded by abort signals or revocation must check authority immediately before the effect, not only before the reply; attaching an abort listener after an event that can trigger the abort is an ordering bug.
-
 ## Tests
 
 - Each bug fix carries a regression test that fails on the pre-fix code.
