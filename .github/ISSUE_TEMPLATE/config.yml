@@ -1,1 +1,11 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
+contact_links:
+  - name: Report a bug
+    url: https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general
+    about: Report unexpected behavior through GitHub Discussions.
+  - name: Suggest a feature
+    url: https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/ideas
+    about: Share a feature idea or improvement through GitHub Discussions.
+  - name: Ask a question
+    url: https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/q-a
+    about: Ask for help or discuss how Prime Agent works.

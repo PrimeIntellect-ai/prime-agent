@@ -1,8 +1,12 @@
 ---
-name: Documentation improvement
-description: Report missing, incorrect, or unclear documentation
+name: Accepted documentation work (maintainers)
+description: Track documentation work accepted from GitHub Discussions
 labels: ["documentation"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use GitHub Discussions instead.
   - type: dropdown
     id: package
     attributes:
