@@ -433,53 +433,21 @@ function loadSkillFromFile(
 }
 
 /**
- * Format skills for inclusion in a system prompt.
- * Uses XML format per Agent Skills standard.
- * See: https://agentskills.io/integrate-skills
- *
- * Skills with disableModelInvocation=true are excluded from the prompt
- * (they can only be invoked explicitly via /skill:name commands).
+ * Point the model at skills on disk. Do not inject a description roster.
+ * Skills with disableModelInvocation=true still suppress even that pointer
+ * when they are the only loaded skills.
  */
 export function formatSkillsForPrompt(skills: Skill[]): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
-
 	if (visibleSkills.length === 0) {
 		return "";
 	}
-
-	const lines = [
-		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use ipython to inspect a skill's file when the task matches its description.",
-		"Skills with a python_import are prepared in the persistent IPython kernel when available and can be called directly by that import name.",
-		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+	return [
 		"",
-		"<available_skills>",
-	];
-
-	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <type>${skill.kind}</type>`);
-		if (skill.kind === "python") {
-			lines.push(`    <python_import>${escapeXml(skill.python.importName)}</python_import>`);
-		}
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
-	}
-
-	lines.push("</available_skills>");
-
-	return lines.join("\n");
-}
-
-function escapeXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
+		"",
+		"Skills live on disk. Read the one SKILL.md that matches the work. Do not preload the catalog, and do not expect a roster of skill descriptions in this prompt.",
+		"Look under `.claude/skills/`, the session skills directory, and any path AGENTS.md names. When a skill file references a relative path, resolve it against that skill's directory (the parent of SKILL.md).",
+	].join("\n");
 }
 
 export interface LoadSkillsOptions {

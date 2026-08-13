@@ -313,7 +313,7 @@ describe("skills", () => {
 			expect(result).toBe("");
 		});
 
-		it("should format skills as XML", () => {
+		it("should point at disk instead of listing skill descriptions", () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
@@ -325,83 +325,24 @@ describe("skills", () => {
 
 			const result = formatSkillsForPrompt(skills);
 
-			expect(result).toContain("<available_skills>");
-			expect(result).toContain("</available_skills>");
-			expect(result).toContain("<skill>");
-			expect(result).toContain("<name>test-skill</name>");
-			expect(result).toContain("<type>markdown</type>");
-			expect(result).toContain("<description>A test skill.</description>");
-			expect(result).toContain("<location>/path/to/skill/SKILL.md</location>");
+			expect(result).toContain("Skills live on disk");
+			expect(result).toContain("Do not preload the catalog");
+			expect(result).not.toContain("<available_skills>");
+			expect(result).not.toContain("<description>A test skill.</description>");
+			expect(result).not.toContain("A test skill.");
 		});
 
-		it("should include Python import metadata for Python-backed skills", () => {
-			const skills: Skill[] = [
-				createTestSkill({
-					name: "python-skill",
-					description: "A Python skill.",
-					filePath: "/path/to/skill/SKILL.md",
-					baseDir: "/path/to/skill",
-					python: {
-						importName: "python_skill",
-						packagePath: "/path/to/skill",
-						pyprojectPath: "/path/to/skill/pyproject.toml",
-					},
-				}),
-			];
-
-			const result = formatSkillsForPrompt(skills);
-
-			expect(result).toContain("<type>python</type>");
-			expect(result).toContain("<python_import>python_skill</python_import>");
-		});
-
-		it("should include intro text before XML", () => {
-			const skills: Skill[] = [
-				createTestSkill({
-					name: "test-skill",
-					description: "A test skill.",
-					filePath: "/path/to/skill/SKILL.md",
-					baseDir: "/path/to/skill",
-				}),
-			];
-
-			const result = formatSkillsForPrompt(skills);
-			const xmlStart = result.indexOf("<available_skills>");
-			const introText = result.substring(0, xmlStart);
-
-			expect(introText).toContain("The following skills provide specialized instructions");
-			expect(introText).toContain("Use ipython to inspect a skill's file");
-			expect(introText).toContain("Skills with a python_import are prepared");
-		});
-
-		it("should escape XML special characters", () => {
-			const skills: Skill[] = [
-				createTestSkill({
-					name: "test-skill",
-					description: 'A skill with <special> & "characters".',
-					filePath: "/path/to/skill/SKILL.md",
-					baseDir: "/path/to/skill",
-				}),
-			];
-
-			const result = formatSkillsForPrompt(skills);
-
-			expect(result).toContain("&lt;special&gt;");
-			expect(result).toContain("&amp;");
-			expect(result).toContain("&quot;characters&quot;");
-		});
-
-		it("should format multiple skills", () => {
+		it("should not inject a roster when many skills are loaded", () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "skill-one",
-					description: "First skill.",
+					description: "Unique first skill description.",
 					filePath: "/path/one/SKILL.md",
 					baseDir: "/path/one",
 				}),
 				createTestSkill({
 					name: "skill-two",
-					description: "Second skill.",
+					description: "Unique second skill description.",
 					filePath: "/path/two/SKILL.md",
 					baseDir: "/path/two",
 				}),
@@ -409,33 +350,10 @@ describe("skills", () => {
 
 			const result = formatSkillsForPrompt(skills);
 
-			expect(result).toContain("<name>skill-one</name>");
-			expect(result).toContain("<name>skill-two</name>");
-			expect((result.match(/<skill>/g) || []).length).toBe(2);
-		});
-
-		it("should exclude skills with disableModelInvocation from prompt", () => {
-			const skills: Skill[] = [
-				createTestSkill({
-					name: "visible-skill",
-					description: "A visible skill.",
-					filePath: "/path/visible/SKILL.md",
-					baseDir: "/path/visible",
-				}),
-				createTestSkill({
-					name: "hidden-skill",
-					description: "A hidden skill.",
-					filePath: "/path/hidden/SKILL.md",
-					baseDir: "/path/hidden",
-					disableModelInvocation: true,
-				}),
-			];
-
-			const result = formatSkillsForPrompt(skills);
-
-			expect(result).toContain("<name>visible-skill</name>");
-			expect(result).not.toContain("<name>hidden-skill</name>");
-			expect((result.match(/<skill>/g) || []).length).toBe(1);
+			expect(result).not.toContain("Unique first skill description.");
+			expect(result).not.toContain("Unique second skill description.");
+			expect(result).not.toContain("<name>skill-one</name>");
+			expect(result).not.toContain("<available_skills>");
 		});
 
 		it("should return empty string when all skills have disableModelInvocation", () => {
