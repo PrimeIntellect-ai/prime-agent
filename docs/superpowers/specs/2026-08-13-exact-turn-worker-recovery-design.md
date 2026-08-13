@@ -41,6 +41,7 @@ until the session becomes idle. Every busy checkpoint records:
 - `activeSessionId`: runtime identity for diagnostics.
 - `sessionId`: persisted session generation from the session header.
 - `sessionFile`: canonical target path.
+- `agentDir`: the exact session-lease namespace, including custom agent dirs.
 - `headEntryId`: exact active branch head, including `null` for an empty branch.
 - `assistantEntryId`: latest assistant entry on that branch, when one exists.
 - `toolCalls`: the exact unresolved `{ id, name }` set declared by that assistant
