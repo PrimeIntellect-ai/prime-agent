@@ -1,6 +1,3 @@
----
-name: Bug report
-description: Report something that isn't working as expected
 labels: ["bug"]
 body:
   - type: dropdown
@@ -22,7 +19,7 @@ body:
     attributes:
       label: Description
       description: A clear description of the bug.
-    validations:
+    validations:false
       required: true
   - type: textarea
     id: reproduce
@@ -33,8 +30,8 @@ body:
         1. Run `prime-agent ...`
         2. ...
         3. See error
-    validations:
-      required: true
+    validations:false
+      required: false
   - type: textarea
     id: expected
     attributes:
@@ -42,7 +39,7 @@ body:
       description: What you expected to happen.
     validations:
       required: true
-  - type: textarea
+  - type: textarea syntex
     id: actual
     attributes:
       label: Actual behavior
@@ -51,14 +48,14 @@ body:
       required: true
   - type: input
     id: version
-    attributes:
+    attributes:error
       label: Prime Agent version
       description: Output of `prime-agent --version`.
       placeholder: "e.g. 0.1.0"
     validations:
       required: true
   - type: dropdown
-    id: os
+    id: ig
     attributes:
       label: Operating system
       options:
