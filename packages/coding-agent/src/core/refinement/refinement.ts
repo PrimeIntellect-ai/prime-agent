@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Message, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
@@ -28,6 +28,8 @@ const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
 const REFINER_ENTRY_LIMIT = 40;
 const REFINER_ENTRY_CONTENT_LIMIT = 240;
+const REFINER_MAX_EXPANSION_ROUNDS = 3;
+const REFINER_EXPANSION_BUDGET = 80_000;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
@@ -142,6 +144,9 @@ Continual harness components:
 Editing model:
 - An \`update\` edit replaces the entry's entire \`content\`; text you do not reproduce is removed.
 - Entries in the harness state above are truncated. \`... (+N chars not shown)\` marks text you were not given.
+- You may only update an entry you have been shown in full. An update to a truncated entry is refused.
+- To see one, reply with \`{"expand": ["entry-id", ...]}\` and nothing else. Those entries are returned in
+  full and you may then emit edits, or expand again. Prefer expanding over rewriting from a fragment.
 
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
@@ -525,8 +530,9 @@ export function formatHarnessStateForPrompt(
 	return lines.join("\n").trim();
 }
 
-function overviewForPrompt(state: HarnessState): string {
+function overviewForPrompt(state: HarnessState): { text: string; fullyVisible: Set<string> } {
 	const lines: string[] = [];
+	const fullyVisible = new Set<string>();
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const entries = Object.values(state.entries[kind]);
 		lines.push(`${kind}: ${entries.length}`);
@@ -539,6 +545,10 @@ function overviewForPrompt(state: HarnessState): string {
 				hidden > 0
 					? `${flattened.slice(0, REFINER_ENTRY_CONTENT_LIMIT)}... (+${hidden} chars not shown)`
 					: flattened;
+			// An entry short enough to render whole needs no expansion round-trip.
+			if (hidden <= 0) {
+				fullyVisible.add(entry.id);
+			}
 			const argumentsText =
 				entry.kind === "skill" && Object.keys(entry.arguments).length > 0
 					? ` args=${JSON.stringify(entry.arguments).slice(0, 240)}`
@@ -555,7 +565,74 @@ function overviewForPrompt(state: HarnessState): string {
 			lines.push(`- +${entries.length - REFINER_ENTRY_LIMIT} more ${kind} entries`);
 		}
 	}
-	return lines.join("\n");
+	return { text: lines.join("\n"), fullyVisible };
+}
+
+/**
+ * A refiner may answer with `{"expand": ["id", ...]}` instead of edits when an entry it
+ * needs is truncated in the overview. Returns the requested ids, or undefined when the
+ * reply is a normal proposal.
+ */
+function parseExpandRequest(text: string): string[] | undefined {
+	let value: unknown;
+	try {
+		value = extractJsonObject(text);
+	} catch {
+		return undefined;
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	if (Array.isArray(record.edits)) {
+		return undefined;
+	}
+	if (!Array.isArray(record.expand)) {
+		return undefined;
+	}
+	const ids = record.expand.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+	return ids.length > 0 ? ids : undefined;
+}
+
+/** Entry ids are rendered with a display-only scope prefix, so accept either form. */
+function findEntryById(state: HarnessState, id: string): HarnessEntry | undefined {
+	const bare = id.replace(/^(local|global):/, "");
+	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
+		const records = state.entries[kind];
+		const match = records[id] ?? records[bare];
+		if (match) {
+			return match;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Render requested entries in full, within a character budget. Withheld and unknown ids
+ * are reported so the refiner knows it is still working without them.
+ */
+function renderExpansion(
+	state: HarnessState,
+	ids: string[],
+	expanded: Set<string>,
+	remaining: { budget: number },
+): string {
+	const lines: string[] = [];
+	for (const id of ids) {
+		const entry = findEntryById(state, id);
+		if (!entry) {
+			lines.push(`- ${id}: not found`);
+			continue;
+		}
+		if (entry.content.length > remaining.budget) {
+			lines.push(`- ${entry.id}: withheld, expansion budget exhausted (${entry.content.length} chars)`);
+			continue;
+		}
+		remaining.budget -= entry.content.length;
+		expanded.add(entry.id);
+		lines.push(`<entry id="${entry.id}" kind="${entry.kind}" title="${entry.title}">\n${entry.content}\n</entry>`);
+	}
+	return lines.join("\n\n");
 }
 
 function historyForPrompt(history: RefinementResult[]): string {
@@ -720,7 +797,14 @@ function validateEdit(edit: RefinementEdit, computedId?: string): string | undef
 export function applyRefinementProposal(
 	state: HarnessState,
 	proposal: RefinementProposal,
-	options: { id: string; rollbackOf?: string; scope?: HarnessScope; baselineState?: HarnessState },
+	options: {
+		id: string;
+		rollbackOf?: string;
+		scope?: HarnessScope;
+		baselineState?: HarnessState;
+		/** Ids the refiner saw in full. When provided, updates to any other id are refused. */
+		fullyVisibleIds?: Set<string>;
+	},
 ): RefinementResult {
 	const appliedEdits: AppliedRefinementEdit[] = [];
 	const proposalModifiedKeys = new Set<string>();
@@ -767,6 +851,18 @@ export function applyRefinementProposal(
 		}
 		if (edit.action === "update" && !before) {
 			appliedEdits.push({ ...edit, id, applied: false, error: "entry not found" });
+			continue;
+		}
+		if (edit.action === "update" && options.fullyVisibleIds && !options.fullyVisibleIds.has(id)) {
+			// An update replaces the entry, so it may only be applied when the refiner
+			// was shown the entry in full.
+			appliedEdits.push({
+				...edit,
+				id,
+				before,
+				applied: false,
+				error: "entry was not shown in full; update refused",
+			});
 			continue;
 		}
 
@@ -860,6 +956,8 @@ export function getRefinementHistory(entries: readonly CustomEntry[]): Refinemen
 export interface RefinementPlan {
 	proposal: RefinementProposal;
 	id: string;
+	/** Entry ids the refiner saw in full, either untruncated or via an expansion round. */
+	fullyVisibleIds?: Set<string>;
 	rollbackOf?: string;
 	rollbackScope?: HarnessScope;
 	/** Target-scope state captured before planning, used to reject conflicting edits at apply time. */
@@ -906,8 +1004,10 @@ export async function planRefinement(
 	const scopeInstruction = options.global
 		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
 		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed.";
+	const overview = overviewForPrompt(state);
+	const fullyVisible = new Set(overview.fullyVisible);
 	const userPrompt = [
-		`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
+		`<current_harness_state>\n${overview.text}\n</current_harness_state>`,
 		`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
 		`<conversation>\n${conversationText}\n</conversation>`,
 		`<scope_policy>\n${scopeInstruction}\n</scope_policy>`,
@@ -923,27 +1023,50 @@ export async function planRefinement(
 	// Keep the refinement request non-reasoning regardless of the interactive session
 	// thinking level so the model uses its output budget for the JSON object.
 	void thinkingLevel;
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: REFINEMENT_SYSTEM_PROMPT,
-			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
-		},
-		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
-	);
+	const conversation: Message[] = [
+		{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() },
+	];
+	const remaining = { budget: REFINER_EXPANSION_BUDGET };
 
-	if (response.stopReason === "error") {
-		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
-	}
-	if (response.stopReason === "length") {
-		throw new Error(`Refinement failed: ${TRUNCATED_JSON_ERROR}`);
-	}
+	for (let round = 0; ; round++) {
+		const response = await completeSimple(
+			model,
+			{ systemPrompt: REFINEMENT_SYSTEM_PROMPT, messages: conversation },
+			{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+		);
 
-	const text = response.content
-		.filter((content): content is { type: "text"; text: string } => content.type === "text")
-		.map((content) => content.text)
-		.join("\n");
-	return { proposal: parseProposal(text), id };
+		if (response.stopReason === "error") {
+			throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
+		}
+		if (response.stopReason === "length") {
+			throw new Error(`Refinement failed: ${TRUNCATED_JSON_ERROR}`);
+		}
+
+		const text = response.content
+			.filter((content): content is { type: "text"; text: string } => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
+
+		const requested = round < REFINER_MAX_EXPANSION_ROUNDS ? parseExpandRequest(text) : undefined;
+		if (!requested) {
+			return { proposal: parseProposal(text), id, fullyVisibleIds: fullyVisible };
+		}
+
+		const rendered = renderExpansion(state, requested, fullyVisible, remaining);
+		const isFinalRound = round + 1 >= REFINER_MAX_EXPANSION_ROUNDS;
+		conversation.push(response, {
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: `<expanded_entries>\n${rendered}\n</expanded_entries>${
+						isFinalRound ? "\n\nThis is the last expansion round. Return edits now, or an empty edits array." : ""
+					}`,
+				},
+			],
+			timestamp: Date.now(),
+		});
+	}
 }
 
 function parseAutoRefineReview(text: string): AutoRefineReview {
@@ -1026,5 +1149,6 @@ export async function refineHarness(
 		id: plan.id,
 		rollbackOf: plan.rollbackOf,
 		scope: plan.rollbackScope ?? (options.global ? "global" : "local"),
+		fullyVisibleIds: plan.fullyVisibleIds,
 	});
 }

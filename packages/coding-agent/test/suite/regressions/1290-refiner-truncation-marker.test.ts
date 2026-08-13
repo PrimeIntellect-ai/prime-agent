@@ -5,7 +5,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type * as PiAi from "@earendil-works/pi-ai";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadHarnessState, planRefinement } from "../../../src/core/refinement/index.js";
+import { applyRefinementProposal, loadHarnessState, planRefinement } from "../../../src/core/refinement/index.js";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
@@ -136,5 +136,147 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		const request = completeSimpleMock.mock.calls[0][1];
 		expect(request.systemPrompt).toContain("replaces the entry's entire");
 		expect(request.systemPrompt).toContain("chars not shown");
+	});
+
+	it("expands an entry on request and applies the update it could not otherwise make", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		const tail = "SUBAGENT LIFECYCLE: delete children only at an approved boundary.";
+		state.entries.prompt.long_note = {
+			id: "long_note",
+			kind: "prompt",
+			title: "Long note",
+			content: `HEAD. ${"filler clause. ".repeat(60)}${tail}`,
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "agent",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			version: 1,
+		};
+
+		completeSimpleMock
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["long_note"] })))
+			.mockResolvedValueOnce(
+				assistantText(
+					JSON.stringify({
+						summary: "s",
+						rationale: "r",
+						expectedOutcome: "e",
+						edits: [
+							{
+								action: "update",
+								kind: "prompt",
+								id: "long_note",
+								title: "Long note",
+								content: "rewritten in full",
+							},
+						],
+					}),
+				),
+			);
+
+		const plan = await planRefinement(
+			[{ role: "user", content: "update the long note", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{},
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		// Round two must carry the prior assistant turn plus the expanded entry.
+		const second = completeSimpleMock.mock.calls[1][1];
+		expect(second.messages).toHaveLength(3);
+		expect(second.messages[1].role).toBe("assistant");
+		expect(second.messages[2].content[0].text).toContain(tail);
+		expect(plan.fullyVisibleIds?.has("long_note")).toBe(true);
+
+		const result = applyRefinementProposal(state, plan.proposal, { id: "r1", fullyVisibleIds: plan.fullyVisibleIds });
+		expect(result.appliedEdits[0].applied).toBe(true);
+		expect(state.entries.prompt.long_note.content).toBe("rewritten in full");
+	});
+
+	it("refuses an update to an entry the refiner never saw in full", () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		state.entries.prompt.long_note = {
+			id: "long_note",
+			kind: "prompt",
+			title: "Long note",
+			content: "x".repeat(2000),
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "agent",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			version: 1,
+		};
+
+		const result = applyRefinementProposal(
+			state,
+			{
+				summary: "s",
+				rationale: "r",
+				expectedOutcome: "e",
+				edits: [{ action: "update", kind: "prompt", id: "long_note", title: "Long note", content: "short delta" }],
+			},
+			{ id: "r2", fullyVisibleIds: new Set<string>() },
+		);
+
+		expect(result.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "entry was not shown in full; update refused",
+		});
+		expect(state.entries.prompt.long_note.content).toHaveLength(2000);
+	});
+
+	it("lets the refiner update a short entry without an expansion round", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		state.entries.memory.card = {
+			id: "card",
+			kind: "memory",
+			title: "Card",
+			content: "A short routing card.",
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "agent",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			version: 1,
+		};
+
+		completeSimpleMock.mockResolvedValueOnce(
+			assistantText(
+				JSON.stringify({
+					summary: "s",
+					rationale: "r",
+					expectedOutcome: "e",
+					edits: [{ action: "update", kind: "memory", id: "card", title: "Card", content: "A shorter card." }],
+				}),
+			),
+		);
+
+		const plan = await planRefinement(
+			[{ role: "user", content: "tighten the card", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{},
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(plan.fullyVisibleIds?.has("card")).toBe(true);
+		const result = applyRefinementProposal(state, plan.proposal, { id: "r3", fullyVisibleIds: plan.fullyVisibleIds });
+		expect(result.appliedEdits[0].applied).toBe(true);
 	});
 });
