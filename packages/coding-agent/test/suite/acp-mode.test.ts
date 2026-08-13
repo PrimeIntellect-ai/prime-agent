@@ -1,6 +1,6 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.js";
 import { PRIME_AGENT_META_NAMESPACE } from "../../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../../src/modes/acp/index.js";
@@ -81,6 +81,32 @@ describe("ACP mode end to end", () => {
 			.map((u) => u.update.content.text)
 			.join("");
 		expect(text).toContain("Hello from prime-agent");
+
+		harness.cleanup();
+	}, 30_000);
+
+	it("reports context usage after the turn", async () => {
+		const harness = await createHarness();
+		harness.setResponses([fauxAssistantMessage("Counted.")]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+
+		const { client, updates } = connectAcpClient(connection);
+
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "Say hello" }],
+		});
+
+		// The reading is taken once the assistant message is costed, which can land
+		// after the prompt resolves.
+		await vi.waitFor(() => {
+			expect(updates.some((u) => u.update?.sessionUpdate === "usage_update")).toBe(true);
+		});
+		const usage = updates.filter((u) => u.update?.sessionUpdate === "usage_update").at(-1)?.update;
+		expect(usage.used).toBeGreaterThan(0);
+		expect(usage.size).toBeGreaterThan(usage.used);
 
 		harness.cleanup();
 	}, 30_000);

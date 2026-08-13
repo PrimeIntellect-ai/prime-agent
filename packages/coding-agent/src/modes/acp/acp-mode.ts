@@ -10,7 +10,7 @@ import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
-import type { AgentConnection } from "../agent-connection/types.js";
+import type { AgentConnection, AgentConnectionSessionEvent } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
 import { primeAgentMeta } from "./acp-meta.js";
@@ -227,6 +227,34 @@ async function turnFailure(connection: AgentConnection, boundary: TurnBoundary):
 	return undefined;
 }
 
+/**
+ * Context-window usage for the session, as ACP's `usage_update`.
+ *
+ * Usage is unknown until a model response has been costed — notably right after
+ * compaction — and a client cannot render a fraction without both numbers, so an
+ * unknown reading is skipped rather than reported as zero.
+ */
+async function acpUsageUpdate(connection: AgentConnection): Promise<Record<string, unknown> | undefined> {
+	const usage = await connection
+		.getState()
+		.then((state) => state.contextUsage)
+		.catch(() => undefined);
+	if (!usage || usage.tokens === null || usage.contextWindow <= 0) return undefined;
+	return { sessionUpdate: "usage_update", used: usage.tokens, size: usage.contextWindow };
+}
+
+/**
+ * Events after which the context can hold a different number of tokens.
+ *
+ * Only a completed assistant message carries the usage the reading is computed
+ * from, and compaction replaces the transcript, so polling on anything else
+ * would cost a round trip per streamed delta to report an unchanged number.
+ */
+function changesContextUsage(event: AgentConnectionSessionEvent): boolean {
+	if (event.type === "compaction_end") return true;
+	return event.type === "message_end" && event.message.role === "assistant";
+}
+
 export async function runAcpMode(runtimeHost: AgentSessionRuntime): Promise<never> {
 	const connection = new InProcessAgentConnection(runtimeHost);
 	return runAcpModeWithConnection(connection, {
@@ -316,6 +344,11 @@ export async function runAcpModeWithConnection(
 					return;
 				}
 				if (event.type !== "session_event") return;
+				if (changesContextUsage(event.event)) {
+					void acpUsageUpdate(connection).then((update) => {
+						if (update) notify(update);
+					});
+				}
 				for (const update of acpUpdatesForSessionEvent(event.event, mappingState)) {
 					notify(update);
 				}

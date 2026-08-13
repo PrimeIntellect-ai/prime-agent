@@ -39,6 +39,9 @@ Session activity arrives as `session/update` notifications:
 | tool starts | `tool_call` (`in_progress`) |
 | tool finishes | `tool_call_update` (`completed` / `failed`) |
 | shell output | `tool_call` plus incremental `tool_call_update` |
+| context fills up | `usage_update` (tokens in context, context window) |
+
+Context usage is reported after every assistant message and after compaction, so a client can show how full the window is. It is omitted while the number is unknown — right after compaction, until the next response is costed — rather than reported as zero.
 
 IPython is Prime Agent's model-facing tool, so a cell is a `tool_call` of kind `execute` whose `rawInput` carries the cell source.
 
