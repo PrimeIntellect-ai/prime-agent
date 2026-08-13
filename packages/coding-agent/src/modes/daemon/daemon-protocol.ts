@@ -760,7 +760,10 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
 export function getDaemonCommandCompatibilities(command: DaemonCommand): readonly DaemonCommandCompatibility[] {
-	const compatibility = DAEMON_COMMAND_COMPATIBILITY[command.type];
+	const compatibility =
+		command.type === "rename_saved_session" && command.sessionDir === undefined
+			? LEGACY_DAEMON_COMMAND
+			: DAEMON_COMMAND_COMPATIBILITY[command.type];
 	const carriesTelemetryPolicy =
 		((command.type === "attach" || command.type === "reattach") && command.telemetryDisabled !== undefined) ||
 		(command.type === "create" && command.config?.telemetryDisabled !== undefined);

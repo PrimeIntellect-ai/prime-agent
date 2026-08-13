@@ -575,6 +575,45 @@ describe("daemon supervisor whole-tree eviction", () => {
 		).toBe("sibling");
 	});
 
+	it("scopes live family rows to the requested configured session directory", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const source = makeWorker("source", [makeSummary("source", now)]);
+		source.descriptor.createCommand.config = { sessionDir: "/tmp/sessions-a" };
+		const foreign = makeWorker("foreign", [makeSummary("foreign", now)]);
+		foreign.descriptor.createCommand.config = { sessionDir: "/tmp/sessions-b" };
+		supervisor.workers.set("source", source);
+		supervisor.workers.set("foreign", foreign);
+		supervisor.catalog.list = vi.fn(async () => []);
+		Object.assign(supervisor.catalog, { family: vi.fn(async () => []) });
+
+		const entries = await supervisor.familyCatalogEntries("/tmp/sessions-a");
+		expect(entries.map((entry) => entry.id)).toEqual(["source-session"]);
+	});
+
+	it("anchors relative live parent paths to the child session file", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const worker = makeWorker("family", [
+			makeSummary("root", now, { sessionId: "root", sessionFile: "/tmp/family/root.jsonl", rlmDepth: 0 }),
+			makeSummary("child", now, {
+				sessionId: "child",
+				sessionFile: "/tmp/family/children/child.jsonl",
+				rlmDepth: 1,
+				parentSessionId: "root",
+				parentSessionPath: "../root.jsonl",
+			}),
+		]);
+		worker.descriptor.createCommand.config = { sessionDir: "/tmp/sessions" };
+		supervisor.workers.set("family", worker);
+		supervisor.catalog.list = vi.fn(async () => []);
+		Object.assign(supervisor.catalog, { family: vi.fn(async () => []) });
+
+		const entries = await supervisor.familyCatalogEntries("/tmp/sessions");
+		const { assertAgentFamilyReach } = await import("../src/core/agent-messages.js");
+		expect(assertAgentFamilyReach(entries[0]!, entries[1]!, entries)).toBe("child");
+	});
+
 	it("uses the source worker session directory for agent-origin family snapshots", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const supervisor = makeSupervisor();
@@ -692,6 +731,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		const source = makeWorker("source", [sourceSummary]);
 		source.descriptor.createCommand.config = { sessionDir: "/tmp/custom-sessions" };
 		const target = makeWorker("target", [targetSummary]);
+		target.descriptor.createCommand.config = { sessionDir: "/tmp/custom-sessions" };
 		supervisor.workers.set("source", source);
 		supervisor.workers.set("target", target);
 		const timestamp = new Date(now);
