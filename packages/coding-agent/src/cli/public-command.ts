@@ -171,6 +171,9 @@ export function composeMcpProjectDeclarationAdmission(
 }
 
 async function runMcpDeclarationCommand(args: string[]): Promise<PublicCommandResult> {
+	// Probing is an internal injected-executor capability only. Reject this
+	// public spelling before parsing or any settings read can occur.
+	if (args[0] === "test") throw new Error("MCP probe is unavailable in this command context.");
 	const command = parseMcpDeclarationCommand(args);
 	const workingDirectory = process.cwd();
 	if (command.scope === "project") {

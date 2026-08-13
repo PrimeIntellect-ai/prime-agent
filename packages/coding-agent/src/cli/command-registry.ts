@@ -152,10 +152,10 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["mcp"],
-		usage: "mcp <list|inspect|preview|test|add|enable|disable|remove> ... [--project]",
+		usage: "mcp <list|inspect|preview|add|enable|disable|remove> ... [--project]",
 		summary: "Manage declarative MCP endpoint records",
 		description:
-			"Commands only read or write credential-free declarations. They never start an MCP runtime or authentication flow. A test probe returns an offline preview.",
+			"Commands only read or write credential-free declarations. They never start an MCP runtime or authentication flow.",
 	},
 	{
 		path: ["mcp", "list"],
@@ -171,11 +171,6 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		path: ["mcp", "preview"],
 		usage: "mcp preview <name> [--project]",
 		summary: "Preview an MCP endpoint declaration",
-	},
-	{
-		path: ["mcp", "test"],
-		usage: "mcp test <name> [--project]",
-		summary: "Preview the MCP initialization request",
 	},
 	{
 		path: ["mcp", "add"],

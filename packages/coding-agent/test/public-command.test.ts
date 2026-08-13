@@ -58,6 +58,17 @@ describe("public command routing", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("rejects public mcp test before command parsing can access settings", async () => {
+		await expect(handlePublicCommand(["mcp", "test", "catalog"])).resolves.toMatchObject({ handled: true });
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("MCP probe is unavailable"));
+	});
+
+	it("does not advertise mcp test in public help", () => {
+		expect(formatTopLevelHelp()).toContain("mcp");
+		expect(formatTopLevelHelp()).not.toContain("mcp <list|inspect|preview|test");
+	});
+
 	it("rewrites attach into the normal interactive resume path", async () => {
 		await expect(handlePublicCommand(["attach", "worker"])).resolves.toEqual({
 			handled: false,
@@ -297,12 +308,11 @@ describe("public command routing", () => {
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: schedule nonsense"));
 	});
 
-	it("formats parser-exact MCP parent and child help and suggests misspelled child commands", async () => {
+	it("formats current MCP parent and child help and suggests misspelled child commands", async () => {
 		expect(getChildCommandSpecs(["mcp"]).map((spec) => ({ path: spec.path, usage: spec.usage }))).toEqual([
 			{ path: ["mcp", "list"], usage: "mcp list [--project]" },
 			{ path: ["mcp", "inspect"], usage: "mcp inspect <name> [--project]" },
 			{ path: ["mcp", "preview"], usage: "mcp preview <name> [--project]" },
-			{ path: ["mcp", "test"], usage: "mcp test <name> [--project]" },
 			{ path: ["mcp", "add"], usage: "mcp add <name> <url> [--project]" },
 			{ path: ["mcp", "enable"], usage: "mcp enable <name> [--project]" },
 			{ path: ["mcp", "disable"], usage: "mcp disable <name> [--project]" },
@@ -310,8 +320,7 @@ describe("public command routing", () => {
 		]);
 
 		await handlePublicCommand(["help", "mcp"]);
-		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("A test probe returns an offline preview."));
-		for (const command of ["list", "inspect", "preview", "test", "add", "enable", "disable", "remove"]) {
+		for (const command of ["list", "inspect", "preview", "add", "enable", "disable", "remove"]) {
 			expect(console.log).toHaveBeenCalledWith(expect.stringContaining(`  ${command}`));
 		}
 
