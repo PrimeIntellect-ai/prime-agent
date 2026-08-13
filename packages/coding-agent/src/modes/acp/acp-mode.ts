@@ -11,7 +11,7 @@ import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
-import type { AgentConnection } from "../agent-connection/types.js";
+import type { AgentConnection, AgentConnectionSlashCommand } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
 import { primeAgentMeta } from "./acp-meta.js";
@@ -101,6 +101,7 @@ interface AcpSessionEntry {
 	id: string;
 	abort: AbortController | undefined;
 	unsubscribe: (() => void) | undefined;
+	commandsTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 /**
@@ -229,11 +230,27 @@ async function turnFailure(connection: AgentConnection, boundary: TurnBoundary):
 }
 
 /**
+ * The order a submitted command is resolved in, mirroring `_normalizeSubmission`:
+ * a session builtin first, then an extension command, then a skill, then a
+ * prompt template. Extension names are already disambiguated upstream, so only
+ * collisions across these sources have to be resolved here.
+ */
+const CONNECTION_COMMAND_PRECEDENCE: Record<AgentConnectionSlashCommand["source"], number> = {
+	extension: 0,
+	skill: 1,
+	prompt: 2,
+};
+
+/**
  * Commands an ACP client can offer for completion.
  *
  * Only commands a prompt actually executes are advertised. The rest of
  * `BUILTIN_SLASH_COMMANDS` opens a TUI selector (`/model`, `/settings`) and has
  * no headless behavior, so listing it would complete to plain prompt text.
+ *
+ * One entry per name, resolved the way a submission is: a client cannot know
+ * which route wins, so advertising both sides of a collision is worse than
+ * advertising the loser not at all.
  */
 async function acpAvailableCommands(connection: AgentConnection): Promise<acp.AvailableCommand[]> {
 	const sessionCommands = BUILTIN_SLASH_COMMANDS.filter((command) => command.execution === "session").map(
@@ -246,14 +263,25 @@ async function acpAvailableCommands(connection: AgentConnection): Promise<acp.Av
 	// Skills, prompt templates, and extension commands. A failure here costs
 	// completion, not the session, so it must not reject session/new.
 	const connectionCommands = await connection.getCommands().catch(() => []);
-	return [
+	const advertised = [
 		...sessionCommands,
-		...connectionCommands.map((command) => ({
-			name: command.name,
-			description: command.description ?? "",
-			...(command.argumentHint ? { input: { hint: command.argumentHint } } : {}),
-		})),
+		...[...connectionCommands]
+			.sort(
+				(left, right) => CONNECTION_COMMAND_PRECEDENCE[left.source] - CONNECTION_COMMAND_PRECEDENCE[right.source],
+			)
+			.map((command) => ({
+				name: command.name,
+				description: command.description ?? "",
+				...(command.argumentHint ? { input: { hint: command.argumentHint } } : {}),
+			})),
 	];
+	// A name that resolves to one route must be advertised once, or a client
+	// completes to an entry whose description belongs to a route that will not run.
+	const byName = new Map<string, acp.AvailableCommand>();
+	for (const command of advertised) {
+		if (!byName.has(command.name)) byName.set(command.name, command);
+	}
+	return [...byName.values()];
 }
 
 export async function runAcpMode(runtimeHost: AgentSessionRuntime): Promise<never> {
@@ -327,7 +355,12 @@ export async function runAcpModeWithConnection(
 				}
 			}
 			const sessionId = randomUUID();
-			const entry: AcpSessionEntry = { id: sessionId, abort: undefined, unsubscribe: undefined };
+			const entry: AcpSessionEntry = {
+				id: sessionId,
+				abort: undefined,
+				unsubscribe: undefined,
+				commandsTimer: undefined,
+			};
 			// Subscribe for the session lifetime, not per prompt turn: prime-agent
 			// subagents are fire-and-forget and keep reporting after the spawning turn
 			// ends, so a turn-scoped subscription would drop their updates. One
@@ -354,16 +387,21 @@ export async function runAcpModeWithConnection(
 			entry.unsubscribe = unsubscribe;
 			session = entry;
 			// Sent after this handler returns: a client cannot route a session
-			// update for a session id it has not been told about yet.
-			setTimeout(() => {
-				void acpAvailableCommands(connection).then((availableCommands) =>
+			// update for a session id it has not been told about yet. The session can
+			// be closed in that gap, so the callback reads resources and notifies only
+			// while it still owns the slot it was scheduled for.
+			entry.commandsTimer = setTimeout(() => {
+				entry.commandsTimer = undefined;
+				if (session !== entry) return;
+				void acpAvailableCommands(connection).then((availableCommands) => {
+					if (session !== entry) return;
 					ctx.client
 						.notify(acp.methods.client.session.update, {
 							sessionId,
 							update: { sessionUpdate: "available_commands_update", availableCommands },
 						})
-						.catch(() => undefined),
-				);
+						.catch(() => undefined);
+				});
 			}, 0);
 			return {
 				sessionId,
@@ -435,6 +473,7 @@ export async function runAcpModeWithConnection(
 			// must abort the connection the same way session/cancel does.
 			const closing = session;
 			session = undefined;
+			if (closing.commandsTimer) clearTimeout(closing.commandsTimer);
 			closing.unsubscribe?.();
 			if (closing.abort) {
 				closing.abort.abort();
@@ -458,6 +497,7 @@ export async function runAcpModeWithConnection(
 	// harness that spawns many short-lived sessions.
 	await handle.closed.catch(() => undefined);
 	session?.abort?.abort();
+	if (session?.commandsTimer) clearTimeout(session.commandsTimer);
 	session?.unsubscribe?.();
 	session = undefined;
 	await connection.dispose().catch(() => undefined);

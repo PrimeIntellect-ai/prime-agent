@@ -14,6 +14,7 @@ import { createEventBus } from "../src/core/event-bus.js";
 import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import type { PromptTemplate } from "../src/core/prompt-templates.js";
 import type { ResourceLoader } from "../src/core/resource-loader.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -207,6 +208,7 @@ export async function createTestExtensionsResult(
 export interface CreateTestResourceLoaderOptions {
 	extensionsResult?: LoadExtensionsResult;
 	skills?: Skill[];
+	prompts?: PromptTemplate[];
 }
 
 export function createTestResourceLoader(options: CreateTestResourceLoaderOptions = {}): ResourceLoader {
@@ -219,7 +221,7 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 	return {
 		getExtensions: () => extensionsResult,
 		getSkills: () => ({ skills: options.skills ?? [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
+		getPrompts: () => ({ prompts: options.prompts ?? [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 		getSystemPrompt: () => undefined,

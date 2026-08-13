@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import * as acp from "@agentclientprotocol/sdk";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -5,7 +6,7 @@ import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.j
 import { PRIME_AGENT_META_NAMESPACE } from "../../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../../src/modes/acp/index.js";
 import { InProcessAgentConnection } from "../../src/modes/agent-connection/in-process-agent-connection.js";
-import { createTestResourceLoader } from "../utilities.js";
+import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.js";
 import { createHarness } from "./harness.js";
 
 /** Minimal AgentSessionRuntime host over a real faux-backed AgentSession. */
@@ -131,6 +132,85 @@ describe("ACP mode end to end", () => {
 		expect(
 			update.availableCommands.find((command: acp.AvailableCommand) => command.name === "compact"),
 		).toMatchObject({ input: { hint: "[instructions]" } });
+
+		harness.cleanup();
+	}, 30_000);
+
+	it("advertises one entry per name, resolved the way a submission is", async () => {
+		const sourceInfo = { path: "/x", source: "user", scope: "user", origin: "top-level" } as const;
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi: any) => {
+					// Collides with the builtin session command, which wins at submission.
+					pi.registerCommand("compact", { description: "extension compact", handler: async () => {} });
+					// Collides with the skill below, and an extension command is resolved first.
+					pi.registerCommand("skill:code-review", { description: "extension review", handler: async () => {} });
+				},
+			],
+			tmpdir(),
+		);
+		const harness = await createHarness({
+			resourceLoader: createTestResourceLoader({
+				extensionsResult,
+				skills: [
+					{
+						kind: "markdown",
+						name: "code-review",
+						description: "skill review",
+						filePath: "/skills/code-review/SKILL.md",
+						baseDir: "/skills/code-review",
+						sourceInfo,
+						disableModelInvocation: false,
+					},
+				],
+				prompts: [
+					{
+						name: "skill:code-review",
+						description: "template review",
+						content: "",
+						filePath: "/prompts/review.md",
+						sourceInfo,
+					},
+				],
+			}),
+		});
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const { client, updates } = connectAcpClient(connection);
+
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+
+		const update = await vi.waitFor(() => {
+			const found = updates.find((u) => u.update?.sessionUpdate === "available_commands_update");
+			if (!found) throw new Error("no available_commands_update yet");
+			return found.update;
+		});
+
+		const names = update.availableCommands.map((command: acp.AvailableCommand) => command.name);
+		expect(names.length).toBe(new Set(names).size);
+		const describe = (name: string) =>
+			update.availableCommands.find((command: acp.AvailableCommand) => command.name === name)?.description;
+		// A session builtin is parsed before any extension command.
+		expect(describe("compact")).not.toBe("extension compact");
+		// An extension command is executed before a skill or a prompt template.
+		expect(describe("skill:code-review")).toBe("extension review");
+
+		harness.cleanup();
+	}, 30_000);
+
+	it("does not advertise commands to a session that was closed first", async () => {
+		const harness = await createHarness();
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const { client, updates } = connectAcpClient(connection);
+
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+		// Closing before the deferred callback runs must cancel it: the resources it
+		// would read belong to a session the client has already released.
+		await client.request("session/close", { sessionId: session.sessionId });
+
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(updates.some((u) => u.update?.sessionUpdate === "available_commands_update")).toBe(false);
 
 		harness.cleanup();
 	}, 30_000);
