@@ -14,8 +14,6 @@ Prime Agent: A Self-Improving RLM Agent
 
 <p align="center">
   <a href="packages/coding-agent/docs/index.md">Documentation</a> &bull;
-  <a href="CONTRIBUTING.md">Contributing</a> &bull;
-  <a href="SECURITY.md">Security</a> &bull;
   <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
   <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a> &bull;
   <a href="https://github.com/badlogic/pi-mono">pi-mono</a>
