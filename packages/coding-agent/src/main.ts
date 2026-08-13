@@ -5,6 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type Api, type ImageContent, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
@@ -59,6 +60,7 @@ import { KeybindingsManager } from "./core/keybindings.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
+import { findSessionByName } from "./core/named-sessions.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
@@ -68,7 +70,7 @@ import {
 	type SessionCwdIssue,
 } from "./core/session-cwd.js";
 import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
-import { SessionManager } from "./core/session-manager.js";
+import { type SessionInfo, SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
@@ -450,6 +452,17 @@ export async function createSessionManager(
 	sessionDir: string | undefined,
 ): Promise<SessionManager> {
 	const explicitCwdOverride = parsed.cwd ? cwd : undefined;
+
+	if (parsed.sessionName) {
+		const name = parsed.sessionName;
+		const sessionByName = await findSessionByName(name, cwd, sessionDir);
+		if (sessionByName) {
+			return SessionManager.open(sessionByName.path, sessionDir, explicitCwdOverride);
+		}
+		const manager = SessionManager.create(cwd, sessionDir);
+		manager.appendSessionInfo(name);
+		return manager;
+	}
 
 	if (parsed.noSession) {
 		return SessionManager.inMemory();
@@ -1095,6 +1108,42 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	if (parsed.help) {
 		console.log(formatTopLevelHelp());
+		process.exit(0);
+	}
+
+	if (parsed.listSessions) {
+		const cwd = parsed.cwd ?? process.cwd();
+		const sessions = await SessionManager.list(cwd, parsed.sessionDir);
+		if (sessions.length === 0) {
+			console.log("No sessions in this directory.");
+		} else {
+			for (const s of sessions) {
+				const id = s.id.slice(0, 8);
+				const name = s.name ?? "";
+				const date = s.modified ? new Date(s.modified).toISOString().replace("T", " ").slice(0, 16) : "";
+				const path = s.path.replace(`${cwd}/`, "");
+				console.log(`${id}  ${date}  ${name.padEnd(20)} ${path}`);
+			}
+		}
+		process.exit(0);
+	}
+
+	if (parsed.deleteSession) {
+		const cwd = parsed.cwd ?? process.cwd();
+		const name = parsed.deleteSession;
+		let session: SessionInfo | undefined;
+		try {
+			session = await findSessionByName(name, cwd, parsed.sessionDir);
+		} catch (error: unknown) {
+			console.error(error instanceof Error ? error.message : String(error));
+			process.exit(1);
+		}
+		if (!session) {
+			console.log(`No session named "${name}" in this directory.`);
+			process.exit(0);
+		}
+		rmSync(session.path, { force: true });
+		console.log(`Deleted session "${name}".`);
 		process.exit(0);
 	}
 

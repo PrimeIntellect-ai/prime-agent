@@ -22,6 +22,9 @@ export interface Args {
 	mode?: Mode;
 	daemonSocket?: string;
 	noSession?: boolean;
+	sessionName?: string;
+	listSessions?: boolean;
+	deleteSession?: string;
 	fork?: string;
 	sessionDir?: string;
 	models?: string[];
@@ -73,6 +76,9 @@ export function parseArgs(args: string[]): Args {
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
+		sessionName: undefined,
+		listSessions: undefined,
+		deleteSession: undefined,
 		unknownFlags: new Map(),
 		diagnostics: [],
 	};
@@ -143,6 +149,12 @@ export function parseArgs(args: string[]): Args {
 			result.appendSystemPrompt.push(args[++i]);
 		} else if (arg === "--no-session") {
 			result.noSession = true;
+		} else if ((arg === "--name" || arg === "-n") && i + 1 < args.length) {
+			result.sessionName = args[++i];
+		} else if (arg === "--list-sessions") {
+			result.listSessions = true;
+		} else if (arg === "--delete-session" && i + 1 < args.length) {
+			result.deleteSession = args[++i];
 		} else if (arg === "--fork" && i + 1 < args.length) {
 			result.fork = args[++i];
 		} else if (arg === "--session-dir" && i + 1 < args.length) {

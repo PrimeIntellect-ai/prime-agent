@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Added `--name` to open or resume a session by name within the current directory, plus `--list-sessions` to list that directory's sessions and `--delete-session` to delete a named session ([#1294](https://github.com/PrimeIntellect-ai/prime-agent/pull/1294) by [@porky11](https://github.com/porky11)).
 
 ## [0.7.2] - 2026-08-11
 
