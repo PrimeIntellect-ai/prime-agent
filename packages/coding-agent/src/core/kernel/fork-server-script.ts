@@ -87,6 +87,7 @@ def _run_child(connection_path, cwd, env):
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
     _forked_pids.clear()
 
     # cwd/env are per-kernel and applied here (not at template import), so all
@@ -157,9 +158,15 @@ def _serve(control_path):
         cwd = req.get("cwd")
         env = req.get("env")
 
+        # Block SIGCHLD across the fork and PID registration below: a child that exits
+        # immediately could otherwise be reaped (and discarded) by the handler before
+        # the parent records its PID, leaving a stale PID in _forked_pids that a later
+        # PID reuse would turn into _kill_forked killing an unrelated same-user process.
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
         try:
             pid = os.fork()
         except OSError as exc:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
             f.write(json.dumps({"id": req_id, "error": str(exc)}).encode() + b"\n")
             f.flush()
             continue
@@ -184,6 +191,9 @@ def _serve(control_path):
 
         # Parent: stay pristine (no loop/threads/ZMQ ever) so the next fork is clean.
         _forked_pids.add(pid)
+        # Unblock now that the PID is recorded; a SIGCHLD queued while blocked (child
+        # already gone) is delivered here and reconciles the set via _reap_children.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
         f.write(json.dumps({"id": req_id, "pid": pid}).encode() + b"\n")
         f.flush()
 

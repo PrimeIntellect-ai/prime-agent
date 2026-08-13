@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Fixed forked IPython kernels leaking as init-reparented orphans when a session exited uncleanly (SIGKILL, crash, or terminal close); the kernel forkserver now reaps the kernels it spawned on teardown ([#1358](https://github.com/PrimeIntellect-ai/prime-agent/issues/1358) by [@Hybirdss](https://github.com/Hybirdss)).
+- Fixed forked IPython kernels leaking as init-reparented orphans when a session exited uncleanly (SIGKILL, crash, or terminal close); the kernel forkserver now reaps the kernels it spawned on teardown ([#1361](https://github.com/PrimeIntellect-ai/prime-agent/pull/1361) by [@Hybirdss](https://github.com/Hybirdss)).
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
