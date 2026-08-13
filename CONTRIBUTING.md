@@ -1,8 +1,8 @@
 # Contributing to Prime Agent
 
-Prime Agent is developed in public, and we welcome bug reports, feature ideas, questions, and other feedback. To keep the project maintainable, public contributions begin in [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
+Thanks for your interest in contributing to Prime Agent! Prime Agent is developed in public, and we welcome bug reports, feature ideas, questions, and other feedback. To keep the project maintainable, public contributions begin in [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
 
-We do not review unsolicited pull requests or use public Issues as the initial intake queue.
+With the influx of agent-generated contributions, we do not review unsolicited pull requests or use public Issues as the initial intake queue. While we are open to contributions by agents, you are responsible for your code and must understand how it interacts with the entire project.
 
 ## Start with a Discussion
 
@@ -16,23 +16,17 @@ Search existing Discussions before creating a new one. Include enough detail for
 
 For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of posting publicly.
 
-## Issues are the Work Queue
+## Issues
 
-GitHub Issues track work that maintainers have accepted and intend to investigate or implement. A maintainer may create an Issue from a Discussion when the scope is clear and the work fits the roadmap.
+GitHub Issues track work that maintainers have accepted and intend to investigate or implement. A maintainer may create an Issue from a Discussion when the scope is clear and the work fits the roadmap. An existing Issue does not automatically mean that an external pull request is wanted. Wait for a maintainer to invite implementation before starting substantial work.
 
-An existing Issue does not automatically mean that an external pull request is wanted. Wait for a maintainer to invite implementation before starting substantial work.
-
-Issues opened by unapproved contributors are automatically closed and redirected to Discussions.
+Issues opened by unapproved contributors are automatically closed and redirected to Discussions. To contribute, share interest in Discussions or corresponding issues, and maintainers can can invite implementation for requested work.
 
 ## Pull Requests and Trusted Contributors
 
-Prime Agent runs on user machines and can execute code with the user's permissions. We therefore limit pull requests to maintainers and trusted contributors who have been explicitly vouched for.
-
-Maintainers may vouch for someone after they have consistently demonstrated a useful understanding of the project through Discussions, issue investigation, testing, documentation, or other collaboration. There is no separate application process and no guarantee that participation will result in approval.
+Prime Agent runs on user machines and can execute code with the user's permissions. We therefore limit pull requests to maintainers and trusted contributors who have been explicitly vouched for. Maintainers may vouch for someone after they have consistently demonstrated a useful understanding of the project through Discussions, issue investigation, testing, documentation, or other collaboration. There is no separate application process and no guarantee that participation will result in approval.
 
 Pull requests from unvouched contributors are automatically closed. If you are interested in contributing code, begin with a Discussion and work with the maintainers on the problem first.
-
-Trusted status may be removed if it is no longer appropriate. Approved external contributors may also be asked to sign a contributor license agreement before a contribution can be merged.
 
 ## Preparing an Approved Pull Request
 
