@@ -1919,7 +1919,7 @@ export class DaemonSupervisor {
 	}
 
 	private async handleList(
-		client: DaemonSocketClient,
+		_client: DaemonSocketClient,
 		command: Extract<DaemonCommand, { type: "list" }>,
 	): Promise<DaemonResponse> {
 		await Promise.all(
@@ -1931,13 +1931,15 @@ export class DaemonSupervisor {
 		const clientOwnedWorkers = [...this.workers.values()].filter((worker) => !this.isVisibleWorker(worker));
 		// Stopping workers stay listed (with an honest workerState) because this
 		// list also feeds busy-daemon safety checks in daemon-launch.
-		const active = [...this.workers.values()]
-			.filter(
-				(worker) =>
-					this.isVisibleWorker(worker) ||
-					(command.includeClientOwned === true && this.isWorkerAccessibleToClient(client, worker)),
-			)
-			.flatMap((worker) => [...worker.summaries.values()].map((summary) => this.publicSummary(worker, summary)));
+		//
+		// All workers are included regardless of ownership so the operator-facing
+		// `list` command never hides sessions that are demonstrably running (see
+		// issue #1215). The per-client `includeClientOwned` flag is retained for
+		// backward compatibility — it was only needed when owned workers were
+		// filtered out by default.
+		const active = [...this.workers.values()].flatMap((worker) =>
+			[...worker.summaries.values()].map((summary) => this.publicSummary(worker, summary)),
+		);
 		const busyClientOwnedSessionCount = clientOwnedWorkers
 			.flatMap((worker) => [...worker.summaries.values()])
 			.filter(isSessionSummaryBusy).length;
@@ -3233,6 +3235,7 @@ export class DaemonSupervisor {
 				.length,
 			workerState: this.effectiveWorkerState(worker),
 			workerPid: worker.descriptor.pid,
+			ownerClientId: worker.descriptor.ownerClientId,
 		};
 	}
 

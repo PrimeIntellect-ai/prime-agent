@@ -81,6 +81,8 @@ export interface SessionSummary {
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
 	workerPid?: number;
+	/** Protocol client that owns this worker; absent for resident (unowned) sessions. */
+	ownerClientId?: string;
 }
 
 /**

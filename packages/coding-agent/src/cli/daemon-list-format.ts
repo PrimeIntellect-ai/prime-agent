@@ -26,6 +26,7 @@ type ListRow = {
 	model: string;
 	messages: string;
 	clients: string;
+	owner: string;
 };
 
 export function formatSessionListTable(sessions: readonly SessionSummary[], nowMs = Date.now()): string {
@@ -37,8 +38,9 @@ export function formatSessionListTable(sessions: readonly SessionSummary[], nowM
 		model: formatSessionModel(session.model),
 		messages: String(session.messageCount),
 		clients: String(session.attachedClients),
+		owner: session.ownerClientId ? "attached" : "",
 	}));
-	return formatTable(["name", "id", "status", "age", "model", "messages", "clients"], rows, formatListCell);
+	return formatTable(["name", "id", "status", "age", "model", "messages", "clients", "owner"], rows, formatListCell);
 }
 
 function sortSessionsForList(sessions: readonly SessionSummary[]): SessionSummary[] {

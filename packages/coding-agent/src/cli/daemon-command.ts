@@ -1644,6 +1644,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
 		typeof candidate.attachedClients === "number" &&
 		typeof candidate.messageCount === "number" &&
 		(candidate.unfinishedActionCount === undefined || typeof candidate.unfinishedActionCount === "number") &&
+		(candidate.ownerClientId === undefined || typeof candidate.ownerClientId === "string") &&
 		typeof candidate.sessionActions === "object" &&
 		candidate.sessionActions !== null &&
 		typeof candidate.sessionActions.queuedCount === "number" &&

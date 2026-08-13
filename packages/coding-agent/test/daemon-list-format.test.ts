@@ -39,7 +39,16 @@ describe("formatSessionListTable", () => {
 		);
 
 		const lines = table.split("\n");
-		expect(lines[0]!.trim().split(/\s+/)).toEqual(["name", "id", "status", "age", "model", "messages", "clients"]);
+		expect(lines[0]!.trim().split(/\s+/)).toEqual([
+			"name",
+			"id",
+			"status",
+			"age",
+			"model",
+			"messages",
+			"clients",
+			"owner",
+		]);
 		expect(lines.slice(1).map((line) => line.trim().split(/\s+/).slice(0, 3))).toEqual([
 			["tool", "ccccddddeeee", "working"],
 			["model", "ddddeeeeffff", "working"],
@@ -51,6 +60,50 @@ describe("formatSessionListTable", () => {
 		expect(table).toContain("openai-codex/gpt-5.5");
 		expect(table).not.toContain("/tmp/project");
 		expect(table).not.toContain("019e71ec-e08a");
+	});
+
+	it("shows owner column for attached sessions", () => {
+		const nowMs = Date.parse("2026-05-29T12:00:00.000Z");
+		const table = stripAnsi(
+			formatSessionListTable(
+				[
+					{
+						...makeSummary({
+							name: "owned",
+							id: "aaaabbbbcccc",
+							lifecycle: "live",
+							activity: "working",
+							clients: 1,
+						}),
+						ownerClientId: "client-1",
+					},
+					makeSummary({
+						name: "resident",
+						id: "ddddeeeeffff",
+						lifecycle: "live",
+						activity: "idle",
+					}),
+				],
+				nowMs,
+			),
+		);
+		const lines = table.split("\n");
+		expect(lines[0]!.trim().split(/\s+/)).toEqual([
+			"name",
+			"id",
+			"status",
+			"age",
+			"model",
+			"messages",
+			"clients",
+			"owner",
+		]);
+		// The attached (owned) session shows "attached" in the owner column.
+		const ownedLine = lines.find((line) => line.includes("owned"));
+		expect(ownedLine).toContain("attached");
+		// The resident (unowned) session has an empty owner column.
+		const residentLine = lines.find((line) => line.includes("resident"));
+		expect(residentLine).not.toContain("attached");
 	});
 });
 
