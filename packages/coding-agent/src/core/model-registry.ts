@@ -376,8 +376,19 @@ function readOpenAICodexAccountId(token: string): string | undefined {
  * The Codex backend gates its model catalog on the reported client version: it answers HTTP 200 with a
  * catalog that grows as the version rises, so a low version yields a silently empty or partial list rather
  * than an error. Prime Agent's own package version is far below the Codex CLI's version line, so it must
- * report a supported Codex client version here instead. Raise this when the Codex CLI publishes a release
- * that gates newer models.
+ * report a supported Codex client version here instead.
+ *
+ * Shipping a new Codex model takes two edits, and both are required:
+ * 1. Add the model to `codexModels` in `packages/ai/scripts/generate-models.ts` and regenerate. That list is
+ *    explicit, not fetched, so an unlisted model does not exist for Prime Agent at all.
+ * 2. Raise this constant to a Codex CLI release whose catalog includes that model. `getExecutableModels()`
+ *    below intersects the registry with the discovered catalog, so a listed model the catalog omits is
+ *    dropped.
+ *
+ * Skipping step 2 fails silently and asymmetrically: `rlm` subagent delegation and `find_models()` resolve
+ * through `getExecutableModels()` and lose the model, while `/model` reads the unfiltered `getAvailable()`
+ * and keeps offering it. A model working as the session model is therefore not evidence that delegation can
+ * see it, and the spawn error reports it as unavailable or unauthenticated rather than undiscovered.
  */
 const OPENAI_CODEX_CLIENT_VERSION = "0.147.0";
 
