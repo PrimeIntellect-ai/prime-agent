@@ -40,6 +40,11 @@ export interface ActiveSessionState {
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
+	/** Monotonic per-session snapshot serial: decouples snapshot identity from
+	 *  the (eventGeneration, lastEventSequence) position, which can be reused
+	 *  with different content (fixes "Duplicate snapshot ... did not match
+	 *  cached bytes" killing healthy workers; upstream issue #1229). */
+	snapshotSerial: number;
 	unsubscribe?: () => void;
 	/** Latest background status summary, surfaced in the agents view. */
 	summaryState?: AgentStatus;
