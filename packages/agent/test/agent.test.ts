@@ -80,6 +80,23 @@ describe("Agent", () => {
 		expect(agent.state.errorMessage).toBeUndefined();
 	});
 
+	it("passes an explicit off reasoning selection to providers", async () => {
+		let reasoning: AgentLoopConfig["reasoning"];
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				reasoning = options?.reasoning;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("hello");
+		expect(reasoning).toBe("off");
+	});
+
 	it("should create an agent instance with custom initial state", () => {
 		const customModel = getModel("openai", "gpt-4o-mini");
 		const agent = new Agent({

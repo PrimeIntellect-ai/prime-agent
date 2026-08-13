@@ -151,4 +151,21 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 		base.initialGoal!.objective = "mutated";
 		expect(merged.initialGoal?.objective).toBe("base goal");
 	});
+
+	it("preserves and overrides the user-facing execution mode across daemon config merges", () => {
+		const base: AgentSessionRuntimeConfig = {
+			cwd: "/repo",
+			executionMode: "interactive",
+		};
+
+		expect(mergeAgentSessionRuntimeConfig(base, { model: "openai/gpt-4o" }).executionMode).toBe("interactive");
+		expect(mergeAgentSessionRuntimeConfig(base, { executionMode: "rpc" }).executionMode).toBe("rpc");
+		expect(mergeAgentSessionRuntimeConfig(base).executionMode).toBe("interactive");
+	});
+
+	it("keeps the daemon telemetry opt-out monotonic across config merges", () => {
+		expect(mergeAgentSessionRuntimeConfig({ telemetryDisabled: true }, {}).telemetryDisabled).toBe(true);
+		expect(mergeAgentSessionRuntimeConfig({}, { telemetryDisabled: true }).telemetryDisabled).toBe(true);
+		expect(mergeAgentSessionRuntimeConfig({}, {}).telemetryDisabled).toBeUndefined();
+	});
 });

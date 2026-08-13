@@ -3,6 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/types.js";
 import {
 	AgentsViewMode,
@@ -11,7 +12,7 @@ import {
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
+import { type AgentsViewRow, resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
@@ -20,6 +21,7 @@ const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
 	teardownSessionUi: vi.fn(async () => undefined),
 	dispose: vi.fn(async () => undefined),
+	connectionPrompt: vi.fn(async () => undefined),
 	clientRequest: vi.fn<() => Promise<unknown>>(),
 }));
 
@@ -39,7 +41,7 @@ vi.mock("../src/modes/daemon/daemon-client.js", () => ({
 
 vi.mock("../src/modes/agent-connection/daemon-agent-connection.js", () => ({
 	DaemonAgentConnection: Object.assign(function DaemonAgentConnection() {}, {
-		attach: vi.fn(async () => ({ dispose: modeMocks.dispose })),
+		attach: vi.fn(async () => ({ prompt: modeMocks.connectionPrompt, dispose: modeMocks.dispose })),
 	}),
 }));
 
@@ -229,6 +231,52 @@ describe("AgentsViewMode", () => {
 		});
 	});
 
+	it("checks telemetry policy before replying from an opted-out agents view", async () => {
+		const client = { close: vi.fn() };
+		const connectDedicatedClient = vi.fn(async () => client);
+		const self = {
+			options: {
+				config: { telemetryDisabled: true },
+				recoverDaemon: vi.fn(async () => undefined),
+				reconnectTimeoutMs: 1234,
+			},
+			connectDedicatedClient,
+		};
+
+		await invoke("sendPrompt", self, "active-1", "private prompt", "followUp");
+
+		expect(connectDedicatedClient).toHaveBeenCalledOnce();
+		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(client, "active-1", {
+			closeClientOnDispose: true,
+			supportsExtensionUi: false,
+			recoverDaemon: self.options.recoverDaemon,
+			reconnectTimeoutMs: 1234,
+			telemetryDisabled: true,
+		});
+		expect(modeMocks.connectionPrompt).toHaveBeenCalledWith("private prompt", {
+			streamingBehavior: "followUp",
+		});
+		expect(modeMocks.dispose).toHaveBeenCalledOnce();
+	});
+
+	it("keeps direct agents-view replies when telemetry is enabled", async () => {
+		const request = vi.fn(async () => ({ success: true as const, data: undefined }));
+		const self = {
+			options: { config: {} },
+			requireClient: () => ({ request }),
+		};
+
+		await invoke("sendPrompt", self, "active-1", "private prompt", "steer");
+
+		expect(request).toHaveBeenCalledWith({
+			type: "prompt",
+			activeSessionId: "active-1",
+			message: "private prompt",
+			streamingBehavior: "steer",
+		});
+		expect(DaemonAgentConnection.attach).not.toHaveBeenCalled();
+	});
+
 	it("uses the opened session as the crash-path back target", async () => {
 		const opened = summary({ sessionName: "opened" });
 		const previous = summary({ id: "previous", activeSessionId: "previous", sessionId: "previous" });
@@ -244,7 +292,7 @@ describe("AgentsViewMode", () => {
 
 		await runAgentsViewMode({
 			socketPath: "/tmp/fake-daemon.sock",
-			config: { cwd: "/tmp" } as never,
+			config: { cwd: "/tmp", telemetryDisabled: true } as never,
 			initialSession: previous,
 			uiServices: {
 				settingsManager: settingsManager as never,
@@ -257,6 +305,11 @@ describe("AgentsViewMode", () => {
 
 		expect(modeMocks.teardownSessionUi).toHaveBeenCalledWith({ preserveAltScreen: true });
 		expect(modeMocks.dispose).toHaveBeenCalledOnce();
+		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(
+			expect.anything(),
+			opened.activeSessionId,
+			expect.objectContaining({ telemetryDisabled: true }),
+		);
 		runView.mockRestore();
 	});
 
@@ -468,6 +521,132 @@ describe("AgentsViewMode", () => {
 			type: "scope_back",
 			selection: { sessionId: root.sessionId },
 		});
+	});
+
+	it("restores expanded subagent lists across view remounts", () => {
+		const persistentState: AgentsViewPersistentState = {};
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+		try {
+			(Reflect.get(view, "expandedSubagentParents") as Set<string>).add("file:/tmp/root.jsonl");
+			(Reflect.get(view, "programShownParents") as Set<string>).add("file:/tmp/root.jsonl");
+
+			const remount = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+			expect((Reflect.get(remount, "expandedSubagentParents") as Set<string>).has("file:/tmp/root.jsonl")).toBe(
+				true,
+			);
+			expect((Reflect.get(remount, "programShownParents") as Set<string>).has("file:/tmp/root.jsonl")).toBe(true);
+
+			// A collapsed-back list persists that way too.
+			(Reflect.get(remount, "expandedSubagentParents") as Set<string>).delete("file:/tmp/root.jsonl");
+			const collapsedRemount = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+			expect(
+				(Reflect.get(collapsedRemount, "expandedSubagentParents") as Set<string>).has("file:/tmp/root.jsonl"),
+			).toBe(false);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("keeps subagent expansion across the active-to-persisted identity flip", () => {
+		const rowsOf = (self: Record<string, unknown>) => Reflect.get(self, "rows") as AgentsViewRow[];
+		const buildView = (expand: boolean) => {
+			const parent = summary({
+				id: "root-active",
+				activeSessionId: "root-active",
+				sessionId: "root-session",
+				sessionFile: undefined,
+				runtimeKind: "top-level",
+			});
+			const child = summary({
+				id: "child-active",
+				activeSessionId: "child-active",
+				sessionId: "child-session",
+				sessionFile: undefined,
+				runtimeKind: "subagent",
+				parentSessionId: "root-session",
+				parentActiveSessionId: "root-active",
+			});
+			const expandedSubagentParents = new Set<string>();
+			const self: Record<string, unknown> = {
+				persistentState: {},
+				lastListedSummaries: [parent, child],
+				savedSessions: [],
+				heartbeats: [],
+				inactiveAgentIdentities: new Set(),
+				pendingDeleteAgent: undefined,
+				liveCatalogReady: true,
+				savedCatalogReady: true,
+				expandedSubagentParents,
+				programShownParents: new Set(),
+				editor: { getText: () => "" },
+				getFilteredRecords: () => Reflect.get(self, "scopedRecords"),
+				applyPendingAncestorExpansion: vi.fn(),
+				restoreSelection: vi.fn(),
+				ui: { requestRender: vi.fn() },
+				setStatusMessage: vi.fn(),
+				withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+			};
+			invoke("reconcileCatalogs", self);
+			if (expand) {
+				const parentRow = rowsOf(self).find(
+					(row) => row.kind === "agent" && row.summary.sessionId === "root-session",
+				);
+				expect(parentRow?.identity).toBe("session:root-session");
+				expandedSubagentParents.add(parentRow!.identity);
+				invoke("reconcileCatalogs", self);
+				expect(rowsOf(self).some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(true);
+			}
+			// The runtime flushes the session file; the record identity flips to file:.
+			self.lastListedSummaries = [{ ...parent, sessionFile: "/tmp/root.jsonl" }, child];
+			invoke("reconcileCatalogs", self);
+			return { self, expandedSubagentParents };
+		};
+
+		const expandedView = buildView(true);
+		const expandedRows = rowsOf(expandedView.self);
+		expect(
+			expandedRows.find((row) => row.kind === "agent" && row.summary.sessionId === "root-session")?.identity,
+		).toBe("file:/tmp/root.jsonl");
+		expect(expandedRows.some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(true);
+		expect(expandedRows.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(
+			true,
+		);
+		expect([...expandedView.expandedSubagentParents]).toEqual(["file:/tmp/root.jsonl"]);
+
+		const collapsedView = buildView(false);
+		const collapsedRows = rowsOf(collapsedView.self);
+		expect(collapsedRows.some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(false);
+		expect(collapsedRows.some((row) => row.kind === "subagent")).toBe(false);
+		expect(collapsedView.expandedSubagentParents.size).toBe(0);
+	});
+
+	it("toggles subagent list expansion from the summary row", () => {
+		const expandedSubagentParents = new Set(["root-row"]);
+		const programShownParents = new Set(["root-row"]);
+		const persistentState: AgentsViewPersistentState = {
+			expandedSubagentParents,
+			programShownParents,
+		};
+		const self: Record<string, unknown> = {
+			persistentState,
+			expandedSubagentParents,
+			programShownParents,
+			rebuildRows: vi.fn(),
+			syncSelectedRowState: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+		const summaryRow = { kind: "subagent-summary", parentIdentity: "root-row", expanded: true };
+
+		invoke("toggleSubagentList", self, summaryRow);
+		expect(expandedSubagentParents.size).toBe(0);
+		// Collapsing the list hides its revealed program too.
+		expect(programShownParents.size).toBe(0);
+		expect(self.rebuildRows).toHaveBeenCalledTimes(1);
+
+		invoke("toggleSubagentList", self, { ...summaryRow, expanded: false });
+		expect(expandedSubagentParents).toEqual(new Set(["root-row"]));
+		expect(programShownParents.size).toBe(0);
+		expect(self.rebuildRows).toHaveBeenCalledTimes(2);
 	});
 });
 

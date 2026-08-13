@@ -45,7 +45,7 @@ export interface TerminalSettings {
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
 	fullscreen?: boolean; // default: true (alternate-screen rendering with scrollable transcript)
-	fullscreenMouse?: boolean; // default: true (wheel scrolling in fullscreen; disable if it breaks selection)
+	fullscreenMouse?: boolean; // default: true, except false in Ghostty to preserve native Cmd-click links
 }
 
 export interface ImageSettings {
@@ -136,6 +136,7 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
+	telemetry?: TelemetrySettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -167,6 +168,11 @@ export interface Settings {
 
 export interface AgentTracesSettings {
 	enabled?: boolean;
+}
+
+export interface TelemetrySettings {
+	enabled?: boolean;
+	noticeShown?: boolean;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -300,6 +306,7 @@ export class SettingsManager {
 	private globalSettings: Settings;
 	private projectSettings: Settings;
 	private settings: Settings;
+	private runtimeOverrides: Settings = {};
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
@@ -446,6 +453,15 @@ export class SettingsManager {
 			delete retrySettings.maxDelayMs;
 		}
 
+		if (typeof settings.telemetry === "boolean") {
+			settings.telemetry = { enabled: settings.telemetry };
+		} else if (
+			settings.telemetry !== undefined &&
+			(typeof settings.telemetry !== "object" || settings.telemetry === null || Array.isArray(settings.telemetry))
+		) {
+			delete settings.telemetry;
+		}
+
 		return settings as Settings;
 	}
 
@@ -487,6 +503,7 @@ export class SettingsManager {
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
+		this.runtimeOverrides = deepMergeSettings(this.runtimeOverrides, overrides);
 		this.settings = deepMergeSettings(this.settings, overrides);
 	}
 
@@ -812,6 +829,37 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getTelemetryEnabled(): boolean {
+		const globalEnabled = this.globalSettings.telemetry?.enabled ?? true;
+		const projectEnabled = this.projectSettings.telemetry?.enabled ?? true;
+		const runtimeEnabled = this.runtimeOverrides.telemetry?.enabled ?? true;
+		return globalEnabled && projectEnabled && runtimeEnabled;
+	}
+
+	private getOrCreateGlobalTelemetrySettings(): TelemetrySettings {
+		const telemetry = this.globalSettings.telemetry;
+		if (typeof telemetry !== "object" || telemetry === null || Array.isArray(telemetry)) {
+			this.globalSettings.telemetry = {};
+		}
+		return this.globalSettings.telemetry!;
+	}
+
+	setTelemetryEnabled(enabled: boolean): void {
+		this.getOrCreateGlobalTelemetrySettings().enabled = enabled;
+		this.markModified("telemetry", "enabled");
+		this.save();
+	}
+
+	getTelemetryNoticeShown(): boolean {
+		return this.runtimeOverrides.telemetry?.noticeShown ?? this.globalSettings.telemetry?.noticeShown ?? false;
+	}
+
+	setTelemetryNoticeShown(shown: boolean): void {
+		this.getOrCreateGlobalTelemetrySettings().noticeShown = shown;
+		this.markModified("telemetry", "noticeShown");
+		this.save();
+	}
+
 	getCompactionReserveTokens(): number {
 		return this.settings.compaction?.reserveTokens ?? 16384;
 	}
@@ -1106,7 +1154,19 @@ export class SettingsManager {
 	}
 
 	getFullscreenMouse(): boolean {
-		return this.settings.terminal?.fullscreenMouse ?? true;
+		const configured = this.settings.terminal?.fullscreenMouse;
+		if (typeof configured === "boolean") return configured;
+		// Ghostty's native Cmd-click URL handling is suppressed while an
+		// application enables mouse reporting, and SGR cannot encode Command for
+		// the application to reproduce that gesture. Preserve native link clicks
+		// by default; users can explicitly enable fullscreen mouse capture.
+		const termProgram = process.env.TERM_PROGRAM?.toLowerCase();
+		const term = process.env.TERM?.toLowerCase();
+		const isGhostty =
+			termProgram === "ghostty" ||
+			term?.includes("ghostty") === true ||
+			(termProgram === undefined && !!process.env.GHOSTTY_RESOURCES_DIR);
+		return !isGhostty;
 	}
 
 	setFullscreenMouse(enabled: boolean): void {

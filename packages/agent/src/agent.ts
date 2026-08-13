@@ -472,7 +472,7 @@ export class Agent {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			model: this._state.model,
-			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,

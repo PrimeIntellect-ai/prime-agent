@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -48,6 +49,25 @@ interface ModelsDevModel {
 	};
 }
 
+interface NebiusCatalogFlavor {
+	model_id: string;
+	model_type?: string;
+	model_name?: string;
+	use_cases?: string[];
+	context_window_k?: number;
+	max_model_len?: number;
+	input_price_per_million_tokens?: number;
+	output_price_per_million_tokens?: number;
+}
+
+interface NebiusCatalogModel {
+	type?: string;
+	name?: string;
+	status?: string;
+	use_cases?: string[];
+	flavors?: NebiusCatalogFlavor[];
+}
+
 interface AiGatewayModel {
 	id: string;
 	name?: string;
@@ -88,6 +108,7 @@ const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	medium: null,
 	high: "high",
 	xhigh: "max",
+	max: null,
 } as const;
 
 const KIMI_K3_THINKING_LEVEL_MAP = {
@@ -111,10 +132,9 @@ const ZAI_THINKING_COMPAT: OpenAICompletionsCompat = {
 };
 
 const NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
-// Nebius /v1/models?verbose=true reports Kimi K3 as text+image while models.dev currently marks it text-only.
-const NEBIUS_MULTIMODAL_MODEL_OVERRIDES = new Set(["moonshotai/Kimi-K3"]);
+const NEBIUS_MODELS_URL = "https://tokenfactory.nebius.com/api/public/models_info";
 // https://api.tokenfactory.nebius.com/openapi.json
-// ChatCompletionRequest supports store, max_tokens, reasoning_effort, stream usage, and strict tools;
+// ChatCompletionRequest exposes store, max_tokens, reasoning_effort, stream usage, and strict tools;
 // ChatMessageRole omits developer, and Chat Completions does not expose OpenAI's 24h cache controls.
 const NEBIUS_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: true,
@@ -125,6 +145,33 @@ const NEBIUS_COMPAT: OpenAICompletionsCompat = {
 	supportsStrictMode: true,
 	supportsLongCacheRetention: false,
 };
+
+async function fetchNebiusCatalog(): Promise<NebiusCatalogModel[] | undefined> {
+	try {
+		console.log("Fetching models from Nebius Token Factory catalog...");
+		const response = await fetch(NEBIUS_MODELS_URL);
+		if (!response.ok) {
+			throw new Error(`HTTP ${response.status}`);
+		}
+		return (await response.json()) as NebiusCatalogModel[];
+	} catch (error) {
+		console.error("Failed to fetch Nebius Token Factory catalog; preserving the generated snapshot:", error);
+		return undefined;
+	}
+}
+
+function getNebiusContextWindow(model: ModelsDevModel | undefined, flavor: NebiusCatalogFlavor): number {
+	const publicContextWindow = (flavor.context_window_k ?? 4) * 1000;
+	const modelsDevContextWindow = model?.limit?.context;
+	if (modelsDevContextWindow === undefined) return Math.max(flavor.max_model_len ?? 4096, publicContextWindow);
+
+	// Token Factory publishes its display value in rounded "k" units. Preserve the exact
+	// models.dev value when it represents the same window, but prefer the live catalog when
+	// the two sources materially disagree. The rounded live value is conservative by design.
+	const difference = Math.abs(modelsDevContextWindow - publicContextWindow);
+	const matchingTolerance = Math.max(2048, publicContextWindow * 0.025);
+	return difference <= matchingTolerance ? modelsDevContextWindow : publicContextWindow;
+}
 
 const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
 const PRIME_INFERENCE_COMPAT: OpenAICompletionsCompat = {
@@ -212,6 +259,7 @@ const PRIME_INFERENCE_FEATURED_MODELS = new Set([
 	"qwen/qwen3-coder-next",
 	"qwen/qwen3-max",
 	"qwen/qwen3-vl-235b-a22b-thinking",
+	"qwen/qwen3.8-max",
 	"x-ai/grok-4.20",
 	"x-ai/grok-4.20-multi-agent",
 	"z-ai/glm-5",
@@ -339,7 +387,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 	}
 	const kimiK3Id = model.id.toLowerCase();
-	if (/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id)) {
+	if (!model.thinkingLevelMap && (/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))) {
 		mergeThinkingLevelMap(model, KIMI_K3_THINKING_LEVEL_MAP);
 	}
 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
@@ -607,6 +655,8 @@ interface PrimeInferenceOpenRouterMetadata {
 	maxTokens?: number;
 	vision: boolean;
 	reasoning: boolean;
+	thinkingLevelMap?: Model<"openai-completions">["thinkingLevelMap"];
+	supportsReasoningEffort?: boolean;
 }
 
 function buildPrimeInferenceOpenRouterIndex(catalog: unknown[]): Map<string, PrimeInferenceOpenRouterMetadata> {
@@ -619,6 +669,7 @@ function buildPrimeInferenceOpenRouterIndex(catalog: unknown[]): Map<string, Pri
 		const architecture = isRecord(item.architecture) ? item.architecture : {};
 		const modalities = Array.isArray(architecture.input_modalities) ? architecture.input_modalities : [];
 		const supportedParameters = Array.isArray(item.supported_parameters) ? item.supported_parameters : [];
+		const reasoningCapabilities = getOpenRouterReasoningCapabilities(item);
 		index.set(item.id.toLowerCase(), {
 			contextWindow: getOptionalNumber(item.context_length) ?? getOptionalNumber(topProvider.context_length),
 			maxTokens: getOptionalNumber(topProvider.max_completion_tokens),
@@ -627,6 +678,12 @@ function buildPrimeInferenceOpenRouterIndex(catalog: unknown[]): Map<string, Pri
 			// `reasoning` object over-reports (e.g. qwen3-max carries one despite
 			// not accepting reasoning params).
 			reasoning: supportedParameters.includes("reasoning"),
+			...(reasoningCapabilities?.thinkingLevelMap
+				? { thinkingLevelMap: reasoningCapabilities.thinkingLevelMap }
+				: {}),
+			...(reasoningCapabilities?.supportsReasoningEffort === false
+				? { supportsReasoningEffort: false }
+				: {}),
 		});
 	}
 	return index;
@@ -707,6 +764,7 @@ function createPrimeInferenceModel(
 		entry.maxTokens ?? override?.maxTokens ?? openRouter?.maxTokens ?? PRIME_INFERENCE_DEFAULT_MAX_TOKENS,
 		contextWindow,
 	);
+	const compat = getPrimeInferenceCompat(entry.id);
 	return {
 		id: entry.id,
 		...(PRIME_INFERENCE_FEATURED_MODELS.has(entry.id.toLowerCase()) ? { featured: true } : {}),
@@ -715,6 +773,7 @@ function createPrimeInferenceModel(
 		provider: "prime-inference",
 		baseUrl: PRIME_INFERENCE_BASE_URL,
 		reasoning: isPrimeInferenceReasoningModel(entry.id, entry.reasoning ?? openRouter?.reasoning),
+		...(openRouter?.thinkingLevelMap ? { thinkingLevelMap: openRouter.thinkingLevelMap } : {}),
 		input: vision ? ["text", "image"] : ["text"],
 		cost: {
 			input: entry.input,
@@ -723,7 +782,15 @@ function createPrimeInferenceModel(
 		},
 		contextWindow,
 		maxTokens,
-		compat: getPrimeInferenceCompat(entry.id),
+		compat: {
+			...compat,
+			...(openRouter?.supportsReasoningEffort === false
+				? {
+						supportsReasoningEffort: false,
+						...(!compat.thinkingFormat ? { thinkingFormat: "openrouter" as const } : {}),
+					}
+				: {}),
+		},
 	};
 }
 
@@ -767,6 +834,7 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 			const outputCost = Math.max(0, parseFloat(model.pricing?.completion || "0")) * 1_000_000;
 			const cacheReadCost = Math.max(0, parseFloat(model.pricing?.input_cache_read || "0")) * 1_000_000;
 			const cacheWriteCost = Math.max(0, parseFloat(model.pricing?.input_cache_write || "0")) * 1_000_000;
+			const reasoningCapabilities = getOpenRouterReasoningCapabilities(model);
 
 			const normalizedModel: Model<any> = {
 				id: modelKey,
@@ -775,6 +843,12 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 				baseUrl: "https://openrouter.ai/api/v1",
 				provider,
 				reasoning: model.supported_parameters?.includes("reasoning") || false,
+				...(reasoningCapabilities?.thinkingLevelMap
+					? { thinkingLevelMap: reasoningCapabilities.thinkingLevelMap }
+					: {}),
+				...(reasoningCapabilities?.supportsReasoningEffort === false
+					? { compat: { supportsReasoningEffort: false } }
+					: {}),
 				input,
 				cost: {
 					input: inputCost,
@@ -858,7 +932,10 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
-		const response = await fetch("https://models.dev/api.json");
+		const [response, nebiusCatalog] = await Promise.all([
+			fetch("https://models.dev/api.json"),
+			fetchNebiusCatalog(),
+		]);
 		const data = await response.json();
 
 		const models: Model<any>[] = [];
@@ -1233,44 +1310,56 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Nebius Token Factory models
-		if (data.nebius?.models) {
-			for (const [modelId, model] of Object.entries(data.nebius.models)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
+		// Token Factory's public catalog is authoritative for current availability and advertised
+		// capabilities. models.dev supplements its metadata when both catalogs contain the same ID.
+		if (nebiusCatalog) {
+			const modelsDevNebius = (data.nebius?.models ?? {}) as Record<string, ModelsDevModel>;
+			for (const catalogModel of nebiusCatalog) {
+				if (catalogModel.status && catalogModel.status !== "active") continue;
+				for (const flavor of catalogModel.flavors ?? []) {
+					const useCases = flavor.use_cases ?? catalogModel.use_cases ?? [];
+					if (!useCases.includes("function_calling")) continue;
+					if ((flavor.model_type ?? catalogModel.type) === "embedding") continue;
 
-				const isDeepSeekV4 = modelId.toLowerCase().includes("deepseek-v4");
-				const contextWindow = m.limit?.context || 4096;
-				const nebiusModel: Model<"openai-completions"> = {
-					id: modelId,
-					name: m.name || modelId,
-					api: "openai-completions",
-					provider: "nebius",
-					baseUrl: NEBIUS_BASE_URL,
-					reasoning: m.reasoning === true,
-					input:
-						m.modalities?.input?.includes("image") || NEBIUS_MULTIMODAL_MODEL_OVERRIDES.has(modelId)
-							? ["text", "image"]
-							: ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					compat: {
-						...NEBIUS_COMPAT,
-						...(isDeepSeekV4 ? DEEPSEEK_V4_COMPAT : {}),
-					},
-					contextWindow,
-					maxTokens: Math.min(m.limit?.output || 4096, contextWindow),
-				};
+					const modelId = flavor.model_id;
+					const m = modelsDevNebius[modelId];
+					const isDeepSeekV4 = modelId.toLowerCase().includes("deepseek-v4");
+					const contextWindow = getNebiusContextWindow(m, flavor);
+					const advertisedOutputLimit = flavor.max_model_len ?? m?.limit?.output ?? 4096;
+					const nebiusModel: Model<"openai-completions"> = {
+						id: modelId,
+						name: flavor.model_name ?? catalogModel.name ?? m?.name ?? modelId,
+						api: "openai-completions",
+						provider: "nebius",
+						baseUrl: NEBIUS_BASE_URL,
+						reasoning: useCases.includes("reasoning") || m?.reasoning === true,
+						input:
+							useCases.includes("image") || m?.modalities?.input?.includes("image")
+								? ["text", "image"]
+								: ["text"],
+						cost: {
+							input: flavor.input_price_per_million_tokens ?? m?.cost?.input ?? 0,
+							output: flavor.output_price_per_million_tokens ?? m?.cost?.output ?? 0,
+							cacheRead: m?.cost?.cache_read ?? 0,
+							cacheWrite: m?.cost?.cache_write ?? 0,
+						},
+						compat: {
+							...NEBIUS_COMPAT,
+							...(isDeepSeekV4 ? DEEPSEEK_V4_COMPAT : {}),
+						},
+						contextWindow,
+						maxTokens: Math.min(advertisedOutputLimit, contextWindow),
+					};
 
-				if (isDeepSeekV4) {
-					mergeThinkingLevelMap(nebiusModel, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+					if (isDeepSeekV4) {
+						mergeThinkingLevelMap(nebiusModel, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+					}
+					models.push(nebiusModel);
 				}
-				models.push(nebiusModel);
 			}
+		} else {
+			const existingProviders = EXISTING_MODELS as unknown as Record<string, Record<string, Model<any>>>;
+			models.push(...Object.values(existingProviders.nebius ?? {}));
 		}
 
 		// Process Fireworks models

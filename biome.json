@@ -1,9 +1,9 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.3.5/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.5.5/schema.json",
 	"linter": {
 		"enabled": true,
 		"rules": {
-			"recommended": true,
+			"preset": "recommended",
 			"style": {
 				"noNonNullAssertion": "off",
 				"useConst": "error",
@@ -13,6 +13,12 @@
 				"noExplicitAny": "off",
 				"noControlCharactersInRegex": "off",
 				"noEmptyInterface": "off"
+			},
+			"complexity": {
+				"useOptionalChain": "off"
+			},
+			"correctness": {
+				"noUnsafeOptionalChaining": "off"
 			}
 		}
 	},
