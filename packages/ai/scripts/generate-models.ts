@@ -2161,6 +2161,7 @@ async function generateModels() {
 			cacheRead: 0.5,
 			cacheWrite: 0,
 		},
+		// Same 500k window/output metadata as grok-4.5.
 		contextWindow: 500000,
 		maxTokens: 500000,
 		compat: { supportsLongCacheRetention: false },
