@@ -270,7 +270,12 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows.map((row) => row.summary.sessionId)).toEqual(["running-oldest", "active-newest", "middle", "created-newest"]);
+		expect(rows.map((row) => row.summary.sessionId)).toEqual([
+			"running-oldest",
+			"active-newest",
+			"middle",
+			"created-newest",
+		]);
 		expect(rows.map((row) => row.section)).toEqual(["running", "idle", "idle", "idle"]);
 	});
 
