@@ -50,7 +50,11 @@ import type { PrivateFrame } from "../session-worker/private-framing.js";
 import { createActiveSessionId, type DaemonSocketClient } from "./active-session-state.js";
 import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
-import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
+import {
+	type CatalogRecoveryAuthority,
+	DAEMON_CATALOG_ROLE_ENV,
+	DaemonCatalogClient,
+} from "./daemon-catalog-process.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import {
 	collectDaemonClientEnv,
@@ -120,7 +124,7 @@ import {
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
-import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
+import { isV2WorkerRecoveryRecord, WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
@@ -2914,52 +2918,46 @@ export class DaemonSupervisor {
 			}
 		}
 		const journal = new WorkerRecoveryJournal(worker.descriptor.recoveryJournalPath);
-		const latest = journal.getLatest();
-		const uncertain = latest.filter((record) => record.busy);
-		if (uncertain.length === 0) {
-			return;
-		}
-		const interruptedSessions = new Map<
-			string,
-			{ activeSessionId: string; sessionFile: string; operations: Set<string> }
-		>();
-		for (const record of uncertain) {
-			const sessionFile =
-				record.sessionFile ??
-				(record.activeSessionId === worker.descriptor.rootActiveSessionId
-					? worker.descriptor.sessionFile
-					: undefined);
-			if (!sessionFile) {
-				continue;
-			}
-			const key = `${record.activeSessionId}\0${sessionFile}`;
-			let interrupted = interruptedSessions.get(key);
-			if (!interrupted) {
-				interrupted = { activeSessionId: record.activeSessionId, sessionFile, operations: new Set() };
-				interruptedSessions.set(key, interrupted);
-			}
-			interrupted.operations.add(record.operation);
+		const uncertain = journal.getLatest().filter((record) => record.busy);
+		if (uncertain.length === 0) return;
+
+		const authorized = uncertain.filter(isV2WorkerRecoveryRecord);
+		for (const legacy of uncertain.filter((record) => !isV2WorkerRecoveryRecord(record))) {
+			// Legacy checkpoints lack exact turn, lineage, lease namespace, and
+			// operation authority. Leave them untouched so no stale supervisor can
+			// hide a newer checkpoint with an unsafe legacy idle write.
+			this.log(`Skipped stale legacy worker recovery authority for ${legacy.activeSessionId}; transcript unchanged`);
 		}
 		await this.assertRecoveryAllowed();
-		await Promise.all(
-			[...interruptedSessions.values()].map((interrupted) =>
-				this.catalog.markInterrupted(interrupted.sessionFile, interrupted.activeSessionId, [
-					...interrupted.operations,
-				]),
-			),
+		const recoveryOutcomes = await Promise.allSettled(
+			authorized.map(async (record) => {
+				const authority: CatalogRecoveryAuthority = {
+					operationId: record.operationId,
+					activeSessionId: record.activeSessionId,
+					sessionId: record.sessionId,
+					agentDir: record.agentDir,
+					sessionFile: record.sessionFile,
+					headEntryId: record.headEntryId,
+					assistantEntryId: record.assistantEntryId,
+					toolCalls: record.toolCalls,
+					lineageDigest: record.lineageDigest,
+				};
+				const result = await this.catalog.markInterrupted(authority, [record.operation]);
+				await this.assertRecoveryAllowed();
+				if (result.status === "stale") {
+					this.log(`Worker recovery ${record.operationId} is stale: ${result.reason}`);
+				}
+				if (!journal.complete(record.activeSessionId, record.operationId)) {
+					this.log(`Worker recovery ${record.operationId} completion lost CAS to a newer epoch`);
+				}
+			}),
 		);
-		await this.assertRecoveryAllowed();
-		for (const record of latest) {
-			journal.record({
-				activeSessionId: record.activeSessionId,
-				sessionId: record.sessionId,
-				...(record.sessionFile ? { sessionFile: record.sessionFile } : {}),
-				busy: false,
-				operation: "recovery_hold",
-			});
-		}
+		const failedRecovery = recoveryOutcomes.find(
+			(outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+		);
+		if (failedRecovery) throw failedRecovery.reason;
 		this.log(
-			`Recovered worker ${worker.descriptor.workerId} without replaying uncertain operations: ${uncertain
+			`Recovered worker ${worker.descriptor.workerId} without replaying uncertain operations: ${authorized
 				.map((record) => record.operation)
 				.join(", ")}`,
 		);

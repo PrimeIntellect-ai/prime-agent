@@ -278,6 +278,28 @@ describe("SessionManager exact-authority recovery", () => {
 		expect(snapshot.lineageDigest).toMatch(/^[0-9a-f]{64}$/);
 	});
 
+	it("captures only the unresolved subset at the authorized head", () => {
+		const session = createSession();
+		session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
+		session.appendMessage(assistantTurn(toolCall("bash-1", "bash"), toolCall("edit-1", "edit")));
+		session.appendMessage(toolResult("bash-1", "bash"));
+
+		const snapshot = session.captureExactRecoveryAuthority("active-1", "op-1");
+
+		expect(snapshot.toolCalls).toEqual([{ id: "edit-1", name: "edit" }]);
+		const result = session.closeUnresolvedToolCallsWithAuthority({
+			...snapshot,
+			activeSessionId: "active-1",
+			operationId: "op-1",
+			sessionFile: session.getSessionFile()!,
+		});
+		expect(result).toEqual({ status: "applied", closed: 1 });
+		expect(toolResultEntries(session).map((entry) => (entry.message as ToolResultMessage).toolCallId)).toEqual([
+			"bash-1",
+			"edit-1",
+		]);
+	});
+
 	it("produces a deterministic lineageDigest for the same branch", () => {
 		const session = createSession();
 		session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
@@ -405,6 +427,23 @@ describe("SessionManager exact-authority recovery", () => {
 		expectStaleWithoutWrite(result, before, sessionFile);
 	});
 
+	it("requires the authorized assistant to be the latest assistant on the recorded lineage", () => {
+		const session = createSession();
+		session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
+		const olderAssistantId = session.appendMessage(assistantTurn(toolCall("older-1", "bash")));
+		session.appendMessage(assistantTurn(toolCall("latest-1", "edit")));
+		const sessionFile = session.getSessionFile()!;
+		const before = readFileSync(sessionFile).length;
+
+		const result = session.closeUnresolvedToolCallsWithAuthority({
+			...buildAuthority(session),
+			assistantEntryId: olderAssistantId,
+			toolCalls: [{ id: "older-1", name: "bash" }],
+		});
+
+		expectStaleWithoutWrite(result, before, sessionFile);
+	});
+
 	it("returns stale for a lineageDigest mismatch without writing", () => {
 		const session = createSession();
 		session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
@@ -482,6 +521,48 @@ describe("SessionManager exact-authority recovery", () => {
 		const result = session.closeUnresolvedToolCallsWithAuthority(authority);
 
 		expectStaleWithoutWrite(result, before, sessionFile);
+	});
+
+	it("rejects reordered or duplicate operation-owned suffix results", () => {
+		for (const suffixKind of ["reordered", "duplicate"] as const) {
+			const session = createSession();
+			session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
+			const assistantId = session.appendMessage(
+				assistantTurn(toolCall("bash-1", "bash"), toolCall("edit-1", "edit")),
+			);
+			const authority = buildAuthority(session, "op-1");
+			if (suffixKind === "reordered") {
+				session.appendMessage(syntheticResult("edit-1", "edit", "op-1", assistantId));
+			} else {
+				session.appendMessage(syntheticResult("bash-1", "bash", "op-1", assistantId));
+				session.appendMessage(syntheticResult("bash-1", "bash", "op-1", assistantId));
+			}
+			const sessionFile = session.getSessionFile()!;
+			const before = readFileSync(sessionFile).length;
+
+			expectStaleWithoutWrite(session.closeUnresolvedToolCallsWithAuthority(authority), before, sessionFile);
+		}
+	});
+
+	it("rejects a suffix result with foreign assistant metadata or result shape", () => {
+		for (const foreign of ["assistant", "shape"] as const) {
+			const session = createSession();
+			session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
+			const assistantId = session.appendMessage(assistantTurn(toolCall("bash-1", "bash")));
+			const authority = buildAuthority(session, "op-1");
+			const result = syntheticResult(
+				"bash-1",
+				"bash",
+				"op-1",
+				foreign === "assistant" ? "other-assistant" : assistantId,
+			);
+			if (foreign === "shape") result.isError = false;
+			session.appendMessage(result);
+			const sessionFile = session.getSessionFile()!;
+			const before = readFileSync(sessionFile).length;
+
+			expectStaleWithoutWrite(session.closeUnresolvedToolCallsWithAuthority(authority), before, sessionFile);
+		}
 	});
 
 	it("resumes an operation-owned partial suffix without duplicating existing synthetic results", () => {

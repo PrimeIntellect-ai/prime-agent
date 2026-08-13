@@ -5,9 +5,81 @@ import { dirname, join, resolve } from "node:path";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
-import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import {
+	acquireSessionLease,
+	canonicalSessionPath,
+	SESSION_LEASE_OWNER_ID_ENV,
+	SESSION_LEASES_ENABLED_ENV,
+	SessionAlreadyActiveError,
+	type SessionLease,
+} from "../../core/session-lease.js";
+import {
+	type ExactRecoveryAuthority,
+	type ExactRecoveryStaleReason,
+	readSessionInfo,
+	type SessionInfo,
+	SessionManager,
+} from "../../core/session-manager.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
+
+const RECOVERY_LEASE_OWNER_PREFIX = "worker-recovery:";
+const WORKER_RECOVERY_MARKER = "prime-agent.worker_recovery";
+const WORKER_RECOVERY_MESSAGE =
+	"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>";
+
+export interface CatalogRecoveryAuthority extends ExactRecoveryAuthority {
+	readonly agentDir: string;
+}
+
+export type CatalogRecoveryStaleReason = ExactRecoveryStaleReason | "live_session_owner";
+
+export type CatalogRecoveryResult =
+	| { readonly status: "applied" }
+	| { readonly status: "already_applied" }
+	| { readonly status: "stale"; readonly reason: CatalogRecoveryStaleReason };
+
+function isCatalogRecoveryAuthority(value: unknown): value is CatalogRecoveryAuthority {
+	if (!value || typeof value !== "object") return false;
+	const authority = value as Partial<CatalogRecoveryAuthority>;
+	if (
+		typeof authority.operationId !== "string" ||
+		!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(authority.operationId) ||
+		typeof authority.activeSessionId !== "string" ||
+		authority.activeSessionId.length === 0 ||
+		typeof authority.sessionId !== "string" ||
+		authority.sessionId.length === 0 ||
+		typeof authority.agentDir !== "string" ||
+		authority.agentDir.length === 0 ||
+		typeof authority.sessionFile !== "string" ||
+		authority.sessionFile.length === 0 ||
+		(typeof authority.headEntryId !== "string" && authority.headEntryId !== null) ||
+		(typeof authority.assistantEntryId !== "string" && authority.assistantEntryId !== null) ||
+		typeof authority.lineageDigest !== "string" ||
+		!/^[0-9a-f]{64}$/i.test(authority.lineageDigest) ||
+		!Array.isArray(authority.toolCalls)
+	) {
+		return false;
+	}
+	const ids = new Set<string>();
+	for (const call of authority.toolCalls) {
+		if (
+			!call ||
+			typeof call.id !== "string" ||
+			call.id.length === 0 ||
+			typeof call.name !== "string" ||
+			call.name.length === 0
+		) {
+			return false;
+		}
+		if (ids.has(call.id)) return false;
+		ids.add(call.id);
+	}
+	return !(
+		(authority.headEntryId === null && authority.assistantEntryId !== null) ||
+		(authority.assistantEntryId === null && authority.toolCalls.length > 0)
+	);
+}
 
 interface SessionInfoWire extends Omit<SessionInfo, "created" | "modified"> {
 	created: string;
@@ -25,8 +97,7 @@ type CatalogRequest =
 			type: "request";
 			id: string;
 			command: "mark_interrupted";
-			sessionPath: string;
-			activeSessionId: string;
+			authority: CatalogRecoveryAuthority;
 			operations: string[];
 	  }
 	| { type: "request"; id: string; command: "shutdown" };
@@ -266,8 +337,12 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				return;
 			}
 			case "mark_interrupted":
-				markSessionInterrupted(request.sessionPath, request.activeSessionId, request.operations);
-				sendCatalogMessage({ type: "response", id: request.id, success: true });
+				sendCatalogMessage({
+					type: "response",
+					id: request.id,
+					success: true,
+					data: await markSessionInterrupted(request.authority, request.operations),
+				});
 				return;
 			case "shutdown":
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
@@ -284,25 +359,80 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 	}
 }
 
-/**
- * Persist interrupted-session recovery state for a session file: close every
- * unresolved tool call in the terminal assistant tool-use turn with synthetic
- * error toolResult messages, then append the prime-agent.worker_recovery marker.
- * Synthetic results are appended first so they are persisted before the marker.
- * Exported for focused daemon catalog tests.
- */
-export function markSessionInterrupted(sessionPath: string, activeSessionId: string, operations: string[]): void {
-	const session = SessionManager.open(sessionPath);
-	session.closeUnresolvedToolCalls();
-	session.appendCustomMessageEntryWithRollback(
-		"prime-agent.worker_recovery",
-		"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
-		false,
-		{
-			activeSessionId,
-			operations,
-		},
+const recoveryQueues = new Map<string, Promise<void>>();
+
+function serializeRecovery<T>(sessionPath: string, action: () => Promise<T> | T): Promise<T> {
+	const previous = recoveryQueues.get(sessionPath) ?? Promise.resolve();
+	const result = previous.catch(() => undefined).then(action);
+	const settled = result.then(
+		() => undefined,
+		() => undefined,
 	);
+	recoveryQueues.set(sessionPath, settled);
+	void settled.then(() => {
+		if (recoveryQueues.get(sessionPath) === settled) recoveryQueues.delete(sessionPath);
+	});
+	return result;
+}
+
+function hasRecoveryMarker(session: SessionManager, operationId: string): boolean {
+	return session.getEntries().some((entry) => {
+		if (entry.type !== "custom_message" || entry.customType !== WORKER_RECOVERY_MARKER) return false;
+		const details = entry.details as { operationId?: unknown } | undefined;
+		return details?.operationId === operationId;
+	});
+}
+
+/**
+ * Recover exactly the journal-authorized interrupted turn under the canonical
+ * session lease. Synthetic results precede one global operation marker; stale
+ * authority performs no writes and persistence failures remain retryable.
+ */
+export async function markSessionInterrupted(
+	authority: CatalogRecoveryAuthority,
+	operations: string[],
+): Promise<CatalogRecoveryResult> {
+	if (!isCatalogRecoveryAuthority(authority) || !operations.every((operation) => operation.length > 0)) {
+		throw new Error("Invalid exact worker recovery authority");
+	}
+	const sessionPath = canonicalSessionPath(authority.sessionFile);
+	const normalizedAuthority: CatalogRecoveryAuthority = { ...authority, sessionFile: sessionPath };
+	return serializeRecovery(sessionPath, (): CatalogRecoveryResult => {
+		let lease: SessionLease | undefined;
+		try {
+			lease = acquireSessionLease(sessionPath, authority.agentDir, {
+				...process.env,
+				[SESSION_LEASES_ENABLED_ENV]: "1",
+				[SESSION_LEASE_OWNER_ID_ENV]: `${RECOVERY_LEASE_OWNER_PREFIX}${authority.operationId}`,
+			});
+		} catch (error) {
+			if (error instanceof SessionAlreadyActiveError) {
+				if (error.activeSessionId?.startsWith(RECOVERY_LEASE_OWNER_PREFIX)) {
+					throw new Error(`Concurrent recovery owns the session lease: ${sessionPath}`);
+				}
+				return { status: "stale", reason: "live_session_owner" };
+			}
+			throw error;
+		}
+		if (!lease) throw new Error(`Could not enable the recovery session lease: ${sessionPath}`);
+		try {
+			const session = SessionManager.open(sessionPath);
+			if (hasRecoveryMarker(session, authority.operationId)) {
+				return { status: "already_applied" };
+			}
+			const recovery = session.closeUnresolvedToolCallsWithAuthority(normalizedAuthority);
+			if (recovery.status === "stale") return recovery;
+			session.appendCustomMessageEntryWithRollback(WORKER_RECOVERY_MARKER, WORKER_RECOVERY_MESSAGE, false, {
+				operationId: authority.operationId,
+				activeSessionId: authority.activeSessionId,
+				operations: [...operations],
+				authority: normalizedAuthority,
+			});
+			return { status: "applied" };
+		} finally {
+			lease.release();
+		}
+	});
 }
 
 export class DaemonCatalogClient {
@@ -382,13 +512,12 @@ export class DaemonCatalogClient {
 		return data.archived;
 	}
 
-	async markInterrupted(sessionPath: string, activeSessionId: string, operations: string[]): Promise<void> {
-		await this.request({
+	markInterrupted(authority: CatalogRecoveryAuthority, operations: string[]): Promise<CatalogRecoveryResult> {
+		return this.request({
 			type: "request",
 			id: randomUUID(),
 			command: "mark_interrupted",
-			sessionPath,
-			activeSessionId,
+			authority,
 			operations,
 		});
 	}

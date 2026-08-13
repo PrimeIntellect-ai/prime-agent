@@ -9985,7 +9985,7 @@ describe("worker recovery authority capture", () => {
 			hash.update(entry.id);
 			hash.update("\0");
 			hash.update(entry.parentId ?? "");
-			hash.update("\n");
+			hash.update("\0");
 		}
 		return hash.digest("hex");
 	}
@@ -10043,8 +10043,8 @@ describe("worker recovery authority capture", () => {
 				expect(record.operationId).toMatch(/^[0-9a-f-]{36}$/);
 			}
 
-			// Resolving the last call and advancing the branch forces a new record
-			// even for the same event name, within the same busy epoch operation id.
+			// Resolving the last call advances the authority and therefore starts a
+			// new operation epoch even though the worker remained busy.
 			manager.appendMessage(toolResult("call-2", "bash"));
 			internals.recordWorkerRecoveryState(state, "tool_execution_end", true);
 			const advanced = WorkerRecoveryJournal.readLatest(journalPath).at(-1)!;
@@ -10054,7 +10054,7 @@ describe("worker recovery authority capture", () => {
 				expect(advanced.assistantEntryId).toBe(assistantEntryId);
 				expect(advanced.toolCalls).toEqual([]);
 				expect(advanced.lineageDigest).toBe(lineageDigestOf(manager));
-				expect(advanced.operationId).toBe(firstOperationId);
+				expect(advanced.operationId).not.toBe(firstOperationId);
 			}
 		} finally {
 			if (previousJournalPath === undefined) {

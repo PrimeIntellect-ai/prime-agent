@@ -23,7 +23,7 @@ import {
 import { readFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { type Api, getLogger, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
+import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	appendRotatingLog,
@@ -111,7 +111,6 @@ import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "..
 import {
 	readSessionInfo,
 	resolveSessionRlmDepth,
-	type SessionEntry,
 	type SessionInfo,
 	SessionManager,
 } from "../../core/session-manager.js";
@@ -208,7 +207,7 @@ import {
 	SNAPSHOT_TARGET_CHUNK_BYTES,
 	type SnapshotTranscriptChunkSource,
 } from "./snapshot-transcript-cache.js";
-import { WorkerRecoveryJournal, type WorkerRecoveryToolCall } from "./worker-recovery-journal.js";
+import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
 export interface DaemonModeOptions {
 	socketPath?: string;
@@ -361,63 +360,6 @@ const RECOVERY_CHECKPOINT_EVENTS: ReadonlySet<string> = new Set([
 	"session_action_update",
 	"rlm_child_update",
 ]);
-
-/**
- * Collect the unresolved `{ id, name }` tool calls declared by the assistant
- * entry at `assistantIndex` in the active branch. A call is unresolved when no
- * toolResult entry after the assistant entry already resolves its id, so the
- * journaled set is exactly what recovery may still need to close. The ids are
- * the tool-execution event identities from the assistant message itself.
- */
-function collectUnresolvedToolCalls(branch: SessionEntry[], assistantIndex: number): WorkerRecoveryToolCall[] {
-	const assistant = branch[assistantIndex];
-	if (assistant?.type !== "message" || assistant.message.role !== "assistant") {
-		return [];
-	}
-	const resolved = new Set<string>();
-	for (let i = assistantIndex + 1; i < branch.length; i++) {
-		const entry = branch[i];
-		if (entry.type !== "message" || entry.message.role !== "toolResult") {
-			continue;
-		}
-		const result = entry.message as ToolResultMessage;
-		if (typeof result.toolCallId === "string") {
-			resolved.add(result.toolCallId);
-		}
-	}
-	const calls: WorkerRecoveryToolCall[] = [];
-	const seen = new Set<string>();
-	for (const block of assistant.message.content) {
-		if (!block || block.type !== "toolCall") {
-			continue;
-		}
-		if (typeof block.id !== "string" || typeof block.name !== "string") {
-			continue;
-		}
-		if (seen.has(block.id) || resolved.has(block.id)) {
-			continue;
-		}
-		seen.add(block.id);
-		calls.push({ id: block.id, name: block.name });
-	}
-	return calls;
-}
-
-/**
- * SHA-256 over the ordered active branch entry identities and their parent
- * links through the branch head. Any advance, branch switch, or structural
- * change on the active branch changes the digest.
- */
-function computeLineageDigest(branch: SessionEntry[]): string {
-	const hash = createHash("sha256");
-	for (const entry of branch) {
-		hash.update(entry.id);
-		hash.update("\0");
-		hash.update(entry.parentId ?? "");
-		hash.update("\n");
-	}
-	return hash.digest("hex");
-}
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
@@ -6343,34 +6285,17 @@ export class AgentDaemon {
 		const busy =
 			busyOverride ?? (isActiveSessionBusy(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
 		try {
-			// Capture the whole recovery authority from one in-memory session
-			// view: exact active branch head, latest assistant entry, its
-			// unresolved tool calls, and the branch lineage digest. Changes to
-			// any of these force a new journal record even when the event name
-			// is unchanged.
-			const sessionManager = session.sessionManager;
-			const branch = sessionManager.getBranch();
-			let assistantEntryId: string | null = null;
-			let toolCalls: WorkerRecoveryToolCall[] = [];
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const entry = branch[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					assistantEntryId = entry.id;
-					toolCalls = collectUnresolvedToolCalls(branch, i);
-					break;
-				}
-			}
+			// SessionManager captures every branch-derived authority field from one
+			// in-memory view so checkpoint and recovery use the same digest and
+			// unresolved-call semantics.
+			const snapshot = session.sessionManager.captureExactRecoveryAuthority(state.activeSessionId, "");
 			this.recoveryJournal.record({
 				activeSessionId: state.activeSessionId,
-				sessionId: session.sessionId,
+				...snapshot,
 				agentDir: this.agentDir,
-				...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
+				...(session.sessionFile ? { sessionFile: canonicalSessionPath(session.sessionFile) } : {}),
 				busy,
 				operation,
-				headEntryId: sessionManager.getLeafId(),
-				assistantEntryId,
-				toolCalls,
-				lineageDigest: computeLineageDigest(branch),
 			});
 		} catch (error) {
 			this.log(`could not checkpoint worker operation state: ${String(error)}`);

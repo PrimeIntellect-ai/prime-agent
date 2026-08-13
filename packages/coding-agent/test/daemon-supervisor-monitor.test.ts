@@ -3123,142 +3123,211 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(client.attachedActiveSessionIds).toEqual(new Set());
 	});
 
-	it("marks each busy worker session interrupted independently", async () => {
-		type RecoveryWorker = {
-			descriptor: {
-				workerId: string;
-				pid: number;
-				rootActiveSessionId: string;
-				recoveryJournalPath: string;
-				orphanProcessJournalPath: string;
-			};
+	type RecoveryWorker = {
+		descriptor: {
+			workerId: string;
+			pid: number;
+			rootActiveSessionId: string;
+			recoveryJournalPath: string;
+			orphanProcessJournalPath: string;
 		};
+	};
+
+	function recoveryRecord(
+		root: string,
+		activeSessionId: string,
+		sessionId: string,
+		sessionFile: string,
+		operation: string,
+		headEntryId = `${activeSessionId}-head`,
+	) {
+		return {
+			activeSessionId,
+			sessionId,
+			agentDir: root,
+			sessionFile,
+			headEntryId,
+			assistantEntryId: `${activeSessionId}-assistant`,
+			toolCalls: [{ id: `${activeSessionId}-call`, name: "bash" }],
+			lineageDigest: "a".repeat(64),
+			busy: true,
+			operation,
+		};
+	}
+
+	function recoveryWorker(root: string, journalPath: string): RecoveryWorker {
+		return {
+			descriptor: {
+				workerId: "worker-1",
+				pid: process.pid,
+				rootActiveSessionId: "root-active",
+				recoveryJournalPath: journalPath,
+				orphanProcessJournalPath: join(root, "worker.orphans.jsonl"),
+			},
+		};
+	}
+
+	function recoverySupervisor(markInterrupted: ReturnType<typeof vi.fn>) {
+		return Object.assign(Object.create(DaemonSupervisor.prototype), {
+			catalog: { markInterrupted },
+			log: vi.fn(),
+			assertRecoveryAllowed: vi.fn(async () => {}),
+		}) as {
+			recoverUncertainWorkerOperations(worker: RecoveryWorker, killWorkerProcess: boolean): Promise<void>;
+		};
+	}
+
+	it("worker recovery completes each successful v2 authority independently", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-test-"));
 		const journalPath = join(root, "worker.recovery.jsonl");
-		const orphanJournalPath = join(root, "worker.orphans.jsonl");
-		writeFileSync(
-			orphanJournalPath,
-			`${JSON.stringify({
-				version: 1,
-				pid: 987_654,
-				ownerPid: process.pid,
-				processStartId: "reused-process",
-				active: true,
-				recordedAt: new Date().toISOString(),
-			})}\n`,
-		);
 		const journal = new WorkerRecoveryJournal(journalPath);
-		journal.record({
-			activeSessionId: "root-active",
-			sessionId: "root-session",
-			sessionFile: "/tmp/root.jsonl",
-			busy: true,
-			operation: "model_stream",
-		});
-		journal.record({
-			activeSessionId: "child-active",
-			sessionId: "child-session",
-			sessionFile: "/tmp/child.jsonl",
-			busy: true,
-			operation: "tool_execution",
-		});
-		const worker: RecoveryWorker = {
-			descriptor: {
-				workerId: "worker-1",
-				pid: process.pid,
-				rootActiveSessionId: "root-active",
-				recoveryJournalPath: journalPath,
-				orphanProcessJournalPath: orphanJournalPath,
-			},
-		};
-		const markInterrupted = vi.fn(async () => undefined);
-		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			catalog: { markInterrupted },
-			log: vi.fn(),
-			assertRecoveryAllowed: vi.fn(async () => {}),
-		}) as {
-			recoverUncertainWorkerOperations(worker: RecoveryWorker, killWorkerProcess: boolean): Promise<void>;
-		};
+		journal.record(recoveryRecord(root, "root-active", "root-session", "/tmp/root.jsonl", "model_stream"));
+		journal.record(recoveryRecord(root, "child-active", "child-session", "/tmp/child.jsonl", "tool_execution"));
+		const records = WorkerRecoveryJournal.readLatest(journalPath);
+		const markInterrupted = vi.fn(async () => ({ status: "applied" as const }));
 
 		try {
-			await supervisor.recoverUncertainWorkerOperations(worker, false);
-			expect(kill).not.toHaveBeenCalled();
-			expect(markInterrupted).toHaveBeenCalledTimes(2);
-			expect(markInterrupted).toHaveBeenCalledWith("/tmp/root.jsonl", "root-active", ["model_stream"]);
-			expect(markInterrupted).toHaveBeenCalledWith("/tmp/child.jsonl", "child-active", ["tool_execution"]);
-		} finally {
-			kill.mockRestore();
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("keeps the recovery journal busy when the catalog mark fails", async () => {
-		type RecoveryWorker = {
-			descriptor: {
-				workerId: string;
-				pid: number;
-				rootActiveSessionId: string;
-				recoveryJournalPath: string;
-				orphanProcessJournalPath: string;
-			};
-		};
-		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-fail-test-"));
-		const journalPath = join(root, "worker.recovery.jsonl");
-		const orphanJournalPath = join(root, "worker.orphans.jsonl");
-		writeFileSync(
-			orphanJournalPath,
-			`${JSON.stringify({
-				version: 1,
-				pid: 987_654,
-				ownerPid: process.pid,
-				processStartId: "reused-process",
-				active: true,
-				recordedAt: new Date().toISOString(),
-			})}\n`,
-		);
-		const journal = new WorkerRecoveryJournal(journalPath);
-		journal.record({
-			activeSessionId: "root-active",
-			sessionId: "root-session",
-			sessionFile: "/tmp/root.jsonl",
-			busy: true,
-			operation: "tool_execution",
-		});
-		const worker: RecoveryWorker = {
-			descriptor: {
-				workerId: "worker-1",
-				pid: process.pid,
-				rootActiveSessionId: "root-active",
-				recoveryJournalPath: journalPath,
-				orphanProcessJournalPath: orphanJournalPath,
-			},
-		};
-		const markInterrupted = vi.fn(async () => {
-			throw new Error("catalog unavailable");
-		});
-		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			catalog: { markInterrupted },
-			log: vi.fn(),
-			assertRecoveryAllowed: vi.fn(async () => {}),
-		}) as {
-			recoverUncertainWorkerOperations(worker: RecoveryWorker, killWorkerProcess: boolean): Promise<void>;
-		};
-
-		try {
-			await expect(supervisor.recoverUncertainWorkerOperations(worker, false)).rejects.toThrow(
-				"catalog unavailable",
+			await recoverySupervisor(markInterrupted).recoverUncertainWorkerOperations(
+				recoveryWorker(root, journalPath),
+				false,
 			);
-			expect(markInterrupted).toHaveBeenCalledOnce();
+			expect(markInterrupted).toHaveBeenCalledTimes(2);
+			for (const record of records) {
+				if (record.version !== 2) throw new Error("Expected v2 fixture record");
+				expect(markInterrupted).toHaveBeenCalledWith(
+					expect.objectContaining({
+						operationId: record.operationId,
+						activeSessionId: record.activeSessionId,
+						sessionId: record.sessionId,
+						agentDir: root,
+						sessionFile: record.sessionFile,
+						headEntryId: record.headEntryId,
+						assistantEntryId: record.assistantEntryId,
+						toolCalls: record.toolCalls,
+						lineageDigest: record.lineageDigest,
+					}),
+					[record.operation],
+				);
+			}
 			expect(WorkerRecoveryJournal.readLatest(journalPath)).toEqual([
-				expect.objectContaining({ activeSessionId: "root-active", busy: true, operation: "tool_execution" }),
+				expect.objectContaining({ activeSessionId: "root-active", busy: false, operation: "recovery_complete" }),
+				expect.objectContaining({ activeSessionId: "child-active", busy: false, operation: "recovery_complete" }),
 			]);
 		} finally {
-			kill.mockRestore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("worker recovery completes stale results but retains busy authority on request failure", async () => {
+		for (const outcome of ["stale", "failure"] as const) {
+			const root = mkdtempSync(join(tmpdir(), `prime-supervisor-recovery-${outcome}-`));
+			const journalPath = join(root, "worker.recovery.jsonl");
+			const journal = new WorkerRecoveryJournal(journalPath);
+			journal.record(recoveryRecord(root, "root-active", "root-session", "/tmp/root.jsonl", "tool_execution"));
+			const markInterrupted = vi.fn(async () => {
+				if (outcome === "failure") throw new Error("catalog unavailable");
+				return { status: "stale" as const, reason: "head" as const };
+			});
+			const supervisor = recoverySupervisor(markInterrupted);
+			try {
+				if (outcome === "failure") {
+					await expect(
+						supervisor.recoverUncertainWorkerOperations(recoveryWorker(root, journalPath), false),
+					).rejects.toThrow("catalog unavailable");
+				} else {
+					await supervisor.recoverUncertainWorkerOperations(recoveryWorker(root, journalPath), false);
+				}
+				expect(WorkerRecoveryJournal.readLatest(journalPath)[0]).toMatchObject({
+					busy: outcome === "failure",
+					operation: outcome === "failure" ? "tool_execution" : "recovery_complete",
+				});
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("worker recovery keeps per-session successes complete when a sibling request fails", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-partial-"));
+		const journalPath = join(root, "worker.recovery.jsonl");
+		const journal = new WorkerRecoveryJournal(journalPath);
+		journal.record(recoveryRecord(root, "root-active", "root-session", "/tmp/root.jsonl", "model_stream"));
+		journal.record(recoveryRecord(root, "child-active", "child-session", "/tmp/child.jsonl", "tool_execution"));
+		const markInterrupted = vi.fn(async (authority: { activeSessionId: string }) => {
+			if (authority.activeSessionId === "child-active") {
+				await Promise.resolve();
+				throw new Error("child catalog failure");
+			}
+			return { status: "applied" as const };
+		});
+		try {
+			await expect(
+				recoverySupervisor(markInterrupted).recoverUncertainWorkerOperations(
+					recoveryWorker(root, journalPath),
+					false,
+				),
+			).rejects.toThrow("child catalog failure");
+			expect(WorkerRecoveryJournal.readLatest(journalPath)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ activeSessionId: "root-active", busy: false }),
+					expect.objectContaining({ activeSessionId: "child-active", busy: true }),
+				]),
+			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("worker recovery CAS cannot clear a newer resumed busy epoch", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-cas-"));
+		const journalPath = join(root, "worker.recovery.jsonl");
+		const journal = new WorkerRecoveryJournal(journalPath);
+		const initial = recoveryRecord(root, "root-active", "root-session", "/tmp/root.jsonl", "tool_execution");
+		journal.record(initial);
+		const old = WorkerRecoveryJournal.readLatest(journalPath)[0]!;
+		if (old.version !== 2) throw new Error("Expected v2 fixture record");
+		const markInterrupted = vi.fn(async () => {
+			journal.record({ ...initial, busy: false, operation: "turn_end" });
+			journal.record({ ...initial, headEntryId: "new-head", busy: true, operation: "turn_start" });
+			return { status: "applied" as const };
+		});
+		try {
+			await recoverySupervisor(markInterrupted).recoverUncertainWorkerOperations(
+				recoveryWorker(root, journalPath),
+				false,
+			);
+			const latest = WorkerRecoveryJournal.readLatest(journalPath)[0]!;
+			expect(latest).toMatchObject({ busy: true, headEntryId: "new-head", operation: "turn_start" });
+			if (latest.version === 2) expect(latest.operationId).not.toBe(old.operationId);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("worker recovery leaves legacy v1 busy records stale without transcript mutation", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-legacy-"));
+		const journalPath = join(root, "worker.recovery.jsonl");
+		const journal = new WorkerRecoveryJournal(journalPath);
+		journal.record({
+			activeSessionId: "root-active",
+			sessionId: "root-session",
+			sessionFile: "/tmp/root.jsonl",
+			busy: true,
+			operation: "tool_execution",
+		});
+		const markInterrupted = vi.fn();
+		try {
+			await recoverySupervisor(markInterrupted).recoverUncertainWorkerOperations(
+				recoveryWorker(root, journalPath),
+				false,
+			);
+			expect(markInterrupted).not.toHaveBeenCalled();
+			expect(WorkerRecoveryJournal.readLatest(journalPath)[0]).toMatchObject({ version: 1, busy: true });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it.each([
 		{ name: "malformed data", data: undefined, error: /invalid update manifest/ },
 		{

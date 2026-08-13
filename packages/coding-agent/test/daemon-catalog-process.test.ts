@@ -1,10 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	acquireSessionLease,
+	canonicalSessionPath,
+	SESSION_LEASE_OWNER_ID_ENV,
+	SESSION_LEASES_ENABLED_ENV,
+} from "../src/core/session-lease.js";
 import { type SessionInfo, SessionManager } from "../src/core/session-manager.js";
 import {
+	type CatalogRecoveryAuthority,
 	listSavedSessionSiblings,
 	markSessionInterrupted,
 	resolveCatalogSessionMatch,
@@ -107,7 +115,10 @@ afterEach(() => {
 	}
 });
 
-function createCatalogFixtureSession(): { sessionFile: string } {
+function createCatalogFixtureSession(
+	calls: Array<{ id: string; name: string }> = [{ id: "bash-1", name: "bash" }],
+	operationId = randomUUID(),
+): { sessionFile: string; authority: CatalogRecoveryAuthority; session: SessionManager } {
 	const root = mkdtempSync(join(tmpdir(), "prime-catalog-mark-interrupted-"));
 	catalogTempDirs.push(root);
 	const sessionDir = join(root, "sessions");
@@ -117,7 +128,7 @@ function createCatalogFixtureSession(): { sessionFile: string } {
 		role: "assistant",
 		content: [
 			{ type: "text", text: "calling" },
-			{ type: "toolCall", id: "bash-1", name: "bash", arguments: {} },
+			...calls.map((call) => ({ type: "toolCall" as const, ...call, arguments: {} })),
 		],
 		api: "anthropic-messages",
 		provider: "anthropic",
@@ -134,107 +145,192 @@ function createCatalogFixtureSession(): { sessionFile: string } {
 		timestamp: 2,
 	});
 	const sessionFile = session.getSessionFile();
-	if (!sessionFile) {
-		throw new Error("Fixture session did not persist");
-	}
-	return { sessionFile };
+	if (!sessionFile) throw new Error("Fixture session did not persist");
+	const snapshot = session.captureExactRecoveryAuthority("active-1", operationId);
+	return {
+		sessionFile,
+		session,
+		authority: {
+			...snapshot,
+			operationId,
+			activeSessionId: "active-1",
+			sessionFile: canonicalSessionPath(sessionFile),
+			agentDir: root,
+		},
+	};
+}
+
+function recoveryMarkers(sessionFile: string): Array<{ details?: unknown }> {
+	return SessionManager.open(sessionFile)
+		.getEntries()
+		.filter(
+			(entry): entry is typeof entry & { type: "custom_message" } =>
+				entry.type === "custom_message" && entry.customType === "prime-agent.worker_recovery",
+		);
 }
 
 describe("daemon catalog mark_interrupted", () => {
-	it("persists synthetic tool results before the worker recovery marker", () => {
-		const { sessionFile } = createCatalogFixtureSession();
+	it("applies the exact authority and persists synthetic results before one marker", async () => {
+		const { sessionFile, authority } = createCatalogFixtureSession();
 
-		markSessionInterrupted(sessionFile, "active-1", ["tool_execution"]);
+		await expect(markSessionInterrupted(authority, ["tool_execution"])).resolves.toEqual({ status: "applied" });
 
 		const reopened = SessionManager.open(sessionFile);
 		const context = reopened.buildSessionContext().messages;
 		expect(context.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "custom"]);
-		expect(context[1]).toMatchObject({
-			role: "assistant",
-			content: [
-				{ type: "text", text: "calling" },
-				{ type: "toolCall", id: "bash-1", name: "bash" },
-			],
-		});
 		expect(context[2]).toMatchObject({
 			role: "toolResult",
 			toolCallId: "bash-1",
 			toolName: "bash",
 			isError: true,
+			details: {
+				recovery: { operationId: authority.operationId, assistantEntryId: authority.assistantEntryId },
+			},
 		});
-		expect(context[3]).toMatchObject({
-			role: "custom",
-			customType: "prime-agent.worker_recovery",
-			details: { activeSessionId: "active-1", operations: ["tool_execution"] },
-		});
-	});
-
-	it("appends an isError toolResult preserving the interrupted tool identity", () => {
-		const { sessionFile } = createCatalogFixtureSession();
-
-		markSessionInterrupted(sessionFile, "active-1", ["tool_execution"]);
-
-		const toolResults = readPersistedToolResults(sessionFile);
-		expect(toolResults).toHaveLength(1);
-		expect(toolResults[0]).toMatchObject({
-			role: "toolResult",
-			toolCallId: "bash-1",
-			toolName: "bash",
-			isError: true,
-		});
-		const text = (toolResults[0]!.content[0] as { text: string }).text;
+		const text = (readPersistedToolResults(sessionFile)[0]!.content[0] as { text: string }).text;
 		expect(text).toContain("whether the tool executed");
 		expect(text).toContain("external side effects are unknown");
-		expect(text).toContain("was not replayed by recovery");
-		expect(text).toContain("Inspect external side effects before retrying");
+		const markers = recoveryMarkers(sessionFile);
+		expect(markers).toHaveLength(1);
+		expect(markers[0]).toMatchObject({
+			details: {
+				operationId: authority.operationId,
+				activeSessionId: "active-1",
+				operations: ["tool_execution"],
+				authority,
+			},
+		});
 	});
 
-	it("persists neither a synthetic result nor a marker when closing tool calls cannot persist", () => {
-		const { sessionFile } = createCatalogFixtureSession();
-		const spy = vi.spyOn(SessionManager.prototype, "appendMessageWithRollback").mockImplementation(() => {
-			throw new Error("disk full");
+	it("deduplicates response-loss replay globally by operationId", async () => {
+		const { sessionFile, authority, session } = createCatalogFixtureSession();
+		await markSessionInterrupted(authority, ["tool_execution"]);
+		// Move to another branch after the committed marker. Global marker lookup
+		// must still win before active-branch authority validation.
+		session.branch(session.getBranch()[0]!.id);
+		session.appendMessage({ role: "user", content: "new branch", timestamp: 3 });
+
+		await expect(markSessionInterrupted(authority, ["tool_execution"])).resolves.toEqual({
+			status: "already_applied",
+		});
+		expect(readPersistedToolResults(sessionFile)).toHaveLength(1);
+		expect(recoveryMarkers(sessionFile)).toHaveLength(1);
+	});
+
+	it("serializes concurrent duplicate requests to one result and one marker", async () => {
+		const { sessionFile, authority } = createCatalogFixtureSession();
+
+		const results = await Promise.all([
+			markSessionInterrupted(authority, ["tool_execution"]),
+			markSessionInterrupted(authority, ["tool_execution"]),
+		]);
+
+		expect(results).toEqual([{ status: "applied" }, { status: "already_applied" }]);
+		expect(readPersistedToolResults(sessionFile)).toHaveLength(1);
+		expect(recoveryMarkers(sessionFile)).toHaveLength(1);
+	});
+
+	it("returns stale without writes after the session advances or generation changes", async () => {
+		for (const mismatch of ["advance", "generation"] as const) {
+			const { sessionFile, authority, session } = createCatalogFixtureSession();
+			const request = mismatch === "generation" ? { ...authority, sessionId: "replaced-generation" } : authority;
+			if (mismatch === "advance") {
+				session.appendMessage({ role: "user", content: "newer work", timestamp: 3 });
+			}
+			const before = readFileSync(sessionFile);
+
+			await expect(markSessionInterrupted(request, ["tool_execution"])).resolves.toMatchObject({
+				status: "stale",
+			});
+			expect(readFileSync(sessionFile)).toEqual(before);
+		}
+	});
+
+	it("classifies a normal live lease owner as stale without opening or writing", async () => {
+		const { sessionFile, authority } = createCatalogFixtureSession();
+		const lease = acquireSessionLease(sessionFile, authority.agentDir, {
+			...process.env,
+			[SESSION_LEASES_ENABLED_ENV]: "1",
+			[SESSION_LEASE_OWNER_ID_ENV]: "live-active-session",
+		});
+		if (!lease) throw new Error("Fixture lease was not enabled");
+		const before = readFileSync(sessionFile);
+		try {
+			await expect(markSessionInterrupted(authority, ["tool_execution"])).resolves.toEqual({
+				status: "stale",
+				reason: "live_session_owner",
+			});
+			expect(readFileSync(sessionFile)).toEqual(before);
+		} finally {
+			lease.release();
+		}
+	});
+
+	it("treats another recovery lease owner as a retryable request failure", async () => {
+		const { sessionFile, authority } = createCatalogFixtureSession();
+		const lease = acquireSessionLease(sessionFile, authority.agentDir, {
+			...process.env,
+			[SESSION_LEASES_ENABLED_ENV]: "1",
+			[SESSION_LEASE_OWNER_ID_ENV]: "worker-recovery:other-operation",
+		});
+		if (!lease) throw new Error("Fixture lease was not enabled");
+		const before = readFileSync(sessionFile);
+		try {
+			await expect(markSessionInterrupted(authority, ["tool_execution"])).rejects.toThrow(
+				"Concurrent recovery owns the session lease",
+			);
+			expect(readFileSync(sessionFile)).toEqual(before);
+		} finally {
+			lease.release();
+		}
+	});
+
+	it("resumes an operation-owned partial result suffix after persistence failure", async () => {
+		const { sessionFile, authority } = createCatalogFixtureSession([
+			{ id: "bash-1", name: "bash" },
+			{ id: "edit-1", name: "edit" },
+		]);
+		const append = SessionManager.prototype.appendMessageWithRollback;
+		let attempts = 0;
+		const spy = vi.spyOn(SessionManager.prototype, "appendMessageWithRollback").mockImplementation(function (
+			this: SessionManager,
+			message,
+		) {
+			attempts++;
+			if (attempts === 2) throw new Error("disk full");
+			return append.call(this, message);
 		});
 		try {
-			expect(() => markSessionInterrupted(sessionFile, "active-1", ["tool_execution"])).toThrow("disk full");
+			await expect(markSessionInterrupted(authority, ["tool_execution"])).rejects.toThrow("disk full");
 		} finally {
 			spy.mockRestore();
 		}
-		const contents = readFileSync(sessionFile, "utf8");
-		expect(contents).not.toContain("prime-agent.worker_recovery");
-		expect(contents).not.toContain("toolResult");
-		expect(contents).not.toContain("unknown");
+		expect(readPersistedToolResults(sessionFile)).toHaveLength(1);
+		expect(recoveryMarkers(sessionFile)).toHaveLength(0);
+
+		await expect(markSessionInterrupted(authority, ["tool_execution"])).resolves.toEqual({ status: "applied" });
+		expect(readPersistedToolResults(sessionFile).map((result) => result.toolCallId)).toEqual(["bash-1", "edit-1"]);
+		expect(recoveryMarkers(sessionFile)).toHaveLength(1);
 	});
 
-	it("resumes partial persistence: a failed marker append keeps the result, retry adds only the marker", () => {
-		const { sessionFile } = createCatalogFixtureSession();
+	it("retries a failed marker append without duplicating persisted results", async () => {
+		const { sessionFile, authority } = createCatalogFixtureSession();
 		const spy = vi
 			.spyOn(SessionManager.prototype, "appendCustomMessageEntryWithRollback")
 			.mockImplementationOnce(() => {
 				throw new Error("marker write failed");
 			});
 		try {
-			expect(() => markSessionInterrupted(sessionFile, "active-1", ["tool_execution"])).toThrow(
-				"marker write failed",
-			);
+			await expect(markSessionInterrupted(authority, ["tool_execution"])).rejects.toThrow("marker write failed");
 		} finally {
 			spy.mockRestore();
 		}
-
-		// The synthetic result was persisted before the marker append failed.
 		expect(readPersistedToolResults(sessionFile)).toHaveLength(1);
-		expect(readFileSync(sessionFile, "utf8")).not.toContain("prime-agent.worker_recovery");
+		expect(recoveryMarkers(sessionFile)).toHaveLength(0);
 
-		// Retrying recovery is resumable: no duplicate result, marker appended once.
-		markSessionInterrupted(sessionFile, "active-1", ["tool_execution"]);
+		await expect(markSessionInterrupted(authority, ["tool_execution"])).resolves.toEqual({ status: "applied" });
 		expect(readPersistedToolResults(sessionFile)).toHaveLength(1);
-		const reopened = SessionManager.open(sessionFile);
-		const context = reopened.buildSessionContext().messages;
-		expect(context.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "custom"]);
-		expect(context[3]).toMatchObject({
-			role: "custom",
-			customType: "prime-agent.worker_recovery",
-			details: { activeSessionId: "active-1", operations: ["tool_execution"] },
-		});
+		expect(recoveryMarkers(sessionFile)).toHaveLength(1);
 	});
 });
 

@@ -1602,7 +1602,7 @@ export class SessionManager {
 			const entry = branch[i];
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 			assistantEntryId = entry.id;
-			toolCalls = collectToolCalls(entry.message);
+			toolCalls = collectUnresolvedToolCalls(entry.message, branch.slice(i + 1));
 			break;
 		}
 		const lineageDigest = computeLineageDigest(branch);
@@ -1641,53 +1641,59 @@ export class SessionManager {
 		if (computeLineageDigest(prefix) !== authority.lineageDigest) {
 			return { status: "stale", reason: "lineage" };
 		}
-		if (authority.assistantEntryId === null) {
-			// No assistant entry to close; nothing to do.
-			return { status: "already_applied" };
+		let assistantIndex = -1;
+		for (let i = prefix.length - 1; i >= 0; i--) {
+			const entry = prefix[i];
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				assistantIndex = i;
+				break;
+			}
 		}
-		const assistantEntry = this.byId.get(authority.assistantEntryId);
-		if (
-			!assistantEntry ||
-			assistantEntry.type !== "message" ||
-			assistantEntry.message.role !== "assistant" ||
-			!this._isAncestorOrSelf(assistantEntry.id, authority.headEntryId)
-		) {
+		const assistantEntry = assistantIndex >= 0 ? prefix[assistantIndex] : undefined;
+		const actualAssistantEntryId = assistantEntry?.id ?? null;
+		if (actualAssistantEntryId !== authority.assistantEntryId) {
 			return { status: "stale", reason: "assistant" };
 		}
-		const actualToolCalls = collectToolCalls(assistantEntry.message);
+		const actualToolCalls =
+			assistantEntry?.type === "message" && assistantEntry.message.role === "assistant"
+				? collectUnresolvedToolCalls(assistantEntry.message, prefix.slice(assistantIndex + 1))
+				: [];
 		if (!this._toolCallsEqual(actualToolCalls, authority.toolCalls)) {
 			return { status: "stale", reason: "toolCalls" };
 		}
-		// Identify the suffix entries (everything after the recorded head).
-		const prefixIndex = prefix.length - 1;
-		const suffix = branch.slice(prefixIndex + 1);
-		const declaredIds = new Set(authority.toolCalls.map((call) => call.id));
-		const coveredIds = new Set<string>();
-		for (const entry of suffix) {
+
+		// The sole permitted head advance is an ordered prefix of this operation's
+		// synthetic results. Unknown ids, duplicates, reordering, foreign metadata,
+		// and ordinary transcript entries all make the authority stale.
+		const suffix = branch.slice(prefix.length);
+		if (suffix.length > authority.toolCalls.length) {
+			return { status: "stale", reason: "foreign_suffix" };
+		}
+		for (let i = 0; i < suffix.length; i++) {
+			const entry = suffix[i];
+			const expected = authority.toolCalls[i]!;
 			if (entry.type !== "message" || entry.message.role !== "toolResult") {
 				return { status: "stale", reason: "foreign_suffix" };
 			}
 			const result = entry.message as ToolResultMessage;
-			if (typeof result.toolCallId !== "string" || !declaredIds.has(result.toolCallId)) {
-				return { status: "stale", reason: "foreign_suffix" };
-			}
 			const details = (result as { details?: unknown }).details;
 			const recovery = (details as { recovery?: unknown } | null | undefined)?.recovery;
-			if (!isRecoveryMetadata(recovery)) {
+			if (
+				result.toolCallId !== expected.id ||
+				result.toolName !== expected.name ||
+				result.isError !== true ||
+				!isRecoveryMetadata(recovery) ||
+				recovery.operationId !== authority.operationId ||
+				recovery.assistantEntryId !== authority.assistantEntryId
+			) {
 				return { status: "stale", reason: "foreign_suffix" };
 			}
-			if (recovery.operationId !== authority.operationId) {
-				return { status: "stale", reason: "foreign_suffix" };
-			}
-			coveredIds.add(result.toolCallId);
 		}
-		const missing: ExactRecoveryToolCall[] = [];
-		for (const call of authority.toolCalls) {
-			if (!coveredIds.has(call.id)) missing.push(call);
-		}
+		const missing = authority.toolCalls.slice(suffix.length);
 		if (missing.length === 0) {
 			return { status: "already_applied" };
 		}
+
 		const metadata: RecoverySyntheticMetadata = {
 			operationId: authority.operationId,
 			assistantEntryId: authority.assistantEntryId,
@@ -1706,18 +1712,9 @@ export class SessionManager {
 		return { status: "applied", closed: missing.length };
 	}
 
-	private _isAncestorOrSelf(candidateId: string, descendantId: string | null): boolean {
-		let current = descendantId ? this.byId.get(descendantId) : undefined;
-		while (current) {
-			if (current.id === candidateId) return true;
-			current = current.parentId ? this.byId.get(current.parentId) : undefined;
-		}
-		return false;
-	}
-
 	private _prefixThrough(headId: string | null, branch: SessionEntry[]): SessionEntry[] | null {
 		if (headId === null) {
-			return [...branch];
+			return [];
 		}
 		const index = branch.findIndex((entry) => entry.id === headId);
 		if (index === -1) return null;
@@ -2600,7 +2597,7 @@ export interface ExactRecoverySnapshot {
 	readonly headEntryId: string | null;
 	/** Latest assistant entry id on the active branch, or null if none. */
 	readonly assistantEntryId: string | null;
-	/** Tool calls declared by the latest assistant entry at capture time, ordered by appearance. */
+	/** Unresolved tool calls from the latest assistant entry at capture time, in declaration order. */
 	readonly toolCalls: ReadonlyArray<ExactRecoveryToolCall>;
 	/** Deterministic SHA-256 digest over the active branch through headEntryId. */
 	readonly lineageDigest: string;
@@ -2608,7 +2605,7 @@ export interface ExactRecoverySnapshot {
 
 /** Full exact recovery authority. Combines the snapshot with the journal-bound identity. */
 export interface ExactRecoveryAuthority extends ExactRecoverySnapshot {
-	/** Stable id of the busy epoch; reused across every checkpoint until idle. */
+	/** Stable id of this exact-authority busy epoch. */
 	readonly operationId: string;
 	/** Runtime identity of the dead worker, supplied by the catalog/journal layer. */
 	readonly activeSessionId: string;
@@ -2649,14 +2646,23 @@ function isRecoveryMetadata(value: unknown): value is RecoverySyntheticMetadata 
 	return true;
 }
 
-/** Extract the ordered, de-duplicated unresolved tool call set from an assistant message. */
-function collectToolCalls(message: AssistantMessage): ExactRecoveryToolCall[] {
+/** Extract the ordered unresolved tool calls from one assistant turn at a branch prefix. */
+function collectUnresolvedToolCalls(
+	message: AssistantMessage,
+	entriesAfterAssistant: ReadonlyArray<SessionEntry>,
+): ExactRecoveryToolCall[] {
+	const resolved = new Set<string>();
+	for (const entry of entriesAfterAssistant) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+		const result = entry.message as ToolResultMessage;
+		if (typeof result.toolCallId === "string") resolved.add(result.toolCallId);
+	}
 	const calls: ExactRecoveryToolCall[] = [];
 	const seen = new Set<string>();
 	for (const block of message.content) {
 		if (!block || block.type !== "toolCall") continue;
 		if (typeof block.id !== "string" || typeof block.name !== "string") continue;
-		if (seen.has(block.id)) continue;
+		if (seen.has(block.id) || resolved.has(block.id)) continue;
 		seen.add(block.id);
 		calls.push({ id: block.id, name: block.name });
 	}
@@ -2668,9 +2674,9 @@ function computeLineageDigest(prefix: SessionEntry[]): string {
 	const hash = createHash("sha256");
 	for (const entry of prefix) {
 		hash.update(entry.id);
-		hash.update(" ");
+		hash.update("\0");
 		hash.update(entry.parentId ?? "");
-		hash.update(" ");
+		hash.update("\0");
 	}
 	return hash.digest("hex");
 }

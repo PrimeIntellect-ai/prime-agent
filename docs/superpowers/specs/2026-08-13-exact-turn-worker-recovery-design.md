@@ -34,9 +34,10 @@ requests can duplicate synthetic results.
 
 ## Recovery authority
 
-Worker recovery records move to a validated v2 shape. Each busy epoch has one
-stable `operationId`, created at the first durable busy checkpoint and reused
-until the session becomes idle. Every busy checkpoint records:
+Worker recovery records move to a validated v2 shape. Each exact-authority busy
+epoch has one stable `operationId`, created at its first durable checkpoint and
+reused while that authority remains unchanged. An authority change starts a new
+epoch even if the worker never reported idle. Every busy checkpoint records:
 
 - `activeSessionId`: runtime identity for diagnostics.
 - `sessionId`: persisted session generation from the session header.
@@ -51,9 +52,10 @@ until the session becomes idle. Every busy checkpoint records:
 - `operationId`, `operation`, `busy`, and `recordedAt`.
 
 The checkpoint is captured from one in-memory `SessionManager` view. Changes to
-session generation, path, head, assistant entry, or lineage force a new journal
-record even when the event name is unchanged. Idle records end the busy epoch;
-the next busy transition receives a new operation id. Journal writes use a
+session generation, path, head, assistant entry, tool calls, or lineage force a
+new journal record and operation id even when the event name is unchanged. Idle
+records end the busy epoch; the next busy transition also receives a new
+operation id. Journal writes use a
 journal-local cross-process guard. Recovery completes an epoch with a
 compare-and-set on `operationId` after re-reading the latest record, so it
 cannot overwrite a newer busy epoch created by a resumed worker.

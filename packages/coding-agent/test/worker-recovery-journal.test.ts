@@ -166,7 +166,7 @@ describe("WorkerRecoveryJournal", () => {
 		expect(WorkerRecoveryJournal.readLatest(path)).toHaveLength(1);
 	});
 
-	it("forces a new record when any authority field changes even if the event name is unchanged", () => {
+	it("starts a new operation epoch when any busy authority field changes", () => {
 		const path = createPath();
 		const journal = new WorkerRecoveryJournal(path);
 		const base = {
@@ -177,6 +177,7 @@ describe("WorkerRecoveryJournal", () => {
 			operation: "turn_end",
 		};
 		journal.record(base);
+		let previous = WorkerRecoveryJournal.readLatest(path)[0] as WorkerRecoveryRecordV2;
 
 		const mutations: Array<[string, Partial<typeof base>]> = [
 			["session generation", { sessionId: "session-2" }],
@@ -193,6 +194,9 @@ describe("WorkerRecoveryJournal", () => {
 			expect(latest).toHaveLength(1);
 			expect(latest[0]).toMatchObject(mutation);
 			expect(latest[0]?.operation).toBe("turn_end");
+			const current = latest[0] as WorkerRecoveryRecordV2;
+			expect(current.operationId).not.toBe(previous.operationId);
+			previous = current;
 		}
 		expect(fileLines(path)).toHaveLength(1 + mutations.length);
 	});
@@ -222,6 +226,34 @@ describe("WorkerRecoveryJournal", () => {
 		expect(closed.busy).toBe(false);
 		expect(closed.operationId).toBe(resumed.operationId);
 		expect(journal.complete("active-1", resumed.operationId)).toBe(true);
+	});
+
+	it("refreshes a stale journal instance under the cross-process guard before writing", () => {
+		const path = createPath();
+		const journalA = new WorkerRecoveryJournal(path);
+		const journalB = new WorkerRecoveryJournal(path);
+		journalA.record({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			...v2Authority,
+			busy: true,
+			operation: "turn_start",
+		});
+		journalB.record({
+			activeSessionId: "active-2",
+			sessionId: "session-2",
+			...v2Authority,
+			sessionFile: "/tmp/session-2.jsonl",
+			busy: true,
+			operation: "turn_start",
+		});
+
+		expect(journalB.getLatest()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ activeSessionId: "active-1", busy: true }),
+				expect.objectContaining({ activeSessionId: "active-2", busy: true }),
+			]),
+		);
 	});
 
 	it("completion re-reads the latest record from disk before comparing", () => {
@@ -295,6 +327,35 @@ describe("WorkerRecoveryJournal", () => {
 		expect(journal.complete("legacy-1", "")).toBe(false);
 	});
 
+	it("does not fall back to an older busy v2 authority after a torn checkpoint", () => {
+		const path = createPath();
+		const journal = new WorkerRecoveryJournal(path);
+		journal.record({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			...v2Authority,
+			busy: true,
+			operation: "tool_execution_start",
+		});
+		appendFileSync(path, '{"version":2,"activeSessionId":"active-1"');
+
+		expect(WorkerRecoveryJournal.readLatest(path)).toEqual([]);
+
+		// A later complete checkpoint supersedes the corrupt line and becomes the
+		// only usable authority.
+		journal.record({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			...v2Authority,
+			headEntryId: "entry-10",
+			busy: true,
+			operation: "tool_execution_start",
+		});
+		expect(WorkerRecoveryJournal.readLatest(path)).toEqual([
+			expect.objectContaining({ version: 2, headEntryId: "entry-10", busy: true }),
+		]);
+	});
+
 	it("skips malformed v2 records while keeping valid ones", () => {
 		const path = createPath();
 		writeFileSync(path, '{"version":2,"activeSessionId":"bad"}\n');
@@ -303,6 +364,7 @@ describe("WorkerRecoveryJournal", () => {
 			activeSessionId: "good-1",
 			sessionId: "session-1",
 			agentDir: "/agent",
+			sessionFile: "/tmp/good-session.jsonl",
 			busy: true,
 			operation: "turn_start",
 			headEntryId: null,
