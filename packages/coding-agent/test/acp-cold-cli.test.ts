@@ -186,33 +186,32 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 }
 
 describe("ACP mode over a cold real CLI process", () => {
-	it(
-		"reports a provider failure instead of a silent end_turn",
-		{ tags: ["kernel-heavy"], timeout: 180_000 },
-		async () => {
-			const baseUrl = await startRejectingProvider();
-			const { responses, updates } = await driveAcpTurn(baseUrl);
+	it("reports a provider failure instead of a silent end_turn", {
+		tags: ["kernel-heavy"],
+		timeout: 180_000,
+	}, async () => {
+		const baseUrl = await startRejectingProvider();
+		const { responses, updates } = await driveAcpTurn(baseUrl);
 
-			const initialize = responses.find((frame) => frame.id === 1);
-			expect(initialize, "the real CLI must answer initialize on stdout").toBeDefined();
+		const initialize = responses.find((frame) => frame.id === 1);
+		expect(initialize, "the real CLI must answer initialize on stdout").toBeDefined();
 
-			const prompt = responses.find((frame) => frame.id === 3);
-			expect(prompt, "session/prompt must answer").toBeDefined();
+		const prompt = responses.find((frame) => frame.id === 3);
+		expect(prompt, "session/prompt must answer").toBeDefined();
 
-			// The provider rejected, so the turn must not claim a clean completion.
-			// Before this was fixed the answer was {stopReason: "end_turn"} with
-			// updates === 0, which a client reads as a successful empty turn.
-			const result = (prompt as { result?: { stopReason?: string } }).result;
-			const error = (prompt as { error?: unknown }).error;
-			expect(
-				error !== undefined || result?.stopReason !== "end_turn",
-				`a failed turn must not report end_turn (updates=${updates}, frame=${JSON.stringify(prompt)})`,
-			).toBe(true);
+		// The provider rejected, so the turn must not claim a clean completion.
+		// Before this was fixed the answer was {stopReason: "end_turn"} with
+		// updates === 0, which a client reads as a successful empty turn.
+		const result = (prompt as { result?: { stopReason?: string } }).result;
+		const error = (prompt as { error?: unknown }).error;
+		expect(
+			error !== undefined || result?.stopReason !== "end_turn",
+			`a failed turn must not report end_turn (updates=${updates}, frame=${JSON.stringify(prompt)})`,
+		).toBe(true);
 
-			// Failing loudly is only half of it: the client also has to be able to
-			// tell *why*. Assert the provider's own rejection reaches the client
-			// rather than a bare "Internal error".
-			expect(JSON.stringify(error)).toContain("unauthorized in test");
-		},
-	);
+		// Failing loudly is only half of it: the client also has to be able to
+		// tell *why*. Assert the provider's own rejection reaches the client
+		// rather than a bare "Internal error".
+		expect(JSON.stringify(error)).toContain("unauthorized in test");
+	});
 });
