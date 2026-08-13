@@ -330,6 +330,7 @@ export class TUI extends Container {
 	private preserveViewportOnNextRender = false; // One-shot: repaint visible viewport in place instead of replaying scrollback
 	private stopped = false;
 	private fullscreenLeftMouseDragged = false;
+	private fullscreenPressedHyperlink: string | null = null;
 	private overlaySelectionRegions: FrameSelectionRegion[] = [];
 
 	// While set, doRender paints fixed frames via the viewport; the inline
@@ -553,6 +554,8 @@ export class TUI extends Container {
 		const enabled = this.shouldEnableFullscreenMouseTracking();
 		if (!enabled) {
 			this.stopSelectionAutoScroll();
+			this.fullscreenLeftMouseDragged = false;
+			this.fullscreenPressedHyperlink = null;
 			this.fullscreen?.viewport.clearSelection();
 		} else if (this.isFullscreenOverlayFocused()) {
 			this.stopSelectionAutoScroll();
@@ -677,6 +680,8 @@ export class TUI extends Container {
 	 */
 	enterFullscreen(options: FullscreenOptions): void {
 		if (this.fullscreen) return;
+		this.fullscreenLeftMouseDragged = false;
+		this.fullscreenPressedHyperlink = null;
 		this.fullscreen = {
 			viewport: new FullscreenViewport(),
 			scroll: options.scroll,
@@ -930,6 +935,9 @@ export class TUI extends Container {
 				event?.button === MOUSE_BUTTON_LEFT && !event.press ? this.fullscreenLeftMouseDragged : false;
 			if (event?.button === MOUSE_BUTTON_LEFT && event.press) {
 				this.fullscreenLeftMouseDragged = event.motion;
+				if (!event.motion) {
+					this.fullscreenPressedHyperlink = fullscreen.viewport.hyperlinkAt(event.y - 1, event.x - 1);
+				}
 			}
 			if (event && !overlayFocused) {
 				const viewport = fullscreen.viewport;
@@ -958,7 +966,7 @@ export class TUI extends Container {
 					this.stopSelectionAutoScroll();
 					viewport.clearSelection();
 					if (event.button === MOUSE_BUTTON_LEFT && !event.motion && !leftReleaseWasDrag) {
-						const url = viewport.hyperlinkAt(event.y - 1, event.x - 1);
+						const url = this.fullscreenPressedHyperlink ?? viewport.hyperlinkAt(event.y - 1, event.x - 1);
 						if (url) this.openHyperlink(url);
 					}
 				}
@@ -980,13 +988,14 @@ export class TUI extends Container {
 				} else if (!event.press) {
 					viewport.clearSelection();
 					if (event.button === MOUSE_BUTTON_LEFT && !event.motion && !leftReleaseWasDrag) {
-						const url = viewport.hyperlinkAt(event.y - 1, event.x - 1);
+						const url = this.fullscreenPressedHyperlink ?? viewport.hyperlinkAt(event.y - 1, event.x - 1);
 						if (url) this.openHyperlink(url);
 					}
 				}
 			}
 			if (event?.button === MOUSE_BUTTON_LEFT && !event.press) {
 				this.fullscreenLeftMouseDragged = false;
+				this.fullscreenPressedHyperlink = null;
 			}
 			return true;
 		}

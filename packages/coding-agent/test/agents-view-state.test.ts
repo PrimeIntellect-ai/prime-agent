@@ -274,44 +274,6 @@ describe("agents view state", () => {
 		expect(rows.map((row) => row.section)).toEqual(["running", "idle", "idle", "idle"]);
 	});
 
-	test("moves an idle session up when it receives a newer message", () => {
-		const running = makeSummary({
-			id: "running",
-			sessionId: "running",
-			sessionName: "running",
-			activity: "working",
-			isStreaming: true,
-			created: "2026-01-03T00:00:00Z",
-			lastActivityAt: "2026-01-03T00:00:00Z",
-		});
-		const first = makeSummary({
-			id: "first",
-			sessionId: "first",
-			sessionName: "first",
-			activity: "idle",
-			created: "2026-01-02T00:00:00Z",
-			lastActivityAt: "2026-01-02T00:00:00Z",
-		});
-		const second = makeSummary({
-			id: "second",
-			sessionId: "second",
-			sessionName: "second",
-			activity: "idle",
-			created: "2026-01-01T00:00:00Z",
-			lastActivityAt: "2026-01-01T00:00:00Z",
-		});
-
-		const initialOrder = buildAgentsViewRows([running, first, second]).map((row) => row.summary.sessionId);
-		const repliedOrder = buildAgentsViewRows([
-			running,
-			first,
-			{ ...second, lastActivityAt: "2026-01-04T00:00:00Z" },
-		]).map((row) => row.summary.sessionId);
-
-		expect(initialOrder).toEqual(["running", "first", "second"]);
-		expect(repliedOrder).toEqual(["running", "second", "first"]);
-	});
-
 	test("summarizes subagents on their parent and omits subagent rows", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({

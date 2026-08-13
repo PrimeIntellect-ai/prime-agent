@@ -961,6 +961,45 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
+	it("clicking a bare URL opens it when OSC 8 metadata is absent", async () => {
+		const transcript = lines(20);
+		transcript[12] = "see https://example.com/docs here";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;6;1M");
+		// The target can repaint between physical press and release while output streams.
+		transcript[12] = "updated without the URL";
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;6;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
+
+		tui.stop();
+	});
+
+	it("clicking a hyperlink after a tab opens the painted target", async () => {
+		const transcript = lines(20);
+		transcript[12] = "\t\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		// The tab is painted as three spaces, so the link starts at column 4.
+		terminal.sendInput("\x1b[<0;4;1M");
+		terminal.sendInput("\x1b[<0;4;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
+
+		tui.stop();
+	});
+
 	it("drag-selecting over a hyperlink copies text without opening it", async () => {
 		const transcript = lines(20);
 		transcript[12] = "see \x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\ here";
