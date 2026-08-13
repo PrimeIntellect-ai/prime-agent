@@ -141,6 +141,7 @@ export interface Settings {
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
+	kernelExecuteTimeoutSeconds?: number; // Interrupt a kernel cell after this many seconds; 0 disables
 	quietStartup?: boolean;
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
@@ -949,6 +950,11 @@ export class SettingsManager {
 
 	getShellPath(): string | undefined {
 		return this.settings.shellPath;
+	}
+
+	/** Seconds before a kernel cell is interrupted. 0 (the default) leaves cells unbounded. */
+	getKernelExecuteTimeoutSeconds(): number {
+		return this.settings.kernelExecuteTimeoutSeconds ?? 0;
 	}
 
 	setShellPath(path: string | undefined): void {
