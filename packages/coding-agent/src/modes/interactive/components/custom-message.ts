@@ -4,6 +4,7 @@ import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@ear
 import type { MessageRenderer } from "../../../core/extensions/types.js";
 import type { CustomMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { styleWorkflowUiKeywords } from "./workflow-rainbow.js";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -40,6 +41,11 @@ export class CustomMessageComponent extends Container {
 			this._expanded = expanded;
 			this.rebuild();
 		}
+	}
+
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		return this.customComponent ? lines : lines.map((line) => styleWorkflowUiKeywords(line));
 	}
 
 	override invalidate(): void {

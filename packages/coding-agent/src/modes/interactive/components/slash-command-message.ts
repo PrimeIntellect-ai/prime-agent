@@ -1,6 +1,7 @@
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { parseSlashCommand } from "../../../core/slash-commands.js";
 import { theme } from "../theme/theme.js";
+import { styleWorkflowUiKeywords } from "./workflow-rainbow.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -14,7 +15,10 @@ export function isLeadingSlashCommand(text: string, isRecognized: (name: string)
 export function styleSlashCommandText(text: string, styleRest: (rest: string) => string = (rest) => rest): string {
 	const parsed = parseSlashCommand(text);
 	const commandEnd = parsed ? parsed.name.length + 1 : text.length;
-	return `${theme.fg("accent", text.slice(0, commandEnd))}${styleRest(text.slice(commandEnd))}`;
+	const command = text.slice(0, commandEnd);
+	const styledCommand =
+		parsed && /^workflows?$/i.test(parsed.name) ? styleWorkflowUiKeywords(command) : theme.fg("accent", command);
+	return `${styledCommand}${styleRest(text.slice(commandEnd))}`;
 }
 
 /** Renders a durable session command with the same layout as a user message. */

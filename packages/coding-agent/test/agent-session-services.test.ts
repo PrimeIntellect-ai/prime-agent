@@ -100,6 +100,27 @@ describe("createAgentSessionFromServices", () => {
 		expect(toolNames(await createServices("env-disabled", {}))).not.toContain("workflow");
 	});
 
+	it("activates the built-in workflow tool in a top-level session", async () => {
+		const tempDir = join(tmpdir(), `pi-session-workflow-tool-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("workflow");
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("honors an explicit daemon-carried telemetry opt-out", async () => {
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-daemon-telemetry-opt-out-${Date.now()}`);

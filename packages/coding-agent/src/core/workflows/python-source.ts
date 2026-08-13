@@ -370,14 +370,43 @@ function validateBodyPolicy(body: string): void {
 	for (const name of reservedNames) {
 		const definition = new RegExp(String.raw`\b(?:(?:async\s+)?def|class)\s+${name}\b`);
 		const binding = new RegExp(
-			String.raw`(?:\b(?:global|nonlocal)\s+[^;\n]*\b${name}\b|\b(?:except|with)\b[^;\n]*\bas\s+${name}\b|\b${name}\s*:=|\b${name}\b\s*=(?!=)|\b${name}\b[\s,)]*=(?!=)|(?:for|async\s+for)\s+(?:\([^)]*\b${name}\b[^)]*\)|[^:;\n]*\b${name}\b)\s+in\b|(?:async\s+)?def\s+\w+\s*\([^)]*\b${name}\b)|\blambda\b[^:;\n]*\b${name}\b[^:;\n]*:|(?:^|[;\n])\s*case\s+[^:;\n]*\b${name}\b[^:;\n]*:`,
+			String.raw`(?:\b(?:global|nonlocal)\s+[^;\n]*\b${name}\b|\b(?:except|with)\b[^;\n]*\bas\s+${name}\b|\b${name}\s*:=|(?:for|async\s+for)\s+(?:\([^)]*\b${name}\b[^)]*\)|[^:;\n]*\b${name}\b)\s+in\b|(?:async\s+)?def\s+\w+\s*\([^)]*\b${name}\b)|\blambda\b[^:;\n]*\b${name}\b[^:;\n]*:|(?:^|[;\n])\s*case\s+[^:;\n]*\b${name}\b[^:;\n]*:`,
 		);
-		if (definition.test(masked) || binding.test(masked)) {
+		if (definition.test(masked) || binding.test(masked) || hasTopLevelAssignment(masked, name)) {
 			throw new Error(`workflow code cannot redefine reserved name \`${name}\``);
 		}
 	}
 	if (!/\bagent\s*\(/.test(masked)) throw new Error("workflow scripts must call agent() at least once");
 	if (!/\breturn\b/.test(masked)) throw new Error("workflow scripts must return a result");
+}
+
+function hasTopLevelAssignment(source: string, name: string): boolean {
+	let depth = 0;
+	let statementStart = 0;
+	for (let index = 0; index < source.length; index++) {
+		const character = source[index];
+		if (character === "(" || character === "[" || character === "{") {
+			depth++;
+			continue;
+		}
+		if (character === ")" || character === "]" || character === "}") {
+			depth = Math.max(0, depth - 1);
+			continue;
+		}
+		if ((character === "\n" || character === ";") && depth === 0) {
+			statementStart = index + 1;
+			continue;
+		}
+		if (character !== "=" || depth !== 0) continue;
+		const prior = source[index - 1];
+		const next = source[index + 1];
+		if (prior === "=" || prior === "!" || prior === "<" || prior === ">" || prior === ":" || next === "=") {
+			continue;
+		}
+		const left = source.slice(statementStart, index);
+		if (new RegExp(`\\b${name}\\b`).test(left)) return true;
+	}
+	return false;
 }
 
 function maskPythonStringsAndComments(source: string): string {

@@ -61,6 +61,22 @@ describe("UserMessageComponent", () => {
 		expect(embedded).not.toContain(theme.fg("accent", "/compact"));
 	});
 
+	test("renders submitted workflow keywords with rainbow colors", () => {
+		initTheme("dark");
+		const rendered = new UserMessageComponent("make a workflow and workflows").render(60).join("\n");
+
+		expect(rendered).toContain("\x1b[38;2;");
+		expect(rendered).not.toContain("\x1b[0m");
+		expect(rendered.replace(/\x1b\[[0-9;]*m|\x1b\]133;[ABC]\x07/g, "")).toContain("make a workflow and workflows");
+	});
+
+	test("does not rainbow-style agent aliases", () => {
+		initTheme("dark");
+		const rendered = new UserMessageComponent("make multiple agents with subagents").render(60).join("\n");
+
+		expect(rendered).not.toContain("\x1b[38;2;");
+	});
+
 	test.each([
 		{
 			name: "wide and multi-code-point command graphemes",

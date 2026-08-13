@@ -32,7 +32,10 @@ export interface WorkflowAgentProgress {
 	label: string;
 	phase?: string;
 	prompt?: string;
-	status: "running" | "completed" | "failed" | "replayed";
+	model?: string;
+	effort?: string;
+	usage?: WorkflowUsage;
+	status: "running" | "completed" | "failed" | "replayed" | "stopped";
 	startedAt?: string;
 	completedAt?: string;
 	error?: string;
@@ -635,10 +638,14 @@ function isWorkflowRunProgress(value: unknown): value is WorkflowRunProgress {
 				typeof agent.label === "string" &&
 				isOptionalString(agent.phase) &&
 				isOptionalString(agent.prompt) &&
+				isOptionalString(agent.model) &&
+				isOptionalString(agent.effort) &&
+				(agent.usage === undefined || isWorkflowUsage(agent.usage)) &&
 				(agent.status === "running" ||
 					agent.status === "completed" ||
 					agent.status === "failed" ||
-					agent.status === "replayed") &&
+					agent.status === "replayed" ||
+					agent.status === "stopped") &&
 				(agent.startedAt === undefined || isIsoDate(agent.startedAt)) &&
 				(agent.completedAt === undefined || isIsoDate(agent.completedAt)) &&
 				isOptionalString(agent.error) &&

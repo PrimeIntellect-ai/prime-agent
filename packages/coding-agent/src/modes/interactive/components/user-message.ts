@@ -2,6 +2,7 @@ import { Box, type Component, Container, Markdown, type MarkdownTheme, visibleWi
 import { parseSlashCommand } from "../../../core/slash-commands.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { isLeadingSlashCommand } from "./slash-command-message.js";
+import { styleWorkflowUiKeywords } from "./workflow-rainbow.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -77,7 +78,7 @@ export class UserMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		const lines = super.render(width);
+		const lines = super.render(width).map((line) => styleWorkflowUiKeywords(line));
 		if (lines.length === 0) {
 			return lines;
 		}

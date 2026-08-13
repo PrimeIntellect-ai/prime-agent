@@ -56,6 +56,15 @@ return await agent("ok")`,
 agent = None
 return await agent("x")`),
 		).rejects.toThrow("reserved name");
+		await expect(
+			parseWorkflowScript(`${header}
+phase("Read")
+result = await agent(
+    "x",
+    phase="Read",
+)
+return result`),
+		).resolves.toEqual(expect.objectContaining({ meta: expect.objectContaining({ name: "test-flow" }) }));
 	});
 
 	it("runs parallel agents concurrently and preserves result order", async () => {

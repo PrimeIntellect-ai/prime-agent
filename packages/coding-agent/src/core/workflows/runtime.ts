@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { availableParallelism } from "node:os";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { MontySession } from "@pydantic/monty/node";
 import { getNativeMonty } from "./monty-loader.js";
 import { normalizeMontyValue, type ParsedPythonWorkflow, parsePythonWorkflow } from "./python-source.js";
@@ -40,6 +41,8 @@ export interface WorkflowUsage {
 export interface WorkflowAgentRunResult {
 	result: unknown;
 	usage?: Partial<WorkflowUsage>;
+	model?: string;
+	effort?: ThinkingLevel;
 }
 
 export interface WorkflowAgentRunner {
@@ -80,13 +83,23 @@ export interface WorkflowRunOptions {
 	replayIdentity?: unknown;
 	onLog?: (message: string) => void;
 	onPhase?: (title: string) => void;
-	onAgentStart?: (event: { id: number; label: string; phase?: string; prompt: string }) => void;
+	onAgentStart?: (event: {
+		id: number;
+		label: string;
+		phase?: string;
+		prompt: string;
+		model?: string;
+		effort?: ThinkingLevel;
+	}) => void;
 	onAgentEnd?: (event: {
 		id: number;
 		label: string;
 		phase?: string;
 		status: "completed" | "failed" | "replayed";
 		result: unknown;
+		usage?: Partial<WorkflowUsage>;
+		model?: string;
+		effort?: ThinkingLevel;
 		error?: string;
 	}) => void;
 }
@@ -309,7 +322,14 @@ export async function runWorkflow<T = unknown>(
 				return fail(new Error(`workflow token budget exhausted (${options.tokenBudget})`));
 			}
 			try {
-				options.onAgentStart?.({ id, label, phase: assignedPhase, prompt });
+				options.onAgentStart?.({
+					id,
+					label,
+					phase: assignedPhase,
+					prompt,
+					model: agentOptions.model,
+					effort: agentOptions.effort,
+				});
 			} catch (error) {
 				return fail(error instanceof Error ? error : new Error(String(error)));
 			}
@@ -373,7 +393,16 @@ export async function runWorkflow<T = unknown>(
 					return fail(error instanceof Error ? error : new Error(String(error)));
 				}
 				try {
-					options.onAgentEnd?.({ id, label, phase: assignedPhase, status: "completed", result });
+					options.onAgentEnd?.({
+						id,
+						label,
+						phase: assignedPhase,
+						status: "completed",
+						result,
+						usage: response.usage,
+						model: response.model,
+						effort: response.effort,
+					});
 				} catch (error) {
 					return fail(error instanceof Error ? error : new Error(String(error)));
 				}

@@ -2,13 +2,16 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
 import { getSelectListTheme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
+import { styleWorkflowUiKeywords } from "./workflow-rainbow.js";
 
 const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
 };
 
-const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
+export type EffortLevel = ThinkingLevel | "ultracode";
+
+const LEVEL_DESCRIPTIONS: Record<EffortLevel, string> = {
 	off: "No reasoning",
 	minimal: "Very brief reasoning",
 	low: "Light reasoning",
@@ -16,6 +19,7 @@ const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	high: "Deep reasoning",
 	xhigh: "Very deep reasoning",
 	max: "Maximum reasoning",
+	ultracode: "xhigh reasoning with automatic dynamic workflows",
 };
 
 /**
@@ -25,18 +29,21 @@ export class ThinkingSelectorComponent extends Container {
 	private selectList: SelectList;
 
 	constructor(
-		currentLevel: ThinkingLevel,
-		availableLevels: ThinkingLevel[],
-		onSelect: (level: ThinkingLevel) => void,
+		currentLevel: EffortLevel,
+		availableLevels: EffortLevel[],
+		onSelect: (level: EffortLevel) => void,
 		onCancel: () => void,
 	) {
 		super();
 
 		const thinkingLevels: SelectItem[] = availableLevels.map((level) => ({
 			value: level,
-			label: level,
+			label: level === "ultracode" ? styleWorkflowUiKeywords(level) : level,
 			description: LEVEL_DESCRIPTIONS[level],
 		}));
+		const selectListTheme = getSelectListTheme();
+		selectListTheme.selectedText = (text) => styleWorkflowUiKeywords(getSelectListTheme().selectedText(text));
+		selectListTheme.description = (text) => styleWorkflowUiKeywords(getSelectListTheme().description(text));
 
 		// Add top border
 		this.addChild(new DynamicBorder());
@@ -45,7 +52,7 @@ export class ThinkingSelectorComponent extends Container {
 		this.selectList = new SelectList(
 			thinkingLevels,
 			thinkingLevels.length,
-			getSelectListTheme(),
+			selectListTheme,
 			THINKING_SELECT_LIST_LAYOUT,
 		);
 
@@ -56,7 +63,7 @@ export class ThinkingSelectorComponent extends Container {
 		}
 
 		this.selectList.onSelect = (item) => {
-			onSelect(item.value as ThinkingLevel);
+			onSelect(item.value as EffortLevel);
 		};
 
 		this.selectList.onCancel = () => {

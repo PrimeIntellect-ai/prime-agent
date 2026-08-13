@@ -12,6 +12,7 @@ import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js
 import { FileChangeSummaryComponent, getToolFileChanges } from "./edit-summary.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
 import { ToolPanel } from "./tool-panel.js";
+import { styleWorkflowUiKeywords } from "./workflow-rainbow.js";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -469,7 +470,11 @@ export class ToolExecutionComponent extends Container {
 
 	private panelHeader(): string {
 		const label = this.toolDefinition?.label ?? this.builtInToolDefinition?.label ?? this.toolName;
-		return `${theme.fg("muted", label)}${theme.fg("dim", " · ")}${this.panelStatus()}`;
+		const styledLabel =
+			this.toolName === "workflow"
+				? styleWorkflowUiKeywords(theme.fg("muted", label), getWorkingPulseFrame())
+				: theme.fg("muted", label);
+		return `${styledLabel}${theme.fg("dim", " · ")}${this.panelStatus()}`;
 	}
 
 	private panelStatus(): string {

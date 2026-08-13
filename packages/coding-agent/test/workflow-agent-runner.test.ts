@@ -137,7 +137,8 @@ describe("WorkflowSubagentRunner", () => {
 				CreateAgentSessionOptions["modelRegistry"]
 			>,
 		});
-		await runner.run("inspect", { label: "inspection", effort: "high" });
+		const result = await runner.run("inspect", { label: "inspection", effort: "high" });
+		expect(result.effort).toBe("high");
 		const options = sessionFactory.mock.calls[0]?.[0] as CreateAgentSessionOptions;
 		expect(options.thinkingLevel).toBe("high");
 		expect(options.tools).toEqual([]);

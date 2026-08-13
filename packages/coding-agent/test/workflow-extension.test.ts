@@ -11,7 +11,7 @@ import type {
 	InputEvent,
 	InputEventResult,
 } from "../src/core/extensions/types.js";
-import { createWorkflowExtension } from "../src/core/workflows/extension.js";
+import { createWorkflowExtension, waitForSessionWorkflows } from "../src/core/workflows/extension.js";
 import type { WorkflowAgentRunner } from "../src/core/workflows/runtime.js";
 import { listWorkflowRuns } from "../src/core/workflows/storage.js";
 
@@ -37,8 +37,11 @@ interface Harness {
 		event: InputEvent,
 		context: ExtensionContext,
 	): Promise<InputEventResult | undefined> | InputEventResult | undefined;
+	beforeAgentStart(prompt: string, context: ExtensionContext): Promise<void> | void;
+	agentStart(context: ExtensionContext): Promise<void> | void;
 	agentEnd(context: ExtensionContext): Promise<void> | void;
 	sent: ReturnType<typeof vi.fn>;
+	setActiveTools: ReturnType<typeof vi.fn>;
 }
 
 const script = `meta = {"name": "audit", "description": "Audit things"}
@@ -60,8 +63,18 @@ function createHarness(thinkingLevel = "medium"): Harness {
 				context: ExtensionContext,
 		  ) => Promise<InputEventResult | undefined> | InputEventResult | undefined)
 		| undefined;
+	let beforeAgentStartHandler:
+		| ((event: { type: "before_agent_start"; prompt: string }, context: ExtensionContext) => Promise<void> | void)
+		| undefined;
+	let agentStartHandler:
+		| ((event: { type: "agent_start" }, context: ExtensionContext) => Promise<void> | void)
+		| undefined;
 	let agentEndHandler: ((event: AgentEndEvent, context: ExtensionContext) => Promise<void> | void) | undefined;
 	const sent = vi.fn();
+	let activeTools = ["ipython", "workflow"];
+	const setActiveTools = vi.fn((tools: string[]) => {
+		activeTools = [...tools];
+	});
 	const api = {
 		registerTool(value: unknown) {
 			tool = value as CapturedTool;
@@ -71,10 +84,13 @@ function createHarness(thinkingLevel = "medium"): Harness {
 		},
 		on(event: string, handler: unknown) {
 			if (event === "input") inputHandler = handler as typeof inputHandler;
+			if (event === "before_agent_start") beforeAgentStartHandler = handler as typeof beforeAgentStartHandler;
+			if (event === "agent_start") agentStartHandler = handler as typeof agentStartHandler;
 			if (event === "agent_end") agentEndHandler = handler as typeof agentEndHandler;
 		},
 		getThinkingLevel: () => thinkingLevel,
-		getActiveTools: () => ["ipython", "workflow"],
+		getActiveTools: () => [...activeTools],
+		setActiveTools,
 		sendMessage: sent,
 	} as unknown as ExtensionAPI;
 	return {
@@ -89,13 +105,27 @@ function createHarness(thinkingLevel = "medium"): Harness {
 			return command;
 		},
 		input: (event, context) => inputHandler?.(event, context),
+		beforeAgentStart: (prompt, context) => beforeAgentStartHandler?.({ type: "before_agent_start", prompt }, context),
+		agentStart: (context) => agentStartHandler?.({ type: "agent_start" }, context),
 		agentEnd: (context) => agentEndHandler?.({ type: "agent_end", messages: [] }, context),
 		sent,
+		setActiveTools,
 	};
 }
 
-function createContext(cwd: string, sessionId = "session-test") {
+async function startAdmittedTurn(
+	harness: Harness,
+	admission: InputEventResult | undefined,
+	context: ExtensionContext,
+): Promise<void> {
+	if (admission?.action !== "transform") throw new Error("expected transformed workflow prompt");
+	await harness.beforeAgentStart(admission.text, context);
+	await harness.agentStart(context);
+}
+
+function createContext(cwd: string, sessionId = "session-test", selections: string[] = []) {
 	const notifications: Array<{ message: string; type?: string }> = [];
+	const editors: Array<{ title: string; content?: string }> = [];
 	const context = {
 		cwd,
 		sessionManager: { getSessionId: () => sessionId },
@@ -105,12 +135,22 @@ function createContext(cwd: string, sessionId = "session-test") {
 		hasUI: true,
 		ui: {
 			confirm: vi.fn(async () => true),
+			select: vi.fn(async (_title: string, options: string[]) => {
+				const next = selections.shift();
+				return next?.startsWith("prefix:") ? options.find((option) => option.startsWith(next.slice(7))) : next;
+			}),
+			input: vi.fn(async (_title: string, placeholder?: string) => placeholder),
+			editor: vi.fn(async (title: string, content?: string) => {
+				editors.push({ title, content });
+				return undefined;
+			}),
+			setWidget: vi.fn(),
 			notify(message: string, type?: string) {
 				notifications.push({ message, type });
 			},
 		},
 	} as unknown as ExtensionCommandContext;
-	return { context, notifications };
+	return { context, notifications, editors };
 }
 
 function makeTemp(): string {
@@ -122,7 +162,7 @@ function makeTemp(): string {
 function createRunner(): WorkflowAgentRunner {
 	return {
 		async run(prompt) {
-			return { result: `result:${prompt}`, usage: { totalTokens: 4 } };
+			return { result: `result:${prompt}`, usage: { input: 1, output: 1, totalTokens: 4, cost: 0 } };
 		},
 	};
 }
@@ -146,6 +186,9 @@ describe("dynamic workflow extension", () => {
 		expect(admission).toEqual(
 			expect.objectContaining({ action: "transform", text: expect.stringContaining("inspect every module") }),
 		);
+		expect(harness.setActiveTools).not.toHaveBeenCalled();
+		await startAdmittedTurn(harness, admission, context);
+		expect(harness.setActiveTools).toHaveBeenCalledWith(["workflow"]);
 		const launched = await harness
 			.tool()
 			.execute("call", { script, args: { prompt: "first" } }, undefined, undefined, context);
@@ -160,6 +203,8 @@ describe("dynamic workflow extension", () => {
 				runId: expect.stringMatching(/^wf_/),
 			}),
 		);
+		expect(context.ui.confirm).not.toHaveBeenCalled();
+
 		await vi.waitFor(() => {
 			expect(listWorkflowRuns(cwd, agentDir)[0]).toMatchObject({
 				status: "completed",
@@ -172,7 +217,16 @@ describe("dynamic workflow extension", () => {
 				},
 			});
 		});
+		expect(context.ui.setWidget).toHaveBeenCalledWith(
+			"workflow-active",
+			expect.arrayContaining([expect.stringContaining("task ")]),
+			{ placement: "belowEditor" },
+		);
+		expect(context.ui.setWidget).toHaveBeenLastCalledWith("workflow-active", undefined, {
+			placement: "belowEditor",
+		});
 		await harness.agentEnd(context);
+		expect(harness.setActiveTools).toHaveBeenLastCalledWith(["ipython", "workflow"]);
 
 		await expect(
 			harness.tool().execute("call", { script, args: { prompt: "again" } }, undefined, undefined, context),
@@ -239,6 +293,42 @@ describe("dynamic workflow extension", () => {
 		},
 	);
 
+	it("does not mutate tool authorization until an admitted workflow agent starts", async () => {
+		const cwd = makeTemp();
+		const harness = createHarness();
+		await createWorkflowExtension({ agentDir: join(cwd, "agent-home"), runnerFactory: createRunner })(harness.api);
+		const { context } = createContext(cwd);
+		const abandoned = await harness.input(
+			{ type: "input", text: "make a workflow that is later rejected", source: "interactive" },
+			context,
+		);
+		expect(abandoned?.action).toBe("transform");
+		expect(harness.setActiveTools).not.toHaveBeenCalled();
+		await expect(
+			harness.tool().execute("abandoned", { script, args: { prompt: "x" } }, undefined, undefined, context),
+		).rejects.toThrow("human-authored `ultracode:` or direct workflow");
+
+		const admitted = await harness.input(
+			{ type: "input", text: "make a workflow that is admitted", source: "interactive" },
+			context,
+		);
+		await startAdmittedTurn(harness, admitted, context);
+		expect(
+			await harness.input({ type: "input", text: "ordinary queued text", source: "interactive" }, context),
+		).toEqual({
+			action: "continue",
+		});
+		expect(
+			await harness.input(
+				{ type: "input", text: "another queued workflow request", source: "interactive" },
+				context,
+			),
+		).toEqual(expect.objectContaining({ action: "transform" }));
+		await expect(
+			harness.tool().execute("active", { script, args: { prompt: "x" } }, undefined, undefined, context),
+		).resolves.toEqual(expect.objectContaining({ details: expect.objectContaining({ status: "async_launched" }) }));
+	});
+
 	it("does not let extension-sourced or stale prompts authorize the tool", async () => {
 		const cwd = makeTemp();
 		const harness = createHarness();
@@ -304,13 +394,25 @@ return await parallel([lambda: agent(args["a"]), lambda: agent("B"), lambda: age
 		const harness = createHarness();
 		await createWorkflowExtension({ agentDir, runnerFactory: () => runner })(harness.api);
 		const { context, notifications } = createContext(cwd, "session-one");
-		await harness.input({ type: "input", text: "ultracode: replay test", source: "interactive" }, context);
+		const replayAdmission = await harness.input(
+			{ type: "input", text: "ultracode: replay test", source: "interactive" },
+			context,
+		);
+		await startAdmittedTurn(harness, replayAdmission, context);
 		await harness.tool().execute("call", { script: replayScript, args: { a: "A" } }, undefined, undefined, context);
 		await vi.waitFor(() => expect(prompts).toEqual(["A", "B", "C"]));
 		const prior = listWorkflowRuns(cwd, agentDir)[0];
 		expect(prior).toBeDefined();
 		await harness.command("workflows").handler(`stop ${prior?.runId}`, context);
-		await vi.waitFor(() => expect(listWorkflowRuns(cwd, agentDir)[0]?.status).toBe("stopped"));
+		await vi.waitFor(() =>
+			expect(listWorkflowRuns(cwd, agentDir)[0]).toMatchObject({
+				status: "stopped",
+				progress: {
+					agents: expect.arrayContaining([expect.objectContaining({ label: "agent #2", status: "stopped" })]),
+				},
+			}),
+		);
+		await harness.agentEnd(context);
 
 		const other = createContext(cwd, "session-two");
 		await harness.command("workflows").handler(`resume ${prior?.runId}`, other.context);
@@ -328,13 +430,60 @@ return await parallel([lambda: agent(args["a"]), lambda: agent("B"), lambda: age
 		expect(notifications.some(({ message }) => message.includes("Resumed"))).toBe(true);
 	});
 
+	it("opens the hierarchical workflow viewer and shows source, overview, phase, and agent detail", async () => {
+		const cwd = makeTemp();
+		const harness = createHarness();
+		createWorkflowExtension({ runnerFactory: () => createRunner(), agentDir: cwd })(harness.api);
+		const first = createContext(cwd);
+		const admission = await harness.input(
+			{ type: "input", text: "make a workflow to inspect", source: "interactive" },
+			first.context,
+		);
+		expect(admission?.action).toBe("transform");
+		await startAdmittedTurn(harness, admission, first.context);
+		await harness
+			.tool()
+			.execute("call-viewer", { script, args: { prompt: "viewer" } }, undefined, undefined, first.context);
+		await waitForSessionWorkflows("session-test");
+		await harness.agentEnd(first.context);
+		const run = listWorkflowRuns(cwd, cwd)[0];
+		expect(run).toBeDefined();
+		const viewer = createContext(cwd, "session-test", [
+			"prefix:✓ audit · completed",
+			"Overview",
+			"Inspect source",
+			"Phase · Audit",
+			"prefix:✓ auditor · completed",
+			"Back",
+			"Back",
+			"Close",
+		]);
+		await harness.command("workflows").handler("", viewer.context);
+		expect(
+			viewer.editors.some((entry) => entry.title.includes("Workflow") && entry.content?.includes("Usage:")),
+		).toBe(true);
+		expect(viewer.editors.some((entry) => entry.title.includes("source") && entry.content === script)).toBe(true);
+		expect(
+			viewer.editors.some(
+				(entry) =>
+					entry.title.includes("auditor") &&
+					entry.content?.includes("Usage: 4 tokens") &&
+					entry.content.includes("Prompt:"),
+			),
+		).toBe(true);
+	});
+
 	it("returns a launch-shaped syntax error and ignores tool-level display metadata", async () => {
 		const cwd = makeTemp();
 		const agentDir = join(cwd, "agent-home");
 		const harness = createHarness();
 		await createWorkflowExtension({ agentDir, runnerFactory: createRunner })(harness.api);
 		const { context } = createContext(cwd);
-		await harness.input({ type: "input", text: "ultracode: invalid workflow", source: "interactive" }, context);
+		const invalidAdmission = await harness.input(
+			{ type: "input", text: "ultracode: invalid workflow", source: "interactive" },
+			context,
+		);
+		await startAdmittedTurn(harness, invalidAdmission, context);
 		const result = await harness.tool().execute(
 			"call",
 			{
@@ -370,6 +519,7 @@ return await parallel([lambda: agent(args["a"]), lambda: agent("B"), lambda: age
 		expect(admission).toEqual(
 			expect.objectContaining({ action: "transform", text: expect.stringContaining("inspect modules") }),
 		);
+		await startAdmittedTurn(harness, admission, context);
 		await harness.tool().execute("call", { script, args: { prompt: "cli" } }, undefined, undefined, context);
 		expect(context.ui.confirm).not.toHaveBeenCalled();
 	});
@@ -384,7 +534,11 @@ return await parallel([lambda: agent(args["a"]), lambda: agent("B"), lambda: age
 		const harness = createHarness();
 		await createWorkflowExtension({ agentDir: join(root, "agent-home"), runnerFactory: createRunner })(harness.api);
 		const { context } = createContext(cwd);
-		await harness.input({ type: "input", text: "ultracode: safe path test", source: "interactive" }, context);
+		const pathAdmission = await harness.input(
+			{ type: "input", text: "ultracode: safe path test", source: "interactive" },
+			context,
+		);
+		await startAdmittedTurn(harness, pathAdmission, context);
 
 		await expect(
 			harness.tool().execute("call", { scriptPath: outside }, undefined, undefined, context),

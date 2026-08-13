@@ -215,7 +215,7 @@ import {
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
 import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
-import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
+import { type EffortLevel, ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,
 	ToolExecutionComponent,
@@ -224,6 +224,7 @@ import {
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
+import { styleWorkflowUiKeywords } from "./components/workflow-rainbow.js";
 import { FeatureHintDeck } from "./feature-hints.js";
 import { scopeHeartbeatsToSession } from "./heartbeat-scope.js";
 import {
@@ -311,7 +312,9 @@ export function styleQueuedMessagePreview(
 	isRecognizedSlashCommand: (name: string) => boolean,
 ): string {
 	const preview = formatQueuedMessagePreview(message, label);
-	if (!isLeadingSlashCommand(message, isRecognizedSlashCommand)) return theme.fg("dim", preview);
+	if (!isLeadingSlashCommand(message, isRecognizedSlashCommand)) {
+		return styleWorkflowUiKeywords(theme.fg("dim", preview));
+	}
 	const prefix = preview.slice(0, preview.length - message.length);
 	return `${theme.fg("dim", prefix)}${styleSlashCommandText(message, (rest) => theme.fg("dim", rest))}`;
 }
@@ -5033,7 +5036,7 @@ export class InteractiveMode {
 					return;
 				}
 				try {
-					await this.agentConnection.prompt(this.preparePromptForEffort(text), {
+					await this.agentConnection.prompt(this.preparePromptForEffort?.(text) ?? text, {
 						streamingBehavior,
 						queueIfBusy: true,
 						images,
@@ -6027,9 +6030,11 @@ export class InteractiveMode {
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
-			.filter((label): label is string => label !== undefined)
-			.join("  ");
+		return styleWorkflowUiKeywords(
+			[agentsHint, depthLabel, modelLabel, shortcutsHint]
+				.filter((label): label is string => label !== undefined)
+				.join("  "),
+		);
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -6210,13 +6215,13 @@ export class InteractiveMode {
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
 		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
-			this.lastStatusText.setText(theme.fg(tone, message));
+			this.lastStatusText.setText(styleWorkflowUiKeywords(theme.fg(tone, message)));
 			this.ui.requestRender();
 			return;
 		}
 
 		const spacer = new Spacer(1);
-		const text = new Text(theme.fg(tone, message), 1, 0);
+		const text = new Text(styleWorkflowUiKeywords(theme.fg(tone, message)), 1, 0);
 		this.chatContainer.addChild(spacer);
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
@@ -8026,7 +8031,13 @@ export class InteractiveMode {
 	}
 
 	private showThinkingSelector(levels: ThinkingLevel[] = this.getAvailableThinkingLevels()): void {
-		const currentLevel = this.connectionState?.thinkingLevel ?? levels[0];
+		const available: EffortLevel[] =
+			levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows() ? [...levels, "ultracode"] : levels;
+		const ultracodeActive =
+			available.includes("ultracode") && this.ultracodeSessionId === this.connectionState?.sessionId;
+		const currentLevel: EffortLevel | undefined = ultracodeActive
+			? "ultracode"
+			: (this.connectionState?.thinkingLevel ?? available[0]);
 		if (!currentLevel) {
 			this.showStatus("Current model does not support thinking");
 			return;
@@ -8034,10 +8045,11 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new ThinkingSelectorComponent(
 				currentLevel,
-				levels,
+				available,
 				(level) => {
 					done();
-					this.applyThinkingLevel(level);
+					if (level === "ultracode") this.applyThinkingLevel("xhigh", "ultracode");
+					else this.applyThinkingLevel(level);
 				},
 				() => {
 					done();

@@ -48,6 +48,10 @@ export class WorkflowSubagentRunner implements WorkflowAgentRunner {
 		const schema = normalizeSchema(options.schema);
 		const outputTool = schema ? createWorkflowOutputTool(schema, capture) : undefined;
 		const { model, thinkingLevel } = this.resolveModel(options.model, options.effort);
+		const execution = {
+			...(model ? { model: `${model.provider}/${model.id}` } : {}),
+			...(thinkingLevel ? { effort: thinkingLevel } : {}),
+		};
 		const tools = [
 			...(this.options.activeToolNames === undefined || this.options.activeToolNames.includes("ipython")
 				? ["ipython"]
@@ -109,11 +113,11 @@ export class WorkflowSubagentRunner implements WorkflowAgentRunner {
 			const usage = collectUsage(session.messages);
 			if (schema) {
 				if (!capture.called) throw new Error("workflow subagent finished without calling workflow_output");
-				return { result: capture.value, usage };
+				return { result: capture.value, usage, ...execution };
 			}
 			const text = lastAssistantText(session.messages);
 			if (!text.trim()) throw new Error("workflow subagent produced empty output");
-			return { result: text, usage };
+			return { result: text, usage, ...execution };
 		} finally {
 			if (timeout) clearTimeout(timeout);
 			removeAbortListener?.();
