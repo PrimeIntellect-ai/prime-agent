@@ -142,11 +142,10 @@ Continual harness components:
 - subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm("sub-task")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
 
 Editing model:
-- An \`update\` edit replaces the entry's entire \`content\`; text you do not reproduce is removed.
-- Entries in the harness state above are truncated. \`... (+N chars not shown)\` marks text you were not given.
-- You may only update an entry you have been shown in full. An update to a truncated entry is refused.
-- To see one, reply with \`{"expand": ["entry-id", ...]}\` and nothing else. Those entries are returned in
-  full and you may then emit edits, or expand again. Prefer expanding over rewriting from a fragment.
+- An \`update\` replaces the entry's entire \`content\`; text you do not reproduce is removed.
+- \`... (+N chars not shown)\` marks an entry you were not shown in full; an update to one is refused.
+- To see entries in full, reply with \`{"expand": ["id", ...]}\` and nothing else. List every entry you
+  need; you may expand again in a later reply.
 
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.

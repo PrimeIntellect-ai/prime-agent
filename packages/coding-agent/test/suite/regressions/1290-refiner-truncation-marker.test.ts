@@ -279,4 +279,106 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		const result = applyRefinementProposal(state, plan.proposal, { id: "r3", fullyVisibleIds: plan.fullyVisibleIds });
 		expect(result.appliedEdits[0].applied).toBe(true);
 	});
+
+	it("expands several entries at once and across rounds", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		for (const name of ["alpha", "beta", "gamma"]) {
+			state.entries.prompt[name] = {
+				id: name,
+				kind: "prompt",
+				title: name,
+				content: `${name.toUpperCase()} head. ${"filler. ".repeat(60)}${name}-tail`,
+				path: "general",
+				scope: "local",
+				reference: {},
+				arguments: {},
+				metadata: {},
+				source: "agent",
+				created_at: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
+				version: 1,
+			};
+		}
+
+		completeSimpleMock
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["alpha", "beta"] })))
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["gamma"] })))
+			.mockResolvedValueOnce(
+				assistantText(
+					JSON.stringify({
+						summary: "s",
+						rationale: "r",
+						expectedOutcome: "e",
+						edits: [
+							{ action: "update", kind: "prompt", id: "alpha", title: "alpha", content: "A" },
+							{ action: "update", kind: "prompt", id: "gamma", title: "gamma", content: "G" },
+						],
+					}),
+				),
+			);
+
+		const plan = await planRefinement(
+			[{ role: "user", content: "revise these", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{},
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(3);
+		const round2 = completeSimpleMock.mock.calls[1][1].messages[2].content[0].text;
+		expect(round2).toContain("alpha-tail");
+		expect(round2).toContain("beta-tail");
+		const round3 = completeSimpleMock.mock.calls[2][1].messages[4].content[0].text;
+		expect(round3).toContain("gamma-tail");
+		expect([...(plan.fullyVisibleIds ?? [])].sort()).toEqual(["alpha", "beta", "gamma"]);
+
+		const result = applyRefinementProposal(state, plan.proposal, { id: "r4", fullyVisibleIds: plan.fullyVisibleIds });
+		expect(result.appliedEdits.every((edit) => edit.applied)).toBe(true);
+	});
+
+	it("accepts the display-prefixed id form the overview renders", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		state.entries.prompt.note = {
+			id: "note",
+			kind: "prompt",
+			title: "Note",
+			content: `HEAD. ${"filler. ".repeat(60)}note-tail`,
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "agent",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			version: 1,
+		};
+
+		completeSimpleMock
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["local:note"] })))
+			.mockResolvedValueOnce(
+				assistantText(
+					JSON.stringify({
+						summary: "s",
+						rationale: "r",
+						expectedOutcome: "e",
+						edits: [{ action: "update", kind: "prompt", id: "note", title: "Note", content: "rewritten" }],
+					}),
+				),
+			);
+
+		const plan = await planRefinement(
+			[{ role: "user", content: "revise", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{},
+		);
+
+		expect(completeSimpleMock.mock.calls[1][1].messages[2].content[0].text).toContain("note-tail");
+		expect(plan.fullyVisibleIds?.has("note")).toBe(true);
+	});
 });
