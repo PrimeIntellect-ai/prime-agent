@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 - Fixed `prime-agent update` failing with `EALLOWREMOTE` on npm 12 when the release is installed from its tarball URL ([#1272](https://github.com/PrimeIntellect-ai/prime-agent/pull/1272) by [@smwbev](https://github.com/smwbev)).
 
 ## [0.7.2] - 2026-08-11

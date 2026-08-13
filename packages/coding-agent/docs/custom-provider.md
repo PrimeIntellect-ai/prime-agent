@@ -603,7 +603,7 @@ interface ProviderModelConfig {
   reasoning: boolean;
 
   /** Maps Prime Agent thinking levels to provider/model-specific values; null marks a level unsupported. */
-  thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh", string | null>>;
+  thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
 
   /** Supported input types. */
   input: ("text" | "image")[];
