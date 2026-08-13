@@ -201,6 +201,12 @@ The `api` field determines which streaming implementation is used:
 | `google-vertex` | Google Vertex AI API |
 | `bedrock-converse-stream` | Amazon Bedrock Converse API |
 
+> **OpenAI Codex authentication:** When configuring `openai-codex-responses`
+> with tokens obtained from the ChatGPT OAuth flow, use the OAuth
+> `access_token` as `apiKey`, not the `id_token`. Both tokens may contain the
+> `chatgpt_account_id` claim, but the Codex backend authenticates requests with
+> the access token and rejects the ID token.
+
 Most OpenAI-compatible providers work with `openai-completions`. Use model-level `thinkingLevelMap` for model-specific thinking levels, and `compat` for provider quirks:
 
 ```typescript
