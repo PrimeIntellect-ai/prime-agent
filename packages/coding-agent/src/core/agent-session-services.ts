@@ -234,8 +234,8 @@ export async function createAgentSessionServices(
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			diagnostics.push({
-				type: "error",
-				message: `Extension "${extensionPath}" error: ${message}`,
+				type: "warning",
+				message: `Skipped provider from extension "${extensionPath}": ${message}`,
 			});
 		}
 	}

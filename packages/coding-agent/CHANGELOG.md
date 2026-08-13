@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed an extension with an unavailable provider credential preventing other providers from loading ([#1230](https://github.com/PrimeIntellect-ai/prime-agent/issues/1230)).
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
