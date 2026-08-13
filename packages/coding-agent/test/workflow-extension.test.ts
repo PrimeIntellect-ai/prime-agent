@@ -179,6 +179,66 @@ describe("dynamic workflow extension", () => {
 		).rejects.toThrow("human-authored `ultracode:` or direct workflow");
 	});
 
+	it.each([
+		"make a workflow to inspect this repository",
+		"create workflows for the release checks",
+		"WORKFLOW",
+		"compare these Workflows please",
+	])("recognizes the whole-word workflow keyword in interactive input: %s", async (text) => {
+		const cwd = makeTemp();
+		const harness = createHarness();
+		await createWorkflowExtension({ agentDir: join(cwd, "agent-home"), runnerFactory: createRunner })(harness.api);
+		const { context } = createContext(cwd);
+
+		expect(await harness.input({ type: "input", text, source: "interactive" }, context)).toEqual(
+			expect.objectContaining({ action: "transform", text: expect.stringContaining(text) }),
+		);
+	});
+
+	it.each(["make multiple agents", "use subagents", "workflowish", "work-flow"])(
+		"does not treat non-workflow aliases or partial words as workflow requests: %s",
+		async (text) => {
+			const cwd = makeTemp();
+			const harness = createHarness();
+			await createWorkflowExtension({ agentDir: join(cwd, "agent-home"), runnerFactory: createRunner })(harness.api);
+			const { context } = createContext(cwd);
+
+			expect(await harness.input({ type: "input", text, source: "interactive" }, context)).toEqual({
+				action: "continue",
+			});
+		},
+	);
+
+	it("preserves the explicit ultracode prefix as an independent interactive trigger", async () => {
+		const cwd = makeTemp();
+		const harness = createHarness();
+		await createWorkflowExtension({ agentDir: join(cwd, "agent-home"), runnerFactory: createRunner })(harness.api);
+		const { context } = createContext(cwd);
+
+		expect(
+			await harness.input(
+				{ type: "input", text: "please ultracode: inspect the repository", source: "interactive" },
+				context,
+			),
+		).toEqual(
+			expect.objectContaining({ action: "transform", text: expect.stringContaining("inspect the repository") }),
+		);
+	});
+
+	it.each(["rpc", "extension"] as const)(
+		"does not let %s input self-authorize by containing the workflow keyword",
+		async (source) => {
+			const cwd = makeTemp();
+			const harness = createHarness();
+			await createWorkflowExtension({ agentDir: join(cwd, "agent-home"), runnerFactory: createRunner })(harness.api);
+			const { context } = createContext(cwd);
+
+			expect(await harness.input({ type: "input", text: "make a workflow", source }, context)).toEqual({
+				action: "continue",
+			});
+		},
+	);
+
 	it("does not let extension-sourced or stale prompts authorize the tool", async () => {
 		const cwd = makeTemp();
 		const harness = createHarness();

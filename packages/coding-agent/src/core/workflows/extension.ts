@@ -90,6 +90,12 @@ interface WorkflowLaunchAcknowledgement {
 	error?: string;
 }
 
+const WORKFLOW_REQUEST_KEYWORD = /\bworkflows?\b/i;
+
+function isDirectWorkflowRequest(text: string): boolean {
+	return WORKFLOW_REQUEST_KEYWORD.test(text);
+}
+
 export function createWorkflowExtension(options: WorkflowExtensionOptions = {}): ExtensionFactory {
 	return (pi) => {
 		const activeRuns = new Map<string, ActiveWorkflowRun>();
@@ -388,13 +394,12 @@ export function createWorkflowExtension(options: WorkflowExtensionOptions = {}):
 		});
 
 		pi.on("input", (event) => {
-			if (event.source !== "interactive" && !options.ultracode) return { action: "continue" };
 			workflowAuthorizationsRemaining = 0;
-			const keyword = /(?:^|\s)ultracode\b\s*:?\s*/i.exec(event.text);
+			const isInteractive = event.source === "interactive";
+			if (event.source === "extension" || (!isInteractive && !options.ultracode)) return { action: "continue" };
+			const keyword = isInteractive ? /(?:^|\s)ultracode\b\s*:?\s*/i.exec(event.text) : null;
 			const automaticUltracode = options.ultracode === true && pi.getThinkingLevel() === "xhigh";
-			const directRequest = /^\s*(?:please\s+)?(?:use|run|write|create)\s+(?:a\s+)?(?:dynamic\s+)?workflow\b/i.test(
-				event.text,
-			);
+			const directRequest = isInteractive && isDirectWorkflowRequest(event.text);
 			if (!automaticUltracode && !keyword && !directRequest) return { action: "continue" };
 			const task = (
 				keyword
