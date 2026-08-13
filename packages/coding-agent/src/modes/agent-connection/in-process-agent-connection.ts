@@ -43,6 +43,9 @@ import type {
 	AgentConnectionNavigateTreeResult,
 	AgentConnectionNewSessionOptions,
 	AgentConnectionPromptOptions,
+	AgentConnectionQueuedMessageLane,
+	AgentConnectionQueuedMessageMutation,
+	AgentConnectionQueuedMessageMutationStatus,
 	AgentConnectionQueueMode,
 	AgentConnectionQueueState,
 	AgentConnectionResourceSnapshot,
@@ -186,6 +189,15 @@ export class InProcessAgentConnection implements AgentConnection {
 			steering: [...this.session.getSteeringMessagePreviews()],
 			followUp: [...this.session.getFollowUpMessagePreviews()],
 		};
+	}
+
+	async mutateQueuedMessage(
+		lane: AgentConnectionQueuedMessageLane,
+		index: number,
+		expectedText: string,
+		mutation: AgentConnectionQueuedMessageMutation,
+	): Promise<AgentConnectionQueuedMessageMutationStatus> {
+		return this.session.mutateQueuedMessage(lane, index, expectedText, mutation);
 	}
 
 	async clearQueue(): Promise<AgentConnectionQueueState> {

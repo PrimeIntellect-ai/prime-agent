@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { KeybindingsManager, TUI_KEYBINDINGS } from "../src/keybindings.js";
 
 describe("KeybindingsManager", () => {
-	it("does not evict selector confirm when input submit is rebound", () => {
+	it("keeps shared defaults when a user binding repeats its own default", () => {
 		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
 			"tui.input.submit": ["enter", "ctrl+enter"],
 		});
@@ -12,7 +12,7 @@ describe("KeybindingsManager", () => {
 		assert.deepStrictEqual(keybindings.getKeys("tui.select.confirm"), ["enter"]);
 	});
 
-	it("does not evict cursor bindings when another action reuses the same key", () => {
+	it("keeps shared cursor defaults when a user binding repeats its own default", () => {
 		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
 			"tui.select.up": ["up", "ctrl+p"],
 		});
@@ -21,7 +21,16 @@ describe("KeybindingsManager", () => {
 		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorUp"), ["up"]);
 	});
 
-	it("still reports direct user binding conflicts without evicting defaults", () => {
+	it("evicts defaults claimed as an added user binding", () => {
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.editor.cursorUp": ["up", "ctrl+b"],
+		});
+
+		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorUp"), ["up", "ctrl+b"]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorLeft"), ["left"]);
+	});
+
+	it("still reports direct user binding conflicts", () => {
 		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
 			"tui.input.submit": "ctrl+x",
 			"tui.select.confirm": "ctrl+x",
@@ -33,6 +42,22 @@ describe("KeybindingsManager", () => {
 				keybindings: ["tui.input.submit", "tui.select.confirm"],
 			},
 		]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorLeft"), ["left", "ctrl+b"]);
+	});
+
+	it("reports conflicts when an explicit binding restates its default", () => {
+		const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.editor.cursorUp": ["up", "ctrl+b"],
+			"tui.editor.cursorLeft": ["left", "ctrl+b"],
+		});
+
+		assert.deepStrictEqual(keybindings.getConflicts(), [
+			{
+				key: "ctrl+b",
+				keybindings: ["tui.editor.cursorUp", "tui.editor.cursorLeft"],
+			},
+		]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorUp"), ["up", "ctrl+b"]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.editor.cursorLeft"), ["left", "ctrl+b"]);
 	});
 });
