@@ -144,8 +144,7 @@ Continual harness components:
 Editing model:
 - An \`update\` replaces the entry's entire \`content\`; text you do not reproduce is removed.
 - \`... (+N chars not shown)\` marks an entry you were not shown in full; an update to one is refused.
-- To see entries in full, reply with \`{"expand": ["id", ...]}\` and nothing else. List every entry you
-  need; you may expand again in a later reply.
+- To see entries in full, reply with \`{"expand": ["id", ...]}\` and nothing else. List every entry you need; you may expand again in a later reply.
 
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
@@ -610,12 +609,12 @@ function findEntryById(state: HarnessState, id: string): HarnessEntry | undefine
  * Render requested entries in full, within a character budget. Withheld and unknown ids
  * are reported so the refiner knows it is still working without them.
  */
-function renderExpansion(
+function expansionForPrompt(
 	state: HarnessState,
 	ids: string[],
 	expanded: Set<string>,
-	remaining: { budget: number },
-): string {
+	budget: number,
+): { text: string; budget: number } {
 	const lines: string[] = [];
 	for (const id of ids) {
 		const entry = findEntryById(state, id);
@@ -623,15 +622,15 @@ function renderExpansion(
 			lines.push(`- ${id}: not found`);
 			continue;
 		}
-		if (entry.content.length > remaining.budget) {
+		if (entry.content.length > budget) {
 			lines.push(`- ${entry.id}: withheld, expansion budget exhausted (${entry.content.length} chars)`);
 			continue;
 		}
-		remaining.budget -= entry.content.length;
+		budget -= entry.content.length;
 		expanded.add(entry.id);
 		lines.push(`<entry id="${entry.id}" kind="${entry.kind}" title="${entry.title}">\n${entry.content}\n</entry>`);
 	}
-	return lines.join("\n\n");
+	return { text: lines.join("\n\n"), budget };
 }
 
 function historyForPrompt(history: RefinementResult[]): string {
@@ -1025,7 +1024,7 @@ export async function planRefinement(
 	const conversation: Message[] = [
 		{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() },
 	];
-	const remaining = { budget: REFINER_EXPANSION_BUDGET };
+	let budget = REFINER_EXPANSION_BUDGET;
 
 	for (let round = 0; ; round++) {
 		const response = await completeSimple(
@@ -1051,14 +1050,15 @@ export async function planRefinement(
 			return { proposal: parseProposal(text), id, fullyVisibleIds: fullyVisible };
 		}
 
-		const rendered = renderExpansion(state, requested, fullyVisible, remaining);
+		const expansion = expansionForPrompt(state, requested, fullyVisible, budget);
+		budget = expansion.budget;
 		const isFinalRound = round + 1 >= REFINER_MAX_EXPANSION_ROUNDS;
 		conversation.push(response, {
 			role: "user",
 			content: [
 				{
 					type: "text",
-					text: `<expanded_entries>\n${rendered}\n</expanded_entries>${
+					text: `<expanded_entries>\n${expansion.text}\n</expanded_entries>${
 						isFinalRound ? "\n\nThis is the last expansion round. Return edits now, or an empty edits array." : ""
 					}`,
 				},
