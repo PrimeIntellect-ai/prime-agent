@@ -247,7 +247,7 @@ export type IpythonToolInput = Static<typeof ipythonSchema>;
 
 export interface IpythonToolDetails {
 	durationMs?: number;
-	status?: "ok" | "error" | "aborted" | "starting";
+	status?: "ok" | "error" | "aborted" | "timeout" | "starting";
 	errorEname?: string;
 	stdout?: string;
 	stderr?: string;
@@ -267,6 +267,13 @@ export interface IpythonToolDetails {
 	};
 }
 
+/** Cells run unbounded unless a positive timeout is configured. */
+export function resolveExecuteTimeoutMs(executeTimeoutSeconds: number | undefined): number {
+	if (executeTimeoutSeconds === undefined) return 0;
+	if (!Number.isFinite(executeTimeoutSeconds) || executeTimeoutSeconds <= 0) return 0;
+	return Math.round(executeTimeoutSeconds * 1000);
+}
+
 export interface IpythonToolOptions {
 	/** Python override. Must have `ipykernel` installed. */
 	python?: string;
@@ -275,6 +282,10 @@ export interface IpythonToolOptions {
 	commandPrefix?: string;
 	/** Optional explicit shell path for bare %%bash cells. */
 	shellPath?: string;
+	/**
+	 * Interrupt a cell after this many seconds. Omitted or <= 0 leaves cells unbounded.
+	 */
+	executeTimeoutSeconds?: number;
 	sessionId?: string;
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
@@ -573,6 +584,7 @@ async function executeWithBusyKernelChoice(
 	onWorkingMessage: (message?: string) => void,
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
 	ctx: ExtensionContext | undefined,
+	timeoutMs: number,
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
 	let kernelRestarted = false;
 	while (true) {
@@ -585,6 +597,7 @@ async function executeWithBusyKernelChoice(
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
 						: undefined,
+					timeoutMs,
 				}),
 				kernelRestarted,
 			};
@@ -662,6 +675,7 @@ export function createIpythonToolDefinition(
 					setToolWorkingMessage,
 					options?.onLateSentAgentMessage,
 					ctx,
+					resolveExecuteTimeoutMs(options?.executeTimeoutSeconds),
 				);
 
 				let text = r.stdout;
@@ -692,7 +706,7 @@ export function createIpythonToolDefinition(
 						kernelRestarted,
 						error: r.error,
 					},
-					isError: r.status === "error" || r.status === "aborted",
+					isError: r.status === "error" || r.status === "aborted" || r.status === "timeout",
 				};
 			} finally {
 				if (hasWorkingMessage) {
