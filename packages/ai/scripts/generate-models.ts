@@ -2162,7 +2162,8 @@ async function generateModels() {
 			cacheWrite: 0,
 		},
 		contextWindow: 500000,
-		maxTokens: 500000,
+		// 0 is the unbounded-output sentinel: buildBaseOptions omits max_output_tokens.
+		maxTokens: 0,
 		compat: { supportsLongCacheRetention: false },
 	};
 	if (grok46Index >= 0) {

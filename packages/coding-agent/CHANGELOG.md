@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Changed model listing to show `unbounded` when a catalog entry has no published output limit.
 
 ## [0.7.2] - 2026-08-11
 

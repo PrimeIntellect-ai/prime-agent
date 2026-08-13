@@ -20222,7 +20222,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 500000,
-			maxTokens: 500000,
+			maxTokens: 0,
 		} satisfies Model<"openai-responses">,
 		"grok-build-0.1": {
 			id: "grok-build-0.1",
