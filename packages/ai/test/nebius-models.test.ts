@@ -20,7 +20,7 @@ describe("Nebius Token Factory models", () => {
 		expect(model.provider).toBe("nebius");
 		expect(model.baseUrl).toBe("https://api.tokenfactory.nebius.com/v1");
 		expect(model.reasoning).toBe(true);
-		expect(model.input).toEqual(["text"]);
+		expect(model.input).toEqual(["text", "image"]);
 		expect(model.contextWindow).toBe(262144);
 		expect(model.maxTokens).toBe(8000);
 		expect(model.compat).toEqual({
@@ -34,13 +34,17 @@ describe("Nebius Token Factory models", () => {
 		});
 	});
 
-	it("registers the tool-capable models.dev catalog on the Nebius endpoint", () => {
+	it("registers only the current public tool-capable catalog on the Nebius endpoint", () => {
 		const models = getModels("nebius");
 
-		expect(models.length).toBeGreaterThanOrEqual(30);
+		expect(models).toHaveLength(25);
 		expect(models.every((model) => model.api === "openai-completions")).toBe(true);
 		expect(models.every((model) => model.baseUrl === "https://api.tokenfactory.nebius.com/v1")).toBe(true);
 		expect(models.every((model) => model.maxTokens <= model.contextWindow)).toBe(true);
+		expect(models.map((model) => model.id)).toContain("zai-org/GLM-5.1");
+		expect(models.map((model) => model.id)).toContain("moonshotai/Kimi-K2.6");
+		expect(models.map((model) => model.id)).not.toContain("zai-org/GLM-5");
+		expect(models.map((model) => model.id)).not.toContain("moonshotai/Kimi-K2.5-fast");
 	});
 
 	it("preserves DeepSeek V4 reasoning replay compatibility", () => {

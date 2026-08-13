@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added Nebius Token Factory as a built-in API-key provider using its OpenAI-compatible endpoint and tool-capable models.dev catalog.
+- Added Nebius Token Factory as a built-in API-key provider using its OpenAI-compatible endpoint and current public tool-capable catalog, enriched with matching models.dev metadata.
 - Fixed OpenAI-compatible models whose output limit fills their context window sending an invalid default token budget.
 
 ## [0.7.2] - 2026-08-11
