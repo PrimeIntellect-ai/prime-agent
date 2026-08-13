@@ -2953,6 +2953,11 @@ export class DaemonSupervisor {
 				await this.assertRecoveryAllowed();
 				if (result.status === "stale") {
 					this.log(`Worker recovery ${record.operationId} is stale: ${result.reason}`);
+					if (killWorkerProcess && result.reason === "live_session_owner") {
+						throw new Error(
+							`Worker recovery ${record.operationId} is waiting for the killed session owner lease to be released`,
+						);
+					}
 				}
 				if (!journal.complete(record.activeSessionId, record.operationId)) {
 					this.log(`Worker recovery ${record.operationId} completion lost CAS to a newer epoch`);

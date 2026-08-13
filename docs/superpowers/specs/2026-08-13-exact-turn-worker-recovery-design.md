@@ -119,7 +119,11 @@ persistence failure leaves the original entry busy for retry.
 
 A stale result is logged with its operation id and reason. It intentionally does
 not add even a warning marker because the recovery process no longer owns the
-active transcript.
+active transcript. The one exception is `live_session_owner` immediately after
+the supervisor signalled the exact worker generation with `SIGKILL`: process
+termination and lease release are asynchronous, so that result remains retryable
+and the busy journal is preserved. A later attempt with no worker generation to
+kill treats a normal live owner as genuinely stale.
 
 ## Failure and race behavior
 
@@ -130,7 +134,8 @@ active transcript.
 | Session branched to another head | `stale`; zero bytes appended. |
 | Path replaced by another session generation | `stale`; zero bytes appended. |
 | Same path receives a newer tool-use turn | `stale`; newer calls remain untouched. |
-| A normal live owner holds the session lease | `stale`; zero bytes appended. |
+| The exact worker was just killed but still holds the session lease | Retryable failure; journal stays busy. |
+| A normal live owner holds the session lease on a later attempt | `stale`; zero bytes appended. |
 | Another recovery holds the session lease | Retryable failure; journal stays busy. |
 | Response lost after marker commit | Replay returns `already_applied`. |
 | Concurrent duplicate requests | Per-path serialization yields one apply and idempotent no-ops. |
