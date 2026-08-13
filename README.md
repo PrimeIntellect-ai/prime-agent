@@ -50,13 +50,27 @@ Prime Agent combines a persistent Python control environment with durable harnes
 
 ## Getting Started
 
-Install the latest stable release on macOS or Linux:
+This repository is [our fork](https://github.com/paralin/prime-agent) of [Prime Intellect's Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent). Clone the fork and set it up:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+git clone https://github.com/paralin/prime-agent.git
+cd prime-agent
+npm i
+npm run build
 ```
 
-The installer downloads a versioned release, verifies its SHA-256 checksum, installs the `prime-agent` command, and can prepare the IPython runtime used by the agent.
+Add `~/.local/bin` to `PATH`, then create a local launcher that points to this checkout:
+
+```bash
+mkdir -p ~/.local/bin
+cat > ~/.local/bin/prime-agent <<EOF
+#!/bin/bash
+set -eo pipefail
+
+exec "$PWD/prime-agent.sh" "\$@"
+EOF
+chmod +x ~/.local/bin/prime-agent
+```
 
 Start Prime Agent from the repository or directory you want it to work in:
 
@@ -81,6 +95,15 @@ prime-agent doctor [--fix]           # Inspect or repair background services
 prime-agent update [--force]         # Update Prime Agent
 prime-agent shutdown [--force]       # Stop every agent, worker, and background service
 ```
+
+## Fork Highlights
+
+Our fork focuses on model routing, retained delegation, provider integrations, and reliable long-running sessions:
+
+- **Model routing:** named model roles support ordered provider fallbacks and exact effort levels. Settings hot-reload, child agents can select service tiers, and model changes can remain local to one session.
+- **Retained Act delegation:** bounded Act calls share the root IPython state while each model keeps a private transcript. The runtime supports nested calls, cancellation, and structured event reporting.
+- **Provider integrations:** the fork adds coordinated Claude Code children, xAI Grok OAuth, an optional OpenRouter Responses transport with session routing, and rotation across configured Codex homes.
+- **Session reliability:** Codex can use provider-native compaction. Child recovery, versioned IPython snapshots, goal waiting, and large-session framing keep extended runs responsive and recoverable.
 
 ## Built for Long-Running Work
 Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
