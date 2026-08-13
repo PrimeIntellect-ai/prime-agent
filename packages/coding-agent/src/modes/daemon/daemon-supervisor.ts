@@ -3064,7 +3064,18 @@ export class DaemonSupervisor {
 	}
 
 	private async familyCatalogEntries(sessionDir?: string): Promise<readonly AgentFamilyCatalogEntry[]> {
+		const effectiveSessionDir = sessionDir ?? this.defaultSessionConfig.sessionDir;
 		const live = [...this.workers.values()]
+			.filter(
+				(worker) =>
+					(worker.descriptor.createCommand.config?.sessionDir ?? this.defaultSessionConfig.sessionDir) ===
+						effectiveSessionDir ||
+					(Boolean(worker.descriptor.createCommand.config?.sessionDir ?? this.defaultSessionConfig.sessionDir) &&
+						Boolean(effectiveSessionDir) &&
+						canonicalSessionPath(
+							(worker.descriptor.createCommand.config?.sessionDir ?? this.defaultSessionConfig.sessionDir)!,
+						) === canonicalSessionPath(effectiveSessionDir!)),
+			)
 			.flatMap((worker) => [...worker.summaries.values()])
 			.map((summary): FamilyCatalogCandidate => ({ ...this.familyCatalogEntry(summary), source: "live" }));
 		// Keep the persisted row even when its path is currently active. A live
@@ -3395,8 +3406,16 @@ export class DaemonSupervisor {
 			depth,
 			status: classifySessionRosterStatus(summary),
 			...(depth > 0 && summary.parentSessionId ? { parentSessionId: summary.parentSessionId } : {}),
-			...(depth > 0 && summary.parentSessionPath
-				? { parentSessionPath: canonicalSessionPath(summary.parentSessionPath) }
+			...(depth > 0 && summary.parentSessionPath && (isAbsolute(summary.parentSessionPath) || summary.sessionFile)
+				? {
+						parentSessionPath: canonicalSessionPath(
+							isAbsolute(summary.parentSessionPath)
+								? summary.parentSessionPath
+								: summary.sessionFile
+									? resolve(dirname(summary.sessionFile), summary.parentSessionPath)
+									: summary.parentSessionPath,
+						),
+					}
 				: {}),
 			...(summary.sessionFile ? { sessionPath: canonicalSessionPath(summary.sessionFile) } : {}),
 		};
