@@ -40,6 +40,7 @@ import {
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { readWithStallTimeout, resolveStallTimeoutMs } from "../utils/stream-stall.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
@@ -454,11 +455,17 @@ async function processStream(
 	model: Model<"openai-codex-responses">,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
-	await processResponsesStream(mapCodexEvents(parseSSE(response)), output, stream, model, {
-		serviceTier: options?.serviceTier,
-		resolveServiceTier: resolveCodexServiceTier,
-		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
-	});
+	await processResponsesStream(
+		mapCodexEvents(parseSSE(response, resolveStallTimeoutMs(options?.streamStallTimeoutMs))),
+		output,
+		stream,
+		model,
+		{
+			serviceTier: options?.serviceTier,
+			resolveServiceTier: resolveCodexServiceTier,
+			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+		},
+	);
 }
 
 class CodexApiError extends Error {
@@ -532,7 +539,7 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // SSE Parsing
 // ============================================================================
 
-async function* parseSSE(response: Response): AsyncGenerator<Record<string, unknown>> {
+async function* parseSSE(response: Response, stallTimeoutMs = 0): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
 	const reader = response.body.getReader();
@@ -541,7 +548,9 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 
 	try {
 		while (true) {
-			const { done, value } = await reader.read();
+			// Bound each read, not the whole stream: a long response that keeps arriving is
+			// fine, a connection held open with nothing on it is not.
+			const { done, value } = await readWithStallTimeout(() => reader.read(), stallTimeoutMs);
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 

@@ -132,6 +132,11 @@ export interface StreamOptions {
 	 */
 	maxRetryDelayMs?: number;
 	/**
+	 * Abort a started stream that produces no data for this many milliseconds and surface
+	 * it as a retryable server error. Default 300000. Set to 0 to leave streams unbounded.
+	 */
+	streamStallTimeoutMs?: number;
+	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
