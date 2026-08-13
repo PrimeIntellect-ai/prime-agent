@@ -381,4 +381,77 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 		expect(completeSimpleMock.mock.calls[1][1].messages[2].content[0].text).toContain("note-tail");
 		expect(plan.fullyVisibleIds?.has("note")).toBe(true);
 	});
+
+	it("stops expanding after the round limit and still returns a proposal", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		state.entries.prompt.note = {
+			id: "note",
+			kind: "prompt",
+			title: "Note",
+			content: `HEAD. ${"filler. ".repeat(60)}note-tail`,
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "agent",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			version: 1,
+		};
+		// A refiner that only ever asks to expand, never proposing edits.
+		completeSimpleMock.mockResolvedValue(assistantText(JSON.stringify({ expand: ["note"] })));
+
+		const plan = await planRefinement(
+			[{ role: "user", content: "go", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{},
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(4);
+		expect(plan.proposal.edits).toEqual([]);
+		const lastInjected = completeSimpleMock.mock.calls[3][1].messages.at(-1).content[0].text;
+		expect(lastInjected).toContain("last expansion round");
+	});
+
+	it("withholds an entry that does not fit the expansion budget and says so", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		state.entries.prompt.huge = {
+			id: "huge",
+			kind: "prompt",
+			title: "Huge",
+			content: "x".repeat(120_000),
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "agent",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			version: 1,
+		};
+		completeSimpleMock
+			.mockResolvedValueOnce(assistantText(JSON.stringify({ expand: ["huge", "missing"] })))
+			.mockResolvedValueOnce(
+				assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "e", edits: [] })),
+			);
+
+		const plan = await planRefinement(
+			[{ role: "user", content: "go", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{},
+		);
+
+		const injected = completeSimpleMock.mock.calls[1][1].messages[2].content[0].text;
+		expect(injected).toContain("expansion budget exhausted");
+		expect(injected).toContain("missing: not found");
+		expect(plan.fullyVisibleIds?.has("huge")).toBe(false);
+	});
 });
