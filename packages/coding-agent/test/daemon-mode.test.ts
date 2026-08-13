@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model, ToolResultMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
 	AGENT_FAMILY_REACH_ERROR,
@@ -43,7 +44,11 @@ import {
 	failure,
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
-import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
+import {
+	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
+	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
+import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -9938,3 +9943,126 @@ function makeClient(id: string, activeSessionId: string, supportsExtensionUi = f
 		capabilities: new Set(supportsExtensionUi ? ["extension_ui"] : []),
 	};
 }
+describe("worker recovery authority capture", () => {
+	function toolCall(id: string, name: string): AssistantMessage["content"][number] {
+		return { type: "toolCall", id, name, arguments: {} };
+	}
+
+	function assistantTurn(...calls: ReturnType<typeof toolCall>[]): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text: "calling tools" }, ...calls],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+	}
+
+	function toolResult(callId: string, name: string): ToolResultMessage {
+		return {
+			role: "toolResult",
+			toolCallId: callId,
+			toolName: name,
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	function lineageDigestOf(manager: SessionManager): string {
+		const hash = createHash("sha256");
+		for (const entry of manager.getBranch()) {
+			hash.update(entry.id);
+			hash.update("\0");
+			hash.update(entry.parentId ?? "");
+			hash.update("\n");
+		}
+		return hash.digest("hex");
+	}
+
+	it("captures head, assistant, unresolved tool calls, and lineage in one v2 checkpoint", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-recovery-capture-"));
+		const previousJournalPath = process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendMessage({ role: "user", content: "run tools", timestamp: 1 });
+			const assistantEntryId = manager.appendMessage(
+				assistantTurn(toolCall("call-1", "bash"), toolCall("call-2", "bash")),
+			);
+			// call-1 is already resolved; only call-2 stays unresolved.
+			manager.appendMessage(toolResult("call-1", "bash"));
+
+			const journalPath = join(tempDir, "worker.recovery.jsonl");
+			process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV] = journalPath;
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime: vi.fn(),
+				worker: { authenticationToken: "token" },
+			});
+			const state = makeState("active-1");
+			state.runtime = {
+				...state.runtime,
+				metadata: { kind: "top-level", createdAt: 1 },
+				session: makeRuntimeSession(manager),
+			} as never;
+			const internals = daemon as unknown as {
+				recordWorkerRecoveryState(state: ActiveSessionState, operation: string, busyOverride?: boolean): void;
+			};
+
+			internals.recordWorkerRecoveryState(state, "tool_execution_start", true);
+			// Identical authority within the same busy epoch is deduplicated.
+			internals.recordWorkerRecoveryState(state, "tool_execution_start", true);
+
+			const records = WorkerRecoveryJournal.readLatest(journalPath);
+			expect(records).toHaveLength(1);
+			const record = records[0]!;
+			expect(record.version).toBe(2);
+			const firstOperationId = record.version === 2 ? record.operationId : undefined;
+			if (record.version === 2) {
+				expect(record.agentDir).toBe(tempDir);
+				expect(record.sessionId).toBe(manager.getSessionId());
+				expect(record.sessionFile).toBe(manager.getSessionFile());
+				expect(record.headEntryId).toBe(manager.getLeafId());
+				expect(record.assistantEntryId).toBe(assistantEntryId);
+				expect(record.toolCalls).toEqual([{ id: "call-2", name: "bash" }]);
+				expect(record.lineageDigest).toBe(lineageDigestOf(manager));
+				expect(record.busy).toBe(true);
+				expect(record.operation).toBe("tool_execution_start");
+				expect(record.operationId).toMatch(/^[0-9a-f-]{36}$/);
+			}
+
+			// Resolving the last call and advancing the branch forces a new record
+			// even for the same event name, within the same busy epoch operation id.
+			manager.appendMessage(toolResult("call-2", "bash"));
+			internals.recordWorkerRecoveryState(state, "tool_execution_end", true);
+			const advanced = WorkerRecoveryJournal.readLatest(journalPath).at(-1)!;
+			expect(advanced.version).toBe(2);
+			if (advanced.version === 2) {
+				expect(advanced.headEntryId).toBe(manager.getLeafId());
+				expect(advanced.assistantEntryId).toBe(assistantEntryId);
+				expect(advanced.toolCalls).toEqual([]);
+				expect(advanced.lineageDigest).toBe(lineageDigestOf(manager));
+				expect(advanced.operationId).toBe(firstOperationId);
+			}
+		} finally {
+			if (previousJournalPath === undefined) {
+				delete process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+			} else {
+				process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV] = previousJournalPath;
+			}
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
