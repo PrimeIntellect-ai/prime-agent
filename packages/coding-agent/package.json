@@ -59,7 +59,7 @@
 		"file-type": "^21.1.1",
 		"glob": "^13.0.1",
 		"hosted-git-info": "^9.0.2",
-		"ignore": "^7.0.5",
+		"ignore": "^7.0.6",
 		"jiti": "^2.7.0",
 		"marked": "^18.0.7",
 		"minimatch": "^10.2.3",
