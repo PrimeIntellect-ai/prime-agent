@@ -958,7 +958,8 @@ resolve_prime_agent_version() {
 		"Resolving latest release" \
 		"Resolving latest release" \
 		"Checking the $release_channel release channel." \
-		curl -fsSL "$prime_agent_base_url/$release_channel" -o "$channel_path"; then
+		curl -fsSL --retry 5 --retry-delay 1 --retry-all-errors \
+			"$prime_agent_base_url/$release_channel" -o "$channel_path"; then
 		rm -rf "$channel_dir"
 		printf 'error: could not resolve latest Prime Agent version from %s/%s\n' "$prime_agent_base_url" "$release_channel" >&2
 		exit 1
