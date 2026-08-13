@@ -2,7 +2,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { VERSION } from "../../../src/config.js";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { ModelRegistry } from "../../../src/core/model-registry.js";
 
@@ -27,7 +26,7 @@ describe("issue #702 codex model discovery client version", () => {
 		}
 	});
 
-	it("reports a supported codex client version so the backend returns a catalog", async () => {
+	it("reports a Codex CLI client version on the discovery request instead of the package version", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "codex-client-version-"));
 		tempDirs.push(tempDir);
 		const authPath = join(tempDir, "auth.json");
@@ -62,7 +61,9 @@ describe("issue #702 codex model discovery client version", () => {
 		const discoveryUrl = requestedUrls.find((url) => url.includes("/codex/models"));
 		expect(discoveryUrl).toBeDefined();
 		const clientVersion = new URL(discoveryUrl ?? "").searchParams.get("client_version");
-		expect(clientVersion).not.toBe(VERSION);
+		// Prime Agent's own version is 0.x well below this floor, so this assertion fails on the
+		// unfixed source. Comparing against VERSION directly would pass today and break silently
+		// once the lockstep package version reaches the pinned constant.
 		expect(clientVersion).toMatch(/^\d+\.\d+\.\d+$/);
 		const [major, minor] = (clientVersion ?? "0.0.0").split(".").map(Number);
 		expect((major ?? 0) > 0 || (minor ?? 0) >= 144).toBe(true);

@@ -387,8 +387,9 @@ function readOpenAICodexAccountId(token: string): string | undefined {
  *
  * Skipping step 2 fails silently and asymmetrically: `rlm` subagent delegation and `find_models()` resolve
  * through `getExecutableModels()` and lose the model, while `/model` reads the unfiltered `getAvailable()`
- * and keeps offering it. A model working as the session model is therefore not evidence that delegation can
- * see it, and the spawn error reports it as unavailable or unauthenticated rather than undiscovered.
+ * and keeps offering it.
+ *
+ * Catalog behaviour measured 2026-08-13; see #702.
  */
 const OPENAI_CODEX_CLIENT_VERSION = "0.147.0";
 
