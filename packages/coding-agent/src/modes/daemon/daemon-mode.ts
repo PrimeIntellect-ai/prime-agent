@@ -201,12 +201,15 @@ import {
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
+import { OperationExtensionInbox } from "./operation-extension-inbox.js";
+import { OperationLedger, OperationTracker } from "./operation-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
 	createSnapshotTranscriptChunks,
 	SNAPSHOT_TARGET_CHUNK_BYTES,
 	type SnapshotTranscriptChunkSource,
 } from "./snapshot-transcript-cache.js";
+import { annotateSessionTreeQuiescence, evaluateSessionTreeQuiescence } from "./tree-quiescence.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
 export interface DaemonModeOptions {
@@ -360,6 +363,20 @@ const RECOVERY_CHECKPOINT_EVENTS: ReadonlySet<string> = new Set([
 	"session_action_update",
 	"rlm_child_update",
 ]);
+
+const POST_SETTLEMENT_RECOVERY_EVENTS: ReadonlySet<string> = new Set([
+	"agent_end",
+	"turn_end",
+	"message_end",
+	"tool_execution_end",
+	"compaction_end",
+	"auto_retry_end",
+	"bash_end",
+]);
+
+export function shouldDeferRecoveryCheckpoint(eventType: string): boolean {
+	return POST_SETTLEMENT_RECOVERY_EVENTS.has(eventType);
+}
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
@@ -521,6 +538,9 @@ export class AgentDaemon {
 		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
+	private readonly operationLedger: OperationLedger;
+	private readonly operationExtensionInbox: OperationExtensionInbox;
+	private operationDeadlineTimer?: ReturnType<typeof setInterval>;
 
 	constructor(
 		private readonly socketPath: string,
@@ -530,6 +550,12 @@ export class AgentDaemon {
 			throw new Error("Daemon config is missing agentDir");
 		}
 		this.agentDir = options.defaultSessionConfig.agentDir;
+		const reliabilityRoot = join(this.agentDir, "reliability");
+		this.operationLedger = new OperationLedger({
+			rootDir: reliabilityRoot,
+			role: options.worker ? "worker" : "daemon",
+		});
+		this.operationExtensionInbox = new OperationExtensionInbox(reliabilityRoot);
 		this.cronStore = options.worker
 			? AgentCronJobStore.forSessionArtifacts()
 			: new AgentCronJobStore(getCronJobsPath(this.agentDir));
@@ -618,12 +644,52 @@ export class AgentDaemon {
 
 		this.registerSignalHandlers();
 		this.summarizer.start();
+		this.sweepOperationDeadlines();
+		this.operationDeadlineTimer = setInterval(() => this.sweepOperationDeadlines(), 30_000);
+		this.operationDeadlineTimer.unref?.();
 		this.log(`Prime Agent daemon listening on ${this.socketPath}`);
 		// No startup restore: on-disk sessions return only via --resume or the agents view.
 		if (!this.shuttingDown) {
 			this.cronScheduler.start();
 		}
 		this.startSupervisorMonitor();
+	}
+
+	private sweepOperationDeadlines(): void {
+		// An unusable reliability directory must degrade the extension lane only; it must never stop
+		// the deadline sweep, which is the watchdog the rest of the mission depends on.
+		for (const request of this.operationExtensionInbox.pending()) {
+			// Claim before applying. If the claim cannot be persisted we grant nothing: applying
+			// without a durable record would re-apply the same request on every sweep, silently
+			// multiplying one human extension into several.
+			try {
+				this.operationExtensionInbox.claim(request);
+			} catch (error) {
+				this.log(
+					`Operation extension inbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				break;
+			}
+			const result = this.operationLedger.extendDeadline(request.operationId, request.extensionMs);
+			try {
+				this.operationExtensionInbox.record(request, result);
+			} catch (error) {
+				this.log(
+					`Operation extension receipt unwritable: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		const allowOwnedCancellation = process.env.PRIME_AGENT_ENABLE_OWNED_OPERATION_DEADLINES === "1";
+		for (const state of this.sessions.values()) {
+			const claimed = state.operationTracker?.claimExpiredCancellations(Date.now(), allowOwnedCancellation) ?? [];
+			if (claimed.length === 0) continue;
+			this.recordWorkerRecoveryState(state, "operation_deadline_cancellation_started");
+			void state.runtime.session.abort().catch((error) => {
+				this.log(
+					`Deadline cancellation failed for ${state.activeSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			});
+		}
 	}
 
 	private startSupervisorMonitor(): void {
@@ -1149,28 +1215,77 @@ export class AgentDaemon {
 		for (const [path, passive] of passiveByPath) {
 			savedByPath.set(path, passive.info);
 		}
-		return buildSessionList(activeSessions, [...savedByPath.values()], scheduledJobs).map((summary) => {
-			const passive = summary.sessionFile ? passiveByPath.get(resolve(summary.sessionFile)) : undefined;
-			if (!passive || summary.activeSessionId) return summary;
-			const parentEntry = passive.chain.at(-2);
+		const summaries = buildSessionList(activeSessions, [...savedByPath.values()], scheduledJobs).map<SessionSummary>(
+			(summary) => {
+				const passive = summary.sessionFile ? passiveByPath.get(resolve(summary.sessionFile)) : undefined;
+				if (!passive || summary.activeSessionId) return summary;
+				const parentEntry = passive.chain.at(-2);
+				return {
+					...summary,
+					runtimeKind: "subagent",
+					...(passive.chain.length === 1 && passive.rootParentState
+						? { parentActiveSessionId: passive.rootParentState.activeSessionId }
+						: {}),
+					parentSessionId: passive.entry.parentSessionId,
+					parentSessionPath:
+						passive.entry.parentSessionFile ??
+						parentEntry?.sessionFile ??
+						passive.rootParentState?.runtime.session.sessionFile ??
+						passive.rootInfo?.path,
+					rlmDepth: passive.entry.rlmDepth ?? passive.info.rlmDepth,
+					rlmChildId: passive.entry.childId,
+					rlmParentNodeId: passive.entry.rlmParentNodeId ?? passive.entry.childId,
+					spawnCode: passive.entry.spawnCode,
+					passiveRegistryStatus: passive.entry.status,
+				};
+			},
+		);
+		return annotateSessionTreeQuiescence(summaries);
+	}
+
+	private async currentSessionTreeQuiescence(rootState: ActiveSessionState) {
+		const summaries = await this.buildSessionListWithPassiveRlmSubagents(
+			[...this.sessions.values()],
+			[],
+			this.cronStore.list(),
+		);
+		const root = summaries.find((summary) => summary.activeSessionId === rootState.activeSessionId);
+		if (!root) {
 			return {
-				...summary,
-				runtimeKind: "subagent",
-				...(passive.chain.length === 1 && passive.rootParentState
-					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
-					: {}),
-				parentSessionId: passive.entry.parentSessionId,
-				parentSessionPath:
-					passive.entry.parentSessionFile ??
-					parentEntry?.sessionFile ??
-					passive.rootParentState?.runtime.session.sessionFile ??
-					passive.rootInfo?.path,
-				rlmDepth: passive.entry.rlmDepth ?? passive.info.rlmDepth,
-				rlmChildId: passive.entry.childId,
-				rlmParentNodeId: passive.entry.rlmParentNodeId ?? passive.entry.childId,
-				spawnCode: passive.entry.spawnCode,
+				state: "uncertain" as const,
+				quiescent: false,
+				nonQuiescentDescendantCount: 0,
+				uncertainDescendantCount: 1,
+				blockingSessionIds: [rootState.activeSessionId],
 			};
-		});
+		}
+		return evaluateSessionTreeQuiescence(root, summaries);
+	}
+
+	private async waitForSessionTreeQuiescence(
+		rootState: ActiveSessionState,
+		timeoutMs = 4 * 60_000,
+	): Promise<ReturnType<typeof evaluateSessionTreeQuiescence> & { timedOut: boolean }> {
+		const deadline = Date.now() + timeoutMs;
+		while (true) {
+			const tree = await this.currentSessionTreeQuiescence(rootState);
+			if (tree.quiescent) return { ...tree, timedOut: false };
+			const residentBlockers = tree.blockingSessionIds
+				.map((activeSessionId) => this.sessions.get(activeSessionId))
+				.filter((state): state is ActiveSessionState => Boolean(state));
+			if (residentBlockers.length === 0) return { ...tree, timedOut: false };
+			const remainingMs = deadline - Date.now();
+			if (remainingMs <= 0) return { ...tree, timedOut: true };
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			await Promise.race([
+				Promise.allSettled(residentBlockers.map((state) => state.runtime.session.waitForIdle())),
+				new Promise<void>((resolveDelay) => {
+					timer = setTimeout(resolveDelay, Math.min(1_000, remainingMs));
+					timer.unref?.();
+				}),
+			]);
+			if (timer) clearTimeout(timer);
+		}
 	}
 
 	private async findPassiveRlmSubagent(
@@ -1210,6 +1325,7 @@ export class AgentDaemon {
 					? desiredActiveSessionId
 					: createActiveSessionId(this.sessions),
 			runtime,
+			operationTracker: undefined,
 			clients: new Set(),
 			pendingAttaches: 0,
 			extensionUiRequests: new Map(),
@@ -1217,6 +1333,10 @@ export class AgentDaemon {
 			lastEventSequence: 0,
 			clientEnv,
 		};
+		state.operationTracker = new OperationTracker(this.operationLedger, {
+			activeSessionId: state.activeSessionId,
+			sessionId: runtime.session.sessionId,
+		});
 		this.sessions.set(state.activeSessionId, state);
 		this.bindingSessions.add(state.activeSessionId);
 		let completeBinding!: () => void;
@@ -1247,6 +1367,7 @@ export class AgentDaemon {
 			onStateBound?.(state);
 		} catch (error) {
 			state.unsubscribe?.();
+			state.operationTracker?.closeAll("failed", "runtime binding failed");
 			this.sessions.delete(state.activeSessionId);
 			await runtime.dispose().catch(() => undefined);
 			throw error;
@@ -4100,11 +4221,17 @@ export class AgentDaemon {
 
 			case "wait_for_headless_completion": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(
-					command.id,
-					"wait_for_headless_completion",
-					await waitForHeadlessCompletion(state.runtime.session),
-				);
+				const completion = await waitForHeadlessCompletion(state.runtime.session);
+				const tree = await this.waitForSessionTreeQuiescence(state);
+				return success(command.id, "wait_for_headless_completion", {
+					...completion,
+					treeQuiescence: tree.state,
+					treeQuiescent: tree.quiescent,
+					nonQuiescentDescendantCount: tree.nonQuiescentDescendantCount,
+					uncertainDescendantCount: tree.uncertainDescendantCount,
+					treeWaitTimedOut: tree.timedOut,
+					blockingSessionIds: tree.blockingSessionIds,
+				});
 			}
 
 			case "get_session_header": {
@@ -6086,6 +6213,10 @@ export class AgentDaemon {
 		for (const client of state.clients) {
 			abortClientSnapshotStreaming(client, state.activeSessionId);
 		}
+		state.operationTracker?.closeAll(
+			disposeError ? "uncertain" : reason === "completed" ? "completed" : "cancelled",
+			disposeError ? `session ${reason}; runtime disposal uncertain` : `session ${reason}`,
+		);
 		this.broadcastToSession(state, { type: "session_closed", activeSessionId: state.activeSessionId, reason });
 		for (const client of state.clients) {
 			client.attachedActiveSessionIds.delete(state.activeSessionId);
@@ -6131,6 +6262,9 @@ export class AgentDaemon {
 	private broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void {
 		if (message.type === "session_event") {
 			const eventType = message.event.type;
+			state.operationTracker?.handleSessionEvent(
+				message.event as unknown as { type: string; [key: string]: unknown },
+			);
 			// A finished turn/compaction is the cue to refresh status.
 			if (eventType === "turn_end" || eventType === "compaction_end") {
 				this.summarizer.notifyActivity(state);
@@ -6145,7 +6279,17 @@ export class AgentDaemon {
 				void this.closeSession(state, "killed");
 			}
 			if (RECOVERY_CHECKPOINT_EVENTS.has(eventType)) {
-				this.recordWorkerRecoveryState(state, eventType);
+				if (shouldDeferRecoveryCheckpoint(eventType)) {
+					// Session event listeners settle busy/retry/tool flags after broadcasting.
+					// Checkpoint on the next microtask so recovery records the post-event truth.
+					queueMicrotask(() => {
+						if (this.sessions.get(state.activeSessionId) === state) {
+							this.recordWorkerRecoveryState(state, `${eventType}_settled`);
+						}
+					});
+				} else {
+					this.recordWorkerRecoveryState(state, eventType);
+				}
 			}
 		}
 		this.stampRlmChildActiveSessionId(message);
@@ -6620,6 +6764,10 @@ export class AgentDaemon {
 		}
 
 		this.summarizer.stop();
+		if (this.operationDeadlineTimer) {
+			clearInterval(this.operationDeadlineTimer);
+			this.operationDeadlineTimer = undefined;
+		}
 		for (const cleanup of this.signalCleanupHandlers) {
 			cleanup();
 		}
@@ -6639,6 +6787,7 @@ export class AgentDaemon {
 			this.server.close(() => resolveClose());
 		});
 		this.cleanupSocketPath();
+		this.operationLedger.dispose();
 		process.exit(exitCode);
 	}
 }

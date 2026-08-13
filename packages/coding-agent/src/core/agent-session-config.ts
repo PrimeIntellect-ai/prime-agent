@@ -6,6 +6,8 @@ export type AgentExecutionMode = "interactive" | "print" | "json" | "rpc" | "acp
 export interface AgentSessionRuntimeConfig {
 	cwd?: string;
 	agentDir?: string;
+	/** Effective project-trust decision for this runtime. False must survive daemon transport and config merges. */
+	projectTrusted?: boolean;
 	sessionDir?: string;
 	provider?: string;
 	model?: string;
@@ -57,6 +59,7 @@ export function mergeAgentSessionRuntimeConfig(
 	return {
 		cwd: override.cwd ?? base.cwd,
 		agentDir: override.agentDir ?? base.agentDir,
+		projectTrusted: override.projectTrusted ?? base.projectTrusted,
 		sessionDir: override.sessionDir ?? base.sessionDir,
 		provider: override.provider ?? base.provider,
 		model: override.model ?? base.model,

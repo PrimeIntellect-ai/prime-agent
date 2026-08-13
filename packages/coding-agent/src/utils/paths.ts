@@ -16,6 +16,14 @@ export function canonicalizePath(path: string): string {
 }
 
 /**
+ * Canonical key for a project directory: absolute, symlink-resolved. Trust
+ * decisions are keyed by this form, so every producer must use one definition.
+ */
+export function canonicalizeDirectory(dir: string): string {
+	return canonicalizePath(resolvePath(dir));
+}
+
+/**
  * Returns true if the value is NOT a package source (npm:, git:, etc.)
  * or a URL protocol. Bare names and relative paths without ./ prefix
  * are considered local.

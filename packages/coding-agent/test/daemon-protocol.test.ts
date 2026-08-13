@@ -8,6 +8,7 @@ import {
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_COMMAND_COMPATIBILITY,
+	DAEMON_DEFAULT_CLIENT_CAPABILITIES,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_OUTBOUND_COMPATIBILITY,
 	DAEMON_PROTOCOL_INFO,
@@ -19,6 +20,7 @@ import {
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	isOperationLedgerNegotiated,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
 
@@ -45,7 +47,8 @@ describe("daemon protocol helpers", () => {
 	});
 
 	it("requires compatibility metadata for the heartbeat protocol surface", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(7);
+		expect(DAEMON_PROTOCOL_VERSION).toBe(8);
+		expect(DAEMON_SCHEMA_REVISION).toBe(18);
 		expect(DAEMON_SCHEMA_ID).toContain(`protocol-${DAEMON_PROTOCOL_VERSION}`);
 		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeats_list).toEqual({
 			minProtocol: 7,
@@ -76,6 +79,18 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("delete_rlm_subagent");
 	});
 
+	it("negotiates operation-ledger fields without breaking either legacy direction", () => {
+		expect(DAEMON_DEFAULT_CLIENT_CAPABILITIES).toContain("operation_ledger_v1");
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("operation_ledger_v1");
+		expect(isOperationLedgerNegotiated(DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES)).toBe(
+			true,
+		);
+		// Old client → new daemon: additive fields stay unnegotiated.
+		expect(isOperationLedgerNegotiated(["attach_snapshot"], DAEMON_DEFAULT_SERVER_CAPABILITIES)).toBe(false);
+		// New client → old daemon: absence is explicit and the client falls back to legacy status.
+		expect(isOperationLedgerNegotiated(DAEMON_DEFAULT_CLIENT_CAPABILITIES, ["attach_snapshot"])).toBe(false);
+	});
+
 	it("capability-gates the optional model catalog surface", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_model_catalog).toEqual({
 			minProtocol: 7,
@@ -100,11 +115,11 @@ describe("daemon protocol helpers", () => {
 
 	it("schema-gates session commands that carry the telemetry policy", () => {
 		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual([
-			{ minProtocol: 7 },
+			{ minProtocol: 8 },
 		]);
 		expect(
 			getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } }),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 8 }]);
 		expect(getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1" })).toEqual([
 			{ minProtocol: 7 },
 		]);

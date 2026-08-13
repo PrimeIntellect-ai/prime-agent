@@ -5,7 +5,12 @@ import { resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { ENV_AGENT_DIR, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
-import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
+import {
+	compareProcessStartIds,
+	getProcessStartId,
+	SESSION_LEASE_OWNER_ID_ENV,
+	SESSION_LEASES_ENABLED_ENV,
+} from "../core/session-lease.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
@@ -359,7 +364,7 @@ function matchesProcessStartId(identity: DaemonUpdateRestartProcessIdentity): bo
 		return true;
 	}
 	const observed = getProcessStartId(identity.pid);
-	return observed === undefined || observed === identity.processStartId;
+	return compareProcessStartIds(identity.processStartId, observed) !== "mismatch";
 }
 
 function isProcessIdentityAlive(identity: DaemonUpdateRestartProcessIdentity): boolean {

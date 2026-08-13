@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import { type SessionInfo, SessionManager } from "../src/core/session-manager.js";
-import { listSavedSessionSiblings, resolveCatalogSessionMatch } from "../src/modes/daemon/daemon-catalog-process.js";
+import {
+	DAEMON_CATALOG_START_TIMEOUT_MS,
+	listSavedSessionSiblings,
+	resolveCatalogSessionMatch,
+} from "../src/modes/daemon/daemon-catalog-process.js";
 
 function session(id: string, name: string | undefined, path: string): SessionInfo {
 	return {
@@ -19,6 +23,12 @@ function session(id: string, name: string | undefined, path: string): SessionInf
 		allMessagesText: "",
 	};
 }
+
+describe("daemon catalog process", () => {
+	it("allows a cold catalog more than five seconds to become ready", () => {
+		expect(DAEMON_CATALOG_START_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+	});
+});
 
 describe("daemon catalog selector resolution", () => {
 	it("reads only a saved child's persisted sibling set", async () => {

@@ -57,7 +57,7 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		expect(onStatusChanged).toHaveBeenCalled();
 	});
 
-	test("a failing model on an idle session settles to a needs_input fallback verdict", async () => {
+	test("a failing classifier is recorded as unavailable without fabricating a task verdict", async () => {
 		vi.useFakeTimers();
 		const generate = vi.fn().mockResolvedValue(undefined); // 404 / 401 / timeout / unparseable
 		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
@@ -66,29 +66,70 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		summarizer.notifyActivity(state);
 		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
 		expect(generate).toHaveBeenCalledOnce();
-		// The activity axis holds an unjudged idle session at "working"; the fallback
-		// settles it to needs_input so it doesn't spin forever.
-		expect(state.summaryState).toMatchObject({ taskState: "needs_input", basedOnMessageCount: 2 });
+		expect(state.summaryState).toBeUndefined();
+		expect((state as unknown as { summaryClassifierState?: unknown }).summaryClassifierState).toMatchObject({
+			status: "classifier_unavailable",
+			consecutiveFailures: 1,
+		});
+		expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toHaveLength(0);
 	});
 
-	test("retries after a needs_input fallback until a real summary lands", async () => {
+	test("backs off classifier retries and clears the failure after a successful summary", async () => {
 		vi.useFakeTimers();
 		const generate = vi
 			.fn()
-			.mockResolvedValueOnce(undefined) // transient failure → blank needs_input fallback
+			.mockResolvedValueOnce(undefined)
 			.mockResolvedValue({ summary: "Reviewed the diff", taskState: "completed" });
 		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
 		const state = makeState({ working: false });
 
 		summarizer.notifyActivity(state);
 		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
-		expect(state.summaryState).toMatchObject({ summary: "", taskState: "needs_input" });
+		expect(state.summaryState).toBeUndefined();
 
-		// A blank recap still owes a summary, so a later sweep retries and records it.
+		// A retry before the backoff expires is ignored.
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+		expect(generate).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(25_000);
 		summarizer.notifyActivity(state);
 		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
 		expect(generate).toHaveBeenCalledTimes(2);
 		expect(state.summaryState).toMatchObject({ summary: "Reviewed the diff", taskState: "completed" });
+		expect((state as unknown as { summaryClassifierState?: unknown }).summaryClassifierState).toMatchObject({
+			status: "available",
+			consecutiveFailures: 0,
+		});
+	});
+
+	test("hard-fails a classifier call that ignores cancellation", async () => {
+		vi.useFakeTimers();
+		const generate = vi.fn(() => new Promise<never>(() => {}));
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		const state = makeState({ working: false });
+
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + 15_500);
+
+		expect((state as unknown as { summaryClassifierState?: unknown }).summaryClassifierState).toMatchObject({
+			status: "classifier_unavailable",
+			consecutiveFailures: 1,
+		});
+	});
+
+	test("does not append an unchanged semantic status", async () => {
+		vi.useFakeTimers();
+		const persisted = { summary: "Reviewed the diff", taskState: "completed", basedOnMessageCount: 2 };
+		const generate = vi.fn().mockResolvedValue({ summary: "Reviewed the diff", taskState: "completed" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		const state = makeState({ working: false, persisted });
+		summarizer.seed(state);
+
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+
+		expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toHaveLength(0);
 	});
 
 	test("refreshes a working session even when the message count is unchanged", async () => {

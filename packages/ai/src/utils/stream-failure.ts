@@ -17,6 +17,7 @@ export type StreamFailureKind =
 	| "auth"
 	| "invalid_request"
 	| "malformed_response"
+	| "degenerate_output"
 	| "unknown";
 
 export interface StreamFailureInfo {
@@ -48,6 +49,7 @@ const KIND_MESSAGES: Record<StreamFailureKind, string> = {
 	auth: "Provider authentication failed",
 	invalid_request: "Provider rejected the request",
 	malformed_response: "Provider returned a malformed response",
+	degenerate_output: "Model stopped making progress and repeated itself",
 	unknown: "Provider stream failed",
 };
 

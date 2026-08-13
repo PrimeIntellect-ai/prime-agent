@@ -24,8 +24,12 @@
 
 - After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
 - Note: `npm run check` does not run tests.
-- NEVER run: `npm run dev`, `npm run build`, `npm test`
+- NEVER run: `npm run dev`, `npm test`
+- Do not run `npm run build` for routine work. It is permitted only for these two audited purposes, and the receipt must say which applied:
+  1. **Installing** — the deliverable is that a locally installed agent runs current code. `packages/agent` resolves through `main: ./dist/index.js`, and `pi-ai`/`pi-tui`/`pi-agent-core` resolve via `node_modules/@earendil-works/*` symlinks into `packages/*`, so BOTH `--dist` and source (`tsx`) modes load built artifacts. A changed package whose `dist` predates its `src` is stale in either mode.
+  2. **Verifying a clean install** — the full suite cannot pass from a fresh `npm ci` without it. Extension loading fails with `Cannot find package '.../pi-agent-core/dist/index.js'`, which is designed behaviour: every CI workflow runs `npm ci` → `npm run build` → `npm run check`. Confirm the failures are environmental by reproducing them at the pristine pre-merge tip in the same worktree before blaming a change.
 - Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
+- The one standing exception is a protected update reconciling this fork onto upstream: that mission MUST run the literal full suite, because a merge can only be cleared against the whole tree. Cap the workers (`--maxWorkers=5`) so the real-process daemon tests are not starved into a false failure, and record the counts in the receipt.
 - Run tests from the package root, not the repo root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
 - When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
@@ -208,17 +212,39 @@ The script handles: version bump, CHANGELOG finalization, commit, tag, publish, 
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 
-Multiple agents may work on different files in the same worktree simultaneously. You MUST follow these rules:
+Multiple agents may work on different files in the same worktree simultaneously, and work is
+routinely handed between sessions. You MUST follow these rules:
 
 ### Committing
 
-- **ONLY commit files YOU changed in THIS session**
-- ALWAYS include `fixes #<number>` or `closes #<number>` in the commit message when there is a related issue or PR
-- NEVER use `git add -A` or `git add .` - these sweep up changes from other agents
-- ALWAYS use `git add <specific-file-paths>` listing only files you modified
-- Before committing, run `git status` and verify you are only staging YOUR files
-- Track which files you created/modified/deleted during the session
-- It is always fine to include `packages/ai/src/models.generated.ts` in a commit alongside the actual files you want to commit
+**All repository work must be committed; no local machine state ever is.** Every file in the
+working tree that belongs to the repository — files you created this session AND files you
+inherited uncommitted from a previous session or another agent — MUST enter a commit before you
+finish. Leaving inherited work unstaged is a defect, not caution: uncommitted work is the only
+state a `git reset --hard`, `git clean`, or a force-resetting updater can destroy without
+recourse.
+
+- Stage EVERY changed and new repository path, inherited or not. `git add -A` is permitted for
+  this purpose; the previous only-your-own-files restriction is retired.
+- **NEVER commit local machine state**, whoever created it: agent caches and context trees
+  (`.brv/`, `.claude/`, `.omp/`), editor and OS junk (`.DS_Store`, `.idea/`, `.vscode/`),
+  credentials and environment files (`.env*`, `*.key`, `*.pem`, auth or token files), logs, build
+  output, `node_modules/`, and anything under a temp path. These are not repository work and must
+  not enter history even when the instruction is "commit everything".
+- If `git add -A` sweeps such a path in, unstage it with `git restore --staged <path>` and add it
+  to `.git/info/exclude` — local and unshared — rather than to the tracked `.gitignore`, which
+  upstream owns and which would conflict on merge.
+- Name every path you excluded, and why, in your report. Never exclude source, tests, docs,
+  manifests, or lockfiles.
+- ALWAYS include `fixes #<number>` or `closes #<number>` in the commit message when there is a
+  related issue or PR.
+- Before committing, run `git status` and confirm the working tree is empty afterwards apart from
+  the exclusions you named.
+- Verify the whole tree before committing it. `npm run check` must exit 0 and the affected tests
+  must pass against the FINAL combined state, since that is what the commit records. Do not split
+  an integrated change into commits whose intermediate states were never checked.
+- It is always fine to include `packages/ai/src/models.generated.ts` in a commit alongside the
+  actual files you want to commit.
 
 ### Forbidden Git Operations
 
@@ -228,7 +254,7 @@ These commands can destroy other agents' work:
 - `git checkout .` - destroys uncommitted changes
 - `git clean -fd` - deletes untracked files
 - `git stash` - stashes ALL changes including other agents' work
-- `git add -A` / `git add .` - stages other agents' uncommitted work
+- `git push --force` to a shared branch - rewrites history other agents built on
 - `git commit --no-verify` - bypasses required checks and is never allowed
 
 ### Safe Workflow
@@ -237,21 +263,23 @@ These commands can destroy other agents' work:
 # 1. Check status first
 git status
 
-# 2. Add ONLY your specific files
-git add packages/ai/src/providers/transform-messages.ts
-git add packages/ai/CHANGELOG.md
+# 2. Stage everything in the tree, inherited work included
+git add -A
 
-# 3. Commit
+# 3. Verify the combined state you are about to record
+npm run check
+
+# 4. Commit
 git commit -m "fix(ai): description"
 
-# 4. Push (pull --rebase if needed, but NEVER reset/checkout)
+# 5. Push (pull --rebase if needed, but NEVER reset/checkout)
 git pull --rebase && git push
 ```
 
 ### If Rebase Conflicts Occur
 
-- Resolve conflicts in YOUR files only
-- If conflict is in a file you didn't modify, abort and ask the user
+- Resolve conflicts in the files this change set touches
+- If a conflict is in a file outside the change set, abort and ask the user
 - NEVER force push
 
 ### User override

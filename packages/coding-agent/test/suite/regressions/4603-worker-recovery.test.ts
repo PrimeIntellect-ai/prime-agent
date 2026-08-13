@@ -8,11 +8,13 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import lockfile from "proper-lockfile";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR } from "../../../src/config.js";
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
@@ -126,7 +128,12 @@ async function createPaths(): Promise<TestPaths> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
-	linkSync(process.execPath, executablePath);
+	if (process.platform === "win32") {
+		linkSync(process.execPath, executablePath);
+	} else {
+		// Homebrew Node resolves libnode relative to its installed executable path.
+		symlinkSync(process.execPath, executablePath);
+	}
 	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
 	socketTempDirs.add(socketTmpDir);
@@ -986,6 +993,90 @@ describe("ENG-4603 worker recovery convergence", () => {
 		}
 	}, 15_000);
 
+	it("renews an expired shutdown admission when no successor claimed it", async () => {
+		const paths = await createPaths();
+		const previousRegistryDir = process.env[supervisorRegistryDirEnv];
+		process.env[supervisorRegistryDirEnv] = paths.registryDir;
+		try {
+			const admission = await acquireDaemonShutdownAdmission();
+			try {
+				const refreshTimer = Reflect.get(admission, "refreshTimer") as NodeJS.Timeout | undefined;
+				if (!refreshTimer) throw new Error("Shutdown admission did not start its lease refresh");
+				clearInterval(refreshTimer);
+				const admissionPath = join(paths.registryDir, "shutdown-admission.json");
+				const record = JSON.parse(readFileSync(admissionPath, "utf8")) as { expiresAt: string };
+				record.expiresAt = new Date(Date.now() - 1_000).toISOString();
+				writeFileSync(admissionPath, `${JSON.stringify(record, null, 2)}\n`);
+
+				await expect(admission.assertOrRenew()).resolves.toBeUndefined();
+				const renewed = JSON.parse(readFileSync(admissionPath, "utf8")) as { expiresAt: string };
+				expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.now());
+			} finally {
+				await admission.release();
+			}
+		} finally {
+			if (previousRegistryDir === undefined) {
+				delete process.env[supervisorRegistryDirEnv];
+			} else {
+				process.env[supervisorRegistryDirEnv] = previousRegistryDir;
+			}
+		}
+	});
+
+	it("coalesces concurrent shutdown admission renewals", async () => {
+		const paths = await createPaths();
+		const previousRegistryDir = process.env[supervisorRegistryDirEnv];
+		process.env[supervisorRegistryDirEnv] = paths.registryDir;
+		try {
+			const admission = await acquireDaemonShutdownAdmission();
+			const renewals: Promise<void>[] = [];
+			let releaseBlockedLocks: () => void = () => undefined;
+			try {
+				const refreshTimer = Reflect.get(admission, "refreshTimer") as NodeJS.Timeout | undefined;
+				if (!refreshTimer) throw new Error("Shutdown admission did not start its lease refresh");
+				clearInterval(refreshTimer);
+
+				const originalLock = lockfile.lock.bind(lockfile);
+				const blockedLocks = new Promise<void>((resolveBlockedLocks) => {
+					releaseBlockedLocks = resolveBlockedLocks;
+				});
+				let signalLockEntered: () => void = () => undefined;
+				const lockEntered = new Promise<void>((resolveLockEntered) => {
+					signalLockEntered = resolveLockEntered;
+				});
+				let lockCalls = 0;
+				const lockSpy = vi.spyOn(lockfile, "lock").mockImplementation(async (...args) => {
+					lockCalls++;
+					signalLockEntered();
+					await blockedLocks;
+					return originalLock(...args);
+				});
+				try {
+					renewals.push(...Array.from({ length: 8 }, () => admission.assertOrRenew()));
+					await lockEntered;
+					expect(lockCalls).toBe(1);
+					releaseBlockedLocks();
+					await Promise.all(renewals);
+					await admission.assertOrRenew();
+					expect(lockCalls).toBe(2);
+				} finally {
+					releaseBlockedLocks();
+					await Promise.allSettled(renewals);
+					lockSpy.mockRestore();
+				}
+			} finally {
+				releaseBlockedLocks();
+				await admission.release();
+			}
+		} finally {
+			if (previousRegistryDir === undefined) {
+				delete process.env[supervisorRegistryDirEnv];
+			} else {
+				process.env[supervisorRegistryDirEnv] = previousRegistryDir;
+			}
+		}
+	});
+
 	it("shutdown --force removes hidden supervisors and workers through the public CLI", async () => {
 		if (process.platform === "win32") return;
 		const paths = await createPaths();
@@ -1027,7 +1118,9 @@ describe("ENG-4603 worker recovery convergence", () => {
 		expect(listenersBeforeShutdown).toContain(`p${successor.child.pid}`);
 
 		const shutdown = await runCli(paths, ["shutdown", "--force", "--json"], 60_000, lsofEnvironment);
-		expect(shutdown.code).toBe(0);
+		if (shutdown.code !== 0) {
+			throw new Error(`shutdown --force failed (${shutdown.code}): ${shutdown.stderr || shutdown.stdout}`);
+		}
 		const shutdownResult = JSON.parse(shutdown.stdout) as { stopped: unknown[]; failed: unknown[] };
 		const survivingIdentities = [
 			{ pid: predecessor.child.pid!, processStartId: predecessorStartId },
