@@ -124,13 +124,13 @@ await rlm.act("Implement every phase of the migration, verify everything, and sh
 Good—this assigns one inspectable step:
 
 ```python
-result = await rlm.act("Inspect the parser owner, fix the delimiter advance, run parser.test.ts, and return the diff and raw test result")
+result = await rlm.act("Inspect the parser, fix the delimiter advance, run parser.test.ts, and return the diff and raw test result")
 ```
 
 Set up the retained lane once with its stable working directory, editing or verification authority, return contract, and expectation of a bounded sequence. Later prompts can be terse deltas because the lane keeps its transcript:
 
 ```python
-await rlm.act("In /repo, you may edit parser files and run focused tests. Return the inspected diff and raw test result. First inspect the parser owner.")
+await rlm.act("In /repo, you may edit parser files and run focused tests. Return the inspected diff and raw test result. First inspect the parser.")
 await rlm.act("Now run the StarPC baseline")
 await rlm.act("Now fix the failing delimiter case and rerun its focused test")
 await rlm.act("Now verify only; do not edit. Work from /repo/wt/review and return raw test output")

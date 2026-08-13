@@ -454,7 +454,7 @@ export function formatHarnessStateForPrompt(
 		"# Continual Harness State",
 		"",
 		"Continual Harness is persisted editable state. Local entries apply only to this Prime Agent session. Global entries persist across sessions.",
-		"The entries below are compact routing and context hints. They may omit qualifications, so verify material claims against current source or behavior before acting.",
+		"The entries below are compact routing and context hints. They may omit qualifications, so check material claims against current source or behavior before acting.",
 		"The base system prompt is immutable. Entries of kind prompt are supplemental prompt notes.",
 		"A skill entry describes a callable that already exists in an installed package. A subagent entry supplies a saved task specification for an ordinary `rlm(...)` child call.",
 		"",
