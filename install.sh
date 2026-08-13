@@ -958,19 +958,110 @@ resolve_prime_agent_version() {
 		"Resolving latest release" \
 		"Resolving latest release" \
 		"Checking the $release_channel release channel." \
-		curl -fsSL --retry 5 --retry-delay 1 --retry-all-errors \
-			"$prime_agent_base_url/$release_channel" -o "$channel_path"; then
+		download_channel_marker "$prime_agent_base_url/$release_channel" "$channel_path"; then
 		rm -rf "$channel_dir"
 		printf 'error: could not resolve latest Prime Agent version from %s/%s\n' "$prime_agent_base_url" "$release_channel" >&2
 		exit 1
 	fi
-	channel_version="$(tr -d '[:space:]' <"$channel_path")"
+	channel_version=$(cat "$channel_path")
 	rm -rf "$channel_dir"
-	if [ -z "$channel_version" ]; then
-		printf 'error: could not resolve latest Prime Agent version from %s/%s\n' "$prime_agent_base_url" "$release_channel" >&2
-		exit 1
-	fi
 	normalize_version "$channel_version"
+}
+
+download_channel_marker() {
+	channel_url="$1"
+	channel_path="$2"
+	max_attempts=6
+	attempt=1
+	rm -f "$channel_path"
+
+	while [ "$attempt" -le "$max_attempts" ]; do
+		attempt_path="$channel_path.attempt.$attempt.$$"
+		header_path="$attempt_path.headers"
+		rm -f "$attempt_path" "$header_path"
+
+		if http_status=$(curl -sS -L \
+			--connect-timeout 5 \
+			--max-time 15 \
+			-D "$header_path" \
+			-o "$attempt_path" \
+			-w '%{http_code}' \
+			"$channel_url"); then
+			curl_status=0
+		else
+			curl_status=$?
+		fi
+
+		if [ "$curl_status" -eq 0 ]; then
+			case "$http_status" in
+				2??)
+					if channel_version=$(validate_channel_marker "$attempt_path"); then
+						printf '%s' "$channel_version" >"$attempt_path.validated"
+						rm -f "$attempt_path" "$header_path"
+						mv "$attempt_path.validated" "$channel_path"
+						return 0
+					fi
+					rm -f "$attempt_path" "$header_path" "$attempt_path.validated"
+					return 1
+					;;
+				408|429|5??) retry_channel_request=1 ;;
+				*) retry_channel_request=0 ;;
+			esac
+		else
+			case "$curl_status" in
+				5|6|7|18|28|35|52|55|56|92) retry_channel_request=1 ;;
+				*) retry_channel_request=0 ;;
+			esac
+		fi
+
+		if [ "$retry_channel_request" -ne 1 ] || [ "$attempt" -eq "$max_attempts" ]; then
+			rm -f "$attempt_path" "$header_path"
+			return 1
+		fi
+
+		retry_delay=$(channel_retry_delay "$header_path" "$attempt")
+		rm -f "$attempt_path" "$header_path"
+		sleep "$retry_delay"
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
+
+validate_channel_marker() {
+	marker_path="$1"
+	awk '
+		BEGIN { value = ""; valid = 1 }
+		{
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+			if ($0 == "") next
+			if (value != "") valid = 0
+			value = $0
+		}
+		END {
+			if (!valid || value !~ /^v?[0-9A-Za-z][0-9A-Za-z.-]*$/) exit 1
+			sub(/^v/, "", value)
+			print value
+		}
+	' "$marker_path"
+}
+
+channel_retry_delay() {
+	header_path="$1"
+	attempt="$2"
+	retry_after=$(awk '
+		/^[Rr][Ee][Tt][Rr][Yy]-[Aa][Ff][Tt][Ee][Rr]:[[:space:]]*[0-9]+[[:space:]]*\r?$/ {
+			gsub(/[^0-9]/, "", $0)
+			value = $0
+		}
+		END { if (value != "") print value }
+	' "$header_path" 2>/dev/null || true)
+	case "$retry_after" in
+		''|*[!0-9]*) retry_after="$attempt" ;;
+	esac
+	if [ "$retry_after" -gt 2 ]; then
+		retry_after=2
+	fi
+	printf '%s' "$retry_after"
 }
 
 normalize_version() {
