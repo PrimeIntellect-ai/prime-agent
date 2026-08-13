@@ -70,6 +70,21 @@ export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | null;
 
+/**
+ * Explicit context-pricing tier for `Model.cost.tiers`. A tier applies when
+ * (usage.input + usage.cacheRead + usage.cacheWrite) is STRICTLY greater
+ * than `contextThreshold`; the base rates on `Model.cost` are used
+ * otherwise. `calculateCost` picks the highest matching tier, so the array
+ * does not need to be pre-sorted. All rate fields are in $/million tokens.
+ */
+export interface CostTier {
+	contextThreshold: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
 export interface ProviderResponse {
 	status: number;
 	headers: Record<string, string>;
@@ -455,6 +470,22 @@ export interface Model<TApi extends Api> {
 		output: number; // $/million tokens
 		cacheRead: number; // $/million tokens
 		cacheWrite: number; // $/million tokens
+		/**
+		 * Optional explicit context-pricing tiers, in $/million tokens.
+		 * A tier applies when (usage.input + usage.cacheRead + usage.cacheWrite)
+		 * is STRICTLY greater than the tier's `contextThreshold`; otherwise
+		 * the base rates above are used. `calculateCost` picks the highest
+		 * matching tier, so this array does not need to be pre-sorted.
+		 */
+		tiers?: CostTier[];
+		/**
+		 * Optional per-service-tier cost multipliers. Multipliers are applied
+		 * AFTER the explicit rates (base or tier-resolved) and AFTER the
+		 * `cacheWrite` override; they scale input, output, cacheRead, and
+		 * cacheWrite uniformly. A missing or `null`/auto/default tier is a
+		 * no-op (multiplier 1).
+		 */
+		serviceTierMultipliers?: Partial<Record<Exclude<ServiceTier, null>, number>>;
 	};
 	contextWindow: number;
 	maxTokens: number;

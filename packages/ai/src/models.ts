@@ -1,5 +1,5 @@
 import { MODELS } from "./models.generated.js";
-import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.js";
+import type { Api, CostTier, KnownProvider, Model, ModelThinkingLevel, ServiceTier, Usage } from "./types.js";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
@@ -46,6 +46,35 @@ export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean 
 
 export interface CostOverrides {
 	cacheWrite?: number;
+	/**
+	 * Optional service-tier override (e.g. "priority", "flex") the caller
+	 * wants charged for this request. When set, `calculateCost` looks up the
+	 * corresponding multiplier in `Model.cost.serviceTierMultipliers` and
+	 * scales the resolved per-token rates uniformly (input, output,
+	 * cacheRead, cacheWrite). A missing or unknown tier is a no-op.
+	 */
+	serviceTier?: ServiceTier;
+}
+
+/**
+ * Pick the highest-threshold tier whose `contextThreshold` is STRICTLY less
+ * than `totalInputUsage`. `tiers` may be in any order; the highest matching
+ * tier wins. Returns `undefined` if no tier matches.
+ */
+function pickCostTier(
+	tiers: CostTier[] | undefined,
+	totalInputUsage: number,
+): CostTier | undefined {
+	if (!tiers || tiers.length === 0) return undefined;
+	let best: CostTier | undefined;
+	for (const tier of tiers) {
+		if (totalInputUsage > tier.contextThreshold) {
+			if (!best || tier.contextThreshold > best.contextThreshold) {
+				best = tier;
+			}
+		}
+	}
+	return best;
 }
 
 export function calculateCost<TApi extends Api>(
@@ -53,10 +82,36 @@ export function calculateCost<TApi extends Api>(
 	usage: Usage,
 	overrides?: CostOverrides,
 ): Usage["cost"] {
-	usage.cost.input = (model.cost.input / 1000000) * usage.input;
-	usage.cost.output = (model.cost.output / 1000000) * usage.output;
-	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
-	usage.cost.cacheWrite = ((overrides?.cacheWrite ?? model.cost.cacheWrite) / 1000000) * usage.cacheWrite;
+	// Tier selection uses total input-usage tokens (input + cacheRead + cacheWrite).
+	// A tier applies only when the total is STRICTLY greater than its threshold,
+	// so a value exactly equal to the threshold stays on the base rates.
+	const totalInputUsage = usage.input + usage.cacheRead + usage.cacheWrite;
+	const tier = pickCostTier(model.cost.tiers, totalInputUsage);
+	const inputRate = tier?.input ?? model.cost.input;
+	const outputRate = tier?.output ?? model.cost.output;
+	const cacheReadRate = tier?.cacheRead ?? model.cost.cacheRead;
+	// Preserve current cacheWrite override behavior: caller-supplied override
+	// wins over both the tier cacheWrite rate and the base model.cost.cacheWrite.
+	const cacheWriteRate = overrides?.cacheWrite ?? tier?.cacheWrite ?? model.cost.cacheWrite;
+
+	usage.cost.input = (inputRate / 1000000) * usage.input;
+	usage.cost.output = (outputRate / 1000000) * usage.output;
+	usage.cost.cacheRead = (cacheReadRate / 1000000) * usage.cacheRead;
+	usage.cost.cacheWrite = (cacheWriteRate / 1000000) * usage.cacheWrite;
+
+	// Apply model-declared service-tier multiplier AFTER explicit rates and
+	// the cacheWrite override. A missing/unknown tier is a no-op (1).
+	const multiplier =
+		overrides?.serviceTier !== undefined && overrides.serviceTier !== null
+			? (model.cost.serviceTierMultipliers?.[overrides.serviceTier] ?? 1)
+			: 1;
+	if (multiplier !== 1) {
+		usage.cost.input *= multiplier;
+		usage.cost.output *= multiplier;
+		usage.cost.cacheRead *= multiplier;
+		usage.cost.cacheWrite *= multiplier;
+	}
+
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
 }
