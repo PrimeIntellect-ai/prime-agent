@@ -291,7 +291,14 @@ background_send = asyncio.create_task(send_later())`,
 				receiver_role: "child",
 				receiver_name: "worker",
 			},
-			{ requestType: "agent_message.send", timeoutMs: 100, signal: controller.signal },
+			{
+				requestId: "test-agent-message-abort",
+				generation: 1,
+				requestType: "agent_message.send",
+				timeoutMs: 100,
+				signal: controller.signal,
+				isCurrent: () => !controller.signal.aborted,
+			},
 		);
 		await Promise.resolve();
 		controller.abort(new Error("host request timed out"));

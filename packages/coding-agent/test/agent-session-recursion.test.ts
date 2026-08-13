@@ -2906,7 +2906,14 @@ describe("AgentSession rlm recursion", () => {
 		const controller = new AbortController();
 		const request = handler(
 			{ type: "rlm.run", prompt: "work", kwargs: {} },
-			{ requestType: "rlm.run", timeoutMs: 100, signal: controller.signal },
+			{
+				requestId: "test-rlm-run-abort",
+				generation: 1,
+				requestType: "rlm.run",
+				timeoutMs: 100,
+				signal: controller.signal,
+				isCurrent: () => !controller.signal.aborted,
+			},
 		);
 		await Promise.resolve();
 		expect(receivedSignal).toBe(controller.signal);
