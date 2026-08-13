@@ -1276,10 +1276,31 @@ export function hyperlinkAtColumn(line: string, column: number): string | null {
 export function urlAtColumn(line: string, column: number): string | null {
 	const explicitUrl = hyperlinkAtColumn(line, column);
 	if (explicitUrl || column < 0) return explicitUrl;
+	for (const span of bareUrlSpans(framePlainText(line))) {
+		if (column >= span.start && column < span.end) return span.url;
+	}
+	return null;
+}
 
-	// Fullscreen normalizes tabs before painting, and strips ANSI without
-	// changing visible columns. Mirror that representation for bare URL spans.
-	const plainText = stripAnsi(line).replace(/\t/g, "   ");
+/**
+ * Fullscreen normalizes tabs before painting, and strips ANSI without changing
+ * visible columns. Mirror that representation for bare URL spans.
+ */
+function framePlainText(line: string): string {
+	return stripAnsi(line).replace(/\t/g, "   ");
+}
+
+interface BareUrlSpan {
+	url: string;
+	/** Visible column where the URL starts. */
+	start: number;
+	/** Visible column one past the URL's last cell. */
+	end: number;
+}
+
+/** Bare HTTP(S) URLs in already-normalized plain text, with visible column bounds. */
+function bareUrlSpans(plainText: string): BareUrlSpan[] {
+	const spans: BareUrlSpan[] = [];
 	const urlPattern = /https?:\/\/[^\s<>"'`]+/giu;
 	for (const match of plainText.matchAll(urlPattern)) {
 		let url = match[0].replace(/[.,;:!?]+$/u, "");
@@ -1293,8 +1314,64 @@ export function urlAtColumn(line: string, column: number): string | null {
 			}
 		}
 		const start = visibleWidth(plainText.slice(0, match.index));
-		const end = start + visibleWidth(url);
-		if (column >= start && column < end) return url;
+		spans.push({ url, start, end: start + visibleWidth(url) });
+	}
+	return spans;
+}
+
+/** Rows joined into one wrap group, capped so a run of full rows cannot run away. */
+const MAX_WRAPPED_URL_ROWS = 8;
+
+/**
+ * A row the terminal wrapped rather than one that ended on its own. A row that
+ * exactly fills the painted width has no room left for a break, so its text
+ * continues on the following row.
+ */
+function isWrappedRow(line: string | undefined, width: number): boolean {
+	if (line === undefined || width <= 0) return false;
+	return visibleWidth(framePlainText(line)) >= width;
+}
+
+/**
+ * Return the URL under a position in a painted frame, following a bare URL that
+ * the frame wrapped across consecutive rows.
+ *
+ * `urlAtColumn` sees one row at a time, so a wrapped bare URL resolved to
+ * whichever fragment landed on the clicked row: clicking the first row opened a
+ * silently truncated address, and clicking a continuation row did nothing. OSC 8
+ * targets are unaffected — the escape is re-emitted on each wrapped row — so they
+ * stay authoritative and are resolved first.
+ */
+export function urlAtFramePosition(
+	lines: readonly string[],
+	row: number,
+	column: number,
+	width: number,
+): string | null {
+	if (row < 0 || row >= lines.length || column < 0) return null;
+	const line = lines[row] ?? "";
+	const explicitUrl = hyperlinkAtColumn(line, column);
+	if (explicitUrl) return explicitUrl;
+
+	let start = row;
+	while (start > 0 && row - start < MAX_WRAPPED_URL_ROWS && isWrappedRow(lines[start - 1], width)) {
+		start--;
+	}
+	let end = row;
+	while (end + 1 < lines.length && end - start < MAX_WRAPPED_URL_ROWS && isWrappedRow(lines[end], width)) {
+		end++;
+	}
+	if (start === end) return urlAtColumn(line, column);
+
+	let joined = "";
+	let columnOffset = 0;
+	for (let index = start; index <= end; index++) {
+		if (index === row) columnOffset = visibleWidth(joined);
+		joined += framePlainText(lines[index] ?? "");
+	}
+	const absoluteColumn = columnOffset + column;
+	for (const span of bareUrlSpans(joined)) {
+		if (absoluteColumn >= span.start && absoluteColumn < span.end) return span.url;
 	}
 	return null;
 }

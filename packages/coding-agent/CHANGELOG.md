@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Fixed clicking a long URL that wrapped onto a second row opening a truncated address, which affected login and OAuth links most.
 
 ## [0.7.2] - 2026-08-11
 

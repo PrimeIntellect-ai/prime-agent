@@ -7,7 +7,7 @@
 
 import type { TableCellSelectionRegion } from "./selection-metadata.js";
 import { isImageLine } from "./terminal-image.js";
-import { sliceByColumn, stripAnsi, urlAtColumn, visibleWidth } from "./utils.js";
+import { sliceByColumn, stripAnsi, urlAtFramePosition, visibleWidth } from "./utils.js";
 
 export const FULLSCREEN_MIN_TRANSCRIPT_ROWS = 3;
 
@@ -633,9 +633,12 @@ export class FullscreenViewport {
 	hyperlinkAt(screenRow: number, screenCol: number): string | null {
 		if (screenRow < 0 || screenCol < 0 || this.lastFrameVisibleHeight === 0) return null;
 		if (screenRow >= this.lastFrameVisibleHeight) return null;
-		const line = this.lastFrame[this.lastFrameVisibleStart + screenRow];
+		const frameRow = this.lastFrameVisibleStart + screenRow;
+		const line = this.lastFrame[frameRow];
 		if (line === undefined || isImageLine(line)) return null;
-		return urlAtColumn(line, screenCol);
+		// prevWidth is the width the frame was painted at, which is what decides
+		// whether a row filled the terminal and therefore wrapped onto the next.
+		return urlAtFramePosition(this.lastFrame, frameRow, screenCol, this.prevWidth);
 	}
 
 	/** Row-diff a composed frame against the previous one with absolute addressing. */

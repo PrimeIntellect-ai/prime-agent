@@ -982,6 +982,73 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
+	it("clicking a bare URL the frame wrapped opens the whole target", async () => {
+		// A 40-column frame splits this login URL across two rows. Resolving one row
+		// at a time made the head row open a truncated address and the continuation
+		// row open nothing at all.
+		const full = "https://example.com/oauth/authorize?client_id=abcdefgh&state=xyz";
+		const transcript = lines(20);
+		transcript[12] = full.slice(0, 40);
+		transcript[13] = full.slice(40);
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		// Row 1 is the head of the wrapped URL, row 2 its continuation.
+		terminal.sendInput("\x1b[<0;6;1M");
+		terminal.sendInput("\x1b[<0;6;1m");
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;6;2M");
+		terminal.sendInput("\x1b[<0;6;2m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(opened, [full, full]);
+
+		tui.stop();
+	});
+
+	it("does not join a full-width row into unrelated following prose", async () => {
+		const transcript = lines(20);
+		// Fills the 40-column row but ends in a complete URL; the next row is prose.
+		transcript[12] = "see https://example.com/docs".padEnd(40, " ");
+		transcript[13] = "and then some following prose";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;6;1M");
+		terminal.sendInput("\x1b[<0;6;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
+
+		tui.stop();
+	});
+
+	it("keeps OSC 8 authoritative on a full-width row", async () => {
+		const transcript = lines(20);
+		const label = "label-".padEnd(40, "-");
+		transcript[12] = "\x1b]8;;https://example.com/target\x1b\\" + label + "\x1b]8;;\x1b\\";
+		transcript[13] = "https://example.com/other";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;3;1M");
+		terminal.sendInput("\x1b[<0;3;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(opened, ["https://example.com/target"]);
+
+		tui.stop();
+	});
+
 	it("clicking a hyperlink after a tab opens the painted target", async () => {
 		const transcript = lines(20);
 		transcript[12] = "\t\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\";
