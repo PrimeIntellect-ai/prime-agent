@@ -116,4 +116,36 @@ describe("getOpenRouterModels", () => {
 		expect(await getOpenRouterModels(fetchMock as typeof fetch, "vendor/live-new")).toEqual([model]);
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
+
+	test("requireId refetches when a concurrent general refresh lacks the id", async () => {
+		let resolveGate: (() => void) | undefined;
+		const gate = new Promise<void>((r) => {
+			resolveGate = r;
+		});
+		const fetchMock = vi
+			.fn(async () => okResponse("vendor/later") as Response)
+			.mockImplementationOnce(async () => {
+				await gate;
+				return okResponse() as Response;
+			});
+		const general = getOpenRouterModels(fetchMock as typeof fetch);
+		const restore = getOpenRouterModels(fetchMock as typeof fetch, "vendor/later");
+		resolveGate?.();
+		expect((await general)?.[0].id).toBe("vendor/live-new");
+		expect((await restore)?.[0].id).toBe("vendor/later");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
+	test("stops refetching for a requireId a fresh catalog did not contain", async () => {
+		vi.useFakeTimers();
+		const start = Date.now();
+		const fetchMock = vi.fn(async () => okResponse() as Response);
+		expect(await getOpenRouterModels(fetchMock as typeof fetch, "vendor/gone")).toEqual([model]);
+		expect(await getOpenRouterModels(fetchMock as typeof fetch, "vendor/gone")).toEqual([model]);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		vi.setSystemTime(start + 5 * 60_000 + 1);
+		expect(await getOpenRouterModels(fetchMock as typeof fetch, "vendor/gone")).toEqual([model]);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		vi.useRealTimers();
+	});
 });

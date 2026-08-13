@@ -426,6 +426,14 @@ function isOpenRouterVirtualAlias(id: string): boolean {
 	return id === "auto" || id.startsWith("openrouter/") || id.startsWith("~");
 }
 
+/**
+ * Merge the live OpenRouter catalog with the generated snapshot. The live
+ * catalog is authoritative for membership and capabilities; for ids the
+ * snapshot already knows, the snapshot's curated cost/limit metadata is
+ * deliberately kept, so pricing or limit changes on OpenRouter apply only
+ * once the snapshot is regenerated. Virtual aliases (auto, openrouter/*, ~*)
+ * exist only in the snapshot and are always preserved.
+ */
 function resolveOpenRouterCatalog(staticModels: Model<Api>[], live: Model<Api>[] | undefined): Model<Api>[] {
 	if (!live || live.length === 0) return staticModels;
 	const staticById = new Map(staticModels.map((m) => [m.id, m]));
