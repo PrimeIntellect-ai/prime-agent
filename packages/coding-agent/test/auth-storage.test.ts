@@ -551,7 +551,9 @@ describe("AuthStorage", () => {
 
 			const config = JSON.parse(readFileSync(primeConfigPath, "utf-8")) as Record<string, unknown>;
 			expect(config.api_key).toBe("new-prime-key");
-			expect(statSync(primeConfigPath).mode & 0o777).toBe(0o600);
+			if (process.platform !== "win32") {
+				expect(statSync(primeConfigPath).mode & 0o777).toBe(0o600);
+			}
 			expect(authStorage.has("prime-inference")).toBe(false);
 			await expect(authStorage.getApiKey("prime-inference")).resolves.toBe("new-prime-key");
 		});
