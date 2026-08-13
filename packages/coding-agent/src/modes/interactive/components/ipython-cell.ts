@@ -32,7 +32,6 @@ export interface IPythonCellState {
 	isPartial?: boolean;
 	isError?: boolean;
 	expanded?: boolean;
-	/** Agent-message expansion (app.messages.expand / ctrl+p) — independent of tool-output `expanded`. */
 	agentMessagesExpanded?: boolean;
 	showExpandHint?: boolean;
 	executionStarted?: boolean;
