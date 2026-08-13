@@ -183,6 +183,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows) |
+| `kernelExecuteTimeoutSeconds` | number | `0` | Interrupt a kernel cell after this many seconds. `0` leaves cells unbounded, which is the current behavior: a command blocked on stdin never returns and the session stalls with no error. |
 | `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
 | `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
 
