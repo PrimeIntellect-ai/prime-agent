@@ -37,7 +37,7 @@ vi.mock("../src/cli/daemon-ps.js", () => ({
 }));
 
 import { INTERNAL_RUNTIME_COMMAND_MARKER } from "../src/cli/args.js";
-import { formatTopLevelHelp } from "../src/cli/command-registry.js";
+import { formatTopLevelHelp, getChildCommandSpecs } from "../src/cli/command-registry.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "../src/cli/daemon-update-restart.js";
 import { handlePublicCommand } from "../src/cli/public-command.js";
 
@@ -295,6 +295,32 @@ describe("public command routing", () => {
 
 		expect(process.exitCode).toBe(1);
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: schedule nonsense"));
+	});
+
+	it("formats parser-exact MCP parent and child help and suggests misspelled child commands", async () => {
+		expect(getChildCommandSpecs(["mcp"]).map((spec) => ({ path: spec.path, usage: spec.usage }))).toEqual([
+			{ path: ["mcp", "list"], usage: "mcp list [--project]" },
+			{ path: ["mcp", "inspect"], usage: "mcp inspect <name> [--project]" },
+			{ path: ["mcp", "preview"], usage: "mcp preview <name> [--project]" },
+			{ path: ["mcp", "test"], usage: "mcp test <name> [--project]" },
+			{ path: ["mcp", "add"], usage: "mcp add <name> <url> [--project]" },
+			{ path: ["mcp", "enable"], usage: "mcp enable <name> [--project]" },
+			{ path: ["mcp", "disable"], usage: "mcp disable <name> [--project]" },
+			{ path: ["mcp", "remove"], usage: "mcp remove <name> [--project]" },
+		]);
+
+		await handlePublicCommand(["help", "mcp"]);
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("A test probe returns an offline preview."));
+		for (const command of ["list", "inspect", "preview", "test", "add", "enable", "disable", "remove"]) {
+			expect(console.log).toHaveBeenCalledWith(expect.stringContaining(`  ${command}`));
+		}
+
+		await handlePublicCommand(["mcp", "list", "--help"]);
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent mcp list [--project]"));
+
+		await handlePublicCommand(["help", "mcp", "lis"]);
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Did you mean "prime-agent help mcp list"?'));
 	});
 
 	it("shows command help when options precede the help flag", async () => {

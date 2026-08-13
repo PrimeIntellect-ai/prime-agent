@@ -11,6 +11,7 @@ import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/
 import type { AuthStorage } from "../auth-storage.js";
 import { contextAwareHostRequestHandler, createHostRequestHandler, type HostRequestHandlers } from "../kernel/index.js";
 import type { McpServerConfig } from "../settings-manager.js";
+import type { McpRuntimeDeclarationSnapshot } from "./mcp-runtime-declaration-snapshot.js";
 
 export interface McpManagerOptions {
 	authStorage: AuthStorage;
@@ -18,6 +19,8 @@ export interface McpManagerOptions {
 	getUserServers?: () => Record<string, McpServerConfig> | undefined;
 	/** Start an interactive host-side login for a server. Provided by the UI mode. */
 	beginLogin?: (server: string) => Promise<void>;
+	/** Immutable declaration-only snapshot; never becomes integration config. */
+	getRuntimeDeclarations?: () => McpRuntimeDeclarationSnapshot;
 }
 
 /** A resolved integration: a catalog/user entry plus its provider id. */
@@ -38,6 +41,7 @@ export class McpManager {
 	private readonly authStorage: AuthStorage;
 	private readonly getUserServers: () => Record<string, McpServerConfig> | undefined;
 	private readonly beginLogin?: (server: string) => Promise<void>;
+	private readonly getRuntimeDeclarations: () => McpRuntimeDeclarationSnapshot | undefined;
 	private integrations = new Map<string, ResolvedIntegration>();
 	/** Provider ids we registered for user servers, so refresh can drop removed ones. */
 	private registeredUserProviderIds = new Set<string>();
@@ -46,8 +50,17 @@ export class McpManager {
 		this.authStorage = options.authStorage;
 		this.getUserServers = options.getUserServers ?? (() => undefined);
 		this.beginLogin = options.beginLogin;
+		this.getRuntimeDeclarations = options.getRuntimeDeclarations ?? (() => undefined);
 		this.resolveIntegrations();
 		this.registerProviders();
+	}
+
+	/**
+	 * Narrow internal declaration consumer. This deliberately returns no raw
+	 * settings and is never consulted by OAuth, host handlers, or transports.
+	 */
+	getDeclarationSnapshot(): McpRuntimeDeclarationSnapshot | undefined {
+		return this.getRuntimeDeclarations();
 	}
 
 	/** Re-read settings and re-register providers; call after a session reload. */

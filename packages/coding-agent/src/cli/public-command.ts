@@ -1,5 +1,12 @@
 import chalk from "chalk";
 import { APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
+import { executeMcpDeclarationCommand, parseMcpDeclarationCommand } from "../core/mcp/mcp-declaration-command.js";
+import {
+	admitGlobalMcpProjectDeclarations,
+	McpProjectDeclarationReader,
+} from "../core/mcp/mcp-project-declaration-reader.js";
+import { releaseProjectMcpDeclarationAdmission } from "../core/mcp/mcp-project-trust.js";
+import { type Settings, SettingsManager } from "../core/settings-manager.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
 import {
@@ -140,9 +147,60 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 		case "config":
 			if (!requireArgumentCount(args.slice(1), 0, "config")) return HANDLED;
 			return continueWith(args);
+		case "mcp":
+			return runMcpDeclarationCommand(args.slice(1));
 		default:
 			return continueWith(args);
 	}
+}
+
+/**
+ * Sole public-command composition point for project MCP policy. It receives a
+ * SettingsManager already loaded by the CLI and reads only its global snapshot.
+ * A project settings value can never create a grant.
+ */
+export function composeMcpProjectDeclarationAdmission(
+	command: ReturnType<typeof parseMcpDeclarationCommand>,
+	globalSettings: Pick<Settings, "mcpProjectTrustPolicy">,
+	workingDirectory: string,
+) {
+	if (command.scope !== "project") return undefined;
+	// The only raw-path authorization. Downstream receives no path or authority
+	// policy, only the opaque admission returned by the shared global composer.
+	return admitGlobalMcpProjectDeclarations(globalSettings, workingDirectory);
+}
+
+async function runMcpDeclarationCommand(args: string[]): Promise<PublicCommandResult> {
+	const command = parseMcpDeclarationCommand(args);
+	const workingDirectory = process.cwd();
+	if (command.scope === "project") {
+		// This global-only read deliberately precedes SettingsManager.create(): a
+		// denied/missing/malformed policy must never open project settings.
+		const admission = composeMcpProjectDeclarationAdmission(
+			command,
+			SettingsManager.loadGlobalSettings(workingDirectory),
+			workingDirectory,
+		);
+		if (!admission) throw new Error("Project MCP declarations are unavailable.");
+		// Do not construct SettingsManager here: it eagerly reads project scope.
+		// This capability-scoped adapter validates around every declaration I/O.
+		try {
+			const reader = await McpProjectDeclarationReader.create(admission);
+			const settings = reader.asCommandSettings();
+			const result = await executeMcpDeclarationCommand(command, settings as SettingsManager, admission);
+			await settings.flush();
+			console.log(JSON.stringify(result, null, 2));
+			return HANDLED;
+		} finally {
+			releaseProjectMcpDeclarationAdmission(admission);
+		}
+	}
+	// User declarations retain the existing full settings behavior.
+	const settings = SettingsManager.create(workingDirectory);
+	const result = await executeMcpDeclarationCommand(command, settings);
+	await settings.flush();
+	console.log(JSON.stringify(result, null, 2));
+	return HANDLED;
 }
 
 function normalizeLeadingDaemonSocketOption(args: string[]): string[] {

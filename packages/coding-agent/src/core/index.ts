@@ -77,6 +77,21 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.js";
+export {
+	type CreateMcpRuntimeDeclarationSnapshotInput,
+	createMcpRuntimeDeclarationSnapshot,
+	type McpRuntimeDeclaration,
+	type McpRuntimeDeclarationSnapshot,
+	type McpRuntimeDeclarationSource,
+} from "./mcp/mcp-runtime-declaration-snapshot.js";
+export {
+	createMcpProjectTrustAuthority,
+	type McpProjectTrustAuthority,
+	type McpProjectTrustAuthorityInput,
+	type McpProjectTrustAuthorization,
+	type McpProjectTrustBinding,
+	type McpProjectTrustBindingValidation,
+} from "./mcp/project-trust-authority.js";
 export type { RefinementResult } from "./refinement/index.js";
 export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";

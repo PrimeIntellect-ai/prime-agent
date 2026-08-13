@@ -150,6 +150,53 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		usage: "config",
 		summary: "Configure package resources",
 	},
+	{
+		path: ["mcp"],
+		usage: "mcp <list|inspect|preview|test|add|enable|disable|remove> ... [--project]",
+		summary: "Manage declarative MCP endpoint records",
+		description:
+			"Commands only read or write credential-free declarations. They never start an MCP runtime or authentication flow. A test probe returns an offline preview.",
+	},
+	{
+		path: ["mcp", "list"],
+		usage: "mcp list [--project]",
+		summary: "List declared MCP endpoints",
+	},
+	{
+		path: ["mcp", "inspect"],
+		usage: "mcp inspect <name> [--project]",
+		summary: "Inspect an MCP endpoint declaration",
+	},
+	{
+		path: ["mcp", "preview"],
+		usage: "mcp preview <name> [--project]",
+		summary: "Preview an MCP endpoint declaration",
+	},
+	{
+		path: ["mcp", "test"],
+		usage: "mcp test <name> [--project]",
+		summary: "Preview the MCP initialization request",
+	},
+	{
+		path: ["mcp", "add"],
+		usage: "mcp add <name> <url> [--project]",
+		summary: "Add an MCP endpoint declaration",
+	},
+	{
+		path: ["mcp", "enable"],
+		usage: "mcp enable <name> [--project]",
+		summary: "Enable an MCP endpoint declaration",
+	},
+	{
+		path: ["mcp", "disable"],
+		usage: "mcp disable <name> [--project]",
+		summary: "Disable an MCP endpoint declaration",
+	},
+	{
+		path: ["mcp", "remove"],
+		usage: "mcp remove <name> [--project]",
+		summary: "Remove an MCP endpoint declaration",
+	},
 ];
 
 export const PUBLIC_COMMAND_NAMES = new Set(

@@ -5,6 +5,7 @@ import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oau
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
+import { createMcpRuntimeDeclarationSnapshot } from "../src/core/mcp/mcp-runtime-declaration-snapshot.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import type { McpServerConfig } from "../src/core/settings-manager.js";
 import { invokeHostRequestThroughKernelForTest as invokeHostRequestHandlerForTest } from "./host-request-context.js";
@@ -168,6 +169,20 @@ describe("McpManager", () => {
 		void manager;
 		// Built-in linear provider must be gone so we don't send the official token to the override URL.
 		expect(getOAuthProvider("mcp:linear")).toBeUndefined();
+	});
+
+	it("keeps declaration snapshots out of host handlers and legacy integrations", () => {
+		const snapshot = createMcpRuntimeDeclarationSnapshot({
+			userDocument: {
+				version: 1,
+				servers: { inert: { name: "inert", url: "https://declaration.example/mcp", enabled: true } },
+			},
+		});
+		const manager = new McpManager({ authStorage, getRuntimeDeclarations: () => snapshot });
+		expect(manager.getDeclarationSnapshot()).toBe(snapshot);
+		expect(manager.listStatus().map((status) => status.server)).not.toContain("inert");
+		expect(manager.hostHandlers()).not.toHaveProperty("mcp.declarations");
+		expect(manager.hostHandlers()).not.toHaveProperty("mcp.config.inert");
 	});
 
 	it("unregisters a user server's OAuth provider when it's removed on refresh()", () => {

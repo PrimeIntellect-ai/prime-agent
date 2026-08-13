@@ -12,6 +12,12 @@ import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
+import { composeMcpProjectDeclarationReader } from "./mcp/mcp-project-declaration-reader.js";
+import {
+	type ProjectMcpDeclarationAdmission,
+	validateProjectMcpDeclarationAdmission,
+} from "./mcp/mcp-project-trust.js";
+import { createMcpRuntimeDeclarationSnapshot } from "./mcp/mcp-runtime-declaration-snapshot.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
 import type { SubagentRuntimeHost } from "./rlm-runtime.js";
@@ -44,6 +50,8 @@ export interface CreateAgentSessionServicesOptions {
 	agentDir?: string;
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
+	/** Explicit opaque admission for an injected manager; absence is fail-closed. */
+	projectMcpAdmission?: ProjectMcpDeclarationAdmission;
 	modelRegistry?: ModelRegistry;
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
@@ -180,78 +188,110 @@ export async function createAgentSessionServices(
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
-	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
-
-	// MCP integrations: registers OAuth providers and gates the built-in
-	// integration skills by whether the user is logged in (enable-by-login).
-	const mcpManager = new McpManager({
-		authStorage,
-		getUserServers: () => settingsManager.getMcpServers(),
-	});
-	// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
-	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
-
-	const userExtensionFactories = options.resourceLoaderOptions?.extensionFactories ?? [];
-	// The built-in Herdr reporter defers to Herdr's own file-based integration
-	// when the loader actually loaded it; two reporters would race on the same
-	// pane. Deferral is late-bound to the loader's loaded paths (inline
-	// factories run after file extensions load), so a file that exists but is
-	// disabled or never discovered does not silence the built-in.
-	// noExtensions is a full opt-out: it disables the built-in reporter too,
-	// not just discovered extension files.
-	const skipHerdrReporter = options.noBuiltinHerdrReporter || options.resourceLoaderOptions?.noExtensions;
-	const builtinExtensionFactories = skipHerdrReporter
-		? []
-		: [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())];
-	const resourceLoader: DefaultResourceLoader = new DefaultResourceLoader({
-		...(options.resourceLoaderOptions ?? {}),
-		extensionFactories: [...builtinExtensionFactories, ...userExtensionFactories],
+	// Compose the global-only admission and scoped reader before SettingsManager
+	// can load project state. Injected managers remain project-inert unless the
+	// caller carries an explicit opaque admission.
+	const { projectMcpAdmission, projectReader, releaseProjectMcpAdmission } = await composeMcpProjectDeclarationReader({
 		cwd,
 		agentDir,
-		settingsManager,
-		extraBuiltinSkillOverrides: () => mcpManager.getDisabledBuiltinSkillOverrides(),
+		settingsManager: options.settingsManager,
+		projectMcpAdmission: options.projectMcpAdmission,
 	});
-	await resourceLoader.reload();
+	try {
+		const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+		const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 
-	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
-	if (
-		!options.telemetryDisabled &&
-		isTelemetryEnabled(settingsManager) &&
-		!settingsManager.getTelemetryNoticeShown()
-	) {
-		diagnostics.push({
-			type: "info",
-			message:
-				"Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
+		// A single declaration-only snapshot is captured before any legacy manager
+		// behavior. The scoped reader validates its opaque admission around every
+		// project filesystem operation.
+		const runtimeMcpDeclarations = createMcpRuntimeDeclarationSnapshot({
+			userDocument: settingsManager.getMcpDeclarationDocument("user"),
+			projectAdmission: projectMcpAdmission,
+			readProjectDocument: projectReader
+				? () => {
+						try {
+							return projectReader.getDocument();
+						} catch (error) {
+							// Root replacement/revocation during the scoped callback discards
+							// only the project contribution. Genuine still-authorized I/O or
+							// parse errors retain their normal failure behavior.
+							if (validateProjectMcpDeclarationAdmission(projectMcpAdmission).kind === "granted") throw error;
+							return undefined;
+						}
+					}
+				: undefined,
 		});
-		settingsManager.setTelemetryNoticeShown(true);
-	}
-	const extensionsResult = resourceLoader.getExtensions();
-	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
-		try {
-			modelRegistry.registerProvider(name, config);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			diagnostics.push({
-				type: "error",
-				message: `Extension "${extensionPath}" error: ${message}`,
-			});
-		}
-	}
-	extensionsResult.runtime.pendingProviderRegistrations = [];
-	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
+		const mcpManager = new McpManager({
+			authStorage,
+			getUserServers: () => settingsManager.getGlobalMcpServers(),
+			getRuntimeDeclarations: () => runtimeMcpDeclarations,
+		});
+		// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
+		modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
 
-	return {
-		cwd,
-		agentDir,
-		authStorage,
-		settingsManager,
-		modelRegistry,
-		resourceLoader,
-		mcpManager,
-		diagnostics,
-	};
+		const userExtensionFactories = options.resourceLoaderOptions?.extensionFactories ?? [];
+		// The built-in Herdr reporter defers to Herdr's own file-based integration
+		// when the loader actually loaded it; two reporters would race on the same
+		// pane. Deferral is late-bound to the loader's loaded paths (inline
+		// factories run after file extensions load), so a file that exists but is
+		// disabled or never discovered does not silence the built-in.
+		// noExtensions is a full opt-out: it disables the built-in reporter too,
+		// not just discovered extension files.
+		const skipHerdrReporter = options.noBuiltinHerdrReporter || options.resourceLoaderOptions?.noExtensions;
+		const builtinExtensionFactories = skipHerdrReporter
+			? []
+			: [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())];
+		const resourceLoader: DefaultResourceLoader = new DefaultResourceLoader({
+			...(options.resourceLoaderOptions ?? {}),
+			extensionFactories: [...builtinExtensionFactories, ...userExtensionFactories],
+			cwd,
+			agentDir,
+			settingsManager,
+			extraBuiltinSkillOverrides: () => mcpManager.getDisabledBuiltinSkillOverrides(),
+		});
+		await resourceLoader.reload();
+
+		const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+		if (
+			!options.telemetryDisabled &&
+			isTelemetryEnabled(settingsManager) &&
+			!settingsManager.getTelemetryNoticeShown()
+		) {
+			diagnostics.push({
+				type: "info",
+				message:
+					"Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
+			});
+			settingsManager.setTelemetryNoticeShown(true);
+		}
+		const extensionsResult = resourceLoader.getExtensions();
+		for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
+			try {
+				modelRegistry.registerProvider(name, config);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				diagnostics.push({
+					type: "error",
+					message: `Extension "${extensionPath}" error: ${message}`,
+				});
+			}
+		}
+		extensionsResult.runtime.pendingProviderRegistrations = [];
+		diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
+
+		return {
+			cwd,
+			agentDir,
+			authStorage,
+			settingsManager,
+			modelRegistry,
+			resourceLoader,
+			mcpManager,
+			diagnostics,
+		};
+	} finally {
+		releaseProjectMcpAdmission?.();
+	}
 }
 
 /**

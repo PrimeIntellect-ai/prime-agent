@@ -10,6 +10,12 @@ import type { AgentAutonomousConfig } from "./autonomous.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
+import { composeMcpProjectDeclarationReader } from "./mcp/mcp-project-declaration-reader.js";
+import {
+	type ProjectMcpDeclarationAdmission,
+	validateProjectMcpDeclarationAdmission,
+} from "./mcp/mcp-project-trust.js";
+import { createMcpRuntimeDeclarationSnapshot } from "./mcp/mcp-runtime-declaration-snapshot.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { findInitialModel } from "./model-resolver.js";
@@ -60,8 +66,13 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
 
-	/** MCP integration manager. When omitted, MCP host handlers are not wired. */
+	/**
+	 * MCP integration manager. When omitted, the SDK creates a global-only
+	 * manager; an explicitly supplied manager is left untouched.
+	 */
 	mcpManager?: McpManager;
+	/** Explicit opaque project declaration admission for an injected settings manager. */
+	projectMcpAdmission?: ProjectMcpDeclarationAdmission;
 
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
@@ -163,247 +174,290 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const authStorage = options.authStorage ?? AuthStorage.create(authPath);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
 
-	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	// An explicit manager is caller authority: do not compose an admission,
+	// construct a scoped reader, or capture declarations on its behalf.
+	const projectMcpComposition = options.mcpManager
+		? undefined
+		: await composeMcpProjectDeclarationReader({
+				cwd,
+				agentDir,
+				settingsManager: options.settingsManager,
+				projectMcpAdmission: options.projectMcpAdmission,
+			});
+	try {
+		const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+		const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
-	// Ensure MCP providers are registered and built-in MCP skills are gated by
-	// auth even on the bare SDK path (not just the CLI's createAgentSessionServices).
-	const mcpManager =
-		options.mcpManager ?? new McpManager({ authStorage, getUserServers: () => settingsManager.getMcpServers() });
-	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
+		// Default SDK managers only consume global legacy integrations and one
+		// immutable declaration snapshot. Explicit managers remain untouched.
+		const runtimeMcpDeclarations: ReturnType<typeof createMcpRuntimeDeclarationSnapshot> | undefined =
+			options.mcpManager
+				? undefined
+				: createMcpRuntimeDeclarationSnapshot({
+						userDocument: settingsManager.getMcpDeclarationDocument("user"),
+						projectAdmission: projectMcpComposition?.projectMcpAdmission,
+						readProjectDocument: projectMcpComposition?.projectReader
+							? () => {
+									try {
+										return projectMcpComposition.projectReader?.getDocument();
+									} catch (error) {
+										if (
+											validateProjectMcpDeclarationAdmission(projectMcpComposition.projectMcpAdmission)
+												.kind === "granted"
+										)
+											throw error;
+										return undefined;
+									}
+								}
+							: undefined,
+					});
+		const mcpManager =
+			options.mcpManager ??
+			new McpManager({
+				authStorage,
+				getUserServers: () => settingsManager.getGlobalMcpServers(),
+				getRuntimeDeclarations: () => runtimeMcpDeclarations!,
+			});
+		modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
 
-	if (!resourceLoader) {
-		resourceLoader = new DefaultResourceLoader({
-			cwd,
-			agentDir,
-			settingsManager,
-			extraBuiltinSkillOverrides: () => mcpManager.getDisabledBuiltinSkillOverrides(),
-		});
-		await resourceLoader.reload();
-		time("resourceLoader.reload");
-	}
-
-	// Check if session has existing data to restore
-	const existingSession = sessionManager.buildSessionContext();
-	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
-	const hasServiceTierEntry = sessionManager.getBranch().some((entry) => entry.type === "service_tier_change");
-
-	let model = options.model;
-	let modelFallbackMessage: string | undefined;
-
-	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
-			model = restoredModel;
+		if (!resourceLoader) {
+			resourceLoader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager,
+				extraBuiltinSkillOverrides: () => mcpManager.getDisabledBuiltinSkillOverrides(),
+			});
+			await resourceLoader.reload();
+			time("resourceLoader.reload");
 		}
+
+		// Check if session has existing data to restore
+		const existingSession = sessionManager.buildSessionContext();
+		const hasExistingSession = existingSession.messages.length > 0;
+		const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
+		const hasServiceTierEntry = sessionManager.getBranch().some((entry) => entry.type === "service_tier_change");
+
+		let model = options.model;
+		let modelFallbackMessage: string | undefined;
+
+		// If session has data, try to restore model from it
+		if (!model && hasExistingSession && existingSession.model) {
+			const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
+			if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
+				model = restoredModel;
+			}
+			if (!model) {
+				modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+			}
+		}
+
+		// If still no model, use findInitialModel (checks settings default, then provider defaults)
 		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+			const result = await findInitialModel({
+				scopedModels: [],
+				isContinuing: hasExistingSession,
+				defaultProvider: settingsManager.getDefaultProvider(),
+				defaultModelId: settingsManager.getDefaultModel(),
+				defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
+				modelRegistry,
+			});
+			model = result.model;
+			if (!model) {
+				modelFallbackMessage = formatNoModelsAvailableMessage();
+			} else if (modelFallbackMessage) {
+				modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+			}
 		}
-	}
 
-	// If still no model, use findInitialModel (checks settings default, then provider defaults)
-	if (!model) {
-		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: hasExistingSession,
-			defaultProvider: settingsManager.getDefaultProvider(),
-			defaultModelId: settingsManager.getDefaultModel(),
-			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
-			modelRegistry,
-		});
-		model = result.model;
+		let thinkingLevel = options.thinkingLevel;
+
+		// If session has data, restore thinking level from it
+		if (thinkingLevel === undefined && hasExistingSession) {
+			thinkingLevel = hasThinkingEntry
+				? (existingSession.thinkingLevel as ThinkingLevel)
+				: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
+		}
+
+		// Fall back to settings default
+		if (thinkingLevel === undefined) {
+			thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+		}
+
+		// Clamp to model capabilities
 		if (!model) {
-			modelFallbackMessage = formatNoModelsAvailableMessage();
-		} else if (modelFallbackMessage) {
-			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+			thinkingLevel = "off";
+		} else {
+			thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 		}
-	}
 
-	let thinkingLevel = options.thinkingLevel;
+		const serviceTierPreference =
+			options.serviceTier ??
+			(hasServiceTierEntry ? existingSession.serviceTier : settingsManager.getDefaultServiceTier());
+		const serviceTier =
+			serviceTierPreference === "priority" && (!model || !supportsFastMode(model))
+				? "default"
+				: serviceTierPreference;
 
-	// If session has data, restore thinking level from it
-	if (thinkingLevel === undefined && hasExistingSession) {
-		thinkingLevel = hasThinkingEntry
-			? (existingSession.thinkingLevel as ThinkingLevel)
-			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
-	}
+		const allowedToolNames =
+			options.allowedToolNames ?? options.tools ?? (options.noTools === "all" ? [] : undefined);
+		const includeGoals = options.includeGoals ?? (options.tools !== undefined || options.noTools !== "all");
+		const initialActiveToolNames: string[] =
+			options.initialActiveToolNames ?? (options.tools ? [...options.tools] : options.noTools ? [] : ["ipython"]);
 
-	// Fall back to settings default
-	if (thinkingLevel === undefined) {
-		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
-	}
+		let agent: Agent;
 
-	// Clamp to model capabilities
-	if (!model) {
-		thinkingLevel = "off";
-	} else {
-		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
-	}
-
-	const serviceTierPreference =
-		options.serviceTier ??
-		(hasServiceTierEntry ? existingSession.serviceTier : settingsManager.getDefaultServiceTier());
-	const serviceTier =
-		serviceTierPreference === "priority" && (!model || !supportsFastMode(model)) ? "default" : serviceTierPreference;
-
-	const allowedToolNames = options.allowedToolNames ?? options.tools ?? (options.noTools === "all" ? [] : undefined);
-	const includeGoals = options.includeGoals ?? (options.tools !== undefined || options.noTools !== "all");
-	const initialActiveToolNames: string[] =
-		options.initialActiveToolNames ?? (options.tools ? [...options.tools] : options.noTools ? [] : ["ipython"]);
-
-	let agent: Agent;
-
-	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
-	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-		const converted = convertToLlm(messages);
-		// Check setting dynamically so mid-session changes take effect
-		if (!settingsManager.getBlockImages()) {
-			return converted;
-		}
-		// Filter out ImageContent from all messages, replacing with text placeholder
-		return converted.map((msg) => {
-			if (msg.role === "user" || msg.role === "toolResult") {
-				const content = msg.content;
-				if (Array.isArray(content)) {
-					const hasImages = content.some((c) => c.type === "image");
-					if (hasImages) {
-						const filteredContent = content
-							.map((c) =>
-								c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
-							)
-							.filter(
-								(c, i, arr) =>
-									// Dedupe consecutive "Image reading is disabled." texts
-									!(
-										c.type === "text" &&
-										c.text === "Image reading is disabled." &&
-										i > 0 &&
-										arr[i - 1].type === "text" &&
-										(arr[i - 1] as { type: "text"; text: string }).text === "Image reading is disabled."
-									),
-							);
-						return { ...msg, content: filteredContent };
+		// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
+		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
+			const converted = convertToLlm(messages);
+			// Check setting dynamically so mid-session changes take effect
+			if (!settingsManager.getBlockImages()) {
+				return converted;
+			}
+			// Filter out ImageContent from all messages, replacing with text placeholder
+			return converted.map((msg) => {
+				if (msg.role === "user" || msg.role === "toolResult") {
+					const content = msg.content;
+					if (Array.isArray(content)) {
+						const hasImages = content.some((c) => c.type === "image");
+						if (hasImages) {
+							const filteredContent = content
+								.map((c) =>
+									c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
+								)
+								.filter(
+									(c, i, arr) =>
+										// Dedupe consecutive "Image reading is disabled." texts
+										!(
+											c.type === "text" &&
+											c.text === "Image reading is disabled." &&
+											i > 0 &&
+											arr[i - 1].type === "text" &&
+											(arr[i - 1] as { type: "text"; text: string }).text === "Image reading is disabled."
+										),
+								);
+							return { ...msg, content: filteredContent };
+						}
 					}
 				}
-			}
-			return msg;
+				return msg;
+			});
+		};
+
+		const extensionRunnerRef: { current?: ExtensionRunner } = {};
+
+		agent = new Agent({
+			initialState: {
+				systemPrompt: "",
+				model,
+				thinkingLevel,
+				serviceTier,
+				tools: [],
+			},
+			convertToLlm: convertToLlmWithBlockImages,
+			streamFn: async (model, context, options) => {
+				const auth = await modelRegistry.getApiKeyAndHeaders(model);
+				if (!auth.ok) {
+					throw new Error(auth.error);
+				}
+				const providerRetrySettings = settingsManager.getProviderRetrySettings();
+				return streamSimple(model, context, {
+					...options,
+					apiKey: auth.apiKey,
+					timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
+					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+					headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
+				});
+			},
+			onPayload: async (payload, _model) => {
+				const runner = extensionRunnerRef.current;
+				if (!runner?.hasHandlers("before_provider_request")) {
+					return payload;
+				}
+				return runner.emitBeforeProviderRequest(payload);
+			},
+			onResponse: async (response, _model) => {
+				const runner = extensionRunnerRef.current;
+				if (!runner?.hasHandlers("after_provider_response")) {
+					return;
+				}
+				await runner.emit({
+					type: "after_provider_response",
+					status: response.status,
+					headers: response.headers,
+				});
+			},
+			sessionId: sessionManager.getSessionId(),
+			transformContext: async (messages) => {
+				const runner = extensionRunnerRef.current;
+				if (!runner) return messages;
+				return runner.emitContext(messages);
+			},
+			steeringMode: settingsManager.getSteeringMode(),
+			followUpMode: settingsManager.getFollowUpMode(),
+			transport: settingsManager.getTransport(),
+			thinkingBudgets: settingsManager.getThinkingBudgets(),
+			maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 		});
-	};
 
-	const extensionRunnerRef: { current?: ExtensionRunner } = {};
-
-	agent = new Agent({
-		initialState: {
-			systemPrompt: "",
-			model,
-			thinkingLevel,
-			serviceTier,
-			tools: [],
-		},
-		convertToLlm: convertToLlmWithBlockImages,
-		streamFn: async (model, context, options) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				throw new Error(auth.error);
+		// Restore messages if session has existing data
+		if (hasExistingSession) {
+			agent.state.messages = existingSession.messages;
+			if (!hasThinkingEntry) {
+				sessionManager.appendThinkingLevelChange(thinkingLevel);
 			}
-			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			return streamSimple(model, context, {
-				...options,
-				apiKey: auth.apiKey,
-				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
-				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
-			});
-		},
-		onPayload: async (payload, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("before_provider_request")) {
-				return payload;
+		} else {
+			// Save initial configuration for new sessions so it can be restored on resume.
+			if (model) {
+				sessionManager.appendModelChange(model.provider, model.id);
 			}
-			return runner.emitBeforeProviderRequest(payload);
-		},
-		onResponse: async (response, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("after_provider_response")) {
-				return;
-			}
-			await runner.emit({
-				type: "after_provider_response",
-				status: response.status,
-				headers: response.headers,
-			});
-		},
-		sessionId: sessionManager.getSessionId(),
-		transformContext: async (messages) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner) return messages;
-			return runner.emitContext(messages);
-		},
-		steeringMode: settingsManager.getSteeringMode(),
-		followUpMode: settingsManager.getFollowUpMode(),
-		transport: settingsManager.getTransport(),
-		thinkingBudgets: settingsManager.getThinkingBudgets(),
-		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
-	});
-
-	// Restore messages if session has existing data
-	if (hasExistingSession) {
-		agent.state.messages = existingSession.messages;
-		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}
-	} else {
-		// Save initial configuration for new sessions so it can be restored on resume.
-		if (model) {
-			sessionManager.appendModelChange(model.provider, model.id);
+		if (!hasServiceTierEntry) {
+			sessionManager.appendServiceTierChange(serviceTierPreference);
 		}
-		sessionManager.appendThinkingLevelChange(thinkingLevel);
-	}
-	if (!hasServiceTierEntry) {
-		sessionManager.appendServiceTierChange(serviceTierPreference);
-	}
 
-	const session = new AgentSession({
-		agent,
-		sessionManager,
-		settingsManager,
-		serviceTierPreference,
-		cwd,
-		// Only the explicit dir — the default may not match injected custom storage.
-		agentDir: options.agentDir,
-		scopedModels: options.scopedModels,
-		resourceLoader,
-		customTools: options.customTools,
-		modelRegistry,
-		mcpManager,
-		initialActiveToolNames,
-		allowedToolNames,
-		includeGoals,
-		includeCompactSkill: options.includeCompactSkill,
-		rlmHeartbeatController: options.rlmHeartbeatController,
-		agentMessageController: options.agentMessageController,
-		agentObserveController: options.agentObserveController,
-		extensionRunnerRef,
-		rlmDepth: options.rlmDepth,
-		rlmMaxDepth: options.rlmMaxDepth,
-		rlmSessionDir: options.rlmSessionDir,
-		rlmParentNodeId: options.rlmParentNodeId,
-		rlmParentAgent: options.rlmParentAgent,
-		subagentRuntimeHost: options.subagentRuntimeHost,
-		sessionStartEvent: options.sessionStartEvent,
-		prewarmIpythonKernel: options.prewarmIpythonKernel,
-		autonomous: options.autonomous,
-		serializedRefine: options.serializedRefine,
-		initialGoal: options.initialGoal,
-	});
-	const extensionsResult = resourceLoader.getExtensions();
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			serviceTierPreference,
+			cwd,
+			// Only the explicit dir — the default may not match injected custom storage.
+			agentDir: options.agentDir,
+			scopedModels: options.scopedModels,
+			resourceLoader,
+			customTools: options.customTools,
+			modelRegistry,
+			mcpManager,
+			initialActiveToolNames,
+			allowedToolNames,
+			includeGoals,
+			includeCompactSkill: options.includeCompactSkill,
+			rlmHeartbeatController: options.rlmHeartbeatController,
+			agentMessageController: options.agentMessageController,
+			agentObserveController: options.agentObserveController,
+			extensionRunnerRef,
+			rlmDepth: options.rlmDepth,
+			rlmMaxDepth: options.rlmMaxDepth,
+			rlmSessionDir: options.rlmSessionDir,
+			rlmParentNodeId: options.rlmParentNodeId,
+			rlmParentAgent: options.rlmParentAgent,
+			subagentRuntimeHost: options.subagentRuntimeHost,
+			sessionStartEvent: options.sessionStartEvent,
+			prewarmIpythonKernel: options.prewarmIpythonKernel,
+			autonomous: options.autonomous,
+			serializedRefine: options.serializedRefine,
+			initialGoal: options.initialGoal,
+		});
+		const extensionsResult = resourceLoader.getExtensions();
 
-	return {
-		session,
-		extensionsResult,
-		modelFallbackMessage,
-	};
+		return {
+			session,
+			extensionsResult,
+			modelFallbackMessage,
+		};
+	} finally {
+		projectMcpComposition?.releaseProjectMcpAdmission?.();
+	}
 }
