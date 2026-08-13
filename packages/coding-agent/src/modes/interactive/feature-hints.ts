@@ -72,7 +72,7 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 	},
 	{
 		id: "trace-sharing",
-		getText: () => "Share traces with /traces on to train open-source LLMs that use RLM harnesses.",
+		getText: () => "Share traces with Prime Intellect using /traces on to train open-source LLMs.",
 	},
 	{
 		id: "persistent-ipython",
