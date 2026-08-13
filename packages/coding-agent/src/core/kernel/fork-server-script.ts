@@ -13,12 +13,19 @@
 //   <- { "id": <n>, "pid": <pid> }                     fork succeeded
 //   <- { "id": <n>, "error": "<message>" }             fork failed
 export const FORK_SERVER_SCRIPT = String.raw`
+import atexit
 import gc
 import json
 import os
 import signal
 import socket
 import sys
+
+
+# PIDs of kernels this forkserver has forked and not yet reaped. The forkserver kills
+# them on its own teardown (see _kill_forked): a forked kernel runs IPKernelApp, which
+# does not reliably tie its own lifetime to a parent, so the forkserver must reap them.
+_forked_pids = set()
 
 
 def _reap_children(*_args):
@@ -30,8 +37,27 @@ def _reap_children(*_args):
             pid, _status = os.waitpid(-1, os.WNOHANG)
             if pid == 0:
                 break
+            _forked_pids.discard(pid)
     except ChildProcessError:
         pass
+
+
+def _kill_forked(*_args):
+    # SIGKILL every kernel we forked and have not reaped. Runs when the forkserver is
+    # torn down, so no kernel is left to reparent to init/systemd and leak its memory:
+    #   - Node dies (SIGKILL/crash/terminal close): the control socket EOFs, the accept
+    #     loop returns, and this runs via atexit.
+    #   - Node's dispose() sends SIGTERM: this runs via the _terminate handler below.
+    for pid in list(_forked_pids):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _terminate(*_args):
+    _kill_forked()
+    os._exit(0)
 
 
 def _import_template():
@@ -54,9 +80,14 @@ def _run_child(connection_path, cwd, env):
     # We are the forked child; become the ipykernel server on the given connection.
     from ipykernel.kernelapp import IPKernelApp
 
-    # Drop the inherited SIGCHLD reaper so it can't interfere with ipykernel's own
-    # child/signal handling.
+    # Shed the forkserver's signal handling and child-tracking state we inherited: this
+    # process is becoming a kernel, not a forkserver, and ipykernel installs its own
+    # handlers from here.
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    _forked_pids.clear()
 
     # cwd/env are per-kernel and applied here (not at template import), so all
     # kernels can share one warm template regardless of their working dir / env.
@@ -72,6 +103,11 @@ def _run_child(connection_path, cwd, env):
     # a Session inherited from the template silently drops messages via check_pid).
     IPKernelApp.clear_instance()
     app = IPKernelApp.instance(connection_file=connection_path)
+    # Backstop for the rare case where the forkserver itself is SIGKILLed (so it cannot
+    # run _kill_forked): ipykernel's ParentPollerUnix makes the kernel exit when its
+    # parent goes away. getppid() is the forkserver and is never 1 here, which the
+    # poller requires. The forkserver's own reaping remains the primary, race-free path.
+    app.parent_handle = os.getppid()
     # initialize() binds the 5 ZMQ ports, writes the resolved ports back into
     # connection.json, and starts the heartbeat thread + ioloop — all post-fork,
     # so no thread/loop/socket is ever inherited across the fork boundary.
@@ -86,6 +122,14 @@ def _serve(control_path):
 
     # Reap forked kernels as they exit, independent of the request loop.
     signal.signal(signal.SIGCHLD, _reap_children)
+    # Kill any kernels we forked before this forkserver exits, so they cannot outlive
+    # their session as orphans: _terminate covers Node's dispose() SIGTERM (a signal
+    # bypasses atexit), atexit covers the accept loop returning on control-socket EOF
+    # when Node dies uncleanly.
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGINT, _terminate)
+    signal.signal(signal.SIGHUP, _terminate)
+    atexit.register(_kill_forked)
 
     _import_template()
     # Freeze the heap so the cyclic GC doesn't write to (and thus COW-copy) the
@@ -139,6 +183,7 @@ def _serve(control_path):
             os._exit(0)
 
         # Parent: stay pristine (no loop/threads/ZMQ ever) so the next fork is clean.
+        _forked_pids.add(pid)
         f.write(json.dumps({"id": req_id, "pid": pid}).encode() + b"\n")
         f.flush()
 
