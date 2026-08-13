@@ -155,6 +155,51 @@ describe("WorkflowPanelComponent", () => {
 		}
 	});
 
+	it("falls back to Back when a selected live action disappears", () => {
+		vi.useFakeTimers();
+		try {
+			const done = vi.fn();
+			const running = { ...data, status: "running" as const, actions: ["Stop", "Save to project", "Back"] };
+			const completed = { ...data, status: "completed" as const, actions: ["Save to project", "Back"] };
+			const component = new WorkflowPanelComponent(
+				{ requestRender: vi.fn() } as never,
+				theme,
+				running,
+				done,
+				() => completed,
+			);
+			component.handleInput("\t");
+			component.handleInput("\t");
+			vi.advanceTimersByTime(250);
+			component.handleInput("\r");
+			expect(done).toHaveBeenCalledWith({ action: "Back" });
+			component.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("ticks live duration rendering while persisted progress is quiet", () => {
+		vi.useFakeTimers();
+		try {
+			const requestRender = vi.fn();
+			const component = new WorkflowPanelComponent(
+				{ requestRender } as never,
+				theme,
+				{ ...data, status: "running" },
+				vi.fn(),
+				() => undefined,
+			);
+			vi.advanceTimersByTime(999);
+			expect(requestRender).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1);
+			expect(requestRender).toHaveBeenCalledOnce();
+			component.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("selects panel actions without hardcoded action keys", () => {
 		const done = vi.fn();
 		const component = new WorkflowPanelComponent({ requestRender: vi.fn() } as never, theme, data, done);

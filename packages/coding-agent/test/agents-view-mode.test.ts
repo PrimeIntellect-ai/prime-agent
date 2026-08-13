@@ -308,7 +308,7 @@ describe("AgentsViewMode", () => {
 		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(
 			expect.anything(),
 			opened.activeSessionId,
-			expect.objectContaining({ telemetryDisabled: true }),
+			expect.objectContaining({ telemetryDisabled: true, supportsWorkflowPanel: true }),
 		);
 		runView.mockRestore();
 	});

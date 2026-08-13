@@ -712,9 +712,10 @@ async function showWorkflowRun(
 		if (run.status === "pending" || run.status === "running") panelActions.push("Stop");
 		if (run.status === "stopped") panelActions.push("Resume / restart");
 		panelActions.push("Save to project", "Save to personal", "↻ Refresh", "Back");
-		const selected = context.ui.supportsWorkflowPanel
-			? await context.ui.workflowPanel?.(toWorkflowPanelData(run, panelActions, agentDir))
-			: await context.ui.select(`${run.workflowName} · ${run.status}`, actions);
+		const selected =
+			context.ui.supportsWorkflowPanel && context.ui.workflowPanel
+				? await context.ui.workflowPanel(toWorkflowPanelData(run, panelActions, agentDir))
+				: await context.ui.select(`${run.workflowName} · ${run.status}`, actions);
 		if (!selected || selected === "Back") return;
 		if (selected === "↻ Refresh") continue;
 		if (selected === "Overview") {

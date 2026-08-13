@@ -31,10 +31,17 @@ export class WorkflowPanelComponent {
 		refresh?: () => ExtensionWorkflowPanelData | undefined,
 	) {
 		if (refresh) {
+			let lastClockRender = Date.now();
 			this.refreshTimer = setInterval(() => {
 				try {
 					const updated = refresh();
-					if (updated) this.updateData(updated);
+					if (updated) {
+						this.updateData(updated);
+						lastClockRender = Date.now();
+					} else if (hasRunningWork(this.data) && Date.now() - lastClockRender >= 1000) {
+						lastClockRender = Date.now();
+						this.invalidate();
+					}
 				} catch {
 					// A transient persistence read must not escape the UI timer.
 				}
@@ -137,7 +144,8 @@ export class WorkflowPanelComponent {
 		const agentIndex = selectedAgentId === undefined ? -1 : agents.findIndex((agent) => agent.id === selectedAgentId);
 		this.agentIndex = agentIndex >= 0 ? agentIndex : boundedIndex(this.agentIndex, agents.length);
 		const actionIndex = selectedAction ? updated.actions.indexOf(selectedAction) : -1;
-		this.actionIndex = actionIndex >= 0 ? actionIndex : boundedIndex(this.actionIndex, updated.actions.length);
+		const safeActionIndex = updated.actions.indexOf("Back");
+		this.actionIndex = actionIndex >= 0 ? actionIndex : Math.max(0, safeActionIndex);
 		this.invalidate();
 	}
 
@@ -261,6 +269,14 @@ export class WorkflowPanelComponent {
 		});
 		return truncateToWidth(` Actions  ${actions.join(" · ")}`, width);
 	}
+}
+
+function hasRunningWork(data: ExtensionWorkflowPanelData): boolean {
+	return (
+		data.status === "pending" ||
+		data.status === "running" ||
+		data.phases.some((phase) => phase.agents.some((agent) => agent.status === "running"))
+	);
 }
 
 function getTerminalRows(tui: TUI): number {

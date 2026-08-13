@@ -469,6 +469,7 @@ return await parallel([lambda: agent(args["a"]), lambda: agent("B"), lambda: age
 			"Back",
 			"Close",
 		]);
+		Object.defineProperty(viewer.context.ui, "supportsWorkflowPanel", { value: true });
 		await harness.command("workflows").handler("", viewer.context);
 		expect(
 			viewer.editors.some((entry) => entry.title.includes("Workflow") && entry.content?.includes("Usage:")),
