@@ -54,7 +54,9 @@ function isCatalogRecoveryAuthority(value: unknown): value is CatalogRecoveryAut
 		typeof authority.sessionFile !== "string" ||
 		authority.sessionFile.length === 0 ||
 		(typeof authority.headEntryId !== "string" && authority.headEntryId !== null) ||
+		(typeof authority.headEntryId === "string" && authority.headEntryId.length === 0) ||
 		(typeof authority.assistantEntryId !== "string" && authority.assistantEntryId !== null) ||
+		(typeof authority.assistantEntryId === "string" && authority.assistantEntryId.length === 0) ||
 		typeof authority.lineageDigest !== "string" ||
 		!/^[0-9a-f]{64}$/i.test(authority.lineageDigest) ||
 		!Array.isArray(authority.toolCalls)
@@ -513,7 +515,7 @@ export class DaemonCatalogClient {
 	}
 
 	markInterrupted(authority: CatalogRecoveryAuthority, operations: string[]): Promise<CatalogRecoveryResult> {
-		return this.request({
+		return this.request<CatalogRecoveryResult>({
 			type: "request",
 			id: randomUUID(),
 			command: "mark_interrupted",

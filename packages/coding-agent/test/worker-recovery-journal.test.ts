@@ -309,7 +309,7 @@ describe("WorkerRecoveryJournal", () => {
 		expect(journal.complete("active-1", first.operationId)).toBe(true);
 	});
 
-	it("refuses to complete legacy v1 busy records, unknown sessions, and empty journals", () => {
+	it("refuses v2 completion for legacy records and guardedly acknowledges legacy stale", () => {
 		const path = createPath();
 		const journal = new WorkerRecoveryJournal(path);
 		journal.record({
@@ -325,6 +325,13 @@ describe("WorkerRecoveryJournal", () => {
 		expect(journal.complete("legacy-1", "any-operation-id")).toBe(false);
 		expect(journal.complete("unknown-session", "any-operation-id")).toBe(false);
 		expect(journal.complete("legacy-1", "")).toBe(false);
+		expect(journal.completeLegacy("legacy-1")).toBe(true);
+		expect(WorkerRecoveryJournal.readLatest(path)[0]).toMatchObject({
+			version: 1,
+			busy: false,
+			operation: "legacy_recovery_stale",
+		});
+		expect(journal.completeLegacy("legacy-1")).toBe(false);
 	});
 
 	it("does not fall back to an older busy v2 authority after a torn checkpoint", () => {

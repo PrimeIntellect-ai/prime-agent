@@ -409,6 +409,29 @@ export class WorkerRecoveryJournal {
 		});
 	}
 
+	/**
+	 * Acknowledge one legacy busy record without granting it transcript mutation
+	 * authority. The journal-local guard prevents a stale supervisor from
+	 * overwriting a concurrently written v2 checkpoint for the same session.
+	 */
+	completeLegacy(activeSessionId: string): boolean {
+		return withJournalGuard(this.path, () => {
+			this.refreshLatest();
+			const latest = this.latest.get(activeSessionId);
+			if (!latest || latest.version !== 1 || !latest.busy) return false;
+			const completed: WorkerRecoveryRecordV1 = {
+				...latest,
+				busy: false,
+				operation: "legacy_recovery_stale",
+				recordedAt: new Date().toISOString(),
+			};
+			this.append(completed);
+			this.latest.set(activeSessionId, completed);
+			this.compactIfAllIdle();
+			return true;
+		});
+	}
+
 	getLatest(): WorkerRecoveryRecord[] {
 		return [...this.latest.values()];
 	}

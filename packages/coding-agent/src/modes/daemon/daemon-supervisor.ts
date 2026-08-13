@@ -2921,12 +2921,19 @@ export class DaemonSupervisor {
 		const uncertain = journal.getLatest().filter((record) => record.busy);
 		if (uncertain.length === 0) return;
 
-		const authorized = uncertain.filter(isV2WorkerRecoveryRecord);
+		const supervisorAgentDir = this.defaultSessionConfig?.agentDir;
+		const authorized = uncertain.filter(isV2WorkerRecoveryRecord).filter((record) => {
+			if (!supervisorAgentDir || resolve(record.agentDir) === resolve(supervisorAgentDir)) return true;
+			this.log(`Worker recovery ${record.operationId} is stale: agentDir namespace mismatch`);
+			journal.complete(record.activeSessionId, record.operationId);
+			return false;
+		});
 		for (const legacy of uncertain.filter((record) => !isV2WorkerRecoveryRecord(record))) {
 			// Legacy checkpoints lack exact turn, lineage, lease namespace, and
-			// operation authority. Leave them untouched so no stale supervisor can
-			// hide a newer checkpoint with an unsafe legacy idle write.
+			// operation authority. A guarded legacy-only acknowledgement avoids
+			// retrying forever without ever granting transcript mutation authority.
 			this.log(`Skipped stale legacy worker recovery authority for ${legacy.activeSessionId}; transcript unchanged`);
+			journal.completeLegacy(legacy.activeSessionId);
 		}
 		await this.assertRecoveryAllowed();
 		const recoveryOutcomes = await Promise.allSettled(

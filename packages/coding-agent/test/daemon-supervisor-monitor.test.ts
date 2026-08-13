@@ -3278,6 +3278,30 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("worker recovery rejects a journaled lease namespace different from the supervisor", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-agent-dir-"));
+		const journalPath = join(root, "worker.recovery.jsonl");
+		const journal = new WorkerRecoveryJournal(journalPath);
+		journal.record(
+			recoveryRecord("/stale/agent-dir", "root-active", "root-session", "/tmp/root.jsonl", "model_stream"),
+		);
+		const markInterrupted = vi.fn();
+		const supervisor = Object.assign(recoverySupervisor(markInterrupted), {
+			defaultSessionConfig: { agentDir: root },
+		});
+		try {
+			await supervisor.recoverUncertainWorkerOperations(recoveryWorker(root, journalPath), false);
+			expect(markInterrupted).not.toHaveBeenCalled();
+			expect(WorkerRecoveryJournal.readLatest(journalPath)[0]).toMatchObject({
+				version: 2,
+				busy: false,
+				operation: "recovery_complete",
+			});
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("worker recovery CAS cannot clear a newer resumed busy epoch", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-cas-"));
 		const journalPath = join(root, "worker.recovery.jsonl");
@@ -3304,7 +3328,7 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("worker recovery leaves legacy v1 busy records stale without transcript mutation", async () => {
+	it("worker recovery acknowledges legacy v1 busy records stale without transcript mutation", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-legacy-"));
 		const journalPath = join(root, "worker.recovery.jsonl");
 		const journal = new WorkerRecoveryJournal(journalPath);
@@ -3322,7 +3346,11 @@ describe("daemon worker supervisor monitoring", () => {
 				false,
 			);
 			expect(markInterrupted).not.toHaveBeenCalled();
-			expect(WorkerRecoveryJournal.readLatest(journalPath)[0]).toMatchObject({ version: 1, busy: true });
+			expect(WorkerRecoveryJournal.readLatest(journalPath)[0]).toMatchObject({
+				version: 1,
+				busy: false,
+				operation: "legacy_recovery_stale",
+			});
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

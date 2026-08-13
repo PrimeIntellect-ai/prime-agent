@@ -230,6 +230,16 @@ describe("daemon catalog mark_interrupted", () => {
 		expect(recoveryMarkers(sessionFile)).toHaveLength(1);
 	});
 
+	it("rejects empty entry ids at the IPC authority boundary", async () => {
+		const { authority } = createCatalogFixtureSession();
+		await expect(markSessionInterrupted({ ...authority, headEntryId: "" }, ["tool_execution"])).rejects.toThrow(
+			"Invalid exact worker recovery authority",
+		);
+		await expect(markSessionInterrupted({ ...authority, assistantEntryId: "" }, ["tool_execution"])).rejects.toThrow(
+			"Invalid exact worker recovery authority",
+		);
+	});
+
 	it("returns stale without writes after the session advances or generation changes", async () => {
 		for (const mismatch of ["advance", "generation"] as const) {
 			const { sessionFile, authority, session } = createCatalogFixtureSession();
