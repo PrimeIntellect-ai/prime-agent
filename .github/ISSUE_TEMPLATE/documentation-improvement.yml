@@ -7,20 +7,6 @@ body:
     attributes:
       value: |
         Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use GitHub Discussions instead.
-  - type: dropdown
-    id: package
-    attributes:
-      label: Package
-      multiple: true
-      description: Which package(s) docs are affected? Select all that apply. A maintainer will apply the matching `pkg:*` labels.
-      options:
-        - agent
-        - ai
-        - coding-agent
-        - tui
-        - Not sure / general
-    validations:
-      required: true
   - type: textarea
     id: summary
     attributes:
