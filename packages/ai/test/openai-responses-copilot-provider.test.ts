@@ -91,6 +91,88 @@ describe("openai-responses provider defaults", () => {
 		});
 	});
 
+	it("omits unsupported service tier for GitHub Copilot", async () => {
+		const model = getModel("github-copilot", "gpt-5.6-sol");
+		let capturedPayload: unknown;
+		const sse = `data: ${JSON.stringify({
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: {
+					input_tokens: 1000000,
+					output_tokens: 1000000,
+					total_tokens: 2000000,
+					input_tokens_details: { cached_tokens: 0 },
+				},
+			},
+		})}\n\n`;
+
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+
+		const stream = streamOpenAIResponses(
+			model,
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{
+				apiKey: "test-token",
+				serviceTier: "priority",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			},
+		);
+
+		const result = await stream.result();
+
+		expect(capturedPayload).toMatchObject({ model: "gpt-5.6-sol" });
+		expect(capturedPayload).not.toHaveProperty("service_tier");
+		expect(result.usage.cost.input).toBe(model.cost.input);
+		expect(result.usage.cost.output).toBe(model.cost.output);
+	});
+
+	it("preserves supported service tier for OpenAI", async () => {
+		const model = getModel("openai", "gpt-5.5");
+		let capturedPayload: unknown;
+
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+
+		const stream = streamOpenAIResponses(
+			model,
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{
+				apiKey: "test-token",
+				serviceTier: "priority",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			},
+		);
+
+		for await (const event of stream) {
+			if (event.type === "done" || event.type === "error") break;
+		}
+
+		expect(capturedPayload).toMatchObject({
+			model: "gpt-5.5",
+			service_tier: "priority",
+		});
+	});
+
 	it.each(["gpt-5.1", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"] as const)(
 		"sends none reasoning effort for OpenAI %s when no reasoning is requested",
 		async (modelId) => {

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed GitHub Copilot OpenAI Responses requests failing when the agent forwarded its unsupported default service tier.
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07

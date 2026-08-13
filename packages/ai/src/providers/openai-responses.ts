@@ -98,8 +98,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+			const serviceTier = model.provider === "github-copilot" ? undefined : options?.serviceTier;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
-			let params = buildParams(model, context, options);
+			let params = buildParams(model, context, options, serviceTier);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
@@ -115,7 +116,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
-				serviceTier: options?.serviceTier,
+				serviceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});
 
@@ -222,7 +223,12 @@ function createClient(
 	});
 }
 
-function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
+function buildParams(
+	model: Model<"openai-responses">,
+	context: Context,
+	options: OpenAIResponsesOptions | undefined,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+) {
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
@@ -244,8 +250,8 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.temperature = options?.temperature;
 	}
 
-	if (options?.serviceTier !== undefined) {
-		params.service_tier = options.serviceTier;
+	if (serviceTier !== undefined) {
+		params.service_tier = serviceTier;
 	}
 
 	if (context.tools && context.tools.length > 0) {
