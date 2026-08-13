@@ -1,6 +1,6 @@
 import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type * as PiAi from "@earendil-works/pi-ai";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
@@ -217,10 +217,15 @@ describe("harness refinement", () => {
 		const statePath = saveHarnessState(harnessStateDir, state);
 
 		expect(loadHarnessState(harnessStateDir).entries.memory.memory_entry).toBeDefined();
-		expect(readdirSync(harnessStateDir)).toEqual([statePath.split("/").at(-1)]);
-		chmodSync(statePath, 0o600);
-		saveHarnessState(harnessStateDir, state);
-		expect(statSync(statePath).mode & 0o777).toBe(0o600);
+		expect(readdirSync(harnessStateDir)).toEqual([basename(statePath)]);
+		// Windows chmod only toggles the read-only bit, so a POSIX mode never
+		// survives the round trip there and the preservation this asserts is
+		// meaningless. saveHarnessState still runs on both platforms above.
+		if (process.platform !== "win32") {
+			chmodSync(statePath, 0o600);
+			saveHarnessState(harnessStateDir, state);
+			expect(statSync(statePath).mode & 0o777).toBe(0o600);
+		}
 	});
 
 	it("applies create, update, and delete for every editable harness kind", () => {
