@@ -60,8 +60,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-export const DAEMON_SCHEMA_REVISION = 16;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-16-1bcb9e7f1a49";
+// Revision 17 adds the negotiated workflow_panel_ui extension UI capability.
+export const DAEMON_SCHEMA_REVISION = 17;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-1bcb9e7f1a49";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -77,6 +78,7 @@ export type DaemonClientCapability =
 	| "attach_snapshot"
 	| "event_sequence"
 	| "extension_ui"
+	| "workflow_panel_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
 	| "client_owned_sessions";
@@ -123,6 +125,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"attach_snapshot",
 	"event_sequence",
 	"extension_ui",
+	"workflow_panel_ui",
 	"slim_attach",
 	"chunked_snapshot",
 	"client_owned_sessions",
@@ -788,7 +791,13 @@ export type DaemonClosingReason = "shutdown" | "update";
 export type DaemonExtensionUIResponse = { value: string } | { confirmed: boolean } | { cancelled: true };
 
 export function isDaemonDialogExtensionUiRequest(method: string): boolean {
-	return method === "select" || method === "confirm" || method === "input" || method === "editor";
+	return (
+		method === "select" ||
+		method === "workflowPanel" ||
+		method === "confirm" ||
+		method === "input" ||
+		method === "editor"
+	);
 }
 
 /**

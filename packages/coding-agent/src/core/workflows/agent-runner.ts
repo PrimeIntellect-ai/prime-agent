@@ -47,7 +47,7 @@ export class WorkflowSubagentRunner implements WorkflowAgentRunner {
 		const capture: OutputCapture = { called: false };
 		const schema = normalizeSchema(options.schema);
 		const outputTool = schema ? createWorkflowOutputTool(schema, capture) : undefined;
-		const { model, thinkingLevel } = this.resolveModel(options.model, options.effort);
+		const { model, thinkingLevel } = await this.resolveModel(options.model, options.effort);
 		const execution = {
 			...(model ? { model: `${model.provider}/${model.id}` } : {}),
 			...(thinkingLevel ? { effort: thinkingLevel } : {}),
@@ -149,25 +149,28 @@ export class WorkflowSubagentRunner implements WorkflowAgentRunner {
 		return this.resourceLoaderPromise;
 	}
 
-	private resolveModel(
+	private async resolveModel(
 		spec: string | undefined,
 		effort: ThinkingLevel | undefined,
-	): {
+	): Promise<{
 		model: CreateAgentSessionOptions["model"];
 		thinkingLevel: ThinkingLevel | undefined;
-	} {
+	}> {
 		if (!spec) return { model: this.options.model, thinkingLevel: effort ?? this.options.thinkingLevel };
+		const registry = this.options.modelRegistry;
+		const isSubscription = (candidate: NonNullable<CreateAgentSessionOptions["model"]>) =>
+			registry?.isUsingOAuth(candidate) === true;
 		if (!spec.includes("/")) {
-			const shorthand = this.options.modelRegistry
-				?.getAvailable()
-				.filter((candidate) => candidate.id === spec || candidate.name.toLowerCase() === spec.toLowerCase());
-			if (shorthand?.length === 1) {
-				return { model: shorthand[0], thinkingLevel: effort ?? this.options.thinkingLevel };
+			const available = (await registry?.getExecutableModels()) ?? [];
+			const shorthand = available.filter((candidate) => modelMatches(candidate.id, candidate.name, spec));
+			const selected = selectAvailableModel(shorthand, this.options.model?.provider, isSubscription);
+			if (selected) {
+				return { model: selected, thinkingLevel: effort ?? this.options.thinkingLevel };
 			}
 			throw new Error(
-				shorthand && shorthand.length > 1
-					? `workflow model "${spec}" is ambiguous; use provider/model`
-					: `workflow model "${spec}" is not available`,
+				shorthand.length > 1
+					? `workflow model "${spec}" is ambiguous across available subscription models; use provider/model`
+					: `workflow model "${spec}" is not available from the configured subscriptions`,
 			);
 		}
 		const slash = spec.indexOf("/");
@@ -180,15 +183,60 @@ export class WorkflowSubagentRunner implements WorkflowAgentRunner {
 		const maybeThinking = colon >= 0 ? modelAndThinking.slice(colon + 1) : undefined;
 		const hasThinking = maybeThinking !== undefined && THINKING_LEVELS.has(maybeThinking as ThinkingLevel);
 		const modelId = hasThinking ? modelAndThinking.slice(0, colon) : modelAndThinking;
-		const model = this.options.modelRegistry
-			?.getAvailable()
-			.find((candidate) => candidate.provider === provider && candidate.id === modelId);
-		if (!model) throw new Error(`workflow model "${provider}/${modelId}" is not available`);
+		const available = (await registry?.getExecutableModels()) ?? [];
+		const exact = available.find((candidate) => candidate.provider === provider && candidate.id === modelId);
+		const subscriptionFallback = selectAvailableModel(
+			available.filter(
+				(candidate) => isSubscription(candidate) && modelMatches(candidate.id, candidate.name, modelId),
+			),
+			this.options.model?.provider,
+			isSubscription,
+		);
+		const model = exact ?? subscriptionFallback;
+		if (!model)
+			throw new Error(`workflow model "${provider}/${modelId}" is not available from configured subscriptions`);
 		return {
 			model,
 			thinkingLevel: effort ?? (hasThinking ? (maybeThinking as ThinkingLevel) : this.options.thinkingLevel),
 		};
 	}
+}
+
+function modelMatches(id: string, name: string, requested: string): boolean {
+	const normalizedRequest = normalizeModelSelector(requested);
+	return [id, name].some((value) => {
+		const normalizedValue = normalizeModelSelector(value);
+		return normalizedValue === normalizedRequest || sortedTokens(normalizedValue) === sortedTokens(normalizedRequest);
+	});
+}
+
+function normalizeModelSelector(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/([a-z])([0-9])/g, "$1 $2")
+		.replace(/([0-9])([a-z])/g, "$1 $2")
+		.replace(/[^a-z0-9]+/g, " ")
+		.trim()
+		.replace(/\s+/g, " ");
+}
+
+function sortedTokens(value: string): string {
+	return value.split(" ").filter(Boolean).sort().join(" ");
+}
+
+function selectAvailableModel<T extends { provider: string }>(
+	matches: T[],
+	parentProvider: string | undefined,
+	isSubscription: (candidate: T) => boolean,
+): T | undefined {
+	if (matches.length === 1) return matches[0];
+	const subscriptions = matches.filter(isSubscription);
+	if (subscriptions.length === 1) return subscriptions[0];
+	if (parentProvider) {
+		const inherited = matches.filter((candidate) => candidate.provider === parentProvider);
+		if (inherited.length === 1) return inherited[0];
+	}
+	return undefined;
 }
 
 function createWorkflowOutputTool(schema: TSchema, capture: OutputCapture): ToolDefinition<TSchema> {

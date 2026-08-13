@@ -953,6 +953,7 @@ async function createDaemonClientConnection(options: {
 	clientOwned?: boolean;
 	noSession?: boolean;
 	supportsExtensionUi?: boolean;
+	supportsWorkflowPanel?: boolean;
 }): Promise<{ connection: DaemonAgentConnection; summary: SessionSummary }> {
 	// Caller must have awaited ensureInteractiveDaemonRunning for this socket.
 	const client = new DaemonClient(options.socketPath);
@@ -965,6 +966,7 @@ async function createDaemonClientConnection(options: {
 				sendClientEnv: true,
 				ownedSession: options.clientOwned,
 				supportsExtensionUi: options.supportsExtensionUi,
+				supportsWorkflowPanel: options.supportsWorkflowPanel,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
 				telemetryDisabled: options.config.telemetryDisabled,
 			});
@@ -1457,6 +1459,7 @@ export async function main(args: string[], options?: MainOptions) {
 			clientOwned: parsed.noSession,
 			noSession: parsed.noSession,
 			supportsExtensionUi: true,
+			supportsWorkflowPanel: true,
 		});
 		const agentConnection: AgentConnection = connection;
 		const attachModelFallbackMessage = isFreshDefaultSession

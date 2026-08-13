@@ -27,6 +27,7 @@ import {
 	type WorkflowAgentProgress,
 	type WorkflowRunRecord,
 } from "./storage.js";
+import { toWorkflowPanelData } from "./view-model.js";
 
 const WorkflowInput = Type.Object(
 	{
@@ -177,6 +178,8 @@ export function createWorkflowExtension(options: WorkflowExtensionOptions = {}):
 					script: resolved.script,
 					args: input.args,
 					sessionId,
+					phases: parsed.meta.phases?.map((phase) => phase.title),
+					progress: { agents: [] },
 					metadata: {
 						source: resolved.source,
 						...(input.resumeFromRunId ? { resumedFrom: input.resumeFromRunId } : {}),
@@ -191,15 +194,15 @@ export function createWorkflowExtension(options: WorkflowExtensionOptions = {}):
 				const removeExternalAbortListener = forwardAbort(input.externalSignal, controller);
 				let latestRecord = record;
 				const liveLogs: string[] = [];
-				const livePhases: string[] = [];
+				const livePhases: string[] = parsed.meta.phases?.map((phase) => phase.title) ?? [];
 				const liveAgents = new Map<number, WorkflowAgentProgress>();
 				let currentPhase: string | undefined;
 				let progressEvents = 0;
-				const persistProgress = (message: string, force = false) => {
-					progressEvents++;
-					if (!force && progressEvents % 10 !== 0) {
-						input.onProgress?.(message, latestRecord);
-						return;
+				let progressFlushTimer: ReturnType<typeof setTimeout> | undefined;
+				const flushProgress = (message: string) => {
+					if (progressFlushTimer) {
+						clearTimeout(progressFlushTimer);
+						progressFlushTimer = undefined;
 					}
 					latestRecord = updateWorkflowRun(
 						context.cwd,
@@ -217,6 +220,24 @@ export function createWorkflowExtension(options: WorkflowExtensionOptions = {}):
 					);
 					input.onProgress?.(message, latestRecord);
 				};
+				const persistProgress = (message: string, force = false) => {
+					progressEvents++;
+					if (force || progressEvents % 10 === 0) {
+						flushProgress(message);
+						return;
+					}
+					input.onProgress?.(message, latestRecord);
+					if (progressFlushTimer) return;
+					progressFlushTimer = setTimeout(() => {
+						try {
+							flushProgress(message);
+						} catch (error) {
+							controller.abort(error);
+						}
+					}, 200);
+					progressFlushTimer.unref?.();
+				};
+
 				const promise = runWorkflow(resolved.script, {
 					runner: runnerFor(context),
 					cwd: context.cwd,
@@ -323,6 +344,7 @@ export function createWorkflowExtension(options: WorkflowExtensionOptions = {}):
 						throw error;
 					})
 					.finally(() => {
+						if (progressFlushTimer) clearTimeout(progressFlushTimer);
 						removeExternalAbortListener?.();
 						activeRuns.delete(record.taskId);
 						renderActiveWorkflowWidget(context, activeRuns);
@@ -386,6 +408,7 @@ export function createWorkflowExtension(options: WorkflowExtensionOptions = {}):
 				"Keep phase titles identical in metadata, standalone phase() statements, and agent phase options; phase() is not a context manager.",
 				"Use the smallest useful orchestration and honor an explicitly requested size. Unique independent units may fan out; dependencies run in explicit phases; duplicate generalists require an intentional verification role.",
 				"Use schema-validated structured agent outputs at coordination boundaries and deduplicate discovered work and evidence before further fan-out or synthesis.",
+				"Honor a human-requested model through each applicable agent model option; model names are resolved against configured subscription models.",
 				"Treat agent, parallel, and pipeline results as nullable. Preserve failures and mark affected output partial or unverified instead of interpreting None as negative evidence.",
 				"Do not request isolation or named agent types. Parallel writes need non-overlapping ownership; otherwise serialize mutation and verify afterward.",
 				"The body must call agent and return JSON-serializable consolidated data. Launch immediately, then wait for workflow-complete before using results.",
@@ -685,7 +708,13 @@ async function showWorkflowRun(
 		if (run.status === "pending" || run.status === "running") actions.push("Stop");
 		if (run.status === "stopped") actions.push("Resume / restart");
 		actions.push("Save to project", "Save to personal", "↻ Refresh", "Back");
-		const selected = await context.ui.select(`${run.workflowName} · ${run.status}`, actions);
+		const panelActions = ["Inspect source"];
+		if (run.status === "pending" || run.status === "running") panelActions.push("Stop");
+		if (run.status === "stopped") panelActions.push("Resume / restart");
+		panelActions.push("Save to project", "Save to personal", "↻ Refresh", "Back");
+		const selected = context.ui.supportsWorkflowPanel
+			? await context.ui.workflowPanel?.(toWorkflowPanelData(run, panelActions, agentDir))
+			: await context.ui.select(`${run.workflowName} · ${run.status}`, actions);
 		if (!selected || selected === "Back") return;
 		if (selected === "↻ Refresh") continue;
 		if (selected === "Overview") {
@@ -755,6 +784,7 @@ Authoring rules:
 - This is sandboxed Python, not JavaScript. The coordinator cannot import modules, read files, run shell commands, access the network, use print, use f-strings, or perform the task itself. Agents do all external work.
 - Available coordinator APIs are await agent(...), await parallel([...zero-argument thunks...]), await pipeline(items, *stages), phase(...), log(...), args, cwd, and budget. agent accepts only label=, phase=, schema=, model=, effort=, and timeout_ms=. cwd is an informational string variable; never pass cwd=. Do not use isolation= or agent_type=.
 - Use small JSON schemas with explicit type, properties, required, and additionalProperties=False for agent results consumed by coordinator code. Give each agent a bounded prompt, exact scope, explicit phase, and stable label.
+- If the human requests a model, pass their model name in model= on every applicable agent. Prime resolves it against models available from configured subscriptions; do not silently substitute the session model.
 - Results from agent, parallel, and pipeline may be None after failure or stop. Check before indexing or concatenating. Missing evidence is unverified/partial, never a negative finding.
 - Discover once and deduplicate work before fan-out. Deduplicate findings by stable evidence identity. Parallel edits need non-overlapping file ownership; otherwise serialize mutation through one owner and verify afterward.
 - Return a compact JSON-serializable dictionary such as {"status": ..., "summary": ..., "results": ..., "unverified": ..., "failures": ..., "counts": ...}. The workflow body must call agent().

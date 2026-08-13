@@ -8,6 +8,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
+	ExtensionWorkflowPanelData,
 	InputEvent,
 	InputEventResult,
 } from "../src/core/extensions/types.js";
@@ -123,9 +124,10 @@ async function startAdmittedTurn(
 	await harness.agentStart(context);
 }
 
-function createContext(cwd: string, sessionId = "session-test", selections: string[] = []) {
+function createContext(cwd: string, sessionId = "session-test", selections: string[] = [], panelResponses?: string[]) {
 	const notifications: Array<{ message: string; type?: string }> = [];
 	const editors: Array<{ title: string; content?: string }> = [];
+	const workflowPanels: ExtensionWorkflowPanelData[] = [];
 	const context = {
 		cwd,
 		sessionManager: { getSessionId: () => sessionId },
@@ -134,6 +136,15 @@ function createContext(cwd: string, sessionId = "session-test", selections: stri
 		signal: undefined,
 		hasUI: true,
 		ui: {
+			...(panelResponses ? { supportsWorkflowPanel: true } : {}),
+			...(panelResponses
+				? {
+						workflowPanel: vi.fn(async (panel: ExtensionWorkflowPanelData) => {
+							workflowPanels.push(panel);
+							return panelResponses.shift();
+						}),
+					}
+				: {}),
 			confirm: vi.fn(async () => true),
 			select: vi.fn(async (_title: string, options: string[]) => {
 				const next = selections.shift();
@@ -150,7 +161,7 @@ function createContext(cwd: string, sessionId = "session-test", selections: stri
 			},
 		},
 	} as unknown as ExtensionCommandContext;
-	return { context, notifications, editors };
+	return { context, notifications, editors, workflowPanels };
 }
 
 function makeTemp(): string {
@@ -471,6 +482,78 @@ return await parallel([lambda: agent(args["a"]), lambda: agent("B"), lambda: age
 					entry.content.includes("Prompt:"),
 			),
 		).toBe(true);
+	});
+
+	it("flushes live sub-threshold progress while an agent is still running", async () => {
+		const cwd = makeTemp();
+		const harness = createHarness();
+		let finish: ((value: { result: string }) => void) | undefined;
+		const runner: WorkflowAgentRunner = {
+			run: vi.fn(
+				() =>
+					new Promise<{ result: string }>((resolve) => {
+						finish = resolve;
+					}),
+			),
+		};
+		createWorkflowExtension({ runnerFactory: () => runner, agentDir: cwd })(harness.api);
+		const { context } = createContext(cwd);
+		const admission = await harness.input(
+			{ type: "input", text: "make a workflow to inspect", source: "interactive" },
+			context,
+		);
+		await startAdmittedTurn(harness, admission, context);
+		await harness
+			.tool()
+			.execute("live-progress", { script, args: { prompt: "wait" } }, undefined, undefined, context);
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		const running = listWorkflowRuns(cwd, cwd)[0];
+		expect(running).toMatchObject({
+			status: "running",
+			phases: ["Audit"],
+			progress: { agents: [expect.objectContaining({ label: "auditor", status: "running" })] },
+		});
+		finish?.({ result: "done" });
+		await waitForSessionWorkflows("session-test");
+		await harness.agentEnd(context);
+	});
+
+	it("uses the transported workflow panel for phase and agent inspection", async () => {
+		const cwd = makeTemp();
+		const harness = createHarness();
+		createWorkflowExtension({ runnerFactory: () => createRunner(), agentDir: cwd })(harness.api);
+		const first = createContext(cwd);
+		const admission = await harness.input(
+			{ type: "input", text: "make a workflow to inspect", source: "interactive" },
+			first.context,
+		);
+		await startAdmittedTurn(harness, admission, first.context);
+		await harness
+			.tool()
+			.execute("call-panel", { script, args: { prompt: "viewer" } }, undefined, undefined, first.context);
+		await waitForSessionWorkflows("session-test");
+		await harness.agentEnd(first.context);
+		const viewer = createContext(
+			cwd,
+			"session-test",
+			["prefix:✓ audit · completed", "Close"],
+			["Inspect source", "Back"],
+		);
+
+		await harness.command("workflows").handler("", viewer.context);
+
+		expect(viewer.workflowPanels).toHaveLength(2);
+		expect(viewer.workflowPanels[0]).toMatchObject({
+			workflowName: "audit",
+			status: "completed",
+			phases: [
+				{
+					title: "Audit",
+					agents: [expect.objectContaining({ label: "auditor", status: "completed", totalTokens: 4 })],
+				},
+			],
+		});
+		expect(viewer.editors.some((entry) => entry.title.includes("source") && entry.content === script)).toBe(true);
 	});
 
 	it("returns a launch-shaped syntax error and ignores tool-level display metadata", async () => {

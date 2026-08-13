@@ -106,6 +106,10 @@ Direct `scriptPath` files must remain inside the session working directory, use 
 
 ## Progress and control
 
+Bare `/workflows` opens the interactive workflow inspector. Select a run to see its planned phases and agents side by side, then open an agent for its model, effort, prompt, duration, token/cost usage, result, or error. The inspector retains the transport-compatible selector fallback when the connected client does not advertise the workflow panel capability.
+
+Natural model requests such as `4.1 GPT` are resolved only against models available from configured providers and subscriptions. When one matching subscription model is available, workflow agents use it instead of silently inheriting the session model; use `provider/model` when multiple matches remain ambiguous.
+
 ```text
 /workflows list
 /workflows status <run-id>

@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CreateAgentSessionOptions } from "../src/core/sdk.js";
 
@@ -55,7 +55,7 @@ function createRunner() {
 		cwd: process.cwd(),
 		agentDir: process.cwd(),
 		modelRegistry: {
-			getAvailable: () => [],
+			getExecutableModels: async () => [],
 		} as unknown as NonNullable<CreateAgentSessionOptions["modelRegistry"]>,
 	});
 }
@@ -106,6 +106,41 @@ describe("WorkflowSubagentRunner", () => {
 		).rejects.toThrow("without calling workflow_output");
 	});
 
+	it("resolves natural model names from configured subscription models", async () => {
+		installSession();
+		const subscriptionModel = getModel("github-copilot", "gpt-4.1");
+		const apiModel = getModel("openai", "gpt-4.1");
+		expect(subscriptionModel).toBeDefined();
+		expect(apiModel).toBeDefined();
+		const runner = new WorkflowSubagentRunner({
+			cwd: process.cwd(),
+			agentDir: process.cwd(),
+			modelRegistry: {
+				getExecutableModels: async () => [subscriptionModel, apiModel].filter((model) => model !== undefined),
+				isUsingOAuth: (model: { provider: string }) => model.provider === "github-copilot",
+			} as unknown as NonNullable<CreateAgentSessionOptions["modelRegistry"]>,
+		});
+
+		const result = await runner.run("inspect", { label: "inspection", model: "4.1 GPT" });
+		expect(result.model).toBe("github-copilot/gpt-4.1");
+		const options = sessionFactory.mock.calls[0]?.[0] as CreateAgentSessionOptions;
+		expect(options.model).toMatchObject({ provider: "github-copilot", id: "gpt-4.1" });
+
+		const subscriptionOnlyRunner = new WorkflowSubagentRunner({
+			cwd: process.cwd(),
+			agentDir: process.cwd(),
+			modelRegistry: {
+				getExecutableModels: async () => [subscriptionModel].filter((model) => model !== undefined),
+				isUsingOAuth: (model: { provider: string }) => model.provider === "github-copilot",
+			} as unknown as NonNullable<CreateAgentSessionOptions["modelRegistry"]>,
+		});
+		const explicitFallback = await subscriptionOnlyRunner.run("inspect", {
+			label: "explicit inspection",
+			model: "openai/gpt-4.1",
+		});
+		expect(explicitFallback.model).toBe("github-copilot/gpt-4.1");
+	});
+
 	it("rejects unavailable model selectors before creating a session", async () => {
 		installSession();
 		await expect(createRunner().run("inspect", { label: "inspection", model: "missing/model" })).rejects.toThrow(
@@ -133,7 +168,7 @@ describe("WorkflowSubagentRunner", () => {
 			agentDir: process.cwd(),
 			thinkingLevel: "medium",
 			activeToolNames: [],
-			modelRegistry: { getAvailable: () => [] } as unknown as NonNullable<
+			modelRegistry: { getExecutableModels: async () => [] } as unknown as NonNullable<
 				CreateAgentSessionOptions["modelRegistry"]
 			>,
 		});

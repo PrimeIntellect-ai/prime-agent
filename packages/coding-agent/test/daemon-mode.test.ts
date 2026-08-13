@@ -4049,6 +4049,9 @@ describe("daemon mode helpers", () => {
 
 		expect(shouldSendDaemonOutboundToClient(lineClient, dialogRequest)).toBe(false);
 		expect(shouldSendDaemonOutboundToClient(uiClient, dialogRequest)).toBe(true);
+		expect(shouldSendDaemonOutboundToClient(uiClient, { ...dialogRequest, method: "workflowPanel" })).toBe(false);
+		uiClient.capabilities.add("workflow_panel_ui");
+		expect(shouldSendDaemonOutboundToClient(uiClient, { ...dialogRequest, method: "workflowPanel" })).toBe(true);
 		expect(
 			shouldSendDaemonOutboundToClient(lineClient, {
 				...dialogRequest,
@@ -4059,6 +4062,9 @@ describe("daemon mode helpers", () => {
 		setDaemonClientSessionCapabilities(uiClient, "active", new Set(["extension_ui"]));
 		setDaemonClientSessionCapabilities(uiClient, "other", new Set());
 		expect(shouldSendDaemonOutboundToClient(uiClient, dialogRequest)).toBe(true);
+		expect(shouldSendDaemonOutboundToClient(uiClient, { ...dialogRequest, method: "workflowPanel" })).toBe(false);
+		setDaemonClientSessionCapabilities(uiClient, "active", new Set(["extension_ui", "workflow_panel_ui"]));
+		expect(shouldSendDaemonOutboundToClient(uiClient, { ...dialogRequest, method: "workflowPanel" })).toBe(true);
 		expect(
 			shouldSendDaemonOutboundToClient(uiClient, {
 				...dialogRequest,

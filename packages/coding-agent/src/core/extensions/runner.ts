@@ -189,6 +189,7 @@ export async function emitSessionShutdownEvent(
 
 const noOpUIContext: ExtensionUIContext = {
 	select: async () => undefined,
+	workflowPanel: async () => undefined,
 	confirm: async () => false,
 	input: async () => undefined,
 	notify: () => {},

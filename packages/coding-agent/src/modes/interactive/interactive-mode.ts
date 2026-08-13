@@ -92,6 +92,7 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
+	ExtensionWorkflowPanelData,
 } from "../../core/extensions/index.js";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
@@ -130,6 +131,8 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
+import { loadWorkflowRun } from "../../core/workflows/storage.js";
+import { toWorkflowPanelData } from "../../core/workflows/view-model.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -224,6 +227,7 @@ import {
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
+import { WorkflowPanelComponent } from "./components/workflow-panel.js";
 import { styleWorkflowUiKeywords } from "./components/workflow-rainbow.js";
 import { FeatureHintDeck } from "./feature-hints.js";
 import { scopeHeartbeatsToSession } from "./heartbeat-scope.js";
@@ -656,6 +660,99 @@ function getPayloadStringArray(payload: Record<string, unknown>, key: string): s
 	return Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : undefined;
 }
 
+function workflowPanelActions(status: ExtensionWorkflowPanelData["status"]): string[] {
+	const actions = ["Inspect source"];
+	if (status === "pending" || status === "running") actions.push("Stop");
+	if (status === "stopped") actions.push("Resume / restart");
+	actions.push("Save to project", "Save to personal", "↻ Refresh", "Back");
+	return actions;
+}
+
+function getWorkflowPanelPayload(
+	payload: Record<string, unknown>,
+	key: string,
+): ExtensionWorkflowPanelData | undefined {
+	const value = payload[key];
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const panel = value as Record<string, unknown>;
+	const status = panel.status;
+	const phases = panel.phases;
+	const actions = panel.actions;
+	if (
+		typeof panel.cwd !== "string" ||
+		(panel.agentDir !== undefined && typeof panel.agentDir !== "string") ||
+		typeof panel.runId !== "string" ||
+		typeof panel.workflowName !== "string" ||
+		(panel.description !== undefined && typeof panel.description !== "string") ||
+		(status !== "pending" &&
+			status !== "running" &&
+			status !== "paused" &&
+			status !== "completed" &&
+			status !== "failed" &&
+			status !== "stopped") ||
+		(panel.startedAt !== undefined && typeof panel.startedAt !== "string") ||
+		(panel.durationMs !== undefined &&
+			(typeof panel.durationMs !== "number" || !Number.isFinite(panel.durationMs))) ||
+		typeof panel.agentCount !== "number" ||
+		!Array.isArray(phases) ||
+		!Array.isArray(actions) ||
+		!actions.every((action): action is string => typeof action === "string")
+	) {
+		return undefined;
+	}
+	const parsedPhases: ExtensionWorkflowPanelData["phases"] = [];
+	for (const phaseValue of phases) {
+		if (!phaseValue || typeof phaseValue !== "object" || Array.isArray(phaseValue)) return undefined;
+		const phase = phaseValue as Record<string, unknown>;
+		if (typeof phase.title !== "string" || !Array.isArray(phase.agents)) return undefined;
+		const agents: ExtensionWorkflowPanelData["phases"][number]["agents"] = [];
+		for (const agentValue of phase.agents) {
+			if (!agentValue || typeof agentValue !== "object" || Array.isArray(agentValue)) return undefined;
+			const agent = agentValue as Record<string, unknown>;
+			if (
+				typeof agent.id !== "number" ||
+				typeof agent.label !== "string" ||
+				(agent.status !== "running" &&
+					agent.status !== "completed" &&
+					agent.status !== "failed" &&
+					agent.status !== "replayed" &&
+					agent.status !== "stopped")
+			) {
+				return undefined;
+			}
+			for (const field of [
+				"phase",
+				"prompt",
+				"model",
+				"effort",
+				"startedAt",
+				"completedAt",
+				"error",
+				"resultPreview",
+			]) {
+				if (agent[field] !== undefined && typeof agent[field] !== "string") return undefined;
+			}
+			if (agent.totalTokens !== undefined && typeof agent.totalTokens !== "number") return undefined;
+			if (agent.cost !== undefined && typeof agent.cost !== "number") return undefined;
+			agents.push(agent as unknown as ExtensionWorkflowPanelData["phases"][number]["agents"][number]);
+		}
+		parsedPhases.push({ title: phase.title, agents });
+	}
+	return {
+		cwd: panel.cwd,
+		...(typeof panel.agentDir === "string" ? { agentDir: panel.agentDir } : {}),
+		runId: panel.runId,
+		workflowName: panel.workflowName,
+		...(typeof panel.description === "string" ? { description: panel.description } : {}),
+		status,
+		...(typeof panel.startedAt === "string" ? { startedAt: panel.startedAt } : {}),
+		...(typeof panel.durationMs === "number" ? { durationMs: panel.durationMs } : {}),
+		agentCount: panel.agentCount,
+		phases: parsedPhases,
+		actions,
+	};
+}
+
 function getPayloadNotifyType(payload: Record<string, unknown>, key: string): "info" | "warning" | "error" | undefined {
 	const value = payload[key];
 	return value === "info" || value === "warning" || value === "error" ? value : undefined;
@@ -1016,6 +1113,7 @@ export class InteractiveMode {
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
 	private extensionTerminalInputUnsubscribers = new Set<() => void>();
 	private activeConnectionExtensionUiRequests = new Map<string, { cancelLocal: () => void }>();
+	private activeExtensionCustomClosers = new Set<() => void>();
 
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
@@ -3550,7 +3648,7 @@ export class InteractiveMode {
 		if (this.extensionEditor) {
 			this.hideExtensionEditor();
 		}
-		this.ui.hideOverlay();
+		for (const close of [...this.activeExtensionCustomClosers]) close();
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
@@ -3723,7 +3821,9 @@ export class InteractiveMode {
 	 */
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
+			supportsWorkflowPanel: true,
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
+			workflowPanel: (data) => this.showWorkflowPanel(data),
 			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
 			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
 			notify: (message, type) => this.showExtensionNotify(message, type),
@@ -4049,6 +4149,35 @@ export class InteractiveMode {
 	/**
 	 * Show a notification for extensions.
 	 */
+	private showWorkflowPanel(data: ExtensionWorkflowPanelData): Promise<string | undefined> {
+		let lastUpdatedAt: string | undefined;
+		return this.showExtensionCustom<string | undefined>(
+			(tui, panelTheme, _keybindings, done) =>
+				new WorkflowPanelComponent(
+					tui,
+					panelTheme,
+					data,
+					(result) => done(result?.action ?? "Back"),
+					() => {
+						const stored = loadWorkflowRun(data.cwd, data.runId, data.agentDir);
+						if (!stored || stored.record.updatedAt === lastUpdatedAt) return undefined;
+						lastUpdatedAt = stored.record.updatedAt;
+						return toWorkflowPanelData(stored.record, workflowPanelActions(stored.record.status), data.agentDir);
+					},
+				),
+			{
+				overlay: true,
+				overlayOptions: () => ({
+					row: 0,
+					col: 0,
+					width: "100%",
+					maxHeight: "100%",
+					suspendFullscreenMouse: true,
+				}),
+			},
+		);
+	}
+
 	private showExtensionNotify(message: string, type?: "info" | "warning" | "error"): void {
 		if (type === "error") {
 			this.showError(message);
@@ -4085,44 +4214,47 @@ export class InteractiveMode {
 		};
 
 		return new Promise((resolve, reject) => {
-			let component: Component & { dispose?(): void };
+			let component: (Component & { dispose?(): void }) | undefined;
+			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
+			let disposed = false;
 
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
-				else restoreEditor();
-				// Note: both branches above already call requestRender
-				resolve(result);
+			const dispose = () => {
+				if (disposed || !component) return;
+				disposed = true;
 				try {
-					component?.dispose?.();
+					component.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
+			const close = (result?: T) => {
+				if (closed) return;
+				closed = true;
+				this.activeExtensionCustomClosers.delete(cancel);
+				if (isOverlay) overlayHandle?.hide();
+				else restoreEditor();
+				resolve(result as T);
+				dispose();
+			};
+			const cancel = () => close();
+			this.activeExtensionCustomClosers.add(cancel);
 
-			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
-				.then((c) => {
-					if (closed) return;
-					component = c;
+			Promise.resolve(factory(this.ui, theme, this.keybindings, (result) => close(result)))
+				.then((created) => {
+					component = created;
+					if (closed) {
+						dispose();
+						return;
+					}
 					if (isOverlay) {
-						// Resolve overlay options - can be static or dynamic function
-						const resolveOptions = (): OverlayOptions | undefined => {
-							if (options?.overlayOptions) {
-								const opts =
-									typeof options.overlayOptions === "function"
-										? options.overlayOptions()
-										: options.overlayOptions;
-								return opts;
-							}
-							// Fallback: use component's width property if available
-							const w = (component as { width?: number }).width;
-							return w ? { width: w } : undefined;
-						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
-						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
+						const componentWidth = (component as unknown as { width?: number }).width;
+						const overlayOptions =
+							typeof options?.overlayOptions === "function"
+								? options.overlayOptions()
+								: (options?.overlayOptions ?? (componentWidth ? { width: componentWidth } : undefined));
+						overlayHandle = this.ui.showOverlay(component, overlayOptions);
+						options?.onHandle?.(overlayHandle);
 					} else {
 						this.editorContainer.clear();
 						this.editorContainer.addChild(component);
@@ -4130,10 +4262,13 @@ export class InteractiveMode {
 						this.ui.requestRender();
 					}
 				})
-				.catch((err) => {
+				.catch((error) => {
 					if (closed) return;
+					closed = true;
+					this.activeExtensionCustomClosers.delete(cancel);
 					if (!isOverlay) restoreEditor();
-					reject(err);
+					dispose();
+					reject(error);
 				});
 		});
 	}
@@ -5195,6 +5330,7 @@ export class InteractiveMode {
 	private expectsConnectionExtensionUiResponse(request: AgentConnectionExtensionUiRequest): boolean {
 		return (
 			request.method === "select" ||
+			request.method === "workflowPanel" ||
 			request.method === "confirm" ||
 			request.method === "input" ||
 			request.method === "editor"
@@ -5230,6 +5366,12 @@ export class InteractiveMode {
 				const value = await this.showExtensionSelector(title, options, {
 					timeout: getPayloadNumber(payload, "timeout"),
 				});
+				return value === undefined ? { cancelled: true } : { value };
+			}
+			case "workflowPanel": {
+				const data = getWorkflowPanelPayload(payload, "panel");
+				if (!data) return { cancelled: true };
+				const value = await this.showWorkflowPanel(data);
 				return value === undefined ? { cancelled: true } : { value };
 			}
 			case "confirm": {

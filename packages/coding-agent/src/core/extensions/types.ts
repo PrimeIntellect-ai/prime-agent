@@ -114,9 +114,51 @@ export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: Keybindi
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
  */
+
+export interface ExtensionWorkflowPanelAgent {
+	id: number;
+	label: string;
+	status: "running" | "completed" | "failed" | "replayed" | "stopped";
+	phase?: string;
+	prompt?: string;
+	model?: string;
+	effort?: string;
+	startedAt?: string;
+	completedAt?: string;
+	totalTokens?: number;
+	cost?: number;
+	error?: string;
+	resultPreview?: string;
+}
+
+export interface ExtensionWorkflowPanelPhase {
+	title: string;
+	agents: ExtensionWorkflowPanelAgent[];
+}
+
+export interface ExtensionWorkflowPanelData {
+	cwd: string;
+	agentDir?: string;
+	runId: string;
+	workflowName: string;
+	description?: string;
+	status: "pending" | "running" | "paused" | "completed" | "failed" | "stopped";
+	startedAt?: string;
+	durationMs?: number;
+	agentCount: number;
+	phases: ExtensionWorkflowPanelPhase[];
+	actions: string[];
+}
+
 export interface ExtensionUIContext {
+	/** Whether this host can render Prime's structured workflow inspector. */
+	readonly supportsWorkflowPanel?: boolean;
+
 	/** Show a selector and return the user's choice. */
 	select(title: string, options: string[], opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
+
+	/** Show Prime's structured workflow inspector and return the selected action. */
+	workflowPanel?(data: ExtensionWorkflowPanelData, opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
 	/** Show a confirmation dialog. */
 	confirm(title: string, message: string, opts?: ExtensionUIDialogOptions): Promise<boolean>;

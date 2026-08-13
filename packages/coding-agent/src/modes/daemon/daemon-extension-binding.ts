@@ -177,8 +177,19 @@ function createExtensionUIContext(
 	};
 
 	return {
+		get supportsWorkflowPanel() {
+			return hasExtensionUiClientForMethod(state, "workflowPanel");
+		},
 		select: (title, values, opts) =>
 			dialogRequest("select", { title, options: values, timeout: opts?.timeout }, opts, undefined, (response) =>
+				"cancelled" in response && response.cancelled
+					? undefined
+					: "value" in response
+						? response.value
+						: undefined,
+			),
+		workflowPanel: (panel, opts) =>
+			dialogRequest("workflowPanel", { panel }, opts, undefined, (response) =>
 				"cancelled" in response && response.cancelled
 					? undefined
 					: "value" in response
@@ -249,6 +260,13 @@ function createExtensionUIContext(
 function hasExtensionUiClientForMethod(state: ActiveSessionState, method: string): boolean {
 	if (!isDaemonDialogExtensionUiRequest(method)) {
 		return state.clients.size > 0;
+	}
+	if (method === "workflowPanel") {
+		return [...state.clients].some((client) =>
+			client.capabilitiesByActiveSessionId
+				? client.capabilitiesByActiveSessionId.get(state.activeSessionId)?.has("workflow_panel_ui") === true
+				: client.capabilities.has("workflow_panel_ui"),
+		);
 	}
 	return [...state.clients].some((client) => client.supportsExtensionUi);
 }

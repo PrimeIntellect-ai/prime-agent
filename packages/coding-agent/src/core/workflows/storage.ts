@@ -91,6 +91,8 @@ export interface CreateWorkflowRunOptions {
 	args?: unknown;
 	status?: WorkflowRunStatus;
 	startedAt?: string;
+	phases?: string[];
+	progress?: WorkflowRunProgress;
 	metadata?: Record<string, unknown>;
 	agentDir?: string;
 }
@@ -217,6 +219,8 @@ export function createWorkflowRun(options: CreateWorkflowRunOptions): WorkflowRu
 			status: options.status ?? "running",
 			startedAt,
 			updatedAt: startedAt,
+			...(options.phases !== undefined ? { phases: options.phases } : {}),
+			...(options.progress !== undefined ? { progress: options.progress } : {}),
 			...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
 		};
 		const serializedRecord = serializeJson(record, "Workflow run record");
