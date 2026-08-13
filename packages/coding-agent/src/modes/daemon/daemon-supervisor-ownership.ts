@@ -246,7 +246,7 @@ class DaemonShutdownAdmission {
 	}
 }
 
-function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
+export function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
 	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? resolve(defaultDaemonSocketDir(), "supervisor-owners");
 }
 

@@ -187,7 +187,11 @@ import {
 	prepareDaemonSocketPath,
 	restrictDaemonSocketPath,
 } from "./daemon-socket.js";
-import { assertDaemonSupervisorOwnerCurrent, isDaemonShutdownAdmissionActive } from "./daemon-supervisor-ownership.js";
+import {
+	assertDaemonSupervisorOwnerCurrent,
+	defaultDaemonSupervisorRegistryDir,
+	isDaemonShutdownAdmissionActive,
+} from "./daemon-supervisor-ownership.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
@@ -757,9 +761,11 @@ export class AgentDaemon {
 		}
 		this.supervisorLaunchInProgress = true;
 		const key = createHash("sha256").update(supervisorSocketPath).digest("hex").slice(0, 12);
-		const lockDirectory = join(dirname(supervisorSocketPath), `.supervisor-launch-${key}.lock`);
+		const registryDir = defaultDaemonSupervisorRegistryDir();
+		const lockDirectory = resolve(registryDir, `.supervisor-launch-${key}.lock`);
 		let ownsLock = false;
 		try {
+			mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 			for (let attempt = 0; attempt < 3 && !ownsLock; attempt++) {
 				const token = randomUUID();
 				const candidateDirectory = `${lockDirectory}.candidate-${process.pid}-${token}`;
@@ -774,7 +780,8 @@ export class AgentDaemon {
 				} catch (error) {
 					rmSync(candidateDirectory, { recursive: true, force: true });
 					const code = (error as NodeJS.ErrnoException).code;
-					if (code !== "EEXIST" && code !== "ENOTEMPTY") {
+					const destinationExists = code === "EPERM" && existsSync(lockDirectory);
+					if (code !== "EEXIST" && code !== "ENOTEMPTY" && !destinationExists) {
 						throw error;
 					}
 					let ownerPid: number | undefined;
