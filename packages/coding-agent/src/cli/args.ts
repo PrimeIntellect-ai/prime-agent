@@ -15,6 +15,7 @@ export interface Args {
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
 	thinking?: ThinkingLevel;
+	effort?: ThinkingLevel | "ultracode";
 	continue?: boolean;
 	resume?: true | string;
 	help?: boolean;
@@ -60,6 +61,7 @@ export interface Args {
 }
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const VALID_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
 const REMOVED_BUILTIN_TOOL_NAMES = new Set(["read", "write", "grep", "find", "ls"]);
 const BUILTIN_TOOL_NAMES = ["ipython"];
 
@@ -163,6 +165,16 @@ export function parseArgs(args: string[]): Args {
 				result.diagnostics.push({
 					type: "error",
 					message: `Unknown built-in tool(s): ${removedTools.join(", ")}. Available built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}`,
+				});
+			}
+		} else if (arg === "--effort" && i + 1 < args.length) {
+			const level = args[++i];
+			if (VALID_EFFORT_LEVELS.includes(level as (typeof VALID_EFFORT_LEVELS)[number])) {
+				result.effort = level as Args["effort"];
+			} else {
+				result.diagnostics.push({
+					type: "warning",
+					message: `Invalid effort level "${level}". Valid values: ${VALID_EFFORT_LEVELS.join(", ")}`,
 				});
 			}
 		} else if (arg === "--thinking" && i + 1 < args.length) {
@@ -315,6 +327,14 @@ export function parseArgs(args: string[]): Args {
 		} else if (!arg.startsWith("-")) {
 			result.messages.push(arg);
 		}
+	}
+
+	if (result.effort !== undefined) {
+		const effortThinking = result.effort === "ultracode" ? "xhigh" : result.effort;
+		if (result.thinking !== undefined && result.thinking !== effortThinking) {
+			result.diagnostics.push({ type: "error", message: "--effort and --thinking cannot select different levels" });
+		}
+		result.thinking = effortThinking;
 	}
 
 	if (result.goalTokenBudget !== undefined && !result.goal) {

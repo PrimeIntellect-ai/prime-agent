@@ -19,6 +19,7 @@ import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
+import { createWorkflowExtension } from "./workflows/extension.js";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -54,6 +55,10 @@ export interface CreateAgentSessionServicesOptions {
 	 * would release the pane while the parent is still running.
 	 */
 	noBuiltinHerdrReporter?: boolean;
+	/** Skip the built-in workflow surface for RLM child sessions. */
+	noBuiltinWorkflow?: boolean;
+	/** Enable session-scoped automatic workflow admission from a trusted CLI flag. */
+	ultracode?: boolean;
 	/** Explicit daemon-carried opt-out; cannot enable telemetry. */
 	telemetryDisabled?: true;
 }
@@ -200,10 +205,16 @@ export async function createAgentSessionServices(
 	// disabled or never discovered does not silence the built-in.
 	// noExtensions is a full opt-out: it disables the built-in reporter too,
 	// not just discovered extension files.
-	const skipHerdrReporter = options.noBuiltinHerdrReporter || options.resourceLoaderOptions?.noExtensions;
-	const builtinExtensionFactories = skipHerdrReporter
-		? []
-		: [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())];
+	const noExtensions = options.resourceLoaderOptions?.noExtensions === true;
+	const workflowsDisabled = settingsManager.getDisableWorkflows() || process.env.PRIME_AGENT_DISABLE_WORKFLOWS === "1";
+	const builtinExtensionFactories = [
+		...(options.noBuiltinHerdrReporter || noExtensions
+			? []
+			: [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())]),
+		...(options.noBuiltinWorkflow || noExtensions || workflowsDisabled
+			? []
+			: [createWorkflowExtension({ agentDir, ultracode: options.ultracode })]),
+	];
 	const resourceLoader: DefaultResourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		extensionFactories: [...builtinExtensionFactories, ...userExtensionFactories],
@@ -215,6 +226,9 @@ export async function createAgentSessionServices(
 	await resourceLoader.reload();
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+	if (options.ultracode && workflowsDisabled) {
+		diagnostics.push({ type: "error", message: "Ultracode is unavailable because Dynamic Workflows are disabled" });
+	}
 	if (
 		!options.telemetryDisabled &&
 		isTelemetryEnabled(settingsManager) &&

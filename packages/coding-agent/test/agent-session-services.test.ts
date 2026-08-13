@@ -49,6 +49,57 @@ describe("createAgentSessionFromServices", () => {
 		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
 	});
 
+	it("installs workflows only for top-level sessions unless extensions are disabled", async () => {
+		const createServices = async (
+			suffix: string,
+			options: { noExtensions?: boolean; noBuiltinWorkflow?: boolean },
+		) => {
+			const tempDir = join(tmpdir(), `pi-session-workflows-${suffix}-${Date.now()}`);
+			mkdirSync(tempDir, { recursive: true });
+			cleanupPaths.push(tempDir);
+			return createAgentSessionServices({
+				cwd: tempDir,
+				agentDir: tempDir,
+				noBuiltinWorkflow: options.noBuiltinWorkflow,
+				resourceLoaderOptions: {
+					noExtensions: options.noExtensions,
+					noPromptTemplates: true,
+					noThemes: true,
+				},
+			});
+		};
+		const toolNames = (services: Awaited<ReturnType<typeof createAgentSessionServices>>) =>
+			services.resourceLoader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()]);
+
+		expect(toolNames(await createServices("parent", {}))).toContain("workflow");
+		expect(toolNames(await createServices("child", { noBuiltinWorkflow: true }))).not.toContain("workflow");
+		expect(toolNames(await createServices("disabled", { noExtensions: true }))).not.toContain("workflow");
+
+		const settingsDir = join(tmpdir(), `pi-session-workflows-setting-${Date.now()}`);
+		mkdirSync(settingsDir, { recursive: true });
+		cleanupPaths.push(settingsDir);
+		const settingsDisabled = await createAgentSessionServices({
+			cwd: settingsDir,
+			agentDir: settingsDir,
+			settingsManager: SettingsManager.inMemory({ disableWorkflows: true }),
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		expect(toolNames(settingsDisabled)).not.toContain("workflow");
+		const ultracodeDisabled = await createAgentSessionServices({
+			cwd: settingsDir,
+			agentDir: settingsDir,
+			ultracode: true,
+			settingsManager: SettingsManager.inMemory({ disableWorkflows: true }),
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		expect(ultracodeDisabled.diagnostics).toContainEqual(
+			expect.objectContaining({ type: "error", message: expect.stringContaining("Ultracode is unavailable") }),
+		);
+
+		vi.stubEnv("PRIME_AGENT_DISABLE_WORKFLOWS", "1");
+		expect(toolNames(await createServices("env-disabled", {}))).not.toContain("workflow");
+	});
+
 	it("honors an explicit daemon-carried telemetry opt-out", async () => {
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-daemon-telemetry-opt-out-${Date.now()}`);

@@ -110,6 +110,16 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("Dynamic Workflows", () => {
+		it("defaults to enabled and persists the disable switch", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getDisableWorkflows()).toBe(false);
+			manager.setDisableWorkflows(true);
+			await manager.flush();
+			expect(SettingsManager.create(projectDir, agentDir).getDisableWorkflows()).toBe(true);
+		});
+	});
+
 	describe("packages migration", () => {
 		it("should keep local-only extensions in extensions array", () => {
 			const settingsPath = join(agentDir, "settings.json");

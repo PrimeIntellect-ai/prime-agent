@@ -153,6 +153,7 @@ export interface Settings {
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
 	bundledSkills?: BundledSkillsSettings; // Configure built-in skills shipped with Prime Agent
 	enableBuiltinSkills?: boolean; // default: true - load built-in skills shipped with prime-agent
+	disableWorkflows?: boolean; // default: false - disable Dynamic Workflows and ultracode admission
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
@@ -1099,6 +1100,16 @@ export class SettingsManager {
 	setEnableBuiltinSkills(enabled: boolean): void {
 		this.globalSettings.enableBuiltinSkills = enabled;
 		this.markModified("enableBuiltinSkills");
+		this.save();
+	}
+
+	getDisableWorkflows(): boolean {
+		return this.settings.disableWorkflows ?? false;
+	}
+
+	setDisableWorkflows(disabled: boolean): void {
+		this.globalSettings.disableWorkflows = disabled;
+		this.markModified("disableWorkflows");
 		this.save();
 	}
 

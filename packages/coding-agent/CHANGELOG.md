@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added sandboxed Python Dynamic Workflows with native child agents, ultracode effort, background progress, durable stop/resume, and saved workflows.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11

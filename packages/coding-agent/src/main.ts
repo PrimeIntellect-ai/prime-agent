@@ -646,6 +646,7 @@ function runtimeConfigFromArgs(
 		systemPrompt: parsed.systemPrompt,
 		appendSystemPrompt: parsed.appendSystemPrompt,
 		thinking: parsed.thinking,
+		ultracode: parsed.effort === "ultracode",
 		models: parsed.models,
 		tools: parsed.tools,
 		noTools: parsed.noTools,
@@ -734,9 +735,12 @@ async function prepareRuntimeServices(options: {
 		agentDir: effectiveAgentDir,
 		authStorage,
 		extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
+		ultracode: config.ultracode,
 		// Subagents share the parent's Herdr pane; their own reporter would race
 		// the parent's and a subagent quit would release the still-active pane.
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
+		// RLM children must not recursively expose the top-level workflow surface.
+		noBuiltinWorkflow: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
 		telemetryDisabled: config.telemetryDisabled,
 		resourceLoaderOptions: {
 			additionalExtensionPaths: config.extensions,
@@ -1471,6 +1475,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
+			initialUltracode: parsed.effort === "ultracode",
 			verbose: parsed.verbose,
 			// Resumed/attached daemon sessions are part of the same fleet; left
 			// arrow takes them to the agents view like any other session. The agents
@@ -1664,6 +1669,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
+			initialUltracode: parsed.effort === "ultracode",
 			verbose: parsed.verbose,
 		});
 		if (startupBenchmark) {

@@ -78,7 +78,12 @@ if [[ "$SKIP_DEPS" == "false" ]]; then
         @img/sharp-libvips-darwin-arm64@1.2.4 \
         @img/sharp-libvips-darwin-x64@1.2.4 \
         @img/sharp-libvips-linux-x64@1.2.4 \
-        @img/sharp-libvips-linux-arm64@1.2.4
+        @img/sharp-libvips-linux-arm64@1.2.4 \
+        @pydantic/monty-darwin-arm64@0.0.19 \
+        @pydantic/monty-darwin-x64@0.0.19 \
+        @pydantic/monty-linux-x64-gnu@0.0.19 \
+        @pydantic/monty-linux-arm64-gnu@0.0.19 \
+        @pydantic/monty-win32-x64-msvc@0.0.19
 else
     echo "==> Skipping cross-platform native bindings (--skip-deps)"
 fi
@@ -107,9 +112,9 @@ for platform in "${PLATFORMS[@]}"; do
     # call site has a try/catch fallback. For Windows builds, we copy the
     # appropriate .node file alongside the binary below.
     if [[ "$platform" == "windows-x64" ]]; then
-        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi.exe
+        bun build --compile --external koffi --external @pydantic/monty --external '@pydantic/monty/*' --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi.exe
     else
-        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi
+        bun build --compile --external koffi --external @pydantic/monty --external '@pydantic/monty/*' --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi
     fi
 done
 
@@ -129,6 +134,18 @@ for platform in "${PLATFORMS[@]}"; do
     cp -r docs binaries/$platform/
     cp -r examples binaries/$platform/
     cp -r skills binaries/$platform/
+
+    # Dynamic Workflows require Monty's native Node addon and worker executable.
+    mkdir -p binaries/$platform/node_modules/@pydantic
+    cp -r ../../node_modules/@pydantic/monty binaries/$platform/node_modules/@pydantic/
+    case "$platform" in
+        darwin-arm64) monty_package="monty-darwin-arm64" ;;
+        darwin-x64) monty_package="monty-darwin-x64" ;;
+        linux-x64) monty_package="monty-linux-x64-gnu" ;;
+        linux-arm64) monty_package="monty-linux-arm64-gnu" ;;
+        windows-x64) monty_package="monty-win32-x64-msvc" ;;
+    esac
+    cp -r "../../node_modules/@pydantic/$monty_package" binaries/$platform/node_modules/@pydantic/
 
     # Copy koffi native module for Windows (needed for VT input support)
     if [[ "$platform" == "windows-x64" ]]; then

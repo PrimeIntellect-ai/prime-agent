@@ -51,6 +51,7 @@
 		"@earendil-works/pi-agent-core": "^0.7.2",
 		"@earendil-works/pi-ai": "^0.7.2",
 		"@earendil-works/pi-tui": "^0.7.2",
+		"@pydantic/monty": "0.0.19",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",

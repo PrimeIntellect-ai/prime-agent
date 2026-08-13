@@ -13,6 +13,7 @@ export interface AgentSessionRuntimeConfig {
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
 	thinking?: ThinkingLevel;
+	ultracode?: boolean;
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;
@@ -64,6 +65,7 @@ export function mergeAgentSessionRuntimeConfig(
 		systemPrompt: override.systemPrompt ?? base.systemPrompt,
 		appendSystemPrompt: cloneArray(override.appendSystemPrompt ?? base.appendSystemPrompt),
 		thinking: override.thinking ?? base.thinking,
+		ultracode: override.ultracode ?? base.ultracode,
 		models: cloneArray(override.models ?? base.models),
 		tools: cloneArray(override.tools ?? base.tools),
 		noTools: override.noTools ?? base.noTools,

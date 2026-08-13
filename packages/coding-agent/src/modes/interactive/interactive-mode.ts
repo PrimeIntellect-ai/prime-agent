@@ -767,6 +767,8 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 	/** Additional image-bearing prompts to send after the initial messages. */
 	initialPrompts?: InteractiveInitialPrompt[];
+	/** Start this client session in xhigh reasoning with automatic workflow admission. */
+	initialUltracode?: boolean;
 	/** Force verbose startup (overrides quietStartup setting) */
 	verbose?: boolean;
 	/** Agent execution boundary. InteractiveMode never talks directly to AgentSession for core execution. */
@@ -888,6 +890,8 @@ export class InteractiveMode {
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
+	/** Session-scoped Claude-style mode: xhigh reasoning plus automatic workflow admission. */
+	private ultracodeSessionId: string | undefined;
 
 	private ctrlCExitHintExpiresAt = 0;
 	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -1275,7 +1279,11 @@ export class InteractiveMode {
 				this.getThinkingLevelCompletions(prefix);
 			const levels = this.getAvailableThinkingLevels();
 			if (levels.length > 0) {
-				effortCommand.argumentHint = `[${levels.join("/")}]`;
+				const effortOptions =
+					levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows()
+						? [...levels, "ultracode"]
+						: levels;
+				effortCommand.argumentHint = `[${effortOptions.join("/")}]`;
 			}
 		}
 
@@ -1440,6 +1448,15 @@ export class InteractiveMode {
 
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
+		if (this.options.initialUltracode) {
+			if (this.settingsManager.getDisableWorkflows()) {
+				this.showWarning("--effort ultracode is unavailable because Dynamic Workflows are disabled");
+			} else if (this.getAvailableThinkingLevels().includes("xhigh")) {
+				this.ultracodeSessionId = this.connectionState?.sessionId;
+			} else {
+				this.showWarning("--effort ultracode requires a model with xhigh reasoning effort");
+			}
+		}
 
 		// Render initial messages AFTER showing loaded resources
 		await this.renderInitialMessages();
@@ -5016,7 +5033,7 @@ export class InteractiveMode {
 					return;
 				}
 				try {
-					await this.agentConnection.prompt(text, {
+					await this.agentConnection.prompt(this.preparePromptForEffort(text), {
 						streamingBehavior,
 						queueIfBusy: true,
 						images,
@@ -6044,7 +6061,11 @@ export class InteractiveMode {
 		if (model.reasoning) {
 			const level = this.connectionState?.thinkingLevel ?? "off";
 			if (level !== "off") {
-				parts.push(level);
+				parts.push(
+					this.ultracodeSessionId !== undefined && this.ultracodeSessionId === this.connectionState?.sessionId
+						? "ultracode"
+						: level,
+				);
 			}
 		}
 		if (this.connectionState?.serviceTier === "priority") {
@@ -7895,14 +7916,24 @@ export class InteractiveMode {
 		const levels = this.getAvailableThinkingLevels();
 		if (levels.length === 0) return null;
 		const current = this.connectionState?.thinkingLevel;
+		const available =
+			levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows()
+				? [...levels, "ultracode" as const]
+				: levels;
 		const term = prefix.trim().toLowerCase();
-		const matches = term ? levels.filter((level) => level.startsWith(term)) : levels;
+		const matches = term ? available.filter((level) => level.startsWith(term)) : available;
 		if (matches.length === 0) return null;
 		return matches.map((level) => ({
 			value: level,
 			label: level,
 			description:
-				level === current ? `${THINKING_LEVEL_DESCRIPTIONS[level]} (current)` : THINKING_LEVEL_DESCRIPTIONS[level],
+				level === "ultracode"
+					? `xhigh reasoning with automatic dynamic workflows${this.ultracodeSessionId !== undefined && this.ultracodeSessionId === this.connectionState?.sessionId ? " (current)" : ""}`
+					: level === current &&
+							(this.ultracodeSessionId === undefined ||
+								this.ultracodeSessionId !== this.connectionState?.sessionId)
+						? `${THINKING_LEVEL_DESCRIPTIONS[level]} (current)`
+						: THINKING_LEVEL_DESCRIPTIONS[level],
 		}));
 	}
 
@@ -7973,8 +8004,22 @@ export class InteractiveMode {
 			this.showThinkingSelector(levels);
 			return;
 		}
+		if (requested === "ultracode") {
+			if (this.settingsManager.getDisableWorkflows()) {
+				this.showError("Dynamic Workflows are disabled by settings");
+				return;
+			}
+			if (!levels.includes("xhigh")) {
+				this.showError("Ultracode requires a model with xhigh reasoning effort");
+				return;
+			}
+			this.applyThinkingLevel("xhigh", "ultracode");
+			return;
+		}
 		if (!levels.includes(requested as ThinkingLevel)) {
-			this.showError(`Unknown thinking level '${requested}'. Available: ${levels.join(", ")}`);
+			const available =
+				levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows() ? [...levels, "ultracode"] : levels;
+			this.showError(`Unknown thinking level '${requested}'. Available: ${available.join(", ")}`);
 			return;
 		}
 		this.applyThinkingLevel(requested as ThinkingLevel);
@@ -8003,18 +8048,30 @@ export class InteractiveMode {
 		});
 	}
 
-	private applyThinkingLevel(level: ThinkingLevel): void {
+	private applyThinkingLevel(level: ThinkingLevel, mode: "thinking" | "ultracode" = "thinking"): void {
+		const sessionId = this.connectionState?.sessionId;
 		void this.agentConnection
 			.setThinkingLevel(level)
 			.then(() => {
+				if (sessionId !== this.connectionState?.sessionId) return;
+				this.ultracodeSessionId = mode === "ultracode" ? sessionId : undefined;
 				this.patchConnectionState({ thinkingLevel: level });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
-				this.showStatus(`Thinking level: ${level}`);
+				this.showStatus(
+					mode === "ultracode" ? "Effort: ultracode (xhigh + automatic workflows)" : `Thinking level: ${level}`,
+				);
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
 			});
+	}
+
+	private preparePromptForEffort(text: string): string {
+		if (this.ultracodeSessionId !== this.connectionState?.sessionId || /^\s*ultracode\s*:/i.test(text)) {
+			return text;
+		}
+		return `ultracode: ${text}`;
 	}
 
 	private showModelSelector(initialSearchInput?: string): void {
