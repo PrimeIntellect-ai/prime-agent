@@ -281,6 +281,22 @@ describe("Anthropic raw SSE parsing", () => {
 		},
 	);
 
+	it("does not send service_tier for MiniMax models without priority pricing", async () => {
+		const model = getModel("minimax", "MiniMax-M2.7");
+		let capturedParams: unknown;
+		const response = createSseResponse(minimalAnthropicEvents);
+		await streamAnthropic(
+			model,
+			{ messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }] },
+			{
+				client: createFakeAnthropicClient(response, (params) => (capturedParams = params)),
+				serviceTier: "priority",
+			},
+		).result();
+
+		expect(capturedParams).not.toHaveProperty("service_tier");
+	});
+
 	it("does not send service_tier for non-MiniMax providers", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		let capturedParams: unknown;

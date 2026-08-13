@@ -341,9 +341,11 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
 
-	// Merge cost (partial override)
+	// Merge cost (partial override), preserving generated pricing metadata
+	// such as context tiers and service-tier multipliers.
 	if (override.cost) {
 		result.cost = {
+			...model.cost,
 			input: override.cost.input ?? model.cost.input,
 			output: override.cost.output ?? model.cost.output,
 			cacheRead: override.cost.cacheRead ?? model.cost.cacheRead,

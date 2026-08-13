@@ -1456,10 +1456,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			if (tier.tier?.type !== "context" || typeof tier.tier.size !== "number") continue;
 			tiers.push({
 				contextThreshold: tier.tier.size,
-				input: tier.input ?? 0,
-				output: tier.output ?? 0,
-				cacheRead: tier.cache_read ?? 0,
-				cacheWrite: tier.cache_write ?? 0,
+				input: tier.input ?? cost.input ?? 0,
+				output: tier.output ?? cost.output ?? 0,
+				cacheRead: tier.cache_read ?? cost.cache_read ?? 0,
+				cacheWrite: tier.cache_write ?? cost.cache_write ?? 0,
 			});
 		}
 		return tiers.length > 0 ? tiers : undefined;

@@ -778,6 +778,27 @@ describe("ModelRegistry", () => {
 			expect(sonnet?.cost.output).toBeGreaterThan(0);
 		});
 
+		test("cost override preserves generated pricing tiers and service-tier multipliers", () => {
+			writeRawModelsJson({
+				minimax: {
+					modelOverrides: {
+						"MiniMax-M3": {
+							cost: { input: 99 },
+						},
+					},
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = getModelsForProvider(registry, "minimax").find((candidate) => candidate.id === "MiniMax-M3");
+
+			expect(model?.cost.input).toBe(99);
+			expect(model?.cost.tiers).toEqual([
+				{ contextThreshold: 512_000, input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
+			]);
+			expect(model?.cost.serviceTierMultipliers).toEqual({ priority: 1.5 });
+		});
+
 		test("model override can add headers at request time", async () => {
 			writeRawModelsJson({
 				openrouter: {

@@ -61,10 +61,7 @@ export interface CostOverrides {
  * than `totalInputUsage`. `tiers` may be in any order; the highest matching
  * tier wins. Returns `undefined` if no tier matches.
  */
-function pickCostTier(
-	tiers: CostTier[] | undefined,
-	totalInputUsage: number,
-): CostTier | undefined {
+function pickCostTier(tiers: CostTier[] | undefined, totalInputUsage: number): CostTier | undefined {
 	if (!tiers || tiers.length === 0) return undefined;
 	let best: CostTier | undefined;
 	for (const tier of tiers) {

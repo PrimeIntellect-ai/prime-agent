@@ -974,10 +974,15 @@ function buildParams(
 		stream: true,
 	};
 
-	// MiniMax's direct Anthropic-compatible API supports a "priority" service
-	// tier (billed at 1.5x standard rates). Other providers/routes on this
-	// path do not accept service_tier, so only forward it for MiniMax.
-	if ((model.provider === "minimax" || model.provider === "minimax-cn") && options?.serviceTier === "priority") {
+	// MiniMax-M3's direct Anthropic-compatible API supports a "priority"
+	// service tier (billed at 1.5x standard rates). Other direct MiniMax
+	// models and other providers do not advertise priority pricing, so only
+	// forward it when the model declares the corresponding cost multiplier.
+	if (
+		(model.provider === "minimax" || model.provider === "minimax-cn") &&
+		model.cost.serviceTierMultipliers?.priority !== undefined &&
+		options?.serviceTier === "priority"
+	) {
 		// The Anthropic SDK only types service_tier as "auto" | "standard_only";
 		// MiniMax accepts "priority", so use a narrow intersection cast.
 		params.service_tier = "priority" as "priority" & MessageCreateParamsStreaming["service_tier"];
