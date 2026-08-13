@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 - Fixed first-run onboarding not indicating that Prime login can be skipped with the configured cancel key ([#1031](https://github.com/PrimeIntellect-ai/prime-agent/pull/1031) by [@kudala-bharani](https://github.com/kudala-bharani)).
 
 ## [0.7.2] - 2026-08-11

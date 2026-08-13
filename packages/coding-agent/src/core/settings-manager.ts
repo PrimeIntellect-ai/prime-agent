@@ -45,7 +45,7 @@ export interface TerminalSettings {
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
 	fullscreen?: boolean; // default: true (alternate-screen rendering with scrollable transcript)
-	fullscreenMouse?: boolean; // default: true (wheel scrolling in fullscreen; disable if it breaks selection)
+	fullscreenMouse?: boolean; // default: true, except false in Ghostty to preserve native Cmd-click links
 }
 
 export interface ImageSettings {
@@ -1154,7 +1154,19 @@ export class SettingsManager {
 	}
 
 	getFullscreenMouse(): boolean {
-		return this.settings.terminal?.fullscreenMouse ?? true;
+		const configured = this.settings.terminal?.fullscreenMouse;
+		if (typeof configured === "boolean") return configured;
+		// Ghostty's native Cmd-click URL handling is suppressed while an
+		// application enables mouse reporting, and SGR cannot encode Command for
+		// the application to reproduce that gesture. Preserve native link clicks
+		// by default; users can explicitly enable fullscreen mouse capture.
+		const termProgram = process.env.TERM_PROGRAM?.toLowerCase();
+		const term = process.env.TERM?.toLowerCase();
+		const isGhostty =
+			termProgram === "ghostty" ||
+			term?.includes("ghostty") === true ||
+			(termProgram === undefined && !!process.env.GHOSTTY_RESOURCES_DIR);
+		return !isGhostty;
 	}
 
 	setFullscreenMouse(enabled: boolean): void {
