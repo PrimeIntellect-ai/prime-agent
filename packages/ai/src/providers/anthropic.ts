@@ -34,6 +34,7 @@ import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.js"
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	classifyStreamFailure,
+	extractStreamFailureInfo,
 	formatStreamFailureMessage,
 	recordStreamFailure,
 	StreamFailureError,
@@ -489,11 +490,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			timestamp: Date.now(),
 		};
 
+		// Fast mode: explicit speed="fast" or serviceTier="priority" on a supported model
+		const isFastModeActive =
+			supportsAnthropicFastMode(model) && (options?.speed === "fast" || options?.serviceTier === "priority");
+
 		try {
 			let client: Anthropic;
-			// Fast mode: explicit speed="fast" or serviceTier="priority" on a supported model
-			const isFastModeActive =
-				supportsAnthropicFastMode(model) && (options?.speed === "fast" || options?.serviceTier === "priority");
 
 			let isOAuth: boolean;
 
@@ -760,6 +762,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);
+			if (isFastModeActive && extractStreamFailureInfo(error).kind === "auth") {
+				output.errorMessage = `Fast mode requires preview access for your account (contact your Anthropic account manager). ${output.errorMessage}`;
+			}
 			recordStreamFailure(model, output, error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
