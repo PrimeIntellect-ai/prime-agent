@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added Grok 4.6 to the xAI catalog with Responses API support, image input, and xhigh reasoning.
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07

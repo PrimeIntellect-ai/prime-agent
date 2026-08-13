@@ -92,6 +92,16 @@ const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	max: null,
 } as const;
 
+const XAI_GROK_46_THINKING_LEVEL_MAP = {
+	off: null,
+	minimal: null,
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: null,
+} as const;
+
 const KIMI_K3_THINKING_LEVEL_MAP = {
 	off: null,
 	minimal: null,
@@ -347,6 +357,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (model.provider === "openai-codex" && model.id === "gpt-5.1-codex-mini") {
 		mergeThinkingLevelMap(model, { minimal: "medium", low: "medium", medium: "medium", high: "high" });
+	}
+	if (model.provider === "xai" && model.id === "grok-4.6") {
+		mergeThinkingLevelMap(model, XAI_GROK_46_THINKING_LEVEL_MAP);
 	}
 }
 
@@ -2130,6 +2143,32 @@ async function generateModels() {
 			contextWindow: 32768,
 			maxTokens: 8192,
 		});
+	}
+
+	const grok46Index = allModels.findIndex(m => m.provider === "xai" && m.id === "grok-4.6");
+	const grok46 = {
+		id: "grok-4.6",
+		name: "Grok 4.6",
+		api: "openai-responses" as const,
+		baseUrl: "https://api.x.ai/v1",
+		provider: "xai" as const,
+		reasoning: true,
+		thinkingLevelMap: { ...XAI_GROK_46_THINKING_LEVEL_MAP },
+		input: ["text", "image"] as ("text" | "image")[],
+		cost: {
+			input: 2,
+			output: 6,
+			cacheRead: 0.5,
+			cacheWrite: 0,
+		},
+		contextWindow: 500000,
+		maxTokens: 500000,
+		compat: { supportsLongCacheRetention: false },
+	};
+	if (grok46Index >= 0) {
+		allModels[grok46Index] = { ...allModels[grok46Index], ...grok46 };
+	} else {
+		allModels.push(grok46);
 	}
 
 	// Add missing Mistral Medium 3.5 model until models.dev includes it
