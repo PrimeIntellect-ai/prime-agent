@@ -9,10 +9,10 @@
 
 ## Comments
 
-- Comments must be short, human-readable, and only where the code cannot say it. Flag comments that restate the code, narrate control flow, or describe deleted mechanisms.
+- Comments must be short, human-readable, and only where the code cannot say it. Reject comments that restate code, narrate control flow, or describe deleted mechanisms or history.
 - Doc comments must describe current behavior, not the history of how it got there.
 
 ## Tests
 
-- Each bug fix carries a regression test that fails on the pre-fix code.
-- Reject tests that assert incidental details or duplicate existing coverage.
+- Add a regression test only when it captures meaningful behavior that fails before the fix; do not require one for trivial or documentation-only changes.
+- Reject incidental or duplicate coverage and copy/string snapshot assertions that merely restate labels or descriptions; assert text only when the text is the behavior.
