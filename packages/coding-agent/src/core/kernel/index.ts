@@ -178,6 +178,11 @@ export interface ExecuteOptions {
 	onLateSentAgentMessage?: (message: KernelSentAgentMessage) => void;
 	/** Cap stdout / stderr / result at this many characters. Default 65536. */
 	maxOutputChars?: number;
+	/**
+	 * Interrupt the cell after this many milliseconds. Omitted or <= 0 leaves the
+	 * cell unbounded, which is how a command blocked on stdin wedges the agent.
+	 */
+	timeoutMs?: number;
 	/** Synthetic host cell (snapshot/restore/list); excluded from lastCellCode attribution. */
 	internal?: boolean;
 }
@@ -240,7 +245,7 @@ export interface ExecuteResult {
 	attachments?: KernelAttachment[];
 	/** Agent messages sent from this cell, in order. */
 	sentAgentMessages?: KernelSentAgentMessage[];
-	status: "ok" | "error" | "aborted";
+	status: "ok" | "error" | "aborted" | "timeout";
 	error?: { ename: string; evalue: string; traceback: string[] };
 	durationMs: number;
 }
@@ -393,6 +398,8 @@ interface ActiveExecution {
 	sentAgentMessages: KernelSentAgentMessage[];
 	error?: ExecuteResult["error"];
 	status: ExecuteResult["status"];
+	/** Set when the execute timeout fired, so the result reports a timeout rather than an abort. */
+	timedOut?: boolean;
 	settled: boolean;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
@@ -975,7 +982,7 @@ export class KernelManager {
 			if (this.activeExecution !== execution) {
 				return;
 			}
-			execution.status = "aborted";
+			execution.status = execution.timedOut ? "timeout" : "aborted";
 			this.resolveExecution(execution, { clearActive: false });
 		};
 		const onAbort = () => {
@@ -986,6 +993,28 @@ export class KernelManager {
 				abortTimer.unref();
 			}
 		};
+		// Bound the cell. A command blocked on stdin never yields on its own, so without
+		// this the execute never settles and the session stalls with no error and no output.
+		let executeTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		const clearExecuteTimer = () => {
+			if (executeTimer) {
+				globalThis.clearTimeout(executeTimer);
+				executeTimer = undefined;
+			}
+		};
+		const timeoutMs = opts.timeoutMs ?? 0;
+		if (timeoutMs > 0) {
+			executeTimer = globalThis.setTimeout(() => {
+				if (this.activeExecution !== execution || execution.settled) {
+					return;
+				}
+				execution.timedOut = true;
+				onAbort();
+			}, timeoutMs);
+			if (executeTimer && typeof executeTimer === "object" && "unref" in executeTimer) {
+				executeTimer.unref();
+			}
+		}
 
 		try {
 			this.activeExecution = execution;
@@ -1012,6 +1041,7 @@ export class KernelManager {
 			return await result.promise;
 		} finally {
 			clearAbortTimer();
+			clearExecuteTimer();
 			opts.signal?.removeEventListener("abort", onAbort);
 		}
 	}
@@ -1146,7 +1176,13 @@ export class KernelManager {
 				result = `${result.slice(0, execution.maxChars)}\n[... output truncated at ${execution.maxChars} chars ...]`;
 			}
 
-			if (execution.opts.signal?.aborted) status = "aborted";
+			if (execution.timedOut) {
+				status = "timeout";
+				const seconds = Math.round((execution.opts.timeoutMs ?? 0) / 1000);
+				stderr += `${stderr ? "\n" : ""}Cell timed out after ${seconds}s and was interrupted.`;
+			} else if (execution.opts.signal?.aborted) {
+				status = "aborted";
+			}
 
 			execution.resolve({
 				stdout,
