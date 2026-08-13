@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Fixed `rlm.delete_subagent()` rejecting the spawn handle returned by `rlm()`.
 
 ## [0.7.2] - 2026-08-11
 
