@@ -978,14 +978,25 @@ export class KernelManager {
 				abortTimer = undefined;
 			}
 		};
+		// First cause wins. Without this latch a user abort already inside its grace
+		// window would be relabelled a timeout, and the grace timer would restart,
+		// delaying the result the user asked to stop.
+		let settleCause: "abort" | "timeout" | undefined;
 		const forceAbort = () => {
 			if (this.activeExecution !== execution) {
 				return;
 			}
-			execution.status = execution.timedOut ? "timeout" : "aborted";
+			execution.status = settleCause === "timeout" ? "timeout" : "aborted";
 			this.resolveExecution(execution, { clearActive: false });
 		};
-		const onAbort = () => {
+		const beginSettle = (cause: "abort" | "timeout") => {
+			if (settleCause) {
+				return;
+			}
+			settleCause = cause;
+			if (cause === "timeout") {
+				execution.timedOut = true;
+			}
 			void this.interrupt().catch(() => undefined);
 			clearAbortTimer();
 			abortTimer = globalThis.setTimeout(forceAbort, KERNEL_ABORT_GRACE_MS);
@@ -993,6 +1004,7 @@ export class KernelManager {
 				abortTimer.unref();
 			}
 		};
+		const onAbort = () => beginSettle("abort");
 		// Bound the cell. A command blocked on stdin never yields on its own, so without
 		// this the execute never settles and the session stalls with no error and no output.
 		let executeTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
@@ -1008,8 +1020,7 @@ export class KernelManager {
 				if (this.activeExecution !== execution || execution.settled) {
 					return;
 				}
-				execution.timedOut = true;
-				onAbort();
+				beginSettle("timeout");
 			}, timeoutMs);
 			if (executeTimer && typeof executeTimer === "object" && "unref" in executeTimer) {
 				executeTimer.unref();
@@ -1029,7 +1040,11 @@ export class KernelManager {
 				const sendPromise = shell.send(encode(msg, conn.key));
 				sendPromise.catch(() => undefined);
 				await Promise.race([sendPromise, result.promise.then(() => undefined)]);
-				if (this.activeExecution === execution && execution.status !== "aborted") {
+				if (
+					this.activeExecution === execution &&
+					execution.status !== "aborted" &&
+					execution.status !== "timeout"
+				) {
 					await sendPromise;
 				}
 			} catch (error) {
