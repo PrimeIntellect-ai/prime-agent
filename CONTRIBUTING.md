@@ -1,6 +1,6 @@
 # Contributing to Prime Agent
 
-Thanks for your interest in contributing to Prime Agent! Prime Agent is developed in public, and we welcome bug reports, feature ideas, questions, and other feedback. To keep the project maintainable, public contributions begin in [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
+Thanks for your interest in contributing to Prime Agent! Prime Agent is developed in public, and we welcome bug reports, feature requests, questions, and other feedback. To keep the project maintainable, public contributions begin in [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
 
 With the influx of agent-generated contributions, we do not review unsolicited pull requests or use public Issues as the initial intake queue. While we are open to contributions by agents, you are responsible for your code and must understand how it interacts with the entire project.
 
@@ -8,9 +8,9 @@ With the influx of agent-generated contributions, we do not review unsolicited p
 
 Choose the category that best matches what you want to share:
 
-- [Bug report](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general)
-- [Feature idea](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/ideas)
-- [Question](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/q-a)
+- [General discussion or question](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general)
+- [Bug report](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports)
+- [Feature request](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests)
 
 Search existing Discussions before creating a new one. Include enough detail for someone else to understand and reproduce the problem, but do not share API keys, tokens, private prompts, or other sensitive information.
 

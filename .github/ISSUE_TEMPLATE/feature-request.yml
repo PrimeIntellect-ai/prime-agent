@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use the Feature idea form in GitHub Discussions instead.
+        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use the Feature request form in GitHub Discussions instead.
   - type: textarea
     id: problem
     attributes:

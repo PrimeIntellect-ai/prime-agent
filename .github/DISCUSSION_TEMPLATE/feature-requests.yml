@@ -1,9 +1,9 @@
-title: "[Idea] "
+title: "[Feature] "
 body:
   - type: markdown
     attributes:
       value: |
-        Use this form to suggest a new capability or improvement. Search existing Discussions first so related ideas stay together.
+        Use this form to request a new capability or improvement. Search existing Discussions first so related requests stay together.
   - type: dropdown
     id: area
     attributes:
