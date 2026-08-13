@@ -314,6 +314,180 @@ describe("daemon supervisor passive subagent topology", () => {
 		);
 	});
 
+	it("fails closed when a saved sibling catalog has conflicting identity or topology", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-saved-sibling-conflict-"));
+		tempDirs.push(directory);
+		const parentSessionPath = join(directory, "parent.jsonl");
+		const base = {
+			cwd: directory,
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			firstMessage: "",
+			allMessagesText: "",
+			parentSessionPath,
+			rlmDepth: 1,
+		};
+		const target = { ...base, id: "target", path: join(directory, "target.jsonl") };
+		const sibling = { ...base, id: "sibling", path: join(directory, "sibling.jsonl"), name: "taken" };
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+
+		for (const conflictingSiblings of [
+			[target, { ...sibling, id: target.id }],
+			[target, { ...sibling, path: target.path }],
+			[target, { ...sibling, parentSessionPath: join(directory, "other-parent.jsonl") }],
+			[target, { ...sibling, rlmDepth: 2 }],
+		]) {
+			expect(() => supervisor.assertSavedSiblingNameAvailable(conflictingSiblings, target, "taken")).toThrow(
+				"Saved sibling catalog is structurally ambiguous",
+			);
+		}
+		expect(() => supervisor.assertSavedSiblingNameAvailable([sibling], target, "taken")).toThrow(
+			"Saved sibling catalog does not contain its target",
+		);
+	});
+
+	it("anchors saved sibling relative parents at their own session files", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-relative-saved-siblings-"));
+		tempDirs.push(directory);
+		const base = {
+			cwd: directory,
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			firstMessage: "",
+			allMessagesText: "",
+			rlmDepth: 1,
+		};
+		const target = {
+			...base,
+			id: "target",
+			path: join(directory, "children", "target.jsonl"),
+			parentSessionPath: "../parent.jsonl",
+		};
+		const sibling = {
+			...base,
+			id: "sibling",
+			path: join(directory, "children", "nested", "sibling.jsonl"),
+			parentSessionPath: "../../parent.jsonl",
+			name: "taken",
+		};
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+
+		expect(() => supervisor.assertSavedSiblingNameAvailable([target, sibling], target, "available")).not.toThrow();
+		expect(() =>
+			supervisor.assertSavedSiblingNameAvailable(
+				[target, { ...sibling, parentSessionPath: "../other-parent.jsonl" }],
+				target,
+				"available",
+			),
+		).toThrow("Saved sibling catalog is structurally ambiguous");
+	});
+
+	it("uses one canonical saved-sibling reservation for equivalent relative parents during create", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-relative-saved-create-reservation-"));
+		tempDirs.push(directory);
+		const base = {
+			cwd: directory,
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			firstMessage: "",
+			allMessagesText: "",
+			rlmDepth: 1,
+		};
+		const firstPath = join(directory, "children", "first.jsonl");
+		const secondPath = join(directory, "children", "nested", "second.jsonl");
+		const siblings = [
+			{ ...base, id: "first", path: firstPath, parentSessionPath: "../parent.jsonl" },
+			{ ...base, id: "second", path: secondPath, parentSessionPath: "../../parent.jsonl" },
+		];
+		let releaseLaunch!: () => void;
+		const launchGate = new Promise<void>((resolve) => {
+			releaseLaunch = resolve;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		const resident = worker("opened");
+		const launchWorker = vi.fn(async () => {
+			await launchGate;
+			return resident;
+		});
+		Object.assign(supervisor, {
+			catalog: { siblings: vi.fn(async () => siblings) },
+			launchWorker,
+		});
+
+		const first = supervisor.createOrReuseWorker("client", {
+			type: "create",
+			name: "shared",
+			sessionPath: firstPath,
+		});
+		await vi.waitFor(() => expect(launchWorker).toHaveBeenCalledOnce());
+		await expect(
+			supervisor.createOrReuseWorker("client", { type: "create", name: "shared", sessionPath: secondPath }),
+		).rejects.toThrow("an agent of that name already exists at depth 1 under this parent");
+		releaseLaunch();
+		await expect(first).resolves.toBe(resident);
+	});
+
+	it("uses one canonical saved-sibling reservation for equivalent relative parents during rename", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-relative-saved-rename-reservation-"));
+		tempDirs.push(directory);
+		const base = {
+			cwd: directory,
+			created: new Date(0),
+			modified: new Date(0),
+			messageCount: 0,
+			firstMessage: "",
+			allMessagesText: "",
+			rlmDepth: 1,
+		};
+		const firstPath = join(directory, "children", "first.jsonl");
+		const secondPath = join(directory, "children", "nested", "second.jsonl");
+		const siblings = [
+			{ ...base, id: "first", path: firstPath, parentSessionPath: "../parent.jsonl" },
+			{ ...base, id: "second", path: secondPath, parentSessionPath: "../../parent.jsonl" },
+		];
+		let releaseRename!: () => void;
+		const renameGate = new Promise<void>((resolve) => {
+			releaseRename = resolve;
+		});
+		const rename = vi.fn(async () => {
+			await renameGate;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		Object.assign(supervisor, { catalog: { siblings: vi.fn(async () => siblings), rename } });
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
+
+		const first = supervisor.handleCommand(client, {
+			type: "rename_saved_session",
+			sessionPath: firstPath,
+			name: "shared",
+		});
+		await vi.waitFor(() => expect(rename).toHaveBeenCalledOnce());
+		await expect(
+			supervisor.handleCommand(client, {
+				type: "rename_saved_session",
+				sessionPath: secondPath,
+				name: "shared",
+			}),
+		).rejects.toThrow("an agent of that name already exists at depth 1 under this parent");
+		releaseRename();
+		await expect(first).resolves.toMatchObject({ success: true });
+	});
+
 	it("publishes an opening reservation before named create validation awaits", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-named-create-race-"));
 		tempDirs.push(directory);

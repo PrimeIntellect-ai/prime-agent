@@ -338,6 +338,12 @@ function throwIfAdmissionCancelled(admission: SupervisorPromptAdmission | undefi
 	if (admission?.status === "cancelled") throw new PromptAdmissionCancelledError();
 }
 
+/** Match catalog sibling topology: relative parents are rooted at each child session file. */
+function canonicalSavedSiblingParentPath(session: Pick<SessionInfo, "path" | "parentSessionPath">): string | undefined {
+	if (!session.parentSessionPath) return undefined;
+	return canonicalSessionPath(resolve(dirname(session.path), session.parentSessionPath));
+}
+
 class SupervisorRecoveryCancelledError extends Error {
 	readonly code = "supervisor_recovery_cancelled" as const;
 }
@@ -2083,7 +2089,9 @@ export class DaemonSupervisor {
 				(session) => canonicalSessionPath(session.path) === canonicalSessionPath(createCommand.sessionPath!),
 			);
 			const targetSummary = target ? summaryForInactiveSession(target) : { sessionId: "new-root", rlmDepth: 0 };
-			const reservation = this.summaryNameReservationInput(targetSummary, createCommand.name);
+			const reservation = target
+				? this.savedSiblingNameReservationInput(target, savedSiblings, createCommand.name)
+				: this.summaryNameReservationInput(targetSummary, createCommand.name);
 			return this.withSessionNameReservation(reservation, async () => {
 				if (target?.parentSessionPath && (target.rlmDepth ?? 0) > 0) {
 					this.assertSavedSiblingNameAvailable(savedSiblings, target, createCommand.name!);
@@ -3180,10 +3188,19 @@ export class DaemonSupervisor {
 		const siblings = await this.catalog.siblings(sessionPath, sessionDir ?? this.defaultSessionConfig.sessionDir);
 		const saved = siblings.find((info) => canonicalSessionPath(info.path) === targetPath);
 		if (!saved) throw new Error(`Session not found: ${sessionPath}`);
+		return this.savedSiblingNameReservationInput(saved, siblings, name);
+	}
+
+	private savedSiblingNameReservationInput(
+		saved: SessionInfo,
+		siblings: readonly SessionInfo[],
+		name: string,
+	): { name: string; depth: number; parentSessionId?: string; parentSessionPath?: string } {
+		const parentSessionPath = canonicalSavedSiblingParentPath(saved);
 		return {
 			name,
 			depth: saved.rlmDepth ?? siblings.find((sibling) => sibling.rlmDepth !== undefined)?.rlmDepth ?? 0,
-			parentSessionPath: saved.parentSessionPath,
+			...(parentSessionPath ? { parentSessionPath } : {}),
 		};
 	}
 
@@ -3222,23 +3239,64 @@ export class DaemonSupervisor {
 
 	private assertSavedSiblingNameAvailable(siblings: SessionInfo[], target: SessionInfo, name: string): void {
 		const setDepth = target.rlmDepth ?? siblings.find((sibling) => sibling.rlmDepth !== undefined)?.rlmDepth ?? 0;
+		const targetPath = canonicalSessionPath(target.path);
+		const parentSessionPath = canonicalSavedSiblingParentPath(target);
+		if (setDepth <= 0 || !parentSessionPath) {
+			throw new Error("Saved sibling catalog has no direct parent");
+		}
+
+		// catalog.siblings() is deliberately bounded: it returns the child set, not
+		// its parent. Preserve that boundary while supplying a local structural
+		// anchor to Core03's immutable exact-one-parent catalog validation. Reject
+		// ambiguous persisted rows rather than letting a malformed saved catalog
+		// weaken a name reservation.
+		const parentId = `saved-sibling-parent:${parentSessionPath}`;
+		const ids = new Set<string>();
+		const paths = new Set<string>();
+		let targetCount = 0;
+		for (const sibling of siblings) {
+			const siblingPath = canonicalSessionPath(sibling.path);
+			const siblingParentPath = canonicalSavedSiblingParentPath(sibling);
+			if (
+				ids.has(sibling.id) ||
+				paths.has(siblingPath) ||
+				sibling.id === parentId ||
+				siblingParentPath !== parentSessionPath ||
+				(sibling.rlmDepth !== undefined && sibling.rlmDepth !== setDepth)
+			) {
+				throw new Error("Saved sibling catalog is structurally ambiguous");
+			}
+			ids.add(sibling.id);
+			paths.add(siblingPath);
+			if (sibling.id === target.id && siblingPath === targetPath) targetCount += 1;
+		}
+		if (targetCount !== 1) {
+			throw new Error("Saved sibling catalog does not contain its target");
+		}
+
 		assertAgentSessionNameAvailable(
-			siblings.map((info) => {
-				const summary = summaryForInactiveSession(info);
-				return {
-					id: summary.sessionId,
-					...(summary.sessionName ? { name: summary.sessionName } : {}),
-					depth: setDepth,
-					status: classifySessionRosterStatus(summary),
-					...(summary.parentSessionPath
-						? { parentSessionPath: canonicalSessionPath(summary.parentSessionPath) }
-						: {}),
-				};
-			}),
+			[
+				{
+					id: parentId,
+					depth: setDepth - 1,
+					status: "inactive" as const,
+					sessionPath: parentSessionPath,
+				},
+				...siblings.map((info) => {
+					const summary = summaryForInactiveSession(info);
+					return {
+						id: summary.sessionId,
+						...(summary.sessionName ? { name: summary.sessionName } : {}),
+						depth: setDepth,
+						status: classifySessionRosterStatus(summary),
+						parentSessionPath,
+					};
+				}),
+			],
 			{
 				name,
 				depth: setDepth,
-				parentSessionPath: target.parentSessionPath ? canonicalSessionPath(target.parentSessionPath) : undefined,
+				parentSessionPath,
 				ignoreSessionId: target.id,
 			},
 		);
