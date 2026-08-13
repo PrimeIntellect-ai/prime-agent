@@ -2909,8 +2909,6 @@ describe("AgentSession rlm recursion", () => {
 			{
 				requestId: "test-rlm-run-abort",
 				generation: 1,
-				requestType: "rlm.run",
-				timeoutMs: 100,
 				signal: controller.signal,
 				isCurrent: () => !controller.signal.aborted,
 			},

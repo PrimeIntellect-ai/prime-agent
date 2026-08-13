@@ -294,8 +294,6 @@ background_send = asyncio.create_task(send_later())`,
 			{
 				requestId: "test-agent-message-abort",
 				generation: 1,
-				requestType: "agent_message.send",
-				timeoutMs: 100,
 				signal: controller.signal,
 				isCurrent: () => !controller.signal.aborted,
 			},

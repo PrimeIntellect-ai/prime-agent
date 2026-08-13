@@ -70,8 +70,6 @@ export const HOST_COMM_TARGET = "host.request";
 export interface HostRequestContext {
 	readonly requestId: string;
 	readonly generation: number;
-	readonly requestType: string;
-	readonly timeoutMs: number;
 	/** Aborted with the source execution, when the deadline expires, or when the Comm closes. */
 	readonly signal: AbortSignal;
 	isCurrent(): boolean;
@@ -110,11 +108,6 @@ function assertGenuineHostRequestContext(context: unknown): asserts context is H
 		typeof (context as HostRequestContext).requestId !== "string" ||
 		!(context as HostRequestContext).requestId ||
 		!Number.isSafeInteger((context as HostRequestContext).generation) ||
-		typeof (context as HostRequestContext).requestType !== "string" ||
-		!(context as HostRequestContext).requestType ||
-		!Number.isSafeInteger((context as HostRequestContext).timeoutMs) ||
-		(context as HostRequestContext).timeoutMs < 1 ||
-		(context as HostRequestContext).timeoutMs > MAX_HOST_REQUEST_TIMEOUT_MS ||
 		typeof (context as HostRequestContext).isCurrent !== "function" ||
 		typeof (context as HostRequestContext).signal !== "object" ||
 		(context as HostRequestContext).signal === null ||
@@ -1569,8 +1562,6 @@ export class KernelManager {
 			const context: HostRequestContext = Object.freeze({
 				requestId: uuid(),
 				generation: ++this.hostRequestGeneration,
-				requestType: envelope.requestType,
-				timeoutMs: envelope.timeoutMs,
 				signal: controller.signal,
 				isCurrent: () =>
 					request !== undefined &&
