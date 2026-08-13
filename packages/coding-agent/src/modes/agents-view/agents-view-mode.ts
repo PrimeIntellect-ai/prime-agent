@@ -13,7 +13,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { APP_TITLE, appendRotatingLog, getAgentDir, getClientErrorLogPath, VERSION } from "../../config.js";
+import { appendRotatingLog, formatWindowTitle, getAgentDir, getClientErrorLogPath, VERSION } from "../../config.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import { KeybindingsManager } from "../../core/keybindings.js";
 import { SessionManager } from "../../core/session-manager.js";
@@ -720,7 +720,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 		this.ui = new TUI(new ProcessTerminal(), options.uiServices.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(options.uiServices.settingsManager.getClearOnShrink());
-		this.ui.terminal.setTitle(`${APP_TITLE} - Agents`);
+		this.ui.terminal.setTitle(formatWindowTitle("Agents"));
 		this.editor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: options.uiServices.settingsManager.getEditorPaddingX(),
 			autocompleteMaxVisible: options.uiServices.settingsManager.getAutocompleteMaxVisible(),

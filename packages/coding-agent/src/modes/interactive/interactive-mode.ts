@@ -55,7 +55,7 @@ import {
 } from "../../cli/daemon-update-restart.js";
 import {
 	APP_NAME,
-	APP_TITLE,
+	formatWindowTitle,
 	getAgentDir,
 	getAgentTracesLogPath,
 	getDebugLogPath,
@@ -1467,9 +1467,9 @@ export class InteractiveMode {
 		const cwdBasename = path.basename(this.getCurrentCwd());
 		const sessionName = this.getCurrentSessionName();
 		if (sessionName) {
-			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
+			this.ui.terminal.setTitle(formatWindowTitle(cwdBasename, sessionName));
 		} else {
-			this.ui.terminal.setTitle(`${APP_TITLE} - ${cwdBasename}`);
+			this.ui.terminal.setTitle(formatWindowTitle(cwdBasename));
 		}
 	}
 
