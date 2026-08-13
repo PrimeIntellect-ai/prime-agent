@@ -21,6 +21,7 @@ describe("ENG-4649 subagent model selection", () => {
 		});
 		try {
 			const prompt = harness.session.agent.state.systemPrompt;
+			expect(prompt).toContain(`You are currently running as \`model-0\` from provider \`${provider}\``);
 			expect(prompt).not.toContain(`${provider}/model-319`);
 			const handlers = (
 				harness.session as unknown as { _createKernelHostHandlers(): HostRequestHandlers }
@@ -366,8 +367,17 @@ describe("ENG-4649 subagent model selection", () => {
 			const child = harness.session.getRlmChildSession(childEntry!.rlm_child_id);
 			expect(child?.model?.id).toBe("child-model");
 			expect(child?.thinkingLevel).toBe("off");
+			expect(child?.agent.state.systemPrompt).toContain(
+				`You are currently running as \`child-model\` from provider \`${provider}\` (display name: \`Child Model\`).`,
+			);
 
 			await harness.session.setModel(harness.getModel("later-parent-model")!);
+			expect(harness.session.agent.state.systemPrompt).toContain(
+				`You are currently running as \`later-parent-model\` from provider \`${provider}\``,
+			);
+			expect(harness.session.agent.state.systemPrompt).not.toContain(
+				`You are currently running as \`parent-model\` from provider \`${provider}\``,
+			);
 			await child!.prompt("check the follow-up", { expandPromptTemplates: false, source: "extension" });
 			await child!.agent.waitForIdle();
 

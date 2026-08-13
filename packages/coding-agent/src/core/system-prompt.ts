@@ -35,6 +35,8 @@ export interface BuildSystemPromptOptions {
 	rlmDepth?: number;
 	/** Human-readable parent name or id for child communication doctrine. */
 	rlmParentAgent?: string;
+	/** Model currently executing this prompt. */
+	currentModel?: { provider: string; id: string; name?: string };
 	/** Local and global Continual Harness state to inject as compact persistent context. */
 	harnessState?: HarnessState;
 	/** Enabled user-configured servers available through the generic kernel MCP API. */
@@ -65,6 +67,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const date = `${year}-${month}-${day}`;
 
 	const appendSection = appendSystemPrompt ? `\n\n${appendSystemPrompt}` : "";
+	const modelSection = formatCurrentModel(options.currentModel);
 
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
@@ -78,6 +81,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	if (customPrompt) {
 		let prompt = customPrompt;
+
+		if (modelSection) {
+			prompt += `\n\n${modelSection}`;
+		}
 
 		// Append project context files
 		if (contextFiles.length > 0) {
@@ -136,6 +143,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		parentAgent: options.rlmParentAgent,
 	});
 
+	if (modelSection) {
+		prompt += `\n\n${modelSection}`;
+	}
+
 	// Append delegation guidance after the base prompt. The base block defines
 	// `rlm(...)` admission and handle mechanics; this block explains when delegation
 	// helps. The rendered subagent-spec roster follows in the harness-state block.
@@ -185,6 +196,14 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	prompt += `\n\n${CHAT_WORKSPACE_PRECEDENCE}`;
 
 	return prompt;
+}
+
+function formatCurrentModel(model: BuildSystemPromptOptions["currentModel"]): string {
+	if (!model) return "";
+
+	const displayName = model.name?.trim();
+	const displayNameSuffix = displayName && displayName !== model.id ? ` (display name: \`${displayName}\`)` : "";
+	return `# Current Model\n\nYou are currently running as \`${model.id}\` from provider \`${model.provider}\`${displayNameSuffix}.`;
 }
 
 function formatGenericMcpGuidance(servers: string[] | undefined): string {
