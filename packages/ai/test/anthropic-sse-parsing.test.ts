@@ -68,12 +68,15 @@ const minimalAnthropicEvents = [
 	},
 ];
 
-function createFakeAnthropicClient(response: Response): Anthropic {
+function createFakeAnthropicClient(response: Response, onCreate?: (params: unknown) => void): Anthropic {
 	return {
 		messages: {
-			create: () => ({
-				asResponse: async () => response,
-			}),
+			create: (params: unknown) => {
+				onCreate?.(params);
+				return {
+					asResponse: async () => response,
+				};
+			},
 		},
 	} as unknown as Anthropic;
 }
@@ -253,6 +256,45 @@ describe("Anthropic raw SSE parsing", () => {
 			path: "A\\H",
 			text: "col1\tcol2",
 		});
+	});
+
+	it.each(["minimax", "minimax-cn"] as const)(
+		"sends service_tier priority for MiniMax-M3 (%s) and prices at 1.5x",
+		async (provider) => {
+			const model = getModel(provider, "MiniMax-M3");
+			let capturedParams: unknown;
+			const response = createSseResponse(minimalAnthropicEvents);
+			const result = await streamAnthropic(
+				model,
+				{ messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }] },
+				{
+					client: createFakeAnthropicClient(response, (params) => (capturedParams = params)),
+					serviceTier: "priority",
+				},
+			).result();
+
+			expect(capturedParams).toMatchObject({ model: "MiniMax-M3", service_tier: "priority" });
+			// message_start reports 12 input / 0 output; message_delta reports 5 output.
+			expect(result.usage.cost.input).toBeCloseTo((12 * 0.3 * 1.5) / 1_000_000);
+			expect(result.usage.cost.output).toBeCloseTo((5 * 1.2 * 1.5) / 1_000_000);
+			expect(result.usage.cost.total).toBeCloseTo((12 * 0.3 * 1.5 + 5 * 1.2 * 1.5) / 1_000_000);
+		},
+	);
+
+	it("does not send service_tier for non-MiniMax providers", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		let capturedParams: unknown;
+		const response = createSseResponse(minimalAnthropicEvents);
+		await streamAnthropic(
+			model,
+			{ messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }] },
+			{
+				client: createFakeAnthropicClient(response, (params) => (capturedParams = params)),
+				serviceTier: "priority",
+			},
+		).result();
+
+		expect(capturedParams).not.toHaveProperty("service_tier");
 	});
 
 	it("ignores unknown SSE events after message_stop", async () => {

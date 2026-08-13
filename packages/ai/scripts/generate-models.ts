@@ -39,6 +39,16 @@ interface ModelsDevModel {
 		output?: number;
 		cache_read?: number;
 		cache_write?: number;
+		tiers?: Array<{
+			input?: number;
+			output?: number;
+			cache_read?: number;
+			cache_write?: number;
+			tier?: {
+				type?: string;
+				size?: number;
+			};
+		}>;
 	};
 	modalities?: {
 		input?: string[];
@@ -1411,6 +1421,50 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
+	/**
+	 * Explicit per-context cost tier emitted for direct MiniMax models.
+	 * Matches the `CostTier` contract on `Model.cost.tiers`
+	 * ({contextThreshold, input, output, cacheRead, cacheWrite}, $/million tokens).
+	 */
+	interface ModelCostTier {
+		contextThreshold: number;
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+	}
+
+	/**
+	 * Official direct MiniMax service-tier price multipliers.
+	 * Priority requests on MiniMax's direct Anthropic-compatible API are billed
+	 * at 1.5x the standard per-token rates.
+	 */
+	const MINIMAX_SERVICE_TIER_MULTIPLIERS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
+		"MiniMax-M3": { priority: 1.5 },
+	};
+
+	/**
+	 * Parse models.dev `cost.tiers` context entries into explicit cost tiers for
+	 * direct MiniMax models. Only context tiers with a numeric size are imported
+	 * and their thresholds/rates are preserved exactly. Scoped to MiniMax: no
+	 * other provider section imports cost tiers.
+	 */
+	function minimaxContextCostTiers(cost: ModelsDevModel["cost"]): ModelCostTier[] | undefined {
+		if (!cost?.tiers?.length) return undefined;
+		const tiers: ModelCostTier[] = [];
+		for (const tier of cost.tiers) {
+			if (tier.tier?.type !== "context" || typeof tier.tier.size !== "number") continue;
+			tiers.push({
+				contextThreshold: tier.tier.size,
+				input: tier.input ?? 0,
+				output: tier.output ?? 0,
+				cacheRead: tier.cache_read ?? 0,
+				cacheWrite: tier.cache_write ?? 0,
+			});
+		}
+		return tiers.length > 0 ? tiers : undefined;
+	}
+
 		// Process MiniMax models
 		const minimaxVariants = [
 			{ key: "minimax", provider: "minimax", baseUrl: "https://api.minimax.io/anthropic" },
@@ -1422,6 +1476,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				for (const [modelId, model] of Object.entries(data[key].models)) {
 					const m = model as ModelsDevModel;
 					if (m.tool_call !== true) continue;
+
+					// Direct MiniMax models only: import explicit context cost tiers and
+					// official service-tier multipliers. Other providers keep flat rates.
+					const tiers = minimaxContextCostTiers(m.cost);
+					const serviceTierMultipliers = MINIMAX_SERVICE_TIER_MULTIPLIERS[modelId];
 
 					models.push({
 						id: modelId,
@@ -1437,6 +1496,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 							output: m.cost?.output || 0,
 							cacheRead: m.cost?.cache_read || 0,
 							cacheWrite: m.cost?.cache_write || 0,
+							...(tiers ? { tiers } : {}),
+							...(serviceTierMultipliers ? { serviceTierMultipliers } : {}),
 						},
 						contextWindow: m.limit?.context || 4096,
 						maxTokens: m.limit?.output || 4096,
@@ -2414,6 +2475,12 @@ export const MODELS = {
 			output += `\t\t\t\toutput: ${model.cost.output},\n`;
 			output += `\t\t\t\tcacheRead: ${model.cost.cacheRead},\n`;
 			output += `\t\t\t\tcacheWrite: ${model.cost.cacheWrite},\n`;
+			if (model.cost.tiers) {
+				output += `\t\t\t\ttiers: ${JSON.stringify(model.cost.tiers)},\n`;
+			}
+			if (model.cost.serviceTierMultipliers) {
+				output += `\t\t\t\tserviceTierMultipliers: ${JSON.stringify(model.cost.serviceTierMultipliers)},\n`;
+			}
 			output += `\t\t\t},\n`;
 			output += `\t\t\tcontextWindow: ${model.contextWindow},\n`;
 			output += `\t\t\tmaxTokens: ${model.maxTokens},\n`;

@@ -8,7 +8,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages.js";
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost, clampThinkingLevel } from "../models.js";
+import { type CostOverrides, calculateCost, clampThinkingLevel } from "../models.js";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -554,11 +554,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							event.message.usage.cache_creation,
 						);
 					}
-					calculateCost(
-						model,
-						output.usage,
-						cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost },
-					);
+					calculateCost(model, output.usage, buildCostOverrides(cacheWriteCost, options?.serviceTier));
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
 						const block: Block = {
@@ -703,11 +699,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(
-						model,
-						output.usage,
-						cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost },
-					);
+					calculateCost(model, output.usage, buildCostOverrides(cacheWriteCost, options?.serviceTier));
 				}
 			}
 
@@ -952,6 +944,22 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
+/**
+ * Build calculateCost overrides: pass through the Anthropic cache-write override
+ * and the requested service tier (used for service-tier price multipliers).
+ * Returns undefined when neither override is set so default pricing is untouched.
+ */
+function buildCostOverrides(
+	cacheWriteCost: number | undefined,
+	serviceTier: StreamOptions["serviceTier"],
+): CostOverrides | undefined {
+	if (cacheWriteCost === undefined && serviceTier == null) return undefined;
+	return {
+		...(cacheWriteCost === undefined ? {} : { cacheWrite: cacheWriteCost }),
+		...(serviceTier == null ? {} : { serviceTier }),
+	};
+}
+
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
@@ -965,6 +973,15 @@ function buildParams(
 		max_tokens: options?.maxTokens || (model.maxTokens / 3) | 0,
 		stream: true,
 	};
+
+	// MiniMax's direct Anthropic-compatible API supports a "priority" service
+	// tier (billed at 1.5x standard rates). Other providers/routes on this
+	// path do not accept service_tier, so only forward it for MiniMax.
+	if ((model.provider === "minimax" || model.provider === "minimax-cn") && options?.serviceTier === "priority") {
+		// The Anthropic SDK only types service_tier as "auto" | "standard_only";
+		// MiniMax accepts "priority", so use a narrow intersection cast.
+		params.service_tier = "priority" as "priority" & MessageCreateParamsStreaming["service_tier"];
+	}
 
 	// For OAuth tokens, we MUST include Claude Code identity
 	if (isOAuthToken) {
