@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Changed the agents view to sort idle and inactive sessions by last message time, newest first, while keeping running agents in stable creation order ([ENG-5126](https://linear.app/primeintellect/issue/ENG-5126/sort-agents-view-sessions-by-last-message-time)).
+- Changed the agents view to sort idle and inactive sessions by last message time, newest first, while keeping running agents in stable creation order.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
