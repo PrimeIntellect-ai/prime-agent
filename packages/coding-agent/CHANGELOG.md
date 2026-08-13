@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added working-directory metadata to the family roster returned by `agent_message.list_agents()`.
+- Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
 
