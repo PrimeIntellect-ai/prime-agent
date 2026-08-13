@@ -99,7 +99,30 @@ interface RequestBody {
 // Retry Helpers
 // ============================================================================
 
-function isRetryableError(status: number, errorText: string): boolean {
+/**
+ * A response the retry policy already rejected, for example a 401. It is thrown from
+ * inside the transport try block, so without a distinct type the generic catch below
+ * treats it as a network error and retries it anyway.
+ */
+export class NonRetryableProviderError extends Error {
+	readonly status: number;
+
+	constructor(message: string, status: number) {
+		super(message);
+		this.name = "NonRetryableProviderError";
+		this.status = status;
+	}
+}
+
+/** Auth failures never succeed on a repeat, so they must cost one request, not the budget. */
+export function isNonRetryableAuthStatus(status: number): boolean {
+	return status === 401 || status === 403;
+}
+
+export function isRetryableError(status: number, errorText: string): boolean {
+	if (isNonRetryableAuthStatus(status)) {
+		return false;
+	}
 	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
 		return true;
 	}
@@ -265,12 +288,17 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						statusText: response.statusText,
 					});
 					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
+					throw new NonRetryableProviderError(info.friendlyMessage || info.message, response.status);
 				} catch (error) {
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
 						}
+					}
+					// The retry policy already rejected this response; retrying it here would
+					// spend the whole budget re-sending a request that cannot start succeeding.
+					if (error instanceof NonRetryableProviderError) {
+						throw error;
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
 					// Network errors are retryable
