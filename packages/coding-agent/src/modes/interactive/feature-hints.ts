@@ -71,6 +71,10 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 		getText: () => "Use /refine to turn useful lessons into reusable skills, memory, and prompts.",
 	},
 	{
+		id: "trace-sharing",
+		getText: () => "Share traces with Prime Intellect using /traces on to train open-source LLMs.",
+	},
+	{
 		id: "persistent-ipython",
 		getText: () => "Prime Agent keeps IPython variables and helpers between turns and compactions.",
 	},
