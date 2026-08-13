@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added ACP `usage_update` reporting, so an ACP client can show how much of the context window a session has consumed ([#1351](https://github.com/PrimeIntellect-ai/prime-agent/pull/1351) by [@AndriyPytel](https://github.com/AndriyPytel)).
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
