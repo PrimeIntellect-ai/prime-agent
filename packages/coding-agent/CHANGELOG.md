@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed `openai-codex` models being invisible to `rlm` subagents and `find_models` because model discovery reported Prime Agent's own version as the Codex client version ([#702](https://github.com/PrimeIntellect-ai/prime-agent/issues/702)).
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11

@@ -27,7 +27,7 @@ import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
-import { getAgentDir, VERSION } from "../config.js";
+import { getAgentDir } from "../config.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -372,6 +372,15 @@ function readOpenAICodexAccountId(token: string): string | undefined {
 	}
 }
 
+/**
+ * The Codex backend gates its model catalog on the reported client version: it answers HTTP 200 with a
+ * catalog that grows as the version rises, so a low version yields a silently empty or partial list rather
+ * than an error. Prime Agent's own package version is far below the Codex CLI's version line, so it must
+ * report a supported Codex client version here instead. Raise this when the Codex CLI publishes a release
+ * that gates newer models.
+ */
+const OPENAI_CODEX_CLIENT_VERSION = "0.147.0";
+
 function openAICodexModelsUrl(baseUrl: string): string {
 	const normalized = baseUrl.replace(/\/+$/, "");
 	let path: string;
@@ -383,7 +392,7 @@ function openAICodexModelsUrl(baseUrl: string): string {
 		path = `${normalized}/codex/models`;
 	}
 	const url = new URL(path);
-	url.searchParams.set("client_version", VERSION);
+	url.searchParams.set("client_version", OPENAI_CODEX_CLIENT_VERSION);
 	return url.toString();
 }
 
