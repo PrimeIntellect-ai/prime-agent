@@ -1906,11 +1906,16 @@ export class DaemonSupervisor {
 				return await forward();
 			}
 			this.persistWorkerStopTombstone(match.worker, true);
+			const releaseStopOwnership = this.acquireWorkerStopOwnership(match.worker);
 			let response: DaemonResponse;
 			try {
 				response = await this.forwardToWorker(match.worker, resolvedCommand);
 			} finally {
-				await this.stopWorker(match.worker, true, false, true);
+				try {
+					await this.stopWorker(match.worker, true, false, true);
+				} finally {
+					releaseStopOwnership();
+				}
 			}
 			return response;
 		} finally {
@@ -4242,9 +4247,14 @@ export class DaemonSupervisor {
 			!this.shuttingDown
 		) {
 			worker.intentionalStop = true;
-			this.workers.delete(worker.descriptor.workerId);
-			this.deleteWorkerDescriptor(worker);
-			void this.syncAgentPeers().catch(() => undefined);
+			// An exact stop owns its registration and descriptor cleanup until its
+			// tuple assertions complete. A synchronous root shutdown event can arrive
+			// before its request resolves, so leave both intact while it is active.
+			if ((this.workerStopCounts?.get(worker) ?? 0) === 0) {
+				this.workers.delete(worker.descriptor.workerId);
+				this.deleteWorkerDescriptor(worker);
+				void this.syncAgentPeers().catch(() => undefined);
+			}
 		}
 	}
 
@@ -4624,6 +4634,25 @@ export class DaemonSupervisor {
 		return observed === processStartId ? "current" : "replaced";
 	}
 
+	/**
+	 * Keep an exact stop's registration and descriptor authoritative while any
+	 * part of its cleanup is in flight. Root kills acquire this before forwarding
+	 * because a synchronous shutdown event may arrive before the worker replies.
+	 */
+	private acquireWorkerStopOwnership(worker: ResidentWorker): () => void {
+		if (!this.workerStopCounts) this.workerStopCounts = new Map();
+		const stopCounts = this.workerStopCounts;
+		stopCounts.set(worker, (stopCounts.get(worker) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const remaining = (stopCounts.get(worker) ?? 1) - 1;
+			if (remaining === 0) stopCounts.delete(worker);
+			else stopCounts.set(worker, remaining);
+		};
+	}
+
 	private async stopWorker(
 		worker: ResidentWorker,
 		removeDescriptor: boolean,
@@ -4632,15 +4661,11 @@ export class DaemonSupervisor {
 		recoveryCleanup = false,
 		directChild?: { child: ChildProcess; closed: Promise<void> },
 	): Promise<void> {
-		if (!this.workerStopCounts) this.workerStopCounts = new Map();
-		const stopCounts = this.workerStopCounts;
-		stopCounts.set(worker, (stopCounts.get(worker) ?? 0) + 1);
+		const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
 		try {
 			await this.stopWorkerUntracked(worker, removeDescriptor, force, archiveSession, recoveryCleanup, directChild);
 		} finally {
-			const remaining = (stopCounts.get(worker) ?? 1) - 1;
-			if (remaining === 0) stopCounts.delete(worker);
-			else stopCounts.set(worker, remaining);
+			releaseStopOwnership();
 		}
 	}
 
