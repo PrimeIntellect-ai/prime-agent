@@ -144,6 +144,7 @@ Continual harness components:
 
 Editing model:
 - An \`update\` replaces the entry's entire \`content\`; text you do not reproduce is removed.
+- The harness overview and every agent's system prompt render only the leading characters of an entry's \`content\` — a mechanical slice, not a summary — so the opening of \`content\` is the entry's interface: begin it with what the entry is and when to open it, never with a date, a header, or narrative.
 - \`... (+N chars not shown)\` marks an entry you were not shown in full; an update to one is refused.
 - Each overview entry has a canonical \`scope:kind:id\` identifier. To see entries in full, reply with \`{"expand": ["scope:kind:id", ...]}\` and nothing else. Copy each identifier exactly; you may expand again in a later reply.
 

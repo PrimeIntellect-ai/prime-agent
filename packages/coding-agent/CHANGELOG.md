@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Fixed the continual harness refiner rewriting entries it was only shown a fragment of; it now sees how much is hidden, can request entries in full, and updates to entries it has not seen are refused ([#1317](https://github.com/PrimeIntellect-ai/prime-agent/pull/1317) by [@bilelrais](https://github.com/bilelrais)).
+- Fixed the continual harness refiner rewriting entries it was only shown a fragment of; it now sees how much is hidden, can request entries in full, and updates to entries it has not seen are refused; its editing rules also now state that the overview and the system prompt render only an entry's leading characters, so an entry's opening must say what it is and when to open it ([#1317](https://github.com/PrimeIntellect-ai/prime-agent/pull/1317) by [@bilelrais](https://github.com/bilelrais)).
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11
