@@ -363,6 +363,32 @@ describe("WorkerRecoveryJournal", () => {
 		]);
 	});
 
+	it("scopes torn-checkpoint suppression to the affected active session", () => {
+		const path = createPath();
+		const journal = new WorkerRecoveryJournal(path);
+		journal.record({
+			activeSessionId: "active-a",
+			sessionId: "session-a",
+			...v2Authority,
+			sessionFile: "/tmp/session-a.jsonl",
+			busy: true,
+			operation: "tool_execution_start",
+		});
+		journal.record({
+			activeSessionId: "active-b",
+			sessionId: "session-b",
+			...v2Authority,
+			sessionFile: "/tmp/session-b.jsonl",
+			busy: true,
+			operation: "tool_execution_start",
+		});
+		appendFileSync(path, '{"version":2,"activeSessionId":"active-b"');
+
+		expect(WorkerRecoveryJournal.readLatest(path)).toEqual([
+			expect.objectContaining({ version: 2, activeSessionId: "active-a", busy: true }),
+		]);
+	});
+
 	it("skips malformed v2 records while keeping valid ones", () => {
 		const path = createPath();
 		writeFileSync(path, '{"version":2,"activeSessionId":"bad"}\n');

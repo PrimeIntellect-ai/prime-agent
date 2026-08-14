@@ -160,6 +160,32 @@ function parseRecord(line: string): WorkerRecoveryRecord | undefined {
 	return parseV2(parsed as Record<string, unknown>) ?? parseV1(parsed as Record<string, unknown>);
 }
 
+/**
+ * Recover the session identity from an invalid checkpoint when it was written
+ * far enough to include the complete JSON string. Journal serialization places
+ * activeSessionId before every authority field, so a torn prefix without a
+ * complete identity cannot contain a later authority change.
+ */
+function malformedActiveSessionId(line: string): string | undefined {
+	try {
+		const parsed = JSON.parse(line) as unknown;
+		if (typeof parsed === "object" && parsed !== null) {
+			const activeSessionId = (parsed as Record<string, unknown>).activeSessionId;
+			if (isNonEmptyString(activeSessionId)) return activeSessionId;
+		}
+	} catch {
+		// A truncated JSON object may still contain the complete identity token.
+	}
+	const token = /"activeSessionId"\s*:\s*("(?:\\.|[^"\\])*")/.exec(line)?.[1];
+	if (!token) return undefined;
+	try {
+		const activeSessionId = JSON.parse(token) as unknown;
+		return isNonEmptyString(activeSessionId) ? activeSessionId : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function parseRecords(path: string): Map<string, WorkerRecoveryRecord> {
 	const indexed = new Map<string, { record: WorkerRecoveryRecord; index: number }>();
 	let contents: string;
@@ -169,21 +195,26 @@ function parseRecords(path: string): Map<string, WorkerRecoveryRecord> {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
 		throw error;
 	}
-	let lastMalformedIndex = -1;
+	const lastMalformedIndex = new Map<string, number>();
 	const lines = contents.split("\n");
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index]!;
 		if (!line) continue;
 		const record = parseRecord(line);
-		if (record) indexed.set(record.activeSessionId, { record, index });
-		else lastMalformedIndex = index;
+		if (record) {
+			indexed.set(record.activeSessionId, { record, index });
+		} else {
+			const activeSessionId = malformedActiveSessionId(line);
+			if (activeSessionId) lastMalformedIndex.set(activeSessionId, index);
+		}
 	}
 	const latest = new Map<string, WorkerRecoveryRecord>();
 	for (const [activeSessionId, { record, index }] of indexed) {
-		// A malformed later checkpoint could contain an authority change that was
-		// only partially persisted. Never fall back to an older busy v2 authority;
-		// a subsequent valid checkpoint may safely supersede the corrupt line.
-		if (record.version === 2 && record.busy && index < lastMalformedIndex) continue;
+		// A malformed later checkpoint for this session could contain an authority
+		// change that was only partially persisted. Never fall back to that session's
+		// older busy v2 authority; unrelated session records remain recoverable.
+		const malformedIndex = lastMalformedIndex.get(activeSessionId) ?? -1;
+		if (record.version === 2 && record.busy && index < malformedIndex) continue;
 		latest.set(activeSessionId, record);
 	}
 	return latest;

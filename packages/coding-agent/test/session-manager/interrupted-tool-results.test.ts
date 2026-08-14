@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -361,6 +361,44 @@ describe("SessionManager exact-authority recovery", () => {
 			.join(" ");
 		expect(text).toContain("whether the tool executed");
 		expect(text).toContain("Inspect external side effects");
+	});
+
+	it("accepts canonical authority for a session opened through a symlink alias", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-interrupted-tool-symlink-"));
+		roots.push(root);
+		const realProject = join(root, "real-project");
+		const realSessions = join(root, "real-sessions");
+		const linkedSessions = join(root, "linked-sessions");
+		mkdirSync(realProject, { recursive: true });
+		mkdirSync(realSessions, { recursive: true });
+		symlinkSync(realSessions, linkedSessions, "dir");
+		const session = SessionManager.create(realProject, linkedSessions);
+		session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
+		session.appendMessage(assistantTurn(toolCall("bash-1", "bash")));
+		const aliasedSessionFile = session.getSessionFile();
+		if (!aliasedSessionFile) throw new Error("Fixture session did not persist");
+		const authority = { ...buildAuthority(session), sessionFile: realpathSync(aliasedSessionFile) };
+
+		expect(session.closeUnresolvedToolCallsWithAuthority(authority)).toEqual({ status: "applied", closed: 1 });
+		expect(toolResultEntries(session)).toHaveLength(1);
+	});
+
+	it("returns stale for a genuinely different canonical session file", () => {
+		const session = createSession();
+		session.appendMessage({ role: "user", content: "run tools", timestamp: Date.now() });
+		session.appendMessage(assistantTurn(toolCall("bash-1", "bash")));
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Fixture session did not persist");
+		const before = readFileSync(sessionFile).length;
+
+		expectStaleWithoutWrite(
+			session.closeUnresolvedToolCallsWithAuthority({
+				...buildAuthority(session),
+				sessionFile: join(dirname(sessionFile), "different.jsonl"),
+			}),
+			before,
+			sessionFile,
+		);
 	});
 
 	it("tags each synthetic result with operationId and assistantEntryId metadata", () => {

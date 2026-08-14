@@ -1629,7 +1629,7 @@ export class SessionManager {
 			return { status: "stale", reason: "generation" };
 		}
 		const currentSessionFile = this.getSessionFile();
-		if (!currentSessionFile || authority.sessionFile !== currentSessionFile) {
+		if (!currentSessionFile || authority.sessionFile !== realpathIfPresent(currentSessionFile)) {
 			return { status: "stale", reason: "sessionFile" };
 		}
 		const branch = this.getBranch();
