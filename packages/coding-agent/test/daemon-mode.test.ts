@@ -696,7 +696,7 @@ describe("daemon mode helpers", () => {
 				{ id: "child-1" } as CreateRlmSubagentRuntimeOptions,
 				"cancelled",
 			);
-		expect(recordDeletion).toHaveBeenCalledWith(parentState, "child-1");
+		expect(recordDeletion).toHaveBeenCalledWith(parentState, "child-1", "revoked");
 		expect(recordDeletion.mock.invocationCallOrder[0]).toBeLessThan(closeSession.mock.invocationCallOrder[1]!);
 		expect(closeSession).toHaveBeenLastCalledWith(childState, "killed");
 		expect(internals.sessions.has(childState.activeSessionId)).toBe(false);
