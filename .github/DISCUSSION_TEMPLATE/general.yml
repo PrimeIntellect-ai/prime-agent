@@ -1,0 +1,44 @@
+title: "[General] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start a general discussion or ask a focused question about Prime Agent. Search the documentation and existing Discussions first.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: What is your discussion about?
+      multiple: true
+      options:
+        - Installation or updates
+        - Configuration and authentication
+        - Agent behavior
+        - AI providers and models
+        - Coding agent and CLI
+        - TUI
+        - Development
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: topic
+    attributes:
+      label: Topic
+      description: What would you like to discuss, understand, or accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried or considered?
+      description: Include relevant commands, documentation, or approaches if useful.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add redacted logs, configuration details, or screenshots if useful.
+    validations:
+      required: false

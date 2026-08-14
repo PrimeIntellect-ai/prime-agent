@@ -1,22 +1,12 @@
 ---
-name: Feature request
-description: Suggest a new feature or enhancement
+name: Accepted feature (maintainers)
+description: Track a feature accepted from GitHub Discussions
 labels: ["enhancement"]
 body:
-  - type: dropdown
-    id: package
+  - type: markdown
     attributes:
-      label: Package
-      multiple: true
-      description: Which package(s) would this feature affect? Select all that apply. A maintainer will apply the matching `pkg:*` labels.
-      options:
-        - agent
-        - ai
-        - coding-agent
-        - tui
-        - Not sure
-    validations:
-      required: true
+      value: |
+        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use the Feature request form in GitHub Discussions instead.
   - type: textarea
     id: problem
     attributes:
