@@ -640,13 +640,27 @@ export class RlmSpawnLedger {
 			}
 		}
 		if (records.length === 0) return;
+		const meta: RlmLedgerMetaRecord = { v: 1, op: "meta", at: nowIso(), sessionsDir: this.canonicalSessionsDir };
+		const payload = [meta, ...records].map((record) => `${JSON.stringify(record)}\n`).join("");
+		// A seed beyond the read bounds would publish a ledger every replaySync
+		// refuses to read — manufacturing the exact poisoned state the bounds
+		// exist to prevent. Skip seeding entirely (flat families, the documented
+		// degradation mode) rather than publishing partial topology: profiles
+		// this large are pathological, and a truncated tree would be more
+		// confusing than a flat one. Not thrown: a hard error here would stick
+		// via seedAttempted and the next append would create an empty ledger.
+		if (records.length + 1 > RLM_LEDGER_MAX_RECORDS || Buffer.byteLength(payload) > RLM_LEDGER_MAX_BYTES) {
+			this.log(
+				`RLM ledger: seed exceeds read bounds (${records.length} records, ${Buffer.byteLength(payload)} bytes); skipping seeding`,
+			);
+			return;
+		}
 		const dir = dirname(this.path);
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const tempPath = `${this.path}.seed-${process.pid}-${Date.now()}`;
-		const meta: RlmLedgerMetaRecord = { v: 1, op: "meta", at: nowIso(), sessionsDir: this.canonicalSessionsDir };
 		const handle = openSync(tempPath, "wx", 0o600);
 		try {
-			writeSync(handle, [meta, ...records].map((record) => `${JSON.stringify(record)}\n`).join(""));
+			writeSync(handle, payload);
 			fsyncSync(handle);
 		} finally {
 			closeSync(handle);

@@ -836,6 +836,45 @@ describe("rlm spawn ledger daemon wiring", () => {
 		}
 	});
 
+	it("skips seeding entirely when the seed would exceed the read bounds", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-bounds-"));
+		try {
+			const sessionsDir = join(tempDir, "sessions");
+			const parentManager = SessionManager.create(tempDir, sessionsDir);
+			parentManager.newSession();
+			parentManager.appendSessionInfo("parent");
+			parentManager.flushNow();
+			const parentFile = parentManager.getSessionFile();
+			if (!parentFile) throw new Error("Missing parent session file");
+			// Few-but-huge records: 40 x ~1MiB names serialize past the 32MiB
+			// byte bound without a 100k-record loop.
+			const hugeName = "n".repeat(1024 * 1024);
+			const entries = Array.from({ length: 40 }, (_, index) => ({
+				childId: `sub-${String(index).padStart(8, "0")}`,
+				sessionName: hugeName,
+				sessionFile: join(tempDir, `huge-${index}.jsonl`),
+				rlmDepth: 1,
+				status: "completed" as const,
+			}));
+			const logged: string[] = [];
+			const ledger = new RlmSpawnLedger(
+				tempDir,
+				sessionsDir,
+				{
+					readRegistryForSessionFile: async (sessionFile) =>
+						canonicalSessionPath(sessionFile) === canonicalSessionPath(parentFile) ? entries : [],
+				},
+				(message) => logged.push(message),
+			);
+			// No ledger file published; the family degrades to flat roots.
+			await expect(ledger.family()).resolves.toEqual([expect.objectContaining({ name: "parent", rlmDepth: 0 })]);
+			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(false);
+			expect(logged.some((message) => message.includes("seed exceeds read bounds"))).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("publishes the seed via rename fallback on filesystems without hard links", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-nolink-"));
 		try {
