@@ -1123,7 +1123,7 @@ export async function reviewAutoRefine(
 ${context.reason}; ${context.turnsSinceLastReview} assistant turns since last auto-refine review
 </trigger>`,
 		`<current_harness_state>
-${overviewForPrompt(state)}
+${overviewForPrompt(state).text}
 </current_harness_state>`,
 		`<refinement_history>
 ${historyForPrompt(history)}

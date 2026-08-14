@@ -10,6 +10,7 @@ import {
 	type HarnessEntryIdentity,
 	loadHarnessState,
 	planRefinement,
+	reviewAutoRefine,
 } from "../../../src/core/refinement/index.js";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
@@ -77,6 +78,49 @@ describe("issue #1290 refiner overview truncation: entries cut to the per-entry 
 			maxTokens: 8192,
 		};
 	}
+
+	it("passes the rendered harness overview to the auto-refine reviewer", async () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		const distinctiveToken = "REVIEW_OVERVIEW_DISTINCTIVE_TOKEN";
+		state.entries.prompt.card = {
+			id: "card",
+			kind: "prompt",
+			title: "Card",
+			content: distinctiveToken,
+			path: "general",
+			scope: "local",
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "agent",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			version: 1,
+		};
+		completeSimpleMock.mockResolvedValueOnce(
+			assistantText(JSON.stringify({ shouldRefine: true, rationale: "review-visible" })),
+		);
+
+		const review = await reviewAutoRefine(
+			[{ role: "user", content: "review the trajectory", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			createRefineModel(),
+			"api-key",
+			{ reason: "turn_interval", turnsSinceLastReview: 1 },
+		);
+
+		const requestText: string = completeSimpleMock.mock.calls[0][1].messages[0].content[0].text;
+		const overviewStart = requestText.indexOf("<current_harness_state>");
+		const overviewEnd = requestText.indexOf("</current_harness_state>", overviewStart);
+		expect(overviewStart).toBeGreaterThanOrEqual(0);
+		expect(overviewEnd).toBeGreaterThan(overviewStart);
+		const overviewBlock = requestText.slice(overviewStart, overviewEnd);
+		expect(overviewBlock).toContain(`- [local:prompt:card] Card (general, v1): ${distinctiveToken}`);
+		expect(overviewBlock).toContain(distinctiveToken);
+		expect(overviewBlock).not.toContain("[object Object]");
+		expect(review).toMatchObject({ shouldRefine: true, rationale: "review-visible" });
+	});
 
 	it("tells the refiner when an entry is longer than the overview shows", async () => {
 		const state = loadHarnessState(makeTempDir(), "local");
