@@ -32,10 +32,7 @@ export interface CatalogRecoveryAuthority extends ExactRecoveryAuthority {
 	readonly agentDir: string;
 }
 
-export type CatalogRecoveryStaleReason =
-	| ExactRecoveryStaleReason
-	| "live_session_owner"
-	| "marker_authority_mismatch";
+export type CatalogRecoveryStaleReason = ExactRecoveryStaleReason | "live_session_owner" | "marker_authority_mismatch";
 
 export type CatalogRecoveryResult =
 	| { readonly status: "applied" }

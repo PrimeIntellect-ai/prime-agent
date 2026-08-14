@@ -25,14 +25,11 @@ import {
 	readSessionInfo,
 	type SessionEntry,
 	type SessionInfo,
-	type SessionMessageEntry,
 	SessionManager,
+	type SessionMessageEntry,
 } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
-import {
-	type CatalogRecoveryAuthority,
-	markSessionInterrupted,
-} from "../src/modes/daemon/daemon-catalog-process.js";
+import { type CatalogRecoveryAuthority, markSessionInterrupted } from "../src/modes/daemon/daemon-catalog-process.js";
 import {
 	AgentDaemon,
 	cancelPendingExtensionUiRequests,
@@ -60,8 +57,8 @@ import {
 } from "../src/modes/daemon/daemon-worker-protocol.js";
 import {
 	isV2WorkerRecoveryRecord,
-	type WorkerRecoveryRecordV2,
 	WorkerRecoveryJournal,
+	type WorkerRecoveryRecordV2,
 } from "../src/modes/daemon/worker-recovery-journal.js";
 
 describe("daemon mode helpers", () => {
@@ -10120,9 +10117,7 @@ describe("worker restore interrupted-session repair", () => {
 	function recoveryMarkers(session: SessionManager): SessionEntry[] {
 		return session
 			.getEntries()
-			.filter(
-				(entry) => entry.type === "custom_message" && entry.customType === "prime-agent.worker_recovery",
-			);
+			.filter((entry) => entry.type === "custom_message" && entry.customType === "prime-agent.worker_recovery");
 	}
 
 	function messageRoles(session: SessionManager): string[] {
@@ -10299,7 +10294,7 @@ describe("worker restore interrupted-session repair", () => {
 
 			const spy = vi.spyOn(SessionManager.prototype, "appendMessageWithRollback").mockImplementation(function (
 				this: SessionManager,
-				message,
+				_message,
 			) {
 				throw new Error("disk full");
 			});
@@ -10352,7 +10347,7 @@ describe("worker restore interrupted-session repair", () => {
 				recovered
 					.getBranch()
 					.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")
-					.map((entry) => (entry as SessionMessageEntry).message.toolCallId),
+					.map((entry) => ((entry as SessionMessageEntry).message as ToolResultMessage).toolCallId),
 			).toEqual(["bash-1", "edit-1"]);
 			expect(recoveryMarkers(recovered)).toHaveLength(1);
 			const latest = WorkerRecoveryJournal.readLatest(journalPath);

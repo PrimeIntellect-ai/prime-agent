@@ -13,6 +13,13 @@ the worker died. It is also not idempotent when persistence succeeds but the
 catalog response is lost. A retry can append the marker again, and concurrent
 requests can duplicate synthetic results.
 
+A second race exists when the assistant entry reaches the transcript after the
+last busy checkpoint. The catalog correctly rejects the older authority as
+stale, but a replacement worker then records `ready` with the unresolved call
+and the supervisor ignores idle records. Recovery must therefore also repair an
+exact unresolved terminal turn while the restoring worker exclusively holds the
+session lease, before it publishes `ready`.
+
 ## Goals
 
 - Bind recovery mutation authority to the exact persisted session generation,
@@ -22,6 +29,8 @@ requests can duplicate synthetic results.
 - Make the complete recovery operation idempotent across response loss,
   concurrent duplicate requests, and partial multi-result persistence.
 - Preserve the warning that execution and external side effects are unknown.
+- Repair unresolved terminal tool calls during worker restore before an idle
+  checkpoint can strand them.
 - Keep the change local to worker recovery rather than adding a general session
   transaction framework.
 
@@ -51,11 +60,11 @@ epoch even if the worker never reported idle. Every busy checkpoint records:
   parent links through `headEntryId`.
 - `operationId`, `operation`, `busy`, and `recordedAt`.
 
-The checkpoint is captured from one in-memory `SessionManager` view. Changes to
-session generation, path, head, assistant entry, tool calls, or lineage force a
-new journal record and operation id even when the event name is unchanged. Idle
-records end the busy epoch; the next busy transition also receives a new
-operation id. Journal writes use a
+The checkpoint is captured from one in-memory `SessionManager` view. While busy,
+changes to session generation, path, head, assistant entry, tool calls, or
+lineage force a new journal record and operation id even when the event name is
+unchanged. An idle record closes the preceding epoch under its operation id;
+the next busy transition receives a new operation id. Journal writes use a
 journal-local cross-process guard. Recovery completes an epoch with a
 compare-and-set on `operationId` after re-reading the latest record, so it
 cannot overwrite a newer busy epoch created by a resumed worker.
@@ -82,9 +91,10 @@ its lease.
 Under the lease, recovery follows this order:
 
 1. Search all entries for a `prime-agent.worker_recovery` marker carrying the
-   same `operationId`. If found, return `already_applied` without writing. This
-   is global rather than active-branch-only so later branching cannot cause a
-   completed operation to be applied again.
+   same `operationId` and full exact authority. A matching marker returns
+   `already_applied`; the same id bound to different authority is stale. The
+   search is global rather than active-branch-only so later branching cannot
+   cause a completed operation to be applied again.
 2. Open the session and verify `sessionId`.
 3. Verify that the active branch prefix through `headEntryId`, its
    `lineageDigest`, and `assistantEntryId` exactly match the journal authority.
@@ -105,6 +115,24 @@ If an append fails after some synthetic results, the request fails. A retry can
 recognize the owned suffix and append only the missing results and marker. If
 new work appears after that partial suffix, the retry becomes stale instead of
 mutating the newer work.
+
+## Restore-time recovery
+
+After a worker opens and binds an existing session under its exclusive session
+lease, it captures the current exact authority before publishing `ready`. If the
+terminal assistant turn has unresolved tool calls, the worker first persists a
+busy `restore_interrupted` epoch with a fresh operation id, then applies the same
+synthetic-result and authority-bound marker helper used by catalog recovery.
+Tools are never replayed and the worker does not automatically continue the
+model turn.
+
+A successful or idempotent apply permits the normal idle `ready` checkpoint,
+which observes no unresolved calls and closes the busy epoch. A stale result,
+journal invariant failure, or persistence error fails the open and leaves the
+busy authority durable. Disposing the failed runtime releases the lease, after
+which the supervisor/catalog path can resume an operation-owned partial suffix
+or recognize its completed marker. Restores with no unresolved calls perform no
+recovery mutation.
 
 ## Supervisor completion
 
@@ -161,15 +189,25 @@ Focused tests must prove:
    duplicates; a foreign suffix after partial persistence blocks continuation.
 6. Supervisor retry retains busy records on request failure but clears them for
    applied, already-applied, and stale outcomes.
-7. Existing interrupted-result wording and ordinary session behavior remain
-   unchanged.
+7. Restore with an unresolved terminal tool call persists busy authority before
+   mutation, appends exactly one synthetic result and marker, then publishes an
+   idle checkpoint with no unresolved calls.
+8. Restore with no unresolved calls performs no recovery mutation, while a
+   crash or persistence failure during restore leaves the busy epoch resumable
+   through the supervisor/catalog path.
+9. Marker deduplication rejects the same operation id when its recorded exact
+   authority differs.
+10. Existing interrupted-result wording and ordinary session behavior remain
+    unchanged.
 
 ## Acceptance criteria
 
 - Every recovery mutation is authorized by an exact v2 checkpoint and protected
   by the session lease.
 - Any authority mismatch produces a byte-for-byte unchanged session file.
-- One operation id can produce at most one recovery marker and one synthetic
-  result per authorized tool call.
+- One operation id can produce at most one authority-matching recovery marker
+  and one synthetic result per authorized tool call.
+- A worker never publishes `ready` while its restored active branch still has an
+  unresolved terminal tool call.
 - Focused tests, type checking, formatting, and linting pass for the exact PR
   head.

@@ -136,6 +136,7 @@ import {
 	resolveActiveSessionState,
 } from "./active-session-state.js";
 import { createCompactAssistantDelta } from "./compact-session-stream.js";
+import { applyWorkerRecoveryToSession, type CatalogRecoveryAuthority } from "./daemon-catalog-process.js";
 import { DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
@@ -200,10 +201,6 @@ import {
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
-import {
-	applyWorkerRecoveryToSession,
-	type CatalogRecoveryAuthority,
-} from "./daemon-catalog-process.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
