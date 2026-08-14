@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	createDaemonRestartCommand,
 	createDaemonShutdownCommand,
 	DaemonClient,
 	type DaemonHello,
@@ -985,16 +986,16 @@ describe("createDaemonShutdownCommand", () => {
 		expect(createDaemonShutdownCommand({ ...modernHello, supervisorPid: 0 })).toEqual({ type: "shutdown" });
 	});
 
-	it("omits supervisorProcessStartId when the handshake omits it", () => {
+	it("omits authority when the handshake lacks process-start identity", () => {
 		const { supervisorProcessStartId: _startId, ...withoutStartId } = modernHello;
-		expect(createDaemonShutdownCommand(withoutStartId)).toEqual({
-			type: "shutdown",
-			authority: {
-				supervisorGeneration: "gen-1",
-				supervisorOwnerToken: "token-1",
-				supervisorPid: 4242,
-				supervisorSocketPath: "/tmp/d.sock",
-			},
+		expect(createDaemonShutdownCommand(withoutStartId)).toEqual({ type: "shutdown" });
+	});
+
+	it("derives restart authority from the same complete handshake", () => {
+		expect(createDaemonRestartCommand(modernHello)).toEqual({
+			type: "restart",
+			authority: createDaemonShutdownCommand(modernHello).authority,
 		});
+		expect(createDaemonRestartCommand(undefined)).toEqual({ type: "restart" });
 	});
 });

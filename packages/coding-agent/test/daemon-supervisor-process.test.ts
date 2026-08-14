@@ -719,7 +719,7 @@ describe("daemon supervisor resident workers", () => {
 
 		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, ["--session-dir", sessionDir, "--no-tools"]);
 		const client = await connectEventually(socketPath, supervisor);
-		const restarted = await client.request({ type: "restart" });
+		const restarted = await client.requestSupervisorRestart();
 		expect(restarted.success).toBe(true);
 		client.close();
 		await waitForExit(supervisor);

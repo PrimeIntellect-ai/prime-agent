@@ -8,11 +8,7 @@ import { expandTildePath } from "../config.js";
 import type { AgentSessionEvent } from "../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js";
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
-import {
-	createDaemonShutdownCommand,
-	DaemonClient,
-	type DaemonClientMessageListener,
-} from "../modes/daemon/daemon-client.js";
+import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
@@ -244,7 +240,7 @@ async function runDaemonClientCommand(parsed: ParsedDaemonClientCommand): Promis
 				if (parsed.positionals.length !== 0) {
 					throw new Error("Usage: daemon restart");
 				}
-				await printResponseData(client, { type: "restart" }, parsed.json);
+				printResponse(await client.requestSupervisorRestart(), parsed.json);
 				return;
 			case "shutdown":
 				await runShutdown(client, parsed.positionals, parsed.json);
@@ -264,8 +260,7 @@ async function runShutdown(client: DaemonClient, args: string[], json: boolean):
 		}
 		throw new Error(`Unknown shutdown option: ${arg}`);
 	}
-	const hello = await client.waitForHello(3000).catch(() => undefined);
-	await printResponseData(client, createDaemonShutdownCommand(hello, force), json);
+	printResponse(await client.requestSupervisorShutdown(force), json);
 }
 
 async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
@@ -1101,7 +1096,10 @@ async function printResponseData(
 	command: Parameters<DaemonClient["request"]>[0],
 	json: boolean,
 ): Promise<void> {
-	const response = await client.request(command);
+	printResponse(await client.request(command), json);
+}
+
+function printResponse(response: DaemonResponse, json: boolean): void {
 	const data = requireSuccess(response);
 	if (json || data !== undefined) {
 		printJson(data ?? response);

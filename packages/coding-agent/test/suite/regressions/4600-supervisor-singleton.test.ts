@@ -669,7 +669,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 			const originalState = await connection.getState();
 			const reconnecting = waitForConnectionStatus(connection, "reconnecting");
 			const reconnected = waitForConnectionStatus(connection, "connected", 60_000);
-			const restarted = await client.request({ type: "restart" }, 10_000);
+			const restarted = await client.requestSupervisorRestart(10_000);
 			expect(restarted.success).toBe(true);
 			await reconnecting;
 			await waitForExit(predecessor);

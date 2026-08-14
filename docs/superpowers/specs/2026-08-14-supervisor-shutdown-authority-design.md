@@ -16,12 +16,13 @@ handshake.
 
 ## Goals
 
-- Prevent legacy or stale clients from shutting down a newer supervisor.
-- Bind shutdown to the exact supervisor observed on the same connection.
-- Fail closed when authority is missing, incomplete, or stale.
+- Prevent legacy or stale clients from terminating a newer supervisor.
+- Bind public shutdown and restart to the exact supervisor observed on the same connection.
+- Keep stale classification, idleness checking, and termination on that one connection.
+- Fail closed when authority is missing, incomplete, rejected, or stale.
 - Preserve new-client replacement of a legacy supervisor during upgrades.
-- Keep explicit and automatic shutdown callers on one shared command builder.
-- Add regression coverage for missing, matching, and mismatched authority.
+- Keep explicit and automatic termination callers behind `DaemonClient` methods.
+- Add regression coverage for missing, matching, mismatched, and rejected authority.
 
 ## Non-goals
 
@@ -62,15 +63,19 @@ The existing handshake already publishes the durable supervisor identity:
 - process start identity;
 - normalized supervisor socket path.
 
-A public `shutdown` command gains an optional wire field containing that exact
-identity. It stays optional in the TypeScript wire type solely for forward
-upgrade compatibility with legacy supervisors.
+Public `shutdown` and `restart` commands gain an optional wire field containing
+that exact identity. It stays optional in the wire type solely for forward
+upgrade compatibility with legacy supervisors. The authority shape itself
+requires all five fields, including a non-empty process-start identity. A modern
+hello missing any field cannot produce authority and therefore cannot authorize
+termination.
 
-A new supervisor requires the field and compares every supplied component to
-its current durable ownership record before scheduling shutdown. Missing,
-malformed, incomplete, or mismatched authority returns a normal failed response
-and leaves the supervisor, workers, descriptors, and socket untouched. The
-`force` flag changes worker-drain behavior only; it never bypasses authority.
+A new supervisor requires the field for either public termination command and
+compares every supplied component to its current durable ownership record before
+scheduling shutdown or restart. Missing, malformed, incomplete, or mismatched
+authority returns a normal failed response and leaves the supervisor, workers,
+descriptors, and socket untouched. The `force` flag changes worker-drain
+behavior only; it never bypasses authority.
 
 The comparison happens synchronously in command handling before the success
 response and before `setImmediate` schedules shutdown. The server reasserts its
@@ -79,31 +84,39 @@ lost ownership cannot accept termination commands.
 
 ## Compatibility
 
-A shared client helper derives shutdown authority from `DaemonClient.hello`:
+`DaemonClient` derives termination authority from its own received hello at send
+time; callers cannot supply a hello from another connection:
 
-- When the handshake contains the complete modern identity, the helper includes
-  it in the command.
+- When the handshake contains the complete modern identity, the client includes
+  it in shutdown or restart.
 - When connected to a legacy supervisor whose handshake lacks any required
-  component, the helper emits the legacy command without authority. The legacy
+  component, the client emits the legacy command without authority. The legacy
   supervisor accepts it, preserving forward upgrade replacement.
+- A schema-16 supervisor already publishes complete identity. The new client
+  sends the authority-bearing shape, which its tolerant old parser accepts.
 - A legacy client talking to a new supervisor emits no authority. The new
   supervisor rejects it, preventing rollback.
 
-The command changes the monotonic schema revision and schema identifier. It does
-not change the protocol major version. Shutdown remains classified as a legacy-
-compatible command so a new client may send the authority-optional wire shape
-to an older supervisor; only the new supervisor enforces the field. Worker-
-local shutdown continues to use its existing internal path.
+The commands change the monotonic schema revision to 18 and update the schema
+identifier without changing the protocol major version. Shutdown and restart
+remain legacy-compatible commands so a new client may send the authority-
+optional shapes to an older supervisor; only the new supervisor enforces the
+field. Worker-local shutdown continues to use its authenticated internal path.
 
 ## Production callers
 
-All public shutdown paths use the shared helper rather than constructing the
-command independently:
+All public termination paths use `DaemonClient` methods rather than constructing
+commands from detached hellos:
 
-- explicit CLI shutdown, including force;
+- explicit CLI shutdown and restart, including force;
 - stale-daemon replacement;
 - process/status cleanup utilities;
 - update and test cleanup paths that target the public supervisor.
+
+Stale replacement keeps the version verdict, busy-session query, authority, and
+shutdown request on one connection. It never reconnects after classifying a
+daemon stale; a disconnect aborts replacement so a successor cannot inherit the
+previous owner's stale verdict.
 
 The supervisor's command to a resident worker remains unguarded because it is
 sent over the authenticated private worker channel and terminates that worker,
@@ -113,29 +126,35 @@ not the public supervisor.
 
 Authority rejection is fail-closed and side-effect free. The response names a
 stable authority error suitable for tests and diagnostics without disclosing a
-replacement token. Client wait logic treats a rejected shutdown as “still
-running” and does not launch a replacement.
+replacement token. Client wait logic treats rejection as “still running” and
+does not launch a replacement.
+
+Process cleanup represents graceful termination with a structured outcome.
+`shutdown_authority_rejected` is terminal: even with `force`, cleanup does not
+signal the supervisor, stop tracked workers, remove its socket, or kill it in a
+residual sweep. Only timeout or unavailability may enter the existing exact-
+process fallback.
 
 If the connected daemon disappears between handshake and command, the existing
-wait-for-gone logic handles the disconnect. Authority must never be copied from
-a separate probe connection because that would reintroduce a time-of-check /
-time-of-use race.
+wait-for-gone logic handles the disconnect. Version classification and authority
+remain on the original connection, eliminating the probe-to-shutdown TOCTOU.
 
 ## Tests
 
 Focused protocol and supervisor regressions cover:
 
-1. A legacy shutdown without authority is rejected by a new supervisor and the
-   same supervisor identity remains reachable.
+1. Legacy shutdown and restart without authority are rejected by a new
+   supervisor and the same identity remains reachable.
 2. A command echoing the exact handshake identity is accepted and terminates
    that supervisor.
-3. Each mismatched component—generation, owner token, pid, process start, and
-   socket path—is independently rejected without shutdown.
-4. `force` cannot bypass missing or mismatched authority.
-5. A new client can still shut down a legacy fixture whose handshake lacks the
-   authority fields.
-6. Automatic stale-daemon replacement does not launch after the guarded
-   supervisor rejects an obsolete client.
+3. Each mismatched component—and authority missing process-start identity—is
+   rejected without shutdown.
+4. `force` cannot bypass authority at the server or convert rejection into
+   signal fallback or tracked-worker cleanup.
+5. A new client can shut down both an identity-less legacy fixture and a
+   schema-16 fixture that publishes full identity and accepts the new field.
+6. Stale classification, list, and shutdown use one connection, and replacement
+   does not launch after guarded rejection.
 7. Public CLI and process cleanup callers include authority, while private
    worker shutdown remains functional.
 

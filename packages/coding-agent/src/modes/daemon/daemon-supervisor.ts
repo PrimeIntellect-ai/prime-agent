@@ -906,8 +906,8 @@ export class DaemonSupervisor {
 	}
 
 	/**
-	 * Fail-closed gate for the public shutdown command. Requires the exact
-	 * durable supervisor identity observed on the same connection's handshake,
+	 * Fail-closed gate for every public supervisor-termination command. Requires
+	 * the exact durable identity observed on the same connection's handshake,
 	 * reasserts current ownership so a generation that already lost ownership
 	 * cannot accept termination commands, and rejects missing, malformed,
 	 * incomplete, or mismatched authority before any shutdown is scheduled.
@@ -1605,6 +1605,7 @@ export class DaemonSupervisor {
 				return success(command.id, command.type, summary ? this.publicSummary(worker, summary) : undefined);
 			}
 			case "restart":
+				await this.assertShutdownAuthority(command.authority);
 				setImmediate(() => void this.shutdown(0, false, true, false, "update"));
 				return success(command.id, command.type);
 			case "shutdown":
@@ -5249,9 +5250,9 @@ function isCompleteDaemonShutdownAuthority(value: unknown): value is DaemonShutd
 		authority.supervisorOwnerToken.length > 0 &&
 		Number.isInteger(authority.supervisorPid) &&
 		(authority.supervisorPid ?? 0) > 0 &&
+		typeof authority.supervisorProcessStartId === "string" &&
+		authority.supervisorProcessStartId.length > 0 &&
 		typeof authority.supervisorSocketPath === "string" &&
-		authority.supervisorSocketPath.length > 0 &&
-		(authority.supervisorProcessStartId === undefined ||
-			(typeof authority.supervisorProcessStartId === "string" && authority.supervisorProcessStartId.length > 0))
+		authority.supervisorSocketPath.length > 0
 	);
 }

@@ -1296,7 +1296,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 				},
 			});
 			await shutdownAdmission.assertOrRenew();
-			const stopped = await shutdownConnectedDaemonAndWait(connectedClient, options.socketPath, 10000, hello);
+			const stopped = await shutdownConnectedDaemonAndWait(connectedClient, options.socketPath, 10000);
 			connectedClient = undefined;
 			if (!stopped) {
 				const remainingDaemon = await probeRunningDaemonSessions(options.socketPath);

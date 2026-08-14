@@ -62,8 +62,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
 // Revision 17 adds supervisor shutdown authority: the public shutdown command may
 // carry the exact supervisor identity observed on the same connection's handshake.
-export const DAEMON_SCHEMA_REVISION = 17;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-2b8db83c63df";
+// Revision 18 applies the same authority to public restart and requires the full
+// process-start identity for every authority-bearing termination command.
+export const DAEMON_SCHEMA_REVISION = 18;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-18-c9d175a9766f";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -350,16 +352,23 @@ export type DaemonSavedSessionListCommand =
 
 /**
  * The exact durable supervisor identity a client observes in `daemon_hello`.
- * A public `shutdown` command carries it so connection access alone is not
- * authority to terminate whichever supervisor happens to own the socket path.
+ * Every public command that terminates the supervisor carries it so connection
+ * access alone is not authority to terminate whichever owner has the socket.
  */
 export interface DaemonShutdownAuthority {
 	supervisorGeneration: string;
 	supervisorOwnerToken: string;
 	supervisorPid: number;
-	supervisorProcessStartId?: string;
+	supervisorProcessStartId: string;
 	supervisorSocketPath: string;
 }
+
+export type DaemonRestartCommand = {
+	id?: string;
+	type: "restart";
+	/** Optional only for forward upgrade compatibility with legacy supervisors. */
+	authority?: DaemonShutdownAuthority;
+};
 
 export type DaemonShutdownCommand = {
 	id?: string;
@@ -639,7 +648,7 @@ export type DaemonCommand =
 	| { id?: string; type: "ack_result"; commandId: string }
 	| { id?: string; type: "prepare_update_restart" }
 	| { id?: string; type: "retry_worker"; activeSessionId: string }
-	| { id?: string; type: "restart" }
+	| DaemonRestartCommand
 	| DaemonShutdownCommand;
 
 type DaemonCommandName = DaemonCommand["type"];

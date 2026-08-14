@@ -10,7 +10,11 @@ import {
 	DaemonClient,
 	type DaemonHello,
 } from "../../../src/modes/daemon/daemon-client.js";
-import type { DaemonShutdownAuthority, DaemonShutdownCommand } from "../../../src/modes/daemon/daemon-protocol.js";
+import type {
+	DaemonRestartCommand,
+	DaemonShutdownAuthority,
+	DaemonShutdownCommand,
+} from "../../../src/modes/daemon/daemon-protocol.js";
 import { createHarness, type Harness } from "../harness.js";
 
 /**
@@ -83,8 +87,8 @@ afterEach(async () => {
 		const client = new DaemonClient(socketPath);
 		try {
 			await client.connect(250);
-			const hello = await client.waitForHello(500);
-			await client.request(createDaemonShutdownCommand(hello, true), 1500).catch(() => undefined);
+			await client.waitForHello(500);
+			await client.requestSupervisorShutdown(true, 1500).catch(() => undefined);
 		} catch {
 			// Socket may already be gone.
 		} finally {
@@ -318,7 +322,7 @@ interface LegacySupervisorMock {
 
 let legacyMockServer: LegacySupervisorMock | undefined;
 
-async function startLegacySupervisorMock(): Promise<string> {
+async function startLegacySupervisorMock(options: { publishSchema16Identity?: boolean } = {}): Promise<string> {
 	const tempDir = mkdtempSync(join(tmpdir(), `prime-legacy-mock-${process.pid}-${randomUUID().slice(0, 8)}-`));
 	const socketPath =
 		process.platform === "win32"
@@ -341,6 +345,15 @@ async function startLegacySupervisorMock(): Promise<string> {
 			appVersion: "0.7.2",
 			clientId: randomUUID(),
 			serverCapabilities: ["attach_snapshot", "event_sequence"],
+			...(options.publishSchema16Identity
+				? {
+						supervisorGeneration: "schema-16-generation",
+						supervisorOwnerToken: "schema-16-owner",
+						supervisorPid: process.pid,
+						supervisorProcessStartId: "schema-16-start",
+						supervisorSocketPath: socketPath,
+					}
+				: {}),
 		};
 		socket.write(`${JSON.stringify(hello)}\n`);
 		let buffer = "";
@@ -557,6 +570,13 @@ describe("daemon supervisor shutdown authority (public seam)", () => {
 				const reachable = await isSocketReachable(paths.socketPath);
 				expect(reachable, `supervisor should remain reachable after ${name} mismatch`).toBe(true);
 			}
+			const { supervisorProcessStartId: _missingStart, ...incomplete } = base;
+			const incompleteResponse = await client.request(
+				{ type: "shutdown", authority: incomplete } as unknown as DaemonShutdownCommand,
+				5000,
+			);
+			expect(incompleteResponse.success, "authority without process-start identity should be rejected").toBe(false);
+			expect(await isSocketReachable(paths.socketPath)).toBe(true);
 			expect(listOwnerRecords(paths.registryDir)).toHaveLength(1);
 		} finally {
 			client.close();
@@ -565,6 +585,32 @@ describe("daemon supervisor shutdown authority (public seam)", () => {
 			handles.delete(handle);
 		}
 	}, 45_000);
+
+	it("public restart cannot bypass missing or mismatched authority", async () => {
+		const paths = await createPaths();
+		const handle = await startSupervisor(paths);
+		const client = await connectEventually(paths.socketPath);
+		try {
+			const hello = client.hello;
+			if (!hello) throw new Error("Supervisor did not publish a daemon_hello");
+			const base = readAuthorityFromHello(hello);
+
+			const missing = await client.request({ type: "restart" } as DaemonRestartCommand, 5000);
+			expect(missing.success).toBe(false);
+			const mismatched = await client.request(
+				{ type: "restart", authority: { ...base, supervisorOwnerToken: "wrong-owner" } } as DaemonRestartCommand,
+				5000,
+			);
+			expect(mismatched.success).toBe(false);
+			expect(await isSocketReachable(paths.socketPath)).toBe(true);
+			expect(listOwnerRecords(paths.registryDir)).toHaveLength(1);
+		} finally {
+			client.close();
+			handle.child.kill("SIGTERM");
+			await waitForHandleExits([handle.child], 4000);
+			handles.delete(handle);
+		}
+	}, 30_000);
 
 	it("force cannot bypass authority rejection", async () => {
 		const paths = await createPaths();
@@ -628,10 +674,33 @@ describe("daemon supervisor shutdown authority (public seam)", () => {
 			// supervisor accepts it and the connection closes with a shutdown reason.
 			const command = createDaemonShutdownCommand(hello);
 			expect(command.authority).toBeUndefined();
-			const response = await client.request(command, 5000);
+			const response = await client.requestSupervisorShutdown(false, 5000);
 			expect(response.command).toBe("shutdown");
 			expect(response.success).toBe(true);
 			expect(legacyMockServer?.shutdownObserved.lastCommand?.authority).toBeUndefined();
+			client.close();
+		} finally {
+			await stopLegacySupervisorMock();
+		}
+	}, 15_000);
+
+	it("preserves cleanup of a schema-16 supervisor that publishes complete identity", async () => {
+		const socketPath = await startLegacySupervisorMock({ publishSchema16Identity: true });
+		try {
+			const client = new DaemonClient(socketPath);
+			await client.connect(500);
+			const hello = await client.waitForHello(1000);
+			expect(hello.schemaRevision).toBe(16);
+
+			const response = await client.requestSupervisorShutdown(false, 5000);
+			expect(response.success).toBe(true);
+			expect(legacyMockServer?.shutdownObserved.lastCommand?.authority).toEqual({
+				supervisorGeneration: "schema-16-generation",
+				supervisorOwnerToken: "schema-16-owner",
+				supervisorPid: process.pid,
+				supervisorProcessStartId: "schema-16-start",
+				supervisorSocketPath: socketPath,
+			});
 			client.close();
 		} finally {
 			await stopLegacySupervisorMock();

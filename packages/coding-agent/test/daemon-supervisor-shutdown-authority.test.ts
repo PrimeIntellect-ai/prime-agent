@@ -16,7 +16,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
-import { createDaemonShutdownCommand, DaemonClient, type DaemonHello } from "../src/modes/daemon/daemon-client.js";
+import {
+	createDaemonRestartCommand,
+	createDaemonShutdownCommand,
+	DaemonClient,
+	type DaemonHello,
+} from "../src/modes/daemon/daemon-client.js";
 import type { DaemonCommand, DaemonShutdownAuthority } from "../src/modes/daemon/daemon-protocol.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
@@ -185,6 +190,12 @@ function shutdownCommand(
 	return { ...command, authority: { ...command.authority, ...override } };
 }
 
+function restartCommand(hello: DaemonHello, override?: Partial<DaemonShutdownAuthority>): DaemonCommand {
+	const command = createDaemonRestartCommand(hello);
+	if (!override || !command.authority) return command;
+	return { ...command, authority: { ...command.authority, ...override } };
+}
+
 describe("supervisor shutdown authority", () => {
 	it("rejects a legacy shutdown without authority and keeps the same supervisor reachable", async () => {
 		const { child, socketPath } = spawnIsolatedSupervisor();
@@ -261,6 +272,31 @@ describe("supervisor shutdown authority", () => {
 			const listed = await client.request({ type: "list" }, 5000);
 			expect(listed.success, `expected supervisor reachable after mismatched ${name}`).toBe(true);
 		}
+
+		const accepted = await client.request(shutdownCommand(hello), 10_000);
+		expect(accepted.success).toBe(true);
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForExit(child);
+	});
+
+	it("rejects public restart without exact authority and leaves the supervisor reachable", async () => {
+		const { child, socketPath } = spawnIsolatedSupervisor();
+		const client = await connectEventually(socketPath, child);
+		const hello = client.hello;
+		if (!hello) throw new Error("Missing supervisor hello");
+
+		const missing = await client.request({ type: "restart" }, 5000);
+		expect(missing.success).toBe(false);
+		expect(missing.success ? undefined : missing.errorInfo?.code).toBe("shutdown_authority_rejected");
+
+		const mismatched = await client.request(
+			restartCommand(hello, { supervisorGeneration: "other-generation" }),
+			5000,
+		);
+		expect(mismatched.success).toBe(false);
+		expect(mismatched.success ? undefined : mismatched.errorInfo?.code).toBe("shutdown_authority_rejected");
+		expect((await client.request({ type: "list" }, 5000)).success).toBe(true);
 
 		const accepted = await client.request(shutdownCommand(hello), 10_000);
 		expect(accepted.success).toBe(true);

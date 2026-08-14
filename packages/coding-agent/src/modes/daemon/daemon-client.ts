@@ -14,6 +14,7 @@ import {
 	type DaemonProtocolVersion,
 	type DaemonRequestProgress,
 	type DaemonResponse,
+	type DaemonRestartCommand,
 	type DaemonSavedSessionInfo,
 	type DaemonServerCapability,
 	type DaemonShutdownAuthority,
@@ -46,6 +47,8 @@ export function daemonShutdownAuthorityFromHello(hello: DaemonHello | undefined)
 		typeof hello.supervisorPid !== "number" ||
 		!Number.isInteger(hello.supervisorPid) ||
 		hello.supervisorPid <= 0 ||
+		typeof hello.supervisorProcessStartId !== "string" ||
+		hello.supervisorProcessStartId.length === 0 ||
 		typeof hello.supervisorSocketPath !== "string" ||
 		hello.supervisorSocketPath.length === 0
 	) {
@@ -55,9 +58,7 @@ export function daemonShutdownAuthorityFromHello(hello: DaemonHello | undefined)
 		supervisorGeneration: hello.supervisorGeneration,
 		supervisorOwnerToken: hello.supervisorOwnerToken,
 		supervisorPid: hello.supervisorPid,
-		...(typeof hello.supervisorProcessStartId === "string" && hello.supervisorProcessStartId.length > 0
-			? { supervisorProcessStartId: hello.supervisorProcessStartId }
-			: {}),
+		supervisorProcessStartId: hello.supervisorProcessStartId,
 		supervisorSocketPath: hello.supervisorSocketPath,
 	};
 }
@@ -69,6 +70,14 @@ export function daemonShutdownAuthorityFromHello(hello: DaemonHello | undefined)
  * authority always comes from the same connection's handshake and a legacy
  * supervisor keeps receiving the legacy wire shape.
  */
+export function createDaemonRestartCommand(hello: DaemonHello | undefined): DaemonRestartCommand {
+	const authority = daemonShutdownAuthorityFromHello(hello);
+	return {
+		type: "restart",
+		...(authority ? { authority } : {}),
+	};
+}
+
 export function createDaemonShutdownCommand(hello: DaemonHello | undefined, force?: boolean): DaemonShutdownCommand {
 	const authority = daemonShutdownAuthorityFromHello(hello);
 	return {
@@ -338,6 +347,16 @@ export class DaemonClient {
 	enableAutoReconnect(options: DaemonClientReconnectOptions): void {
 		this.requestRecoveryEnabled = true;
 		this.reconnectOptions = options;
+	}
+
+	async requestSupervisorRestart(timeoutMs = 30000): Promise<DaemonResponse> {
+		const hello = this.helloMessage ?? (await this.waitForHello());
+		return this.request(createDaemonRestartCommand(hello), timeoutMs);
+	}
+
+	async requestSupervisorShutdown(force = false, timeoutMs = 30000): Promise<DaemonResponse> {
+		const hello = this.helloMessage ?? (await this.waitForHello());
+		return this.request(createDaemonShutdownCommand(hello, force), timeoutMs);
 	}
 
 	async request(

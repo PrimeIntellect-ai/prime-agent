@@ -27,13 +27,15 @@ interface FakeDaemonOptions {
 	protocolVersion?: number;
 	appVersion?: string;
 	schemaId?: string;
+	schemaRevision?: number;
 	serverCapabilities?: string[];
 	supervisorGeneration?: string;
 	supervisorOwnerToken?: string;
 	supervisorPid?: number;
 	supervisorProcessStartId?: string;
 	supervisorSocketPath?: string;
-	onCommand?: (command: { type: string }) => void;
+	onCommand?: (command: { type: string }, connectionId: number) => void;
+	onConnection?: () => void;
 }
 
 interface FakeDaemon {
@@ -48,7 +50,10 @@ function send(socket: Socket, message: unknown): void {
 async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDaemon> {
 	const dir = mkdtempSync(join(tmpdir(), "pa-launch-"));
 	const socketPath = join(dir, "d.sock");
+	let nextConnectionId = 0;
 	const server: Server = createServer((socket) => {
+		const connectionId = ++nextConnectionId;
+		options.onConnection?.();
 		socket.on("error", () => undefined);
 		send(socket, {
 			type: "daemon_hello",
@@ -56,6 +61,7 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 			protocol: { name: "prime-agent.daemon", version: options.protocolVersion ?? DAEMON_PROTOCOL_VERSION },
 			appVersion: options.appVersion,
 			schemaId: options.schemaId ?? DAEMON_SCHEMA_ID,
+			...(options.schemaRevision !== undefined ? { schemaRevision: options.schemaRevision } : {}),
 			...(options.supervisorGeneration
 				? {
 						supervisorGeneration: options.supervisorGeneration,
@@ -85,7 +91,7 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 					command?: { type: string; id: string };
 				};
 				const command = wire.type === "command" && wire.command ? wire.command : wire;
-				options.onCommand?.(command);
+				options.onCommand?.(command, connectionId);
 				if (command.type === "list") {
 					send(socket, {
 						type: "response",
@@ -318,6 +324,26 @@ describe("ensureInteractiveDaemonRunning", () => {
 		expect(await probeDaemonVersion(daemon.socketPath)).toMatchObject({ status: "stale" });
 	});
 
+	it("classifies and attempts stale replacement on one unchanged connection", async () => {
+		const commandConnections: Array<{ type: string; connectionId: number }> = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: "stale-schema",
+			sessions: [],
+			rejectShutdown: true,
+			supervisorGeneration: "same-connection-generation",
+			supervisorProcessStartId: "same-connection-start",
+			onCommand: (command, connectionId) => commandConnections.push({ type: command.type, connectionId }),
+		});
+		cleanups.push(daemon.close);
+
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).rejects.toThrow("stale");
+		const terminatingCommands = commandConnections.filter(({ type }) => type === "list" || type === "shutdown");
+		expect(terminatingCommands.map(({ type }) => type)).toEqual(["list", "shutdown"]);
+		expect(new Set(terminatingCommands.map(({ connectionId }) => connectionId)).size).toBe(1);
+	});
+
 	it("does not treat a live daemon as absent when cold startup delays the first connection", async () => {
 		const daemon = await startFakeDaemon({
 			protocolVersion: DAEMON_PROTOCOL_VERSION,
@@ -505,6 +531,33 @@ describe("shutdownDaemonAndWait", () => {
 		// legacy command shape without authority and the legacy supervisor
 		// accepts it, preserving forward-upgrade replacement.
 		expect(shutdownCommand?.authority).toBeUndefined();
+	});
+
+	it("sends authority-bearing shutdown to a schema-16 daemon that accepts unknown wire fields", async () => {
+		const commands: Array<Record<string, unknown>> = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: "protocol-7-schema-16-1bcb9e7f1a49",
+			schemaRevision: 16,
+			supervisorGeneration: "schema-16-generation",
+			supervisorOwnerToken: "schema-16-owner",
+			supervisorPid: 424240,
+			supervisorProcessStartId: "schema-16-start",
+			onCommand: (command) => commands.push({ ...(command as Record<string, unknown>) }),
+		});
+		cleanups.push(daemon.close);
+
+		expect(await shutdownDaemonAndWait(daemon.socketPath)).toBe(true);
+		expect(commands.find((command) => command.type === "shutdown")).toMatchObject({
+			authority: {
+				supervisorGeneration: "schema-16-generation",
+				supervisorOwnerToken: "schema-16-owner",
+				supervisorPid: 424240,
+				supervisorProcessStartId: "schema-16-start",
+				supervisorSocketPath: daemon.socketPath,
+			},
+		});
 	});
 
 	it("emits authority from the same connection's hello toward a modern daemon", async () => {

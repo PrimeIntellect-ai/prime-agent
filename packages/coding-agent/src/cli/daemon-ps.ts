@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
 import { isOrphanProcessIdentityCurrent, readActiveOrphanProcesses } from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
-import { createDaemonShutdownCommand, DaemonClient } from "../modes/daemon/daemon-client.js";
+import { DaemonClient } from "../modes/daemon/daemon-client.js";
 import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
@@ -565,6 +565,7 @@ async function runShutdownAllConverging(
 	const stopped: Array<{ socketPath: string; action: string }> = [];
 	const failed: Array<{ socketPath: string; reason: string }> = [];
 	const handledPids = new Set<number>();
+	const protectedSockets = new Set<string>();
 	const reportedFailures = new Set<string>();
 
 	if (force) {
@@ -592,15 +593,14 @@ async function runShutdownAllConverging(
 			}
 			continue;
 		}
+		let preserveTrackedWorkers = false;
 		switch (action.kind) {
 			case "remove-file": {
 				if ((await probeDaemon(socketPath)).reachable) {
-					apply(
-						await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission),
-						socketPath,
-						stopped,
-						failed,
-					);
+					const outcome = await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission);
+					preserveTrackedWorkers = outcome.preserveTrackedWorkers === true;
+					if (preserveTrackedWorkers) protectedSockets.add(socketPath);
+					apply(outcome, socketPath, stopped, failed);
 				} else {
 					await assertAdmission();
 					if (removeSocketFile(socketPath)) {
@@ -613,12 +613,10 @@ async function runShutdownAllConverging(
 			}
 			case "kill": {
 				if ((await probeDaemon(socketPath)).reachable) {
-					apply(
-						await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission),
-						socketPath,
-						stopped,
-						failed,
-					);
+					const outcome = await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission);
+					preserveTrackedWorkers = outcome.preserveTrackedWorkers === true;
+					if (preserveTrackedWorkers) protectedSockets.add(socketPath);
+					apply(outcome, socketPath, stopped, failed);
 				} else if (isDaemonProcessListening(pid!, socketPath)) {
 					await assertAdmission();
 					await forceKillDaemon(pid!);
@@ -633,19 +631,18 @@ async function runShutdownAllConverging(
 				}
 				break;
 			}
-			case "shutdown":
-				apply(
-					await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission),
-					socketPath,
-					stopped,
-					failed,
-				);
+			case "shutdown": {
+				const outcome = await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission);
+				preserveTrackedWorkers = outcome.preserveTrackedWorkers === true;
+				if (preserveTrackedWorkers) protectedSockets.add(socketPath);
+				apply(outcome, socketPath, stopped, failed);
 				break;
+			}
 			case "skip":
 				failed.push({ socketPath, reason: action.reason });
 				break;
 		}
-		if (force && action.kind !== "skip") {
+		if (force && action.kind !== "skip" && !preserveTrackedWorkers) {
 			failed.push(
 				...(await forceStopTrackedWorkers(socketPath, assertAdmission)).map((reason) => ({ socketPath, reason })),
 			);
@@ -653,7 +650,14 @@ async function runShutdownAllConverging(
 	}
 
 	if (force) {
-		await terminateVerifiedResiduals(stopped, failed, handledPids, reportedFailures, assertAdmission);
+		await terminateVerifiedResiduals(
+			stopped,
+			failed,
+			handledPids,
+			protectedSockets,
+			reportedFailures,
+			assertAdmission,
+		);
 	}
 
 	if (json) {
@@ -735,6 +739,7 @@ async function terminateVerifiedResiduals(
 	stopped: Array<{ socketPath: string; action: string }>,
 	failed: Array<{ socketPath: string; reason: string }>,
 	handledPids: Set<number>,
+	protectedSockets: ReadonlySet<string>,
 	reportedFailures: Set<string>,
 	assertAdmission: () => Promise<void>,
 ): Promise<void> {
@@ -768,7 +773,7 @@ async function terminateVerifiedResiduals(
 		previousSignature = signature;
 		const seenPids = new Set<number>();
 		for (const listener of listeners) {
-			if (seenPids.has(listener.pid)) {
+			if (protectedSockets.has(listener.socketPath) || seenPids.has(listener.pid)) {
 				continue;
 			}
 			seenPids.add(listener.pid);
@@ -897,11 +902,18 @@ async function stopBackgroundService(
 	assertAdmission: () => Promise<void>,
 ): Promise<ReapOutcome> {
 	await assertAdmission();
-	if (await shutdownDaemon(socketPath, force)) {
+	const shutdownAttempt = await shutdownDaemon(socketPath, force);
+	if (shutdownAttempt.status === "stopped") {
 		if (pid !== undefined) {
 			handledPids.add(pid);
 		}
 		return { reaped: `stopped background service${pid ? ` (pid ${pid})` : ""}` };
+	}
+	if (shutdownAttempt.status === "authority-rejected") {
+		return {
+			skipped: "shutdown authority rejected; refusing signal fallback",
+			preserveTrackedWorkers: true,
+		};
 	}
 	if (!(await canConnectToSocket(socketPath, 250))) {
 		await assertAdmission();
@@ -1136,7 +1148,7 @@ export async function runReap(json: boolean, force: boolean): Promise<void> {
 	}
 }
 
-type ReapOutcome = { reaped: string } | { skipped: string };
+type ReapOutcome = ({ reaped: string } | { skipped: string }) & { preserveTrackedWorkers?: boolean };
 
 function apply(
 	outcome: ReapOutcome,
@@ -1234,29 +1246,39 @@ async function canConnectToSocket(socketPath: string, timeoutMs: number): Promis
  * shutdown ack alone is not proof, so success is reported only once the socket
  * stops accepting connections.
  */
-async function shutdownDaemon(socketPath: string, force: boolean): Promise<boolean> {
+export type DaemonShutdownAttempt =
+	| { status: "stopped" }
+	| { status: "authority-rejected" }
+	| { status: "unavailable" }
+	| { status: "timed-out" };
+
+export async function shutdownDaemon(socketPath: string, force: boolean): Promise<DaemonShutdownAttempt> {
 	const client = new DaemonClient(socketPath);
 	try {
 		await client.connect(1000);
 	} catch {
 		client.close();
-		return false;
+		return { status: "unavailable" };
 	}
+	let authorityRejected = false;
 	try {
-		const hello = await client.waitForHello(2000).catch(() => undefined);
-		await client.request(createDaemonShutdownCommand(hello, force), 1500);
+		const response = await client.requestSupervisorShutdown(force, 1500);
+		authorityRejected = !response.success && response.errorInfo?.code === "shutdown_authority_rejected";
 	} catch {
 		// The daemon may still stop; the connectivity check below is the source of truth.
 	} finally {
 		client.close();
 	}
+	if (authorityRejected) {
+		return { status: "authority-rejected" };
+	}
 
 	const deadline = Date.now() + 5000;
 	while (Date.now() < deadline) {
 		if (!(await canConnectToSocket(socketPath, 250))) {
-			return true;
+			return { status: "stopped" };
 		}
 		await delay(50);
 	}
-	return false;
+	return { status: "timed-out" };
 }
