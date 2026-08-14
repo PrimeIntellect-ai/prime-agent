@@ -217,6 +217,25 @@ describe("daemon catalog mark_interrupted", () => {
 		expect(recoveryMarkers(sessionFile)).toHaveLength(1);
 	});
 
+	it("does not accept the same operationId with a different authority as already applied", async () => {
+		const { sessionFile, authority } = createCatalogFixtureSession();
+		await expect(markSessionInterrupted(authority, ["tool_execution"])).resolves.toEqual({ status: "applied" });
+
+		// The journal may never reuse an operationId for a different authority,
+		// so a marker under a different authority must not suppress repair.
+		const differentAuthority = {
+			...authority,
+			headEntryId: "entry-other",
+			toolCalls: [{ id: "bash-9", name: "bash" }],
+		};
+		await expect(markSessionInterrupted(differentAuthority, ["tool_execution"])).resolves.toEqual({
+			status: "stale",
+			reason: "marker_authority_mismatch",
+		});
+		expect(readPersistedToolResults(sessionFile)).toHaveLength(1);
+		expect(recoveryMarkers(sessionFile)).toHaveLength(1);
+	});
+
 	it("serializes concurrent duplicate requests to one result and one marker", async () => {
 		const { sessionFile, authority } = createCatalogFixtureSession();
 

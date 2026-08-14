@@ -21,8 +21,18 @@ import {
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
-import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
+import {
+	readSessionInfo,
+	type SessionEntry,
+	type SessionInfo,
+	type SessionMessageEntry,
+	SessionManager,
+} from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import {
+	type CatalogRecoveryAuthority,
+	markSessionInterrupted,
+} from "../src/modes/daemon/daemon-catalog-process.js";
 import {
 	AgentDaemon,
 	cancelPendingExtensionUiRequests,
@@ -48,7 +58,11 @@ import {
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "../src/modes/daemon/daemon-worker-protocol.js";
-import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
+import {
+	isV2WorkerRecoveryRecord,
+	type WorkerRecoveryRecordV2,
+	WorkerRecoveryJournal,
+} from "../src/modes/daemon/worker-recovery-journal.js";
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -10056,6 +10070,295 @@ describe("worker recovery authority capture", () => {
 				expect(advanced.lineageDigest).toBe(lineageDigestOf(manager));
 				expect(advanced.operationId).not.toBe(firstOperationId);
 			}
+		} finally {
+			if (previousJournalPath === undefined) {
+				delete process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+			} else {
+				process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV] = previousJournalPath;
+			}
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("worker restore interrupted-session repair", () => {
+	function toolCall(id: string, name: string): AssistantMessage["content"][number] {
+		return { type: "toolCall", id, name, arguments: {} };
+	}
+
+	function assistantTurn(...calls: ReturnType<typeof toolCall>[]): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text: "calling tools" }, ...calls],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+	}
+
+	function toolResult(callId: string, name: string): ToolResultMessage {
+		return {
+			role: "toolResult",
+			toolCallId: callId,
+			toolName: name,
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	function recoveryMarkers(session: SessionManager): SessionEntry[] {
+		return session
+			.getEntries()
+			.filter(
+				(entry) => entry.type === "custom_message" && entry.customType === "prime-agent.worker_recovery",
+			);
+	}
+
+	function messageRoles(session: SessionManager): string[] {
+		return session
+			.getBranch()
+			.filter((entry) => entry.type === "message")
+			.map((entry) => (entry as SessionMessageEntry).message.role);
+	}
+
+	function createRestoreWorkerDaemon(tempDir: string, sessionDir: string, journalPath: string): AgentDaemon {
+		process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV] = journalPath;
+		return new AgentDaemon(join(tempDir, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+			createRuntime: vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					isSessionActive: false,
+					hasRunningRlmChildren: () => false,
+					isRetrying: false,
+					hasAcceptedPromptInFlight: false,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			}),
+			worker: { authenticationToken: "token" },
+		});
+	}
+
+	function restoreWorkerInternals(daemon: AgentDaemon): {
+		createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+	} {
+		return daemon as unknown as {
+			createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+		};
+	}
+
+	it("repairs unresolved tool calls of a restored session before the ready checkpoint", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-restore-repair-"));
+		const previousJournalPath = process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendMessage({ role: "user", content: "run tools", timestamp: 1 });
+			const assistantEntryId = manager.appendMessage(assistantTurn(toolCall("bash-1", "bash")));
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Fixture session did not persist");
+
+			const journalPath = join(tempDir, "worker.recovery.jsonl");
+			const daemon = createRestoreWorkerDaemon(tempDir, sessionDir, journalPath);
+			const internals = restoreWorkerInternals(daemon);
+			const record = vi.spyOn(WorkerRecoveryJournal.prototype, "record");
+			try {
+				await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+
+				// The busy restore_interrupted epoch is journaled before the idle
+				// ready checkpoint; both share one operation id for the exact
+				// authority, and the ready authority has no unresolved calls. The
+				// raw journal is compacted to the final idle line, so ordering is
+				// captured through the journal writes themselves.
+				expect(record).toHaveBeenCalledTimes(2);
+				const [busyInput, readyInput] = record.mock.calls.map(([input]) => input);
+				expect(busyInput).toMatchObject({ busy: true, operation: "restore_interrupted" });
+				expect(readyInput).toMatchObject({ busy: false, operation: "ready" });
+				const busyRecord = record.mock.results[0]!.value as WorkerRecoveryRecordV2;
+				const readyRecord = record.mock.results[1]!.value as WorkerRecoveryRecordV2;
+				expect(busyRecord.operationId).toMatch(/^[0-9a-f-]{36}$/);
+				expect(busyRecord.toolCalls).toEqual([{ id: "bash-1", name: "bash" }]);
+				expect(busyRecord.assistantEntryId).toBe(assistantEntryId);
+				expect(busyRecord.headEntryId).toBe(manager.getLeafId());
+				expect(readyRecord.busy).toBe(false);
+				expect(readyRecord.toolCalls).toEqual([]);
+				expect(readyRecord.operationId).toBe(busyRecord.operationId);
+			} finally {
+				record.mockRestore();
+			}
+
+			// The transcript ends with one synthetic result and one marker, and
+			// the durable latest journal record is the idle ready checkpoint.
+			const reopened = SessionManager.open(sessionFile);
+			const context = reopened.buildSessionContext().messages;
+			expect(context.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "custom"]);
+			expect(context[2]).toMatchObject({
+				role: "toolResult",
+				toolCallId: "bash-1",
+				toolName: "bash",
+				isError: true,
+			});
+			const markers = recoveryMarkers(reopened);
+			expect(markers).toHaveLength(1);
+			const markerDetails = (markers[0] as { details?: unknown }).details as { operationId?: unknown };
+			const records = WorkerRecoveryJournal.readLatest(journalPath);
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({ version: 2, busy: false, operation: "ready", toolCalls: [] });
+			expect(records[0]).toMatchObject({ operationId: markerDetails.operationId });
+		} finally {
+			if (previousJournalPath === undefined) {
+				delete process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+			} else {
+				process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV] = previousJournalPath;
+			}
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not mutate a restored session with no unresolved tool calls", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-restore-noop-"));
+		const previousJournalPath = process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendMessage({ role: "user", content: "run tools", timestamp: 1 });
+			manager.appendMessage(assistantTurn(toolCall("bash-1", "bash")));
+			manager.appendMessage(toolResult("bash-1", "bash"));
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Fixture session did not persist");
+
+			const journalPath = join(tempDir, "worker.recovery.jsonl");
+			const daemon = createRestoreWorkerDaemon(tempDir, sessionDir, journalPath);
+			const internals = restoreWorkerInternals(daemon);
+			const record = vi.spyOn(WorkerRecoveryJournal.prototype, "record");
+			try {
+				await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+
+				// No repair epoch is journaled; only the idle ready checkpoint is
+				// written, and the transcript gains no recovery entries. The
+				// daemon-resident session_state entry is not a transcript message.
+				expect(record).toHaveBeenCalledTimes(1);
+				expect(record.mock.calls[0]![0]).toMatchObject({ busy: false, operation: "ready" });
+			} finally {
+				record.mockRestore();
+			}
+
+			const reopened = SessionManager.open(sessionFile);
+			expect(messageRoles(reopened)).toEqual(["user", "assistant", "toolResult"]);
+			expect(recoveryMarkers(reopened)).toHaveLength(0);
+			const records = WorkerRecoveryJournal.readLatest(journalPath);
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({ version: 2, busy: false, operation: "ready", toolCalls: [] });
+		} finally {
+			if (previousJournalPath === undefined) {
+				delete process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+			} else {
+				process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV] = previousJournalPath;
+			}
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("recovers the busy restore epoch through the supervisor/catalog seam after a crash", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-restore-retry-"));
+		const previousJournalPath = process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendMessage({ role: "user", content: "run tools", timestamp: 1 });
+			manager.appendMessage(assistantTurn(toolCall("bash-1", "bash"), toolCall("edit-1", "edit")));
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Fixture session did not persist");
+
+			const journalPath = join(tempDir, "worker.recovery.jsonl");
+			const daemon = createRestoreWorkerDaemon(tempDir, sessionDir, journalPath);
+			const internals = restoreWorkerInternals(daemon);
+
+			const spy = vi.spyOn(SessionManager.prototype, "appendMessageWithRollback").mockImplementation(function (
+				this: SessionManager,
+				message,
+			) {
+				throw new Error("disk full");
+			});
+			try {
+				// The restore repair fails while persisting the first synthetic
+				// result; the open fails closed and no mutation is persisted.
+				await expect(internals.createRuntime({ type: "create", sessionPath: sessionFile })).rejects.toThrow(
+					"disk full",
+				);
+			} finally {
+				spy.mockRestore();
+			}
+
+			// The busy restore_interrupted epoch is durable with the exact
+			// authority, and the transcript is still untouched.
+			const records = WorkerRecoveryJournal.readLatest(journalPath);
+			expect(records).toHaveLength(1);
+			const busy = records[0]!;
+			expect(isV2WorkerRecoveryRecord(busy)).toBe(true);
+			expect(busy).toMatchObject({ version: 2, busy: true, operation: "restore_interrupted" });
+			const opened = SessionManager.open(sessionFile);
+			expect(messageRoles(opened)).toEqual(["user", "assistant"]);
+			expect(recoveryMarkers(opened)).toHaveLength(0);
+			if (!isV2WorkerRecoveryRecord(busy)) {
+				throw new Error("Expected a v2 busy restore_interrupted record");
+			}
+
+			// After the lease is released, the supervisor/catalog machinery
+			// applies the journaled authority and completes the epoch.
+			const authority: CatalogRecoveryAuthority = {
+				operationId: busy.operationId,
+				activeSessionId: busy.activeSessionId,
+				sessionId: busy.sessionId,
+				agentDir: busy.agentDir,
+				sessionFile: busy.sessionFile,
+				headEntryId: busy.headEntryId,
+				assistantEntryId: busy.assistantEntryId,
+				toolCalls: busy.toolCalls,
+				lineageDigest: busy.lineageDigest,
+			};
+			await expect(markSessionInterrupted(authority, ["restore_interrupted"])).resolves.toEqual({
+				status: "applied",
+			});
+			expect(new WorkerRecoveryJournal(journalPath).complete(busy.activeSessionId, busy.operationId)).toBe(true);
+
+			// Exactly the two journaled calls are closed, one marker is appended,
+			// and the durable latest record is the completed epoch.
+			const recovered = SessionManager.open(sessionFile);
+			expect(
+				recovered
+					.getBranch()
+					.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")
+					.map((entry) => (entry as SessionMessageEntry).message.toolCallId),
+			).toEqual(["bash-1", "edit-1"]);
+			expect(recoveryMarkers(recovered)).toHaveLength(1);
+			const latest = WorkerRecoveryJournal.readLatest(journalPath);
+			expect(latest).toHaveLength(1);
+			expect(latest[0]).toMatchObject({ version: 2, busy: false, operation: "recovery_complete" });
+			expect(latest[0]).toMatchObject({ operationId: busy.operationId });
 		} finally {
 			if (previousJournalPath === undefined) {
 				delete process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];

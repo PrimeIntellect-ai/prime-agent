@@ -200,6 +200,10 @@ import {
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
+import {
+	applyWorkerRecoveryToSession,
+	type CatalogRecoveryAuthority,
+} from "./daemon-catalog-process.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
@@ -1244,6 +1248,11 @@ export class AgentDaemon {
 					throw new RuntimeOpenCancelledError();
 				}
 			}
+			// Extensions are bound by this point; repair any unresolved tool calls
+			// of a restored session while this worker holds the session lease.
+			// Failures throw so the catch below removes the state and disposes the
+			// runtime and lease, and no idle `ready` checkpoint strands the calls.
+			this.repairRestoredInterruptedSession(state);
 			onStateBound?.(state);
 		} catch (error) {
 			state.unsubscribe?.();
@@ -1271,6 +1280,79 @@ export class AgentDaemon {
 		this.summarizer.seed(state);
 		this.recordWorkerRecoveryState(state, "ready");
 		return state;
+	}
+
+	/**
+	 * Repair a restored session whose terminal active-branch assistant turn has
+	 * unresolved tool calls. Runs during worker restore while this worker holds
+	 * the session lease exclusively, before the idle `ready` checkpoint could
+	 * strand those calls. Reuses the exact-authority fenced/idempotent
+	 * synthetic-result + marker semantics shared with the catalog; never
+	 * replays tools or mutates on stale authority.
+	 *
+	 * A busy `restore_interrupted` epoch with the exact head/assistant/tool
+	 * call/lineage authority is persisted before any mutation, so a crash in
+	 * the middle is recovered by the supervisor through the catalog after this
+	 * worker's lease is released. Only after a successful or idempotent repair
+	 * does the caller write `ready` with no unresolved tool calls.
+	 */
+	private repairRestoredInterruptedSession(state: ActiveSessionState): void {
+		if (!this.recoveryJournal) {
+			return;
+		}
+		const session = state.runtime.session;
+		const sessionFile = session.sessionFile;
+		if (!sessionFile) {
+			return;
+		}
+		const sessionManager = session.sessionManager;
+		const authority = sessionManager.captureExactRecoveryAuthority(state.activeSessionId, "");
+		if (authority.toolCalls.length === 0) {
+			// Nothing was interrupted; a normal restore never mutates the
+			// transcript or adds a marker.
+			return;
+		}
+		const operation = "restore_interrupted";
+		const recorded = this.recoveryJournal.record({
+			activeSessionId: state.activeSessionId,
+			...authority,
+			agentDir: this.agentDir,
+			sessionFile: canonicalSessionPath(sessionFile),
+			busy: true,
+			operation,
+		});
+		if (recorded.version !== 2 || !recorded.busy) {
+			// Unreachable for a complete v2 input; fail closed rather than let
+			// the caller write an idle `ready` checkpoint that strands the calls.
+			const error = new Error(
+				`Could not journal restore repair authority for ${sessionFile}; session stays busy for recovery`,
+			);
+			this.log(error.message);
+			throw error;
+		}
+		const catalogAuthority: CatalogRecoveryAuthority = {
+			operationId: recorded.operationId,
+			activeSessionId: recorded.activeSessionId,
+			sessionId: recorded.sessionId,
+			agentDir: recorded.agentDir,
+			sessionFile: recorded.sessionFile,
+			headEntryId: recorded.headEntryId,
+			assistantEntryId: recorded.assistantEntryId,
+			toolCalls: recorded.toolCalls,
+			lineageDigest: recorded.lineageDigest,
+		};
+		const result = applyWorkerRecoveryToSession(sessionManager, catalogAuthority, [operation]);
+		if (result.status === "stale") {
+			// The authority was captured from this same in-memory view, so a stale
+			// result is an invariant failure. Fail the open closed and keep the
+			// busy epoch journaled: writing `ready` here would strand the calls.
+			const error = new Error(
+				`Restore repair for ${sessionFile} is stale (${result.reason}); session stays busy for recovery`,
+			);
+			this.log(error.message);
+			throw error;
+		}
+		this.log(`Restore repair for ${sessionFile} ${result.status} under ${recorded.operationId}`);
 	}
 
 	private refreshReplacedSessionState(state: ActiveSessionState): void {

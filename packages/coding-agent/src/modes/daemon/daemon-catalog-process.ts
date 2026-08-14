@@ -32,7 +32,10 @@ export interface CatalogRecoveryAuthority extends ExactRecoveryAuthority {
 	readonly agentDir: string;
 }
 
-export type CatalogRecoveryStaleReason = ExactRecoveryStaleReason | "live_session_owner";
+export type CatalogRecoveryStaleReason =
+	| ExactRecoveryStaleReason
+	| "live_session_owner"
+	| "marker_authority_mismatch";
 
 export type CatalogRecoveryResult =
 	| { readonly status: "applied" }
@@ -377,12 +380,92 @@ function serializeRecovery<T>(sessionPath: string, action: () => Promise<T> | T)
 	return result;
 }
 
-function hasRecoveryMarker(session: SessionManager, operationId: string): boolean {
-	return session.getEntries().some((entry) => {
-		if (entry.type !== "custom_message" || entry.customType !== WORKER_RECOVERY_MARKER) return false;
-		const details = entry.details as { operationId?: unknown } | undefined;
-		return details?.operationId === operationId;
+/**
+ * Marker dedupe is bound to the full exact authority binding (operationId
+ * selects the marker; every authority field including the runtime identity
+ * must match): a journal may only reuse an operationId for an identical
+ * authority epoch, so a marker carrying a different authority can never
+ * authorize this request. The persisted marker records the full normalized
+ * authority it was applied under.
+ */
+function sameRecoveryMarkerAuthority(stored: unknown, authority: CatalogRecoveryAuthority): boolean {
+	if (!stored || typeof stored !== "object") return false;
+	const candidate = stored as Partial<CatalogRecoveryAuthority>;
+	if (
+		typeof candidate.operationId !== "string" ||
+		candidate.operationId !== authority.operationId ||
+		typeof candidate.activeSessionId !== "string" ||
+		candidate.activeSessionId !== authority.activeSessionId ||
+		typeof candidate.sessionId !== "string" ||
+		candidate.sessionId !== authority.sessionId ||
+		typeof candidate.agentDir !== "string" ||
+		candidate.agentDir !== authority.agentDir ||
+		typeof candidate.sessionFile !== "string" ||
+		canonicalSessionPath(candidate.sessionFile) !== authority.sessionFile ||
+		candidate.headEntryId !== authority.headEntryId ||
+		candidate.assistantEntryId !== authority.assistantEntryId ||
+		candidate.lineageDigest !== authority.lineageDigest ||
+		!Array.isArray(candidate.toolCalls) ||
+		candidate.toolCalls.length !== authority.toolCalls.length
+	) {
+		return false;
+	}
+	for (let i = 0; i < authority.toolCalls.length; i++) {
+		const storedCall = candidate.toolCalls[i] as { id?: unknown; name?: unknown } | undefined;
+		const expected = authority.toolCalls[i]!;
+		if (!storedCall || storedCall.id !== expected.id || storedCall.name !== expected.name) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Find the global recovery marker for `operationId`. The lookup is global
+ * rather than active-branch-only so later branching cannot cause a completed
+ * operation to be applied again, but a marker only counts when its recorded
+ * authority exactly matches the request.
+ */
+function findRecoveryMarker(
+	session: SessionManager,
+	authority: CatalogRecoveryAuthority,
+): { readonly sameAuthority: boolean } | undefined {
+	for (const entry of session.getEntries()) {
+		if (entry.type !== "custom_message" || entry.customType !== WORKER_RECOVERY_MARKER) continue;
+		const details = entry.details as { operationId?: unknown; authority?: unknown } | undefined;
+		if (details?.operationId !== authority.operationId) continue;
+		return { sameAuthority: sameRecoveryMarkerAuthority(details.authority, authority) };
+	}
+	return undefined;
+}
+
+/**
+ * Apply exact-authority recovery to an open session: global marker dedupe
+ * (operationId plus the full recorded authority), then synthetic results for
+ * the journaled tool calls, then one final operation marker. Stale authority
+ * performs no writes. The caller owns lease fencing and per-path serialization
+ * so the session file cannot race another owner or writer.
+ */
+export function applyWorkerRecoveryToSession(
+	session: SessionManager,
+	authority: CatalogRecoveryAuthority,
+	operations: readonly string[],
+): CatalogRecoveryResult {
+	const marker = findRecoveryMarker(session, authority);
+	if (marker) {
+		return marker.sameAuthority
+			? { status: "already_applied" }
+			: { status: "stale", reason: "marker_authority_mismatch" };
+	}
+	const recovery = session.closeUnresolvedToolCallsWithAuthority(authority);
+	if (recovery.status === "stale") return recovery;
+	session.appendCustomMessageEntryWithRollback(WORKER_RECOVERY_MARKER, WORKER_RECOVERY_MESSAGE, false, {
+		operationId: authority.operationId,
+		activeSessionId: authority.activeSessionId,
+		operations: [...operations],
+		authority,
 	});
+	return { status: "applied" };
 }
 
 /**
@@ -419,18 +502,7 @@ export async function markSessionInterrupted(
 		if (!lease) throw new Error(`Could not enable the recovery session lease: ${sessionPath}`);
 		try {
 			const session = SessionManager.open(sessionPath);
-			if (hasRecoveryMarker(session, authority.operationId)) {
-				return { status: "already_applied" };
-			}
-			const recovery = session.closeUnresolvedToolCallsWithAuthority(normalizedAuthority);
-			if (recovery.status === "stale") return recovery;
-			session.appendCustomMessageEntryWithRollback(WORKER_RECOVERY_MARKER, WORKER_RECOVERY_MESSAGE, false, {
-				operationId: authority.operationId,
-				activeSessionId: authority.activeSessionId,
-				operations: [...operations],
-				authority: normalizedAuthority,
-			});
-			return { status: "applied" };
+			return applyWorkerRecoveryToSession(session, normalizedAuthority, operations);
 		} finally {
 			lease.release();
 		}

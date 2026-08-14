@@ -301,8 +301,8 @@ export class WorkerRecoveryJournal {
 		this.latest = parseRecords(path);
 	}
 
-	record(input: WorkerRecoveryRecordInput): void {
-		withJournalGuard(this.path, () => {
+	record(input: WorkerRecoveryRecordInput): WorkerRecoveryRecord {
+		return withJournalGuard(this.path, () => {
 			this.refreshLatest();
 			const previous = this.latest.get(input.activeSessionId);
 			let record: WorkerRecoveryRecord;
@@ -332,11 +332,15 @@ export class WorkerRecoveryJournal {
 				};
 			}
 			if (sameV2Checkpoint(previous, record)) {
-				return;
+				// The checkpoint is byte-identical to the persisted latest record;
+				// return that durable record rather than the reconstructed one so
+				// callers observe the real persisted authority and recordedAt.
+				return previous!;
 			}
 			this.append(record);
 			this.latest.set(record.activeSessionId, record);
 			this.compactIfAllIdle();
+			return record;
 		});
 	}
 
