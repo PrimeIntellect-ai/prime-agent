@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 import {
 	type DaemonInfo,
 	evaluateShutdownQuietPeriod,
+	isProtectedDaemonAction,
 	isWorkerSocketPath,
 	mergeDiscoveredDaemonProcesses,
+	orderShutdownActions,
 	parseLsofListeners,
 	parsePrimeAgentProcessIds,
 	parsePsEtimes,
@@ -302,12 +304,42 @@ describe("shutdownDaemon authority outcome", () => {
 		);
 		try {
 			process.env[ENV_AGENT_DIR] = directory;
+			const workerDaemon = {
+				socketPath: workerSocketPath,
+				pid: workerPid,
+				status: "unreachable" as const,
+				isDefault: false,
+			};
+			const supervisorDaemon = {
+				socketPath: supervisorSocketPath,
+				pid: process.pid,
+				status: "current" as const,
+				isDefault: false,
+			};
+			const ordered = orderShutdownActions(
+				[
+					{ kind: "kill", daemon: workerDaemon },
+					{ kind: "shutdown", daemon: supervisorDaemon },
+				],
+				new Set([workerSocketPath]),
+				new Map([[workerPid, "worker-start"]]),
+			);
+			expect(ordered.map((action) => action.daemon.socketPath)).toEqual([supervisorSocketPath, workerSocketPath]);
+
 			const sockets = new Set<string>();
 			const processes = new Map<number, string | undefined>();
 			protectAuthorityRejectedScope(supervisorSocketPath, process.pid, sockets, processes);
 			expect(sockets).toEqual(new Set([supervisorSocketPath, workerSocketPath]));
 			expect(processes.get(process.pid)).toBe(getProcessStartId(process.pid));
 			expect(processes.get(workerPid)).toBe("worker-start");
+			expect(isProtectedDaemonAction(workerDaemon, sockets, processes)).toBe(true);
+			expect(
+				isProtectedDaemonAction(
+					{ socketPath: join(directory, "secondary.sock"), pid: process.pid },
+					sockets,
+					processes,
+				),
+			).toBe(true);
 		} finally {
 			if (previousAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
 			else process.env[ENV_AGENT_DIR] = previousAgentDir;

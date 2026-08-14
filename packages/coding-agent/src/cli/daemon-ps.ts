@@ -493,6 +493,30 @@ export function planShutdownAll(daemons: readonly DaemonInfo[], force: boolean):
 	});
 }
 
+export function isProtectedDaemonAction(
+	daemon: Pick<DaemonInfo, "socketPath" | "pid">,
+	protectedSockets: ReadonlySet<string>,
+	protectedProcesses: ReadonlyMap<number, string | undefined>,
+): boolean {
+	if (protectedSockets.has(normalizeSocketPath(daemon.socketPath))) return true;
+	if (daemon.pid === undefined || !protectedProcesses.has(daemon.pid)) return false;
+	const expectedStartId = protectedProcesses.get(daemon.pid);
+	return expectedStartId === undefined || getProcessStartId(daemon.pid) === expectedStartId;
+}
+
+export function orderShutdownActions(
+	actions: readonly ReapAction[],
+	dependentSockets: ReadonlySet<string>,
+	dependentProcesses: ReadonlyMap<number, string | undefined>,
+): ReapAction[] {
+	return [...actions].sort((left, right) => {
+		const dependentOrder =
+			Number(isProtectedDaemonAction(left.daemon, dependentSockets, dependentProcesses)) -
+			Number(isProtectedDaemonAction(right.daemon, dependentSockets, dependentProcesses));
+		return dependentOrder || SHUTDOWN_ALL_ACTION_ORDER[left.kind] - SHUTDOWN_ALL_ACTION_ORDER[right.kind];
+	});
+}
+
 const SHUTDOWN_ALL_ACTION_ORDER: Record<ReapAction["kind"], number> = {
 	shutdown: 0,
 	"remove-file": 1,
@@ -569,17 +593,19 @@ async function runShutdownAllConverging(
 	const protectedProcesses = new Map<number, string | undefined>();
 	const reportedFailures = new Set<string>();
 
-	if (force) {
-		await stopHiddenSupervisors(stopped, failed, handledPids, reportedFailures, assertAdmission);
-	}
 	const daemons = (await discoverDaemons()).filter((daemon) => !isWorkerSocketPath(daemon.socketPath));
 
-	const actions = [...planShutdownAll(daemons, force)].sort(
-		(left, right) => SHUTDOWN_ALL_ACTION_ORDER[left.kind] - SHUTDOWN_ALL_ACTION_ORDER[right.kind],
-	);
+	const dependentSockets = new Set<string>();
+	const dependentProcesses = new Map<number, string | undefined>();
+	collectTrackedDependentScope(dependentSockets, dependentProcesses);
+	const actions = orderShutdownActions(planShutdownAll(daemons, force), dependentSockets, dependentProcesses);
 
 	for (const action of actions) {
 		const { socketPath, pid } = action.daemon;
+		if (isProtectedDaemonAction(action.daemon, protectedSockets, protectedProcesses)) {
+			stopped.push({ socketPath, action: "preserved after shutdown authority rejection" });
+			continue;
+		}
 		if (pid !== undefined && handledPids.has(pid)) {
 			await assertAdmission();
 			removeSocketFile(socketPath);
@@ -657,6 +683,15 @@ async function runShutdownAllConverging(
 	}
 
 	if (force) {
+		await stopHiddenSupervisors(
+			stopped,
+			failed,
+			handledPids,
+			protectedSockets,
+			protectedProcesses,
+			reportedFailures,
+			assertAdmission,
+		);
 		await terminateVerifiedResiduals(
 			stopped,
 			failed,
@@ -694,6 +729,8 @@ async function stopHiddenSupervisors(
 	stopped: Array<{ socketPath: string; action: string }>,
 	failed: Array<{ socketPath: string; reason: string }>,
 	handledPids: Set<number>,
+	protectedSockets: ReadonlySet<string>,
+	protectedProcesses: ReadonlyMap<number, string | undefined>,
 	reportedFailures: Set<string>,
 	assertAdmission: () => Promise<void>,
 ): Promise<void> {
@@ -720,7 +757,13 @@ async function stopHiddenSupervisors(
 				);
 				continue;
 			}
-			hidden.push(...group.filter((listener) => listener.pid !== currentPid));
+			hidden.push(
+				...group.filter(
+					(listener) =>
+						listener.pid !== currentPid &&
+						!isProtectedDaemonAction(listener, protectedSockets, protectedProcesses),
+				),
+			);
 		}
 		if (hidden.length === 0) {
 			return;
@@ -755,6 +798,27 @@ function addProtectedProcess(
 	if (protectedProcesses.get(pid) !== processStartId) {
 		// Conflicting or incomplete identity must broaden protection, never narrow it.
 		protectedProcesses.set(pid, undefined);
+	}
+}
+
+function collectTrackedDependentScope(
+	dependentSockets: Set<string>,
+	dependentProcesses: Map<number, string | undefined>,
+): void {
+	for (const { descriptor } of findAllTrackedWorkers()) {
+		dependentSockets.add(normalizeSocketPath(descriptor.socketPath));
+		addProtectedProcess(dependentProcesses, descriptor.pid, descriptor.processStartId);
+		if (!descriptor.orphanProcessJournalPath) continue;
+		try {
+			for (const orphan of readActiveOrphanProcesses(descriptor.orphanProcessJournalPath, descriptor.pid)) {
+				if (isOrphanProcessIdentityCurrent(orphan)) {
+					addProtectedProcess(dependentProcesses, orphan.pid, orphan.processStartId);
+				}
+			}
+		} catch {
+			// The known worker identity remains deferred; do not infer child identities
+			// from missing or malformed journal data.
+		}
 	}
 }
 
@@ -824,15 +888,7 @@ async function terminateVerifiedResiduals(
 		previousSignature = signature;
 		const seenPids = new Set<number>();
 		for (const listener of listeners) {
-			const protectedStartId = protectedProcesses.get(listener.pid);
-			const protectedProcess =
-				protectedProcesses.has(listener.pid) &&
-				(protectedStartId === undefined || getProcessStartId(listener.pid) === protectedStartId);
-			if (
-				protectedSockets.has(normalizeSocketPath(listener.socketPath)) ||
-				protectedProcess ||
-				seenPids.has(listener.pid)
-			) {
+			if (isProtectedDaemonAction(listener, protectedSockets, protectedProcesses) || seenPids.has(listener.pid)) {
 				continue;
 			}
 			seenPids.add(listener.pid);

@@ -130,11 +130,13 @@ replacement token. Client wait logic treats rejection as “still running” and
 does not launch a replacement.
 
 Process cleanup represents graceful termination with a structured outcome.
-`shutdown_authority_rejected` is terminal: even with `force`, cleanup protects
-the supervisor plus every tracked worker and child identity/socket from direct
-cleanup and residual convergence. It does not signal them, remove their sockets,
-or delete their descriptors. Only timeout or unavailability may enter the
-existing exact-process fallback.
+`shutdown_authority_rejected` is terminal: even with `force`, cleanup first
+defers known tracked workers and journaled children behind their supervisor,
+then protects the rejected supervisor plus every tracked worker/child exact
+identity and socket before each remaining direct action, same-path duplicate
+cleanup, and residual convergence. It does not signal them, remove their sockets, or delete their
+descriptors. Only timeout or unavailability may enter the existing exact-process
+fallback.
 
 If the connected daemon disappears before a response, the existing wait-for-gone
 logic handles the uncertain disconnect. A normal failed response is terminal
