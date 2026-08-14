@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed multi-turn `/btw` side conversations exhausting large model contexts by compacting their transient in-memory history while preserving recent follow-ups.
 - Fixed concurrent Python kernel bootstraps deleting active virtual environments by publishing leased immutable generations with bounded inactive retention, preserving compatible legacy and exact-path overrides, and included a bounded redacted stderr tail when bootstrap commands fail.
 - Fixed update-restored sessions becoming unresumable when a restart marker preceded an aborted tool result ([#1102](https://github.com/PrimeIntellect-ai/prime-agent/pull/1102) by [@junhoyeo](https://github.com/junhoyeo)).
 - Fixed live daemon supervisors, workers, and session leases being treated as stale when upgrading across process-start identity token formats.

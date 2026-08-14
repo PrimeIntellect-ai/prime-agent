@@ -1,8 +1,15 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Context, StreamOptions, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { type SideQuestionEvent, startSideQuestion } from "../../../src/core/side-question.js";
+import type { BashExecutionMessage } from "../../../src/core/messages.js";
+import {
+	type SideQuestionDependencies,
+	type SideQuestionEvent,
+	startSideQuestion,
+} from "../../../src/core/side-question.js";
 import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
 import { BashExecutionComponent } from "../../../src/modes/interactive/components/bash-execution.js";
 import { SideQuestionComponent } from "../../../src/modes/interactive/components/side-question.js";
@@ -16,6 +23,29 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 		resolve = resolvePromise;
 	});
 	return { promise, resolve };
+}
+
+function sideQuestionDependencies(harness: Awaited<ReturnType<typeof createHarness>>): SideQuestionDependencies {
+	return {
+		getCompactionSettings: () => harness.settingsManager.getCompactionSettings(),
+		getRequestAuth: (model) => harness.session.getRequestAuth(model),
+	};
+}
+
+function contextUser(text: string): UserMessage {
+	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+}
+
+function contextAssistant(text: string, totalTokens: number): AssistantMessage {
+	const message = fauxAssistantMessage(text);
+	return {
+		...message,
+		usage: {
+			...message.usage,
+			input: totalTokens,
+			totalTokens,
+		},
+	};
 }
 
 describe("ENG-4509 side questions", () => {
@@ -88,9 +118,9 @@ describe("ENG-4509 side questions", () => {
 						expect.stringContaining("Second side question?"),
 					]);
 					expect(context.tools).toEqual([]);
-					// The instruction is repeated only on the first side turn.
+					// Each turn carries the instruction so compaction cannot discard it.
 					expect(texts[2]).toContain("Answer this side question");
-					expect(texts[4]).not.toContain("Answer this side question");
+					expect(texts[4]).toContain("Answer this side question");
 					return fauxAssistantMessage("second side answer");
 				},
 			]);
@@ -108,6 +138,674 @@ describe("ENG-4509 side questions", () => {
 			await run.done;
 
 			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "second side answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("leaves under-threshold side-question context unchanged", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100000, maxTokens: 20000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 20000, keepRecentTokens: 50 } },
+		});
+		try {
+			harness.session.agent.state.messages = [
+				contextUser("small main context"),
+				contextAssistant("small main answer", 100),
+			];
+			const messagesBefore = structuredClone(harness.session.messages);
+			harness.setResponses([
+				(context) => {
+					expect(context.messages.map(getMessageText)).toEqual([
+						"small main context",
+						"small main answer",
+						expect.stringContaining("What is still in context?"),
+					]);
+					return fauxAssistantMessage("everything");
+				},
+			]);
+
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"under-threshold",
+				"What is still in context?",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "everything" });
+			expect(harness.session.messages).toEqual(messagesBefore);
+			expect(harness.faux.state.callCount).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("respects disabled automatic compaction for over-threshold context", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100000, maxTokens: 20000 }],
+			settings: { compaction: { enabled: false, reserveTokens: 20000, keepRecentTokens: 50 } },
+		});
+		try {
+			harness.session.agent.state.messages = [
+				contextUser("large context remains verbatim"),
+				contextAssistant("large answer remains verbatim", 90000),
+			];
+			harness.setResponses([
+				(context) => {
+					expect(context.messages.map(getMessageText)).toEqual([
+						"large context remains verbatim",
+						"large answer remains verbatim",
+						expect.stringContaining("Do not compact this side question"),
+					]);
+					return fauxAssistantMessage("not compacted");
+				},
+			]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"disabled-compaction",
+				"Do not compact this side question",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "not compacted" });
+			expect(harness.faux.state.callCount).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("ignores provider-excluded bash output when sizing side context", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100_000, maxTokens: 20_000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 20_000, keepRecentTokens: 50 } },
+		});
+		try {
+			const excludedBash: BashExecutionMessage = {
+				role: "bashExecution",
+				command: "dump-noisy-output",
+				output: "x".repeat(400_000),
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: Date.now(),
+				excludeFromContext: true,
+			};
+			harness.session.agent.state.messages = [
+				contextUser("small visible context"),
+				contextAssistant("small visible answer", 100),
+				excludedBash,
+			];
+			harness.setResponses([
+				(context) => {
+					const text = context.messages.map(getMessageText).join("\n");
+					expect(text).not.toContain("dump-noisy-output");
+					expect(text).toContain("Does excluded output affect sizing?");
+					return fauxAssistantMessage("no");
+				},
+			]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"excluded-sizing",
+				"Does excluded output affect sizing?",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "no" });
+			expect(harness.faux.state.callCount).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("applies extension context and payload hooks to summary requests", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100_000, maxTokens: 20_000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 20_000, keepRecentTokens: 50 } },
+		});
+		try {
+			const secret = "extension-redacted-secret";
+			harness.session.agent.state.messages = [
+				contextUser(`${secret} ${"x".repeat(340_000)}`),
+				contextAssistant("large visible answer", 85_000),
+			];
+			const previousTransform = harness.session.agent.transformContext;
+			const transformContext = vi.fn(async (messages: AgentMessage[], signal?: AbortSignal) => {
+				const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+				return transformed.filter((message) => !getMessageText(message).includes(secret));
+			});
+			const onPayload = vi.fn((payload: unknown) => payload);
+			let summarySawPayloadHook = false;
+			harness.session.agent.transformContext = transformContext;
+			harness.session.agent.onPayload = onPayload;
+			harness.setResponses(
+				Array.from({ length: 12 }, () => (context: Context, options: StreamOptions | undefined) => {
+					const text = context.messages.map(getMessageText).join("\n");
+					expect(text).not.toContain(secret);
+					if (options?.maxTokens !== undefined) {
+						expect(options.onPayload).toBe(onPayload);
+						summarySawPayloadHook = true;
+						return fauxAssistantMessage("redacted context summary");
+					}
+					return fauxAssistantMessage("hook-safe answer");
+				}),
+			);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"summary-hooks",
+				"Answer without the redacted context",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "hook-safe answer" });
+			expect(transformContext).toHaveBeenCalled();
+			expect(summarySawPayloadHook).toBe(true);
+			expect(harness.faux.state.callCount).toBeGreaterThan(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("ignores retained pre-compaction usage when sizing side context", async () => {
+		const contextWindow = 32_768;
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow, maxTokens: 8_192 }],
+			settings: { compaction: { enabled: true } },
+		});
+		try {
+			const compactionTimestamp = Date.now();
+			const retainedAssistant = contextAssistant("retained visual answer", 32_000);
+			retainedAssistant.timestamp = compactionTimestamp - 1_000;
+			const image = { type: "image" as const, data: "retained-image", mimeType: "image/png" as const };
+			harness.session.agent.state.messages = [
+				{
+					role: "compactionSummary",
+					summary: "Earlier work was compacted.",
+					tokensBefore: 32_000,
+					timestamp: compactionTimestamp,
+				},
+				{
+					role: "user",
+					content: [{ type: "text", text: `Retain this visual turn ${"v".repeat(40_000)}` }, image],
+					timestamp: compactionTimestamp - 2_000,
+				},
+				retainedAssistant,
+				contextUser(`Later removable context ${"r".repeat(60_000)}`),
+			];
+			const enforcing = (context: Context, options: StreamOptions | undefined) => {
+				if (options?.maxTokens !== undefined) return fauxAssistantMessage("bounded stale-context summary");
+				const textTokens = Math.ceil(
+					context.messages.reduce((total, message) => total + getMessageText(message).length, 0) / 4,
+				);
+				if (textTokens + 1_200 + 8_192 > contextWindow) {
+					return fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: "stale usage prevented compaction",
+					});
+				}
+				expect(
+					context.messages.some(
+						(message) =>
+							message.role === "user" &&
+							Array.isArray(message.content) &&
+							message.content.some((block) => block.type === "image" && block.data === "retained-image"),
+					),
+				).toBe(true);
+				return fauxAssistantMessage("answered from compacted visual context");
+			};
+			harness.setResponses(Array.from({ length: 12 }, () => enforcing));
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"stale-compaction-usage",
+				"What survives the compacted context?",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({
+				status: "complete",
+				answer: "answered from compacted visual context",
+			});
+			expect(harness.faux.state.callCount).toBeGreaterThan(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("compacts over-threshold context in memory before answering", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 32_768, maxTokens: 8_192 }],
+			settings: { compaction: { enabled: true, reserveTokens: 8_192, keepRecentTokens: 50 } },
+		});
+		try {
+			harness.session.agent.state.messages = [
+				contextUser(`old request ${"x".repeat(60_000)}`),
+				contextAssistant("old answer", 15_100),
+				contextUser(`recent request ${"r".repeat(40_000)}`),
+				contextAssistant(`recent answer ${"a".repeat(80)}`, 25_200),
+			];
+			const messagesBefore = structuredClone(harness.session.messages);
+			vi.spyOn(harness.session, "getRequestAuth").mockResolvedValue({
+				apiKey: "faux-key",
+				headers: { "x-side-summary": "present" },
+			});
+			let summaryCalls = 0;
+			const response = (context: Context, options: StreamOptions | undefined) => {
+				if (options?.maxTokens !== undefined) {
+					summaryCalls++;
+					expect(options.headers).toMatchObject({ "x-side-summary": "present" });
+					return fauxAssistantMessage(`summary checkpoint ${summaryCalls}`);
+				}
+				expect(context.tools).toEqual([]);
+				return fauxAssistantMessage("compacted answer");
+			};
+			harness.setResponses(Array.from({ length: 12 }, () => response));
+
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"threshold",
+				"Answer from the compact context",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "compacted answer" });
+			expect(harness.session.messages).toEqual(messagesBefore);
+			expect(summaryCalls).toBeGreaterThan(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("bounds and chunks side summaries to the selected model context", async () => {
+		const contextWindow = 32_768;
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow, maxTokens: 8_192 }],
+			settings: { compaction: { enabled: true } },
+			systemPrompt: "s".repeat(25_000),
+		});
+		try {
+			harness.session.agent.state.messages = [
+				contextUser(`old five-thousand-token turn ${"o".repeat(20_000)}`),
+				contextAssistant("old answer", 5_000),
+				contextUser(`recent twenty-thousand-token turn ${"r".repeat(80_000)}`),
+				contextAssistant("recent answer", 25_000),
+			];
+			let summaryRequests = 0;
+			const enforcingSummary = (context: Context, options: StreamOptions | undefined) => {
+				summaryRequests++;
+				const promptChars =
+					(context.systemPrompt?.length ?? 0) +
+					context.messages.reduce((total, message) => total + getMessageText(message).length, 0);
+				const estimatedInput = Math.ceil(promptChars / 4);
+				if (estimatedInput + (options?.maxTokens ?? 0) > contextWindow) {
+					return fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: "provider rejected oversized summary request",
+					});
+				}
+				return fauxAssistantMessage(`bounded summary ${summaryRequests}`);
+			};
+			const enforcingRequest = (context: Context, options: StreamOptions | undefined) => {
+				if (options?.maxTokens !== undefined) return enforcingSummary(context, options);
+				expect(context.messages.map(getMessageText).join("\n")).toContain("bounded summary");
+				return fauxAssistantMessage("bounded answer");
+			};
+			harness.setResponses(Array.from({ length: 12 }, () => enforcingRequest));
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"bounded-summary",
+				"Answer after bounded summarization",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(summaryRequests).toBeGreaterThan(1);
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "bounded answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("splits CJK summaries by UTF-8 bytes and bounds the final answer", async () => {
+		const contextWindow = 32_768;
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow, maxTokens: 8_192 }],
+			settings: { compaction: { enabled: true } },
+		});
+		try {
+			harness.session.agent.state.messages = [
+				contextUser(`CJK history ${"漢".repeat(30_000)}`),
+				contextAssistant("CJK answer", 20_000),
+			];
+			let summaries = 0;
+			const enforcing = (context: Context, options: StreamOptions | undefined) => {
+				const promptBytes =
+					new TextEncoder().encode(context.systemPrompt ?? "").length +
+					context.messages.reduce(
+						(total, message) => total + new TextEncoder().encode(getMessageText(message)).length,
+						0,
+					);
+				if (promptBytes + (options?.maxTokens ?? 8_192) > contextWindow) {
+					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "oversized CJK request" });
+				}
+				if (options?.maxTokens !== undefined) {
+					summaries++;
+					return fauxAssistantMessage(`CJK summary ${summaries}`);
+				}
+				return fauxAssistantMessage("CJK bounded answer");
+			};
+			harness.setResponses(Array.from({ length: 12 }, () => enforcing));
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"cjk-budget",
+				"Answer after CJK compaction",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+			expect(summaries).toBeGreaterThan(1);
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "CJK bounded answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("retains image-bearing tool turns verbatim across compaction", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100_000, maxTokens: 5_000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 5_000, keepRecentTokens: 50 } },
+		});
+		try {
+			const toolCallId = "image-tool-call";
+			const toolResult: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId,
+				toolName: "inspect_image",
+				content: [{ type: "image", data: "preserved-image-data", mimeType: "image/png" }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+			harness.session.agent.state.messages = [
+				contextUser(`Inspect this image with the tool. ${"i".repeat(20_000)}`),
+				fauxAssistantMessage(fauxToolCall("inspect_image", {}, { id: toolCallId })),
+				toolResult,
+				contextAssistant("The image was inspected.", 1_000),
+				contextUser(`later removable text ${"z".repeat(90_000)}`),
+				contextAssistant("later answer", 90_000),
+			];
+			const imageRequest = (context: Context, options: StreamOptions | undefined) => {
+				if (options?.maxTokens !== undefined) return fauxAssistantMessage("later-text summary");
+
+				const retainedCall = context.messages.find(
+					(message) =>
+						message.role === "assistant" &&
+						message.content.some((block) => block.type === "toolCall" && block.id === toolCallId),
+				);
+				const retainedResult = context.messages.find(
+					(message) => message.role === "toolResult" && message.toolCallId === toolCallId,
+				);
+				expect(retainedCall).toBeDefined();
+				expect(retainedResult?.content).toEqual([
+					{ type: "image", data: "preserved-image-data", mimeType: "image/png" },
+				]);
+				return fauxAssistantMessage("image-aware answer");
+			};
+			harness.setResponses(Array.from({ length: 12 }, () => imageRequest));
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"image-context",
+				"What did the image show?",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "image-aware answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps removable-gap summaries in chronological position", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 32_768, maxTokens: 8_192 }],
+			settings: { compaction: { enabled: true, reserveTokens: 8_192, keepRecentTokens: 500 } },
+		});
+		try {
+			harness.session.agent.state.messages = [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "PROTECTED_IMAGE_A" },
+						{ type: "image", data: "image-a", mimeType: "image/png" },
+					],
+					timestamp: Date.now(),
+				} satisfies UserMessage,
+				contextAssistant("A acknowledged", 1_300),
+				contextUser(`CORRECTION_B ${"b".repeat(12_000)}`),
+				contextAssistant("B acknowledged", 4_400),
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "RETAINED_C" },
+						{ type: "image", data: "image-c", mimeType: "image/png" },
+					],
+					timestamp: Date.now(),
+				} satisfies UserMessage,
+				contextAssistant("C acknowledged", 25_000),
+			];
+			let summaryCalls = 0;
+			const response = (context: Context, options: StreamOptions | undefined) => {
+				if (options?.maxTokens !== undefined) {
+					summaryCalls++;
+					expect(context.messages.map(getMessageText).join("\n")).toContain("CORRECTION_B");
+					return fauxAssistantMessage("SUMMARY_OF_B");
+				}
+				const texts = context.messages.map(getMessageText);
+				const protectedIndex = texts.findIndex((text) => text.includes("PROTECTED_IMAGE_A"));
+				const summaryIndex = texts.findIndex((text) => text.includes("SUMMARY_OF_B"));
+				const retainedIndex = texts.findIndex((text) => text.includes("RETAINED_C"));
+				expect(protectedIndex).toBeGreaterThanOrEqual(0);
+				expect(summaryIndex).toBeGreaterThan(protectedIndex);
+				expect(retainedIndex).toBeGreaterThan(summaryIndex);
+				return fauxAssistantMessage("chronological answer");
+			};
+			harness.setResponses(Array.from({ length: 8 }, () => response));
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"chronology",
+				"Use the corrected chronology",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+			expect(summaryCalls).toBeGreaterThan(0);
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "chronological answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("cancels an in-flight side-question summary", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100000, maxTokens: 20000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 20000, keepRecentTokens: 50 } },
+		});
+		const summaryStarted = deferred();
+		try {
+			harness.session.agent.state.messages = [
+				contextUser(`old request ${"x".repeat(600)}`),
+				contextAssistant("old answer", 180),
+				contextUser(`recent request ${"r".repeat(160)}`),
+				contextAssistant(`recent answer ${"a".repeat(80)}`, 90000),
+			];
+			const messagesBefore = structuredClone(harness.session.messages);
+			harness.setResponses([
+				async (_context, options) => {
+					summaryStarted.resolve();
+					await new Promise<void>((resolve) => {
+						options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+					});
+					return fauxAssistantMessage("must not be used");
+				},
+			]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"cancel-summary",
+				"Cancel while summarizing",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await summaryStarted.promise;
+			run.abort();
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "cancelled" });
+			expect(harness.session.messages).toEqual(messagesBefore);
+			expect(harness.faux.state.callCount).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("compacts and retries an overflow only once", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100000, maxTokens: 20000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 20000, keepRecentTokens: 50 } },
+		});
+		try {
+			harness.session.agent.state.messages = [
+				contextUser(`old request ${"x".repeat(300)}`),
+				contextAssistant("old answer", 100),
+				contextUser(`recent request ${"r".repeat(160)}`),
+				contextAssistant(`recent answer ${"a".repeat(80)}`, 200),
+			];
+			harness.setResponses([
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Your input exceeds the context window of this model",
+				}),
+				fauxAssistantMessage("overflow recovery summary"),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Your input exceeds the context window of this model",
+				}),
+				fauxAssistantMessage("must not run"),
+			]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"overflow",
+				"Trigger the overflow backstop",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({
+				status: "error",
+				errorMessage: "Your input exceeds the context window of this model",
+			});
+			expect(harness.faux.state.callCount).toBe(3);
+			expect(harness.getPendingResponseCount()).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("retains side-turn continuity and instructions across compaction", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 32_768, maxTokens: 8_192 }],
+			settings: { compaction: { enabled: true, reserveTokens: 8_192, keepRecentTokens: 50 } },
+		});
+		try {
+			harness.session.agent.state.messages = [
+				contextUser(`main request ${"x".repeat(100_000)}`),
+				contextAssistant("main answer", 25_100),
+			];
+			let summaryCalls = 0;
+			const response = (context: Context, options: StreamOptions | undefined) => {
+				if (options?.maxTokens !== undefined) {
+					summaryCalls++;
+					return fauxAssistantMessage("main-context summary: the chosen color was ultraviolet");
+				}
+				expect(context.tools).toEqual([]);
+				return fauxAssistantMessage("because it was visible");
+			};
+			harness.setResponses(Array.from({ length: 12 }, () => response));
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"continuity",
+				"Why was that color chosen?",
+				(event) => {
+					events.push(event);
+				},
+				[{ question: "What color was chosen?", answer: "ultraviolet" }],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "because it was visible" });
+			expect(summaryCalls).toBeGreaterThan(0);
 		} finally {
 			harness.cleanup();
 		}

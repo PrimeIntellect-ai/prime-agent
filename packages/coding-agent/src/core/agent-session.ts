@@ -1396,7 +1396,12 @@ export class AgentSession {
 		this._subagentRuntimeHost = host;
 	}
 
-	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
+	/** Resolve required request auth through the session model registry. */
+	getRequestAuth(model: Model<Api>): Promise<{ apiKey: string; headers?: Record<string, string> }> {
+		return this._getRequiredRequestAuth(model);
+	}
+
+	private async _getRequiredRequestAuth(model: Model<Api>): Promise<{
 		apiKey: string;
 		headers?: Record<string, string>;
 	}> {
