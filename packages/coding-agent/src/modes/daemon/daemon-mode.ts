@@ -901,16 +901,6 @@ export class AgentDaemon {
 		return this.rlmSpawnLedgerInstance;
 	}
 
-	/** Ledger-backed family of every session rooted in this daemon's sessions dir. */
-	rlmLedgerFamily(): Promise<SessionInfo[]> {
-		return this.rlmSpawnLedger().family();
-	}
-
-	/** Ledger-backed same-parent rows for a session path (roots are mutual siblings). */
-	rlmLedgerSiblings(sessionPath: string): Promise<SessionInfo[]> {
-		return this.rlmSpawnLedger().siblings(sessionPath);
-	}
-
 	private appendRlmLedgerSpawn(input: {
 		childId: string;
 		parent: string;
@@ -928,11 +918,13 @@ export class AgentDaemon {
 			});
 	}
 
-	private appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): void {
+	private async appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): Promise<void> {
 		const childId = state.runtime.metadata.rlmChildId;
 		const child = state.runtime.session.sessionFile;
 		if (!childId || !child) return;
-		this.rlmSpawnLedger()
+		// Awaited: the supervisor answers sibling-name checks from the ledger,
+		// so the rename must be durable before the reservation is released.
+		await this.rlmSpawnLedger()
 			.appendRename({ childId, child, name })
 			.catch((error) => {
 				this.log(`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`);
@@ -5272,7 +5264,7 @@ export class AgentDaemon {
 			async () => {
 				await this.assertStateSessionNameAvailable(state, normalizedName);
 				state.runtime.session.setSessionName(normalizedName);
-				this.appendRlmLedgerRenameForState(state, normalizedName);
+				await this.appendRlmLedgerRenameForState(state, normalizedName);
 			},
 		);
 	}

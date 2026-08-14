@@ -7,6 +7,8 @@ import {
 	openSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
+	rmSync,
 	statSync,
 	truncateSync,
 	writeSync,
@@ -374,7 +376,21 @@ export class RlmSpawnLedger {
 			);
 			const parent = parentByChild.get(target);
 			if (parent !== undefined) {
-				return family.filter((row) => parentByChild.get(canonicalSessionPath(row.path)) === parent);
+				const rows = family.filter((row) => parentByChild.get(canonicalSessionPath(row.path)) === parent);
+				// The target's edge can be reconciliation-dropped (parent file
+				// gone) while its own file still exists: fall back to presenting
+				// the survivor alone rather than an empty set the callers would
+				// read as "session not found".
+				if (!rows.some((row) => canonicalSessionPath(row.path) === target)) {
+					try {
+						if ((await stat(target)).isFile()) {
+							return [await this.sessionRow(target, 0, undefined, undefined)];
+						}
+					} catch {
+						// fall through to the (possibly empty) sibling rows
+					}
+				}
+				return rows;
 			}
 			// Roots are siblings of the other roots. A session outside both the
 			// ledger and the sessions dir is presented alone (matching the
@@ -524,13 +540,16 @@ export class RlmSpawnLedger {
 		name: string | undefined,
 	): Promise<SessionInfo> {
 		// Display-grade fields are best-effort from the ordinary session-info
-		// read; topology (path, depth, parent) always comes from the ledger.
-		// For roots the ledger carries no name, so the name too comes from this
-		// read — writer-owned display data, not authority.
+		// read; topology (path, depth, parent) comes EXCLUSIVELY from the
+		// ledger: header-claimed parentSessionPath/rlmDepth (e.g. fork headers)
+		// are stripped, never passed through. For roots the ledger carries no
+		// name, so the name comes from this read — writer-owned display data,
+		// not authority.
 		const info = await readSessionInfo(path).catch(() => null);
 		if (info) {
+			const { parentSessionPath: _headerParent, rlmDepth: _headerDepth, ...display } = info;
 			return {
-				...info,
+				...display,
 				rlmDepth: depth,
 				...(parentPath ? { parentSessionPath: parentPath } : {}),
 				...(name ? { name } : {}),
@@ -559,6 +578,13 @@ export class RlmSpawnLedger {
 		} catch {
 			return;
 		}
+		// Collect the complete seed first, then publish it atomically via a
+		// temp file + rename: the ledger file only exists once seeding is
+		// complete, so an interrupted seed leaves nothing and the next
+		// construction re-seeds from scratch. A concurrent process appending
+		// before the rename creates the real file on demand and thereby
+		// suppresses this seed — the same behavior as any pre-existing ledger.
+		const records: RlmLedgerSpawnRecord[] = [];
 		const queue: Array<{ sessionFile: string; depth: number }> = rootEntries
 			.filter((name) => name.endsWith(".jsonl"))
 			.sort()
@@ -576,23 +602,46 @@ export class RlmSpawnLedger {
 				// absent and derive parent depth + 1 instead of skipping the edge.
 				const registryDepth = entry.rlmDepth !== undefined && entry.rlmDepth >= 1 ? entry.rlmDepth : undefined;
 				const childDepth = registryDepth ?? depth + 1;
-				try {
-					this.appendSpawnUnlocked({
-						childId: entry.childId,
-						parent: sessionFile,
-						child: entry.sessionFile,
-						depth: childDepth,
-						name: entry.sessionName,
-					});
-				} catch (error) {
-					// A duplicate-path or invalid registry artifact must not poison the seed.
-					this.log(
-						`RLM ledger: skipped seeding ${entry.childId}: ${error instanceof Error ? error.message : String(error)}`,
-					);
+				if (!entry.childId) {
+					this.log("RLM ledger: skipped seeding a registry entry without a childId");
 					continue;
 				}
+				records.push({
+					v: 1,
+					op: "spawn",
+					at: nowIso(),
+					childId: entry.childId,
+					parent: canonicalSessionPath(sessionFile),
+					child: childPath,
+					depth: childDepth,
+					name: entry.sessionName,
+				});
 				queue.push({ sessionFile: entry.sessionFile, depth: childDepth });
 			}
+		}
+		if (records.length === 0) return;
+		const dir = dirname(this.path);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const tempPath = `${this.path}.seed-${process.pid}-${Date.now()}`;
+		const meta: RlmLedgerMetaRecord = { v: 1, op: "meta", at: nowIso(), sessionsDir: this.canonicalSessionsDir };
+		const handle = openSync(tempPath, "wx", 0o600);
+		try {
+			writeSync(handle, [meta, ...records].map((record) => `${JSON.stringify(record)}\n`).join(""));
+			fsyncSync(handle);
+		} finally {
+			closeSync(handle);
+		}
+		try {
+			// A live append that raced the seed wins: it created the real file
+			// with fresher data than the registries; drop the seed.
+			if (existsSync(this.path)) {
+				rmSync(tempPath, { force: true });
+				return;
+			}
+			renameSync(tempPath, this.path);
+		} catch (error) {
+			rmSync(tempPath, { force: true });
+			throw error;
 		}
 	}
 

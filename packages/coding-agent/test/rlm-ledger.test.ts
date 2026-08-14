@@ -304,6 +304,56 @@ describe("rlm spawn ledger", () => {
 		}
 	});
 
+	it("never passes header-claimed topology through for roots (fork headers)", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-fork-root-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			// A fork: header carries parentSession, so readSessionInfo reports a
+			// parentSessionPath — writer-owned topology the ledger must strip.
+			const fork = SessionManager.forkFrom(parentFile, root, sessionsDir);
+			fork.appendSessionInfo("forked-root");
+			fork.flushNow();
+			const forkFile = fork.getSessionFile();
+			if (!forkFile) throw new Error("Missing fork session file");
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const family = await ledger.family();
+			const forkRow = family.find((row) => row.name === "forked-root");
+			expect(forkRow).toBeDefined();
+			expect(forkRow?.rlmDepth).toBe(0);
+			expect(forkRow?.parentSessionPath).toBeUndefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("returns the surviving child alone when its parent file is gone", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-orphan-"));
+		try {
+			const { sessionsDir, parent, parentFile } = makeRoots(root);
+			const artifactDir = parent.getSessionArtifactDir();
+			if (!artifactDir) throw new Error("Missing artifact dir");
+			const child = makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 1, "survivor");
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: child.file,
+				depth: 1,
+				name: "survivor",
+			});
+			rmSync(parentFile);
+
+			// The edge is reconciliation-dropped, but the child file exists: it
+			// must come back as a lone root-shaped row, not vanish entirely.
+			const siblings = await ledger.siblings(child.file);
+			expect(siblings).toEqual([
+				expect.objectContaining({ path: canonicalSessionPath(child.file), name: "survivor", rlmDepth: 0 }),
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("presents roots at their own depth without asserting depth-0 against nested-daemon edges", async () => {
 		// A nested daemon's sessions dir has roots that legitimately carry
 		// env-derived depths > 0: an edge at depth 3 whose parent is a root must
@@ -364,8 +414,6 @@ function makeDaemonFixture(tempDir: string) {
 		): Promise<void>;
 		setStateSessionName(state: ActiveSessionState, name: string): Promise<void>;
 		rlmSpawnLedger(): RlmSpawnLedger;
-		rlmLedgerFamily(): Promise<Array<{ name?: string; rlmDepth: number; path: string }>>;
-		rlmLedgerSiblings(sessionPath: string): Promise<Array<{ name?: string; rlmDepth: number }>>;
 	};
 	return { daemon, internals, sessionsDir };
 }
@@ -608,7 +656,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 
 			const { internals } = makeDaemonFixture(tempDir);
 			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(false);
-			const family = await internals.rlmLedgerFamily();
+			const family = await internals.rlmSpawnLedger().family();
 			expect(family.map((row) => [row.name, row.rlmDepth])).toEqual(
 				expect.arrayContaining([
 					["parent", 0],
@@ -625,11 +673,55 @@ describe("rlm spawn ledger daemon wiring", () => {
 
 			// Memoized: the seeded ledger, not the registries, is the source now.
 			rmSync(join(parentArtifactDir, "rlm-subagents.jsonl"));
-			const again = await internals.rlmLedgerFamily();
+			const again = await internals.rlmSpawnLedger().family();
 			expect(again.map((row) => row.name)).toEqual(expect.arrayContaining(["seed-worker", "nested-worker"]));
 
-			const siblings = await internals.rlmLedgerSiblings(child.file);
+			const siblings = await internals.rlmSpawnLedger().siblings(child.file);
 			expect(siblings.map((row) => row.name).sort()).toEqual(["seed-worker", "zero-depth-worker"]);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves no ledger file behind an interrupted seed and re-seeds completely", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-crash-"));
+		try {
+			const sessionsDir = join(tempDir, "sessions");
+			const parentManager = SessionManager.create(tempDir, sessionsDir);
+			parentManager.newSession();
+			parentManager.appendSessionInfo("parent");
+			parentManager.flushNow();
+			const parentFile = parentManager.getSessionFile();
+			const parentArtifactDir = parentManager.getSessionArtifactDir();
+			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
+			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const seedEntry = {
+				childId: "sub-11111111",
+				sessionName: "worker",
+				sessionFile: child.file,
+				rlmDepth: 1,
+				status: "completed" as const,
+			};
+			let calls = 0;
+			const flaky = new RlmSpawnLedger(tempDir, sessionsDir, {
+				readRegistryForSessionFile: async () => {
+					if (++calls === 1) throw new Error("disk exploded mid-seed");
+					return [];
+				},
+			});
+			await expect(flaky.family()).resolves.toEqual([expect.objectContaining({ name: "parent" })]);
+			// The interrupted seed published nothing: no ledger file, no partial state.
+			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(false);
+
+			const healthy = new RlmSpawnLedger(tempDir, sessionsDir, {
+				readRegistryForSessionFile: async (sessionFile) =>
+					canonicalSessionPath(sessionFile) === canonicalSessionPath(parentFile) ? [seedEntry] : [],
+			});
+			await expect(healthy.family()).resolves.toEqual([
+				expect.objectContaining({ name: "parent", rlmDepth: 0 }),
+				expect.objectContaining({ name: "worker", rlmDepth: 1 }),
+			]);
+			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(true);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
