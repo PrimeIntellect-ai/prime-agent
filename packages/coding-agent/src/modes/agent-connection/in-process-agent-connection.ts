@@ -354,6 +354,10 @@ export class InProcessAgentConnection implements AgentConnection {
 			question,
 			(event) => this.emit({ type: "side_question_event", event }),
 			previousTurns,
+			{
+				getCompactionSettings: () => this.session.settingsManager.getCompactionSettings(),
+				getRequestAuth: (model) => this.session.getRequestAuth(model),
+			},
 		);
 		this.sideQuestionRuns.set(id, run);
 		const removeRun = () => {

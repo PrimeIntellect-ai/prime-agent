@@ -4002,6 +4002,10 @@ export class AgentDaemon {
 						}
 					},
 					command.previousTurns,
+					{
+						getCompactionSettings: () => state.runtime.session.settingsManager.getCompactionSettings(),
+						getRequestAuth: (model) => state.runtime.session.getRequestAuth(model),
+					},
 				);
 				this.sideQuestionRuns.set(command.sideQuestionId, {
 					run,
