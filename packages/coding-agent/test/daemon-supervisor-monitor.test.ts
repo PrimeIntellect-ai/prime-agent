@@ -3332,7 +3332,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const markInterrupted = vi
 			.fn()
 			.mockResolvedValueOnce({ status: "stale" as const, reason: "live_session_owner" as const })
-			.mockResolvedValueOnce({ status: "applied" as const });
+			.mockResolvedValueOnce({ status: "stale" as const, reason: "live_session_owner" as const });
 		const worker = recoveryWorker(root, journalPath);
 		worker.descriptor.pid = 2_147_483_647;
 		const supervisor = recoverySupervisor(markInterrupted);
@@ -3346,6 +3346,7 @@ describe("daemon worker supervisor monitoring", () => {
 
 			await supervisor.recoverUncertainWorkerOperations(worker, false);
 			expect(markInterrupted).toHaveBeenCalledTimes(2);
+			expect(markInterrupted.mock.calls[1]?.[0]).toEqual(markInterrupted.mock.calls[0]?.[0]);
 			expect(WorkerRecoveryJournal.readLatest(journalPath)[0]).toMatchObject({
 				busy: false,
 				operation: "recovery_complete",

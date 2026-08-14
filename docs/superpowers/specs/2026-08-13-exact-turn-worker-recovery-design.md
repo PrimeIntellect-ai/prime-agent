@@ -122,8 +122,10 @@ not add even a warning marker because the recovery process no longer owns the
 active transcript. The one exception is `live_session_owner` immediately after
 the supervisor signalled the exact worker generation with `SIGKILL`: process
 termination and lease release are asynchronous, so that result remains retryable
-and the busy journal is preserved. A later attempt with no worker generation to
-kill treats a normal live owner as genuinely stale.
+and the busy journal is preserved. A later attempt with no verified worker
+generation to kill treats a live owner as stale; that result does not prove the
+owner is a new generation, so journal compare-and-set remains the fence that
+prevents completion from clobbering a newer worker epoch.
 
 ## Failure and race behavior
 
