@@ -332,6 +332,13 @@ export interface OpenAIResponsesCompat {
 	sendSessionIdHeader?: boolean;
 	/** Whether the provider supports `prompt_cache_retention: "24h"`. Default: true. */
 	supportsLongCacheRetention?: boolean;
+	/**
+	 * Whether the endpoint serves Fast mode (`service_tier: "priority"`).
+	 * Built-in ChatGPT-authenticated models detect this from provider and model
+	 * id; set it for a proxy or gateway that forwards `service_tier` to an
+	 * upstream that honors it. Default: false.
+	 */
+	supportsFastMode?: boolean;
 }
 
 /** Compatibility settings for Anthropic Messages-compatible APIs. */

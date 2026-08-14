@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added `compat.supportsFastMode` for `openai-responses` models so an endpoint that forwards `service_tier` to a ChatGPT-authenticated upstream can serve Fast mode.
 - Fixed interrupted tool turns replaying late tool results after an interposed user message ([#1102](https://github.com/PrimeIntellect-ai/prime-agent/pull/1102) by [@junhoyeo](https://github.com/junhoyeo)).
 
 ## [0.7.2] - 2026-08-11

@@ -1,8 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
-import { getApiProvider } from "@earendil-works/pi-ai";
+import type {
+	AnthropicMessagesCompat,
+	Api,
+	Context,
+	Model,
+	OpenAICompletionsCompat,
+	OpenAIResponsesCompat,
+} from "@earendil-works/pi-ai";
+import { getApiProvider, supportsFastMode } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -452,6 +459,24 @@ describe("ModelRegistry", () => {
 			expect(model?.thinkingLevelMap).toEqual({ minimal: null, high: "max" });
 			expect(compat?.supportsStrictMode).toBe(false);
 			expect(compat?.cacheControlFormat).toBe("anthropic");
+		});
+
+		test("compat schema accepts the OpenAI Responses fast mode flag for a built-in model", () => {
+			writeRawModelsJson({
+				openai: {
+					baseUrl: "http://127.0.0.1:8787/v1",
+					modelOverrides: {
+						"gpt-5.5": { compat: { supportsFastMode: true } },
+					},
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("openai", "gpt-5.5");
+
+			expect(registry.getError()).toBeUndefined();
+			expect((model?.compat as OpenAIResponsesCompat | undefined)?.supportsFastMode).toBe(true);
+			expect(supportsFastMode(model as Model<Api>)).toBe(true);
 		});
 
 		test("compat schema accepts Anthropic eager tool input streaming flag", () => {
