@@ -1,0 +1,50 @@
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to request a new capability or improvement. Search existing Discussions first so related requests stay together.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Prime Agent would this affect?
+      multiple: true
+      options:
+        - Agent core
+        - AI providers and models
+        - Coding agent and CLI
+        - TUI
+        - Installation or updates
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Describe the behavior or experience you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Share any workarounds or alternative approaches you have considered.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples, mockups, or related Discussions if useful.
+    validations:
+      required: false

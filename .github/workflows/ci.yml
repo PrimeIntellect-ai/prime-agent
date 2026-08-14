@@ -14,8 +14,26 @@ permissions:
   contents: read
 
 jobs:
+  trust:
+    name: Contributor trust
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ github.event_name == 'push' || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - name: Check pull request author
+        id: vouch
+        if: github.event_name == 'pull_request'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          user: ${{ github.event.pull_request.user.login }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build-check:
     name: Build and check
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,6 +65,8 @@ jobs:
 
   test:
     name: Test (${{ matrix.name }})
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -121,8 +141,8 @@ jobs:
 
   build-check-test:
     name: build-check-test
-    if: always()
-    needs: [build-check, test]
+    if: always() && needs.trust.outputs.allowed == 'true'
+    needs: [trust, build-check, test]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
