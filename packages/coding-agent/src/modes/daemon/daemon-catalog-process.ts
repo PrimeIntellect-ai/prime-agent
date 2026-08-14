@@ -1,13 +1,31 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
+import { isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
+export const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
+
+function resolveDaemonCatalogEntrypoint(): string {
+	const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+	const candidates = [
+		join(moduleDirectory, "daemon-catalog-entry.js"),
+		join(moduleDirectory, "daemon-catalog-entry.ts"),
+		resolve(moduleDirectory, "../modes/daemon/daemon-catalog-entry.js"),
+	];
+	const entrypoint = candidates.find((candidate) => existsSync(candidate));
+	if (!entrypoint) {
+		throw new Error("Cannot locate the daemon catalog entrypoint");
+	}
+	return entrypoint;
+}
 
 interface SessionInfoWire extends Omit<SessionInfo, "created" | "modified"> {
 	created: string;
@@ -391,7 +409,9 @@ export class DaemonCatalogClient {
 	}
 
 	private async spawnCatalog(): Promise<void> {
-		const launch = createCliSubprocessLaunchSpec(["--version"]);
+		const launch = isBunBinary
+			? createCliSubprocessLaunchSpec(["--version"])
+			: createCliSubprocessLaunchSpec([], process.execPath, process.execArgv, resolveDaemonCatalogEntrypoint());
 		const child = spawn(launch.command, launch.args, {
 			cwd: process.cwd(),
 			env: createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" }),
@@ -413,7 +433,7 @@ export class DaemonCatalogClient {
 				}
 				child.kill("SIGKILL");
 				rejectReady(error);
-			}, 5000);
+			}, DAEMON_CATALOG_START_TIMEOUT_MS);
 			const cleanup = () => {
 				clearTimeout(timeout);
 				child.off("message", onMessage);

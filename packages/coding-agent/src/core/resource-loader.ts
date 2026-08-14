@@ -76,6 +76,7 @@ function loadContextFileFromDir(dir: string): { path: string; content: string } 
 export function loadProjectContextFiles(options: {
 	cwd: string;
 	agentDir: string;
+	projectTrusted?: boolean;
 }): Array<{ path: string; content: string }> {
 	const resolvedCwd = options.cwd;
 	const resolvedAgentDir = options.agentDir;
@@ -89,6 +90,9 @@ export function loadProjectContextFiles(options: {
 		seenPaths.add(globalContext.path);
 	}
 
+	if (options.projectTrusted === false) {
+		return contextFiles;
+	}
 	const ancestorContextFiles: Array<{ path: string; content: string }> = [];
 
 	let currentDir = resolvedCwd;
@@ -117,6 +121,7 @@ export interface DefaultResourceLoaderOptions {
 	cwd: string;
 	agentDir: string;
 	settingsManager?: SettingsManager;
+	projectTrusted?: boolean;
 	eventBus?: EventBus;
 	additionalExtensionPaths?: string[];
 	additionalSkillPaths?: string[];
@@ -213,7 +218,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 	constructor(options: DefaultResourceLoaderOptions) {
 		this.cwd = options.cwd;
 		this.agentDir = options.agentDir;
-		this.settingsManager = options.settingsManager ?? SettingsManager.create(this.cwd, this.agentDir);
+		this.settingsManager =
+			options.settingsManager ??
+			SettingsManager.create(this.cwd, this.agentDir, { projectTrusted: options.projectTrusted });
+		if (options.settingsManager && options.projectTrusted !== undefined) {
+			this.settingsManager.setProjectTrusted(options.projectTrusted);
+		}
 		this.eventBus = options.eventBus ?? createEventBus();
 		this.bundledSkillsDir = options.bundledSkillsDir === undefined ? getBundledSkillsDir() : options.bundledSkillsDir;
 		this.packageManager = new DefaultPackageManager({
@@ -473,7 +483,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 
 		const agentsFiles = {
-			agentsFiles: this.noContextFiles ? [] : loadProjectContextFiles({ cwd: this.cwd, agentDir: this.agentDir }),
+			agentsFiles: this.noContextFiles
+				? []
+				: loadProjectContextFiles({
+						cwd: this.cwd,
+						agentDir: this.agentDir,
+						projectTrusted: this.settingsManager.isProjectTrusted(),
+					}),
 		};
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 		this.agentsFiles = resolvedAgentsFiles.agentsFiles;
@@ -863,7 +879,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private discoverSystemPromptFile(): string | undefined {
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "SYSTEM.md");
-		if (existsSync(projectPath)) {
+		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
 			return projectPath;
 		}
 
@@ -877,7 +893,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private discoverAppendSystemPromptFile(): string | undefined {
 		const projectPath = join(this.cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md");
-		if (existsSync(projectPath)) {
+		if (this.settingsManager.isProjectTrusted() && existsSync(projectPath)) {
 			return projectPath;
 		}
 

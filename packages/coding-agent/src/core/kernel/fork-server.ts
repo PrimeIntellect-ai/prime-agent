@@ -32,6 +32,17 @@ function affectsInterpreterStartup(key: string): boolean {
 	return key.startsWith("PYTHON") || INTERPRETER_STARTUP_ENV_EXACT.includes(key);
 }
 
+function terminateForkedKernel(pid: number): void {
+	try {
+		// Forked kernels call setsid(), so terminate the kernel and descendants.
+		process.kill(-pid, "SIGTERM");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+		// The parent can receive the pid just before the child reaches setsid().
+		process.kill(pid, "SIGTERM");
+	}
+}
+
 export class ForkServerUnavailable extends Error {
 	constructor(message: string) {
 		super(message);
@@ -211,7 +222,7 @@ class ForkServer {
 				// fork succeeded but nobody owns it, so kill the orphan here.
 				if (this.abandoned.delete(msg.id) && typeof msg.pid === "number") {
 					try {
-						process.kill(msg.pid, "SIGTERM");
+						terminateForkedKernel(msg.pid);
 					} catch {
 						// Orphan already exited.
 					}

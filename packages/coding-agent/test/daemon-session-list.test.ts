@@ -56,6 +56,45 @@ describe("buildSessionList", () => {
 		]);
 	});
 
+	it("surfaces classifier failure separately from runtime activity and open operations", () => {
+		const state = makeState({
+			activeSessionId: "active",
+			summaryClassifierState: {
+				status: "classifier_unavailable",
+				lastAttemptAt: "2026-08-10T08:00:00.000Z",
+				consecutiveFailures: 2,
+				nextAttemptAt: "2026-08-10T08:05:00.000Z",
+			},
+			operationTracker: {
+				summary: () => ({
+					openOperationCount: 1,
+					lastMeaningfulProgressAt: "2026-08-10T08:01:00.000Z",
+					operations: [
+						{
+							schemaVersion: 1,
+							operationId: "op-1",
+							activeSessionId: "active",
+							kind: "provider",
+							phase: "active",
+							status: "open",
+							startedAt: "2026-08-10T08:00:00.000Z",
+							updatedAt: "2026-08-10T08:01:00.000Z",
+							lastMeaningfulProgressAt: "2026-08-10T08:01:00.000Z",
+						},
+					],
+				}),
+			} as ActiveSessionState["operationTracker"],
+		});
+		const summary = summaryForActiveSession(state);
+		expect(summary.activity).toBe("idle");
+		expect(summary.reliability).toMatchObject({
+			classifier: { status: "classifier_unavailable", consecutiveFailures: 2 },
+			openOperationCount: 1,
+			lastMeaningfulProgressAt: "2026-08-10T08:01:00.000Z",
+		});
+		expect(summary.reliability?.openOperations).toHaveLength(1);
+	});
+
 	it("uses the stable session header time for active rows without a saved catalog entry", () => {
 		const state = makeState({ activeSessionId: "active", sessionFile: "/tmp/active.jsonl" });
 		const first = summaryForActiveSession(state);
@@ -63,6 +102,28 @@ describe("buildSessionList", () => {
 		expect(first.created).toBe("2026-05-01T00:00:00.000Z");
 		expect(first.lastActivityAt).toBe("2026-05-01T00:00:00.000Z");
 		expect(second.created).toBe(first.created);
+	});
+
+	it("uses meaningful message time instead of status-only file mtime for resident rows", () => {
+		const timestamp = Date.parse("2026-05-05T12:00:00.000Z");
+		const state = makeState({
+			activeSessionId: "meaningful-age",
+			messages: [{ role: "assistant", content: "done", timestamp }] as unknown as AgentMessage[],
+		});
+
+		const summary = summaryForActiveSession(state);
+		expect(summary.modified).toBe(new Date(timestamp).toISOString());
+		expect(summary.lastActivityAt).toBe(new Date(timestamp).toISOString());
+	});
+
+	it("reports a quiescent top-level session idle even when status classification is unavailable", () => {
+		const summary = summaryForActiveSession(
+			makeState({
+				activeSessionId: "classifier-unavailable",
+				messages: [{ role: "user", content: "hi" }] as unknown as AgentMessage[],
+			}),
+		);
+		expect(summary.activity).toBe("idle");
 	});
 
 	it("takes last activity from custom messages and tool results", () => {
@@ -691,6 +752,8 @@ interface StateOptions {
 	messages?: AgentMessage[];
 	hasUserContent?: boolean;
 	summaryState?: ActiveSessionState["summaryState"];
+	summaryClassifierState?: ActiveSessionState["summaryClassifierState"];
+	operationTracker?: ActiveSessionState["operationTracker"];
 	childRunStatuses?: Record<string, "queued" | "running" | "done" | "error" | "cancelled">;
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
@@ -722,6 +785,8 @@ function makeState(options: StateOptions): ActiveSessionState {
 		clients,
 		lastEventSequence: 0,
 		summaryState: options.summaryState,
+		summaryClassifierState: options.summaryClassifierState,
+		operationTracker: options.operationTracker,
 		runtime: {
 			metadata: options.metadata ?? { kind: "top-level", createdAt: 1 },
 			diagnostics: [],

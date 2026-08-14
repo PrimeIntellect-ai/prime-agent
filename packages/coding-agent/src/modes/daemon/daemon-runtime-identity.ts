@@ -15,7 +15,13 @@ export function getDaemonRuntimeIdentity(environment: NodeJS.ProcessEnv = proces
 	const entrypoint = process.argv[1];
 	const launcher = environment[PRIME_AGENT_LAUNCHER_PATH_ENV];
 	return {
-		buildId: environment[PRIME_AGENT_BUILD_ID_ENV] ?? bundledBuildId() ?? `release-${VERSION}`,
+		// The bundle's embedded id wins over the launcher's environment value. prime-agent.sh
+		// derives that value from the worktree's live `git describe`, so preferring it would let a
+		// daemon still serving an older bundle report the current checkout: commit without
+		// rebuilding, restart, and the mismatch becomes invisible. The embedded id is the only
+		// value that describes the code actually loaded. The environment is the fallback for
+		// unbundled execution, where __PI_BUILD_ID__ is never substituted.
+		buildId: bundledBuildId() ?? environment[PRIME_AGENT_BUILD_ID_ENV] ?? `release-${VERSION}`,
 		executablePath: resolve(process.execPath),
 		...(entrypoint ? { entrypointPath: resolve(entrypoint) } : {}),
 		...(launcher ? { launcherPath: resolve(launcher) } : {}),

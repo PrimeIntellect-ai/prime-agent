@@ -14,6 +14,7 @@ import {
 	KernelBusyAfterInterruptError,
 	type KernelDiffDisplay,
 	KernelManager,
+	type KernelProcessOwnershipEvent,
 	type KernelSentAgentMessage,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
@@ -260,6 +261,8 @@ export interface IpythonToolDetails {
 	sentAgentMessages?: KernelSentAgentMessage[];
 	/** True when this result came after killing and restarting a busy kernel. */
 	kernelRestarted?: boolean;
+	cleanupStatus?: ExecuteResult["cleanupStatus"];
+	survivingProcessIds?: number[];
 	error?: {
 		ename: string;
 		evalue: string;
@@ -291,6 +294,7 @@ export interface IpythonToolOptions {
 	 * (some names restored or some failed), so the session can tell the model.
 	 */
 	onRestore?: (result: RestoreResult) => void;
+	onProcessOwnershipChange?: (event: KernelProcessOwnershipEvent) => void;
 	onLateSentAgentMessage?: (toolCallId: string, message: KernelSentAgentMessage) => void;
 	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
 	provisioner?: IpythonKernelProvisioner;
@@ -486,6 +490,7 @@ export class IpythonKernelProvisioner {
 				snapshot: snapshotDir
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
 					: undefined,
+				onProcessOwnershipChange: this.options?.onProcessOwnershipChange,
 			});
 			let pendingRestore: RestoreResult | undefined;
 			try {
@@ -690,6 +695,8 @@ export function createIpythonToolDefinition(
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,
 						kernelRestarted,
+						cleanupStatus: r.cleanupStatus,
+						survivingProcessIds: r.survivingProcessIds,
 						error: r.error,
 					},
 					isError: r.status === "error" || r.status === "aborted",

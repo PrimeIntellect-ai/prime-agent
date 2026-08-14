@@ -151,6 +151,31 @@ Update preparation is two-phase:
 
 If preparation or manifest validation fails, prepared workers are released and all roots continue running.
 
+## Reliability truth and detached monitoring
+
+Every daemon and worker writes an owner-only operation snapshot plus a bounded append-only transition journal under `<agent-dir>/reliability/operations/`. The journal is capped at 4 MiB or 4096 records. After either cap is crossed, it is atomically replaced with a complete checkpoint, so recovery always has a bounded evidence source.
+
+Runtime operations carry their phase, parent operation, last meaningful progress, absolute deadline, timeout-policy class, ownership, cleanup state, and terminal outcome. The emitted operation kinds are exactly `turn`, `provider`, `tool`, `kernel`, `bash`, `compaction`, and `retry`.
+
+`prime-agent monitor` is a warning-only, out-of-process reader. It alerts after four minutes of unexplained silence, so a healthy delivery path satisfies the five-minute notification invariant on the next one-minute monitor tick. Alerts enter a restart-safe outbox; macOS and fallback-webhook attempts retain delivery receipts and use the following failed-cycle retry schedule: 1, 2, 4, 8, then 15 minutes. Delivered but unacknowledged notifications are reminded every 15 minutes.
+
+Useful commands:
+
+```sh
+prime-agent monitor --json
+prime-agent monitor --calibration --json
+prime-agent monitor --ack <notification-id>
+prime-agent monitor --extend <operation-id> --minutes 15
+```
+
+On macOS, install the repository-owned one-minute LaunchAgent with `prime-agent monitor service install [--json]`; inspect it with `prime-agent monitor service status [--json]`, and remove it with `prime-agent monitor service uninstall [--json]`. The service uses `RunAtLoad=true` and `StartInterval=60`. The monitor records service state and reports a previous failure or a missed start/completion older than 180 seconds as `monitor_service_failed` or `monitor_service_stale`; `prime-agent doctor` reports the same conditions. Service installation is unsupported on non-macOS systems.
+
+The service command family is `prime-agent monitor service install|uninstall|status [--json]`.
+
+Deadline policy is phase-specific. Provider, retry, compaction, and turn caps remain advisory. Tool, kernel, and bash caps can cancel only when process ownership is proven and `PRIME_AGENT_ENABLE_OWNED_OPERATION_DEADLINES=1` enables the canary. A deadline extension is accepted only from the human control path, is capped at 60 minutes and three renewals per operation, and does not happen through self-renewal or reconnect. `monitor --calibration` reports per-class p50/p95/p99 latency, uncertainty, cleanup uncertainty, and whether the minimum clean canary sample exists. It does not silently enable hard enforcement.
+
+A session is complete only when its root verdict is `completed` and its recursive RLM tree is quiescent. Running, recovering, uncertain, or failed descendants keep completion false. Goal pause/resume provides a model-callable waiting state, and streaming repetition protection terminates low-period degenerate output without suppressing normal repeated language.
+
 ## Benchmarks
 
 From `packages/coding-agent`:

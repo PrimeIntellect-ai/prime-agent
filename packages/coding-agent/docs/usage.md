@@ -150,6 +150,12 @@ Replace the default system prompt with:
 
 Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location.
 
+### Project Trust
+
+Before project-scoped settings or resources are loaded, Prime Agent resolves trust for the canonical working directory. In interactive mode, `"ask"` offers `Trust`, `Trust parent folder (<path>)`, `Trust (this session only)`, `Do not trust`, and `Do not trust (this session only)`. In print, JSON, RPC, ACP, and daemon modes there is no trust prompt: `"ask"` behaves as untrusted.
+
+Use the one-run overrides `--approve` or `-a` to trust project resources, or `--no-approve` or `-na` to reject them. These overrides take precedence over saved trust and the global `defaultProjectTrust` setting, and do not change saved trust. An explicit absolute resource path supplied on the CLI is an explicit user choice and remains CLI-scoped; project settings, packages, or extensions cannot create that exception.
+
 ## Exporting and Sharing Sessions
 
 Use `/export [file]` to write a session to HTML.
@@ -241,13 +247,14 @@ Built-in tools: `ipython`.
 |--------|-------------|
 | `-e`, `--extension <source>` | Load an extension from path, npm, or git; repeatable |
 | `--no-extensions`, `-ne` | Disable extension discovery |
-| `--skill <path>` | Load a skill; repeatable |
 | `--no-skills`, `-ns` | Disable skill discovery |
 | `--prompt-template <path>` | Load a prompt template; repeatable |
 | `--no-prompt-templates`, `-np` | Disable prompt template discovery |
 | `--theme <path>` | Load a theme; repeatable |
 | `--no-themes` | Disable theme discovery |
 | `--no-context-files`, `-nc` | Disable `AGENTS.md` and `CLAUDE.md` discovery |
+| `--approve`, `-a` | Trust project resources for this run |
+| `--no-approve`, `-na` | Reject project resources for this run |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings. Example:
 

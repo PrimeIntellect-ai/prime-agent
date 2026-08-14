@@ -168,8 +168,9 @@ import {
 	normalizeGoalState,
 	validateGoalBudget,
 	validateGoalObjective,
+	validateGoalPauseReason,
 } from "./goals.js";
-import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
+import type { HostRequestHandlers, KernelProcessOwnershipEvent, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
@@ -324,6 +325,7 @@ export type AgentSessionEvent =
 			message: KernelSentAgentMessage;
 	  }
 	| { type: "session_action_update"; actions: SessionActionSnapshot }
+	| ({ type: "process_ownership_update" } & KernelProcessOwnershipEvent)
 	| {
 			type: "compaction_start";
 			reason: CompactionReason;
@@ -1824,14 +1826,14 @@ export class AgentSession {
 		});
 	}
 
-	private async _resumeGoal(): Promise<void> {
+	private _resumeGoalState(): boolean {
 		if (!this._goalState.objective) {
 			this._emitGoalUpdate();
-			return;
+			return false;
 		}
 		if (this._goalState.status !== "paused" && this._goalState.status !== "budget_limited") {
 			this._emitGoalUpdate();
-			return;
+			return false;
 		}
 		const exhausted =
 			this._goalState.tokenBudget !== undefined && this._goalState.tokensUsed >= this._goalState.tokenBudget;
@@ -1843,7 +1845,11 @@ export class AgentSession {
 			lastReason: exhausted ? "Goal token budget already reached" : undefined,
 			lastError: undefined,
 		});
-		if (nextStatus === "active") {
+		return nextStatus === "active";
+	}
+
+	private async _resumeGoal(): Promise<void> {
+		if (this._resumeGoalState()) {
 			await this._runOrQueueGoalContext("continuation");
 		}
 	}
@@ -2836,6 +2842,14 @@ export class AgentSession {
 				}
 				return goalHostResponse(this._createGoalFromHost(payload.objective, payload.token_budget), false);
 			}
+			case "goal.pause": {
+				if (typeof payload.reason !== "string") {
+					throw new Error("goal.pause reason must be a string");
+				}
+				return goalHostResponse(this._pauseGoalFromHost(payload.reason), false);
+			}
+			case "goal.resume":
+				return goalHostResponse(this._resumeGoalFromHost(), false);
 			case "goal.complete":
 				return goalHostResponse(this._completeGoalFromHost(), true);
 			default:
@@ -3143,6 +3157,22 @@ export class AgentSession {
 				// idle, or a terminal record (complete / error): nothing pending, start fresh.
 				return this._startGoal(objective, tokenBudget);
 		}
+	}
+
+	private _pauseGoalFromHost(reasonText: string): GoalState {
+		if (this._goalState.status !== "active") {
+			throw new Error("cannot pause goal because this thread has no active goal");
+		}
+		this._pauseGoal(validateGoalPauseReason(reasonText));
+		return this._goalState;
+	}
+
+	private _resumeGoalFromHost(): GoalState {
+		if (this._goalState.status !== "paused") {
+			throw new Error("cannot resume goal because this thread has no paused goal");
+		}
+		this._resumeGoalState();
+		return this._goalState;
 	}
 
 	private _completeGoalFromHost(): GoalState {
@@ -8500,6 +8530,7 @@ export class AgentSession {
 			{
 				getModel: () => this.model,
 				isIdle: () => !this.isStreaming,
+				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,
 				abort: () => this.abort(),
 				hasPendingMessages: () => this.queuedActionCount > 0,
@@ -8663,6 +8694,7 @@ export class AgentSession {
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
+				onProcessOwnershipChange: (event) => this._emit({ type: "process_ownership_update", ...event }),
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
@@ -8773,7 +8805,7 @@ export class AgentSession {
 			}),
 		};
 		if (this._includeGoals) {
-			for (const type of ["goal.get", "goal.create", "goal.complete"]) {
+			for (const type of ["goal.get", "goal.create", "goal.pause", "goal.resume", "goal.complete"]) {
 				handlers[type] = async (payload) => this.handleGoalHostRequest(type, payload);
 			}
 		}

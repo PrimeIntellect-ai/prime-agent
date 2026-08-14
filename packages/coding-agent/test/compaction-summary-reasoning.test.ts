@@ -30,9 +30,41 @@ function createModel(reasoning: boolean): Model<"anthropic-messages"> {
 	};
 }
 
+const validCompactionSummary = `## Goal
+Test summary
+
+## User Directives
+- (none)
+
+## Constraints & Preferences
+- (none)
+
+## Progress
+### Done
+- [x] Summarized the test conversation.
+### In Progress
+- [ ] (none)
+### Blocked
+- (none)
+
+## Key Decisions
+- **Summary**: Preserve the test state.
+
+## Active State
+- (none)
+
+## Verification & Evidence
+- Test summary generated.
+
+## Next Steps
+1. Continue the session.
+
+## Critical Context
+- (none)`;
+
 const mockSummaryResponse: AssistantMessage = {
 	role: "assistant",
-	content: [{ type: "text", text: "## Goal\nTest summary" }],
+	content: [{ type: "text", text: validCompactionSummary }],
 	api: "anthropic-messages",
 	provider: "anthropic",
 	model: "claude-sonnet-4-5",
@@ -114,5 +146,16 @@ describe("generateSummary reasoning options", () => {
 			apiKey: "test-key",
 		});
 		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
+	});
+
+	it("rejects an incomplete checkpoint instead of replacing session context", async () => {
+		completeSimpleMock.mockResolvedValueOnce({
+			...mockSummaryResponse,
+			content: [{ type: "text", text: "partial summary" }],
+		});
+
+		await expect(generateSummary(messages, createModel(false), 2000, "test-key")).rejects.toThrow(
+			"Compaction summary is missing required section: ## Goal",
+		);
 	});
 });

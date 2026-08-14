@@ -94,6 +94,8 @@ function createFauxIpythonTool(sessionRef: { current?: AgentSession }): AgentToo
 }
 
 const COMPLETE_GOAL_CELL = { code: "goal.complete" };
+const PAUSE_GOAL_CELL = { code: 'goal.pause {"reason": "waiting for PR target"}' };
+const RESUME_GOAL_CELL = { code: "goal.resume" };
 
 function createWaitingTool(): {
 	tool: AgentTool;
@@ -188,6 +190,55 @@ describe("AgentSession goals", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
+	it("pauses autonomous continuation while waiting for external input", async () => {
+		const harness = await createGoalHarness();
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ipython", PAUSE_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Waiting for the PR target."),
+			fauxAssistantMessage("should not run"),
+		]);
+
+		await harness.session.prompt("/goal publish the change");
+
+		expect(visibleAssistantTexts(harness)).toEqual(["Waiting for the PR target."]);
+		expect(harness.session.goalState).toMatchObject({
+			active: false,
+			status: "paused",
+			lastReason: "waiting for PR target",
+			continuationsUsed: 0,
+		});
+		expect(harness.getPendingResponseCount()).toBe(1);
+
+		await harness.session.reload();
+		expect(harness.session.goalState).toMatchObject({
+			active: false,
+			status: "paused",
+			lastReason: "waiting for PR target",
+		});
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("resumes a model-paused goal after external input arrives", async () => {
+		const harness = await createGoalHarness();
+		harness.session.handleGoalHostRequest("goal.create", { objective: "publish the change" });
+		harness.session.handleGoalHostRequest("goal.pause", { reason: "waiting for PR target" });
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ipython", RESUME_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("ipython", COMPLETE_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Goal complete."),
+		]);
+
+		await harness.session.prompt("Target PrimeIntellect-ai/prime-agent:main.");
+
+		expect(visibleAssistantTexts(harness)).toEqual(["Goal complete."]);
+		expect(harness.session.goalState).toMatchObject({
+			active: false,
+			status: "complete",
+			lastReason: "Goal achieved",
+		});
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
 	it("counts tokens from the goal completion turn", async () => {
 		const harness = await createGoalHarness();
 		harness.setResponses([
@@ -271,11 +322,23 @@ describe("AgentSession goals", () => {
 		expect(() => harness.session.handleGoalHostRequest("goal.nonsense")).toThrow(
 			'unknown goal request type "goal.nonsense"',
 		);
+		expect(() => harness.session.handleGoalHostRequest("goal.pause", {})).toThrow(
+			"goal.pause reason must be a string",
+		);
+		expect(() => harness.session.handleGoalHostRequest("goal.pause", { reason: "waiting" })).toThrow(
+			"cannot pause goal because this thread has no active goal",
+		);
+		expect(() => harness.session.handleGoalHostRequest("goal.resume")).toThrow(
+			"cannot resume goal because this thread has no paused goal",
+		);
 		expect(() => harness.session.handleGoalHostRequest("goal.complete")).toThrow(
 			"cannot complete goal because this thread has no goal",
 		);
 
 		harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
+		expect(() => harness.session.handleGoalHostRequest("goal.pause", { reason: "   " })).toThrow(
+			"Goal pause reason must not be empty",
+		);
 		expect(() => harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" })).toThrow(
 			"already has an active goal",
 		);

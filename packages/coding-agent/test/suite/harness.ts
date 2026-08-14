@@ -127,7 +127,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	if (withConfiguredAuth) {
 		authStorage.setRuntimeApiKey(model.provider, "faux-key");
 	}
-	const modelRegistry = ModelRegistry.inMemory(authStorage);
+	const modelRegistry = ModelRegistry.inMemory(authStorage, {});
 	if (withConfiguredAuth) {
 		modelRegistry.registerProvider(model.provider, {
 			baseUrl: model.baseUrl,

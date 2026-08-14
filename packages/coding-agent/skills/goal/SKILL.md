@@ -13,6 +13,8 @@ it. Call it directly from IPython:
 ```python
 await goal.get()
 await goal.create("ship the release notes", token_budget=200000)
+await goal.pause("waiting for release approval")
+await goal.resume()
 await goal.complete()
 ```
 
@@ -28,6 +30,11 @@ await goal.complete()
   the user or system/developer instructions explicitly ask for a persistent
   long-running goal; do not infer goals from ordinary tasks. Set `token_budget`
   only when an explicit token budget is requested.
+- `await goal.pause(reason)` — pause autonomous continuation when no concrete
+  action is possible because progress depends only on an external actor or
+  event. Give the exact blocker; do not keep emitting holding updates.
+- `await goal.resume()` — reactivate a paused goal after new input resolves the
+  blocker.
 - `await goal.complete()` — mark the existing goal achieved. Use only when the
   objective has actually been achieved and no required work remains; do not
   call it merely because the budget is nearly exhausted or because you are
@@ -36,9 +43,10 @@ await goal.complete()
 
 ## Rules
 
-- Goal status transitions other than completion (pause, resume, clear,
-  budget-limiting) are controlled by the user and the host; there is no API for
-  them here.
+- Pause an incomplete goal instead of repeatedly reporting an unchanged
+  external blocker. Resume it only after new input makes concrete progress
+  possible. Clear and budget-limit transitions remain controlled by the user
+  and host.
 - When an active goal is actually complete, call `await goal.complete()`; do
   not merely say it is done — the harness keeps continuing the goal until the
   completion call arrives.

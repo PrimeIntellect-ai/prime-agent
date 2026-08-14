@@ -36,6 +36,10 @@
           "path": "settings.md"
         },
         {
+          "title": "Security",
+          "path": "security.md"
+        },
+        {
           "title": "Keybindings",
           "path": "keybindings.md"
         },
