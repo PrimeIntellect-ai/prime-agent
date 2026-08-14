@@ -220,10 +220,12 @@ async function generateBoundedSideSummary(
 	apiKey: string,
 	headers: Record<string, string> | undefined,
 	signal: AbortSignal,
+	parent: Agent,
 ): Promise<string | undefined> {
 	const budget = getSideSummaryBudget(model, settings.reserveTokens);
 	if (!budget) return undefined;
-	let segments = splitSummaryText(serializeConversation(convertToLlm(messages)), budget.inputTokens);
+	const transformedMessages = parent.transformContext ? await parent.transformContext(messages, signal) : messages;
+	let segments = splitSummaryText(serializeConversation(convertToLlm(transformedMessages)), budget.inputTokens);
 	for (let level = 0; level < 8; level++) {
 		const summaries: string[] = [];
 		for (const [index, segment] of segments.entries()) {
@@ -244,6 +246,13 @@ async function generateBoundedSideSummary(
 					SIDE_QUESTION_SUMMARY_INSTRUCTION,
 					undefined,
 					"off",
+					{
+						onPayload: parent.onPayload,
+						onResponse: parent.onResponse,
+						serviceTier: parent.state.serviceTier,
+						sessionId: parent.sessionId,
+						maxRetryDelayMs: parent.maxRetryDelayMs,
+					},
 				),
 			);
 		}
@@ -279,6 +288,7 @@ async function compactSideContext(
 	settings: CompactionSettings,
 	dependencies: SideQuestionDependencies,
 	signal: AbortSignal,
+	parent: Agent,
 	fixedOverheadTokens: number,
 	prompt: string,
 	aggressive = false,
@@ -336,7 +346,7 @@ async function compactSideContext(
 			let summary = summaryCache.get(key);
 			if (!summary) {
 				const removable = turns.slice(gap.start, gap.end).flatMap((turn) => turn.messages);
-				summary = await generateBoundedSideSummary(removable, model, settings, apiKey, headers, signal);
+				summary = await generateBoundedSideSummary(removable, model, settings, apiKey, headers, signal, parent);
 				if (summary === undefined) return undefined;
 				summaryCache.set(key, summary);
 			}
@@ -385,7 +395,7 @@ export function startSideQuestion(
 	}
 
 	// Snapshot only: side-question compaction and answering never mutate the live session.
-	const mainMessages = structuredClone(parent.state.messages);
+	const mainMessages = structuredClone(parent.state.messages).filter((message) => convertToLlm([message]).length > 0);
 	const previousTurnMessages = createPreviousTurnMessages(previousTurns, model);
 	const prompt = sideQuestionPrompt(question);
 	const promptMessage = {
@@ -486,6 +496,7 @@ export function startSideQuestion(
 						settings,
 						dependencies,
 						runAbort.signal,
+						parent,
 						hiddenOverheadTokens,
 						prompt,
 					)) ?? contextMessages;
@@ -501,6 +512,7 @@ export function startSideQuestion(
 					settings,
 					dependencies,
 					runAbort.signal,
+					parent,
 					hiddenOverheadTokens,
 					prompt,
 					true,

@@ -1,8 +1,10 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Context, StreamOptions, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { BashExecutionMessage } from "../../../src/core/messages.js";
 import {
 	type SideQuestionDependencies,
 	type SideQuestionEvent,
@@ -219,6 +221,109 @@ describe("ENG-4509 side questions", () => {
 
 			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "not compacted" });
 			expect(harness.faux.state.callCount).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("ignores provider-excluded bash output when sizing side context", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100_000, maxTokens: 20_000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 20_000, keepRecentTokens: 50 } },
+		});
+		try {
+			const excludedBash: BashExecutionMessage = {
+				role: "bashExecution",
+				command: "dump-noisy-output",
+				output: "x".repeat(400_000),
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: Date.now(),
+				excludeFromContext: true,
+			};
+			harness.session.agent.state.messages = [
+				contextUser("small visible context"),
+				contextAssistant("small visible answer", 100),
+				excludedBash,
+			];
+			harness.setResponses([
+				(context) => {
+					const text = context.messages.map(getMessageText).join("\n");
+					expect(text).not.toContain("dump-noisy-output");
+					expect(text).toContain("Does excluded output affect sizing?");
+					return fauxAssistantMessage("no");
+				},
+			]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"excluded-sizing",
+				"Does excluded output affect sizing?",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "no" });
+			expect(harness.faux.state.callCount).toBe(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("applies extension context and payload hooks to summary requests", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 100_000, maxTokens: 20_000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 20_000, keepRecentTokens: 50 } },
+		});
+		try {
+			const secret = "extension-redacted-secret";
+			harness.session.agent.state.messages = [
+				contextUser(`${secret} ${"x".repeat(340_000)}`),
+				contextAssistant("large visible answer", 85_000),
+			];
+			const previousTransform = harness.session.agent.transformContext;
+			const transformContext = vi.fn(async (messages: AgentMessage[], signal?: AbortSignal) => {
+				const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+				return transformed.filter((message) => !getMessageText(message).includes(secret));
+			});
+			const onPayload = vi.fn((payload: unknown) => payload);
+			let summarySawPayloadHook = false;
+			harness.session.agent.transformContext = transformContext;
+			harness.session.agent.onPayload = onPayload;
+			harness.setResponses(
+				Array.from({ length: 12 }, () => (context: Context, options: StreamOptions | undefined) => {
+					const text = context.messages.map(getMessageText).join("\n");
+					expect(text).not.toContain(secret);
+					if (options?.maxTokens !== undefined) {
+						expect(options.onPayload).toBe(onPayload);
+						summarySawPayloadHook = true;
+						return fauxAssistantMessage("redacted context summary");
+					}
+					return fauxAssistantMessage("hook-safe answer");
+				}),
+			);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"summary-hooks",
+				"Answer without the redacted context",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				sideQuestionDependencies(harness),
+			);
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "hook-safe answer" });
+			expect(transformContext).toHaveBeenCalled();
+			expect(summarySawPayloadHook).toBe(true);
+			expect(harness.faux.state.callCount).toBeGreaterThan(1);
 		} finally {
 			harness.cleanup();
 		}
