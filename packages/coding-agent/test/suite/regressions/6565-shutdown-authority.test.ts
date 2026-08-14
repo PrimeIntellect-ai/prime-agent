@@ -5,8 +5,12 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { DaemonHello } from "../../../src/modes/daemon/daemon-client.js";
-import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import {
+	createDaemonShutdownCommand,
+	DaemonClient,
+	type DaemonHello,
+} from "../../../src/modes/daemon/daemon-client.js";
+import type { DaemonShutdownAuthority, DaemonShutdownCommand } from "../../../src/modes/daemon/daemon-protocol.js";
 import { createHarness, type Harness } from "../harness.js";
 
 /**
@@ -32,20 +36,6 @@ interface FixtureHandle {
 		reject: (error: Error) => void;
 		timeout: ReturnType<typeof setTimeout>;
 	}>;
-}
-
-interface DaemonSupervisorShutdownAuthority {
-	supervisorGeneration?: string;
-	supervisorOwnerToken?: string;
-	supervisorPid?: number;
-	supervisorProcessStartId?: string;
-	supervisorSocketPath?: string;
-}
-
-interface DaemonShutdownCommand {
-	type: "shutdown";
-	force?: boolean;
-	authority?: DaemonSupervisorShutdownAuthority;
 }
 
 const fixturePath = resolve(__dirname, "../../fixtures/eng-4600-supervisor-fixture.ts");
@@ -93,15 +83,18 @@ afterEach(async () => {
 		const client = new DaemonClient(socketPath);
 		try {
 			await client.connect(250);
-			await client.waitForHello(500);
-			await client.request({ type: "shutdown", force: true } as DaemonShutdownCommand, 1500).catch(() => undefined);
+			const hello = await client.waitForHello(500);
+			await client.request(createDaemonShutdownCommand(hello, true), 1500).catch(() => undefined);
 		} catch {
 			// Socket may already be gone.
 		} finally {
 			client.close();
 		}
 	}
-	await waitForHandleExits(handles, 4000);
+	await waitForHandleExits(
+		[...handles].map((handle) => handle.child),
+		4000,
+	);
 	await waitForHandleExits(cleanupChildProcesses, 4000);
 	handles.clear();
 	cleanupChildProcesses.clear();
@@ -319,6 +312,7 @@ async function startSupervisor(paths: {
 interface LegacySupervisorMock {
 	server: Server;
 	socketPath: string;
+	tempDir: string;
 	shutdownObserved: { count: number; lastCommand?: DaemonShutdownCommand };
 }
 
@@ -390,7 +384,7 @@ async function startLegacySupervisorMock(): Promise<string> {
 			resolveListen();
 		});
 	});
-	legacyMockServer = { server, socketPath, shutdownObserved: { count: 0 } };
+	legacyMockServer = { server, socketPath, tempDir, shutdownObserved: { count: 0 } };
 	return socketPath;
 }
 
@@ -402,31 +396,12 @@ async function stopLegacySupervisorMock(): Promise<void> {
 	legacyMockServer = undefined;
 	await new Promise<void>((resolveClose) => {
 		mock.server.close(() => resolveClose());
-		mock.server.closeAllConnections?.();
+		(mock.server as Server & { closeAllConnections?: () => void }).closeAllConnections?.();
 	});
-	if (process.platform !== "win32") {
-		try {
-			rmSync(mock.socketPath, { force: true });
-		} catch {
-			// Best effort cleanup.
-		}
-	}
+	rmSync(mock.tempDir, { recursive: true, force: true });
 }
 
-async function waitForServerClosed(server: Server | undefined): Promise<void> {
-	if (!server) {
-		return;
-	}
-	if (!server.listening) {
-		return;
-	}
-	await new Promise<void>((resolveClose) => {
-		server.once("close", () => resolveClose());
-		setTimeout(() => resolveClose(), 4000);
-	});
-}
-
-function requireAuthority(authority: DaemonSupervisorShutdownAuthority): DaemonSupervisorShutdownAuthority {
+function requireAuthority(authority: Partial<DaemonShutdownAuthority>): DaemonShutdownAuthority {
 	if (
 		typeof authority.supervisorGeneration !== "string" ||
 		typeof authority.supervisorOwnerToken !== "string" ||
@@ -436,10 +411,16 @@ function requireAuthority(authority: DaemonSupervisorShutdownAuthority): DaemonS
 	) {
 		throw new Error("Supervisor hello did not advertise the modern authority identity");
 	}
-	return authority;
+	return {
+		supervisorGeneration: authority.supervisorGeneration,
+		supervisorOwnerToken: authority.supervisorOwnerToken,
+		supervisorPid: authority.supervisorPid,
+		supervisorProcessStartId: authority.supervisorProcessStartId,
+		supervisorSocketPath: authority.supervisorSocketPath,
+	};
 }
 
-function readAuthorityFromHello(hello: DaemonHello): DaemonSupervisorShutdownAuthority {
+function readAuthorityFromHello(hello: DaemonHello): DaemonShutdownAuthority {
 	return requireAuthority({
 		supervisorGeneration: hello.supervisorGeneration,
 		supervisorOwnerToken: hello.supervisorOwnerToken,
@@ -539,7 +520,7 @@ describe("daemon supervisor shutdown authority (public seam)", () => {
 			const base = readAuthorityFromHello(hello);
 			const mutations: Array<{
 				name: string;
-				mutate: (authority: DaemonSupervisorShutdownAuthority) => DaemonSupervisorShutdownAuthority;
+				mutate: (authority: DaemonShutdownAuthority) => DaemonShutdownAuthority;
 			}> = [
 				{
 					name: "supervisorGeneration",
@@ -645,11 +626,13 @@ describe("daemon supervisor shutdown authority (public seam)", () => {
 			// A new client derives authority from the hello. With no authority fields
 			// present, it must emit the legacy command without authority; the legacy
 			// supervisor accepts it and the connection closes with a shutdown reason.
-			const response = await client.request({ type: "shutdown" } as DaemonShutdownCommand, 5000);
+			const command = createDaemonShutdownCommand(hello);
+			expect(command.authority).toBeUndefined();
+			const response = await client.request(command, 5000);
 			expect(response.command).toBe("shutdown");
 			expect(response.success).toBe(true);
+			expect(legacyMockServer?.shutdownObserved.lastCommand?.authority).toBeUndefined();
 			client.close();
-			await waitForServerClosed(legacyMockServer);
 		} finally {
 			await stopLegacySupervisorMock();
 		}
