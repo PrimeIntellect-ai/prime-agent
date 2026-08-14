@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,11 +15,13 @@ import {
 	planReap,
 	planShutdownAll,
 	planShutdownConfirmation,
+	protectAuthorityRejectedScope,
 	reapOutcomeFromShutdownAttempt,
 	shutdownDaemon,
 	sortDaemons,
 	verifyHelloSupervisorPid,
 } from "../src/cli/daemon-ps.js";
+import { ENV_AGENT_DIR } from "../src/config.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir } from "../src/modes/daemon/daemon-socket.js";
@@ -276,6 +278,41 @@ describe("shutdownDaemon authority outcome", () => {
 		expect(reapOutcomeFromShutdownAttempt({ status: "stopped" }, 42)).toEqual({
 			reaped: "stopped idle background service (pid 42)",
 		});
+	});
+
+	it("protects the rejected supervisor and every tracked worker listener", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-daemon-ps-protected-scope-"));
+		const previousAgentDir = process.env[ENV_AGENT_DIR];
+		const supervisorSocketPath = join(directory, "supervisor.sock");
+		const workerSocketPath = join(directory, "worker.sock");
+		const descriptorDirectory = join(directory, "daemon-workers", "scope");
+		mkdirSync(descriptorDirectory, { recursive: true });
+		const workerPid = 987654321;
+		writeFileSync(
+			join(descriptorDirectory, "worker.json"),
+			JSON.stringify({
+				version: 1,
+				supervisorSocketPath,
+				workerId: "worker",
+				pid: workerPid,
+				processStartId: "worker-start",
+				socketPath: workerSocketPath,
+				recoveryJournalPath: join(directory, "recovery.jsonl"),
+			}),
+		);
+		try {
+			process.env[ENV_AGENT_DIR] = directory;
+			const sockets = new Set<string>();
+			const processes = new Map<number, string | undefined>();
+			protectAuthorityRejectedScope(supervisorSocketPath, process.pid, sockets, processes);
+			expect(sockets).toEqual(new Set([supervisorSocketPath, workerSocketPath]));
+			expect(processes.get(process.pid)).toBe(getProcessStartId(process.pid));
+			expect(processes.get(workerPid)).toBe("worker-start");
+		} finally {
+			if (previousAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+			else process.env[ENV_AGENT_DIR] = previousAgentDir;
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	it("surfaces authority rejection instead of treating a responsive supervisor as unresponsive", async () => {

@@ -130,14 +130,17 @@ replacement token. Client wait logic treats rejection as “still running” and
 does not launch a replacement.
 
 Process cleanup represents graceful termination with a structured outcome.
-`shutdown_authority_rejected` is terminal: even with `force`, cleanup does not
-signal the supervisor, stop tracked workers, remove its socket, or kill it in a
-residual sweep. Only timeout or unavailability may enter the existing exact-
-process fallback.
+`shutdown_authority_rejected` is terminal: even with `force`, cleanup protects
+the supervisor plus every tracked worker and child identity/socket from direct
+cleanup and residual convergence. It does not signal them, remove their sockets,
+or delete their descriptors. Only timeout or unavailability may enter the
+existing exact-process fallback.
 
-If the connected daemon disappears between handshake and command, the existing
-wait-for-gone logic handles the disconnect. Version classification and authority
-remain on the original connection, eliminating the probe-to-shutdown TOCTOU.
+If the connected daemon disappears before a response, the existing wait-for-gone
+logic handles the uncertain disconnect. A normal failed response is terminal
+`false`, even if the rejecting process exits independently afterward. Version
+classification and authority remain on the original connection, eliminating the
+probe-to-shutdown TOCTOU.
 
 ## Tests
 
@@ -150,11 +153,11 @@ Focused protocol and supervisor regressions cover:
 3. Each mismatched component—and authority missing process-start identity—is
    rejected without shutdown.
 4. `force` cannot bypass authority at the server or convert rejection into
-   signal fallback or tracked-worker cleanup.
-5. A new client can shut down both an identity-less legacy fixture and a
-   schema-16 fixture that publishes full identity and accepts the new field.
-6. Stale classification, list, and shutdown use one connection, and replacement
-   does not launch after guarded rejection.
+   signal fallback, tracked-worker cleanup, or residual worker termination.
+5. A new client can shut down or restart both an identity-less legacy fixture
+   and a schema-16 fixture that publishes full identity and accepts new fields.
+6. Stale classification, list, and shutdown use one connection; rejection is
+   terminal even if the daemon exits independently afterward.
 7. Public CLI and process cleanup callers include authority, while private
    worker shutdown remains functional.
 

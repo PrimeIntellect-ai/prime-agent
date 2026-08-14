@@ -12,6 +12,7 @@ import {
 	shutdownDaemonAndWait,
 } from "../src/cli/daemon-launch.js";
 import { ENV_AGENT_DIR, getDaemonLogPath, VERSION } from "../src/config.js";
+import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
 
 interface FakeDaemonOptions {
@@ -22,8 +23,10 @@ interface FakeDaemonOptions {
 	failList?: boolean;
 	/** When false, the server ignores `shutdown` and stays up. */
 	respondToShutdown?: boolean;
-	/** When true, the server rejects `shutdown` with a failed response and stays up. */
+	/** When true, the server rejects `shutdown` with a failed response. */
 	rejectShutdown?: boolean;
+	/** Close independently after writing a rejected shutdown response. */
+	closeAfterRejectedShutdown?: boolean;
 	protocolVersion?: number;
 	appVersion?: string;
 	schemaId?: string;
@@ -120,9 +123,17 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 							error: "shutdown authority rejected",
 							errorInfo: { code: "shutdown_authority_rejected" },
 						});
+						if (options.closeAfterRejectedShutdown) {
+							server.close();
+							socket.end();
+						}
 						continue;
 					}
 					send(socket, { type: "response", command: "shutdown", id: wire.id, success: true });
+					server.close();
+					socket.end();
+				} else if (command.type === "restart") {
+					send(socket, { type: "response", command: "restart", id: wire.id, success: true });
 					server.close();
 					socket.end();
 				}
@@ -533,6 +544,18 @@ describe("shutdownDaemonAndWait", () => {
 		expect(shutdownCommand?.authority).toBeUndefined();
 	});
 
+	it("returns false when authority is rejected even if the daemon exits afterward", async () => {
+		const daemon = await startFakeDaemon({
+			rejectShutdown: true,
+			closeAfterRejectedShutdown: true,
+			supervisorGeneration: "reject-then-exit-generation",
+			supervisorProcessStartId: "reject-then-exit-start",
+		});
+		cleanups.push(daemon.close);
+
+		await expect(shutdownDaemonAndWait(daemon.socketPath, 100)).resolves.toBe(false);
+	});
+
 	it("sends authority-bearing shutdown to a schema-16 daemon that accepts unknown wire fields", async () => {
 		const commands: Array<Record<string, unknown>> = [];
 		const daemon = await startFakeDaemon({
@@ -558,6 +581,39 @@ describe("shutdownDaemonAndWait", () => {
 				supervisorSocketPath: daemon.socketPath,
 			},
 		});
+	});
+
+	it("sends authority-bearing restart to a schema-16 daemon that accepts unknown wire fields", async () => {
+		const commands: Array<Record<string, unknown>> = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: "protocol-7-schema-16-1bcb9e7f1a49",
+			schemaRevision: 16,
+			supervisorGeneration: "schema-16-restart-generation",
+			supervisorOwnerToken: "schema-16-restart-owner",
+			supervisorPid: 424241,
+			supervisorProcessStartId: "schema-16-restart-start",
+			onCommand: (command) => commands.push({ ...(command as Record<string, unknown>) }),
+		});
+		cleanups.push(daemon.close);
+		const client = new DaemonClient(daemon.socketPath);
+		await client.connect();
+		try {
+			const response = await client.requestSupervisorRestart();
+			expect(response.success).toBe(true);
+			expect(commands.find((command) => command.type === "restart")).toMatchObject({
+				authority: {
+					supervisorGeneration: "schema-16-restart-generation",
+					supervisorOwnerToken: "schema-16-restart-owner",
+					supervisorPid: 424241,
+					supervisorProcessStartId: "schema-16-restart-start",
+					supervisorSocketPath: daemon.socketPath,
+				},
+			});
+		} finally {
+			client.close();
+		}
 	});
 
 	it("emits authority from the same connection's hello toward a modern daemon", async () => {

@@ -26,7 +26,7 @@ describe("daemon protocol helpers", () => {
 	it("keeps the advertised schema identity synchronized with wire type shapes", () => {
 		const source = readFileSync(resolve(__dirname, "../src/modes/daemon/daemon-protocol.ts"), "utf8");
 		const commandSource = source.slice(
-			source.indexOf("export type DaemonCommand ="),
+			source.indexOf("export interface DaemonShutdownAuthority"),
 			source.indexOf("type DaemonCommandName"),
 		);
 		const savedSessionSource = source.slice(

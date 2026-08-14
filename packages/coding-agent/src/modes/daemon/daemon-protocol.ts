@@ -65,7 +65,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 18 applies the same authority to public restart and requires the full
 // process-start identity for every authority-bearing termination command.
 export const DAEMON_SCHEMA_REVISION = 18;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-18-c9d175a9766f";
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-18-2dae6dbd5404";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;

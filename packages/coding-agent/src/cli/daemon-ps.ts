@@ -566,6 +566,7 @@ async function runShutdownAllConverging(
 	const failed: Array<{ socketPath: string; reason: string }> = [];
 	const handledPids = new Set<number>();
 	const protectedSockets = new Set<string>();
+	const protectedProcesses = new Map<number, string | undefined>();
 	const reportedFailures = new Set<string>();
 
 	if (force) {
@@ -599,7 +600,9 @@ async function runShutdownAllConverging(
 				if ((await probeDaemon(socketPath)).reachable) {
 					const outcome = await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission);
 					preserveTrackedWorkers = outcome.preserveTrackedWorkers === true;
-					if (preserveTrackedWorkers) protectedSockets.add(socketPath);
+					if (preserveTrackedWorkers) {
+						protectAuthorityRejectedScope(socketPath, pid, protectedSockets, protectedProcesses);
+					}
 					apply(outcome, socketPath, stopped, failed);
 				} else {
 					await assertAdmission();
@@ -615,7 +618,9 @@ async function runShutdownAllConverging(
 				if ((await probeDaemon(socketPath)).reachable) {
 					const outcome = await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission);
 					preserveTrackedWorkers = outcome.preserveTrackedWorkers === true;
-					if (preserveTrackedWorkers) protectedSockets.add(socketPath);
+					if (preserveTrackedWorkers) {
+						protectAuthorityRejectedScope(socketPath, pid, protectedSockets, protectedProcesses);
+					}
 					apply(outcome, socketPath, stopped, failed);
 				} else if (isDaemonProcessListening(pid!, socketPath)) {
 					await assertAdmission();
@@ -634,7 +639,9 @@ async function runShutdownAllConverging(
 			case "shutdown": {
 				const outcome = await stopBackgroundService(socketPath, pid, handledPids, force, assertAdmission);
 				preserveTrackedWorkers = outcome.preserveTrackedWorkers === true;
-				if (preserveTrackedWorkers) protectedSockets.add(socketPath);
+				if (preserveTrackedWorkers) {
+					protectAuthorityRejectedScope(socketPath, pid, protectedSockets, protectedProcesses);
+				}
 				apply(outcome, socketPath, stopped, failed);
 				break;
 			}
@@ -655,6 +662,7 @@ async function runShutdownAllConverging(
 			failed,
 			handledPids,
 			protectedSockets,
+			protectedProcesses,
 			reportedFailures,
 			assertAdmission,
 		);
@@ -735,11 +743,54 @@ async function stopHiddenSupervisors(
 	}
 }
 
+function addProtectedProcess(
+	protectedProcesses: Map<number, string | undefined>,
+	pid: number,
+	processStartId: string | undefined,
+): void {
+	if (!protectedProcesses.has(pid)) {
+		protectedProcesses.set(pid, processStartId);
+		return;
+	}
+	if (protectedProcesses.get(pid) !== processStartId) {
+		// Conflicting or incomplete identity must broaden protection, never narrow it.
+		protectedProcesses.set(pid, undefined);
+	}
+}
+
+export function protectAuthorityRejectedScope(
+	supervisorSocketPath: string,
+	supervisorPid: number | undefined,
+	protectedSockets: Set<string>,
+	protectedProcesses: Map<number, string | undefined>,
+): void {
+	protectedSockets.add(normalizeSocketPath(supervisorSocketPath));
+	if (supervisorPid !== undefined) {
+		addProtectedProcess(protectedProcesses, supervisorPid, getProcessStartId(supervisorPid));
+	}
+	for (const { descriptor } of findTrackedWorkers(supervisorSocketPath)) {
+		protectedSockets.add(normalizeSocketPath(descriptor.socketPath));
+		addProtectedProcess(protectedProcesses, descriptor.pid, descriptor.processStartId);
+		if (!descriptor.orphanProcessJournalPath) continue;
+		try {
+			for (const orphan of readActiveOrphanProcesses(descriptor.orphanProcessJournalPath, descriptor.pid)) {
+				if (isOrphanProcessIdentityCurrent(orphan)) {
+					addProtectedProcess(protectedProcesses, orphan.pid, orphan.processStartId);
+				}
+			}
+		} catch {
+			// Missing or malformed child records cannot reduce protection for the
+			// supervisor and worker identities already captured above.
+		}
+	}
+}
+
 async function terminateVerifiedResiduals(
 	stopped: Array<{ socketPath: string; action: string }>,
 	failed: Array<{ socketPath: string; reason: string }>,
 	handledPids: Set<number>,
 	protectedSockets: ReadonlySet<string>,
+	protectedProcesses: ReadonlyMap<number, string | undefined>,
 	reportedFailures: Set<string>,
 	assertAdmission: () => Promise<void>,
 ): Promise<void> {
@@ -773,7 +824,15 @@ async function terminateVerifiedResiduals(
 		previousSignature = signature;
 		const seenPids = new Set<number>();
 		for (const listener of listeners) {
-			if (protectedSockets.has(listener.socketPath) || seenPids.has(listener.pid)) {
+			const protectedStartId = protectedProcesses.get(listener.pid);
+			const protectedProcess =
+				protectedProcesses.has(listener.pid) &&
+				(protectedStartId === undefined || getProcessStartId(listener.pid) === protectedStartId);
+			if (
+				protectedSockets.has(normalizeSocketPath(listener.socketPath)) ||
+				protectedProcess ||
+				seenPids.has(listener.pid)
+			) {
 				continue;
 			}
 			seenPids.add(listener.pid);

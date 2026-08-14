@@ -248,16 +248,22 @@ export async function shutdownConnectedDaemonAndWait(
 	timeoutMs = 5000,
 ): Promise<boolean> {
 	let shutdownAccepted = false;
+	let shutdownRejected = false;
 	let expectedIdentity: DaemonProcessIdentity | undefined;
 	try {
 		const hello = client.hello ?? (await client.waitForHello());
 		expectedIdentity = processIdentityFromDaemonHello(hello);
 		const response = await client.requestSupervisorShutdown();
 		shutdownAccepted = response.success;
+		shutdownRejected = !response.success;
 	} catch {
-		// A connect failure isn't treated as "gone"; waitForDaemonGone is the source of truth.
+		// A disconnect before a response remains uncertain; waitForDaemonGone is
+		// the source of truth only when the daemon did not explicitly reject.
 	} finally {
 		client.close();
+	}
+	if (shutdownRejected) {
+		return false;
 	}
 	return waitForDaemonGone(socketPath, timeoutMs, shutdownAccepted, expectedIdentity);
 }
