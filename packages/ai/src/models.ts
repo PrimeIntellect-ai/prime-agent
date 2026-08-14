@@ -1,5 +1,5 @@
 import { MODELS } from "./models.generated.js";
-import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.js";
+import type { Api, KnownProvider, Model, ModelThinkingLevel, OpenAIResponsesCompat, Usage } from "./types.js";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
@@ -36,7 +36,19 @@ export function getModels<TProvider extends KnownProvider>(
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
 }
 
+/**
+ * Whether the model can serve requests at OpenAI Fast (`service_tier: "priority"`).
+ *
+ * Only the Responses APIs send `service_tier`, so no other API can opt in. A
+ * `openai-responses` model declares support through `compat.supportsFastMode`,
+ * which is how a proxy or gateway that forwards `service_tier` to a
+ * ChatGPT-authenticated upstream exposes Fast mode. Built-in ChatGPT models are
+ * recognized by provider and model id.
+ */
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
+	if (model.api === "openai-responses") {
+		return (model.compat as OpenAIResponsesCompat | undefined)?.supportsFastMode === true;
+	}
 	return (
 		model.provider === "openai-codex" &&
 		model.api === "openai-codex-responses" &&

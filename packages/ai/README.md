@@ -893,7 +893,9 @@ interface OpenAICompletionsCompat {
 }
 
 interface OpenAIResponsesCompat {
-  // Reserved for future use
+  sendSessionIdHeader?: boolean;        // Whether to send the `session_id` cache-affinity header from `sessionId` when caching is enabled (default: true)
+  supportsLongCacheRetention?: boolean; // Whether the endpoint accepts `prompt_cache_retention: '24h'` (default: true)
+  supportsFastMode?: boolean;           // Whether the endpoint serves Fast mode (`service_tier: 'priority'`) (default: false)
 }
 ```
 

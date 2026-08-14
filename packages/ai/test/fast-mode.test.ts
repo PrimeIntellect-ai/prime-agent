@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { supportsFastMode } from "../src/models.js";
 import { buildBaseOptions } from "../src/providers/simple-options.js";
-import type { Api, Model } from "../src/types.js";
+import type { Api, Model, OpenAIResponsesCompat } from "../src/types.js";
 
-function model(provider: string, id: string, api: Api): Model<Api> {
+function model(provider: string, id: string, api: Api, compat?: OpenAIResponsesCompat): Model<Api> {
 	return {
 		id,
 		name: id,
@@ -15,7 +15,8 @@ function model(provider: string, id: string, api: Api): Model<Api> {
 		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 1000,
 		maxTokens: 100,
-	};
+		...(compat ? { compat } : {}),
+	} as Model<Api>;
 }
 
 describe("Fast mode", () => {
@@ -32,5 +33,23 @@ describe("Fast mode", () => {
 	it("forwards priority through simple stream options", () => {
 		const testModel = model("openai-codex", "gpt-5.5", "openai-codex-responses");
 		expect(buildBaseOptions(testModel, { serviceTier: "priority" }).serviceTier).toBe("priority");
+	});
+
+	it("supports an openai-responses model that declares compat.supportsFastMode", () => {
+		expect(supportsFastMode(model("openai", "gpt-5.5", "openai-responses", { supportsFastMode: true }))).toBe(true);
+	});
+
+	it("treats an openai-responses model without the flag as unsupported", () => {
+		expect(supportsFastMode(model("openai", "gpt-5.5", "openai-responses", {}))).toBe(false);
+		expect(supportsFastMode(model("openai", "gpt-5.5", "openai-responses", { supportsFastMode: false }))).toBe(false);
+	});
+
+	it("ignores the flag on APIs that never send service_tier", () => {
+		expect(
+			supportsFastMode(model("anthropic", "claude-sonnet-5", "anthropic-messages", { supportsFastMode: true })),
+		).toBe(false);
+		expect(supportsFastMode(model("moonshotai", "kimi-k2.6", "openai-completions", { supportsFastMode: true }))).toBe(
+			false,
+		);
 	});
 });
