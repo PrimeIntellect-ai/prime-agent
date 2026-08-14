@@ -50,12 +50,6 @@ describe("readWithStallTimeout", () => {
 		await assertion;
 	});
 
-	// The retry layer keys off this: a stall must look transient, or a false positive
-	// would fail the turn instead of costing one retry.
-	it("classifies as a server error so existing retry treats it as transient", () => {
-		expect(new StreamStallError(1_000).type).toBe("server_error");
-	});
-
 	it("never arms a timer when disabled", async () => {
 		vi.useFakeTimers();
 		let settled = false;

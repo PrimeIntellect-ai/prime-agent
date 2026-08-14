@@ -9,12 +9,16 @@
 export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 300_000;
 
 /**
- * Raised when a stream produces no bytes within its stall budget. Classified as a
- * server error so the existing retry path treats it as transient: a false positive
- * costs one retry, never a failed turn.
+ * Raised when a stream produces no bytes within its stall budget.
+ *
+ * It carries no provider error type on purpose. The outer catch in
+ * `streamOpenAICodexResponses` copies only `error.message` onto the assistant message, so
+ * any type set here would be discarded before anything could read it. A stall is retried
+ * because the session's `_isRetryableError` is retry-by-default for a `stopReason: "error"`
+ * message, not because of a field on this class. Wiring structured provider_stream_failure
+ * diagnostics is separate work, tracked on #1330.
  */
 export class StreamStallError extends Error {
-	readonly type = "server_error";
 	readonly stallTimeoutMs: number;
 
 	constructor(stallTimeoutMs: number) {
