@@ -70,7 +70,7 @@ Useful commands:
 ```bash
 prime-agent agents                   # Browse running, idle, and saved sessions
 prime-agent attach <agent>           # Reattach to a running session
-prime-agent --resume <path|id>       # Resume a saved session
+prime-agent --resume [path|id]       # Browse sessions or resume one directly
 prime-agent status                   # Inspect background service state
 prime-agent doctor [--fix]           # Inspect or repair background services
 prime-agent update [--force]         # Update Prime Agent

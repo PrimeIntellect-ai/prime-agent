@@ -42,7 +42,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/effort` | Set the reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
-| `/resume` | Pick from previous sessions |
+| `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session file, ID, and message counts |
