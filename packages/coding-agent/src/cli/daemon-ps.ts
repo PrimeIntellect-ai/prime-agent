@@ -1150,6 +1150,16 @@ export async function runReap(json: boolean, force: boolean): Promise<void> {
 
 type ReapOutcome = ({ reaped: string } | { skipped: string }) & { preserveTrackedWorkers?: boolean };
 
+export function reapOutcomeFromShutdownAttempt(attempt: DaemonShutdownAttempt, pid: number | undefined): ReapOutcome {
+	if (attempt.status === "stopped") {
+		return { reaped: `stopped idle background service${pid ? ` (pid ${pid})` : ""}` };
+	}
+	if (attempt.status === "authority-rejected") {
+		return { skipped: "shutdown authority rejected", preserveTrackedWorkers: true };
+	}
+	return { skipped: `shutdown request ${attempt.status}` };
+}
+
 function apply(
 	outcome: ReapOutcome,
 	socketPath: string,
@@ -1176,9 +1186,7 @@ async function reapReachableDaemon(socketPath: string, pid: number | undefined):
 	if (probe.sessionCount !== 0) {
 		return { skipped: `now has ${probe.sessionCount ?? "unknown"} session(s)` };
 	}
-	return (await shutdownDaemon(socketPath, false))
-		? { reaped: `stopped idle background service${pid ? ` (pid ${pid})` : ""}` }
-		: { skipped: "shutdown request failed" };
+	return reapOutcomeFromShutdownAttempt(await shutdownDaemon(socketPath, false), pid);
 }
 
 function removeSocketFile(socketPath: string): boolean {

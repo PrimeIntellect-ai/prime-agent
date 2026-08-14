@@ -15,6 +15,7 @@ import {
 	planReap,
 	planShutdownAll,
 	planShutdownConfirmation,
+	reapOutcomeFromShutdownAttempt,
 	shutdownDaemon,
 	sortDaemons,
 	verifyHelloSupervisorPid,
@@ -267,6 +268,16 @@ describe("planShutdownConfirmation", () => {
 });
 
 describe("shutdownDaemon authority outcome", () => {
+	it("never treats a structured rejection object as successful reap", () => {
+		expect(reapOutcomeFromShutdownAttempt({ status: "authority-rejected" }, 42)).toEqual({
+			skipped: "shutdown authority rejected",
+			preserveTrackedWorkers: true,
+		});
+		expect(reapOutcomeFromShutdownAttempt({ status: "stopped" }, 42)).toEqual({
+			reaped: "stopped idle background service (pid 42)",
+		});
+	});
+
 	it("surfaces authority rejection instead of treating a responsive supervisor as unresponsive", async () => {
 		if (process.platform === "win32") return;
 		const directory = mkdtempSync(join(tmpdir(), "prime-daemon-ps-authority-"));
