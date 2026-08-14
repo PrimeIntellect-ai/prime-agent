@@ -11,6 +11,7 @@ import {
 	readFileSync,
 	readSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
 	writeSync,
@@ -276,6 +277,11 @@ function parseLedgerLine(line: string, index: number): RlmLedgerRecord | RlmLedg
 
 function readAllSync(fd: number): Buffer {
 	const size = fstatSync(fd).size;
+	// Never allocate beyond the read bound: every full read of the ledger,
+	// including the repair path, is bounded the same way replaySync is.
+	if (size > RLM_LEDGER_MAX_BYTES) {
+		throw new Error(`RLM ledger exceeds ${RLM_LEDGER_MAX_BYTES} bytes (${size}); refusing to read`);
+	}
 	const buffer = Buffer.alloc(size);
 	let offset = 0;
 	while (offset < size) {
@@ -646,18 +652,34 @@ export class RlmSpawnLedger {
 			closeSync(handle);
 		}
 		try {
-			// Atomic no-clobber publish: link() fails with EEXIST if a live
-			// append created the real file meanwhile — that append wins (its
-			// data is fresher than the registries) and the seed is discarded.
-			// A clobbering rename() here would overwrite and lose that append.
-			linkSync(tempPath, this.path);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-				rmSync(tempPath, { force: true });
-				throw error;
-			}
+			this.publishSeedFile(tempPath);
 		} finally {
 			rmSync(tempPath, { force: true });
+		}
+	}
+
+	private publishSeedFile(tempPath: string): void {
+		// Atomic no-clobber publish: link() fails with EEXIST if a live append
+		// created the real file meanwhile — that append wins (its data is
+		// fresher than the registries) and the seed is discarded. A clobbering
+		// rename() here would overwrite and lose that append.
+		try {
+			linkSync(tempPath, this.path);
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EEXIST") {
+				return;
+			}
+			// Filesystems without hard links (network/synced homes, non-NTFS
+			// Windows volumes): fall back to check-then-rename. Non-atomic, but
+			// strictly better than never seeding; the residual window is the
+			// documented O_APPEND trust bucket.
+			this.log(`RLM ledger: link publish failed (${code ?? "unknown"}), falling back to rename`);
+			if (existsSync(this.path)) {
+				return;
+			}
+			renameSync(tempPath, this.path);
 		}
 	}
 
@@ -690,6 +712,18 @@ export class RlmSpawnLedger {
 	}
 
 	private truncateTornTailSync(): void {
+		// Fail closed loudly at the read bound BEFORE the swallowing repair
+		// try-block: an oversized ledger must never trigger a file-sized
+		// allocation, and the error must not be silenced as a repair failure.
+		let size: number;
+		try {
+			size = statSync(this.path).size;
+		} catch {
+			return;
+		}
+		if (size > RLM_LEDGER_MAX_BYTES) {
+			throw new Error(`RLM ledger ${this.path} exceeds ${RLM_LEDGER_MAX_BYTES} bytes (${size}); refusing to read`);
+		}
 		// All offsets are BYTE offsets on raw buffers: string indices diverge
 		// from byte offsets as soon as any record carries multi-byte UTF-8
 		// (session names do, in real data), and ftruncate takes bytes.

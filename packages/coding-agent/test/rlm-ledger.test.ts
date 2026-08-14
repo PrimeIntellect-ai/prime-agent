@@ -9,6 +9,26 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+
+const linkFailure = vi.hoisted(() => ({ code: undefined as string | undefined }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		linkSync: (
+			existingPath: Parameters<typeof actual.linkSync>[0],
+			newPath: Parameters<typeof actual.linkSync>[1],
+		) => {
+			if (linkFailure.code) {
+				const error = new Error(`simulated link failure ${linkFailure.code}`) as NodeJS.ErrnoException;
+				error.code = linkFailure.code;
+				throw error;
+			}
+			return actual.linkSync(existingPath, newPath);
+		},
+	};
+});
+
 import { dirname, join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -238,6 +258,12 @@ describe("rlm spawn ledger", () => {
 			mkdirSync(dirname(oversized.ledgerPath), { recursive: true });
 			writeFileSync(oversized.ledgerPath, Buffer.alloc(RLM_LEDGER_MAX_BYTES + 1, "\n"));
 			await expect(oversized.edges()).rejects.toThrow("bytes");
+
+			// The torn-tail repair path must hit the same bound before any
+			// file-sized allocation, not just replaySync.
+			await expect(
+				new RlmSpawnLedger(root, sessionsDir).appendRename({ childId: "sub-1", child: "/c", name: "n" }),
+			).rejects.toThrow("bytes");
 
 			const record = `${JSON.stringify({ v: 1, op: "rename", at: "x", childId: "sub-1", child: "/c", name: "n" })}\n`;
 			writeFileSync(oversized.ledgerPath, record.repeat(RLM_LEDGER_MAX_RECORDS + 1));
@@ -805,6 +831,54 @@ describe("rlm spawn ledger daemon wiring", () => {
 			const contents = readFileSync(rlmLedgerPath(tempDir, sessionsDir), "utf8");
 			expect(contents).toContain("sub-22222222");
 			expect(contents).not.toContain("sub-11111111");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("publishes the seed via rename fallback on filesystems without hard links", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-nolink-"));
+		try {
+			const sessionsDir = join(tempDir, "sessions");
+			const parentManager = SessionManager.create(tempDir, sessionsDir);
+			parentManager.newSession();
+			parentManager.appendSessionInfo("parent");
+			parentManager.flushNow();
+			const parentFile = parentManager.getSessionFile();
+			const parentArtifactDir = parentManager.getSessionArtifactDir();
+			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
+			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const logged: string[] = [];
+			const ledger = new RlmSpawnLedger(
+				tempDir,
+				sessionsDir,
+				{
+					readRegistryForSessionFile: async (sessionFile) =>
+						canonicalSessionPath(sessionFile) === canonicalSessionPath(parentFile)
+							? [
+									{
+										childId: "sub-11111111",
+										sessionName: "worker",
+										sessionFile: child.file,
+										rlmDepth: 1,
+										status: "completed" as const,
+									},
+								]
+							: [],
+				},
+				(message) => logged.push(message),
+			);
+			linkFailure.code = "ENOTSUP";
+			try {
+				await expect(ledger.family()).resolves.toEqual([
+					expect.objectContaining({ name: "parent", rlmDepth: 0 }),
+					expect.objectContaining({ name: "worker", rlmDepth: 1 }),
+				]);
+			} finally {
+				linkFailure.code = undefined;
+			}
+			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(true);
+			expect(logged.some((message) => message.includes("falling back to rename"))).toBe(true);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
