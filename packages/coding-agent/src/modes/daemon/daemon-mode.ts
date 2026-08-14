@@ -202,7 +202,7 @@ import {
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
-import { type RlmLedgerDeleteReason, RlmSpawnLedger } from "./rlm-ledger.js";
+import { createRlmLedgerRegistrySeedSource, type RlmLedgerDeleteReason, RlmSpawnLedger } from "./rlm-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
 	createSnapshotTranscriptChunks,
@@ -895,13 +895,7 @@ export class AgentDaemon {
 		this.rlmSpawnLedgerInstance ??= new RlmSpawnLedger(
 			this.agentDir,
 			this.rlmLedgerSessionsDir(),
-			{
-				readRegistryForSessionFile: async (sessionFile) => {
-					const info = await readSessionInfo(sessionFile);
-					if (!info) return [];
-					return this.readLatestRlmSubagentRegistryPath(this.rlmSubagentRegistryPathForInfo(info));
-				},
-			},
+			createRlmLedgerRegistrySeedSource(),
 			(message) => this.log(message),
 		);
 		return this.rlmSpawnLedgerInstance;
@@ -1047,7 +1041,6 @@ export class AgentDaemon {
 		if (!latest || latest.status === "deleted") {
 			return;
 		}
-		this.appendRlmLedgerDelete({ childId, child: latest.sessionFile, reason });
 		if (
 			!this.appendRlmSubagentRegistryEntry(parentState, {
 				...latest,
@@ -1057,6 +1050,11 @@ export class AgentDaemon {
 		) {
 			throw new Error(`Failed to persist deletion for RLM subagent ${childId}`);
 		}
+		// After the registry tombstone: a crash in between leaves a live ledger
+		// edge over a tombstoned registry entry, which reconciliation drops once
+		// the transcript disappears; the reverse order could tombstone the
+		// ledger while the registry still claims the child exists.
+		this.appendRlmLedgerDelete({ childId, child: latest.sessionFile, reason });
 	}
 
 	private readLatestRlmSubagentRegistry(
@@ -2500,6 +2498,10 @@ export class AgentDaemon {
 				options.onSessionPublished?.(runtime.session);
 			},
 		);
+		// Admission is complete only once the spawn record is durably in the
+		// ledger: no self-heal exists for a lost spawn record (seeding only runs
+		// when the ledger file is absent; reconciliation only drops edges).
+		await this.rlmSpawnLedger().flush();
 		return runtime;
 	}
 
