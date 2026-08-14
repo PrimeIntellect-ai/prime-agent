@@ -921,15 +921,10 @@ export class AgentDaemon {
 		this.rlmSpawnLedger()
 			.appendSpawn(input)
 			.catch((error) => {
+				// TODO: once the ledger is the messaging authority (post-stack
+				// rebase), a swallowed spawn-append failure means an invisible
+				// child — revisit failing admission here instead of logging.
 				this.log(`failed to append RLM ledger spawn: ${error instanceof Error ? error.message : String(error)}`);
-			});
-	}
-
-	private appendRlmLedgerDelete(input: { childId: string; child: string; reason: RlmLedgerDeleteReason }): void {
-		this.rlmSpawnLedger()
-			.appendDelete(input)
-			.catch((error) => {
-				this.log(`failed to append RLM ledger delete: ${error instanceof Error ? error.message : String(error)}`);
 			});
 	}
 
@@ -1038,7 +1033,14 @@ export class AgentDaemon {
 		const latest = (await this.readLatestRlmSubagentRegistry(parentState, true)).find(
 			(entry) => entry.childId === childId,
 		);
-		if (!latest || latest.status === "deleted") {
+		if (!latest) {
+			return;
+		}
+		if (latest.status === "deleted") {
+			// Self-heal: a crash between the registry tombstone and the ledger
+			// delete leaves a permanent ghost live edge; retrying the deletion
+			// finishes the ledger side.
+			await this.appendRlmLedgerDeleteIfLive(childId, latest.sessionFile, reason);
 			return;
 		}
 		if (
@@ -1051,10 +1053,29 @@ export class AgentDaemon {
 			throw new Error(`Failed to persist deletion for RLM subagent ${childId}`);
 		}
 		// After the registry tombstone: a crash in between leaves a live ledger
-		// edge over a tombstoned registry entry, which reconciliation drops once
-		// the transcript disappears; the reverse order could tombstone the
-		// ledger while the registry still claims the child exists.
-		this.appendRlmLedgerDelete({ childId, child: latest.sessionFile, reason });
+		// edge over a tombstoned registry entry (healed on a retried delete);
+		// the reverse order could tombstone the ledger while the registry still
+		// claims the child exists.
+		await this.rlmSpawnLedger()
+			.appendDelete({ childId, child: latest.sessionFile, reason })
+			.catch((error) => {
+				this.log(`failed to append RLM ledger delete: ${error instanceof Error ? error.message : String(error)}`);
+			});
+	}
+
+	private async appendRlmLedgerDeleteIfLive(childId: string, child: string, reason: RlmLedgerDeleteReason) {
+		try {
+			const ledger = this.rlmSpawnLedger();
+			const target = canonicalSessionPath(child);
+			const live = (await ledger.edges()).some(
+				(edge) => edge.childId === childId && canonicalSessionPath(edge.child) === target,
+			);
+			if (live) {
+				await ledger.appendDelete({ childId, child, reason });
+			}
+		} catch (error) {
+			this.log(`failed to heal RLM ledger delete: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	private readLatestRlmSubagentRegistry(

@@ -468,6 +468,24 @@ describe("rlm spawn ledger daemon wiring", () => {
 			const lines = readFileSync(ledger.ledgerPath, "utf8").trim().split("\n");
 			expect(JSON.parse(lines.at(-1)!)).toMatchObject({ op: "delete", reason: "revoked" });
 			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(true);
+
+			// Self-heal: with the registry already tombstoned, a live ledger edge
+			// (a delete lost to a crash) is finished off by a retried deletion.
+			await ledger.appendSpawn({
+				childId: "sub-1234abcd",
+				parent: parentFile,
+				child: childState.runtime.session.sessionFile,
+				depth: 1,
+				name: "spawned-worker",
+			});
+			await expect(ledger.edges()).resolves.toHaveLength(1);
+			await internals.recordRlmSubagentDeletion(parentState, "sub-1234abcd", "gc");
+			await expect(ledger.edges()).resolves.toEqual([]);
+			const healed = readFileSync(ledger.ledgerPath, "utf8").trim().split("\n");
+			expect(JSON.parse(healed.at(-1)!)).toMatchObject({ op: "delete", reason: "gc" });
+			// A second retry with no live edge appends nothing further.
+			await internals.recordRlmSubagentDeletion(parentState, "sub-1234abcd", "gc");
+			expect(readFileSync(ledger.ledgerPath, "utf8").trim().split("\n")).toHaveLength(healed.length);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
