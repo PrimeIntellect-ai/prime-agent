@@ -80,10 +80,12 @@ export interface RlmLedgerSeedRegistryEntry {
 }
 
 export interface RlmLedgerSeedSource {
-	/** Registry path for a parent session file, mirroring the daemon's layout convention. */
-	registryPathForSessionFile(sessionFile: string): string;
-	/** Tolerant last-writer-wins registry read; must never throw for a missing file. */
-	readRegistry(path: string): Promise<RlmLedgerSeedRegistryEntry[]>;
+	/**
+	 * Tolerant last-writer-wins registry read for a parent session file, using
+	 * the daemon's existing registry conventions. Must never throw for a
+	 * missing registry; other failures may throw (seeding degrades to empty).
+	 */
+	readRegistryForSessionFile(sessionFile: string): Promise<RlmLedgerSeedRegistryEntry[]>;
 }
 
 export function rlmLedgerPath(agentDir: string, sessionsDir: string): string {
@@ -415,8 +417,7 @@ export class RlmSpawnLedger {
 		const visited = new Set<string>(queue.map((item) => resolve(item.sessionFile)));
 		while (queue.length > 0) {
 			const { sessionFile, depth } = queue.shift()!;
-			const registryPath = this.seedSource.registryPathForSessionFile(sessionFile);
-			for (const entry of await this.seedSource.readRegistry(registryPath)) {
+			for (const entry of await this.seedSource.readRegistryForSessionFile(sessionFile)) {
 				if (entry.status === "deleted") continue;
 				const childPath = resolve(entry.sessionFile);
 				if (visited.has(childPath)) continue;
