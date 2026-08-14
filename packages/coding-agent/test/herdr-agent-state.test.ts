@@ -42,6 +42,16 @@ function createMockPi() {
 	return { pi, handlers, busHandlers };
 }
 
+/**
+ * The endpoint the extension will dial for a given HERDR_SOCKET_PATH. Windows
+ * has no Unix domain sockets, so Herdr listens on a named pipe whose name
+ * embeds the socket path; mirror that here or the fake server and the
+ * extension never meet.
+ */
+function listenEndpoint(socketPath: string): string {
+	return process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+}
+
 async function startFakeHerdrServer(socketPath: string): Promise<{
 	server: Server;
 	requests: RecordedRequest[];
@@ -76,7 +86,7 @@ async function startFakeHerdrServer(socketPath: string): Promise<{
 
 	await new Promise<void>((resolve, reject) => {
 		server.on("error", reject);
-		server.listen(socketPath, resolve);
+		server.listen(listenEndpoint(socketPath), resolve);
 	});
 
 	const waitForRequests = (count: number, timeoutMs = 3000): Promise<void> => {

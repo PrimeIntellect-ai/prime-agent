@@ -161,6 +161,11 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 	let idleTimer: ReturnType<typeof setTimeout> | undefined;
 	let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
+	// On Windows Herdr listens on a named pipe whose name embeds the socket
+	// path; connecting to the bare path fails with ENOTSOCK, and sendRequest
+	// swallows that error, so the pane would silently stay Unknown forever.
+	const socketEndpoint = process.platform === "win32" && socketPath ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+
 	function sendRequest(request: unknown): Promise<void> {
 		return new Promise((resolve) => {
 			let done = false;
@@ -171,7 +176,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 				resolve();
 			};
 
-			const socket = createConnection(socketPath!);
+			const socket = createConnection(socketEndpoint!);
 			socket.on("error", finish);
 			socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
 			socket.on("data", finish);
