@@ -112,10 +112,10 @@ async function runPrintModeWithConnectionInternal(
 		await bindHeadlessExtensions?.();
 
 		if (initialMessage) {
-			await connection.promptAndWait(initialMessage, { images: initialImages, source: "rpc" });
+			await connection.promptAndWait(initialMessage, { images: initialImages });
 		}
 		for (const message of messages) {
-			await connection.promptAndWait(message, { source: "rpc" });
+			await connection.promptAndWait(message);
 		}
 
 		const autonomousStatus = await connection.waitForHeadlessCompletion();

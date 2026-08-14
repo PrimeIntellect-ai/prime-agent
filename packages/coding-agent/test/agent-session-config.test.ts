@@ -168,9 +168,4 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 		expect(mergeAgentSessionRuntimeConfig({}, { telemetryDisabled: true }).telemetryDisabled).toBe(true);
 		expect(mergeAgentSessionRuntimeConfig({}, {}).telemetryDisabled).toBeUndefined();
 	});
-
-	it("carries ultracode through daemon config merges", () => {
-		expect(mergeAgentSessionRuntimeConfig({ ultracode: true }, { model: "test" }).ultracode).toBe(true);
-		expect(mergeAgentSessionRuntimeConfig({ ultracode: true }, { ultracode: false }).ultracode).toBe(false);
-	});
 });

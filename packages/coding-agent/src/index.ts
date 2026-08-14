@@ -264,39 +264,6 @@ export {
 	truncateTail,
 	withFileMutationQueue,
 } from "./core/tools/index.js";
-// Dynamic workflows
-export { WorkflowSubagentRunner, type WorkflowSubagentRunnerOptions } from "./core/workflows/agent-runner.js";
-export { createWorkflowExtension, type WorkflowExtensionOptions } from "./core/workflows/extension.js";
-export {
-	parseWorkflowScript,
-	runWorkflow,
-	type WorkflowAgentRunner,
-	type WorkflowAgentRunOptions,
-	type WorkflowAgentRunResult,
-	type WorkflowJournal,
-	type WorkflowJournalEntry,
-	type WorkflowJournalStart,
-	type WorkflowMeta,
-	type WorkflowRunOptions,
-	type WorkflowRunResult,
-	type WorkflowUsage,
-} from "./core/workflows/runtime.js";
-export {
-	createWorkflowJournal,
-	createWorkflowRun,
-	listWorkflowRuns,
-	loadWorkflowRun,
-	readWorkflowRun,
-	resolveSavedWorkflow,
-	type SavedWorkflow,
-	saveRunAsProjectWorkflow,
-	saveRunAsUserWorkflow,
-	updateWorkflowRun,
-	type WorkflowAgentProgress,
-	type WorkflowRunProgress,
-	type WorkflowRunRecord,
-	type WorkflowRunStatus,
-} from "./core/workflows/storage.js";
 // Main entry point
 export { type MainOptions, main } from "./main.js";
 export {

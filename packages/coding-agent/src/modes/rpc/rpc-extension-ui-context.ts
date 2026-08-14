@@ -68,7 +68,6 @@ export function createRpcExtensionUiBridge(output: (request: RpcExtensionUIReque
 							? response.value
 							: undefined,
 			),
-		workflowPanel: async () => undefined,
 		confirm: (title, message, opts) =>
 			createDialogPromise(opts, false, { method: "confirm", title, message, timeout: opts?.timeout }, (response) =>
 				"cancelled" in response && response.cancelled

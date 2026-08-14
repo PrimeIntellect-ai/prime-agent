@@ -600,25 +600,6 @@ describe("ToolExecutionComponent parity", () => {
 		}
 	});
 
-	test("rainbow-styles the workflow tool label while preserving its status", () => {
-		const component = new ToolExecutionComponent(
-			"workflow",
-			"tool-workflow",
-			{},
-			{},
-			{ ...createBaseToolDefinition("workflow"), label: "Dynamic Workflow" },
-			createFakeTui(),
-			process.cwd(),
-		);
-
-		const queued = component.render(100).join("\n");
-		expect(stripAnsi(queued)).toContain("Dynamic Workflow · queued");
-		expect(queued).toContain("\x1b[38;2;");
-
-		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
-		expect(stripAnsi(component.render(100).join("\n"))).toContain("Dynamic Workflow · done");
-	});
-
 	test("shows the error status in the rail panel header", () => {
 		const component = new ToolExecutionComponent(
 			"bash",

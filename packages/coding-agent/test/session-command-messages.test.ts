@@ -17,10 +17,7 @@ import {
 import { parseSessionSlashCommand } from "../src/core/slash-commands.js";
 import { CompactionOutcomeMessageComponent } from "../src/modes/interactive/components/compaction-outcome-message.js";
 import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
-import {
-	SlashCommandMessageComponent,
-	styleSlashCommandText,
-} from "../src/modes/interactive/components/slash-command-message.js";
+import { SlashCommandMessageComponent } from "../src/modes/interactive/components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "../src/modes/interactive/components/slash-command-result-message.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -128,18 +125,6 @@ describe("session command messages", () => {
 				details: { ...commandMessage.details, commandEntryId: "" },
 			}),
 		).toBe(false);
-	});
-
-	test.each(["/workflow audit", "/workflows status"])("rainbow-styles the durable %s command", (text) => {
-		const styled = styleSlashCommandText(text);
-
-		expect(stripAnsi(styled)).toBe(text);
-		expect(styled).toContain("\x1b[38;2;");
-	});
-
-	test("keeps unrelated durable commands in one ordinary accent color", () => {
-		const styled = styleSlashCommandText("/goal ship it");
-		expect(styled.match(/\x1b\[38;2;/g)).toHaveLength(1);
 	});
 
 	test("creates and validates typed compaction outcome messages", () => {

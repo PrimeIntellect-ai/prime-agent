@@ -34,14 +34,6 @@ Edit directly or use `/settings` for common options.
 }
 ```
 
-### Dynamic Workflows
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `disableWorkflows` | boolean | `false` | Disable the built-in Workflow tool, `/workflow` saved-workflow access, keyword admission, and ultracode orchestration |
-
-Set `PRIME_AGENT_DISABLE_WORKFLOWS=1` for the equivalent process-wide opt-out. See [Dynamic Workflows](workflows.md).
-
 ### UI & Display
 
 | Setting | Type | Default | Description |

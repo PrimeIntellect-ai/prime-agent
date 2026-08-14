@@ -92,7 +92,6 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
-	ExtensionWorkflowPanelData,
 } from "../../core/extensions/index.js";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
@@ -131,8 +130,6 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
-import { loadWorkflowRun } from "../../core/workflows/storage.js";
-import { toWorkflowPanelData } from "../../core/workflows/view-model.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -218,7 +215,7 @@ import {
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
 import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
-import { type EffortLevel, ThinkingSelectorComponent } from "./components/thinking-selector.js";
+import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,
 	ToolExecutionComponent,
@@ -227,8 +224,6 @@ import {
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
-import { WorkflowPanelComponent } from "./components/workflow-panel.js";
-import { styleWorkflowUiKeywords } from "./components/workflow-rainbow.js";
 import { FeatureHintDeck } from "./feature-hints.js";
 import { scopeHeartbeatsToSession } from "./heartbeat-scope.js";
 import {
@@ -316,9 +311,7 @@ export function styleQueuedMessagePreview(
 	isRecognizedSlashCommand: (name: string) => boolean,
 ): string {
 	const preview = formatQueuedMessagePreview(message, label);
-	if (!isLeadingSlashCommand(message, isRecognizedSlashCommand)) {
-		return styleWorkflowUiKeywords(theme.fg("dim", preview));
-	}
+	if (!isLeadingSlashCommand(message, isRecognizedSlashCommand)) return theme.fg("dim", preview);
 	const prefix = preview.slice(0, preview.length - message.length);
 	return `${theme.fg("dim", prefix)}${styleSlashCommandText(message, (rest) => theme.fg("dim", rest))}`;
 }
@@ -660,99 +653,6 @@ function getPayloadStringArray(payload: Record<string, unknown>, key: string): s
 	return Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : undefined;
 }
 
-function workflowPanelActions(status: ExtensionWorkflowPanelData["status"]): string[] {
-	const actions = ["Inspect source"];
-	if (status === "pending" || status === "running") actions.push("Stop");
-	if (status === "stopped") actions.push("Resume / restart");
-	actions.push("Save to project", "Save to personal", "↻ Refresh", "Back");
-	return actions;
-}
-
-function getWorkflowPanelPayload(
-	payload: Record<string, unknown>,
-	key: string,
-): ExtensionWorkflowPanelData | undefined {
-	const value = payload[key];
-	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-	const panel = value as Record<string, unknown>;
-	const status = panel.status;
-	const phases = panel.phases;
-	const actions = panel.actions;
-	if (
-		typeof panel.cwd !== "string" ||
-		(panel.agentDir !== undefined && typeof panel.agentDir !== "string") ||
-		typeof panel.runId !== "string" ||
-		typeof panel.workflowName !== "string" ||
-		(panel.description !== undefined && typeof panel.description !== "string") ||
-		(status !== "pending" &&
-			status !== "running" &&
-			status !== "paused" &&
-			status !== "completed" &&
-			status !== "failed" &&
-			status !== "stopped") ||
-		(panel.startedAt !== undefined && typeof panel.startedAt !== "string") ||
-		(panel.durationMs !== undefined &&
-			(typeof panel.durationMs !== "number" || !Number.isFinite(panel.durationMs))) ||
-		typeof panel.agentCount !== "number" ||
-		!Array.isArray(phases) ||
-		!Array.isArray(actions) ||
-		!actions.every((action): action is string => typeof action === "string")
-	) {
-		return undefined;
-	}
-	const parsedPhases: ExtensionWorkflowPanelData["phases"] = [];
-	for (const phaseValue of phases) {
-		if (!phaseValue || typeof phaseValue !== "object" || Array.isArray(phaseValue)) return undefined;
-		const phase = phaseValue as Record<string, unknown>;
-		if (typeof phase.title !== "string" || !Array.isArray(phase.agents)) return undefined;
-		const agents: ExtensionWorkflowPanelData["phases"][number]["agents"] = [];
-		for (const agentValue of phase.agents) {
-			if (!agentValue || typeof agentValue !== "object" || Array.isArray(agentValue)) return undefined;
-			const agent = agentValue as Record<string, unknown>;
-			if (
-				typeof agent.id !== "number" ||
-				typeof agent.label !== "string" ||
-				(agent.status !== "running" &&
-					agent.status !== "completed" &&
-					agent.status !== "failed" &&
-					agent.status !== "replayed" &&
-					agent.status !== "stopped")
-			) {
-				return undefined;
-			}
-			for (const field of [
-				"phase",
-				"prompt",
-				"model",
-				"effort",
-				"startedAt",
-				"completedAt",
-				"error",
-				"resultPreview",
-			]) {
-				if (agent[field] !== undefined && typeof agent[field] !== "string") return undefined;
-			}
-			if (agent.totalTokens !== undefined && typeof agent.totalTokens !== "number") return undefined;
-			if (agent.cost !== undefined && typeof agent.cost !== "number") return undefined;
-			agents.push(agent as unknown as ExtensionWorkflowPanelData["phases"][number]["agents"][number]);
-		}
-		parsedPhases.push({ title: phase.title, agents });
-	}
-	return {
-		cwd: panel.cwd,
-		...(typeof panel.agentDir === "string" ? { agentDir: panel.agentDir } : {}),
-		runId: panel.runId,
-		workflowName: panel.workflowName,
-		...(typeof panel.description === "string" ? { description: panel.description } : {}),
-		status,
-		...(typeof panel.startedAt === "string" ? { startedAt: panel.startedAt } : {}),
-		...(typeof panel.durationMs === "number" ? { durationMs: panel.durationMs } : {}),
-		agentCount: panel.agentCount,
-		phases: parsedPhases,
-		actions,
-	};
-}
-
 function getPayloadNotifyType(payload: Record<string, unknown>, key: string): "info" | "warning" | "error" | undefined {
 	const value = payload[key];
 	return value === "info" || value === "warning" || value === "error" ? value : undefined;
@@ -867,8 +767,6 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 	/** Additional image-bearing prompts to send after the initial messages. */
 	initialPrompts?: InteractiveInitialPrompt[];
-	/** Start this client session in xhigh reasoning with automatic workflow admission. */
-	initialUltracode?: boolean;
 	/** Force verbose startup (overrides quietStartup setting) */
 	verbose?: boolean;
 	/** Agent execution boundary. InteractiveMode never talks directly to AgentSession for core execution. */
@@ -990,8 +888,6 @@ export class InteractiveMode {
 	private contextUsageRefresh = { generation: 0, lastSuccessGeneration: 0 };
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
-	/** Session-scoped Claude-style mode: xhigh reasoning plus automatic workflow admission. */
-	private ultracodeSessionId: string | undefined;
 
 	private ctrlCExitHintExpiresAt = 0;
 	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -1113,7 +1009,6 @@ export class InteractiveMode {
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
 	private extensionTerminalInputUnsubscribers = new Set<() => void>();
 	private activeConnectionExtensionUiRequests = new Map<string, { cancelLocal: () => void }>();
-	private activeExtensionCustomClosers = new Set<() => void>();
 
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
@@ -1380,11 +1275,7 @@ export class InteractiveMode {
 				this.getThinkingLevelCompletions(prefix);
 			const levels = this.getAvailableThinkingLevels();
 			if (levels.length > 0) {
-				const effortOptions =
-					levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows()
-						? [...levels, "ultracode"]
-						: levels;
-				effortCommand.argumentHint = `[${effortOptions.join("/")}]`;
+				effortCommand.argumentHint = `[${levels.join("/")}]`;
 			}
 		}
 
@@ -1549,15 +1440,6 @@ export class InteractiveMode {
 
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
-		if (this.options.initialUltracode) {
-			if (this.settingsManager.getDisableWorkflows()) {
-				this.showWarning("--effort ultracode is unavailable because Dynamic Workflows are disabled");
-			} else if (this.getAvailableThinkingLevels().includes("xhigh")) {
-				this.ultracodeSessionId = this.connectionState?.sessionId;
-			} else {
-				this.showWarning("--effort ultracode requires a model with xhigh reasoning effort");
-			}
-		}
 
 		// Render initial messages AFTER showing loaded resources
 		await this.renderInitialMessages();
@@ -3648,7 +3530,7 @@ export class InteractiveMode {
 		if (this.extensionEditor) {
 			this.hideExtensionEditor();
 		}
-		for (const close of [...this.activeExtensionCustomClosers]) close();
+		this.ui.hideOverlay();
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
@@ -3821,9 +3703,7 @@ export class InteractiveMode {
 	 */
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
-			supportsWorkflowPanel: true,
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
-			workflowPanel: (data) => this.showWorkflowPanel(data),
 			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
 			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
 			notify: (message, type) => this.showExtensionNotify(message, type),
@@ -4149,35 +4029,6 @@ export class InteractiveMode {
 	/**
 	 * Show a notification for extensions.
 	 */
-	private showWorkflowPanel(data: ExtensionWorkflowPanelData): Promise<string | undefined> {
-		let lastUpdatedAt: string | undefined;
-		return this.showExtensionCustom<string | undefined>(
-			(tui, panelTheme, _keybindings, done) =>
-				new WorkflowPanelComponent(
-					tui,
-					panelTheme,
-					data,
-					(result) => done(result?.action ?? "Back"),
-					() => {
-						const stored = loadWorkflowRun(data.cwd, data.runId, data.agentDir);
-						if (!stored || stored.record.updatedAt === lastUpdatedAt) return undefined;
-						lastUpdatedAt = stored.record.updatedAt;
-						return toWorkflowPanelData(stored.record, workflowPanelActions(stored.record.status), data.agentDir);
-					},
-				),
-			{
-				overlay: true,
-				overlayOptions: () => ({
-					row: 0,
-					col: 0,
-					width: "100%",
-					maxHeight: "100%",
-					suspendFullscreenMouse: true,
-				}),
-			},
-		);
-	}
-
 	private showExtensionNotify(message: string, type?: "info" | "warning" | "error"): void {
 		if (type === "error") {
 			this.showError(message);
@@ -4214,47 +4065,44 @@ export class InteractiveMode {
 		};
 
 		return new Promise((resolve, reject) => {
-			let component: (Component & { dispose?(): void }) | undefined;
-			let overlayHandle: OverlayHandle | undefined;
+			let component: Component & { dispose?(): void };
 			let closed = false;
-			let disposed = false;
 
-			const dispose = () => {
-				if (disposed || !component) return;
-				disposed = true;
+			const close = (result: T) => {
+				if (closed) return;
+				closed = true;
+				if (isOverlay) this.ui.hideOverlay();
+				else restoreEditor();
+				// Note: both branches above already call requestRender
+				resolve(result);
 				try {
-					component.dispose?.();
+					component?.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
-			const close = (result?: T) => {
-				if (closed) return;
-				closed = true;
-				this.activeExtensionCustomClosers.delete(cancel);
-				if (isOverlay) overlayHandle?.hide();
-				else restoreEditor();
-				resolve(result as T);
-				dispose();
-			};
-			const cancel = () => close();
-			this.activeExtensionCustomClosers.add(cancel);
 
-			Promise.resolve(factory(this.ui, theme, this.keybindings, (result) => close(result)))
-				.then((created) => {
-					component = created;
-					if (closed) {
-						dispose();
-						return;
-					}
+			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
+				.then((c) => {
+					if (closed) return;
+					component = c;
 					if (isOverlay) {
-						const componentWidth = (component as unknown as { width?: number }).width;
-						const overlayOptions =
-							typeof options?.overlayOptions === "function"
-								? options.overlayOptions()
-								: (options?.overlayOptions ?? (componentWidth ? { width: componentWidth } : undefined));
-						overlayHandle = this.ui.showOverlay(component, overlayOptions);
-						options?.onHandle?.(overlayHandle);
+						// Resolve overlay options - can be static or dynamic function
+						const resolveOptions = (): OverlayOptions | undefined => {
+							if (options?.overlayOptions) {
+								const opts =
+									typeof options.overlayOptions === "function"
+										? options.overlayOptions()
+										: options.overlayOptions;
+								return opts;
+							}
+							// Fallback: use component's width property if available
+							const w = (component as { width?: number }).width;
+							return w ? { width: w } : undefined;
+						};
+						const handle = this.ui.showOverlay(component, resolveOptions());
+						// Expose handle to caller for visibility control
+						options?.onHandle?.(handle);
 					} else {
 						this.editorContainer.clear();
 						this.editorContainer.addChild(component);
@@ -4262,13 +4110,10 @@ export class InteractiveMode {
 						this.ui.requestRender();
 					}
 				})
-				.catch((error) => {
+				.catch((err) => {
 					if (closed) return;
-					closed = true;
-					this.activeExtensionCustomClosers.delete(cancel);
 					if (!isOverlay) restoreEditor();
-					dispose();
-					reject(error);
+					reject(err);
 				});
 		});
 	}
@@ -5171,7 +5016,7 @@ export class InteractiveMode {
 					return;
 				}
 				try {
-					await this.agentConnection.prompt(this.preparePromptForEffort?.(text) ?? text, {
+					await this.agentConnection.prompt(text, {
 						streamingBehavior,
 						queueIfBusy: true,
 						images,
@@ -5330,7 +5175,6 @@ export class InteractiveMode {
 	private expectsConnectionExtensionUiResponse(request: AgentConnectionExtensionUiRequest): boolean {
 		return (
 			request.method === "select" ||
-			request.method === "workflowPanel" ||
 			request.method === "confirm" ||
 			request.method === "input" ||
 			request.method === "editor"
@@ -5366,12 +5210,6 @@ export class InteractiveMode {
 				const value = await this.showExtensionSelector(title, options, {
 					timeout: getPayloadNumber(payload, "timeout"),
 				});
-				return value === undefined ? { cancelled: true } : { value };
-			}
-			case "workflowPanel": {
-				const data = getWorkflowPanelPayload(payload, "panel");
-				if (!data) return { cancelled: true };
-				const value = await this.showWorkflowPanel(data);
 				return value === undefined ? { cancelled: true } : { value };
 			}
 			case "confirm": {
@@ -6172,11 +6010,9 @@ export class InteractiveMode {
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		return styleWorkflowUiKeywords(
-			[agentsHint, depthLabel, modelLabel, shortcutsHint]
-				.filter((label): label is string => label !== undefined)
-				.join("  "),
-		);
+		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
+			.filter((label): label is string => label !== undefined)
+			.join("  ");
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -6208,11 +6044,7 @@ export class InteractiveMode {
 		if (model.reasoning) {
 			const level = this.connectionState?.thinkingLevel ?? "off";
 			if (level !== "off") {
-				parts.push(
-					this.ultracodeSessionId !== undefined && this.ultracodeSessionId === this.connectionState?.sessionId
-						? "ultracode"
-						: level,
-				);
+				parts.push(level);
 			}
 		}
 		if (this.connectionState?.serviceTier === "priority") {
@@ -6357,13 +6189,13 @@ export class InteractiveMode {
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
 		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
-			this.lastStatusText.setText(styleWorkflowUiKeywords(theme.fg(tone, message)));
+			this.lastStatusText.setText(theme.fg(tone, message));
 			this.ui.requestRender();
 			return;
 		}
 
 		const spacer = new Spacer(1);
-		const text = new Text(styleWorkflowUiKeywords(theme.fg(tone, message)), 1, 0);
+		const text = new Text(theme.fg(tone, message), 1, 0);
 		this.chatContainer.addChild(spacer);
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
@@ -8063,24 +7895,14 @@ export class InteractiveMode {
 		const levels = this.getAvailableThinkingLevels();
 		if (levels.length === 0) return null;
 		const current = this.connectionState?.thinkingLevel;
-		const available =
-			levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows()
-				? [...levels, "ultracode" as const]
-				: levels;
 		const term = prefix.trim().toLowerCase();
-		const matches = term ? available.filter((level) => level.startsWith(term)) : available;
+		const matches = term ? levels.filter((level) => level.startsWith(term)) : levels;
 		if (matches.length === 0) return null;
 		return matches.map((level) => ({
 			value: level,
 			label: level,
 			description:
-				level === "ultracode"
-					? `xhigh reasoning with automatic dynamic workflows${this.ultracodeSessionId !== undefined && this.ultracodeSessionId === this.connectionState?.sessionId ? " (current)" : ""}`
-					: level === current &&
-							(this.ultracodeSessionId === undefined ||
-								this.ultracodeSessionId !== this.connectionState?.sessionId)
-						? `${THINKING_LEVEL_DESCRIPTIONS[level]} (current)`
-						: THINKING_LEVEL_DESCRIPTIONS[level],
+				level === current ? `${THINKING_LEVEL_DESCRIPTIONS[level]} (current)` : THINKING_LEVEL_DESCRIPTIONS[level],
 		}));
 	}
 
@@ -8151,35 +7973,15 @@ export class InteractiveMode {
 			this.showThinkingSelector(levels);
 			return;
 		}
-		if (requested === "ultracode") {
-			if (this.settingsManager.getDisableWorkflows()) {
-				this.showError("Dynamic Workflows are disabled by settings");
-				return;
-			}
-			if (!levels.includes("xhigh")) {
-				this.showError("Ultracode requires a model with xhigh reasoning effort");
-				return;
-			}
-			this.applyThinkingLevel("xhigh", "ultracode");
-			return;
-		}
 		if (!levels.includes(requested as ThinkingLevel)) {
-			const available =
-				levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows() ? [...levels, "ultracode"] : levels;
-			this.showError(`Unknown thinking level '${requested}'. Available: ${available.join(", ")}`);
+			this.showError(`Unknown thinking level '${requested}'. Available: ${levels.join(", ")}`);
 			return;
 		}
 		this.applyThinkingLevel(requested as ThinkingLevel);
 	}
 
 	private showThinkingSelector(levels: ThinkingLevel[] = this.getAvailableThinkingLevels()): void {
-		const available: EffortLevel[] =
-			levels.includes("xhigh") && !this.settingsManager.getDisableWorkflows() ? [...levels, "ultracode"] : levels;
-		const ultracodeActive =
-			available.includes("ultracode") && this.ultracodeSessionId === this.connectionState?.sessionId;
-		const currentLevel: EffortLevel | undefined = ultracodeActive
-			? "ultracode"
-			: (this.connectionState?.thinkingLevel ?? available[0]);
+		const currentLevel = this.connectionState?.thinkingLevel ?? levels[0];
 		if (!currentLevel) {
 			this.showStatus("Current model does not support thinking");
 			return;
@@ -8187,11 +7989,10 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new ThinkingSelectorComponent(
 				currentLevel,
-				available,
+				levels,
 				(level) => {
 					done();
-					if (level === "ultracode") this.applyThinkingLevel("xhigh", "ultracode");
-					else this.applyThinkingLevel(level);
+					this.applyThinkingLevel(level);
 				},
 				() => {
 					done();
@@ -8202,30 +8003,18 @@ export class InteractiveMode {
 		});
 	}
 
-	private applyThinkingLevel(level: ThinkingLevel, mode: "thinking" | "ultracode" = "thinking"): void {
-		const sessionId = this.connectionState?.sessionId;
+	private applyThinkingLevel(level: ThinkingLevel): void {
 		void this.agentConnection
 			.setThinkingLevel(level)
 			.then(() => {
-				if (sessionId !== this.connectionState?.sessionId) return;
-				this.ultracodeSessionId = mode === "ultracode" ? sessionId : undefined;
 				this.patchConnectionState({ thinkingLevel: level });
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
-				this.showStatus(
-					mode === "ultracode" ? "Effort: ultracode (xhigh + automatic workflows)" : `Thinking level: ${level}`,
-				);
+				this.showStatus(`Thinking level: ${level}`);
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
 			});
-	}
-
-	private preparePromptForEffort(text: string): string {
-		if (this.ultracodeSessionId !== this.connectionState?.sessionId || /^\s*ultracode\s*:/i.test(text)) {
-			return text;
-		}
-		return `ultracode: ${text}`;
 	}
 
 	private showModelSelector(initialSearchInput?: string): void {

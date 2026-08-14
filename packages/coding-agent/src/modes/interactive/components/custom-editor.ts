@@ -8,7 +8,6 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.js";
-import { styleWorkflowUiKeywords } from "./workflow-rainbow.js";
 
 export interface CustomEditorOptions extends EditorOptions {
 	placeholder?: string;
@@ -124,7 +123,7 @@ export class CustomEditor extends Editor {
 	}
 
 	override render(width: number): string[] {
-		let lines = super.render(width).map((line) => styleWorkflowUiKeywords(line));
+		let lines = super.render(width);
 		if (this.placeholder && this.getText().length === 0 && lines.length >= 2) {
 			lines = [lines[0]!, this.renderPlaceholderLine(width), ...lines.slice(2)];
 		}

@@ -1,6 +1,5 @@
 import type { AutocompleteProvider, EditorTheme, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
-import stripAnsi from "strip-ansi";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
@@ -146,22 +145,6 @@ describe("CustomEditor", () => {
 		editor.handleInput("\x18\x18");
 
 		expect(handler).toHaveBeenCalledTimes(2);
-	});
-
-	it("rainbow-styles workflow UI keywords without changing the prompt text", () => {
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText("make a workflow with ultracode");
-
-		const rendered = editor.render(80).join("\n");
-		expect(stripAnsi(rendered)).toContain("make a workflow with ultracode");
-		expect(rendered).toContain("\x1b[38;2;");
-	});
-
-	it("does not rainbow-style agent aliases", () => {
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText("make multiple agents with subagents");
-
-		expect(editor.render(80).join("\n")).not.toContain("\x1b[38;2;");
 	});
 
 	it("renders the editor caret before an empty prompt placeholder", () => {

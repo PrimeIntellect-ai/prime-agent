@@ -2561,9 +2561,7 @@ describe("DaemonAgentConnection", () => {
 
 	it("forwards extension UI requests and responses", async () => {
 		const fakeClient = new FakeDaemonClient();
-		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
-			supportsWorkflowPanel: true,
-		});
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 		const events: AgentConnectionEvent[] = [];
 		connection.subscribe((event) => {
 			events.push(event);
@@ -2574,14 +2572,7 @@ describe("DaemonAgentConnection", () => {
 			activeSessionId: "active-1",
 			supportsExtensionUi: true,
 			clientId: expect.any(String),
-			capabilities: [
-				"attach_snapshot",
-				"event_sequence",
-				"extension_ui",
-				"workflow_panel_ui",
-				"slim_attach",
-				"chunked_snapshot",
-			],
+			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
 		});
 
 		fakeClient.emitMessage({
@@ -2617,15 +2608,6 @@ describe("DaemonAgentConnection", () => {
 			requestId: "request-1",
 			response: { confirmed: true },
 		});
-
-		const watcher = await connection.watchSession("active-watch");
-		expect(watcher).toBeDefined();
-		expect(fakeClient.requests.at(-1)).toMatchObject({
-			type: "attach",
-			activeSessionId: "active-watch",
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
-		});
-		await watcher?.close();
 	});
 
 	it("uses an extended timeout for refine requests through the daemon protocol", async () => {

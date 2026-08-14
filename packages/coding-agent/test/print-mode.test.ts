@@ -143,7 +143,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.promptAndWait).toHaveBeenCalledWith("Say done", { images, source: "rpc" });
+		expect(session.promptAndWait).toHaveBeenCalledWith("Say done", { images });
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
@@ -278,7 +278,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.promptAndWait).toHaveBeenCalledWith("hello", { source: "rpc" });
+		expect(session.promptAndWait).toHaveBeenCalledWith("hello", {});
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});

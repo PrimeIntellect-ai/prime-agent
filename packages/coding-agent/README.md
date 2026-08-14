@@ -24,7 +24,6 @@ Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mon
   - [Commands](#commands)
   - [Keyboard Shortcuts](#keyboard-shortcuts)
   - [Message Queue](#message-queue)
-- [Dynamic Workflows](#dynamic-workflows)
 - [Sessions](#sessions)
   - [Branching](#branching)
   - [Compaction](#compaction)
@@ -148,7 +147,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 |---------|-------------|
 | `/login`, `/logout` | OAuth authentication |
 | `/model` | Switch models |
-| `/effort` | Set reasoning/thinking level, including session-scoped `ultracode` |
+| `/effort` | Set reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume` | Open the searchable session view |
@@ -157,8 +156,6 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/session` | Show session info (file, ID, messages) |
 | `/traces [status\|on\|off\|preview\|upload-current\|upload-all\|login]` | Preview traces, run one-shot current/all uploads, and manage automatic sharing (`upload` aliases `upload-current`) |
 | `/usage` | Show token, cost, and context usage |
-| `/workflow <name\|path.py> [JSON]` | Launch a saved Python Dynamic Workflow |
-| `/workflows` | List, inspect, stop, resume, or save workflow runs |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -204,14 +201,6 @@ Submit messages while the agent is working:
 On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so Prime Agent can receive the follow-up shortcut.
 
 Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUpMode` can be `"one-at-a-time"` (default, waits for response) or `"all"` (delivers all queued at once). `transport` selects provider transport preference (`"sse"`, `"websocket"`, or `"auto"`) for providers that support multiple transports.
-
-## Dynamic Workflows
-
-Prefix a substantive task with `ultracode:` to let Prime Agent generate a sandboxed Python coordinator that fans work out to native child sessions. Use `/effort ultracode` or `--effort ultracode` for automatic workflow orchestration with xhigh reasoning.
-
-Workflows launch in the background, persist progress and results, and support stop plus same-session ordered resume. Saved project workflows live in `.prime/agent/workflows/*.py`; personal workflows live in `~/.prime/agent/workflows/*.py`.
-
-Generated coordinators run in a dedicated Monty capability sandbox, never the persistent IPython kernel. The child agents still use Prime Agent's normal TypeScript `AgentSession` machinery. See [Dynamic Workflows](docs/workflows.md) for the Python API, launch contract, approval and human-origin rules, storage, resume semantics, limits, and security boundary.
 
 ## Sessions
 
@@ -566,8 +555,7 @@ cat README.md | prime-agent -p "Summarize this text"
 | `--provider <name>` | Provider (anthropic, openai, google, etc.) |
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
-| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
-| `--effort <level>` | `low`, `medium`, `high`, `xhigh`, `max`, or `ultracode` (xhigh plus automatic workflows) |
+| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
 
 Use `prime-agent model list [search]` to list available models.
@@ -676,9 +664,6 @@ prime-agent --tools ipython -p "Review the code"
 
 # High thinking level
 prime-agent --thinking high "Solve this complex problem"
-
-# Xhigh reasoning with automatic Dynamic Workflows
-prime-agent --effort ultracode "Audit every package and consolidate findings"
 ```
 
 ### Environment Variables
@@ -700,7 +685,6 @@ prime-agent --effort ultracode "Audit every package and consolidate findings"
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `ipykernel` instead of auto-bootstrapping `~/.prime/agent/kernel-venv` |
-| `PRIME_AGENT_DISABLE_WORKFLOWS` | Set to `1` to disable Dynamic Workflows and ultracode orchestration |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
 The remaining `PI_*` variables in this table are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.prime/agent` configuration path.

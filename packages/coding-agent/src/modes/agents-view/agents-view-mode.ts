@@ -334,7 +334,6 @@ async function openAgentsViewSession(
 		try {
 			const connection = await DaemonAgentConnection.attach(client, summary.activeSessionId, {
 				closeClientOnDispose: true,
-				supportsWorkflowPanel: true,
 				recoverDaemon: options.recoverDaemon,
 				reconnectTimeoutMs: options.reconnectTimeoutMs,
 				telemetryDisabled: options.config.telemetryDisabled,
@@ -358,7 +357,6 @@ async function openAgentsViewSession(
 		const resumed = await resumeSavedAgentsViewSession(client, options.config, summary);
 		const connection = await DaemonAgentConnection.attach(client, resumed.activeSessionId, {
 			closeClientOnDispose: true,
-			supportsWorkflowPanel: true,
 			recoverDaemon: options.recoverDaemon,
 			reconnectTimeoutMs: options.reconnectTimeoutMs,
 			telemetryDisabled: options.config.telemetryDisabled,

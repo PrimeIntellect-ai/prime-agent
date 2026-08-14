@@ -27,7 +27,6 @@ Public releases are currently installed from versioned release artifacts. The in
 - [Using Prime Agent](usage.md) - interactive mode, RLM subagents, slash commands, context files, and CLI reference.
 - [Architecture overview](architecture.md) - client, daemon, worker, session, kernel, provider, and storage boundaries.
 - [RLM programming model](rlm.md) - programmatic execution, native subagents, Python skills, and durable state.
-- [Dynamic Workflows](workflows.md) - sandboxed Python coordinators, background runs, progress, saved workflows, and ordered resume.
 - [Long-running and background agents](long-running-agents.md) - daemon workers, messaging, heartbeats, goals, schedules, and autonomous mode.
 - [Providers](providers.md) - subscription and API-key setup for built-in providers.
 - [Settings](settings.md) - global and project settings.

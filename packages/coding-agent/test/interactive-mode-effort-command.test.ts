@@ -8,12 +8,9 @@ import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 type EffortCommandContext = {
 	connectionState?: {
-		sessionId?: string;
 		thinkingLevel: ThinkingLevel;
 		availableThinkingLevels: ThinkingLevel[];
 	};
-	ultracodeSessionId?: string;
-	settingsManager: { getDisableWorkflows: () => boolean };
 	agentConnection: { setThinkingLevel: (level: ThinkingLevel) => Promise<void> };
 	footer: { invalidate: () => void };
 	showStatus: (message: string) => void;
@@ -21,8 +18,7 @@ type EffortCommandContext = {
 	patchConnectionState: (patch: Record<string, unknown>) => void;
 	updateEditorBorderColor: () => void;
 	getAvailableThinkingLevels: () => ThinkingLevel[];
-	applyThinkingLevel: (level: ThinkingLevel, mode?: "thinking" | "ultracode") => void;
-	preparePromptForEffort: (text: string) => string;
+	applyThinkingLevel: (level: ThinkingLevel) => void;
 	showThinkingSelector: (levels?: ThinkingLevel[]) => void;
 	showSelector: (create: (done: () => void) => { component: Component; focus: Component }) => void;
 	ui: { requestRender: () => void };
@@ -33,8 +29,7 @@ type InteractiveModePrototype = {
 	getThinkingLevelCompletions(this: EffortCommandContext, prefix: string): AutocompleteItem[] | null;
 	handleEffortCommand(this: EffortCommandContext, arg: string): void;
 	showThinkingSelector(this: EffortCommandContext, levels?: ThinkingLevel[]): void;
-	applyThinkingLevel(this: EffortCommandContext, level: ThinkingLevel, mode?: "thinking" | "ultracode"): void;
-	preparePromptForEffort(this: EffortCommandContext, text: string): string;
+	applyThinkingLevel(this: EffortCommandContext, level: ThinkingLevel): void;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
@@ -108,11 +103,9 @@ function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5"
 function makeContext(overrides: Partial<EffortCommandContext> = {}): EffortCommandContext {
 	const context: EffortCommandContext = {
 		connectionState: {
-			sessionId: "session-1",
 			thinkingLevel: "medium",
 			availableThinkingLevels: ["off", "low", "medium", "high"],
 		},
-		settingsManager: { getDisableWorkflows: () => false },
 		agentConnection: { setThinkingLevel: vi.fn(async () => {}) },
 		footer: { invalidate: vi.fn() },
 		showStatus: vi.fn(),
@@ -120,8 +113,7 @@ function makeContext(overrides: Partial<EffortCommandContext> = {}): EffortComma
 		patchConnectionState: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
 		getAvailableThinkingLevels: () => interactiveModePrototype.getAvailableThinkingLevels.call(context),
-		applyThinkingLevel: (level, mode) => interactiveModePrototype.applyThinkingLevel.call(context, level, mode),
-		preparePromptForEffort: (text) => interactiveModePrototype.preparePromptForEffort.call(context, text),
+		applyThinkingLevel: (level) => interactiveModePrototype.applyThinkingLevel.call(context, level),
 		showThinkingSelector: (levels) => interactiveModePrototype.showThinkingSelector.call(context, levels),
 		showSelector: vi.fn(),
 		ui: { requestRender: vi.fn() },
@@ -160,33 +152,6 @@ describe("InteractiveMode /effort", () => {
 
 			expect(interactiveModePrototype.getThinkingLevelCompletions.call(context, "")).toBeNull();
 		});
-
-		it("offers ultracode only when xhigh is supported", () => {
-			const context = makeContext({
-				connectionState: {
-					sessionId: "session-1",
-					thinkingLevel: "high",
-					availableThinkingLevels: ["off", "high", "xhigh"],
-				},
-			});
-
-			expect(interactiveModePrototype.getThinkingLevelCompletions.call(context, "ultra")?.[0]?.value).toBe(
-				"ultracode",
-			);
-		});
-
-		it("omits ultracode when Dynamic Workflows are disabled", () => {
-			const context = makeContext({
-				connectionState: {
-					sessionId: "session-1",
-					thinkingLevel: "high",
-					availableThinkingLevels: ["off", "high", "xhigh"],
-				},
-				settingsManager: { getDisableWorkflows: () => true },
-			});
-
-			expect(interactiveModePrototype.getThinkingLevelCompletions.call(context, "ultra")).toBeNull();
-		});
 	});
 
 	describe("command handling", () => {
@@ -202,44 +167,6 @@ describe("InteractiveMode /effort", () => {
 			expect(context.footer.invalidate).toHaveBeenCalledWith();
 			expect(context.updateEditorBorderColor).toHaveBeenCalledWith();
 			expect(context.showError).not.toHaveBeenCalled();
-		});
-
-		it("enables session-scoped ultracode as xhigh plus automatic prompt admission", async () => {
-			const setThinkingLevel = vi.fn(async () => {});
-			const context = makeContext({
-				agentConnection: { setThinkingLevel },
-				connectionState: {
-					sessionId: "session-1",
-					thinkingLevel: "high",
-					availableThinkingLevels: ["off", "high", "xhigh"],
-				},
-			});
-
-			interactiveModePrototype.handleEffortCommand.call(context, "ultracode");
-			await vi.waitFor(() =>
-				expect(context.showStatus).toHaveBeenCalledWith("Effort: ultracode (xhigh + automatic workflows)"),
-			);
-
-			expect(setThinkingLevel).toHaveBeenCalledWith("xhigh");
-			expect(context.ultracodeSessionId).toBe("session-1");
-			expect(interactiveModePrototype.preparePromptForEffort.call(context, "audit routes")).toBe(
-				"ultracode: audit routes",
-			);
-		});
-
-		it("rejects ultracode when Dynamic Workflows are disabled", () => {
-			const context = makeContext({
-				connectionState: {
-					sessionId: "session-1",
-					thinkingLevel: "high",
-					availableThinkingLevels: ["off", "high", "xhigh"],
-				},
-				settingsManager: { getDisableWorkflows: () => true },
-			});
-
-			interactiveModePrototype.handleEffortCommand.call(context, "ultracode");
-			expect(context.showError).toHaveBeenCalledWith("Dynamic Workflows are disabled by settings");
-			expect(context.agentConnection.setThinkingLevel).not.toHaveBeenCalled();
 		});
 
 		it("rejects an unknown level without touching the connection", () => {
@@ -274,75 +201,6 @@ describe("InteractiveMode /effort", () => {
 
 			expect(done).toHaveBeenCalledOnce();
 			expect(context.agentConnection.setThinkingLevel).toHaveBeenCalledWith("high");
-		});
-
-		it("shows ultracode in the selector and applies it as xhigh automatic workflows", async () => {
-			let selector: ThinkingSelectorComponent | undefined;
-			const done = vi.fn();
-			const context = makeContext({
-				connectionState: {
-					sessionId: "session-1",
-					thinkingLevel: "high",
-					availableThinkingLevels: ["off", "high", "xhigh"],
-				},
-				showSelector: (create) => {
-					selector = create(done).component as ThinkingSelectorComponent;
-				},
-			});
-
-			interactiveModePrototype.handleEffortCommand.call(context, "");
-
-			const selectList = selector?.getSelectList();
-			selectList?.setSelectedIndex(3);
-			expect(selectList?.getSelectedItem()?.value).toBe("ultracode");
-			selectList?.onSelect?.(selectList.getSelectedItem()!);
-
-			expect(done).toHaveBeenCalledOnce();
-			expect(context.agentConnection.setThinkingLevel).toHaveBeenCalledWith("xhigh");
-			await vi.waitFor(() => expect(context.ultracodeSessionId).toBe("session-1"));
-			expect(interactiveModePrototype.preparePromptForEffort.call(context, "audit routes")).toBe(
-				"ultracode: audit routes",
-			);
-		});
-
-		it("preselects ultracode when it is active for the current session", () => {
-			let selector: ThinkingSelectorComponent | undefined;
-			const context = makeContext({
-				connectionState: {
-					sessionId: "session-1",
-					thinkingLevel: "xhigh",
-					availableThinkingLevels: ["off", "high", "xhigh"],
-				},
-				ultracodeSessionId: "session-1",
-				showSelector: (create) => {
-					selector = create(vi.fn()).component as ThinkingSelectorComponent;
-				},
-			});
-
-			interactiveModePrototype.handleEffortCommand.call(context, "");
-
-			expect(selector?.getSelectList().getSelectedItem()?.value).toBe("ultracode");
-		});
-
-		it("omits ultracode from the selector when Dynamic Workflows are disabled", () => {
-			let selector: ThinkingSelectorComponent | undefined;
-			const context = makeContext({
-				connectionState: {
-					sessionId: "session-1",
-					thinkingLevel: "high",
-					availableThinkingLevels: ["off", "high", "xhigh"],
-				},
-				settingsManager: { getDisableWorkflows: () => true },
-				ultracodeSessionId: "session-1",
-				showSelector: (create) => {
-					selector = create(vi.fn()).component as ThinkingSelectorComponent;
-				},
-			});
-
-			interactiveModePrototype.handleEffortCommand.call(context, "");
-			const selectList = selector?.getSelectList();
-
-			expect(selectList?.getSelectedItem()?.value).toBe("high");
 		});
 
 		it("reports when the model does not support thinking", () => {

@@ -13,7 +13,6 @@ import {
 	isSessionSlashCommandResultMessage,
 	type SessionSlashCommandResultMessage,
 } from "../core/messages.js";
-import { hasSessionWorkflows, waitForSessionWorkflows } from "../core/workflows/extension.js";
 
 export function latestAutonomousGateAttempt(status: AgentAutonomousStatus): number {
 	return Math.max(status.lastGateFailure?.attempt ?? 0, 0, ...Object.values(status.gateAttempts));
@@ -77,10 +76,6 @@ export async function waitForHeadlessCompletion(session: AgentSession): Promise<
 	let repeatedProgressPrompts = 0;
 	while (true) {
 		await session.waitForIdle();
-		if (hasSessionWorkflows(session.sessionId)) {
-			await waitForSessionWorkflows(session.sessionId);
-			await session.waitForIdle();
-		}
 		const status = session.getAutonomousStatus();
 		if (!shouldContinueAutonomousGates(status) || !status.lastGateFailure) {
 			return status;

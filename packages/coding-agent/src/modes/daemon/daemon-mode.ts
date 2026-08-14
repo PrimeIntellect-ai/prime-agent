@@ -6793,10 +6793,11 @@ function isSequencedSessionOutbound(message: DaemonOutbound): message is Sequenc
 }
 
 export function shouldSendDaemonOutboundToClient(client: DaemonSocketClient, message: DaemonOutbound): boolean {
-	if (message.type !== "extension_ui_request" || !isDaemonDialogExtensionUiRequest(message.method)) return true;
-	const capabilities = daemonClientCapabilitiesForSession(client, message.activeSessionId);
-	if (message.method === "workflowPanel") return capabilities.has("workflow_panel_ui");
-	return daemonClientSupportsExtensionUi(client, message.activeSessionId);
+	return (
+		message.type !== "extension_ui_request" ||
+		!isDaemonDialogExtensionUiRequest(message.method) ||
+		daemonClientSupportsExtensionUi(client, message.activeSessionId)
+	);
 }
 
 export async function resolveDaemonSessionPath(selector: string, cwd: string, sessionDir?: string): Promise<string> {

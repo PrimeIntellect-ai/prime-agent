@@ -168,8 +168,6 @@ export interface DaemonAgentConnectionOptions {
 	sendClientEnv?: boolean;
 	/** Advertise support for interactive extension dialogs. */
 	supportsExtensionUi?: boolean;
-	/** Advertise support for Prime's structured workflow panel. */
-	supportsWorkflowPanel?: boolean;
 	/** Dispose the connection by stopping its hidden worker instead of detaching. */
 	ownedSession?: boolean;
 	/** Require the target worker to have been created with telemetry disabled. */
@@ -299,7 +297,6 @@ export class DaemonAgentConnection implements AgentConnection {
 
 	async attach(): Promise<void> {
 		const supportsExtensionUi = this.options.supportsExtensionUi !== false;
-		const supportsWorkflowPanel = this.options.supportsWorkflowPanel === true;
 		const result = await this.requestData<SessionSummary | DaemonAttachResult>({
 			type: "attach",
 			activeSessionId: this.activeSessionId,
@@ -309,7 +306,6 @@ export class DaemonAgentConnection implements AgentConnection {
 				"attach_snapshot",
 				"event_sequence",
 				...(supportsExtensionUi ? (["extension_ui"] as const) : []),
-				...(supportsWorkflowPanel ? (["workflow_panel_ui"] as const) : []),
 				"slim_attach",
 				"chunked_snapshot",
 				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
@@ -1151,7 +1147,6 @@ export class DaemonAgentConnection implements AgentConnection {
 		let reattached = false;
 		try {
 			const supportsExtensionUi = this.options.supportsExtensionUi !== false;
-			const supportsWorkflowPanel = this.options.supportsWorkflowPanel === true;
 			const result = await this.requestData<DaemonAttachResult>({
 				type: "reattach",
 				activeSessionId: sourceActiveSessionId,
@@ -1162,7 +1157,6 @@ export class DaemonAgentConnection implements AgentConnection {
 					"attach_snapshot",
 					"event_sequence",
 					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
-					...(supportsWorkflowPanel ? (["workflow_panel_ui"] as const) : []),
 					"slim_attach",
 					"chunked_snapshot",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),

@@ -646,7 +646,6 @@ function runtimeConfigFromArgs(
 		systemPrompt: parsed.systemPrompt,
 		appendSystemPrompt: parsed.appendSystemPrompt,
 		thinking: parsed.thinking,
-		ultracode: parsed.effort === "ultracode",
 		models: parsed.models,
 		tools: parsed.tools,
 		noTools: parsed.noTools,
@@ -735,12 +734,9 @@ async function prepareRuntimeServices(options: {
 		agentDir: effectiveAgentDir,
 		authStorage,
 		extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
-		ultracode: config.ultracode,
 		// Subagents share the parent's Herdr pane; their own reporter would race
 		// the parent's and a subagent quit would release the still-active pane.
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
-		// RLM children must not recursively expose the top-level workflow surface.
-		noBuiltinWorkflow: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
 		telemetryDisabled: config.telemetryDisabled,
 		resourceLoaderOptions: {
 			additionalExtensionPaths: config.extensions,
@@ -953,7 +949,6 @@ async function createDaemonClientConnection(options: {
 	clientOwned?: boolean;
 	noSession?: boolean;
 	supportsExtensionUi?: boolean;
-	supportsWorkflowPanel?: boolean;
 }): Promise<{ connection: DaemonAgentConnection; summary: SessionSummary }> {
 	// Caller must have awaited ensureInteractiveDaemonRunning for this socket.
 	const client = new DaemonClient(options.socketPath);
@@ -966,7 +961,6 @@ async function createDaemonClientConnection(options: {
 				sendClientEnv: true,
 				ownedSession: options.clientOwned,
 				supportsExtensionUi: options.supportsExtensionUi,
-				supportsWorkflowPanel: options.supportsWorkflowPanel,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
 				telemetryDisabled: options.config.telemetryDisabled,
 			});
@@ -1459,7 +1453,6 @@ export async function main(args: string[], options?: MainOptions) {
 			clientOwned: parsed.noSession,
 			noSession: parsed.noSession,
 			supportsExtensionUi: true,
-			supportsWorkflowPanel: true,
 		});
 		const agentConnection: AgentConnection = connection;
 		const attachModelFallbackMessage = isFreshDefaultSession
@@ -1478,7 +1471,6 @@ export async function main(args: string[], options?: MainOptions) {
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
-			initialUltracode: parsed.effort === "ultracode",
 			verbose: parsed.verbose,
 			// Resumed/attached daemon sessions are part of the same fleet; left
 			// arrow takes them to the agents view like any other session. The agents
@@ -1672,7 +1664,6 @@ export async function main(args: string[], options?: MainOptions) {
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
-			initialUltracode: parsed.effort === "ultracode",
 			verbose: parsed.verbose,
 		});
 		if (startupBenchmark) {

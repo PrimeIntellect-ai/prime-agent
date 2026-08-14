@@ -14,7 +14,6 @@ import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
-	DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
 	type DaemonCommand,
 	type DaemonOutbound,
 	getDaemonCommandCompatibilities,
@@ -67,12 +66,6 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
 			expect.arrayContaining(["heartbeat_catalog", "heartbeat_management"]),
 		);
-	});
-
-	it("advertises the capability-gated workflow panel UI", () => {
-		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(17);
-		expect(DAEMON_SUPPORTED_CLIENT_CAPABILITIES).toContain("workflow_panel_ui");
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("workflow_panel_ui");
 	});
 
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {

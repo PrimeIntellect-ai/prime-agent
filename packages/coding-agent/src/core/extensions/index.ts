@@ -78,7 +78,6 @@ export type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
-	ExtensionWorkflowPanelData,
 	GetActiveToolsHandler,
 	GetAllToolsHandler,
 	GetCommandsHandler,
