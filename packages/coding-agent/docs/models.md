@@ -485,7 +485,7 @@ For providers or proxies using `api: "openai-responses"`, `compat` describes wha
 | `supportsLongCacheRetention` | Endpoint accepts `prompt_cache_retention: "24h"` when cache retention is `long`. Default: `true`. |
 | `supportsFastMode` | Endpoint serves Fast mode (`service_tier: "priority"`), which makes `/fast` available for the model. Default: `false`. |
 
-`supportsFastMode` is for a proxy or gateway that forwards `service_tier` to a ChatGPT-authenticated upstream. Built-in ChatGPT models (GPT-5.4, GPT-5.5, GPT-5.6) already report Fast support and do not need it. Setting it on an endpoint that ignores `service_tier` still applies the Fast cost multiplier to reported usage, so only enable it where the upstream honors the field.
+`supportsFastMode` is for a proxy or gateway that forwards `service_tier` to a ChatGPT-authenticated upstream. Built-in ChatGPT models (GPT-5.4, GPT-5.5, GPT-5.6) already report Fast support and do not need it. Cost follows the tier the endpoint reports: a response that echoes `service_tier: "default"` is priced at standard rates, and the requested tier is assumed only when the response omits the field.
 
 ```json
 {
