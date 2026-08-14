@@ -167,6 +167,38 @@ describe("rlm spawn ledger", () => {
 		}
 	});
 
+	it("repairs a torn tail by byte offset, preserving preceding multi-byte UTF-8 records", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-utf8-torn-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			// Multi-byte UTF-8 in the name makes string indices diverge from
+			// byte offsets; the truncate must not cut into this record.
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "wörker-💥-ümlaut",
+			});
+			writeFileSync(ledger.ledgerPath, `${readFileSync(ledger.ledgerPath, "utf8")}{"v":1,"op":"spawn","torn`);
+			const repairing = new RlmSpawnLedger(root, sessionsDir);
+			await repairing.appendSpawn({
+				childId: "sub-22222222",
+				parent: parentFile,
+				child: join(root, "b.jsonl"),
+				depth: 1,
+				name: "second",
+			});
+			await expect(new RlmSpawnLedger(root, sessionsDir).edges()).resolves.toEqual([
+				expect.objectContaining({ childId: "sub-11111111", name: "wörker-💥-ümlaut" }),
+				expect.objectContaining({ childId: "sub-22222222", name: "second" }),
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("skips v1 records with unknown ops instead of failing the whole ledger", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-forward-"));
 		try {
@@ -722,6 +754,57 @@ describe("rlm spawn ledger daemon wiring", () => {
 				expect.objectContaining({ name: "worker", rlmDepth: 1 }),
 			]);
 			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("discards the seed when a live append creates the ledger during seeding", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-race-"));
+		try {
+			const sessionsDir = join(tempDir, "sessions");
+			const parentManager = SessionManager.create(tempDir, sessionsDir);
+			parentManager.newSession();
+			parentManager.appendSessionInfo("parent");
+			parentManager.flushNow();
+			const parentFile = parentManager.getSessionFile();
+			const parentArtifactDir = parentManager.getSessionArtifactDir();
+			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
+			const stale = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "stale");
+			const live = makeChildSession(tempDir, join(parentArtifactDir, "sub-22222222"), parentFile, 1, "live");
+			// A second process's ledger over the same file: no seed source, so
+			// its append lands directly.
+			const other = new RlmSpawnLedger(tempDir, sessionsDir);
+			const seeding = new RlmSpawnLedger(tempDir, sessionsDir, {
+				readRegistryForSessionFile: async (sessionFile) => {
+					if (canonicalSessionPath(sessionFile) !== canonicalSessionPath(parentFile)) return [];
+					// Simulate the race: the live append creates the real file
+					// between the seed's initial existence check and its publish.
+					await other.appendSpawn({
+						childId: "sub-22222222",
+						parent: parentFile,
+						child: live.file,
+						depth: 1,
+						name: "live",
+					});
+					return [
+						{
+							childId: "sub-11111111",
+							sessionName: "stale",
+							sessionFile: stale.file,
+							rlmDepth: 1,
+							status: "completed" as const,
+						},
+					];
+				},
+			});
+
+			const family = await seeding.family();
+			// The live append won; the stale seed was discarded, not clobbered over it.
+			expect(family.map((row) => row.name)).toEqual(["parent", "live"]);
+			const contents = readFileSync(rlmLedgerPath(tempDir, sessionsDir), "utf8");
+			expect(contents).toContain("sub-22222222");
+			expect(contents).not.toContain("sub-11111111");
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

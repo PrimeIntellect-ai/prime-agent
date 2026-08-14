@@ -2,15 +2,17 @@ import { createHash } from "node:crypto";
 import {
 	closeSync,
 	existsSync,
+	fstatSync,
 	fsyncSync,
+	ftruncateSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
+	readSync,
 	realpathSync,
-	renameSync,
 	rmSync,
 	statSync,
-	truncateSync,
 	writeSync,
 } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -270,6 +272,18 @@ function parseLedgerLine(line: string, index: number): RlmLedgerRecord | RlmLedg
 		default:
 			return undefined;
 	}
+}
+
+function readAllSync(fd: number): Buffer {
+	const size = fstatSync(fd).size;
+	const buffer = Buffer.alloc(size);
+	let offset = 0;
+	while (offset < size) {
+		const bytesRead = readSync(fd, buffer, offset, size - offset, offset);
+		if (bytesRead === 0) break;
+		offset += bytesRead;
+	}
+	return buffer.subarray(0, offset);
 }
 
 function edgeKey(childId: string, child: string): string {
@@ -632,16 +646,18 @@ export class RlmSpawnLedger {
 			closeSync(handle);
 		}
 		try {
-			// A live append that raced the seed wins: it created the real file
-			// with fresher data than the registries; drop the seed.
-			if (existsSync(this.path)) {
-				rmSync(tempPath, { force: true });
-				return;
-			}
-			renameSync(tempPath, this.path);
+			// Atomic no-clobber publish: link() fails with EEXIST if a live
+			// append created the real file meanwhile — that append wins (its
+			// data is fresher than the registries) and the seed is discarded.
+			// A clobbering rename() here would overwrite and lose that append.
+			linkSync(tempPath, this.path);
 		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				rmSync(tempPath, { force: true });
+				throw error;
+			}
+		} finally {
 			rmSync(tempPath, { force: true });
-			throw error;
 		}
 	}
 
@@ -674,12 +690,28 @@ export class RlmSpawnLedger {
 	}
 
 	private truncateTornTailSync(): void {
+		// All offsets are BYTE offsets on raw buffers: string indices diverge
+		// from byte offsets as soon as any record carries multi-byte UTF-8
+		// (session names do, in real data), and ftruncate takes bytes.
 		try {
-			const contents = readFileSync(this.path, "utf8");
-			if (contents.length === 0 || contents.endsWith("\n")) return;
-			const lastNewline = contents.lastIndexOf("\n");
-			truncateSync(this.path, lastNewline + 1);
-			this.log(`RLM ledger: truncated torn final line (${contents.length - lastNewline - 1} bytes)`);
+			const fd = openSync(this.path, "r+");
+			try {
+				const first = readAllSync(fd);
+				if (first.length === 0 || first[first.length - 1] === 0x0a) return;
+				const lastNewline = first.lastIndexOf(0x0a);
+				// Cheap cross-process hardening: only truncate when the bytes are
+				// stable across two reads and the size has not moved under us
+				// (same fd for stat and truncate). A racing append between this
+				// check and the ftruncate remains possible — same trust bucket as
+				// the documented O_APPEND small-write atomicity assumption.
+				const second = readAllSync(fd);
+				if (second.length !== first.length || !second.equals(first)) return;
+				if (fstatSync(fd).size !== first.length) return;
+				ftruncateSync(fd, lastNewline + 1);
+				this.log(`RLM ledger: truncated torn final line (${first.length - lastNewline - 1} bytes)`);
+			} finally {
+				closeSync(fd);
+			}
 		} catch {
 			// Leave the tail for the reader's torn-line tolerance.
 		}
