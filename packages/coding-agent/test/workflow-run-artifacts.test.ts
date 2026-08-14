@@ -166,6 +166,41 @@ try {
 		});
 	});
 
+	it("adopts a fully prepared terminal record left before the final CAS link", () => {
+		const { agentDir, project } = createFixture();
+		const pending = createWorkflowRunArtifact({
+			cwd: project,
+			agentDir,
+			runId: "pending-terminal",
+			workflowName: "pending-terminal",
+			source: "source",
+		});
+		const paths = getWorkflowRunArtifactPaths(project, "pending-terminal", agentDir);
+		writeFileSync(
+			join(paths.runDirectory, ".terminal.json.pending"),
+			JSON.stringify({
+				...pending,
+				status: "completed",
+				updatedAt: pending.createdAt,
+				completedAt: pending.createdAt,
+				result: { recovered: true },
+			}),
+		);
+
+		expect(() =>
+			updateWorkflowRunArtifact(
+				project,
+				"pending-terminal",
+				{ status: "failed", completedAt: pending.createdAt, error: "later writer" },
+				agentDir,
+			),
+		).toThrow("already terminal");
+		expect(loadWorkflowRunArtifact(project, "pending-terminal", agentDir)?.record).toMatchObject({
+			status: "completed",
+			result: { recovered: true },
+		});
+	});
+
 	it("rejects unsafe, duplicate, oversized, invalid, and non-serializable artifacts", () => {
 		const { root, agentDir, project } = createFixture();
 		const create = (runId: string) =>
@@ -400,7 +435,11 @@ describe("workflow artifact journal", () => {
 
 		const journalPath = getWorkflowRunArtifactPaths(project, "journal-run", agentDir).journalPath;
 		expect(lstatSync(journalPath).mode & 0o777).toBe(0o700);
-		expect(readdirSync(journalPath).sort()).toEqual([
+		expect(
+			readdirSync(journalPath)
+				.filter((name) => !name.startsWith("."))
+				.sort(),
+		).toEqual([
 			"000000000001.completed.json",
 			"000000000001.started.json",
 			"000000000002.started.json",
@@ -419,6 +458,44 @@ describe("workflow artifact journal", () => {
 		const extended = createWorkflowJournal(project, "journal-run", agentDir);
 		expect(extended.replay({ sequence: 2, key: "agent-b", occurrence: 0 })).toMatchObject({ result: { value: "B" } });
 		expect(extended.entries()).toHaveLength(3);
+	});
+
+	it("adopts fully prepared journal records left before their final CAS links", () => {
+		const { agentDir, project } = createFixture();
+		createWorkflowRunArtifact({
+			cwd: project,
+			agentDir,
+			runId: "pending-journal",
+			workflowName: "journal",
+			source: "source",
+		});
+		const journalPath = getWorkflowRunArtifactPaths(project, "pending-journal", agentDir).journalPath;
+		const identity = { sequence: 1, key: "agent-a", occurrence: 0 };
+		writeFileSync(
+			join(journalPath, ".000000000001.started.json.pending"),
+			JSON.stringify({
+				...identity,
+				version: 1,
+				event: "started",
+				recordedAt: "2026-01-01T00:00:00.000Z",
+			}),
+		);
+		const journal = createWorkflowJournal(project, "pending-journal", agentDir);
+		journal.start(identity);
+		writeFileSync(
+			join(journalPath, ".000000000001.completed.json.pending"),
+			JSON.stringify({
+				...identity,
+				version: 1,
+				event: "completed",
+				result: { recovered: true },
+				recordedAt: "2026-01-01T00:00:01.000Z",
+			}),
+		);
+		journal.record({ ...identity, result: { later: true } });
+
+		const restored = createWorkflowJournal(project, "pending-journal", agentDir);
+		expect(restored.replay(identity)).toMatchObject({ result: { recovered: true } });
 	});
 
 	it("fails closed on corrupt records and completions without matching starts", () => {

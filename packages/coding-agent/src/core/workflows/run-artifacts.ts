@@ -378,10 +378,18 @@ class FileWorkflowJournal implements WorkflowJournal {
 		try {
 			this.#createRecord(this.#recordPath(entry.sequence, "completed"), record);
 		} catch (error) {
-			if (isErrno(error, "EEXIST")) {
-				throw new Error(`Workflow journal sequence ${entry.sequence} is already completed.`);
+			if (!isErrno(error, "EEXIST")) throw error;
+			this.#load();
+			const completed = this.#records.find(
+				(candidate): candidate is PersistedWorkflowJournalCompletion =>
+					candidate.event === "completed" && candidate.sequence === entry.sequence,
+			);
+			if (!completed || completed.key !== entry.key || completed.occurrence !== entry.occurrence) {
+				throw new Error(
+					`Workflow journal sequence ${entry.sequence} is already completed with a different identity.`,
+				);
 			}
-			throw error;
+			return;
 		}
 		this.#load();
 	}
@@ -543,43 +551,97 @@ function ensureChildDirectory(parent: string, name: string): string {
 }
 
 function atomicCreateFile(path: string, contents: string, validateParent: () => void): void {
-	const temporaryPath = join(dirname(path), `.${parse(path).base}.pending`);
+	const base = parse(path).base;
+	const temporaryPath = join(dirname(path), `.${base}.stage.${process.pid}.${randomUUID()}`);
+	const pendingPath = join(dirname(path), `.${base}.pending`);
 	let descriptor: number | undefined;
-	let created = false;
-	let installed = false;
+	let createdStage = false;
+	let createdPending = false;
+	let installedTarget = false;
 	let operationError: unknown;
 	try {
 		validateParent();
+		cleanupStaleAtomicStages(dirname(path), base, validateParent);
 		descriptor = openSync(temporaryPath, "wx", 0o600);
-		created = true;
+		createdStage = true;
 		validateParent();
 		writeFileSync(descriptor, contents, "utf8");
 		fsyncSync(descriptor);
 		closeSync(descriptor);
 		descriptor = undefined;
 		validateParent();
-		linkSync(temporaryPath, path);
-		installed = true;
-		fsyncDirectory(dirname(path));
+		try {
+			linkSync(temporaryPath, pendingPath);
+			createdPending = true;
+			fsyncDirectory(dirname(path));
+		} catch (error) {
+			if (!isErrno(error, "EEXIST")) throw error;
+		}
+		try {
+			linkSync(pendingPath, path);
+			installedTarget = true;
+			fsyncDirectory(dirname(path));
+		} catch (error) {
+			if (
+				!isErrno(error, "EEXIST") ||
+				!createdPending ||
+				readBoundedTextFile(path, Buffer.byteLength(contents, "utf8")) !== contents
+			) {
+				throw error;
+			}
+			installedTarget = true;
+		}
+		if (!createdPending) operationError = errnoError("EEXIST", `Another writer prepared ${path}.`);
 	} catch (error) {
-		operationError = error;
+		operationError ??= error;
 	}
 	if (descriptor !== undefined) {
 		try {
 			closeSync(descriptor);
 		} catch (error) {
-			if (!installed) operationError ??= error;
+			operationError ??= error;
 		}
 	}
-	if (created) {
+	if (createdStage) {
 		try {
 			validateParent();
 			rmSync(temporaryPath, { force: true });
 		} catch (error) {
-			if (!installed) operationError ??= error;
+			if (!installedTarget) operationError ??= error;
 		}
 	}
 	if (operationError !== undefined) throw operationError;
+}
+
+function cleanupStaleAtomicStages(directory: string, base: string, validateParent: () => void): void {
+	const prefix = `.${base}.stage.`;
+	let entries: Dirent<string>[];
+	try {
+		entries = readdirSync(directory, { withFileTypes: true, encoding: "utf8" });
+	} catch (error) {
+		if (isErrno(error, "ENOENT")) return;
+		throw error;
+	}
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.startsWith(prefix)) continue;
+		const ownerPid = Number(entry.name.slice(prefix.length).split(".", 1)[0]);
+		if (Number.isSafeInteger(ownerPid) && ownerPid !== process.pid && isProcessAlive(ownerPid)) continue;
+		validateParent();
+		rmSync(join(directory, entry.name), { force: true });
+	}
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return !isErrno(error, "ESRCH");
+	}
+}
+
+function errnoError(code: string, message: string): Error & { code: string } {
+	return Object.assign(new Error(message), { code });
 }
 
 function atomicWriteFile(path: string, contents: string, validateParent: () => void): void {
