@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
 import { isOrphanProcessIdentityCurrent, readActiveOrphanProcesses } from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
-import { DaemonClient } from "../modes/daemon/daemon-client.js";
+import { createDaemonShutdownCommand, DaemonClient } from "../modes/daemon/daemon-client.js";
 import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
@@ -1243,7 +1243,8 @@ async function shutdownDaemon(socketPath: string, force: boolean): Promise<boole
 		return false;
 	}
 	try {
-		await client.request({ type: "shutdown", force }, 1500);
+		const hello = await client.waitForHello(2000).catch(() => undefined);
+		await client.request(createDaemonShutdownCommand(hello, force), 1500);
 	} catch {
 		// The daemon may still stop; the connectivity check below is the source of truth.
 	} finally {

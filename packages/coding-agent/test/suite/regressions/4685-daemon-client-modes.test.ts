@@ -8,7 +8,7 @@ import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../../
 import { ENV_AGENT_DIR } from "../../../src/config.js";
 import type { AutonomousRuntimeState } from "../../../src/core/autonomous.js";
 import type { DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
-import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { createDaemonShutdownCommand, DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js";
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
 import { RpcClient } from "../../../src/modes/rpc/rpc-client.js";
@@ -40,7 +40,8 @@ afterEach(async () => {
 		const client = new DaemonClient(socketPath);
 		try {
 			await client.connect(500);
-			await client.request({ type: "shutdown" }, 5000);
+			const hello = await client.waitForHello(1500).catch(() => undefined);
+			await client.request(createDaemonShutdownCommand(hello), 5000);
 		} catch {
 			// The process may have exited before publishing its socket.
 		} finally {

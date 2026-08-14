@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR, getCronJobsPath } from "../../../src/config.js";
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
-import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { createDaemonShutdownCommand, DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import {
 	acquireDaemonSupervisorOwnership,
@@ -510,7 +510,7 @@ async function cleanupRegisteredProcesses(existingClient?: DaemonClient): Promis
 async function forceShutdownReachableSupervisor(socketPath: string, existingClient?: DaemonClient): Promise<void> {
 	if (existingClient?.isConnected) {
 		try {
-			await existingClient.request({ type: "shutdown", force: true }, 5000);
+			await existingClient.request(createDaemonShutdownCommand(existingClient.hello, true), 5000);
 			return;
 		} catch {
 			// Retry through a fresh connection before exact-identity process cleanup.
@@ -520,7 +520,7 @@ async function forceShutdownReachableSupervisor(socketPath: string, existingClie
 	try {
 		await cleanupClient.connect(1000);
 		await cleanupClient.waitForHello(2000);
-		await cleanupClient.request({ type: "shutdown", force: true }, 5000);
+		await cleanupClient.request(createDaemonShutdownCommand(cleanupClient.hello, true), 5000);
 	} catch {
 		// The exact-identity fallback handles an unreachable supervisor.
 	} finally {
@@ -554,7 +554,7 @@ async function stopSupervisor(handle: FixtureHandle, socketPath: string): Promis
 	try {
 		await client.connect(1000);
 		await client.waitForHello(2000);
-		await client.request({ type: "shutdown" }, 5000);
+		await client.request(createDaemonShutdownCommand(client.hello), 5000);
 	} finally {
 		client.close();
 	}
@@ -726,7 +726,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 			);
 			await connection.dispose();
 			connection = undefined;
-			await client.request({ type: "shutdown", force: true }, 10_000);
+			await client.request(createDaemonShutdownCommand(client.hello, true), 10_000);
 			client.close();
 			await waitForExit(legacyCleanup);
 			await waitForCleanupProcessExit(workerCleanupIdentity);

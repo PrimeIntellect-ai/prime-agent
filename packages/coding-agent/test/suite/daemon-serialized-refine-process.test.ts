@@ -33,7 +33,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../src/core/orphan-process-journal.js";
 import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../src/core/session-lease.js";
-import { DaemonClient } from "../../src/modes/daemon/daemon-client.js";
+import { createDaemonShutdownCommand, DaemonClient } from "../../src/modes/daemon/daemon-client.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
@@ -62,7 +62,8 @@ afterEach(async () => {
 		const client = new DaemonClient(socketPath);
 		try {
 			await client.connect(500);
-			await client.request({ type: "shutdown" }, 5000);
+			const hello = await client.waitForHello(1500).catch(() => undefined);
+			await client.request(createDaemonShutdownCommand(hello), 5000);
 		} catch {
 			// The process may have exited before publishing its socket.
 		} finally {

@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { appendRotatingLog, expandTildePath, getClientErrorLogPath, getDaemonLogPath, VERSION } from "../config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
 import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
-import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
+import { createDaemonShutdownCommand, DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
 import { isSessionSummaryBusy, type SessionSummary } from "../modes/daemon/daemon-session-list.js";
@@ -243,7 +243,7 @@ export async function shutdownConnectedDaemonAndWait(
 	let shutdownAccepted = false;
 	const expectedIdentity = processIdentityFromDaemonHello(hello);
 	try {
-		const response = await client.request({ type: "shutdown" }).catch(() => undefined);
+		const response = await client.request(createDaemonShutdownCommand(hello)).catch(() => undefined);
 		shutdownAccepted = response?.success === true;
 	} catch {
 		// A connect failure isn't treated as "gone"; waitForDaemonGone is the source of truth.
@@ -320,21 +320,24 @@ async function shutdownStaleDaemonIfNotBusy(socketPath: string): Promise<boolean
 		}
 	} catch {
 		// Couldn't reach it to inspect; don't send a blind shutdown, just verify below.
-	} finally {
-		client.close();
 	}
 
 	if (!connected) {
+		client.close();
 		return waitForDaemonGone(socketPath);
 	}
 	if (hasBusySessions) {
+		client.close();
 		logDaemonLaunch(`refusing to replace stale daemon on ${socketPath}: busy session(s) present`);
 		return false;
 	}
 	logDaemonLaunch(
 		`replacing stale daemon on ${socketPath} (idle): ${loadedSessionCount} loaded session(s) will reload`,
 	);
-	return shutdownDaemonAndWait(socketPath);
+	// Shut down over the same connection whose handshake the client observed:
+	// authority must never be copied from a separate probe connection because
+	// that would reintroduce a time-of-check / time-of-use race.
+	return shutdownConnectedDaemonAndWait(client, socketPath, 5000, client.hello);
 }
 
 async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promise<void> {

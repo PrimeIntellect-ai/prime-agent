@@ -138,6 +138,15 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
 	});
 
+	it("adds supervisor shutdown authority at its introducing schema revision", () => {
+		// Revision 17 adds the optional shutdown authority wire field. The
+		// command stays legacy-compatible (no minSchemaRevision gate) so a new
+		// client may send the authority-optional shape to a legacy supervisor;
+		// only the new supervisor enforces the field.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(17);
+		expect(DAEMON_COMMAND_COMPATIBILITY.shutdown).toEqual({ minProtocol: 7 });
+	});
+
 	it("keeps refine failure events backward-compatible on the existing session event channel", () => {
 		const event: DaemonOutbound = {
 			type: "session_event",

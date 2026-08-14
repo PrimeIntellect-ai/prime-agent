@@ -9,7 +9,7 @@ import {
 } from "../../../src/cli/daemon-update-restart.js";
 import { ENV_AGENT_DIR } from "../../../src/config.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
-import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { createDaemonShutdownCommand, DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import type { DaemonResponse } from "../../../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import { createHarness, type Harness } from "../harness.js";
@@ -231,7 +231,7 @@ async function stopDaemon(socketPath: string): Promise<void> {
 	try {
 		await client.connect(500);
 		await client.waitForHello(2000);
-		await client.request({ type: "shutdown", force: true }, 5000).catch(() => undefined);
+		await client.request(createDaemonShutdownCommand(client.hello, true), 5000).catch(() => undefined);
 	} catch {
 		return;
 	} finally {

@@ -14,7 +14,11 @@ import {
 } from "../src/core/session-lease.js";
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
-import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
+import {
+	createDaemonShutdownCommand,
+	DaemonClient,
+	getDaemonSocketCloseReason,
+} from "../src/modes/daemon/daemon-client.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { DaemonWorkerDescriptor } from "../src/modes/daemon/daemon-worker-protocol.js";
 
@@ -33,7 +37,8 @@ afterEach(async () => {
 		const client = new DaemonClient(socketPath);
 		try {
 			await client.connect(250);
-			await client.request({ type: "shutdown" }, 2000);
+			const hello = await client.waitForHello(1000).catch(() => undefined);
+			await client.request(createDaemonShutdownCommand(hello), 2000);
 		} catch {
 			// Already gone.
 		} finally {
@@ -68,6 +73,11 @@ afterEach(async () => {
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+/** Public shutdown command for the supervisor observed by this client's handshake. */
+function shutdownCommand(client: DaemonClient, force?: boolean): ReturnType<typeof createDaemonShutdownCommand> {
+	return createDaemonShutdownCommand(client.hello, force);
+}
 
 function tempDir(): string {
 	const directory = mkdtempSync(join(tmpdir(), "prime-daemon-supervisor-test-"));
@@ -394,7 +404,7 @@ describe("daemon supervisor resident workers", () => {
 		});
 		expect(countWorkerDescriptors(agentDir)).toBe(1);
 
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 	}, 60_000);
@@ -493,7 +503,7 @@ describe("daemon supervisor resident workers", () => {
 		);
 		expect((await readSessionInfo(sessionFile))?.state?.status).not.toBe("archived");
 
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 	}, 60_000);
@@ -541,7 +551,7 @@ describe("daemon supervisor resident workers", () => {
 			"Adopted client-owned worker descriptor was not removed",
 		);
 		const replacementClient = await connectEventually(socketPath);
-		await replacementClient.request({ type: "shutdown" });
+		await replacementClient.request(shutdownCommand(replacementClient));
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	}, 60_000);
@@ -590,7 +600,7 @@ describe("daemon supervisor resident workers", () => {
 				deliveryStatus: "queued",
 			},
 		});
-		const shutdown = await client.request({ type: "shutdown" }, 10_000);
+		const shutdown = await client.request(shutdownCommand(client), 10_000);
 		expect(shutdown.success).toBe(true);
 		client.close();
 		await waitForSocketGone(socketPath);
@@ -644,7 +654,7 @@ describe("daemon supervisor resident workers", () => {
 		).toEqual([]);
 		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
 
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -694,7 +704,7 @@ describe("daemon supervisor resident workers", () => {
 			),
 		).toEqual([]);
 
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -721,7 +731,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(readSupervisorConfig(agentDir)).toMatchObject({
 			defaultSessionConfig: { sessionDir, noTools: true },
 		});
-		await replacementClient.request({ type: "shutdown" });
+		await replacementClient.request(shutdownCommand(replacementClient));
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -747,7 +757,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(listed.success).toBe(true);
 		expect(requireSessionList(listed.success ? listed.data : undefined)).toEqual([]);
 
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -797,7 +807,7 @@ describe("daemon supervisor resident workers", () => {
 		const observer = await connectEventually(socketPath, supervisor);
 		const observerClosed = new Promise<Error>((resolveClose) => observer.onClose(resolveClose));
 
-		expect((await client.request({ type: "shutdown" })).success).toBe(true);
+		expect((await client.request(shutdownCommand(client))).success).toBe(true);
 		client.close();
 		expect(getDaemonSocketCloseReason(await observerClosed)).toBe("shutdown");
 		observer.close();
@@ -817,7 +827,7 @@ describe("daemon supervisor resident workers", () => {
 				(session) => session.activeSessionId || session.workerPid,
 			),
 		).toEqual([]);
-		await replacementClient.request({ type: "shutdown" });
+		await replacementClient.request(shutdownCommand(replacementClient));
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	}, 30_000);
@@ -881,7 +891,7 @@ describe("daemon supervisor resident workers", () => {
 			20_000,
 		);
 
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -958,7 +968,7 @@ describe("daemon supervisor resident workers", () => {
 		});
 		expect(attached.success).toBe(true);
 
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 		if (resumedSummary.workerPid) {
@@ -1045,7 +1055,7 @@ describe("daemon supervisor resident workers", () => {
 		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
 		expect(cronStore.list().find((job) => job.id === heartbeat.id)).toMatchObject({ status: "cancelled" });
 
-		await replacementClient.request({ type: "shutdown" });
+		await replacementClient.request(shutdownCommand(replacementClient));
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -1108,7 +1118,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(
 			new Set(requireSessionList(adopted.success ? adopted.data : undefined).map((summary) => summary.workerPid)),
 		).toEqual(new Set(pids));
-		await replacementClient.request({ type: "shutdown" });
+		await replacementClient.request(shutdownCommand(replacementClient));
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 		await Promise.all(
@@ -1245,7 +1255,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(
 			new Set(requireSessionList(adopted.success ? adopted.data : undefined).map((summary) => summary.workerPid)),
 		).toEqual(new Set(pids));
-		await replacementClient.request({ type: "shutdown" });
+		await replacementClient.request(shutdownCommand(replacementClient));
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 		await Promise.all(
@@ -1431,7 +1441,7 @@ describe("daemon supervisor resident workers", () => {
 		await expect(connection.getState()).resolves.toMatchObject({ sessionId: createdSummary.sessionId });
 
 		await connection.dispose();
-		await client.request({ type: "shutdown" });
+		await client.request(shutdownCommand(client));
 		client.close();
 		await waitForSocketGone(socketPath);
 		await waitForProcessGone(recovered.workerPid);
@@ -1499,7 +1509,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(store.list().find((candidate) => candidate.id === job.id)).toBeDefined();
 
 		const replacement = await connectEventually(socketPath);
-		await replacement.request({ type: "shutdown" });
+		await replacement.request(shutdownCommand(replacement));
 		replacement.close();
 		await waitForSocketGone(socketPath);
 		await waitForProcessGone(summary.workerPid);

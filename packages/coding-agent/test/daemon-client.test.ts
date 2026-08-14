@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
+import {
+	createDaemonShutdownCommand,
+	DaemonClient,
+	type DaemonHello,
+	getDaemonSocketCloseReason,
+} from "../src/modes/daemon/daemon-client.js";
 import {
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_PROTOCOL_VERSION,
@@ -927,3 +932,69 @@ async function captureRejection(promise: Promise<void>): Promise<Error> {
 	}
 	throw new Error("Expected daemon client connect attempt to reject");
 }
+
+describe("createDaemonShutdownCommand", () => {
+	const modernHello: DaemonHello = {
+		type: "daemon_hello" as const,
+		socketPath: "/tmp/d.sock",
+		protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+		schemaId: "protocol-7-schema-17-abc",
+		schemaRevision: 17,
+		appVersion: "1.0.0",
+		supervisorGeneration: "gen-1",
+		supervisorOwnerToken: "token-1",
+		supervisorPid: 4242,
+		supervisorProcessStartId: "start-1",
+		supervisorSocketPath: "/tmp/d.sock",
+		clientId: "client-1",
+		serverCapabilities: [],
+	};
+
+	it("derives the full authority from a modern handshake", () => {
+		expect(createDaemonShutdownCommand(modernHello)).toEqual({
+			type: "shutdown",
+			authority: {
+				supervisorGeneration: "gen-1",
+				supervisorOwnerToken: "token-1",
+				supervisorPid: 4242,
+				supervisorProcessStartId: "start-1",
+				supervisorSocketPath: "/tmp/d.sock",
+			},
+		});
+	});
+
+	it("propagates force only when requested", () => {
+		expect(createDaemonShutdownCommand(modernHello, true)).toMatchObject({ force: true });
+		expect(createDaemonShutdownCommand(modernHello, false)).not.toHaveProperty("force");
+		expect(createDaemonShutdownCommand(modernHello)).not.toHaveProperty("force");
+	});
+
+	it("omits authority for a legacy handshake lacking any required identity component", () => {
+		expect(createDaemonShutdownCommand(undefined)).toEqual({ type: "shutdown" });
+		const { supervisorGeneration: _generation, ...legacyHello } = modernHello;
+		expect(createDaemonShutdownCommand(legacyHello)).toEqual({ type: "shutdown" });
+	});
+
+	it("omits authority when the handshake lacks the owner token or pid", () => {
+		expect(createDaemonShutdownCommand({ ...modernHello, supervisorOwnerToken: undefined })).toEqual({
+			type: "shutdown",
+		});
+		expect(createDaemonShutdownCommand({ ...modernHello, supervisorPid: undefined })).toEqual({
+			type: "shutdown",
+		});
+		expect(createDaemonShutdownCommand({ ...modernHello, supervisorPid: 0 })).toEqual({ type: "shutdown" });
+	});
+
+	it("omits supervisorProcessStartId when the handshake omits it", () => {
+		const { supervisorProcessStartId: _startId, ...withoutStartId } = modernHello;
+		expect(createDaemonShutdownCommand(withoutStartId)).toEqual({
+			type: "shutdown",
+			authority: {
+				supervisorGeneration: "gen-1",
+				supervisorOwnerToken: "token-1",
+				supervisorPid: 4242,
+				supervisorSocketPath: "/tmp/d.sock",
+			},
+		});
+	});
+});

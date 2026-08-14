@@ -3,7 +3,21 @@ import { SessionImportFileNotFoundError } from "../../core/session-import-errors
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { DaemonErrorInfo, DaemonResponse } from "./daemon-protocol.js";
 
+export class DaemonShutdownAuthorityError extends Error {
+	readonly code = "shutdown_authority_rejected" as const;
+
+	constructor() {
+		super(
+			"Daemon shutdown authority rejected: the connection's supervisor identity does not match the running supervisor",
+		);
+		this.name = "DaemonShutdownAuthorityError";
+	}
+}
+
 export function serializeDaemonError(error: unknown): DaemonErrorInfo | undefined {
+	if (error instanceof DaemonShutdownAuthorityError) {
+		return { code: error.code };
+	}
 	if (error instanceof MissingSessionCwdError) {
 		return { code: "missing_session_cwd", issue: error.issue };
 	}
@@ -30,6 +44,9 @@ export function deserializeDaemonError(response: Extract<DaemonResponse, { succe
 	}
 	if (errorInfo?.code === "session_already_active") {
 		return new SessionAlreadyActiveError(errorInfo.sessionPath, errorInfo.activeSessionId);
+	}
+	if (errorInfo?.code === "shutdown_authority_rejected") {
+		return new DaemonShutdownAuthorityError();
 	}
 	return new Error(response.error);
 }

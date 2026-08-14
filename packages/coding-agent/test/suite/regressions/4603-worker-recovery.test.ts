@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR } from "../../../src/config.js";
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
-import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { createDaemonShutdownCommand, DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import type { DaemonResponse } from "../../../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import {
@@ -809,7 +809,7 @@ describe("ENG-4603 worker recovery convergence", () => {
 			}),
 		);
 		await connection.dispose();
-		await successorClient.request({ type: "shutdown", force: true }, 10_000);
+		await successorClient.request(createDaemonShutdownCommand(successorClient.hello, true), 10_000);
 		successorClient.close();
 		predecessorClient.close();
 		await waitForExit(successor);

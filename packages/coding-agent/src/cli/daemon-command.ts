@@ -8,7 +8,11 @@ import { expandTildePath } from "../config.js";
 import type { AgentSessionEvent } from "../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js";
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
-import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
+import {
+	createDaemonShutdownCommand,
+	DaemonClient,
+	type DaemonClientMessageListener,
+} from "../modes/daemon/daemon-client.js";
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
@@ -260,7 +264,8 @@ async function runShutdown(client: DaemonClient, args: string[], json: boolean):
 		}
 		throw new Error(`Unknown shutdown option: ${arg}`);
 	}
-	await printResponseData(client, { type: "shutdown", force }, json);
+	const hello = await client.waitForHello(3000).catch(() => undefined);
+	await printResponseData(client, createDaemonShutdownCommand(hello, force), json);
 }
 
 async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {

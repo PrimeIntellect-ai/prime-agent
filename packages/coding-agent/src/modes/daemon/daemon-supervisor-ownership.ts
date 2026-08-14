@@ -315,7 +315,7 @@ export async function acquireDaemonSupervisorOwnership(
 		generation: options.generation,
 		pid: process.pid,
 		...(processStartId ? { processStartId } : {}),
-		socketPath: normalizeSocketPath(options.socketPath),
+		socketPath: normalizeDaemonSupervisorSocketPath(options.socketPath),
 		descriptorDir: canonicalizeFilesystemPath(options.descriptorDir),
 		agentDir: canonicalizeFilesystemPath(options.agentDir),
 		appVersion: options.appVersion,
@@ -377,7 +377,7 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		!current ||
 		current.pid !== owner.pid ||
 		current.processStartId !== owner.processStartId ||
-		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
+		current.socketPath !== normalizeDaemonSupervisorSocketPath(owner.socketPath) ||
 		!isProcessAlive(current.pid)
 	) {
 		throw new DaemonSupervisorOwnershipLostError(owner.generation);
@@ -431,7 +431,7 @@ export async function persistDaemonStartupFenceFromOwner(
 	const fenceDirectory = resolve(registryDir, "startup-fences");
 	mkdirSync(fenceDirectory, { recursive: true, mode: 0o700 });
 	const path = startupFencePath(fenceDirectory, socketPath);
-	const normalizedSocketPath = normalizeSocketPath(socketPath);
+	const normalizedSocketPath = normalizeDaemonSupervisorSocketPath(socketPath);
 	return withDaemonSupervisorRegistryGuard(registryDir, () => {
 		const owners = listOwnerDirectories(registryDir).flatMap((directory) => {
 			const owner = readOwnerRecordForScope(directory, (scope) => scope.socketPath === normalizedSocketPath);
@@ -455,7 +455,7 @@ export async function persistDaemonStartupFenceFromOwner(
 			hello.supervisorGeneration !== owner.generation ||
 			hello.supervisorOwnerToken !== owner.token ||
 			typeof helloSocketPath !== "string" ||
-			normalizeSocketPath(helloSocketPath) !== owner.socketPath ||
+			normalizeDaemonSupervisorSocketPath(helloSocketPath) !== owner.socketPath ||
 			typeof owner.processStartId !== "string" ||
 			hello.supervisorProcessStartId !== owner.processStartId
 		) {
@@ -491,7 +491,7 @@ export async function waitForDaemonStartupFence(
 		if (!fence) {
 			return;
 		}
-		if (fence.socketPath !== normalizeSocketPath(socketPath)) {
+		if (fence.socketPath !== normalizeDaemonSupervisorSocketPath(socketPath)) {
 			throw new Error(`Daemon startup fence does not match ${socketPath}`);
 		}
 		if (!isProcessIdentityAlive(fence)) {
@@ -545,7 +545,13 @@ function isProcessAlive(pid: number): boolean {
 	return true;
 }
 
-function normalizeSocketPath(socketPath: string): string {
+/**
+ * Normalize a supervisor socket path for durable-record and authority
+ * comparisons. The same normalization is applied when the durable owner is
+ * published and when a shutdown authority is validated, so a client cannot
+ * dodge the match with a non-canonical spelling.
+ */
+export function normalizeDaemonSupervisorSocketPath(socketPath: string): string {
 	if (process.platform === "win32") {
 		return socketPath.toLowerCase();
 	}
@@ -794,7 +800,7 @@ function writeJsonAtomically(path: string, value: unknown): void {
 }
 
 function startupFencePath(directory: string, socketPath: string): string {
-	const key = createHash("sha256").update(normalizeSocketPath(socketPath)).digest("hex");
+	const key = createHash("sha256").update(normalizeDaemonSupervisorSocketPath(socketPath)).digest("hex");
 	return resolve(directory, `${key}.json`);
 }
 
