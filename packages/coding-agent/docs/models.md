@@ -13,6 +13,7 @@ Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.prime
 - [Per-model Overrides](#per-model-overrides)
 - [Anthropic Messages Compatibility](#anthropic-messages-compatibility)
 - [OpenAI Compatibility](#openai-compatibility)
+- [OpenAI Responses Compatibility](#openai-responses-compatibility)
 
 ## Minimal Example
 
@@ -468,6 +469,32 @@ Vercel AI Gateway example:
           }
         }
       ]
+    }
+  }
+}
+```
+
+
+## OpenAI Responses Compatibility
+
+For providers or proxies using `api: "openai-responses"`, `compat` describes what the endpoint supports.
+
+| Field | Description |
+|-------|-------------|
+| `sendSessionIdHeader` | Send the OpenAI `session_id` cache-affinity header from the session id when caching is enabled. Default: `true`. |
+| `supportsLongCacheRetention` | Endpoint accepts `prompt_cache_retention: "24h"` when cache retention is `long`. Default: `true`. |
+| `supportsFastMode` | Endpoint serves Fast mode (`service_tier: "priority"`), which makes `/fast` available for the model. Default: `false`. |
+
+`supportsFastMode` is for a proxy or gateway that forwards `service_tier` to a ChatGPT-authenticated upstream. Built-in ChatGPT models (GPT-5.4, GPT-5.5, GPT-5.6) already report Fast support and do not need it. Setting it on an endpoint that ignores `service_tier` still applies the Fast cost multiplier to reported usage, so only enable it where the upstream honors the field.
+
+```json
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "modelOverrides": {
+        "gpt-5.5": { "compat": { "supportsFastMode": true } }
+      }
     }
   }
 }
