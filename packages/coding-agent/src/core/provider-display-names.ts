@@ -1,1 +1,20 @@
-// provider-display-names.ts
+export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  "amazon-bedrock": "Amazon Bedrock",
+  anthropic: "Anthropic",
+  "azure-openai": "Azure OpenAI",
+  chutes: "Chutes",
+  cloudflare: "Cloudflare",
+  aiand: "ai&",
+  google: "Google",
+  "google-vertex": "Google Vertex",
+  mistral: "Mistral",
+  openai: "OpenAI",
+  "openai-codex": "OpenAI Codex",
+  openrouter: "OpenRouter",
+  "prime-inference": "Prime Inference",
+  "github-copilot": "GitHub Copilot",
+  "vercel-ai-gateway": "Vercel AI Gateway",
+  huggingface: "Hugging Face",
+  moonshotai: "Moonshot AI",
+  zen: "Zen",
+};
