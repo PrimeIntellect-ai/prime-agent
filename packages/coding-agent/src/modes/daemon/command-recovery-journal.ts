@@ -206,11 +206,17 @@ export class CommandRecoveryJournal {
 			closeSync(descriptor);
 		}
 		renameSync(tempPath, this.path);
-		const directoryDescriptor = openSync(dirname(this.path), "r");
-		try {
-			fsyncSync(directoryDescriptor);
-		} finally {
-			closeSync(directoryDescriptor);
+		if (process.platform !== "win32") {
+			// Durability belt-and-suspenders: fsync the parent directory so the
+			// rename itself is persisted, not just the file contents. Windows/NTFS
+			// rejects opening a directory with a file descriptor for this (EPERM on
+			// every compact); NTFS's own metadata journaling covers this case there.
+			const directoryDescriptor = openSync(dirname(this.path), "r");
+			try {
+				fsyncSync(directoryDescriptor);
+			} finally {
+				closeSync(directoryDescriptor);
+			}
 		}
 		this.recordCount = records.length;
 	}
