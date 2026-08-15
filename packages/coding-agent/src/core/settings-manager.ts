@@ -1,5 +1,17 @@
 import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import {
+	closeSync,
+	existsSync,
+	fsyncSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -217,6 +229,26 @@ export interface SettingsError {
 	error: Error;
 }
 
+function writeSettingsAtomically(path: string, content: string): void {
+	const directory = dirname(path);
+	const temporaryDirectory = mkdtempSync(join(directory, ".settings-"));
+	const temporaryPath = join(temporaryDirectory, "settings.json");
+	const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
+
+	try {
+		const descriptor = openSync(temporaryPath, "wx", mode);
+		try {
+			writeFileSync(descriptor, content, "utf-8");
+			fsyncSync(descriptor);
+		} finally {
+			closeSync(descriptor);
+		}
+		renameSync(temporaryPath, path);
+	} finally {
+		rmSync(temporaryDirectory, { recursive: true, force: true });
+	}
+}
+
 export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
@@ -274,7 +306,7 @@ export class FileSettingsStorage implements SettingsStorage {
 				if (!release) {
 					release = this.acquireLockSyncWithRetry(path);
 				}
-				writeFileSync(path, next, "utf-8");
+				writeSettingsAtomically(path, next);
 			}
 		} finally {
 			if (release) {

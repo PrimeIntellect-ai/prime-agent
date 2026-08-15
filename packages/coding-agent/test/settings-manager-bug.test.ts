@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -143,5 +143,17 @@ describe("SettingsManager - External Edit Preservation", () => {
 
 		const savedProjectSettings = JSON.parse(readFileSync(projectSettingsPath, "utf-8"));
 		expect(savedProjectSettings.extensions).toEqual(["./in-memory-extension.ts"]);
+	});
+
+	it("keeps settings file permissions while replacing its contents", async () => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }), { mode: 0o640 });
+
+		const manager = SettingsManager.create(projectDir, agentDir);
+		manager.setTheme("light");
+		await manager.flush();
+
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toMatchObject({ theme: "light" });
+		expect(statSync(settingsPath).mode & 0o777).toBe(0o640);
 	});
 });
