@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { FORK_SERVER_SCRIPT } from "./fork-server-script.js";
+import { wrapKernelSpawn } from "./spawn-wrapper.js";
 
 const READY_TIMEOUT_MS = 30_000;
 const SPAWN_TIMEOUT_MS = 10_000;
@@ -172,7 +173,8 @@ class ForkServer {
 			server.listen(socketPath, () => {
 				// The template only imports; its own cwd/env are irrelevant since each
 				// forked child applies the per-kernel cwd/env itself. Inherit the daemon's.
-				const proc = spawn(this.params.python, ["-c", FORK_SERVER_SCRIPT, socketPath], {
+				const launch = wrapKernelSpawn(this.params.python, ["-c", FORK_SERVER_SCRIPT, socketPath]);
+				const proc = spawn(launch.command, launch.args, {
 					env: this.launchEnv,
 					stdio: ["ignore", "ignore", "pipe"],
 				});

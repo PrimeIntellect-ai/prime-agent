@@ -10,6 +10,7 @@ import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
+import { wrapKernelSpawn } from "./spawn-wrapper.js";
 import {
 	buildListNamesCode,
 	buildRestoreCode,
@@ -720,7 +721,8 @@ export class KernelManager {
 		}
 
 		if (!forked) {
-			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
+			const launch = wrapKernelSpawn(python, ["-m", "ipykernel_launcher", "-f", connection.path]);
+			const kernel = spawn(launch.command, launch.args, {
 				cwd: this.options.cwd,
 				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
 				stdio: ["ignore", "pipe", "pipe"],
