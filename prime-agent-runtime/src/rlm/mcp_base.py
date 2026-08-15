@@ -263,7 +263,7 @@ class McpIntegration:
                     t.name: {
                         "name": t.name,
                         "description": getattr(t, "description", "") or "",
-                        "inputSchema": getattr(t, "inputSchema", None) or {},
+                        "inputSchema": _tool_input_schema(t),
                     }
                     for t in resp.tools
                 }
@@ -301,6 +301,20 @@ class McpIntegration:
             desc = self._tools[name].get("description") or ""
             _call.__doc__ = f"{desc}\n\nArguments (JSON Schema):\n{json.dumps(schema, indent=2)}"
         return _call
+
+
+def _tool_input_schema(tool: Any) -> dict[str, Any]:
+    """Return a tool's JSON Schema across mcp SDK versions.
+
+    The SDK renamed ``Tool.inputSchema`` to ``Tool.input_schema`` in 2.0. Reading
+    only the camelCase name silently yields ``{}`` on >=2.0, which strips every
+    tool's argument schema from ``list_tools()`` and ``help()``.
+    """
+    for attr in ("input_schema", "inputSchema"):
+        schema = getattr(tool, attr, None)
+        if isinstance(schema, dict) and schema:
+            return schema
+    return {}
 
 
 def _parse_result(result: Any) -> Any:

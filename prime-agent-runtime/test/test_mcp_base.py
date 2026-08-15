@@ -25,6 +25,10 @@ class _FakeSession:
         self._result = result
         self.calls = []
 
+    #: Attribute the fake Tool exposes its schema under. The mcp SDK renamed
+    #: ``inputSchema`` to ``input_schema`` in 2.0; tests cover both spellings.
+    schema_attr = "input_schema"
+
     async def list_tools(self):
         Tool = type("Tool", (), {})
 
@@ -32,7 +36,7 @@ class _FakeSession:
             t = Tool()
             t.name = name
             t.description = desc
-            t.inputSchema = schema
+            setattr(t, self.schema_attr, schema)
             return t
 
         resp = type("Resp", (), {})()
@@ -168,6 +172,47 @@ class McpIntegrationTest(unittest.TestCase):
             out = _run(integration.list_issues(team="Eng"))
         self.assertEqual(out, {"issues": [1, 2]})
         self.assertEqual(session.calls, [("list_issues", {"team": "Eng"})])
+
+    def test_list_tools_exposes_schema_from_sdk2_snake_case(self):
+        """mcp SDK >=2.0 names the field input_schema; the schema must survive."""
+        schema = {
+            "type": "object",
+            "properties": {"componentName": {"type": "string"}},
+            "required": ["componentName"],
+        }
+        session = _FakeSession(tools=[("get_meta", "Get metadata", schema)], result=None)
+        session.schema_attr = "input_schema"
+        self._write_auth(
+            {"type": "oauth", "access": "t", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        with self._patch_session(session):
+            tools = _run(_Integration().list_tools())
+        self.assertEqual(tools[0]["inputSchema"], schema)
+
+    def test_list_tools_exposes_schema_from_legacy_camel_case(self):
+        """mcp SDK <2.0 named the field inputSchema; keep reading it."""
+        schema = {"type": "object", "properties": {"team": {"type": "string"}}}
+        session = _FakeSession(tools=[("list_issues", "List issues", schema)], result=None)
+        session.schema_attr = "inputSchema"
+        self._write_auth(
+            {"type": "oauth", "access": "t", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        with self._patch_session(session):
+            tools = _run(_Integration().list_tools())
+        self.assertEqual(tools[0]["inputSchema"], schema)
+
+    def test_bound_tool_docstring_carries_schema(self):
+        """help(tool) must render real arguments, not an empty schema."""
+        schema = {"type": "object", "properties": {"componentName": {"type": "string"}}}
+        session = _FakeSession(tools=[("get_meta", "Get metadata", schema)], result=None)
+        self._write_auth(
+            {"type": "oauth", "access": "t", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        with self._patch_session(session):
+            integration = _Integration()
+            _run(integration.list_tools())
+            doc = integration.get_meta.__doc__ or ""
+        self.assertIn("componentName", doc)
 
     def test_unknown_tool_raises_with_available_list(self):
         session = _FakeSession(tools=[("list_issues", "", {})], result=None)
