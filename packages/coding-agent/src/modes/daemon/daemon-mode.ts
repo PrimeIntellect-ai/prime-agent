@@ -3987,7 +3987,8 @@ export class AgentDaemon {
 				if (this.hasActiveSideQuestionFor(client, state.activeSessionId)) {
 					throw new Error("A side question is already running for this client and session");
 				}
-				const run = startSideQuestion(
+				let run: SideQuestionRun;
+				run = startSideQuestion(
 					state.runtime.session.agent,
 					command.sideQuestionId,
 					command.question,
@@ -3997,7 +3998,7 @@ export class AgentDaemon {
 							activeSessionId: state.activeSessionId,
 							event,
 						});
-						if (event.status !== "running") {
+						if (event.status !== "running" && this.sideQuestionRuns.get(event.id)?.run === run) {
 							this.sideQuestionRuns.delete(event.id);
 						}
 					},
@@ -4013,7 +4014,9 @@ export class AgentDaemon {
 					activeSessionId: state.activeSessionId,
 				});
 				void run.done.catch((error) => {
-					this.sideQuestionRuns.delete(command.sideQuestionId);
+					if (this.sideQuestionRuns.get(command.sideQuestionId)?.run === run) {
+						this.sideQuestionRuns.delete(command.sideQuestionId);
+					}
 					this.log(
 						`side question ${command.sideQuestionId} failed: ${error instanceof Error ? error.message : String(error)}`,
 					);

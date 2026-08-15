@@ -884,6 +884,23 @@ describe("ENG-4509 side questions", () => {
 		}
 	});
 
+	it("emits completion at message end and again when the run settles", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage("settled answer")]);
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(harness.session.agent, "redundant-complete", "Will this settle?", (event) => {
+				events.push(event);
+			});
+			await run.done;
+
+			expect(events.filter((event) => event.status === "complete")).toHaveLength(2);
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "settled answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("emits a terminal event after a transient event delivery failure", async () => {
 		const harness = await createHarness();
 		try {

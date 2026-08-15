@@ -460,11 +460,20 @@ export function startSideQuestion(
 				return;
 			}
 			const nextAnswer = readAssistantText(event.message);
-			if (nextAnswer === answer) {
+			const completedMessage =
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.stopReason !== "error" &&
+				event.message.stopReason !== "aborted" &&
+				!isContextOverflow(event.message, model.contextWindow);
+			if (nextAnswer === answer && !completedMessage) {
 				return;
 			}
 			answer = nextAnswer;
-			await emit("running");
+			// The daemon writes side-question events directly to the attached client,
+			// so a reconnect between message_end and run settlement could otherwise
+			// leave the pane permanently "running". Emit completion at both boundaries.
+			await emit(completedMessage ? "complete" : "running");
 		});
 		try {
 			await sideAgent.prompt(prompt);

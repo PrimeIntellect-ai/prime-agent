@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added `compat.supportsFastMode` in `models.json` so `/fast` works for an `openai-responses` model served through a proxy or gateway that forwards `service_tier`.
+- Fixed `/btw` side panes remaining stuck in a running state when the final daemon event was lost during reconnect.
 - Fixed multi-turn `/btw` side conversations exhausting large model contexts by compacting their transient in-memory history while preserving recent follow-ups.
 - Fixed concurrent Python kernel bootstraps deleting active virtual environments by publishing leased immutable generations with bounded inactive retention, preserving compatible legacy and exact-path overrides, and included a bounded redacted stderr tail when bootstrap commands fail.
 - Fixed update-restored sessions becoming unresumable when a restart marker preceded an aborted tool result ([#1102](https://github.com/PrimeIntellect-ai/prime-agent/pull/1102) by [@junhoyeo](https://github.com/junhoyeo)).
