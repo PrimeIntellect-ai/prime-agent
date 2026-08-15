@@ -52,6 +52,7 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
+const LOCAL_CODEX_BEARER_HEADER = "x-prime-local-codex-bearer";
 
 const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"completed",
@@ -166,7 +167,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
 
-			const accountId = extractAccountId(apiKey);
+			const localBearer = usesLocalCodexBearer(model.baseUrl, model.headers, options?.headers);
+			const accountId = localBearer ? undefined : extractAccountId(apiKey);
 			let body = buildRequestBody(model, context, options);
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
@@ -182,7 +184,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				websocketRequestId,
 			);
 			const bodyJson = JSON.stringify(body);
-			const transport = options?.transport || "auto";
+			const transport = localBearer ? "sse" : options?.transport || "auto";
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
 			if (websocketDisabledForSession) {
 				recordWebSocketSseFallback(options?.sessionId);
@@ -352,7 +354,8 @@ export const compactOpenAICodexResponses = async (
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 
-	const accountId = extractAccountId(apiKey);
+	const localBearer = usesLocalCodexBearer(model.baseUrl, model.headers, options.headers);
+	const accountId = localBearer ? undefined : extractAccountId(apiKey);
 	const input = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
 	});
@@ -1474,6 +1477,25 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 	return { message, friendlyMessage };
 }
 
+// ============================================================================
+// Auth & Headers
+// ============================================================================
+
+function usesLocalCodexBearer(
+	baseUrl: string | undefined,
+	modelHeaders: Record<string, string> | undefined,
+	requestHeaders: Record<string, string> | undefined,
+): boolean {
+	const configured = requestHeaders?.[LOCAL_CODEX_BEARER_HEADER] ?? modelHeaders?.[LOCAL_CODEX_BEARER_HEADER];
+	if (configured !== "1") return false;
+
+	const url = new URL(resolveCodexUrl(baseUrl));
+	return (
+		url.protocol === "http:" &&
+		(url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "localhost")
+	);
+}
+
 function extractAccountId(token: string): string {
 	try {
 		const parts = token.split(".");
@@ -1497,15 +1519,17 @@ function createCodexRequestId(): string {
 function buildBaseCodexHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: Record<string, string> | undefined,
-	accountId: string,
+	accountId: string | undefined,
 	token: string,
 ): Headers {
 	const headers = new Headers(initHeaders);
 	for (const [key, value] of Object.entries(additionalHeaders || {})) {
 		headers.set(key, value);
 	}
+	headers.delete(LOCAL_CODEX_BEARER_HEADER);
 	headers.set("Authorization", `Bearer ${token}`);
-	headers.set("chatgpt-account-id", accountId);
+	if (accountId) headers.set("chatgpt-account-id", accountId);
+	else headers.delete("chatgpt-account-id");
 	headers.set("originator", "pi");
 	const userAgent = _os ? `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})` : "pi (browser)";
 	headers.set("User-Agent", userAgent);
@@ -1515,7 +1539,7 @@ function buildBaseCodexHeaders(
 function buildSSEHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: Record<string, string> | undefined,
-	accountId: string,
+	accountId: string | undefined,
 	token: string,
 	sessionId?: string,
 ): Headers {
@@ -1535,7 +1559,7 @@ function buildSSEHeaders(
 function buildWebSocketHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: Record<string, string> | undefined,
-	accountId: string,
+	accountId: string | undefined,
 	token: string,
 	requestId: string,
 ): Headers {
