@@ -1,1 +1,1 @@
-// This file will be updated with aiand provider config
+// generate-models.ts
