@@ -3,9 +3,19 @@ import { execEnvForSession, filterClientEnv, withClientEnv } from "../src/modes/
 
 describe("filterClientEnv", () => {
 	it("keeps only allowlisted keys", () => {
-		expect(filterClientEnv({ HERDR_PANE_ID: "w1:p1", PATH: "/evil", HERDR_ENV: "1" })).toEqual({
+		expect(
+			filterClientEnv({
+				HERDR_PANE_ID: "w1:p1",
+				PATH: "/evil",
+				HERDR_ENV: "1",
+				PI_SLACK_STATE_DIR: "/state",
+				PI_SLACK_FOREIGN_AGENT_INTAKE_RESULT_PATH: "/result.json",
+			}),
+		).toEqual({
 			HERDR_PANE_ID: "w1:p1",
 			HERDR_ENV: "1",
+			PI_SLACK_STATE_DIR: "/state",
+			PI_SLACK_FOREIGN_AGENT_INTAKE_RESULT_PATH: "/result.json",
 		});
 	});
 
@@ -100,6 +110,9 @@ describe("withClientEnv", () => {
 				HERDR_SOCKET_PATH: undefined,
 				HERDR_TAB_ID: undefined,
 				HERDR_WORKSPACE_ID: undefined,
+				PI_SLACK_FOREIGN_AGENT_INTAKE_RESULT_PATH: undefined,
+				PI_SLACK_RUNTIME_ENV_PATH: undefined,
+				PI_SLACK_STATE_DIR: undefined,
 			});
 		});
 	});
