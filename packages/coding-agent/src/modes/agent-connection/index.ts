@@ -23,6 +23,7 @@ export type {
 	AgentConnectionModelCatalog,
 	AgentConnectionModelChangeEntry,
 	AgentConnectionModelCycleResult,
+	AgentConnectionModelSwitchEntry,
 	AgentConnectionNavigateTreeOptions,
 	AgentConnectionNavigateTreeResult,
 	AgentConnectionNewSessionOptions,

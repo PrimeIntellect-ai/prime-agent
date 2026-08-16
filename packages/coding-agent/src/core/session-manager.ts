@@ -123,6 +123,19 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	modelId: string;
 }
 
+/** Automatic failover from one model to the next `fallbackModels` chain entry. */
+export interface ModelSwitchEntry extends SessionEntryBase {
+	type: "model_switch";
+	/** Previous model as `provider/id`. */
+	from: string;
+	/** New model as `provider/id`. */
+	to: string;
+	/** Provider failure that exhausted the retry policy on `from`. */
+	reason: string;
+	/** 1-based position of `to` within the configured fallback chain. */
+	attempt: number;
+}
+
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
 	summary: string;
@@ -251,6 +264,7 @@ export type SessionEntry =
 	| ThinkingLevelChangeEntry
 	| ServiceTierChangeEntry
 	| ModelChangeEntry
+	| ModelSwitchEntry
 	| CompactionEntry
 	| BranchSummaryEntry
 	| CustomEntry
@@ -1534,6 +1548,22 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			provider,
 			modelId,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append an automatic model failover record as child of current leaf. Returns entry id. */
+	appendModelSwitch(from: string, to: string, reason: string, attempt: number): string {
+		const entry: ModelSwitchEntry = {
+			type: "model_switch",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			from,
+			to,
+			reason,
+			attempt,
 		};
 		this._appendEntry(entry);
 		return entry.id;

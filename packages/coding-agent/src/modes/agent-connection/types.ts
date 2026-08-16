@@ -169,6 +169,14 @@ export interface AgentConnectionModelChangeEntry extends AgentConnectionSessionE
 	modelId: string;
 }
 
+export interface AgentConnectionModelSwitchEntry extends AgentConnectionSessionEntryBase {
+	type: "model_switch";
+	from: string;
+	to: string;
+	reason: string;
+	attempt: number;
+}
+
 export interface AgentConnectionCompactionEntry extends AgentConnectionSessionEntryBase {
 	type: "compaction";
 	summary: string;
@@ -243,6 +251,7 @@ export type AgentConnectionSessionEntry =
 	| AgentConnectionThinkingLevelChangeEntry
 	| AgentConnectionServiceTierChangeEntry
 	| AgentConnectionModelChangeEntry
+	| AgentConnectionModelSwitchEntry
 	| AgentConnectionCompactionEntry
 	| AgentConnectionBranchSummaryEntry
 	| AgentConnectionCustomEntry
@@ -595,6 +604,7 @@ export type AgentConnectionSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| { type: "model_switch"; from: string; to: string; reason: string; attempt: number }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
 	| { type: "recap_update"; recap: string | undefined }

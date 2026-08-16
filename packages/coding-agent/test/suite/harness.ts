@@ -63,6 +63,7 @@ export interface HarnessOptions {
 	api?: string;
 	provider?: string;
 	models?: FauxModelDefinition[];
+	fallbackModels?: Model<string>[];
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -196,6 +197,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		agentMessageController: options.agentMessageController,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		baseToolsOverride: toolMap,
+		fallbackModels: options.fallbackModels,
 		extensionRunnerRef,
 		rlmDepth: options.rlmDepth,
 		rlmMaxDepth: options.rlmMaxDepth,
