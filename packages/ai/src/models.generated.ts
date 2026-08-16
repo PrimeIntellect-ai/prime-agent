@@ -20853,5 +20853,23 @@ export const MODELS = {
 			contextWindow: 1000000,
 			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
+		"glm-5.3": {
+			id: "glm-5.3",
+			name: "GLM-5.3",
+			api: "openai-completions",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			compat: {"supportsDeveloperRole":false,"thinkingFormat":"zai","zaiToolStream":true},
+			reasoning: true,
+			input: ["text"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 131072,
+		} satisfies Model<"openai-completions">,
 	},
 } as const;
