@@ -441,6 +441,55 @@ export function createHeartbeatPromptMessage(
 }
 
 /**
+ * Add elapsed-time prefixes to provider-facing message copies.
+ *
+ * The session anchor is used when valid; otherwise the earliest finite message
+ * timestamp anchors the context. Provider payloads remain opaque.
+ */
+export function addElapsedMessageTimes(messages: Message[], conversationStartedAt: number): Message[] {
+	let anchor = Number.isFinite(conversationStartedAt) ? conversationStartedAt : Number.POSITIVE_INFINITY;
+	if (!Number.isFinite(anchor)) {
+		for (const message of messages) {
+			if (Number.isFinite(message.timestamp)) {
+				anchor = Math.min(anchor, message.timestamp);
+			}
+		}
+		if (!Number.isFinite(anchor)) anchor = 0;
+	}
+
+	return messages.map((message) => {
+		const timestamp = Number.isFinite(message.timestamp) ? message.timestamp : anchor;
+		const elapsedSeconds = Math.max(0, Math.floor((timestamp - anchor) / 1000));
+		const prefix = { type: "text" as const, text: `[T+${elapsedSeconds}s]` };
+
+		switch (message.role) {
+			case "user": {
+				const content =
+					typeof message.content === "string"
+						? [{ type: "text" as const, text: message.content }]
+						: message.content.map((block) => ({ ...block }));
+				return { ...message, content: [prefix, ...content] };
+			}
+			case "toolResult":
+				return { ...message, content: [prefix, ...message.content.map((block) => ({ ...block }))] };
+			case "assistant": {
+				const content = message.content.map((block) => ({ ...block }));
+				let insertionIndex = 0;
+				while (insertionIndex < content.length && content[insertionIndex]?.type === "thinking") {
+					insertionIndex++;
+				}
+				content.splice(insertionIndex, 0, prefix);
+				return { ...message, content };
+			}
+			default: {
+				const _exhaustiveCheck: never = message;
+				return _exhaustiveCheck;
+			}
+		}
+	});
+}
+
+/**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *
  * This is used by:
