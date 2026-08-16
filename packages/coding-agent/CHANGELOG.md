@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Changed default Google and Google Vertex provider models to `gemini-3.7-flash`.
 - Changed compaction checkpoints to preserve active directives, runtime state, and verification evidence, and to fail closed instead of replacing context with an incomplete summary.
 - Fixed fullscreen wheel scrolling in Ghostty while retaining application link clicks; set `terminal.fullscreenMouse` to `false` to use native Cmd-click instead.
 - Changed the agents view to sort idle and inactive sessions by last message time, newest first, while keeping running agents in stable creation order.

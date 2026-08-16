@@ -333,7 +333,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" });
 	}
 	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
-		mergeThinkingLevelMap(model, { off: null });
+		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: "LOW", medium: "MEDIUM", high: "HIGH" });
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
@@ -1731,6 +1731,27 @@ async function generateModels() {
 		});
 	}
 
+	// Add missing Gemini 3.7 Flash model if not loaded from models.dev
+	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-3.7-flash")) {
+		allModels.push({
+			id: "gemini-3.7-flash",
+			name: "Gemini 3.7 Flash",
+			api: "google-generative-ai",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			provider: "google",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 0.5,
+				output: 3,
+				cacheRead: 0.05,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		});
+	}
+
 	// Add missing Gemini 3.1 Flash Lite Preview until models.dev includes it.
 	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-3.1-flash-lite-preview")) {
 		allModels.push({
@@ -2178,6 +2199,18 @@ async function generateModels() {
 
 	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
 	const vertexModels: Model<"google-vertex">[] = [
+		{
+			id: "gemini-3.7-flash",
+			name: "Gemini 3.7 Flash (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
 		{
 			id: "gemini-3-pro-preview",
 			name: "Gemini 3 Pro Preview (Vertex)",
