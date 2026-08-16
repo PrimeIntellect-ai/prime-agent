@@ -209,26 +209,37 @@ describe("IPythonCellComponent diff rendering", () => {
 		expect(header).toMatch(/\+1 -1/);
 	});
 
-	it("advertises the collapse key on the last diff header when diffs are expanded", () => {
+	it("advertises the collapse key on the cell header when diffs are expanded", () => {
+		const render = (editDiffsExpanded: boolean) =>
+			new IPythonCellComponent({
+				code: "await edit(...)",
+				details: { status: "ok", diffs: [{ path: "a.ts", oldStr: "x", newStr: "X", startLine: 1 }] },
+				executionStarted: true,
+				argsComplete: true,
+				expanded: false,
+				editDiffsExpanded,
+			}).render(120);
+		const header = (lines: string[]) => stripAnsi(lines[0] ?? "");
+		// Expanded diffs: the header carries the ctrl+j cue (the summary line is gone).
+		expect(header(render(true)).match(/to collapse/g)).toHaveLength(1);
+		// Collapsed diffs: no ctrl+j cue on the header (the summary line carries it).
+		expect(header(render(false))).not.toContain("to collapse");
+	});
+
+	it("never overflows a narrow pane when expanded diffs add the header hint", () => {
+		const width = 24;
 		const lines = new IPythonCellComponent({
 			code: "await edit(...)",
 			details: {
 				status: "ok",
-				diffs: [
-					{ path: "a.ts", oldStr: "x", newStr: "X", startLine: 1 },
-					{ path: "b.ts", oldStr: "y", newStr: "Y", startLine: 1 },
-				],
+				diffs: [{ path: "src/some/dir/file.ts", oldStr: "x", newStr: "X", startLine: 1 }],
 			},
 			executionStarted: true,
 			argsComplete: true,
 			expanded: true,
 			editDiffsExpanded: true,
-		}).render(120);
-		const plain = lines.map(stripAnsi);
-		const hinted = plain.filter((line) => line.includes("to collapse") && /[+]\d+ -\d+/.test(line));
-		// Exactly one diff header (the last file's) carries the ctrl+j cue.
-		expect(hinted).toHaveLength(1);
-		expect(hinted[0]).toContain("b.ts");
+		}).render(width);
+		expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
 	});
 
 	it("renders a large diff without spreading the row array (no RangeError)", () => {
