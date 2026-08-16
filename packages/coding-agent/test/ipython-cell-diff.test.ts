@@ -206,7 +206,29 @@ describe("IPythonCellComponent diff rendering", () => {
 		const header = lines.map(stripAnsi).find((line) => line.includes("…"));
 		expect(header).toBeDefined();
 		// The +/- counts survive truncation; only the path is shortened.
-		expect(header).toMatch(/\+1 -1\s*$/);
+		expect(header).toMatch(/\+1 -1/);
+	});
+
+	it("advertises the collapse key on the last diff header when diffs are expanded", () => {
+		const lines = new IPythonCellComponent({
+			code: "await edit(...)",
+			details: {
+				status: "ok",
+				diffs: [
+					{ path: "a.ts", oldStr: "x", newStr: "X", startLine: 1 },
+					{ path: "b.ts", oldStr: "y", newStr: "Y", startLine: 1 },
+				],
+			},
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+			editDiffsExpanded: true,
+		}).render(120);
+		const plain = lines.map(stripAnsi);
+		const hinted = plain.filter((line) => line.includes("to collapse") && /[+]\d+ -\d+/.test(line));
+		// Exactly one diff header (the last file's) carries the ctrl+j cue.
+		expect(hinted).toHaveLength(1);
+		expect(hinted[0]).toContain("b.ts");
 	});
 
 	it("renders a large diff without spreading the row array (no RangeError)", () => {

@@ -672,9 +672,12 @@ export class IPythonCellComponent implements Component {
 			if (existing) existing.push(diff);
 			else diffsByPath.set(diff.path, [diff]);
 		}
+		let index = 0;
 		for (const [path, edits] of diffsByPath) {
+			index += 1;
 			this.addPlain(lines, "");
-			this.renderFileDiff(lines, width, path, edits, marker);
+			const showHint = index === diffsByPath.size && this.state.showExpandHint !== false;
+			this.renderFileDiff(lines, width, path, edits, marker, showHint);
 		}
 	}
 
@@ -684,6 +687,7 @@ export class IPythonCellComponent implements Component {
 		path: string,
 		edits: readonly DiffDisplay[],
 		marker: string,
+		showHint: boolean,
 	): void {
 		const language = getLanguageFromPath(path);
 		let added = 0;
@@ -704,7 +708,10 @@ export class IPythonCellComponent implements Component {
 			}
 		});
 
-		const counts = `${theme.fg("toolDiffAdded", `+${added}`)} ${theme.fg("toolDiffRemoved", `-${removed}`)}`;
+		// The expanded diff replaces the summary line that normally carries the
+		// ctrl+j hint, so the last file's diff header advertises the collapse key.
+		const hint = showHint ? `${theme.fg("dim", " · ")}${expandCollapseHint("app.edits.expand", true)}` : "";
+		const counts = `${theme.fg("toolDiffAdded", `+${added}`)} ${theme.fg("toolDiffRemoved", `-${removed}`)}${hint}`;
 		const displayPath = displayEditPath(path, this.state.cwd);
 		// Truncate the path (not the counts) so it can't push the header past width.
 		const fixed = visibleWidth(marker) + 1 + 2 + visibleWidth(counts);
