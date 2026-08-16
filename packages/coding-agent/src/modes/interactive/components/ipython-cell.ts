@@ -704,7 +704,8 @@ export class IPythonCellComponent implements Component {
 		});
 
 		// Unlike the ctrl+o hint (latest tool row only), the ctrl+j hint renders on
-		// every edit summary row, matching the thinking and agent-message hints.
+		// every tool row, matching the thinking and agent-message hints. Within a
+		// row it renders once, on the last file's summary line (showHint).
 		const hint = showHint ? this.state.editDiffsExpanded === true : undefined;
 		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, hint, width));
 
