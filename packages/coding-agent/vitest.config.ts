@@ -10,6 +10,7 @@ const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url
 export default defineConfig({
 	test: {
 		globals: true,
+		setupFiles: ["./test/setup-env.ts"],
 		environment: "node",
 		testTimeout: 30000,
 		tags: [
