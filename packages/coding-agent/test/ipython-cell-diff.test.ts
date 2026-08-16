@@ -133,6 +133,11 @@ describe("IPythonCellComponent diff rendering", () => {
 		const hidden = renderCell({ ...state, editDiffsExpanded: false }).split("\n");
 		const hiddenSummary = hidden.find((l) => l.includes("╰─ a.ts"));
 		expect(hiddenSummary).toMatch(/^ {4}╰─ a\.ts \+1 -1 · .*to expand\)$/);
+
+		// The ctrl+j hint is not owned by the latest tool row: it stays visible
+		// on rows whose ctrl+o hint is suppressed (showExpandHint=false).
+		const notLatest = renderCell({ ...state, editDiffsExpanded: false, showExpandHint: false }).split("\n");
+		expect(notLatest.find((l) => l.includes("╰─ a.ts"))).toMatch(/to expand\)$/);
 		expect(hidden.some((l) => /1 - .*x/.test(l))).toBe(false);
 
 		const shown = renderCell({ ...state, editDiffsExpanded: true }).split("\n");

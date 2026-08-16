@@ -283,7 +283,6 @@ function buildEditCallComponent(
 	args: RenderableEditArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.js").theme,
 	expanded: boolean,
-	showExpandHint: boolean,
 	cwd: string,
 ): EditCallRenderComponent {
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
@@ -310,7 +309,10 @@ function buildEditCallComponent(
 			rawPath ?? "...",
 			cwd,
 			change,
-			showExpandHint ? expanded : undefined,
+			// The ctrl+j hint renders on every edit summary row (unlike the ctrl+o
+			// hint, which the latest tool row owns), matching thinking and
+			// agent-message hints.
+			expanded,
 			expanded ? renderDiff(component.preview.diff).split("\n") : undefined,
 		),
 	);
@@ -488,14 +490,7 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(
-				component,
-				args,
-				theme,
-				context.expanded,
-				context.showExpandHint !== false,
-				context.cwd,
-			);
+			return buildEditCallComponent(component, args, theme, context.expanded, context.cwd);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -525,7 +520,6 @@ export function createEditToolDefinition(
 						context.args as RenderableEditArgs | undefined,
 						theme,
 						context.expanded,
-						context.showExpandHint !== false,
 						context.cwd,
 					);
 				}

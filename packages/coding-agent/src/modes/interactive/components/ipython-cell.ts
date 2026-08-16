@@ -703,7 +703,9 @@ export class IPythonCellComponent implements Component {
 			}
 		});
 
-		const hint = showHint && this.state.showExpandHint !== false ? this.state.editDiffsExpanded === true : undefined;
+		// Unlike the ctrl+o hint (latest tool row only), the ctrl+j hint renders on
+		// every edit summary row, matching the thinking and agent-message hints.
+		const hint = showHint ? this.state.editDiffsExpanded === true : undefined;
 		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, hint, width));
 
 		for (const row of rows) {
