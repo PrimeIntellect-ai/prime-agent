@@ -249,6 +249,28 @@ describe("IPythonCellComponent diff rendering", () => {
 		expect(summary).toMatch(/\+1 -1 · /);
 	});
 
+	it("advertises the collapse key once per cell when diffs are expanded", () => {
+		const lines = new IPythonCellComponent({
+			code: "await edit(...)",
+			details: {
+				status: "ok",
+				diffs: [
+					{ path: "a.ts", oldStr: "x", newStr: "X", startLine: 1 },
+					{ path: "b.ts", oldStr: "y", newStr: "Y", startLine: 1 },
+				],
+			},
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+			editDiffsExpanded: true,
+		}).render(120);
+		const plain = lines.map(stripAnsi);
+		const hinted = plain.filter((line) => line.includes("to collapse") && /[+]\d+ -\d+/.test(line));
+		// Exactly one file row (the last file's) carries the ctrl+j cue.
+		expect(hinted).toHaveLength(1);
+		expect(hinted[0]).toContain("b.ts");
+	});
+
 	it("renders a large diff without spreading the row array (no RangeError)", () => {
 		const n = 5000;
 		const oldStr = Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
