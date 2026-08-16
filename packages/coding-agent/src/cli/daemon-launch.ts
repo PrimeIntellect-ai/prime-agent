@@ -491,6 +491,7 @@ const EARLY_LAUNCH_VALUE_FLAGS = new Set([
 	"--fork",
 	"--session-dir",
 	"--models",
+	"--fallback-models",
 	"--tools",
 	"-t",
 	"--thinking",

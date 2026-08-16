@@ -228,6 +228,20 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 }
 ```
 
+### Model Failover
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `fallbackModels` | string[] | - | Ordered `"provider/model-id"` failover chain (same format as `--fallback-models` CLI flag) |
+
+```json
+{
+  "fallbackModels": ["anthropic/claude-sonnet-4-5", "openai/gpt-5.2"]
+}
+```
+
+When a model's retry policy is exhausted on a retryable failure (rate limit, server error, network, provider cooldown), the session switches to the next entry and continues the same conversation. Auth and invalid-request failures never trigger failover. Each switch is recorded as a `model_switch` entry in the session file.
+
 ### Markdown
 
 | Setting | Type | Default | Description |

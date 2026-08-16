@@ -339,6 +339,71 @@ export function resolveModelScopeFromModels(patterns: string[], availableModels:
 	return scopedModels;
 }
 
+/**
+ * Resolve an ordered `fallbackModels` chain to concrete models.
+ *
+ * Unlike `--models`, a fallback entry must be an exact `provider/model-id`:
+ * a silently dropped or glob-expanded failover target would surface as a dead
+ * chain only once production was already failing. Invalid entries throw.
+ */
+export function resolveFallbackModelsFromModels(entries: string[], availableModels: Model<Api>[]): Model<Api>[] {
+	const resolved: Model<Api>[] = [];
+
+	for (const entry of entries) {
+		const trimmed = entry.trim();
+		if (!trimmed) {
+			throw new Error(
+				`Invalid fallbackModels entry: empty value. Each entry must be "provider/model-id", for example "anthropic/claude-sonnet-4-5".`,
+			);
+		}
+
+		const separator = trimmed.indexOf("/");
+		const provider = separator === -1 ? "" : trimmed.slice(0, separator).trim();
+		const modelId = separator === -1 ? "" : trimmed.slice(separator + 1).trim();
+		if (!provider || !modelId) {
+			throw new Error(
+				`Invalid fallbackModels entry "${trimmed}": expected "provider/model-id", for example "anthropic/claude-sonnet-4-5".`,
+			);
+		}
+
+		const knownProvider = availableModels.some((model) => model.provider.toLowerCase() === provider.toLowerCase());
+		if (!knownProvider) {
+			const providers = [...new Set(availableModels.map((model) => model.provider))].sort();
+			throw new Error(
+				`Invalid fallbackModels entry "${trimmed}": unknown provider "${provider}". Known providers: ${providers.join(", ") || "none"}.`,
+			);
+		}
+
+		const model = availableModels.find(
+			(candidate) =>
+				candidate.provider.toLowerCase() === provider.toLowerCase() &&
+				candidate.id.toLowerCase() === modelId.toLowerCase(),
+		);
+		if (!model) {
+			const providerModels = availableModels
+				.filter((candidate) => candidate.provider.toLowerCase() === provider.toLowerCase())
+				.map((candidate) => candidate.id)
+				.sort();
+			throw new Error(
+				`Invalid fallbackModels entry "${trimmed}": unknown model "${modelId}" for provider "${provider}". Available: ${providerModels.join(", ") || "none"}.`,
+			);
+		}
+
+		if (!resolved.some((existing) => modelsAreEqual(existing, model))) {
+			resolved.push(model);
+		}
+	}
+
+	return resolved;
+}
+
+/** Resolve a `fallbackModels` chain against the live model registry. */
+export async function resolveFallbackModels(entries: string[], modelRegistry: ModelRegistry): Promise<Model<Api>[]> {
+	if (entries.length === 0) return [];
+	const availableModels = await modelRegistry.refreshAvailableModels();
+	return resolveFallbackModelsFromModels(entries, availableModels);
+}
+
 export async function resolveModelScope(patterns: string[], modelRegistry: ModelRegistry): Promise<ScopedModel[]> {
 	const availableModels = await modelRegistry.refreshAvailableModels();
 	return resolveModelScopeFromModels(patterns, availableModels);

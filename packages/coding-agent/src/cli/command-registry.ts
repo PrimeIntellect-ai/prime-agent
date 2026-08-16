@@ -179,6 +179,7 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 			["--model <id>", "Select a model"],
 			["--api-key <key>", "Use an API key for this run"],
 			["--models <patterns>", "Set comma-separated models for cycling"],
+			["--fallback-models <list>", "Comma-separated provider/model-id failover chain"],
 			["--thinking <level>", "Set reasoning: off, minimal, low, medium, high, xhigh, max"],
 		],
 	},

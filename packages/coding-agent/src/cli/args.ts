@@ -25,6 +25,7 @@ export interface Args {
 	fork?: string;
 	sessionDir?: string;
 	models?: string[];
+	fallbackModels?: string[];
 	tools?: string[];
 	noTools?: boolean;
 	noBuiltinTools?: boolean;
@@ -149,6 +150,19 @@ export function parseArgs(args: string[]): Args {
 			result.sessionDir = args[++i];
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i].split(",").map((s) => s.trim());
+		} else if (arg === "--fallback-models" && i + 1 < args.length) {
+			const entries = args[++i]
+				.split(",")
+				.map((s) => s.trim())
+				.filter((s) => s.length > 0);
+			if (entries.length === 0) {
+				result.diagnostics.push({
+					type: "error",
+					message: `--fallback-models requires at least one "provider/model-id" entry.`,
+				});
+			} else {
+				result.fallbackModels = entries;
+			}
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {

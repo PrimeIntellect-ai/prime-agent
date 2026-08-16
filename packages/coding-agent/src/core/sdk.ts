@@ -37,6 +37,8 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Ordered failover chain used when the per-model retry policy is exhausted */
+	fallbackModels?: Model<any>[];
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -375,6 +377,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Only the explicit dir — the default may not match injected custom storage.
 		agentDir: options.agentDir,
 		scopedModels: options.scopedModels,
+		fallbackModels: options.fallbackModels,
 		resourceLoader,
 		customTools: options.customTools,
 		modelRegistry,
