@@ -271,6 +271,22 @@ describe("IPythonCellComponent diff rendering", () => {
 		expect(hinted[0]).toContain("b.ts");
 	});
 
+	it("never overflows a narrow pane when expanded diffs render", () => {
+		const width = 24;
+		const lines = new IPythonCellComponent({
+			code: "await edit(...)",
+			details: {
+				status: "ok",
+				diffs: [{ path: "src/some/dir/file.ts", oldStr: "x", newStr: "X", startLine: 1 }],
+			},
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+			editDiffsExpanded: true,
+		}).render(width);
+		expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+	});
+
 	it("renders a large diff without spreading the row array (no RangeError)", () => {
 		const n = 5000;
 		const oldStr = Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
