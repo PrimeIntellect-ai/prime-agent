@@ -1,7 +1,10 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Container, resetCapabilitiesCache, setCapabilities, Text, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { type BashOperations, createBashTool, createBashToolDefinition } from "../src/core/tools/bash.js";
@@ -461,6 +464,44 @@ describe("ToolExecutionComponent parity", () => {
 		const collapsedAgain = stripAnsi(component.render(120).join("\n"));
 		expect(collapsedAgain).not.toContain("-1 before");
 		expect(collapsedAgain).toContain("+1 -1");
+	});
+
+	test("keeps the ctrl+j hint on the header while no summary line renders", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "edit-hint-"));
+		const filePath = join(dir, "sample.txt");
+		writeFileSync(filePath, "before\n");
+		try {
+			const component = new ToolExecutionComponent(
+				"edit",
+				"tool-4h",
+				{ path: filePath, oldText: "before", newText: "after" },
+				{},
+				createEditToolDefinition(dir),
+				createFakeTui(),
+				dir,
+			);
+			component.setArgsComplete();
+			component.render(120);
+			// The preview computes asynchronously; poll until it lands.
+			await vi.waitFor(() => {
+				expect(stripAnsi(component.render(120).join("\n"))).toContain("to expand");
+			});
+			// Pre-result: no summary line exists yet, so the header carries the hint.
+			const preResult = stripAnsi(component.render(120).join("\n"));
+			expect(preResult).not.toContain("╰─");
+			expect(preResult.split("to expand").length - 1).toBe(1);
+
+			// Once a successful result lands, the summary line takes over the hint.
+			component.updateResult(
+				{ content: [], details: { diff: "-1 before\n+1 after", firstChangedLine: 1 }, isError: false },
+				false,
+			);
+			const settled = stripAnsi(component.render(120).join("\n"));
+			expect(settled.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
+			expect(settled.split("to expand").length - 1).toBe(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("uses the generic result fallback for legacy-named custom tools", () => {
