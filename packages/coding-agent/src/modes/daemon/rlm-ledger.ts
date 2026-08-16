@@ -11,7 +11,6 @@ import {
 	readFileSync,
 	readSync,
 	realpathSync,
-	renameSync,
 	rmSync,
 	statSync,
 	writeSync,
@@ -680,25 +679,20 @@ export class RlmSpawnLedger {
 	private publishSeedFile(tempPath: string): void {
 		// Atomic no-clobber publish: link() fails with EEXIST if a live append
 		// created the real file meanwhile — that append wins (its data is
-		// fresher than the registries) and the seed is discarded. A clobbering
-		// rename() here would overwrite and lose that append.
+		// fresher than the registries) and the seed is discarded. No-clobber
+		// publication is a hard requirement for seeding: post-consolidation,
+		// deletes live only in the ledger, so any clobber window can lose live
+		// appends and resurrect deleted edges. Filesystems that cannot provide
+		// link() therefore get flat pre-ledger history (the documented
+		// degradation mode) rather than a check-then-rename race.
 		try {
 			linkSync(tempPath, this.path);
-			return;
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
 			if (code === "EEXIST") {
 				return;
 			}
-			// Filesystems without hard links (network/synced homes, non-NTFS
-			// Windows volumes): fall back to check-then-rename. Non-atomic, but
-			// strictly better than never seeding; the residual window is the
-			// documented O_APPEND trust bucket.
-			this.log(`RLM ledger: link publish failed (${code ?? "unknown"}), falling back to rename`);
-			if (existsSync(this.path)) {
-				return;
-			}
-			renameSync(tempPath, this.path);
+			this.log(`RLM ledger: link publish unavailable (${code ?? "unknown"}); skipping seeding`);
 		}
 	}
 

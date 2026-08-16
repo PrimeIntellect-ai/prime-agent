@@ -197,7 +197,11 @@ import {
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
 } from "./rlm-ledger.js";
-import { readRlmSubagentDisplayEntry, writeRlmSubagentDisplayEntry } from "./rlm-subagent-display.js";
+import {
+	readRlmSubagentDisplayEntry,
+	rlmSubagentDisplayPath,
+	writeRlmSubagentDisplayEntry,
+} from "./rlm-subagent-display.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
 	createSnapshotTranscriptChunks,
@@ -551,6 +555,8 @@ export class AgentDaemon {
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
+	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
+	private readonly pendingRlmSpawnAppends = new Map<string, Promise<void>>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -928,23 +934,6 @@ export class AgentDaemon {
 		return this.rlmSpawnLedgerInstance;
 	}
 
-	private appendRlmLedgerSpawn(input: {
-		childId: string;
-		parent: string;
-		child: string;
-		depth: number;
-		name: string;
-	}): void {
-		this.rlmSpawnLedger()
-			.appendSpawn(input)
-			.catch((error) => {
-				// TODO: once the ledger is the messaging authority (post-stack
-				// rebase), a swallowed spawn-append failure means an invisible
-				// child — revisit failing admission here instead of logging.
-				this.log(`failed to append RLM ledger spawn: ${error instanceof Error ? error.message : String(error)}`);
-			});
-	}
-
 	private async appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): Promise<void> {
 		const childId = state.runtime.metadata.rlmChildId;
 		const child = state.runtime.session.sessionFile;
@@ -1042,14 +1031,23 @@ export class AgentDaemon {
 	): boolean {
 		const parentSession = parentState.runtime.session;
 		// Spawn admission is the moment the daemon knows the edge firsthand.
+		// The ledger is the only topology store, so the append's outcome is
+		// load-bearing: the promise is stashed per childId for the admission
+		// path to await — admission fails if the spawn record cannot be made
+		// durable (a swallowed failure would admit a child that listing,
+		// hydration, and a2a wake can never find after passivation).
 		if (input.status === "running" && parentSession.sessionFile) {
-			this.appendRlmLedgerSpawn({
+			const spawnAppend = this.rlmSpawnLedger().appendSpawn({
 				childId: input.childId,
 				parent: parentSession.sessionFile,
 				child: input.sessionFile,
 				depth: input.rlmDepth,
 				name: input.sessionName,
 			});
+			// Mark handled so an early rejection cannot surface as an
+			// unhandled-rejection crash before the admission path awaits it.
+			spawnAppend.catch(() => undefined);
+			this.pendingRlmSpawnAppends.set(input.childId, spawnAppend);
 		}
 		try {
 			writeRlmSubagentDisplayEntry({
@@ -2600,44 +2598,70 @@ export class AgentDaemon {
 				},
 			}),
 		);
-		await this.addRuntime(
-			runtime,
-			undefined,
-			parentState.clientEnv,
-			(state) => {
-				stateRef = state;
-			},
-			() => options.parentSession.getRlmChildRunStatus(options.id) !== "cancelled",
-			() => {
-				if (runtime.session.sessionName !== options.sessionName) {
-					runtime.session.setSessionName(options.sessionName);
-				}
-				if (runtime.session.sessionFile) {
-					this.recordRlmSubagentState(parentState, {
-						childId: options.id,
-						sessionName: options.sessionName,
-						sessionDir: options.sessionDir,
-						sessionFile: runtime.session.sessionFile,
-						rlmDepth: options.rlmDepth,
-						rlmMaxDepth: options.rlmMaxDepth,
-						rlmParentNodeId: options.rlmParentNodeId,
-						prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
-						spawnCode: options.spawnCode,
-						model: {
-							provider: options.model.provider,
-							modelId: options.model.id,
-						},
-						status: "running",
-						createdAt: runtime.metadata.createdAt,
-					});
-				}
-				options.onSessionPublished?.(runtime.session);
-			},
-		);
+		let state: ActiveSessionState;
+		try {
+			state = await this.addRuntime(
+				runtime,
+				undefined,
+				parentState.clientEnv,
+				(createdState) => {
+					stateRef = createdState;
+				},
+				() => options.parentSession.getRlmChildRunStatus(options.id) !== "cancelled",
+				() => {
+					if (runtime.session.sessionName !== options.sessionName) {
+						runtime.session.setSessionName(options.sessionName);
+					}
+					if (runtime.session.sessionFile) {
+						this.recordRlmSubagentState(parentState, {
+							childId: options.id,
+							sessionName: options.sessionName,
+							sessionDir: options.sessionDir,
+							sessionFile: runtime.session.sessionFile,
+							rlmDepth: options.rlmDepth,
+							rlmMaxDepth: options.rlmMaxDepth,
+							rlmParentNodeId: options.rlmParentNodeId,
+							prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
+							spawnCode: options.spawnCode,
+							model: {
+								provider: options.model.provider,
+								modelId: options.model.id,
+							},
+							status: "running",
+							createdAt: runtime.metadata.createdAt,
+						});
+					}
+					options.onSessionPublished?.(runtime.session);
+				},
+			);
+		} catch (error) {
+			this.pendingRlmSpawnAppends.delete(options.id);
+			throw error;
+		}
 		// Admission is complete only once the spawn record is durably in the
 		// ledger: no self-heal exists for a lost spawn record (seeding only runs
-		// when the ledger file is absent; reconciliation only drops edges).
-		await this.rlmSpawnLedger().flush();
+		// when the ledger file is absent; reconciliation only drops edges). A
+		// failed append therefore FAILS admission — the just-added child is
+		// closed like any other admission failure rather than admitted as a
+		// ghost the ledger-driven listing and hydration could never find.
+		const spawnAppend = this.pendingRlmSpawnAppends.get(options.id);
+		this.pendingRlmSpawnAppends.delete(options.id);
+		try {
+			await spawnAppend;
+		} catch (error) {
+			await this.closeSession(state, "killed", false).catch(() => undefined);
+			// The child was never admitted: no ledger edge exists, so the
+			// display file written at the spawn write point must not remain
+			// claiming a running child.
+			try {
+				rmSync(rlmSubagentDisplayPath(options.sessionDir), { force: true });
+			} catch {
+				// Best-effort: a stale display file without an edge is inert.
+			}
+			throw new Error(
+				`Failed to record RLM subagent spawn for ${options.id}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		return runtime;
 	}
 
