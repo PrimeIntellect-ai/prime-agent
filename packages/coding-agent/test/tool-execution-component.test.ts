@@ -449,8 +449,10 @@ describe("ToolExecutionComponent parity", () => {
 		const collapsed = stripAnsi(component.render(120).join("\n"));
 		expect(collapsed).not.toContain("-1 before");
 		expect(collapsed).toContain("+1 -1");
-		// The `╰─ path +N -M` summary line carries the ctrl+j hint.
+		// The collapsed `╰─ path +N -M` summary line carries the ctrl+j hint —
+		// and it is the only carrier: the header must not duplicate it.
 		expect(collapsed.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
+		expect(collapsed.split("to expand").length - 1).toBe(1);
 
 		component.setEditDiffsExpanded(true);
 		const withDiffLines = stripAnsi(component.render(120).join("\n")).split("\n");
