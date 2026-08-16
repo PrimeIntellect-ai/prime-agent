@@ -828,6 +828,30 @@ export function formatAgentDepthLabel(depth: number | undefined, hasChildren: bo
 	return `depth ${depth}`;
 }
 
+export function deriveAutomaticSessionName(prompt: string, maxLength = 52): string | undefined {
+	const normalized = prompt.replace(/\s+/gu, " ").trim();
+	if (!normalized || normalized.startsWith("/")) return undefined;
+	if (normalized.length <= maxLength) return normalized;
+	const candidate = normalized.slice(0, maxLength + 1);
+	const boundary = candidate.lastIndexOf(" ");
+	return `${candidate.slice(0, boundary >= Math.floor(maxLength * 0.6) ? boundary : maxLength).trimEnd()}…`;
+}
+
+export function formatTerminalIdentityTitle(input: {
+	appTitle: string;
+	sessionId?: string;
+	sessionName?: string;
+	cwd: string;
+}): string {
+	const shortId = input.sessionId
+		?.replace(/[^a-zA-Z0-9]/gu, "")
+		.slice(-5)
+		.toUpperCase();
+	const cwdBasename = path.basename(input.cwd);
+	const identity = [shortId ? `[${shortId}]` : undefined, input.sessionName, cwdBasename].filter(Boolean).join(" — ");
+	return identity ? `${identity} | ${input.appTitle}` : input.appTitle;
+}
+
 export class InteractiveMode {
 	private static readonly EXIT_HINT_DURATION_MS = 2000;
 	private static readonly ESCAPE_REPEAT_WINDOW_MS = 500;
@@ -1478,13 +1502,14 @@ export class InteractiveMode {
 	 * Update terminal title with session name and cwd.
 	 */
 	private updateTerminalTitle(): void {
-		const cwdBasename = path.basename(this.getCurrentCwd());
-		const sessionName = this.getCurrentSessionName();
-		if (sessionName) {
-			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
-		} else {
-			this.ui.terminal.setTitle(`${APP_TITLE} - ${cwdBasename}`);
-		}
+		this.ui.terminal.setTitle(
+			formatTerminalIdentityTitle({
+				appTitle: APP_TITLE,
+				sessionId: this.connectionState?.sessionId,
+				sessionName: this.getCurrentSessionName(),
+				cwd: this.getCurrentCwd(),
+			}),
+		);
 	}
 
 	/**
@@ -1576,6 +1601,7 @@ export class InteractiveMode {
 				}
 				const prompt = startupPrompts[next]!;
 				try {
+					await this.ensureAutomaticSessionName(prompt.text);
 					await this.agentConnection.prompt(prompt.text, {
 						images: prompt.images,
 						streamingBehavior: next === 0 ? "steer" : "followUp",
@@ -2723,6 +2749,17 @@ export class InteractiveMode {
 
 	private getCurrentCwd(): string {
 		return this.connectionState?.cwd ?? this.uiServices.getInitialCwd();
+	}
+
+	private async ensureAutomaticSessionName(prompt: string): Promise<void> {
+		if (this.getCurrentSessionName() || (this.connectionState?.messageCount ?? 0) > 0) return;
+		const name = deriveAutomaticSessionName(prompt);
+		if (!name) return;
+		try {
+			await this.agentConnection.setSessionName(name);
+		} catch {
+			// Naming is presentation-only and must never block prompt admission.
+		}
 	}
 
 	private getCurrentSessionName(): string | undefined {
@@ -5036,6 +5073,7 @@ export class InteractiveMode {
 					return;
 				}
 				try {
+					await this.ensureAutomaticSessionName(text);
 					await this.agentConnection.prompt(text, {
 						streamingBehavior,
 						queueIfBusy: true,
@@ -9922,6 +9960,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 			if (options.name) await this.agentConnection.setSessionName(options.name);
 			if (options.prompt) {
 				this.editor.addToHistory?.(options.prompt);
+				await this.ensureAutomaticSessionName(options.prompt);
 				await this.agentConnection.prompt(options.prompt, { images });
 			}
 		} catch (error: unknown) {
