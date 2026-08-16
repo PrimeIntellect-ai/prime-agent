@@ -1,10 +1,11 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Container, resetCapabilitiesCache, setCapabilities, Text, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { type BashOperations, createBashTool, createBashToolDefinition } from "../src/core/tools/bash.js";
@@ -481,11 +482,13 @@ describe("ToolExecutionComponent parity", () => {
 				"edit",
 				"tool-4err",
 				{ path: filePath, edits: [{ oldText: "before", newText: "after" }] },
+
 				{},
 				createEditToolDefinition(dir),
 				createFakeTui(),
 				dir,
 			);
+
 			component.setEditDiffsExpanded(true);
 			const deadline = Date.now() + 2000;
 			while (Date.now() < deadline && !stripAnsi(component.render(120).join("\n")).includes("+1 -1")) {
@@ -572,6 +575,44 @@ describe("ToolExecutionComponent parity", () => {
 			expect(row[textColumn]).not.toBe(" ");
 		}
 		expect(diffRows.join(" ")).toContain("tau");
+	});
+
+	test("renders exactly one ctrl+j hint before and after the result lands", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "edit-hint-"));
+		const filePath = join(dir, "sample.txt");
+		writeFileSync(filePath, "before\n");
+		try {
+			const component = new ToolExecutionComponent(
+				"edit",
+				"tool-4h",
+				{ path: filePath, oldText: "before", newText: "after" },
+				{},
+				createEditToolDefinition(dir),
+				createFakeTui(),
+				dir,
+			);
+			component.setArgsComplete();
+			component.render(120);
+			// The preview computes asynchronously; poll until it lands.
+			await vi.waitFor(() => {
+				expect(stripAnsi(component.render(120).join("\n"))).toContain("to expand");
+			});
+			// Pre-result: the preview's summary line already carries the hint.
+			const preResult = stripAnsi(component.render(120).join("\n"));
+			expect(preResult.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
+			expect(preResult.split("to expand").length - 1).toBe(1);
+
+			// A successful result keeps a single hint on the summary line.
+			component.updateResult(
+				{ content: [], details: { diff: "-1 before\n+1 after", firstChangedLine: 1 }, isError: false },
+				false,
+			);
+			const settled = stripAnsi(component.render(120).join("\n"));
+			expect(settled.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
+			expect(settled.split("to expand").length - 1).toBe(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("uses the generic result fallback for legacy-named custom tools", () => {
