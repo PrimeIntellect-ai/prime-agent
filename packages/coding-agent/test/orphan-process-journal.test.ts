@@ -31,7 +31,7 @@ describe("orphan process journal", () => {
 		const path = join(directory, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
 
-		recordOrphanProcessState(process.pid, true);
+		expect(recordOrphanProcessState(process.pid, true)).toMatchObject({ status: "owned", pid: process.pid });
 
 		const active = readActiveOrphanProcesses(path, process.pid);
 		expect(active).toHaveLength(1);
@@ -39,9 +39,19 @@ describe("orphan process journal", () => {
 		expect(active[0] && isOrphanProcessIdentityCurrent(active[0])).toBe(true);
 		expect(readActiveOrphanProcesses(path, process.pid + 1)).toEqual([]);
 
-		recordOrphanProcessState(process.pid, false);
+		expect(recordOrphanProcessState(process.pid, false)).toMatchObject({ status: "released", pid: process.pid });
 		expect(readActiveOrphanProcesses(path, process.pid)).toEqual([]);
 		clearOrphanProcessJournal(path);
 		expect(existsSync(path)).toBe(false);
+	});
+
+	it("reports untracked and uncertain ownership instead of silently pretending cleanup is safe", () => {
+		delete process.env[ORPHAN_PROCESS_JOURNAL_ENV];
+		expect(recordOrphanProcessState(process.pid, true)).toMatchObject({ status: "untracked" });
+
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-broken-"));
+		tempDirs.push(directory);
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = directory;
+		expect(recordOrphanProcessState(process.pid, true)).toMatchObject({ status: "uncertain" });
 	});
 });

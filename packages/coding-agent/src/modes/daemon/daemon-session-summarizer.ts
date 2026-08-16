@@ -6,6 +6,8 @@ import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js"
 import type { ActiveSessionState } from "./active-session-state.js";
 
 const SWEEP_INTERVAL_MS = 25_000;
+const CLASSIFIER_TIMEOUT_MS = 15_000;
+const CLASSIFIER_MAX_BACKOFF_MS = 15 * 60_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
 
@@ -121,7 +123,7 @@ function cleanRecap(raw: string): string | undefined {
 	return value;
 }
 
-/** Take the content of the last `<recap>` and `<status>` tags; idle verdicts default to needs_input. */
+/** Take the content of the last valid `<recap>` and `<status>` tags. */
 export function parseAgentStatusResponse(text: string, isWorking: boolean): AgentStatusResult | undefined {
 	// Normalize unicode angle-bracket lookalikes (‹ › ＜ ＞) so a tag written with them still parses.
 	const cleaned = text.replace(/[‹＜]/g, "<").replace(/[›＞]/g, ">");
@@ -136,6 +138,9 @@ export function parseAgentStatusResponse(text: string, isWorking: boolean): Agen
 	}
 	const statusMatch = [...cleaned.matchAll(/<status>\s*([a-z_]+)\s*<\/status>/gi)].at(-1);
 	const status = statusMatch ? statusMatch[1]!.toUpperCase() : undefined;
+	if (status !== "COMPLETED" && status !== "NEEDS_INPUT") {
+		return undefined;
+	}
 	const taskState: AgentTaskState = status === "COMPLETED" ? "completed" : "needs_input";
 	return { summary, taskState };
 }
@@ -304,14 +309,14 @@ export class DaemonSessionSummarizer {
 		const isWorking = isSessionWorking(state);
 		const previous = state.summaryState;
 		// Idle sessions with a current verdict need no refresh; working sessions
-		// always refresh so the recap keeps up with the in-progress turn.
+		// refresh so the recap can keep up with the in-progress turn.
 		const contentUnchanged = previous?.basedOnMessageCount === messageCount;
 		const owesIdleVerdict = !isWorking && previous?.taskState === undefined;
-		// A blank recap means the model call hasn't succeeded yet (e.g. the
-		// needs_input fallback fired on a transient failure); keep retrying until a
-		// real summary lands so the recap isn't left permanently empty.
-		const owesSummary = !isWorking && !previous?.summary;
-		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary) {
+		if (contentUnchanged && !isWorking && !owesIdleVerdict) {
+			return;
+		}
+		const nextAttemptAt = state.summaryClassifierState?.nextAttemptAt;
+		if (nextAttemptAt && Date.now() < Date.parse(nextAttemptAt)) {
 			return;
 		}
 		// Include the in-progress message so a long streaming turn gets a live recap.
@@ -319,25 +324,42 @@ export class DaemonSessionSummarizer {
 		const contextMessages = streaming ? [...messages, streaming] : messages;
 
 		const controller = new AbortController();
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<undefined>((resolveDeadline) => {
+			timeout = setTimeout(() => {
+				controller.abort();
+				resolveDeadline(undefined);
+			}, CLASSIFIER_TIMEOUT_MS);
+			timeout.unref?.();
+		});
 		this.inFlight.set(id, controller);
 		try {
-			const generated = await this.generate({
-				registry: session.modelRegistry,
-				messages: contextMessages,
-				isWorking,
-				signal: controller.signal,
-			});
-			// A failed classification on an idle session would spin at "working"
-			// forever (the activity axis holds unjudged idle sessions there), so
-			// settle it to needs_input.
-			const result =
-				generated ??
-				(!isWorking && (owesIdleVerdict || owesSummary)
-					? { summary: previous?.summary ?? "", taskState: "needs_input" as const }
-					: undefined);
-			if (!result) {
+			const generated = await Promise.race([
+				this.generate({
+					registry: session.modelRegistry,
+					messages: contextMessages,
+					isWorking,
+					signal: controller.signal,
+				}),
+				deadline,
+			]);
+			if (!generated) {
+				const failures = (state.summaryClassifierState?.consecutiveFailures ?? 0) + 1;
+				const backoffMs = Math.min(SWEEP_INTERVAL_MS * 2 ** (failures - 1), CLASSIFIER_MAX_BACKOFF_MS);
+				state.summaryClassifierState = {
+					status: "classifier_unavailable",
+					consecutiveFailures: failures,
+					lastAttemptAt: new Date().toISOString(),
+					nextAttemptAt: new Date(Date.now() + backoffMs).toISOString(),
+				};
+				this.onStatusChanged?.(state);
 				return;
 			}
+			state.summaryClassifierState = {
+				status: "available",
+				consecutiveFailures: 0,
+				lastAttemptAt: new Date().toISOString(),
+			};
 			// Discard if the session closed, was swapped, or moved to a new turn
 			// during the async call — never write a verdict for stale state.
 			if (
@@ -351,16 +373,19 @@ export class DaemonSessionSummarizer {
 			// A working refresh carries no verdict; keep the prior one at the same
 			// message count so a still-valid needs_input isn't dropped.
 			const taskState =
-				result.taskState ?? (previous?.basedOnMessageCount === messageCount ? previous?.taskState : undefined);
+				generated.taskState ?? (previous?.basedOnMessageCount === messageCount ? previous?.taskState : undefined);
 			const status: AgentStatus = {
-				summary: result.summary,
+				summary: generated.summary,
 				taskState,
 				basedOnMessageCount: messageCount,
 			};
-			const changed = previous?.summary !== status.summary || previous?.taskState !== status.taskState;
+			const changed =
+				previous?.summary !== status.summary ||
+				previous?.taskState !== status.taskState ||
+				previous?.basedOnMessageCount !== status.basedOnMessageCount;
 			state.summaryState = status;
-			// Persist only settled idle verdicts, never mid-stream.
-			if (!isWorking) {
+			// Persist only semantic changes to settled idle verdicts, never polling refreshes.
+			if (!isWorking && changed) {
 				try {
 					session.sessionManager.appendAgentStatus(status);
 				} catch {
@@ -371,6 +396,7 @@ export class DaemonSessionSummarizer {
 				this.onStatusChanged?.(state);
 			}
 		} finally {
+			clearTimeout(timeout);
 			this.inFlight.delete(id);
 			// Re-debounce a request that arrived mid-pass instead of dropping it.
 			if (this.rerunRequested.delete(id)) {

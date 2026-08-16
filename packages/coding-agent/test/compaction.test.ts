@@ -15,6 +15,7 @@ import {
 	getLastAssistantUsage,
 	prepareCompaction,
 	shouldCompact,
+	validateCompactionSummary,
 } from "../src/core/compaction/index.js";
 import {
 	buildSessionContext,
@@ -182,6 +183,9 @@ describe("buildSummarizationPrompt", () => {
 		expect(prompt).toContain("## Goal");
 		// The kernel keeps running across compaction — the note must not claim a wipe.
 		expect(prompt).toContain("IPython kernel keeps running");
+		expect(prompt).toContain("## User Directives");
+		expect(prompt).toContain("## Active State");
+		expect(prompt).toContain("## Verification & Evidence");
 		expect(prompt).not.toMatch(/wiped|restarted/);
 	});
 
@@ -199,6 +203,53 @@ describe("buildSummarizationPrompt", () => {
 		expect(initial).not.toContain("existing summary provided in <previous-summary> tags");
 		expect(update).toContain("existing summary provided in <previous-summary> tags");
 		expect(update).toContain("<user-instructions>");
+	});
+});
+
+describe("validateCompactionSummary", () => {
+	const validSummary = `## Goal
+Continue the protected update.
+
+## User Directives
+- Preserve local optimizations.
+
+## Constraints & Preferences
+- Keep the update clobber-safe.
+
+## Progress
+### Done
+- [x] Audited the current implementation.
+
+### In Progress
+- [ ] Reconcile upstream.
+
+### Blocked
+- (none)
+
+## Key Decisions
+- **Use native compaction**: Extend the existing checkpoint.
+
+## Active State
+- Branch: reconcile/upstream.
+
+## Verification & Evidence
+- Focused test pending.
+
+## Next Steps
+1. Run the focused test.
+
+## Critical Context
+- Preserve the private remote.`;
+
+	it("accepts a complete continuation checkpoint", () => {
+		expect(validateCompactionSummary(validSummary)).toBe(validSummary);
+	});
+
+	it("rejects a checkpoint that could clobber active context", () => {
+		const incomplete = validSummary.replace("## User Directives", "## Notes");
+		expect(() => validateCompactionSummary(incomplete)).toThrow(
+			"Compaction summary is missing required section: ## User Directives",
+		);
 	});
 });
 

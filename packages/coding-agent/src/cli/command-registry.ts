@@ -86,6 +86,41 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["--fix   Remove stale sockets and stop idle orphaned services", "--json  Print JSON"],
 	},
 	{
+		path: ["monitor"],
+		usage: "monitor [--json] [service <install|uninstall|status> [--json] | --calibration | --ack <notification-id> | --extend <operation-id> --minutes <1-60>]",
+		summary: "Check detached work, manage the monitor service, retry warnings, or extend a deadline",
+		options: [
+			"--json  Print JSON",
+			"service <install|uninstall|status> [--json]  Manage the macOS monitor scheduler",
+			"--calibration  Report phase-specific latency percentiles and canary readiness",
+			"--ack <notification-id>  Acknowledge an alert",
+			"--extend <operation-id> --minutes <1-60>  Queue a capped human deadline extension",
+		],
+	},
+	{
+		path: ["monitor", "service"],
+		usage: "monitor service <install|uninstall|status> [--json]",
+		summary: "Manage the repository-owned macOS reliability monitor service",
+	},
+	{
+		path: ["monitor", "service", "install"],
+		usage: "monitor service install [--json]",
+		summary: "Install and start the macOS reliability monitor service",
+		options: ["--json  Print JSON"],
+	},
+	{
+		path: ["monitor", "service", "uninstall"],
+		usage: "monitor service uninstall [--json]",
+		summary: "Stop and remove the macOS reliability monitor service",
+		options: ["--json  Print JSON"],
+	},
+	{
+		path: ["monitor", "service", "status"],
+		usage: "monitor service status [--json]",
+		summary: "Show the macOS reliability monitor service status",
+		options: ["--json  Print JSON"],
+	},
+	{
 		path: ["shutdown"],
 		usage: "shutdown [--force] [--json]",
 		summary: "Stop every agent and background service",
@@ -170,6 +205,8 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 			["--offline", "Disable startup network operations"],
 			["--verbose", "Force verbose startup"],
 			["--daemon-socket <path>", "Use a specific daemon socket"],
+			["-a, --approve", "Trust this project's resources for this run only"],
+			["-na, --no-approve", "Do not trust this project's resources for this run"],
 		],
 	},
 	{

@@ -96,19 +96,6 @@ export function resolveConfigValueUncached(config: string): string | undefined {
 	return envValue || config;
 }
 
-export function resolveConfigValueOrThrow(config: string, description: string): string {
-	const resolvedValue = resolveConfigValueUncached(config);
-	if (resolvedValue !== undefined) {
-		return resolvedValue;
-	}
-
-	if (config.startsWith("!")) {
-		throw new Error(`Failed to resolve ${description} from shell command: ${config.slice(1)}`);
-	}
-
-	throw new Error(`Failed to resolve ${description}`);
-}
-
 /**
  * Resolve all header values using the same resolution logic as API keys.
  */
@@ -120,18 +107,6 @@ export function resolveHeaders(headers: Record<string, string> | undefined): Rec
 		if (resolvedValue) {
 			resolved[key] = resolvedValue;
 		}
-	}
-	return Object.keys(resolved).length > 0 ? resolved : undefined;
-}
-
-export function resolveHeadersOrThrow(
-	headers: Record<string, string> | undefined,
-	description: string,
-): Record<string, string> | undefined {
-	if (!headers) return undefined;
-	const resolved: Record<string, string> = {};
-	for (const [key, value] of Object.entries(headers)) {
-		resolved[key] = resolveConfigValueOrThrow(value, `${description} header "${key}"`);
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }

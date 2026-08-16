@@ -155,6 +155,15 @@ if (status && status.trim()) {
 }
 console.log("  Working directory clean\n");
 
+// 1b. Refresh the generated model catalog.
+// `npm run build` deliberately compiles the checked-in catalog without touching the network, so
+// ordinary builds stay reproducible and never dirty the tree. A release is the point where the
+// catalog should pick up live provider data; the result is staged into the release commit below,
+// which also keeps the published artifact identical to the tagged tree.
+console.log("Refreshing the generated model catalog...");
+run("npm run generate-models -w @earendil-works/pi-ai");
+console.log();
+
 // 2. Bump or set version
 const version = bumpOrSetVersion(RELEASE_TARGET);
 console.log(`  New version: ${version}\n`);

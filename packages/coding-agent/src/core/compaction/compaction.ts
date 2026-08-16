@@ -469,6 +469,10 @@ Use this EXACT format:
 ## Goal
 [What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
 
+
+## User Directives
+- [Exact active user instructions, approval boundaries, deadlines, and explicit stop conditions]
+- [Preserve quoted wording when paraphrasing could change meaning]
 ## Constraints & Preferences
 - [Any constraints, preferences, or requirements mentioned by user]
 - [Or "(none)" if none were mentioned]
@@ -486,6 +490,14 @@ Use this EXACT format:
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
 
+
+## Active State
+- [Current repository/branch/worktree state, running process or session IDs, and durable artifact paths]
+- [Live variables or resources needed to continue, or "(none)"]
+
+## Verification & Evidence
+- [Commands or scenarios already run and their exact outcomes]
+- [Anything still unverified]
 ## Next Steps
 1. [Ordered list of what should happen next]
 
@@ -513,6 +525,10 @@ Use this EXACT format:
 ## Goal
 [Preserve existing goals, add new ones if the task expanded]
 
+
+## User Directives
+- [Preserve every still-active user instruction, approval boundary, deadline, and stop condition]
+- [Add new directives; remove one only when the new messages explicitly supersede it]
 ## Constraints & Preferences
 - [Preserve existing, add new ones discovered]
 
@@ -529,6 +545,12 @@ Use this EXACT format:
 ## Key Decisions
 - **[Decision]**: [Brief rationale] (preserve all previous, add new)
 
+
+## Active State
+- [Preserve and update repository/branch/worktree state, running process or session IDs, and durable artifact paths]
+
+## Verification & Evidence
+- [Preserve completed verification with exact outcomes; add new evidence and remaining unverified work]
 ## Next Steps
 1. [Update based on current state]
 
@@ -536,6 +558,39 @@ Use this EXACT format:
 - [Preserve important context, add new if needed]
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+
+const REQUIRED_COMPACTION_SUMMARY_SECTIONS = [
+	"## Goal",
+	"## User Directives",
+	"## Constraints & Preferences",
+	"## Progress",
+	"## Key Decisions",
+	"## Active State",
+	"## Verification & Evidence",
+	"## Next Steps",
+	"## Critical Context",
+] as const;
+
+export function validateCompactionSummary(summary: string): string {
+	const checkpoint = summary.trim();
+	if (!checkpoint) {
+		throw new Error("Compaction summary is empty");
+	}
+
+	let previousSectionIndex = -1;
+	for (const section of REQUIRED_COMPACTION_SUMMARY_SECTIONS) {
+		const sectionIndex = checkpoint.indexOf(section);
+		if (sectionIndex === -1) {
+			throw new Error(`Compaction summary is missing required section: ${section}`);
+		}
+		if (sectionIndex <= previousSectionIndex) {
+			throw new Error(`Compaction summary section is out of order: ${section}`);
+		}
+		previousSectionIndex = sectionIndex;
+	}
+
+	return checkpoint;
+}
 
 /**
  * Build the instruction portion of the summarization prompt: the initial or
@@ -608,7 +663,7 @@ export async function generateSummary(
 		.map((c) => c.text)
 		.join("\n");
 
-	return textContent;
+	return validateCompactionSummary(textContent);
 }
 
 // ============================================================================

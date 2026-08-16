@@ -248,7 +248,7 @@ describe("DaemonClient", () => {
 		await expect(request).rejects.toThrow("closed before the operation completed");
 	});
 
-	it("rejects an old daemon before requesting session state", async () => {
+	it("rejects a protocol-7 daemon before sending project trust for session creation", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
@@ -256,9 +256,13 @@ describe("DaemonClient", () => {
 		await connect;
 		emitHello(socket, DAEMON_PROTOCOL_VERSION - 1);
 
-		await expect(client.request({ type: "get_state", activeSessionId: "active-1" })).rejects.toThrow(
-			"does not support get_state",
-		);
+		expect(client.hello?.protocol.version).toBe(7);
+		await expect(
+			client.request({
+				type: "create",
+				config: { cwd: "/tmp/project", projectTrusted: false },
+			}),
+		).rejects.toThrow("does not support create");
 		expect(socket.writes).toEqual([]);
 		client.close();
 	});

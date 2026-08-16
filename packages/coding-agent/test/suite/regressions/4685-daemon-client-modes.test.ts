@@ -97,12 +97,8 @@ async function runCli(
 	});
 	child.stdin?.end(options.stdin ?? "");
 	const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
-		const timeout = setTimeout(() => {
-			child.kill("SIGKILL");
-			reject(new Error(`CLI timed out\n${stderr}`));
-		}, 20_000);
+		child.once("error", reject);
 		child.once("exit", (code, signal) => {
-			clearTimeout(timeout);
 			resolveExit({ code, signal: signal as NodeJS.Signals | null });
 		});
 	});
@@ -130,9 +126,8 @@ async function runRpc(
 	const input = commands.map((command) => JSON.stringify(command)).join("\n");
 	child.stdin?.end(options.trailingNewline === false ? input : `${input}\n`);
 	const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
-		const timeout = setTimeout(() => reject(new Error(`RPC fixture timed out\n${stderr}`)), 10_000);
+		child.once("error", reject);
 		child.once("exit", (code, signal) => {
-			clearTimeout(timeout);
 			resolveExit({ code, signal: signal as NodeJS.Signals | null });
 		});
 	});

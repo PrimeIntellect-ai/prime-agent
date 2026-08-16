@@ -7,12 +7,14 @@ import {
 	mergeDiscoveredDaemonProcesses,
 	parseLsofListeners,
 	parsePrimeAgentProcessIds,
+	parsePsEtime,
 	parsePsEtimes,
 	parseSsListeners,
 	planReap,
 	planShutdownAll,
 	planShutdownConfirmation,
 	sortDaemons,
+	uptimePsArgs,
 	verifyHelloSupervisorPid,
 } from "../src/cli/daemon-ps.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
@@ -122,6 +124,20 @@ describe("parsePsEtimes", () => {
 		expect(uptimes.get(1234)).toBe(86400);
 		expect(uptimes.get(5678)).toBe(42);
 		expect(uptimes.size).toBe(2);
+	});
+});
+
+describe("macOS process elapsed time", () => {
+	it("parses ps etime values into elapsed seconds", () => {
+		const uptimes = parsePsEtime("  1234  1-02:03:04\n  5678  03:04\n  9012  05:06:07\n");
+		expect(uptimes.get(1234)).toBe(93_784);
+		expect(uptimes.get(5678)).toBe(184);
+		expect(uptimes.get(9012)).toBe(18_367);
+	});
+
+	it("selects the portable elapsed-time column by platform", () => {
+		expect(uptimePsArgs([123, 456], "darwin")).toEqual(["-o", "pid=,etime=", "-p", "123,456"]);
+		expect(uptimePsArgs([123, 456], "linux")).toEqual(["-o", "pid=,etimes=", "-p", "123,456"]);
 	});
 });
 

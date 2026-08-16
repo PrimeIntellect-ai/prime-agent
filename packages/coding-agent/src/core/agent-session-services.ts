@@ -13,12 +13,14 @@ import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
+import { parseDefaultProjectTrust, resolveProjectTrusted } from "./project-trust.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
 import type { SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
+import { ProjectTrustStore } from "./trust-manager.js";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -44,6 +46,8 @@ export interface CreateAgentSessionServicesOptions {
 	agentDir?: string;
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
+	/** Explicit one-run trust decision. When omitted, trust is resolved non-interactively from global policy and trust.json. */
+	projectTrusted?: boolean;
 	modelRegistry?: ModelRegistry;
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
@@ -179,8 +183,19 @@ export async function createAgentSessionServices(
 ): Promise<AgentSessionServices> {
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
+	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
-	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+	const projectTrusted =
+		options.projectTrusted ??
+		(await resolveProjectTrusted({
+			cwd,
+			trustStore: new ProjectTrustStore(agentDir),
+			defaultProjectTrust: parseDefaultProjectTrust(settingsManager.getGlobalSettings().defaultProjectTrust),
+			interactive: false,
+			onDiagnostic: (message) => diagnostics.push({ type: "warning", message }),
+		}));
+	settingsManager.setProjectTrusted(projectTrusted);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 
 	// MCP integrations: registers OAuth providers and gates the built-in
@@ -210,11 +225,11 @@ export async function createAgentSessionServices(
 		cwd,
 		agentDir,
 		settingsManager,
+		projectTrusted,
 		extraBuiltinSkillOverrides: () => mcpManager.getDisabledBuiltinSkillOverrides(),
 	});
 	await resourceLoader.reload();
 
-	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	if (
 		!options.telemetryDisabled &&
 		isTelemetryEnabled(settingsManager) &&

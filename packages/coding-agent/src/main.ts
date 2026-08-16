@@ -26,6 +26,7 @@ import { processFileArguments } from "./cli/file-processor.js";
 import { buildInitialMessage } from "./cli/initial-message.js";
 import { listModels } from "./cli/list-models.js";
 import { installOwnedSessionRecoveryTracking, isOwnedSessionWorkerProcess } from "./cli/owned-session-worker.js";
+import { type ProjectTrustPromptOption, resolveCliProjectTrust } from "./cli/project-trust.js";
 import { handlePublicCommand } from "./cli/public-command.js";
 import {
 	looksLikeSessionPath,
@@ -110,7 +111,7 @@ import { ExtensionSelectorComponent } from "./modes/interactive/components/exten
 import { shouldRunOnboarding } from "./modes/interactive/onboarding.js";
 import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
-import { isLocalPath } from "./utils/paths.js";
+import { canonicalizeDirectory, isLocalPath } from "./utils/paths.js";
 
 /**
  * Read all content from piped stdin.
@@ -161,6 +162,71 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
 export type ClientMode = AgentExecutionMode;
 /** Compatibility view of the CLI's internal daemon process entrypoint. */
 export type AppMode = ClientMode | "daemon";
+export type SelectProjectTrust = (
+	options: readonly ProjectTrustPromptOption[],
+) => Promise<ProjectTrustPromptOption["value"] | undefined>;
+
+export interface MainProjectTrustResolverOptions {
+	startupCwd: string;
+	agentDir: string;
+	trustOverride?: boolean;
+}
+
+export interface ResolveMainProjectTrustOptions {
+	finalCwd: string;
+	appMode: AppMode;
+	select?: SelectProjectTrust;
+	onDiagnostic?: (message: string) => void;
+}
+
+export interface MainProjectTrustResolver {
+	resolve(options: ResolveMainProjectTrustOptions): Promise<boolean>;
+}
+
+export function createMainProjectTrustResolver(options: MainProjectTrustResolverOptions): MainProjectTrustResolver {
+	const settingsManager = SettingsManager.create(options.startupCwd, options.agentDir, {
+		projectTrusted: false,
+	});
+	const sessionDecisions = new Map<string, boolean>();
+
+	return {
+		async resolve(resolveOptions): Promise<boolean> {
+			const cwdKey = canonicalizeDirectory(resolveOptions.finalCwd);
+			if (options.trustOverride === undefined) {
+				const cachedDecision = sessionDecisions.get(cwdKey);
+				if (cachedDecision !== undefined) {
+					return cachedDecision;
+				}
+			}
+
+			let selectedSessionDecision: boolean | undefined;
+			const select = resolveOptions.select;
+			const projectTrusted = await resolveCliProjectTrust({
+				cwd: resolveOptions.finalCwd,
+				agentDir: options.agentDir,
+				settingsManager,
+				trustOverride: options.trustOverride,
+				interactive: resolveOptions.appMode === "interactive",
+				select: select
+					? async (promptOptions) => {
+							const selection = await select(promptOptions);
+							if (selection === "trust-session") {
+								selectedSessionDecision = true;
+							} else if (selection === "do-not-trust-session") {
+								selectedSessionDecision = false;
+							}
+							return selection;
+						}
+					: undefined,
+				onDiagnostic: resolveOptions.onDiagnostic,
+			});
+			if (selectedSessionDecision !== undefined) {
+				sessionDecisions.set(cwdKey, selectedSessionDecision);
+			}
+			return projectTrusted;
+		},
+	};
+}
 
 export function shouldRejectNonInteractiveAttach(attachAgent: string | undefined, appMode: AppMode): boolean {
 	return attachAgent !== undefined && appMode !== "interactive";
@@ -632,18 +698,20 @@ function runtimeAutonomousConfigFromArgs(parsed: Args): AgentSessionRuntimeConfi
 	};
 }
 
-function runtimeConfigFromArgs(
+export function runtimeConfigFromArgs(
 	parsed: Args,
 	cwd: string,
 	agentDir: string,
 	sessionDir: string | undefined,
 	appMode: AppMode,
-	telemetryDisabled?: true,
+	telemetryDisabled: true | undefined,
+	projectTrusted: boolean,
 ): AgentSessionRuntimeConfig {
 	return {
 		cwd,
 		agentDir,
 		sessionDir,
+		projectTrusted,
 		provider: parsed.provider,
 		model: parsed.model,
 		apiKey: parsed.apiKey,
@@ -737,6 +805,7 @@ async function prepareRuntimeServices(options: {
 		cwd: options.cwd,
 		agentDir: effectiveAgentDir,
 		authStorage,
+		projectTrusted: config.projectTrusted,
 		extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
 		// Subagents share the parent's Herdr pane; their own reporter would race
 		// the parent's and a subagent quit would release the still-active pane.
@@ -878,6 +947,49 @@ async function promptForMissingSessionCwd(
 		ui.setFocus(selector);
 		ui.start();
 	});
+}
+
+async function promptForProjectTrust(
+	cwd: string,
+	options: readonly ProjectTrustPromptOption[],
+	settingsManager: SettingsManager,
+): Promise<ProjectTrustPromptOption["value"] | undefined> {
+	initTheme(settingsManager.getTheme());
+	setKeybindings(KeybindingsManager.create());
+	const decisionsByLabel = new Map(options.map((option) => [option.label, option.value]));
+
+	const promiseConstructor = Promise as PromiseConstructor & {
+		withResolvers<T>(): {
+			promise: Promise<T>;
+			resolve: (value: T | PromiseLike<T>) => void;
+			reject: (reason?: unknown) => void;
+		};
+	};
+	const { promise, resolve } = promiseConstructor.withResolvers<ProjectTrustPromptOption["value"] | undefined>();
+	const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
+	ui.setClearOnShrink(settingsManager.getClearOnShrink());
+
+	let settled = false;
+	const finish = (result: ProjectTrustPromptOption["value"] | undefined) => {
+		if (settled) {
+			return;
+		}
+		settled = true;
+		ui.stop();
+		resolve(result);
+	};
+
+	const selector = new ExtensionSelectorComponent(
+		`Project trust\n${cwd}\nTrusting loads this project's settings and executable resources.`,
+		options.map((option) => option.label),
+		(option) => finish(decisionsByLabel.get(option)),
+		() => finish(undefined),
+		{ tui: ui },
+	);
+	ui.addChild(selector);
+	ui.setFocus(selector);
+	ui.start();
+	return promise;
 }
 
 function getDaemonSummaryActiveSessionId(summary: SessionSummary): string {
@@ -1137,8 +1249,27 @@ export async function main(args: string[], options?: MainOptions) {
 	time("runMigrations");
 
 	const agentDir = getAgentDir();
-	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	const startupSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
+	const projectTrustResolver = createMainProjectTrustResolver({
+		startupCwd: cwd,
+		agentDir,
+		trustOverride: parsed.projectTrustOverride,
+	});
+	const resolveProjectTrustForCwd = (
+		finalCwd: string,
+		resolutionMode: AppMode,
+		allowPrompt = false,
+	): Promise<boolean> =>
+		projectTrustResolver.resolve({
+			finalCwd,
+			appMode: resolutionMode,
+			select:
+				allowPrompt && resolutionMode === "interactive"
+					? (promptOptions) => promptForProjectTrust(finalCwd, promptOptions, startupSettingsManager)
+					: undefined,
+			onDiagnostic: (message) => reportDiagnostics([{ type: "warning", message }]),
+		});
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
@@ -1244,18 +1375,19 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
-	const telemetrySettingsManager =
-		sessionManager.getCwd() === cwd
-			? startupSettingsManager
-			: SettingsManager.create(sessionManager.getCwd(), agentDir);
-	const telemetryDisabled = isTelemetryEnabled(telemetrySettingsManager) ? undefined : true;
+	const finalCwd = sessionManager.getCwd();
+	const projectTrusted = await resolveProjectTrustForCwd(finalCwd, appMode, true);
+	time("resolveProjectTrust");
+	const runtimeSettingsManager = SettingsManager.create(finalCwd, agentDir, { projectTrusted });
+	const telemetryDisabled = isTelemetryEnabled(runtimeSettingsManager) ? undefined : true;
 	const defaultSessionConfig = runtimeConfigFromArgs(
 		parsed,
-		sessionManager.getCwd(),
+		finalCwd,
 		agentDir,
 		sessionDir,
 		appMode,
 		telemetryDisabled,
+		projectTrusted,
 	);
 	// Verifier/headless clients pass initialGoal in each create request. The long-lived
 	// daemon fallback must not seed that goal into unrelated future sessions.
@@ -1269,7 +1401,22 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionConfig,
 		sessionOptions: runtimeSessionOptions,
 	}) => {
-		const config = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
+		const mergedConfig = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
+		let runtimeProjectTrusted: boolean;
+		if (
+			sessionConfig?.cwd !== undefined &&
+			sessionConfig.projectTrusted !== undefined &&
+			canonicalizeDirectory(sessionConfig.cwd) === canonicalizeDirectory(cwd)
+		) {
+			runtimeProjectTrusted = sessionConfig.projectTrusted;
+		} else {
+			runtimeProjectTrusted = await resolveProjectTrustForCwd(cwd, mergedConfig.executionMode ?? appMode);
+		}
+		const config: AgentSessionRuntimeConfig = {
+			...mergedConfig,
+			cwd,
+			projectTrusted: runtimeProjectTrusted,
+		};
 		const prepared = await prepareRuntimeServices({
 			config,
 			cwd,
@@ -1395,11 +1542,14 @@ export async function main(args: string[], options?: MainOptions) {
 						summary,
 						sessionManager.getCwd(),
 					);
+					const attachedCwd = attachedSessionManager.getCwd();
+					const attachedProjectTrusted = await resolveProjectTrustForCwd(attachedCwd, "interactive");
 					const attachedPrepared = await prepareRuntimeServices({
 						config: mergeAgentSessionRuntimeConfig(defaultSessionConfig, {
-							cwd: attachedSessionManager.getCwd(),
+							cwd: attachedCwd,
+							projectTrusted: attachedProjectTrusted,
 						}),
-						cwd: attachedSessionManager.getCwd(),
+						cwd: attachedCwd,
 						agentDir,
 						sessionManager: attachedSessionManager,
 						extensionFactories: options?.extensionFactories,
@@ -1508,7 +1658,7 @@ export async function main(args: string[], options?: MainOptions) {
 		return;
 	}
 	if (useDaemonClient) {
-		const settingsManager = SettingsManager.create(sessionManager.getCwd(), agentDir);
+		const settingsManager = runtimeSettingsManager;
 		let stdinContent: string | undefined;
 		if (appMode !== "rpc" && appMode !== "acp") {
 			stdinContent = await readPipedStdin();

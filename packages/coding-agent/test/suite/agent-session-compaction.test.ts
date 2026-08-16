@@ -58,6 +58,38 @@ function failingGateCommand(): string {
 	return `${process.execPath} -e "console.error('gate failed'); process.exit(1)"`;
 }
 
+const validCompactionSummary = `## Goal
+Preserve model-generated summary context.
+
+## User Directives
+- (none)
+
+## Constraints & Preferences
+- (none)
+
+## Progress
+### Done
+- [x] Captured model-generated summary.
+### In Progress
+- [ ] (none)
+### Blocked
+- (none)
+
+## Key Decisions
+- **Continue**: Keep the session usable.
+
+## Active State
+- Session remains active.
+
+## Verification & Evidence
+- Compaction metadata is persisted.
+
+## Next Steps
+1. Continue the session.
+
+## Critical Context
+- model-generated summary`;
+
 describe("AgentSession compaction characterization", () => {
 	const harnesses: Harness[] = [];
 
@@ -111,7 +143,7 @@ describe("AgentSession compaction characterization", () => {
 		harness.setResponses([
 			fauxAssistantMessage("one response"),
 			fauxAssistantMessage("two response"),
-			fauxAssistantMessage("model-generated summary"),
+			fauxAssistantMessage(validCompactionSummary),
 			fauxAssistantMessage("model-generated turn summary"),
 			fauxAssistantMessage("still usable"),
 		]);

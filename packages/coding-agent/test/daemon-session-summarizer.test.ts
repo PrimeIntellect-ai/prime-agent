@@ -42,11 +42,11 @@ describe("daemon session summarizer", () => {
 			expect(result).toEqual({ summary: "Refactoring token validation" });
 		});
 
-		test("falls back to needs_input on a missing or unrecognized idle verdict", () => {
+		test("does not fabricate needs_input from a missing or unrecognized idle verdict", () => {
 			expect(
-				parseAgentStatusResponse("<recap>Doing something</recap>\n<status>MAYBE</status>", false)?.taskState,
-			).toBe("needs_input");
-			expect(parseAgentStatusResponse("<recap>Doing something</recap>", false)?.taskState).toBe("needs_input");
+				parseAgentStatusResponse("<recap>Doing something</recap>\n<status>MAYBE</status>", false),
+			).toBeUndefined();
+			expect(parseAgentStatusResponse("<recap>Doing something</recap>", false)).toBeUndefined();
 		});
 
 		test("ignores narration outside the tags and never leaks free-form text", () => {

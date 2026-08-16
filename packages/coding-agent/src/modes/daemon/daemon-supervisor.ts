@@ -41,7 +41,12 @@ import {
 	type IdleEvictionMinutes,
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
-import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
+import {
+	canonicalSessionPath,
+	compareProcessStartIds,
+	getProcessStartId,
+	SessionAlreadyActiveError,
+} from "../../core/session-lease.js";
 import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
@@ -1270,16 +1275,14 @@ export class DaemonSupervisor {
 			this.write(client, failure(command.id, command.type, `Unknown daemon command: ${command.type}`));
 			return;
 		}
-		if (
-			command.type === "get_session_tree" &&
-			preParsed.protocolVersion < DAEMON_COMMAND_COMPATIBILITY.get_session_tree.minProtocol
-		) {
+		const commandCompatibility = DAEMON_COMMAND_COMPATIBILITY[command.type];
+		if (preParsed.protocolVersion < commandCompatibility.minProtocol) {
 			this.write(
 				client,
 				failure(
 					command.id,
 					command.type,
-					`get_session_tree requires client protocol ${DAEMON_COMMAND_COMPATIBILITY.get_session_tree.minProtocol} or newer`,
+					`${command.type} requires client protocol ${commandCompatibility.minProtocol} or newer`,
 				),
 			);
 			return;
@@ -1640,7 +1643,9 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter((worker) => this.isLiveWorker(worker));
+				const workers = [...this.workers.values()].filter(
+					(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
+				);
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
 					await Promise.all(
@@ -2810,9 +2815,12 @@ export class DaemonSupervisor {
 					await this.assertRecoveryAllowed();
 					const processAlive = isProcessAlive(worker.descriptor.pid);
 					const observedProcessStartId = processAlive ? getProcessStartId(worker.descriptor.pid) : undefined;
+					const processIdentityComparison = compareProcessStartIds(
+						worker.descriptor.processStartId,
+						observedProcessStartId,
+					);
 					const processIdentityMatches =
-						worker.descriptor.processStartId === undefined ||
-						observedProcessStartId === worker.descriptor.processStartId;
+						worker.descriptor.processStartId === undefined || processIdentityComparison === "match";
 					if (processAlive && processIdentityMatches) {
 						try {
 							await this.connectWorker(worker, 1500);
@@ -2847,7 +2855,7 @@ export class DaemonSupervisor {
 					}
 					if (
 						processAlive &&
-						(worker.descriptor.processStartId === undefined || observedProcessStartId === undefined)
+						(worker.descriptor.processStartId === undefined || processIdentityComparison === "unverifiable")
 					) {
 						throw new Error(
 							`Cannot safely replace live session worker ${worker.descriptor.workerId} without a verified process identity`,
@@ -2905,6 +2913,10 @@ export class DaemonSupervisor {
 	private async recoverUncertainWorkerOperations(worker: ResidentWorker, killWorkerProcess = true): Promise<void> {
 		await this.assertRecoveryAllowed();
 		if (killWorkerProcess) {
+			// Recovery needs the catalog to record interrupted work. Do not terminate a
+			// still-recoverable worker until that dependency is ready.
+			await this.catalog.start();
+			await this.assertRecoveryAllowed();
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 		}
 		const orphanProcessJournalPath = worker.descriptor.orphanProcessJournalPath;
@@ -4671,7 +4683,15 @@ export class DaemonSupervisor {
 		if (observed === undefined) {
 			return "unknown";
 		}
-		return observed === processStartId ? "current" : "replaced";
+		// Cross-format tokens (legacy ps: vs pinned ps2:) cannot prove PID reuse.
+		const comparison = compareProcessStartIds(processStartId, observed);
+		if (comparison === "match") {
+			return "current";
+		}
+		if (comparison === "mismatch") {
+			return "replaced";
+		}
+		return "unknown";
 	}
 
 	/**
