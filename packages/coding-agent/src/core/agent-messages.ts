@@ -154,6 +154,19 @@ export interface AgentSessionMessageSendInput {
 	receiverRole?: AgentFamilyRelationship;
 }
 
+export interface AgentSessionCreateInput {
+	name: string;
+	config?: unknown;
+	sessionPath?: string;
+	cwd?: string;
+}
+
+export interface AgentSessionCreateResult {
+	activeSessionId: string;
+	sessionId: string;
+	sessionName: string;
+}
+
 export interface AgentSessionMessageController {
 	listAgents(): AgentSessionMessageListResult | Promise<AgentSessionMessageListResult>;
 	roster?(): AgentFamilyRosterResult | Promise<AgentFamilyRosterResult>;
@@ -161,6 +174,7 @@ export interface AgentSessionMessageController {
 	assertSessionNameAvailable?(input: AgentSessionNameAvailabilityInput): void | Promise<void>;
 	setSessionName?(name: string): void | Promise<void>;
 	sendAgentMessage(input: AgentSessionMessageSendInput): Promise<AgentSessionMessageReceipt>;
+	createSession?(input: AgentSessionCreateInput): Promise<AgentSessionCreateResult>;
 }
 
 export interface AgentSessionMessageSafetyStatus {

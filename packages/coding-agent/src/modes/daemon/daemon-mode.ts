@@ -28,6 +28,8 @@ import {
 	type AgentFamilyCatalogEntry,
 	type AgentFamilyRelationship,
 	type AgentFamilyRosterResult,
+	type AgentSessionCreateInput,
+	type AgentSessionCreateResult,
 	type AgentSessionMessageAgentSummary,
 	type AgentSessionMessageController,
 	type AgentSessionMessageDeliveryStatus,
@@ -3122,6 +3124,7 @@ export class AgentDaemon {
 					fromState: requireCurrentState(),
 					origin: "agent",
 				}),
+			createSession: (input) => this.createSessionViaSupervisor(input),
 		};
 	}
 
@@ -5413,6 +5416,42 @@ export class AgentDaemon {
 				30_000,
 			);
 			if (!response.success) throw deserializeDaemonError(response);
+		} finally {
+			client.close();
+		}
+	}
+
+	private async createSessionViaSupervisor(input: AgentSessionCreateInput): Promise<AgentSessionCreateResult> {
+		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		if (!supervisorSocketPath) {
+			throw new Error("agent.create_session is only available in a daemon worker");
+		}
+		const client = new DaemonClient(supervisorSocketPath);
+		try {
+			await client.connect(1000);
+			await client.waitForHello(1000);
+			const response = await client.request(
+				{
+					type: "create",
+					name: input.name,
+					...(input.config !== undefined ? { config: input.config as AgentSessionRuntimeConfig } : {}),
+					...(input.sessionPath !== undefined ? { sessionPath: input.sessionPath } : {}),
+					...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+					continueRecent: false,
+					lifecycle: "client_owned",
+				},
+				30_000,
+			);
+			if (!response.success) throw deserializeDaemonError(response);
+			const data = response.data as Partial<AgentSessionCreateResult> | undefined;
+			if (!data || typeof data.activeSessionId !== "string" || typeof data.sessionId !== "string") {
+				throw new Error("Daemon returned an invalid create response");
+			}
+			return {
+				activeSessionId: data.activeSessionId,
+				sessionId: data.sessionId,
+				sessionName: typeof data.sessionName === "string" ? data.sessionName : input.name,
+			};
 		} finally {
 			client.close();
 		}

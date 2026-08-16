@@ -3030,6 +3030,25 @@ export class AgentSession {
 		}
 	}
 
+	async handleCreateSessionHostRequest(payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+		if (!this._agentMessageController?.createSession) {
+			throw new Error("agent.create_session is not available in this session");
+		}
+		if (this._rlmDepth > 0) {
+			throw new Error("agent.create_session is restricted to depth-0 root sessions");
+		}
+		if (typeof payload.name !== "string" || payload.name.trim() === "") {
+			throw new Error("agent.create_session name must be a non-empty string");
+		}
+		const result = await this._agentMessageController.createSession({
+			name: payload.name,
+			...(payload.config !== undefined ? { config: payload.config } : {}),
+			...(typeof payload.sessionPath === "string" ? { sessionPath: payload.sessionPath } : {}),
+			...(typeof payload.cwd === "string" ? { cwd: payload.cwd } : {}),
+		});
+		return { ...result };
+	}
+
 	handleAgentObserveHostRequest(
 		type: string,
 		payload: Record<string, unknown> = {},
@@ -8611,6 +8630,9 @@ export class AgentSession {
 					},
 				}),
 			);
+		}
+		if (this._agentMessageController?.createSession && this._rlmDepth === 0) {
+			handlers["agent.create_session"] = async (payload) => this.handleCreateSessionHostRequest(payload);
 		}
 		if (this._agentObserveController) {
 			Object.assign(
