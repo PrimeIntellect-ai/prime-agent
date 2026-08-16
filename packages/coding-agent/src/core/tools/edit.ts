@@ -258,8 +258,12 @@ function buildEditCallComponent(
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
 	const canExpand = component.preview !== undefined && !("error" in component.preview);
+	// Collapsed rows carry the ctrl+j hint on the `╰─ path +N -M` summary line,
+	// so the header only hints when expanded (where no summary line renders).
 	const expandHint =
-		canExpand && showExpandHint ? `${theme.fg("dim", " · ")}${expandCollapseHint("app.edits.expand", expanded)}` : "";
+		canExpand && showExpandHint && expanded
+			? `${theme.fg("dim", " · ")}${expandCollapseHint("app.edits.expand", expanded)}`
+			: "";
 	component.addChild(new Text(`${formatEditCall(args, theme)}${expandHint}`, 0, 0));
 
 	const body =
