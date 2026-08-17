@@ -73,9 +73,9 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "prime-inference", model: "openai/gpt-5.5", label: "prime-inference-gpt-5.5" },
 	// GitHub Copilot
 	{ provider: "github-copilot", model: "claude-sonnet-4.5", label: "copilot-claude-sonnet-4.5" },
-	{ provider: "github-copilot", model: "gpt-5.1-codex", label: "copilot-gpt-5.1-codex" },
-	{ provider: "github-copilot", model: "gemini-3-flash-preview", label: "copilot-gemini-3-flash-preview" },
-	{ provider: "github-copilot", model: "grok-code-fast-1", label: "copilot-grok-code-fast-1" },
+	{ provider: "github-copilot", model: "gpt-5.2-codex", label: "copilot-gpt-5.2-codex" },
+	{ provider: "github-copilot", model: "gemini-3.5-flash", label: "copilot-gemini-3.5-flash" },
+	{ provider: "github-copilot", model: "grok-4.5", label: "copilot-grok-4.5" },
 	// Amazon Bedrock
 	{
 		provider: "amazon-bedrock",
@@ -85,7 +85,7 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	// xAI
 	{ provider: "xai", model: "grok-code-fast-1", label: "xai-grok-code-fast-1" },
 	// Cerebras
-	{ provider: "cerebras", model: "zai-glm-4.7", label: "cerebras-zai-glm-4.7" },
+	{ provider: "cerebras", model: "gpt-oss-120b", label: "cerebras-gpt-oss-120b" },
 	// Cloudflare Workers AI
 	{ provider: "cloudflare-workers-ai", model: "@cf/moonshotai/kimi-k2.6", label: "cloudflare-kimi-k2.6" },
 	// Cloudflare AI Gateway
@@ -96,8 +96,8 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	},
 	{
 		provider: "cloudflare-ai-gateway",
-		model: "claude-sonnet-4-5",
-		label: "cloudflare-gateway-claude-sonnet-4-5",
+		model: "claude-sonnet-4.5",
+		label: "cloudflare-gateway-claude-sonnet-4.5",
 		upstreamApiKeyEnv: "ANTHROPIC_API_KEY",
 	},
 	{
@@ -121,18 +121,31 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "opencode", model: "big-pickle", label: "zen-big-pickle" },
 	{ provider: "opencode", model: "claude-sonnet-4-5", label: "zen-claude-sonnet-4-5" },
 	{ provider: "opencode", model: "gemini-3-flash", label: "zen-gemini-3-flash" },
-	{ provider: "opencode", model: "glm-4.7-free", label: "zen-glm-4.7-free" },
+	{ provider: "opencode", model: "glm-5.2", label: "zen-glm-5.2" },
 	{ provider: "opencode", model: "gpt-5.2-codex", label: "zen-gpt-5.2-codex" },
-	{ provider: "opencode", model: "minimax-m2.1-free", label: "zen-minimax-m2.1-free" },
+	{ provider: "opencode", model: "minimax-m2.7", label: "zen-minimax-m2.7" },
 	// OpenCode Go
-	{ provider: "opencode-go", model: "kimi-k2.5", label: "go-kimi-k2.5" },
-	{ provider: "opencode-go", model: "minimax-m2.5", label: "go-minimax-m2.5" },
+	{ provider: "opencode-go", model: "kimi-k2.6", label: "go-kimi-k2.6" },
+	{ provider: "opencode-go", model: "minimax-m2.7", label: "go-minimax-m2.7" },
 	// Xiaomi MiMo
 	{ provider: "xiaomi", model: "mimo-v2.5-pro", label: "xiaomi-mimo-v2.5-pro" },
 	{ provider: "xiaomi-token-plan-cn", model: "mimo-v2.5-pro", label: "xiaomi-token-plan-cn-mimo-v2.5-pro" },
 	{ provider: "xiaomi-token-plan-ams", model: "mimo-v2.5-pro", label: "xiaomi-token-plan-ams-mimo-v2.5-pro" },
 	{ provider: "xiaomi-token-plan-sgp", model: "mimo-v2.5-pro", label: "xiaomi-token-plan-sgp-mimo-v2.5-pro" },
 ];
+
+function resolveProviderModel(pair: ProviderModelPair): Model<Api> | undefined {
+	return (getModel as (provider: string, model: string) => Model<Api> | undefined)(pair.provider, pair.model);
+}
+
+describe("Cross-Provider Handoff configuration", () => {
+	it("references models in the generated catalog", () => {
+		const missingModels = PROVIDER_MODEL_PAIRS.filter((pair) => !resolveProviderModel(pair)).map(
+			(pair) => `${pair.provider}/${pair.model}`,
+		);
+		expect(missingModels).toEqual([]);
+	});
+});
 
 // Cached context structure
 interface CachedContext {
@@ -203,7 +216,7 @@ async function generateContext(
 	pair: ProviderModelPair,
 	apiKey: string,
 ): Promise<{ messages: Message[]; api: Api } | null> {
-	const baseModel = (getModel as (p: string, m: string) => Model<Api> | undefined)(pair.provider, pair.model);
+	const baseModel = resolveProviderModel(pair);
 	if (!baseModel) {
 		console.log(`  Model not found: ${pair.provider}/${pair.model}`);
 		return null;
@@ -416,10 +429,7 @@ describe.skipIf(!hasAnyApiKey())("Cross-Provider Handoff", () => {
 					},
 				];
 
-				const baseModel = (getModel as (p: string, m: string) => Model<Api> | undefined)(
-					targetPair.provider,
-					targetPair.model,
-				);
+				const baseModel = resolveProviderModel(targetPair);
 				if (!baseModel) {
 					console.log(`[Target: ${targetPair.label}] Model not found`);
 					continue;

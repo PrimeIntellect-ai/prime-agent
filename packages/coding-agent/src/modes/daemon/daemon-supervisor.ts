@@ -42,7 +42,7 @@ import {
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
-import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
+import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
@@ -888,7 +888,10 @@ export class DaemonSupervisor {
 	private async assertCurrentOwnership(): Promise<void> {
 		const ownership = this.ownership;
 		if (!ownership) {
-			const error = new Error(`Daemon supervisor generation ${this.generation} no longer owns its registry entry`);
+			const error = new Error(
+				`Daemon supervisor generation ${this.generation} holds no registry ownership (never acquired or already released); ` +
+					`socket: ${this.socketPath}; restart the daemon to recover — sessions are preserved`,
+			);
 			Object.assign(error, { code: "supervisor_generation_stale" as const });
 			throw error;
 		}
@@ -4994,7 +4997,7 @@ export class DaemonSupervisor {
 		}
 		return {
 			sessionFile,
-			artifactDir: join(dirname(dirname(sessionFile)), "session-artifacts", worker.descriptor.rootSessionId),
+			artifactDir: getSessionArtifactPathForFile(sessionFile, worker.descriptor.rootSessionId),
 		};
 	}
 
