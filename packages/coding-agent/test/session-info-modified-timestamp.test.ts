@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -47,37 +47,44 @@ describe("SessionInfo.modified", () => {
 	});
 
 	it("uses last user/assistant message timestamp instead of file mtime", async () => {
-		const filePath = join(tmpdir(), `pi-session-${Date.now()}-modified.jsonl`);
-		createSessionFile(filePath);
+		// SessionManager private-directory hardening must not attempt to chmod the
+		// shared system temp root, which is intentionally not owner-private.
+		const directory = mkdtempSync(join(tmpdir(), "pi-session-modified-"));
+		const filePath = join(directory, "session.jsonl");
+		try {
+			createSessionFile(filePath);
 
-		const before = await stat(filePath);
-		// Ensure the file mtime can differ from our message timestamp even on coarse filesystems.
-		await new Promise((r) => setTimeout(r, 10));
+			const before = await stat(filePath);
+			// Ensure the file mtime can differ from our message timestamp even on coarse filesystems.
+			await new Promise((r) => setTimeout(r, 10));
 
-		const mgr = SessionManager.open(filePath);
-		const msgTime = Date.now();
-		mgr.appendMessage({
-			role: "assistant",
-			content: [{ type: "text", text: "later" }],
-			api: "openai-completions",
-			provider: "openai",
-			model: "test",
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: msgTime,
-		});
+			const mgr = SessionManager.open(filePath);
+			const msgTime = Date.now();
+			mgr.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "later" }],
+				api: "openai-completions",
+				provider: "openai",
+				model: "test",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: msgTime,
+			});
 
-		const sessions = await SessionManager.list("/tmp", dirname(filePath));
-		const s = sessions.find((x) => x.path === filePath);
-		expect(s).toBeDefined();
-		expect(s!.modified.getTime()).toBe(msgTime);
-		expect(s!.modified.getTime()).not.toBe(before.mtime.getTime());
+			const sessions = await SessionManager.list("/tmp", dirname(filePath));
+			const s = sessions.find((x) => x.path === filePath);
+			expect(s).toBeDefined();
+			expect(s!.modified.getTime()).toBe(msgTime);
+			expect(s!.modified.getTime()).not.toBe(before.mtime.getTime());
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });

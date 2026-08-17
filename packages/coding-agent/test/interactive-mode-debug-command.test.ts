@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -70,8 +70,32 @@ describe("InteractiveMode /debug", () => {
 		expect(debugLog).toContain("Terminal: 80x24");
 		expect(debugLog).toContain("rendered line");
 		expect(debugLog).toContain(JSON.stringify(message));
+		expect(statSync(getDebugLogPath()).mode & 0o777).toBe(0o600);
+		expect(statSync(tempAgentDir).mode & 0o777).toBe(0o700);
 		expect(context.showError).not.toHaveBeenCalled();
 		expect(context.ui.requestRender).toHaveBeenCalledWith();
+	});
+
+	it("refuses a symlinked debug log without modifying its target", async () => {
+		const target = join(tempAgentDir, "outside.log");
+		writeFileSync(target, "sentinel");
+		symlinkSync(target, getDebugLogPath());
+		const context: DebugCommandContext = {
+			ui: {
+				terminal: { columns: 80, rows: 24 },
+				render: vi.fn(() => ["rendered line"]),
+				requestRender: vi.fn(),
+			},
+			agentConnection: { getMessages: vi.fn(async () => []) },
+			chatContainer: new Container(),
+			showError: vi.fn(),
+		};
+
+		await interactiveModePrototype.handleDebugCommand.call(context);
+
+		expect(context.showError).toHaveBeenCalledWith(expect.stringContaining("non-regular private file"));
+		expect(readFileSync(target, "utf8")).toBe("sentinel");
+		expect(context.ui.requestRender).not.toHaveBeenCalled();
 	});
 
 	it("reports connection failures instead of falling back to local UI services", async () => {

@@ -1,26 +1,19 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
-import {
-	appendFileSync,
-	chmodSync,
-	chownSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "fs";
-import { readdir, readFile, stat } from "fs/promises";
-import { basename, dirname, join, resolve } from "path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
+import { lstat, readdir, readFile, stat } from "fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
 import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
+import {
+	appendPrivateFile,
+	assertRegularFileNoSymlink,
+	ensurePrivateDirectory,
+	writePrivateFileAtomicLines,
+} from "../utils/private-files.js";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -52,25 +45,6 @@ const CONTENT_ENTRY_TYPES = new Set([
 	"compaction",
 	"branch_summary",
 ]);
-
-function realpathIfPresent(path: string): string {
-	try {
-		return realpathSync(path);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return path;
-		throw error;
-	}
-}
-
-function statMetadataIfPresent(path: string): { mode: number; uid: number; gid: number } | undefined {
-	try {
-		const { mode, uid, gid } = statSync(path);
-		return { mode: mode & 0o777, uid, gid };
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-		throw error;
-	}
-}
 
 export interface SessionHeader {
 	type: "session";
@@ -324,11 +298,22 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionName"
 >;
 
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+
+function assertValidSessionId(sessionId: string): void {
+	if (!SESSION_ID_PATTERN.test(sessionId)) {
+		throw new Error(
+			"Invalid session id: expected 1-128 ASCII letters, digits, dots, underscores, or hyphens, starting with a letter or digit",
+		);
+	}
+}
+
 function createSessionId(): string {
 	return uuidv7();
 }
 
 function getSessionFilePath(sessionDir: string, sessionId: string): string {
+	assertValidSessionId(sessionId);
 	return join(sessionDir, `${sessionId}.jsonl`);
 }
 
@@ -343,8 +328,49 @@ function createUniqueSessionFileTarget(sessionDir: string): { sessionId: string;
 	throw new Error("Unable to create a unique session file");
 }
 
-function getSessionArtifactPath(sessionDir: string, sessionId: string): string {
-	return join(dirname(sessionDir), "session-artifacts", sessionId);
+function getSessionArtifactPath(sessionDir: string, sessionId: string, create = true): string {
+	assertValidSessionId(sessionId);
+	const artifactRoot = resolve(dirname(sessionDir), "session-artifacts");
+	const artifactPath = resolve(artifactRoot, sessionId);
+	const lexicalRelativePath = relative(artifactRoot, artifactPath);
+	if (lexicalRelativePath.startsWith("..") || isAbsolute(lexicalRelativePath)) {
+		throw new Error(`Session artifact path escapes its root: ${artifactPath}`);
+	}
+
+	if (!create) {
+		if (!existsSync(artifactRoot)) return artifactPath;
+		const rootStats = lstatSync(artifactRoot);
+		if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
+			throw new Error(`Refusing to use non-directory private path: ${artifactRoot}`);
+		}
+		if (process.platform !== "win32" && (rootStats.mode & 0o777) !== 0o700) {
+			throw new Error(`Refusing to read non-private session artifact directory: ${artifactRoot}`);
+		}
+		if (!existsSync(artifactPath)) return artifactPath;
+		const artifactStats = lstatSync(artifactPath);
+		if (artifactStats.isSymbolicLink() || !artifactStats.isDirectory()) {
+			throw new Error(`Refusing to use non-directory private path: ${artifactPath}`);
+		}
+		if (process.platform !== "win32" && (artifactStats.mode & 0o777) !== 0o700) {
+			throw new Error(`Refusing to read non-private session artifact directory: ${artifactPath}`);
+		}
+		const canonicalRoot = realpathSync(artifactRoot);
+		const canonicalArtifactPath = realpathSync(artifactPath);
+		const canonicalRelativePath = relative(canonicalRoot, canonicalArtifactPath);
+		if (canonicalRelativePath.startsWith("..") || isAbsolute(canonicalRelativePath)) {
+			throw new Error(`Session artifact path escapes its canonical root: ${artifactPath}`);
+		}
+		return canonicalArtifactPath;
+	}
+	ensurePrivateDirectory(artifactRoot);
+	ensurePrivateDirectory(artifactPath);
+	const canonicalRoot = realpathSync(artifactRoot);
+	const canonicalArtifactPath = realpathSync(artifactPath);
+	const canonicalRelativePath = relative(canonicalRoot, canonicalArtifactPath);
+	if (canonicalRelativePath.startsWith("..") || isAbsolute(canonicalRelativePath)) {
+		throw new Error(`Session artifact path escapes its canonical root: ${artifactPath}`);
+	}
+	return canonicalArtifactPath;
 }
 
 /** Generate a unique short ID (8 hex chars, collision-checked) */
@@ -602,9 +628,7 @@ export function buildSessionContext(
  */
 export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefaultAgentDir()): string {
 	const sessionDir = getSessionsDir(agentDir);
-	if (!existsSync(sessionDir)) {
-		mkdirSync(sessionDir, { recursive: true });
-	}
+	ensurePrivateDirectory(sessionDir);
 	return sessionDir;
 }
 
@@ -652,7 +676,7 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 function finalizeLoadedEntries(entries: FileEntry[]): FileEntry[] {
 	if (entries.length === 0) return entries;
 	const header = entries[0];
-	if (header.type !== "session" || typeof (header as any).id !== "string") {
+	if (header.type !== "session" || typeof header.id !== "string" || !SESSION_ID_PATTERN.test(header.id)) {
 		return [];
 	}
 	applyChildUsageAttributions(entries);
@@ -662,6 +686,7 @@ function finalizeLoadedEntries(entries: FileEntry[]): FileEntry[] {
 /** Exported for testing */
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(filePath)) return [];
+	assertRegularFileNoSymlink(filePath);
 	return finalizeLoadedEntries(parseEntriesFromBuffer(readFileSync(filePath)));
 }
 
@@ -673,6 +698,7 @@ export async function loadEntriesFromFileAsync(
 	options: { streamThresholdBytes?: number } = {},
 ): Promise<FileEntry[]> {
 	if (!existsSync(filePath)) return [];
+	assertRegularFileNoSymlink(filePath);
 	const streamThresholdBytes = options.streamThresholdBytes ?? SESSION_STREAMING_LOAD_THRESHOLD_BYTES;
 	if ((await stat(filePath)).size < streamThresholdBytes) {
 		return finalizeLoadedEntries(await parseEntriesFromBufferAsync(await readFile(filePath)));
@@ -692,6 +718,7 @@ export async function loadEntriesFromFileAsync(
 }
 
 function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined {
+	assertRegularFileNoSymlink(filePath);
 	const firstLine = readFirstLineSync(filePath);
 	if (!firstLine) {
 		return undefined;
@@ -779,7 +806,7 @@ function rootRlmDepthFromEnv(): number {
 function isValidSessionFile(filePath: string): boolean {
 	try {
 		const header = readSessionHeader(filePath);
-		return header?.type === "session" && typeof header.id === "string";
+		return header?.type === "session" && typeof header.id === "string" && SESSION_ID_PATTERN.test(header.id);
 	} catch {
 		return false;
 	}
@@ -813,6 +840,7 @@ function sessionHeaderMatchesCwd(header: Partial<SessionHeader> | undefined, cwd
 	return (
 		header?.type === "session" &&
 		typeof header.id === "string" &&
+		SESSION_ID_PATTERN.test(header.id) &&
 		typeof header.cwd === "string" &&
 		normalizeCwd(header.cwd) === normalizeCwd(cwd)
 	);
@@ -1005,6 +1033,8 @@ const sessionInfoCache = new Map<string, SessionInfoCacheEntry>();
 export async function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	let stats: Awaited<ReturnType<typeof stat>>;
 	try {
+		const lexicalStats = await lstat(filePath);
+		if (lexicalStats.isSymbolicLink() || !lexicalStats.isFile()) return null;
 		stats = await stat(filePath);
 	} catch {
 		return null;
@@ -1082,6 +1112,9 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 					return null;
 				}
 				header = entry as SessionHeader;
+				if (typeof header.id !== "string" || !SESSION_ID_PATTERN.test(header.id)) {
+					return null;
+				}
 			}
 
 			lastActivityTime = updateLastActivityTime(lastActivityTime, entry);
@@ -1194,6 +1227,7 @@ export class SessionManager {
 	private sessionDir: string;
 	private cwd: string;
 	private persist: boolean;
+	private ownsSessionDir: boolean;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
@@ -1208,12 +1242,14 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		preloadedEntries?: FileEntry[],
+		ownsSessionDir = true,
 	) {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
 		this.persist = persist;
-		if (persist && sessionDir && !existsSync(sessionDir)) {
-			mkdirSync(sessionDir, { recursive: true });
+		this.ownsSessionDir = ownsSessionDir;
+		if (persist && sessionDir && ownsSessionDir) {
+			ensurePrivateDirectory(sessionDir);
 		}
 
 		if (sessionFile) {
@@ -1231,6 +1267,16 @@ export class SessionManager {
 	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
 		this.sessionFile = resolve(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			try {
+				const firstHeader = readSessionHeader(this.sessionFile);
+				if (firstHeader?.type === "session" && typeof firstHeader.id === "string") {
+					assertValidSessionId(firstHeader.id);
+				}
+			} catch (error) {
+				// A malformed first line is handled by the existing corrupt-file recovery
+				// path below. Preserve errors from filesystem safety checks and invalid IDs.
+				if (!(error instanceof SyntaxError)) throw error;
+			}
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
@@ -1245,7 +1291,11 @@ export class SessionManager {
 			}
 
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-			this.sessionId = header?.id ?? createSessionId();
+			if (!header) {
+				throw new Error(`Session file is missing a valid header: ${this.sessionFile}`);
+			}
+			assertValidSessionId(header.id);
+			this.sessionId = header.id;
 
 			let shouldRewrite = migrateToCurrentVersion(this.fileEntries);
 			if (header?.parentSession && !isValidRlmDepth(header.rlmDepth)) {
@@ -1267,6 +1317,7 @@ export class SessionManager {
 
 	newSession(options?: NewSessionOptions): string | undefined {
 		let sessionId = options?.id ?? createSessionId();
+		assertValidSessionId(sessionId);
 		let sessionFile: string | undefined;
 		const hasExplicitRlmDepth = options !== undefined && Object.hasOwn(options, "rlmDepth");
 		let parentHeader: Partial<SessionHeader> | undefined;
@@ -1345,21 +1396,10 @@ export class SessionManager {
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
-		const targetPath = realpathIfPresent(this.sessionFile);
-		const directory = dirname(targetPath);
-		mkdirSync(directory, { recursive: true });
-		const tempPath = join(directory, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
-		try {
-			const metadata = statMetadataIfPresent(targetPath);
-			writeFileSync(tempPath, content, metadata === undefined ? undefined : { mode: metadata.mode });
-			if (metadata !== undefined) {
-				chownSync(tempPath, metadata.uid, metadata.gid);
-				chmodSync(tempPath, metadata.mode);
-			}
-			renameSync(tempPath, targetPath);
-		} finally {
-			rmSync(tempPath, { force: true });
-		}
+		writePrivateFileAtomicLines(this.sessionFile, [content], {
+			preserveOwnership: true,
+			privateParent: this.ownsSessionDir,
+		});
 		this._notifyPersistListeners();
 	}
 
@@ -1408,12 +1448,11 @@ export class SessionManager {
 			return this.sessionFile;
 		}
 		const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
+		ensurePrivateDirectory(dir);
 		const previousHeader = this.getHeader();
 		const target = createUniqueSessionFileTarget(dir);
 		this.sessionDir = dir;
+		this.ownsSessionDir = true;
 		this.sessionId = target.sessionId;
 		this.sessionFile = target.sessionFile;
 		this.persist = true;
@@ -1435,8 +1474,8 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	getSessionArtifactDir(): string | undefined {
-		return this.persist ? getSessionArtifactPath(this.sessionDir, this.sessionId) : undefined;
+	getSessionArtifactDir(options: { create?: boolean } = {}): string | undefined {
+		return this.persist ? getSessionArtifactPath(this.sessionDir, this.sessionId, options.create ?? true) : undefined;
 	}
 
 	/**
@@ -1468,8 +1507,7 @@ export class SessionManager {
 			this._rewriteFile();
 			this.flushed = true;
 		} else {
-			mkdirSync(dirname(this.sessionFile), { recursive: true });
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			appendPrivateFile(this.sessionFile, `${JSON.stringify(entry)}\n`, { privateParent: this.ownsSessionDir });
 			this._notifyPersistListeners();
 		}
 	}
@@ -2180,7 +2218,7 @@ export class SessionManager {
 		}
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true);
+		return new SessionManager(cwd ?? process.cwd(), dir, path, true, undefined, sessionDir !== undefined);
 	}
 
 	/**
@@ -2199,7 +2237,7 @@ export class SessionManager {
 		}
 		const cwd = cwdOverride ?? (entries[0] as SessionHeader).cwd;
 		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries);
+		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries, sessionDir !== undefined);
 	}
 
 	/**
@@ -2241,9 +2279,7 @@ export class SessionManager {
 		migrateToCurrentVersion(sourceEntries);
 
 		const dir = sessionDir ?? getDefaultSessionDir(targetCwd);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
+		ensurePrivateDirectory(dir);
 
 		// Create new session file with new ID but forked content
 		const target = createUniqueSessionFileTarget(dir);
@@ -2262,7 +2298,7 @@ export class SessionManager {
 			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
 			git: captureGitContext(targetCwd) ?? undefined,
 		};
-		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`);
+		const forkedEntries: FileEntry[] = [newHeader];
 
 		// Drop the source's git_state entries (re-linking children): they describe the source repo,
 		// so the fork would otherwise report the source's git instead of its own target context.
@@ -2279,8 +2315,12 @@ export class SessionManager {
 			if (entry.type === "session" || entry.type === "git_state") continue;
 			const parentId = liveParent(entry.parentId);
 			const out = parentId === entry.parentId ? entry : { ...entry, parentId };
-			appendFileSync(newSessionFile, `${JSON.stringify(out)}\n`);
+			forkedEntries.push(out);
 		}
+		function* serializedEntries(): Iterable<string> {
+			for (const entry of forkedEntries) yield `${JSON.stringify(entry)}\n`;
+		}
+		writePrivateFileAtomicLines(newSessionFile, serializedEntries());
 
 		return new SessionManager(targetCwd, dir, newSessionFile, true);
 	}

@@ -58,7 +58,10 @@ export function buildSnapshotCode(outPath: string, manifestPath: string, maxByte
 	// working even when the user namespace shadows names like list/open/print/len.
 	return `
 def _prime_agent_snapshot_state():
-    import builtins as _b, json, os, sys, datetime
+    import builtins as _b, json, os, stat, sys, datetime
+    if not _b.hasattr(os, "O_NOFOLLOW"):
+        _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"error": "O_NOFOLLOW unavailable"}))
+        return
     try:
         import dill
     except _b.Exception as _err:
@@ -99,11 +102,28 @@ def _prime_agent_snapshot_state():
         payload[name] = blob
         total += _b.len(blob)
 
-    os.makedirs(os.path.dirname(${pyStr(outPath)}), exist_ok=True)
-    tmp = ${pyStr(outPath)} + ".tmp"
+    out_dir = os.path.dirname(${pyStr(outPath)})
+    if os.path.lexists(out_dir):
+        out_dir_info = os.lstat(out_dir)
+        if stat.S_ISLNK(out_dir_info.st_mode) or not stat.S_ISDIR(out_dir_info.st_mode):
+            _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"error": "unsafe snapshot directory"}))
+            return
+    else:
+        os.makedirs(out_dir, mode=0o700, exist_ok=False)
+    tmp = ${pyStr(outPath)} + ".tmp." + _b.str(os.getpid()) + "." + os.urandom(8).hex()
     try:
-        with _b.open(tmp, "wb") as fh:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "wb") as fh:
             dill.dump(payload, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+            if hasattr(os, "fchmod"):
+                os.fchmod(fh.fileno(), 0o600)
+        if os.path.lexists(${pyStr(outPath)}):
+            out_info = os.lstat(${pyStr(outPath)})
+            if stat.S_ISLNK(out_info.st_mode) or not stat.S_ISREG(out_info.st_mode):
+                raise OSError("unsafe snapshot destination")
         os.replace(tmp, ${pyStr(outPath)})
     except _b.Exception as _err:
         try:
@@ -123,11 +143,28 @@ def _prime_agent_snapshot_state():
         "pythonVersion": sys.version.split()[0],
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    manifest_tmp = None
     try:
-        with _b.open(${pyStr(manifestPath)}, "w") as fh:
+        manifest_tmp = ${pyStr(manifestPath)} + ".tmp." + _b.str(os.getpid()) + "." + os.urandom(8).hex()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(manifest_tmp, flags, 0o600)
+        with os.fdopen(fd, "w") as fh:
             json.dump(manifest, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+            if hasattr(os, "fchmod"):
+                os.fchmod(fh.fileno(), 0o600)
+        if os.path.lexists(${pyStr(manifestPath)}):
+            manifest_info = os.lstat(${pyStr(manifestPath)})
+            if stat.S_ISLNK(manifest_info.st_mode) or not stat.S_ISREG(manifest_info.st_mode):
+                raise OSError("unsafe snapshot manifest")
+        os.replace(manifest_tmp, ${pyStr(manifestPath)})
     except _b.Exception:
-        pass
+        try:
+            if manifest_tmp is not None:
+                os.remove(manifest_tmp)
+        except _b.Exception:
+            pass
     _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"saved": saved, "skipped": skipped, "bytes": bytes_written}))
 
 
@@ -149,7 +186,10 @@ export function buildRestoreCode(inPath: string): string {
 	return `
 def _prime_agent_restore_state():
     import builtins as _b, json, os, sys
-    if not os.path.exists(${pyStr(inPath)}):
+    if not _b.hasattr(os, "O_NOFOLLOW"):
+        _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"restored": [], "failed": [], "error": "O_NOFOLLOW unavailable"}))
+        return
+    if not os.path.lexists(${pyStr(inPath)}):
         _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"restored": [], "failed": []}))
         return
     try:
@@ -159,7 +199,14 @@ def _prime_agent_restore_state():
         return
 
     try:
-        with _b.open(${pyStr(inPath)}, "rb") as fh:
+        import stat as _stat
+        snapshot_stat = os.lstat(${pyStr(inPath)})
+        if not _stat.S_ISREG(snapshot_stat.st_mode):
+            _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"restored": [], "failed": [], "error": "load failed: snapshot is not a regular file"}))
+            return
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        fd = os.open(${pyStr(inPath)}, flags)
+        with os.fdopen(fd, "rb") as fh:
             payload = dill.load(fh)
     except _b.Exception as _err:
         _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"restored": [], "failed": [], "error": "load failed: " + _b.str(_err)}))

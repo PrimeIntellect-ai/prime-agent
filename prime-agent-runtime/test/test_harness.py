@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -133,6 +135,93 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("await rlm.list_subagents()", overview)
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
+
+    def test_windows_harness_proxy_never_resolves_or_writes(self) -> None:
+        from unittest.mock import patch
+
+        harness_module = importlib.import_module("rlm.harness")
+        with patch.object(harness_module.os, "name", "nt"), patch.object(
+            harness_module, "_state_file", side_effect=AssertionError("state path must not resolve")
+        ):
+            state = harness_module.get_harness_state(Path("should-not-be-read"))
+            self.assertEqual(state.list(), [])
+            with self.assertRaisesRegex(RuntimeError, "Persistent harness storage is unsupported on Windows"):
+                state.create_memory("blocked", "blocked")
+            with self.assertRaisesRegex(RuntimeError, "Persistent harness storage is unsupported on Windows"):
+                state.save()
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions and symlink semantics")
+    def test_private_atomic_state_rejects_symlink_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "harness"
+            state_path = root / "harness_state.json"
+            state = HarnessState(state_path, scope="global")
+            state.save()
+
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(state_path.stat().st_mode), 0o600)
+
+            outside = Path(temp_dir) / "outside.json"
+            outside.write_text("sentinel", encoding="utf-8")
+            state_path.unlink()
+            state_path.symlink_to(outside)
+
+            with self.assertRaisesRegex(OSError, "non-regular private file"):
+                state.save()
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel")
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions and symlink semantics")
+    def test_symlinked_harness_load_blocks_later_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "harness"
+            root.mkdir(mode=0o700)
+            state_path = root / "harness_state.json"
+            outside = Path(temp_dir) / "outside.json"
+            outside.write_text('{"sentinel": true}', encoding="utf-8")
+            state_path.symlink_to(outside)
+
+            state = HarnessState(state_path, scope="global")
+            self.assertEqual(state.list(), [])
+            with self.assertRaisesRegex(RuntimeError, "non-regular private file"):
+                state.save()
+            self.assertEqual(outside.read_text(encoding="utf-8"), '{"sentinel": true}')
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
+    def test_existing_harness_directory_below_symlinked_ancestor_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            outside = Path(temp_dir) / "outside"
+            existing = outside / "existing"
+            existing.mkdir(parents=True, mode=0o755)
+            link = Path(temp_dir) / "link"
+            link.symlink_to(outside, target_is_directory=True)
+            state = HarnessState(link / "existing" / "harness_state.json")
+
+            with self.assertRaisesRegex(RuntimeError, "non-directory private path"):
+                state.save()
+            self.assertEqual(stat.S_IMODE(existing.stat().st_mode), 0o755)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
+    def test_cached_missing_state_rejects_unsafe_replacement_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            outside = Path(temp_dir) / "outside.json"
+            outside.write_text('{"sentinel": true}', encoding="utf-8")
+            state_path.symlink_to(outside)
+
+            with self.assertRaisesRegex(RuntimeError, "non-regular private file"):
+                state.create_memory("Blocked", "must not remain in memory", id="blocked")
+            self.assertIsNone(state.get("memory", "blocked"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX no-follow capability")
+    def test_missing_no_follow_capability_fails_closed(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            with patch.object(os, "O_NOFOLLOW", new=None):
+                with self.assertRaisesRegex(OSError, "O_NOFOLLOW"):
+                    state.save()
 
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

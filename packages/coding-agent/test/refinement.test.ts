@@ -16,6 +16,7 @@ import {
 	getRefinementHistoryPath,
 	type HarnessState,
 	inferRefinementResultScope,
+	isPersistentHarnessStorageSupported,
 	loadGlobalRefinementHistory,
 	loadHarnessState,
 	mergeHarnessStates,
@@ -27,6 +28,7 @@ import {
 	type RefinementResult,
 	refineHarness,
 	saveHarnessState,
+	WINDOWS_HARNESS_PERSISTENCE_UNSUPPORTED_ERROR,
 } from "../src/core/refinement/index.js";
 import type { CustomEntry } from "../src/core/session-manager.js";
 
@@ -59,6 +61,26 @@ function makeTempDir(): string {
 	tempDir = mkdtempSync(join(tmpdir(), "prime-agent-refinement-test-"));
 	return tempDir;
 }
+
+describe("Windows harness persistence policy", () => {
+	it("does not read persistent state and rejects writes", () => {
+		const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		try {
+			expect(isPersistentHarnessStorageSupported()).toBe(false);
+			const state = loadHarnessState(join(makeTempDir(), "unread"));
+			expect(state).toEqual({
+				schema: 1,
+				entries: { prompt: {}, memory: {}, skill: {}, subagent: {} },
+				refinements: [],
+			});
+			expect(() => saveHarnessState(join(makeTempDir(), "unwritten"), state)).toThrow(
+				WINDOWS_HARNESS_PERSISTENCE_UNSUPPORTED_ERROR,
+			);
+		} finally {
+			platform.mockRestore();
+		}
+	});
+});
 
 const kinds = ["prompt", "memory", "skill", "subagent"] as const satisfies readonly RefinementKind[];
 const skillReference = {

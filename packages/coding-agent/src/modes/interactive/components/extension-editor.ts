@@ -5,8 +5,6 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import {
 	Container,
 	Editor,
@@ -18,6 +16,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.js";
+import { createPrivateTempFile, readPrivateFile } from "../../../utils/private-files.js";
 import { getEditorTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { keyHint } from "./keybinding-hints.js";
@@ -117,10 +116,10 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		}
 
 		const currentText = this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-extension-editor-${Date.now()}.md`);
+		const temp = createPrivateTempFile("pi-extension-editor-", ".md", currentText);
+		const tmpFile = temp.path;
 
 		try {
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
 			this.tui.stop();
 
 			const [editor, ...editorArgs] = editorCmd.split(" ");
@@ -130,18 +129,17 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 			});
 
 			if (result.status === 0) {
-				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
+				const newContent = readPrivateFile(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
 			}
 		} finally {
 			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
+				fs.rmSync(temp.directory, { recursive: true, force: true });
+			} finally {
+				this.tui.start();
+				// Force full re-render since external editor uses alternate screen
+				this.tui.requestRender(true);
 			}
-			this.tui.start();
-			// Force full re-render since external editor uses alternate screen
-			this.tui.requestRender(true);
 		}
 	}
 }

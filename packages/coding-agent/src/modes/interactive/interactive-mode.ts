@@ -138,6 +138,7 @@ import { readClipboardImage } from "../../utils/clipboard-image.js";
 import { parseGitUrl } from "../../utils/git.js";
 import { resizeImage } from "../../utils/image-resize.js";
 import { getCwdRelativePath } from "../../utils/paths.js";
+import { createPrivateTempFile, readPrivateFile, writePrivateFileAtomic } from "../../utils/private-files.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { ensureTool, ensureToolWithStatus, formatMissingRipgrepMessage } from "../../utils/tools-manager.js";
 import { checkForNewPiVersion } from "../../utils/version-check.js";
@@ -7364,12 +7365,10 @@ export class InteractiveMode {
 		}
 
 		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-editor-${Date.now()}.pi.md`);
+		const temp = createPrivateTempFile("pi-editor-", ".pi.md", currentText);
+		const tmpFile = temp.path;
 
 		try {
-			// Write current content to temp file
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
-
 			// Stop TUI to release terminal
 			this.ui.stop();
 
@@ -7384,26 +7383,23 @@ export class InteractiveMode {
 
 			// On successful exit (status 0), replace editor content
 			if (result.status === 0) {
-				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
+				const newContent = readPrivateFile(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
 			}
 			// On non-zero exit, keep original text (no action needed)
 		} finally {
-			// Clean up temp file
 			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
+				// Cleanup failures must not leave the terminal UI stopped.
+				fs.rmSync(temp.directory, { recursive: true, force: true });
+			} finally {
+				this.ui.start();
+				// ui.stop() left fullscreen so the editor got a clean terminal
+				if (this.fullscreenEnabled) {
+					this.applyFullscreen(true);
+				}
+				// Force full re-render since external editor uses alternate screen
+				this.ui.requestRender(true);
 			}
-
-			// Restart TUI
-			this.ui.start();
-			// ui.stop() left fullscreen so the editor got a clean terminal
-			if (this.fullscreenEnabled) {
-				this.applyFullscreen(true);
-			}
-			// Force full re-render since external editor uses alternate screen
-			this.ui.requestRender(true);
 		}
 	}
 
@@ -9033,11 +9029,13 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Export to a temp file
-		const tmpFile = path.join(os.tmpdir(), "session.html");
+		// Export to a private, unpredictable temp file.
+		const temp = createPrivateTempFile("prime-agent-share-", ".html");
+		const tmpFile = temp.path;
 		try {
 			await this.agentConnection.exportToHtml(tmpFile);
 		} catch (error: unknown) {
+			fs.rmSync(temp.directory, { recursive: true, force: true });
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 			return;
 		}
@@ -9054,11 +9052,7 @@ export class InteractiveMode {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
+			fs.rmSync(temp.directory, { recursive: true, force: true });
 		};
 
 		// Create a secret gist asynchronously
@@ -9991,8 +9985,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 				"",
 			].join("\n");
 
-			fs.mkdirSync(path.dirname(debugLogPath), { recursive: true });
-			fs.writeFileSync(debugLogPath, debugData);
+			writePrivateFileAtomic(debugLogPath, debugData);
 
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(

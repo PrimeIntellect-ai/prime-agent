@@ -1,21 +1,11 @@
 import { spawnSync } from "child_process";
 import { createHash } from "crypto";
-import {
-	accessSync,
-	appendFileSync,
-	constants,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-} from "fs";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
+import { appendPrivateFile, ensurePrivateFile } from "./utils/private-files.js";
 
 // =============================================================================
 // Package Detection
@@ -593,9 +583,9 @@ const MAX_LOG_BYTES = 5 * 1024 * 1024;
  */
 export function appendRotatingLog(logPath: string, message: string, maxBytes: number = MAX_LOG_BYTES): void {
 	try {
-		mkdirSync(dirname(logPath), { recursive: true });
+		ensurePrivateFile(logPath);
 		try {
-			if (existsSync(logPath) && statSync(logPath).size > maxBytes) {
+			if (statSync(logPath).size > maxBytes) {
 				// Drop any prior .old first: renameSync fails on Windows if it exists.
 				rmSync(`${logPath}.old`, { force: true });
 				renameSync(logPath, `${logPath}.old`);
@@ -603,7 +593,7 @@ export function appendRotatingLog(logPath: string, message: string, maxBytes: nu
 		} catch {
 			// Keep appending rather than dropping the log on a rotation failure.
 		}
-		appendFileSync(logPath, `${message}\n`);
+		appendPrivateFile(logPath, `${message}\n`);
 	} catch {
 		// A read-only or missing log dir must never break the caller.
 	}

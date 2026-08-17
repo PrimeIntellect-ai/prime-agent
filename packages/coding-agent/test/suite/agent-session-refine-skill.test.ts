@@ -244,10 +244,22 @@ describe("AgentSession refine skill host requests", () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 		await harness.session.prompt("one");
+		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		const internals = harness.session as unknown as SessionInternals;
 		const handlerKeys = Object.keys(internals._createKernelHostHandlers());
 		expect(handlerKeys).toEqual(expect.arrayContaining(["refine.run", "refine.status"]));
+	});
+
+	it("rejects manual refine before model work when persistent harness storage is unavailable", async () => {
+		const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		try {
+			await expect(harness.session.refine()).rejects.toThrow("Persistent harness storage is unsupported on Windows");
+		} finally {
+			platform.mockRestore();
+		}
 	});
 
 	it("does not register refine handlers when auto-refine is not allowed (rlmDepth > 0)", async () => {

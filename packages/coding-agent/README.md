@@ -702,3 +702,12 @@ MIT
 - [Prime Agent AI](../ai): Core LLM toolkit
 - [Prime Agent Core](../agent): Agent framework
 - [Prime Agent TUI](../tui): Terminal UI components
+
+
+## Platform support
+
+Persistent continual-harness storage, `/refine`, and all security-hardened private persistence require POSIX filesystem semantics and Node `O_NOFOLLOW` support. Windows is not currently supported; unsupported filesystems fail closed rather than using an insecure no-follow fallback. On Windows, Prime Agent disables persistent harness reads and auto-refine and rejects `/refine` before model work; in-memory session features remain available.
+
+### Filesystem race limitation
+
+Private file helpers reject symlinks and non-regular final components. They cannot fully prevent a same-user concurrent replacement of an already-validated parent directory with only Node path APIs; complete dirfd `openat`/`renameat` protection requires a native layer.
