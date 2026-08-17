@@ -4209,6 +4209,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		const fakeThis: any = {
 			toolOutputExpanded: false,
 			agentMessagesExpanded: false,
+			editDiffsExpanded: false,
 			customHeader: undefined,
 			builtInHeader: { setExpanded: vi.fn() },
 			chatContainer: { children: chatChildren },
@@ -4237,7 +4238,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 
 	test("toggles agent messages separately from tools", () => {
 		const toolChild = { setExpanded: vi.fn() };
-		const ipythonChild = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn() };
+		const ipythonChild = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
 		const messageChild = new AgentMessageComponent({
 			role: "custom",
 			customType: "agent_message",
@@ -4265,6 +4266,26 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenLastCalledWith(true);
 		expect(fakeThis.agentMessagesExpanded).toBe(true);
+	});
+
+	test("toggles edit diffs separately from tools and agent messages", () => {
+		const child = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
+		const fakeThis = createExpansionFakeThis([child]);
+
+		fakeThis.toggleEditDiffExpansion();
+
+		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(fakeThis.toolOutputExpanded).toBe(false);
+		expect(fakeThis.agentMessagesExpanded).toBe(false);
+		expect(child.setEditDiffsExpanded).toHaveBeenCalledWith(true);
+		expect(child.setExpanded).toHaveBeenCalledWith(false);
+		expect(child.setAgentMessagesExpanded).toHaveBeenCalledWith(false);
+
+		fakeThis.setToolsExpanded(true);
+
+		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(child.setEditDiffsExpanded).toHaveBeenLastCalledWith(true);
+		expect(child.setExpanded).toHaveBeenLastCalledWith(true);
 	});
 });
 
