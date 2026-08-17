@@ -18,7 +18,7 @@ import {
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { canonicalSessionPath } from "../../core/session-lease.js";
-import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
+import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { readFirstLineSync } from "../../utils/file-lines.js";
 
 /**
@@ -133,7 +133,7 @@ export function createRlmLedgerRegistrySeedSource(): RlmLedgerSeedSource {
 				return [];
 			}
 			if (!headerId) return [];
-			const registryPath = join(dirname(dirname(sessionFile)), "session-artifacts", headerId, "rlm-subagents.jsonl");
+			const registryPath = join(getSessionArtifactPathForFile(sessionFile, headerId), "rlm-subagents.jsonl");
 			let contents: string;
 			try {
 				contents = await readFile(registryPath, "utf8");

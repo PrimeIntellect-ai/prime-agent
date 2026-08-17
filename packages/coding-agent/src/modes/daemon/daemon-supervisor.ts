@@ -42,7 +42,7 @@ import {
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
-import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
+import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
@@ -4997,7 +4997,7 @@ export class DaemonSupervisor {
 		}
 		return {
 			sessionFile,
-			artifactDir: join(dirname(dirname(sessionFile)), "session-artifacts", worker.descriptor.rootSessionId),
+			artifactDir: getSessionArtifactPathForFile(sessionFile, worker.descriptor.rootSessionId),
 		};
 	}
 
