@@ -938,6 +938,7 @@ interface RlmChildRun {
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
+	model: Model<Api>;
 	status: RlmChildAgentStatus;
 	error?: string;
 	abort: () => void;
@@ -3449,10 +3450,11 @@ export class AgentSession {
 
 		const lastAssistant = this._findLastAssistantInMessages(event.messages);
 		const concreteAuthFailure = lastAssistant ? this._isConcreteProviderAuthFailure(lastAssistant) : false;
-		if (!lastAssistant || (!this._isRetryableError(lastAssistant) && !concreteAuthFailure)) {
+		const retryConcreteAuthFailure = lastAssistant?.provider !== "intercept" && concreteAuthFailure;
+		if (!lastAssistant || (!this._isRetryableError(lastAssistant) && !retryConcreteAuthFailure)) {
 			return;
 		}
-		if (concreteAuthFailure) {
+		if (retryConcreteAuthFailure) {
 			this._captureRetryAuthFailureSource(lastAssistant);
 		}
 
@@ -3586,7 +3588,7 @@ export class AgentSession {
 				if (assistantMsg.stopReason !== "error") {
 					this._overflowRecovery = "idle";
 				}
-				if (this._isConcreteProviderAuthFailure(assistantMsg)) {
+				if (assistantMsg.provider !== "intercept" && this._isConcreteProviderAuthFailure(assistantMsg)) {
 					this._captureRetryAuthFailureSource(assistantMsg);
 				}
 
@@ -3630,7 +3632,9 @@ export class AgentSession {
 			// Check for retryable errors first (overloaded, rate limit, server errors)
 			const concreteAuthFailure = this._isConcreteProviderAuthFailure(msg);
 			const retryConcreteAuthFailure =
-				concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
+				msg.provider !== "intercept" &&
+				concreteAuthFailure &&
+				!this._isStructuredPermanentProviderRetryExhausted(msg);
 			if (this._isRetryableError(msg) || retryConcreteAuthFailure) {
 				if (retryConcreteAuthFailure) {
 					this._captureRetryAuthFailureSource(msg);
@@ -9604,6 +9608,60 @@ export class AgentSession {
 		return unsubscribe;
 	}
 
+	/**
+	 * Live recursive child roster for connection snapshots.
+	 *
+	 * The run registry is authoritative while a child is queued or running; retained
+	 * sessions preserve completed children and expose any nested work that outlives
+	 * their direct parent run. This deliberately does not reconstruct state from
+	 * observer events, which can predate a newly attached connection.
+	 */
+	getRlmChildSnapshots(): RlmChildAgentSnapshot[] {
+		const snapshots: RlmChildAgentSnapshot[] = [];
+		const recorded = new Set<string>();
+		const traversed = new Set<string>();
+		for (const run of this._activeRlmChildRuns.values()) {
+			const hidden =
+				run.detachedDeletion || this._deletingRlmChildren.has(run.id) || this._deletedRlmChildIds.has(run.id);
+			const child = run.session;
+			if (!hidden) {
+				snapshots.push({
+					id: run.id,
+					parentId: this._rlmParentNodeId,
+					sessionName: child?.sessionName ?? run.sessionName,
+					model: `${(child?.model ?? run.model).provider}/${(child?.model ?? run.model).id}`,
+					label: rlmChildLabel(run.prompt),
+					status: run.status,
+					sessionDir: run.sessionDir,
+				});
+				recorded.add(run.id);
+			}
+			if (child) {
+				traversed.add(run.id);
+				snapshots.push(...child.getRlmChildSnapshots());
+			}
+		}
+		for (const [childId, child] of this._rlmChildSessions) {
+			if (recorded.has(childId) || traversed.has(childId)) continue;
+			const hidden = this._deletingRlmChildren.has(childId) || this._deletedRlmChildIds.has(childId);
+			if (!hidden) {
+				snapshots.push({
+					id: childId,
+					parentId: this._rlmParentNodeId,
+					sessionName: child.sessionName,
+					model: child.model ? `${child.model.provider}/${child.model.id}` : undefined,
+					label: child.sessionName ?? "child agent",
+					// A failed delete retains the session solely for cleanup retry. Preserve
+					// its cancellation truth in snapshots rather than reviving it as done.
+					status: this._rlmChildCleanupFailures.has(childId) ? "cancelled" : "done",
+					sessionDir: child._rlmSessionDir ?? child.sessionManager.getSessionDir(),
+				});
+			}
+			snapshots.push(...child.getRlmChildSnapshots());
+		}
+		return snapshots;
+	}
+
 	/** True when any direct or nested subagent is still running or queued. */
 	hasRunningRlmChildren(): boolean {
 		for (const run of this._activeRlmChildRuns.values()) {
@@ -9801,6 +9859,7 @@ export class AgentSession {
 			prompt,
 			sessionName,
 			sessionDir: childSessionDir,
+			model: modelSelection.model,
 			status: "queued",
 			settled: false,
 			abort: noopRlmChildAbort,
@@ -10125,6 +10184,13 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		if (this._isFauxProviderQueueExhausted(message)) {
+			return false;
+		}
+
+		// The intercept provider adds an idempotency key at the logical request boundary.
+		// Retrying here would call agent.continue() and mint a new key; provider retries
+		// remain below that boundary and retain the original key.
+		if (message.provider === "intercept") {
 			return false;
 		}
 

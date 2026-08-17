@@ -19,7 +19,8 @@ import {
 	createAgentSessionMessage,
 	isAgentSessionMessage,
 } from "../src/core/agent-messages.js";
-import { AgentSession } from "../src/core/agent-session.js";
+import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.js";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandlers, KernelManager } from "../src/core/kernel/index.js";
@@ -35,6 +36,7 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager, type SettingsStorage } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import { type ActiveSessionState, resolveActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
@@ -110,7 +112,10 @@ interface CapturedCommReply {
 
 interface InspectableRlmRun {
 	id: string;
+	prompt: string;
+	sessionName: string;
 	sessionDir: string;
+	model: typeof model;
 	abort: () => void;
 	status: string;
 	settled: boolean;
@@ -131,6 +136,7 @@ interface InspectableRlmSession {
 	_rlmChildCleanupFailures: Map<string, Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number]>;
 	_rlmChildSessions: Map<string, AgentSession>;
 	_rlmChildUnsubscribes: Map<string, () => void>;
+	_deletedRlmChildIds: Set<string>;
 	_createKernelHostHandlers(): HostRequestHandlers;
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
@@ -648,6 +654,138 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("replacement", { name: "retained-retry-worker" })).resolves.toMatchObject({
 			name: "retained-retry-worker",
 		});
+	});
+
+	it("keeps a failed runtime deletion cancelled in direct and connection snapshots until retry", async () => {
+		const childId = "cancelled-cleanup-child";
+		const child = createSession({ rlmSessionDir: join(tempDir, childId) });
+		child.setSessionName("cancelled-cleanup-worker");
+		let deleteAttempts = 0;
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				deleteRlmSubagentRuntime: async (_id, session) => {
+					if (++deleteAttempts === 1) throw new Error("runtime deletion failed");
+					await session?.disposeAsync();
+				},
+			},
+		});
+		expect(root.registerRlmChildSession(childId, child)).toBe(true);
+		const events: AgentSessionEvent[] = [];
+		root.subscribe((event) => events.push(event));
+		await expect(root.deleteRlmSubagent("cancelled-cleanup-worker")).rejects.toThrow("runtime deletion failed");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "rlm_child_update",
+				child: expect.objectContaining({ id: childId, status: "cancelled" }),
+			}),
+		);
+		expect(root.getRlmChildSnapshots()).toEqual([expect.objectContaining({ id: childId, status: "cancelled" })]);
+		const connection = new InProcessAgentConnection({
+			session: root,
+			setRebindSession() {},
+			setBeforeSessionInvalidate() {},
+			dispose: async () => {},
+		} as unknown as AgentSessionRuntime);
+		await expect(connection.getInitialSnapshot()).resolves.toMatchObject({
+			children: [expect.objectContaining({ id: childId, status: "cancelled" })],
+		});
+		await expect(root.deleteRlmSubagent("cancelled-cleanup-worker")).resolves.toMatchObject({
+			subagent: { rlm_child_id: childId },
+		});
+		expect(deleteAttempts).toBe(2);
+		expect(root.getRlmChildSnapshots()).toEqual([]);
+	});
+
+	it("keeps live nested children visible when their direct parent is hidden by deletion", () => {
+		const root = createSession();
+		const rootInternals = root as unknown as InspectableRlmSession;
+		const hiddenParents = [
+			{ id: "deleted-parent", hiding: "deleted" as const },
+			{ id: "deleting-parent", hiding: "deleting" as const },
+			{ id: "detached-parent", hiding: "detached" as const },
+		];
+		const parentInternalsToClear: InspectableRlmSession[] = [];
+
+		for (const [index, { id, hiding }] of hiddenParents.entries()) {
+			const parent = createSession({ rlmSessionDir: join(tempDir, id) });
+			const parentInternals = parent as unknown as InspectableRlmSession;
+			parentInternalsToClear.push(parentInternals);
+			const nestedId = `${id}-live-grandchild`;
+			parentInternals._activeRlmChildRuns.set(nestedId, {
+				id: nestedId,
+				prompt: "still working",
+				sessionName: nestedId,
+				sessionDir: join(tempDir, nestedId),
+				model,
+				abort: () => {},
+				status: index === 1 ? "queued" : "running",
+				settled: false,
+			});
+
+			if (hiding === "detached") {
+				rootInternals._activeRlmChildRuns.set(id, {
+					id,
+					prompt: "hidden parent",
+					sessionName: id,
+					sessionDir: join(tempDir, id),
+					model,
+					abort: () => {},
+					status: "cancelled",
+					settled: false,
+					detachedDeletion: {
+						rlm_child_id: id,
+						active_session_id: null,
+						session_id: null,
+						session_name: id,
+						session_dir: join(tempDir, id),
+						status: "running",
+					},
+					session: parent,
+				});
+				// The same child can be visible in both lifecycle registries while
+				// deletion settles; it must be traversed exactly once and remain hidden.
+				rootInternals._rlmChildSessions.set(id, parent);
+			} else {
+				rootInternals._rlmChildSessions.set(id, parent);
+				if (hiding === "deleted") {
+					rootInternals._deletedRlmChildIds.add(id);
+				} else {
+					rootInternals._deletingRlmChildren.set(id, {
+						subagent: {
+							rlm_child_id: id,
+							active_session_id: null,
+							session_id: null,
+							session_name: id,
+							session_dir: join(tempDir, id),
+							status: "completed",
+						},
+						promise: Promise.resolve({
+							subagent: {
+								rlm_child_id: id,
+								active_session_id: null,
+								session_id: null,
+								session_name: id,
+								session_dir: join(tempDir, id),
+								status: "completed",
+							},
+						}),
+					});
+				}
+			}
+		}
+
+		const snapshots = root.getRlmChildSnapshots();
+		expect(snapshots.map((snapshot) => snapshot.id).sort()).toEqual(
+			hiddenParents.map(({ id }) => `${id}-live-grandchild`).sort(),
+		);
+		expect(snapshots.map((snapshot) => snapshot.status).sort()).toEqual(["queued", "running", "running"]);
+		// These are deliberately minimal lifecycle records; remove them before
+		// fixture teardown asks real runs to settle.
+		rootInternals._activeRlmChildRuns.clear();
+		rootInternals._rlmChildSessions.clear();
+		for (const parentInternals of parentInternalsToClear) parentInternals._activeRlmChildRuns.clear();
+		root.dispose();
 	});
 
 	it("makes an orchestrator-chosen name override a custom runtime's preexisting name", async () => {

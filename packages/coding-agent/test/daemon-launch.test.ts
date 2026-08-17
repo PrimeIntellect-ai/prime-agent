@@ -10,6 +10,7 @@ import {
 	probeRunningDaemonSessions,
 	shouldStartDaemonEarly,
 	shutdownDaemonAndWait,
+	shutdownExactDaemonAndWait,
 } from "../src/cli/daemon-launch.js";
 import { ENV_AGENT_DIR, getDaemonLogPath, VERSION } from "../src/config.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
@@ -26,6 +27,7 @@ interface FakeDaemonOptions {
 	appVersion?: string;
 	schemaId?: string;
 	serverCapabilities?: string[];
+	runtimeBuildId?: string;
 	onCommand?: (command: { type: string }) => void;
 }
 
@@ -50,6 +52,7 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 			appVersion: options.appVersion,
 			schemaId: options.schemaId ?? DAEMON_SCHEMA_ID,
 			clientId: "fake-client",
+			runtime: options.runtimeBuildId ? { buildId: options.runtimeBuildId } : undefined,
 			serverCapabilities: options.serverCapabilities ?? [],
 		});
 		let buffer = "";
@@ -196,6 +199,41 @@ describe("probeRunningDaemonSessions", () => {
 		const daemon = await startFakeDaemon({ failList: true });
 		cleanups.push(daemon.close);
 		expect(await probeRunningDaemonSessions(daemon.socketPath)).toEqual({ reachable: true });
+	});
+});
+
+describe("shutdownExactDaemonAndWait", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		await Promise.all(cleanups.splice(0).map((fn) => fn()));
+	});
+
+	it("shuts down only a current same-build daemon at the supplied socket", async () => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			runtimeBuildId: `release-${VERSION}`,
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+		await expect(shutdownExactDaemonAndWait(daemon.socketPath)).resolves.toBe(true);
+		expect(commands).toEqual(["shutdown"]);
+	});
+
+	it("refuses a same-version daemon with a different build identity", async () => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			runtimeBuildId: "unrelated-build",
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+		await expect(shutdownExactDaemonAndWait(daemon.socketPath)).rejects.toThrow("Refusing exact shutdown");
+		expect(commands).not.toContain("shutdown");
 	});
 });
 

@@ -600,6 +600,7 @@ interface CreateAttachResultOptions {
 	omitSessionContext?: boolean;
 	sessionTree?: DaemonAttachResult["snapshot"]["sessionTree"];
 	parent?: DaemonAttachResult["snapshot"]["parent"];
+	children?: DaemonAttachResult["snapshot"]["children"];
 	replay?: DaemonAttachResult["replay"];
 }
 
@@ -654,6 +655,7 @@ function createAttachResult(
 			lastEventSequence,
 			lastEventCursor,
 			...(options.parent ? { parent: options.parent } : {}),
+			...(options.children ? { children: options.children } : {}),
 		},
 		replay: options.replay ?? {
 			status: "complete",
@@ -2136,6 +2138,40 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "attach",
 			activeSessionId: "active-restored",
+		});
+	});
+
+	it("keeps the live child roster after an empty attach snapshot", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.attachResultFactory = (command) =>
+			createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, { children: [] });
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+
+		await connection.attach();
+		fakeClient.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "rlm_child_update",
+				child: {
+					id: "child-live",
+					label: "live child",
+					status: "running",
+					sessionDir: "/tmp/child-live",
+				},
+			},
+			meta: {
+				id: "active-1:13",
+				protocol: DAEMON_PROTOCOL_INFO,
+				activeSessionId: "active-1",
+				sequence: 13,
+				cursor: { generation: "generation-active-1", sequence: 13 },
+				emittedAt: "2026-01-01T00:00:00.000Z",
+			},
+		});
+
+		await expect(connection.getInitialSnapshot()).resolves.toMatchObject({
+			children: [expect.objectContaining({ id: "child-live", status: "running" })],
 		});
 	});
 

@@ -7,11 +7,19 @@ const mocks = vi.hoisted(() => ({
 	psCalls: [] as boolean[],
 	reapCalls: [] as Array<[boolean, boolean]>,
 	shutdownCalls: [] as Array<[boolean, boolean]>,
+	exactShutdownCalls: [] as string[],
 }));
 
 vi.mock("../src/cli/daemon-command.js", () => ({
 	handleDaemonCommand: async (args: string[]) => {
 		mocks.daemonCommands.push(args);
+		return true;
+	},
+}));
+
+vi.mock("../src/cli/daemon-launch.js", () => ({
+	shutdownExactDaemonAndWait: async (socketPath: string) => {
+		mocks.exactShutdownCalls.push(socketPath);
 		return true;
 	},
 }));
@@ -48,6 +56,7 @@ describe("public command routing", () => {
 		mocks.psCalls.length = 0;
 		mocks.reapCalls.length = 0;
 		mocks.shutdownCalls.length = 0;
+		mocks.exactShutdownCalls.length = 0;
 		process.exitCode = undefined;
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
@@ -239,6 +248,22 @@ describe("public command routing", () => {
 			[true, false],
 			[false, true],
 		]);
+	});
+
+	it("shuts down only the explicitly addressed verified daemon", async () => {
+		await handlePublicCommand(["shutdown", "--daemon-socket", "/tmp/rollout/daemon.sock", "--json"]);
+		expect(mocks.exactShutdownCalls).toEqual(["/tmp/rollout/daemon.sock"]);
+		expect(mocks.shutdownCalls).toEqual([]);
+		expect(console.log).toHaveBeenCalledWith(
+			JSON.stringify({ socketPath: "/tmp/rollout/daemon.sock", stopped: true }),
+		);
+	});
+
+	it("rejects force with exact-socket shutdown", async () => {
+		await handlePublicCommand(["shutdown", "--daemon-socket", "/tmp/rollout/daemon.sock", "--force"]);
+		expect(mocks.exactShutdownCalls).toEqual([]);
+		expect(mocks.shutdownCalls).toEqual([]);
+		expect(process.exitCode).toBe(1);
 	});
 
 	it("routes doctor fixes through the safe cleanup path", async () => {

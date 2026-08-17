@@ -27,7 +27,9 @@ afterEach(async () => {
 		await new Promise<void>((done) => server.close(() => done()));
 	}
 	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
+		// The cold CLI may finish while an inherited uv/Python helper is releasing
+		// files in its private HOME. Retry ENOTEMPTY rather than racing teardown.
+		rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
 	}
 });
 

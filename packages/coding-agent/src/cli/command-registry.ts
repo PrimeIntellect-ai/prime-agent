@@ -87,10 +87,15 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["shutdown"],
-		usage: "shutdown [--force] [--json]",
-		summary: "Stop every agent and background service",
-		description: "Without --force, an interactive confirmation is required. --force also kills unresponsive workers.",
-		options: ["--force  Skip confirmation and kill unresponsive processes", "--json   Print JSON"],
+		usage: "shutdown [--force] [--json] [--daemon-socket <path>]",
+		summary: "Stop agents and background services",
+		description:
+			"Without --daemon-socket, stops every service after confirmation. With --daemon-socket, stops only the verified daemon at that exact path and cannot be combined with --force.",
+		options: [
+			"--force                 Skip confirmation and kill unresponsive processes",
+			"--daemon-socket <path>  Stop only the verified daemon at this exact socket",
+			"--json                  Print JSON",
+		],
 	},
 	{
 		path: ["package"],

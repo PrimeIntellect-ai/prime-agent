@@ -41,6 +41,7 @@ type SessionRetryCompactionInternals = {
 	_retryAttempt: number;
 	_retryPromise: Promise<void> | undefined;
 	_retryResolve: (() => void) | undefined;
+	_retryAuthFailureSources: unknown[];
 	_autoCompactionAbortController: AbortController | undefined;
 	_postCompactionContinuationScheduled: boolean;
 	_processAgentEvent: (event: AgentEvent) => Promise<void>;
@@ -249,7 +250,29 @@ describe("AgentSession retry and event characterization", () => {
 		});
 	}
 
-	it("retries generic provider errors", async () => {
+	it.each(["unknown after provider", "401 status code: unauthorized API key"])(
+		"does not outer-retry intercept provider error: %s",
+		async (errorMessage) => {
+			const harness = await createHarness({
+				provider: "intercept",
+				settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+				fauxAssistantMessage("must not make a second logical request"),
+			]);
+
+			await harness.session.prompt("test");
+
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+			const internals = harness.session as unknown as SessionRetryCompactionInternals;
+			expect(internals._retryAuthFailureSources).toEqual([]);
+		},
+	);
+
+	it("retries generic errors from non-intercept providers", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
 		harnesses.push(harness);
 		harness.setResponses([

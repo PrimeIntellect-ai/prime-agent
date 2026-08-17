@@ -265,6 +265,37 @@ export async function shutdownDaemonAndWait(socketPath: string, timeoutMs = 5000
 	}
 }
 
+/**
+ * Shut down exactly one current daemon addressed by `socketPath`.
+ *
+ * Unlike the machine-wide shutdown/reap commands this performs no discovery. It
+ * also refuses stale, foreign, or same-version/different-build daemons before
+ * sending a shutdown request. Callers use this for rollout-owned daemon sockets.
+ */
+export async function shutdownExactDaemonAndWait(socketPath: string, timeoutMs = 10_000): Promise<boolean> {
+	const client = new DaemonClient(socketPath);
+	try {
+		await client.connect(1000);
+		const hello = await client.waitForHello(2000);
+		const expectedRuntime = getDaemonRuntimeIdentity();
+		const compatible =
+			hello.protocol.version === DAEMON_PROTOCOL_VERSION &&
+			hello.schemaId === DAEMON_SCHEMA_ID &&
+			hello.appVersion === VERSION &&
+			hello.runtime?.buildId === expectedRuntime.buildId;
+		if (!compatible) {
+			throw new Error(`Refusing exact shutdown of an unverified daemon on ${socketPath}`);
+		}
+		return await shutdownConnectedDaemonAndWait(client, socketPath, timeoutMs, hello);
+	} catch (error) {
+		client.close();
+		if (!existsSync(socketPath)) {
+			return true;
+		}
+		throw error;
+	}
+}
+
 // activeSessions is undefined when the daemon is reachable but its sessions couldn't
 // be listed — callers must treat that as "possibly busy", not idle.
 export type RunningDaemonProbe =

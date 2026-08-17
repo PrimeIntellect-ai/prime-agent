@@ -50,13 +50,15 @@ afterEach(async () => {
 		}
 	}
 	daemonSockets.clear();
-	for (const child of children) {
+	const trackedChildren = [...children];
+	for (const child of trackedChildren) {
 		if (child.exitCode === null && child.signalCode === null) {
 			child.kill("SIGTERM");
 		}
 	}
 	children.clear();
-	for (const pid of workerPids) {
+	const trackedWorkerPids = [...workerPids];
+	for (const pid of trackedWorkerPids) {
 		try {
 			process.kill(pid, "SIGCONT");
 		} catch {
@@ -73,6 +75,34 @@ afterEach(async () => {
 		}
 	}
 	workerPids.clear();
+	await Promise.all(
+		trackedChildren.map(async (child) => {
+			try {
+				await waitForExit(child);
+			} catch {
+				child.kill("SIGKILL");
+				await waitForExit(child);
+			}
+		}),
+	);
+	await Promise.all(
+		trackedWorkerPids.map(async (pid) => {
+			try {
+				await waitForProcessGone(pid);
+			} catch {
+				try {
+					process.kill(-pid, "SIGKILL");
+				} catch {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						return;
+					}
+				}
+				await waitForProcessGone(pid);
+			}
+		}),
+	);
 	for (const directory of tempDirs.splice(0)) {
 		// Detached workers can release kernel/snapshot files just after their process group exits on macOS.
 		rmSync(directory, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });

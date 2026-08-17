@@ -3,6 +3,7 @@
  * Transforms to Message[] only at the LLM call boundary.
  */
 
+import { randomBytes } from "node:crypto";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -26,6 +27,17 @@ import type {
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 const ABORT_ERROR_MESSAGE = "Request was aborted";
+const PRIME_AGENT_RELAY_ID_HEADER = "X-Prime-Agent-Relay-ID";
+
+function withPrimeAgentRelayId(headers: Record<string, string> | undefined): Record<string, string> {
+	const filteredHeaders = Object.fromEntries(
+		Object.entries(headers ?? {}).filter(
+			([name]) => name.toLowerCase() !== PRIME_AGENT_RELAY_ID_HEADER.toLowerCase(),
+		),
+	);
+	return { ...filteredHeaders, [PRIME_AGENT_RELAY_ID_HEADER]: randomBytes(16).toString("hex") };
+}
+
 const EMPTY_USAGE: AssistantMessage["usage"] = {
 	input: 0,
 	output: 0,
@@ -516,6 +528,7 @@ async function streamAssistantResponse(
 				...config,
 				apiKey: resolvedApiKey,
 				signal,
+				...(config.model.provider === "intercept" ? { headers: withPrimeAgentRelayId(config.headers) } : {}),
 			}),
 			signal,
 		);

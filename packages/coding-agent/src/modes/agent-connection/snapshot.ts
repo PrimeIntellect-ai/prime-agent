@@ -74,6 +74,7 @@ export function createAgentConnectionSnapshot(
 			tree: sessionManager.getTree(),
 			leafId: sessionManager.getLeafId(),
 		},
+		children: session.getRlmChildSnapshots(),
 	};
 }
 

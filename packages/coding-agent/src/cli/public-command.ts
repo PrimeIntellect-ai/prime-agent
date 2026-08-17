@@ -13,6 +13,7 @@ import {
 	REMOVED_COMMAND_NAMES,
 } from "./command-registry.js";
 import { handleDaemonCommand } from "./daemon-command.js";
+import { shutdownExactDaemonAndWait } from "./daemon-launch.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
 
@@ -259,8 +260,38 @@ async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 }
 
 async function runShutdown(args: string[]): Promise<PublicCommandResult> {
-	const options = parseBooleanOptions(args, new Set(["--force", "--json"]), "shutdown");
+	let socketPath: string | undefined;
+	const booleanOptions: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg === "--daemon-socket") {
+			const value = args[++index];
+			if (!value || value.startsWith("-")) {
+				return fail("--daemon-socket requires a path");
+			}
+			if (socketPath !== undefined) {
+				return fail("--daemon-socket may only be supplied once");
+			}
+			socketPath = value;
+			continue;
+		}
+		booleanOptions.push(arg);
+	}
+	const options = parseBooleanOptions(booleanOptions, new Set(["--force", "--json"]), "shutdown");
 	if (!options) return HANDLED;
+	if (socketPath !== undefined) {
+		if (options.has("--force")) {
+			return fail("--force cannot be combined with exact --daemon-socket shutdown");
+		}
+		const stopped = await shutdownExactDaemonAndWait(socketPath);
+		if (!stopped) {
+			throw new Error(`Exact daemon shutdown was not confirmed for ${socketPath}`);
+		}
+		if (options.has("--json")) {
+			console.log(JSON.stringify({ socketPath, stopped: true }));
+		}
+		return HANDLED;
+	}
 	await runShutdownAll(options.has("--json"), options.has("--force"));
 	return HANDLED;
 }

@@ -145,9 +145,14 @@ function requireBuiltPackage(packageDir) {
 	}
 }
 
+function isReleaseCopyable(source) {
+	const name = basename(source);
+	return name !== "__pycache__" && name !== ".DS_Store" && !name.endsWith(".pyc");
+}
+
 function copyIfExists(source, target) {
 	if (existsSync(source)) {
-		cpSync(source, target, { recursive: true });
+		cpSync(source, target, { recursive: true, filter: isReleaseCopyable });
 	}
 }
 
