@@ -901,7 +901,7 @@ function findParentRow(
 	return undefined;
 }
 
-function isSubagentSummary(summary: SessionSummary): boolean {
+export function isSubagentSummary(summary: SessionSummary): boolean {
 	if (summary.runtimeKind) {
 		return summary.runtimeKind === "subagent";
 	}

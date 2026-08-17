@@ -485,7 +485,7 @@ describe("#502 unified session view regressions", () => {
 				summary: "Investigate a variable background status that can be truncated",
 				model: { provider: "prime-inference", id: "gpt-5.6-terra" } as SessionSummary["model"],
 				thinkingLevel: "high" as SessionSummary["thinkingLevel"],
-			},
+			} as SessionSummary,
 			title: "Inspect agents view",
 			subtitle: "",
 			statusLabel: "idle",
@@ -522,6 +522,12 @@ describe("#502 unified session view regressions", () => {
 
 		subagent.summary.summary = "";
 		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+
+		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
+		subagent.summary.runtimeKind = undefined;
+		subagent.summary.rlmChildId = "effort-child";
+		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+
 		subagent.summary.thinkingLevel = "off";
 		subagent.summary.summary = "A later summary";
 		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
