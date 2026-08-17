@@ -2552,15 +2552,13 @@ export class AgentsViewMode implements Component, Focusable {
 			: pendingKill
 				? `${keyText("app.agents.delete")} again to ${row.section === "running" ? "stop" : "delete"}`
 				: styleRowTitle(row);
-		// Append the background summary as a dim suffix on the same line, e.g.
-		// "fix auth · Refactoring token validation". Hidden during delete/stop
-		// confirmations so the warning text stands alone.
+		// Keep stable model information ahead of the variable summary so narrow rows truncate the summary first.
 		const summaryText = !pendingDelete && !pendingKill ? row.summary.summary : undefined;
 		const modelLabel =
 			row.summary.runtimeKind === "subagent" && !pendingDelete && !pendingKill && row.summary.model
 				? `${row.summary.model.provider}/${row.summary.model.id}${row.summary.thinkingLevel && row.summary.thinkingLevel !== "off" ? `:${row.summary.thinkingLevel}` : ""}`
 				: undefined;
-		const suffixes = [summaryText, modelLabel].filter(
+		const suffixes = [modelLabel, summaryText].filter(
 			(suffix): suffix is string => suffix !== undefined && suffix.length > 0,
 		);
 		const titleContent = suffixes.length > 0 ? `${title} ${theme.fg("dim", `· ${suffixes.join(" · ")}`)}` : title;

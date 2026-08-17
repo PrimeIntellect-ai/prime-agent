@@ -472,7 +472,7 @@ describe("#502 unified session view regressions", () => {
 		expect(rendered).toMatch(/123456 · 2h\s*$/);
 	});
 
-	test("subagent rows show their model and effective effort within the existing responsive title cell", () => {
+	test("scoped subagent rows keep model and effort ahead of summaries", () => {
 		initTheme("dark");
 		const subagent = {
 			// Direct children in a scoped Agents View render as agent rows while
@@ -482,7 +482,7 @@ describe("#502 unified session view regressions", () => {
 			summary: {
 				...summary("effort-child"),
 				runtimeKind: "subagent" as const,
-				summary: "",
+				summary: "Investigate a variable background status that can be truncated",
 				model: { provider: "prime-inference", id: "gpt-5.6-terra" } as SessionSummary["model"],
 				thinkingLevel: "high" as SessionSummary["thinkingLevel"],
 			},
@@ -512,10 +512,21 @@ describe("#502 unified session view regressions", () => {
 				),
 			);
 
+		const full = render(120);
+		expect(full).toContain(
+			"Inspect agents view · prime-inference/gpt-5.6-terra:high · Investigate a variable background status",
+		);
+		const narrow = render(75);
+		expect(narrow).toContain("prime-inference/gpt-5.6-terra:high");
+		expect(narrow).not.toContain("Investigate a variable background status");
+
+		subagent.summary.summary = "";
 		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
 		subagent.summary.thinkingLevel = "off";
-		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra");
+		subagent.summary.summary = "A later summary";
+		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
 		expect(render(100)).not.toContain(":off");
+
 		expect(render(20)).toHaveLength(20);
 	});
 });
