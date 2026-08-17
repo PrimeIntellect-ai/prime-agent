@@ -2181,23 +2181,25 @@ export class DaemonSupervisor {
 		const orphanProcessJournalPath =
 			existing?.descriptor.orphanProcessJournalPath ?? join(this.descriptorDir, `${workerId}.orphans.jsonl`);
 		const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", socketPath]);
+		const workerEnvironment = createCliSubprocessEnv({
+			...process.env,
+			...launchEnv,
+			[DAEMON_WORKER_ROLE_ENV]: "1",
+			[DAEMON_WORKER_TOKEN_ENV]: token,
+			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
+			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
+			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
+			[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
+			[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
+			[SESSION_LEASES_ENABLED_ENV]: "1",
+			[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
+		});
+		delete workerEnvironment.RLM_DEPTH;
 		await this.assertRecoveryAllowed();
 		const child: ChildProcess = spawn(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
-			env: createCliSubprocessEnv({
-				...process.env,
-				...launchEnv,
-				[DAEMON_WORKER_ROLE_ENV]: "1",
-				[DAEMON_WORKER_TOKEN_ENV]: token,
-				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
-				[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
-				[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
-				[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
-				[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
-				[SESSION_LEASES_ENABLED_ENV]: "1",
-				[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
-			}),
+			env: workerEnvironment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
 		});
 		const detachWorkerStderr = child.stderr

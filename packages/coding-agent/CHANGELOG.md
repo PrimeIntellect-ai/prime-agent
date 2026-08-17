@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
+
 ## [0.7.3] - 2026-08-17
 
 - Fixed assistant rendering when provider payloads contain null or sparse content blocks.
