@@ -22,7 +22,11 @@ import {
 	formatAgentSessionNameUnavailable,
 	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
-import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
+import {
+	type AgentSessionRuntimeConfig,
+	mergeAgentSessionRuntimeConfig,
+	sanitizeAgentSessionRuntimeConfigForDurableStorage,
+} from "../../core/agent-session-config.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -55,6 +59,7 @@ import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-p
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import {
 	collectDaemonClientEnv,
+	collectDaemonLaunchEnv,
 	createDaemonEventMeta,
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
@@ -72,6 +77,7 @@ import {
 	type DaemonResponse,
 	type DaemonUpdateRestartManifest,
 	failure,
+	filterPersistedDaemonLaunchEnv,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
 	salvageDaemonCommandId,
@@ -99,6 +105,8 @@ import {
 } from "./daemon-socket.js";
 import {
 	acquireDaemonSupervisorOwnership,
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	getDaemonSupervisorRegistryDir,
 	isDaemonShutdownAdmissionActive,
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
@@ -271,6 +279,10 @@ interface ResidentWorker {
 	intentionalStop: boolean;
 	stopRevision: number;
 	launchEnv?: Record<string, string>;
+	/** Fresh client environment used once for a resident replacement, never persisted. */
+	recoveryLaunchEnv?: Record<string, string>;
+	/** Fresh client create command used once for a resident replacement, never persisted. */
+	recoveryCreateCommand?: DaemonCreateCommand;
 	stopFinalization?: Promise<void>;
 	ownerCleanupTimer?: ReturnType<typeof setTimeout>;
 	promotedOwnerClientId?: string;
@@ -431,6 +443,12 @@ function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is 
 		(descriptor.pid ?? 0) > 0 &&
 		(descriptor.processStartId === undefined || typeof descriptor.processStartId === "string") &&
 		(descriptor.ownerClientId === undefined || typeof descriptor.ownerClientId === "string") &&
+		(descriptor.launchEnv === undefined ||
+			(typeof descriptor.launchEnv === "object" &&
+				descriptor.launchEnv !== null &&
+				Object.entries(descriptor.launchEnv).every(
+					([key, value]) => typeof key === "string" && typeof value === "string",
+				))) &&
 		typeof descriptor.socketPath === "string" &&
 		typeof descriptor.authenticationToken === "string" &&
 		typeof descriptor.rootActiveSessionId === "string" &&
@@ -604,6 +622,8 @@ export class DaemonSupervisor {
 	private readonly promptAdmissions = new Map<DaemonSocketClient, Map<string, SupervisorPromptAdmission>>();
 	private readonly signalCleanupHandlers: Array<() => void> = [];
 	private readonly descriptorDir: string;
+	/** Captured from the host and forwarded unchanged to every worker. */
+	private readonly supervisorRegistryDir = getDaemonSupervisorRegistryDir();
 	private readonly generation = randomUUID();
 	private readonly supervisorConfigPath: string;
 	private readonly defaultSessionConfig: AgentSessionRuntimeConfig;
@@ -648,13 +668,14 @@ export class DaemonSupervisor {
 				throw new Error("Daemon supervisor config is missing agentDir");
 			}
 			this.socketLease = await acquireDaemonSocketPathLease(this.socketPath);
-			await waitForDaemonStartupFence(this.socketPath);
+			await waitForDaemonStartupFence(this.socketPath, 10_000, this.supervisorRegistryDir);
 			this.ownership = await acquireDaemonSupervisorOwnership({
 				socketPath: this.socketPath,
 				descriptorDir: this.descriptorDir,
 				agentDir,
 				generation: this.generation,
 				appVersion: VERSION,
+				registryDir: this.supervisorRegistryDir,
 			});
 			await prepareDaemonSocketPath(this.socketPath, this.socketLease);
 
@@ -934,10 +955,17 @@ export class DaemonSupervisor {
 				if (!isDaemonWorkerDescriptor(descriptor, this.socketPath)) {
 					continue;
 				}
+				const storedLaunchEnv = descriptor.launchEnv;
+				const storedCreateConfig = descriptor.createCommand.config;
+				descriptor.launchEnv = filterPersistedDaemonLaunchEnv(storedLaunchEnv);
+				descriptor.createCommand = {
+					...descriptor.createCommand,
+					config: sanitizeAgentSessionRuntimeConfigForDurableStorage(storedCreateConfig ?? {}),
+				};
 				descriptor.lifecycle = "recovering";
 				descriptor.recoveryJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.recovery.jsonl`);
 				descriptor.orphanProcessJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.orphans.jsonl`);
-				this.workers.set(descriptor.workerId, {
+				const worker: ResidentWorker = {
 					descriptor,
 					descriptorPath: path,
 					summaries: new Map(),
@@ -947,7 +975,15 @@ export class DaemonSupervisor {
 					snapshotLoads: new Map(),
 					intentionalStop: descriptor.stopRequestedAt !== undefined,
 					stopRevision: 0,
-				});
+					launchEnv: descriptor.launchEnv,
+				};
+				if (
+					JSON.stringify(storedLaunchEnv) !== JSON.stringify(descriptor.launchEnv) ||
+					JSON.stringify(storedCreateConfig) !== JSON.stringify(descriptor.createCommand.config)
+				) {
+					this.persistWorker(worker);
+				}
+				this.workers.set(descriptor.workerId, worker);
 			} catch (error) {
 				this.log(`Ignoring invalid worker descriptor ${path}: ${String(error)}`);
 			}
@@ -978,7 +1014,7 @@ export class DaemonSupervisor {
 		const persisted: PersistedSupervisorConfig = {
 			version: 1,
 			socketPath: this.socketPath,
-			defaultSessionConfig: this.defaultSessionConfig,
+			defaultSessionConfig: sanitizeAgentSessionRuntimeConfigForDurableStorage(this.defaultSessionConfig),
 		};
 		const tempPath = `${this.supervisorConfigPath}.${process.pid}.tmp`;
 		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
@@ -995,7 +1031,14 @@ export class DaemonSupervisor {
 	private persistWorker(worker: ResidentWorker): void {
 		worker.descriptor.updatedAt = new Date().toISOString();
 		const tempPath = `${worker.descriptorPath}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(worker.descriptor, null, 2)}\n`, { mode: 0o600 });
+		const durableDescriptor: DaemonWorkerDescriptor = {
+			...worker.descriptor,
+			createCommand: {
+				...worker.descriptor.createCommand,
+				config: sanitizeAgentSessionRuntimeConfigForDurableStorage(worker.descriptor.createCommand.config ?? {}),
+			},
+		};
+		writeFileSync(tempPath, `${JSON.stringify(durableDescriptor, null, 2)}\n`, { mode: 0o600 });
 		chmodSync(tempPath, 0o600);
 		renameSync(tempPath, worker.descriptorPath);
 	}
@@ -2027,7 +2070,12 @@ export class DaemonSupervisor {
 		if (command.sessionPath) {
 			const activeMatches = this.matchWorkers(command.sessionPath);
 			if (activeMatches.length === 1 && !(await this.reclaimStaleWorkerRegistration(activeMatches[0]!.worker))) {
-				return this.reuseWorkerForCreate(activeMatches[0]!.worker, ownerClientId, command.sessionPath);
+				return await this.reuseWorkerForCreate(
+					activeMatches[0]!.worker,
+					ownerClientId,
+					command.sessionPath,
+					command,
+				);
 			}
 			if (activeMatches.length > 1) {
 				throw new Error(`Ambiguous active session "${command.sessionPath}"`);
@@ -2038,8 +2086,8 @@ export class DaemonSupervisor {
 				: await this.catalog.resolve(command.sessionPath, config.cwd ?? process.cwd(), config.sessionDir);
 			createCommand = { ...createCommand, sessionPath };
 			const existing = this.findWorkerBySessionFile(sessionPath);
-			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
-				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
+			if (existing && !(await this.reclaimStaleWorkerRegistration(existing))) {
+				return await this.reuseWorkerForCreate(existing, ownerClientId, sessionPath, command);
 			}
 			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
 			// the recursive-harness residency/eviction PR will revisit it.
@@ -2078,15 +2126,90 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private reuseWorkerForCreate(
+	private async reuseWorkerForCreate(
 		worker: ResidentWorker,
 		ownerClientId: string | undefined,
 		sessionPath: string,
-	): ResidentWorker {
-		if (worker.descriptor.ownerClientId === ownerClientId) {
-			return worker;
+		command: DaemonCreateCommand,
+	): Promise<ResidentWorker> {
+		if (worker.descriptor.ownerClientId !== ownerClientId) {
+			throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
 		}
-		throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
+		// Only an ownerless resident create received over the daemon's protected
+		// local socket can supply the one-shot credentials required to replace a
+		// failed worker. The descriptor remains a non-secret recovery recipe.
+		if (
+			ownerClientId === undefined &&
+			command.lifecycle !== "client_owned" &&
+			command.launchEnv &&
+			(!worker.client || worker.descriptor.lifecycle !== "ready")
+		) {
+			// A fresh-environment recovery is single-flight. A concurrent resume may
+			// join but must never replace the first caller's credentials. If an
+			// automatic env-less recovery is winding down, fence behind it before
+			// adopting the new one-shot capability.
+			const inFlightRecovery = worker.recovery;
+			if (inFlightRecovery) {
+				if (worker.recoveryLaunchEnv) {
+					await inFlightRecovery;
+					if (!worker.client || worker.descriptor.lifecycle !== "ready") {
+						throw new Error(
+							worker.descriptor.lastError ??
+								`Session worker ${worker.descriptor.workerId} did not recover for the first fresh resume`,
+						);
+					}
+					return worker;
+				}
+				await inFlightRecovery;
+				if (worker.client && worker.descriptor.lifecycle === "ready") {
+					return worker;
+				}
+				if (worker.recovery) {
+					await worker.recovery;
+					if (!worker.client || worker.descriptor.lifecycle !== "ready") {
+						throw new Error(
+							worker.descriptor.lastError ??
+								`Session worker ${worker.descriptor.workerId} did not recover for the first fresh resume`,
+						);
+					}
+					return worker;
+				}
+			}
+			const previousDescriptor = worker.descriptor;
+			const previousIntentionalStop = worker.intentionalStop;
+			worker.recoveryLaunchEnv = {
+				...worker.descriptor.launchEnv,
+				...command.launchEnv,
+			};
+			worker.recoveryCreateCommand = command;
+			worker.intentionalStop = false;
+			worker.descriptor = {
+				...previousDescriptor,
+				stopRequestedAt: undefined,
+				archiveOnStop: undefined,
+				lifecycle: "recovering",
+				consecutiveFailures: 0,
+			};
+			try {
+				this.persistWorker(worker);
+			} catch (error) {
+				// Persistence is the hand-off point; do not retain an unrecorded
+				// credential capability for a later automatic recovery.
+				worker.recoveryLaunchEnv = undefined;
+				worker.recoveryCreateCommand = undefined;
+				worker.intentionalStop = previousIntentionalStop;
+				worker.descriptor = previousDescriptor;
+				throw error;
+			}
+			await this.recoverWorker(worker);
+			if (!worker.client || worker.descriptor.lifecycle !== "ready") {
+				throw new Error(
+					worker.descriptor.lastError ??
+						`Session worker ${worker.descriptor.workerId} did not recover with its fresh environment`,
+				);
+			}
+		}
+		return worker;
 	}
 
 	/**
@@ -2138,11 +2261,18 @@ export class DaemonSupervisor {
 			throw new Error("Session is not owned by this client");
 		}
 		const previousDescriptor = worker.descriptor;
-		worker.descriptor = { ...previousDescriptor, ownerClientId: undefined };
+		const previousLaunchEnv = worker.launchEnv;
+		const persistedLaunchEnv = filterPersistedDaemonLaunchEnv(previousLaunchEnv);
+		worker.descriptor = {
+			...previousDescriptor,
+			ownerClientId: undefined,
+			...(persistedLaunchEnv ? { launchEnv: persistedLaunchEnv } : { launchEnv: undefined }),
+		};
 		try {
 			this.persistWorker(worker);
 		} catch (error) {
 			worker.descriptor = previousDescriptor;
+			worker.launchEnv = previousLaunchEnv;
 			throw error;
 		}
 		worker.promotedOwnerClientId = clientId;
@@ -2150,7 +2280,7 @@ export class DaemonSupervisor {
 			clearTimeout(worker.ownerCleanupTimer);
 			worker.ownerCleanupTimer = undefined;
 		}
-		worker.launchEnv = undefined;
+		worker.launchEnv = persistedLaunchEnv;
 		await this.syncAgentPeers().catch((error) => this.log(`Could not synchronize agent peers: ${String(error)}`));
 	}
 
@@ -2164,8 +2294,21 @@ export class DaemonSupervisor {
 			throw new Error(`Session worker ${existing.descriptor.workerId} recovery was cancelled`);
 		}
 		const recoveryStopRevision = existing?.stopRevision;
-		const launchEnv =
-			ownerClientId || existing?.descriptor.ownerClientId ? (command.launchEnv ?? existing?.launchEnv) : undefined;
+		const ownerClientIdForDescriptor = existing?.descriptor.ownerClientId ?? ownerClientId;
+		// A resident descriptor is deliberately a non-secret recovery recipe. Only
+		// a fresh local client resume may supply a transient recovery environment.
+		const launchEnv = existing
+			? ownerClientIdForDescriptor === undefined
+				? (existing.recoveryLaunchEnv ?? existing.descriptor.launchEnv)
+				: existing.launchEnv
+			: command.launchEnv;
+		const persistedLaunchEnv = filterPersistedDaemonLaunchEnv(launchEnv);
+		// Do not propagate credentials inherited by a replacement supervisor during
+		// automatic resident recovery; the allowlist is sufficient for a relaunch.
+		const inheritedEnv =
+			ownerClientIdForDescriptor === undefined && launchEnv !== undefined
+				? (filterPersistedDaemonLaunchEnv(collectDaemonLaunchEnv(process.env)) ?? {})
+				: process.env;
 		const createCommand: DaemonCreateCommand = {
 			...withoutSupervisorCreateFields(command),
 			config: mergeAgentSessionRuntimeConfig(this.defaultSessionConfig, command.config),
@@ -2186,13 +2329,15 @@ export class DaemonSupervisor {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
 			env: createCliSubprocessEnv({
-				...process.env,
+				...inheritedEnv,
 				...launchEnv,
 				[DAEMON_WORKER_ROLE_ENV]: "1",
 				[DAEMON_WORKER_TOKEN_ENV]: token,
 				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
 				[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
 				[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
+				// Host authority wins over inherited or caller-provided values.
+				[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]: this.supervisorRegistryDir,
 				[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
 				[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
 				[SESSION_LEASES_ENABLED_ENV]: "1",
@@ -2242,11 +2387,18 @@ export class DaemonSupervisor {
 				supervisorSocketPath: this.socketPath,
 				authenticationToken: token,
 				rootActiveSessionId,
-				ownerClientId: existing?.descriptor.ownerClientId ?? ownerClientId,
+				...(ownerClientIdForDescriptor !== undefined ? { ownerClientId: ownerClientIdForDescriptor } : {}),
+				...(ownerClientIdForDescriptor === undefined && persistedLaunchEnv
+					? { launchEnv: persistedLaunchEnv }
+					: {}),
 				createdAt: existing?.descriptor.createdAt ?? now,
 				updatedAt: now,
 				lifecycle: "starting",
-				createCommand: { ...createCommand, id: undefined },
+				createCommand: {
+					...createCommand,
+					id: undefined,
+					config: sanitizeAgentSessionRuntimeConfigForDurableStorage(createCommand.config ?? {}),
+				},
 				consecutiveFailures: existing?.descriptor.consecutiveFailures ?? 0,
 			};
 			worker = existing ?? {
@@ -2263,12 +2415,20 @@ export class DaemonSupervisor {
 			};
 			await this.assertRecoveryAllowed();
 			worker.descriptor = descriptor;
-			worker.launchEnv = launchEnv;
+			// Retain only durable settings for resident recovery; client-owned workers
+			// retain their live owner's transient environment only in memory.
+			worker.launchEnv = ownerClientIdForDescriptor === undefined ? persistedLaunchEnv : launchEnv;
 			descriptorAssigned = true;
 			this.persistWorker(worker);
 			worker.intentionalStop = false;
 			this.workers.set(workerId, worker);
 		} catch (error) {
+			// A standalone replacement failure consumes its one-shot credentials.
+			// An active recovery loop retains them until its remaining retries finish.
+			if (existing && !existing.recovery) {
+				existing.recoveryLaunchEnv = undefined;
+				existing.recoveryCreateCommand = undefined;
+			}
 			if (startupGate instanceof Writable) {
 				startupGate.destroy();
 			}
@@ -2326,8 +2486,18 @@ export class DaemonSupervisor {
 			this.persistWorker(worker);
 			await this.syncAgentPeers().catch((error) => this.log(`Could not synchronize agent peers: ${String(error)}`));
 			this.broadcastHeartbeatsChanged();
+			// The replacement consumed the fresh environment. Never retain it for a
+			// later automatic recovery.
+			worker.recoveryLaunchEnv = undefined;
+			worker.recoveryCreateCommand = undefined;
 			return worker;
 		} catch (error) {
+			// Preserve credentials only while the owning recovery loop can retry.
+			// Its `finally` consumes them after success, exhaustion, or cancellation.
+			if (!worker.recovery) {
+				worker.recoveryLaunchEnv = undefined;
+				worker.recoveryCreateCommand = undefined;
+			}
 			if (isSupervisorGenerationStale(error)) {
 				throw error;
 			}
@@ -2792,6 +2962,25 @@ export class DaemonSupervisor {
 
 	private async recoverWorker(worker: ResidentWorker): Promise<void> {
 		if (this.isWorkerRecoveryCancelled(worker)) {
+			worker.recoveryLaunchEnv = undefined;
+			worker.recoveryCreateCommand = undefined;
+			return;
+		}
+		if (
+			worker.descriptor.ownerClientId === undefined &&
+			!worker.recoveryLaunchEnv &&
+			!isProcessAlive(worker.descriptor.pid)
+		) {
+			// Never recover resident credentials from a descriptor or the daemon's
+			// ambient environment. A new local client resume must supply them. The
+			// dead worker cannot clean up its detached children, but leave uncertain
+			// operations durable until that fresh resume can launch a replacement.
+			await this.assertRecoveryAllowed();
+			this.reapOrphanedWorkerResources(worker);
+			if (this.isWorkerRecoveryCancelled(worker)) return;
+			worker.descriptor.lifecycle = "failed";
+			worker.descriptor.lastError = "Waiting for a client with fresh environment";
+			this.persistWorker(worker);
 			return;
 		}
 		if (worker.descriptor.ownerClientId && !worker.launchEnv && !isProcessAlive(worker.descriptor.pid)) {
@@ -2807,6 +2996,19 @@ export class DaemonSupervisor {
 			for (const [retryIndex, retryDelay] of WORKER_RETRY_DELAYS_MS.entries()) {
 				await delay(retryDelay);
 				if (this.isWorkerRecoveryCancelled(worker)) {
+					return;
+				}
+				if (
+					worker.descriptor.ownerClientId === undefined &&
+					!worker.recoveryLaunchEnv &&
+					!isProcessAlive(worker.descriptor.pid)
+				) {
+					await this.assertRecoveryAllowed();
+					this.reapOrphanedWorkerResources(worker);
+					if (this.isWorkerRecoveryCancelled(worker)) return;
+					worker.descriptor.lifecycle = "failed";
+					worker.descriptor.lastError = "Waiting for a client with fresh environment";
+					this.persistWorker(worker);
 					return;
 				}
 				try {
@@ -2856,13 +3058,22 @@ export class DaemonSupervisor {
 							`Cannot safely replace live session worker ${worker.descriptor.workerId} without a verified process identity`,
 						);
 					}
+					if (worker.descriptor.ownerClientId === undefined && !worker.recoveryLaunchEnv) {
+						// A verified live resident may be adopted without credentials, but a
+						// replacement would kill it and launch a new process. Do neither
+						// unless this recovery attempt owns a current one-shot client env.
+						worker.descriptor.lifecycle = "failed";
+						worker.descriptor.lastError = "Waiting for a client with fresh environment";
+						this.persistWorker(worker);
+						return;
+					}
 					const safeToKillWorkerProcess =
 						processAlive && processIdentityMatches && worker.descriptor.processStartId !== undefined;
 					await this.recoverUncertainWorkerOperations(worker, safeToKillWorkerProcess);
 					if (this.isWorkerRecoveryCancelled(worker)) {
 						return;
 					}
-					await this.launchWorker(worker.descriptor.createCommand, worker);
+					await this.launchWorker(worker.recoveryCreateCommand ?? worker.descriptor.createCommand, worker);
 					return;
 				} catch (error) {
 					if (isSupervisorRecoveryCancelled(error) || this.isWorkerRecoveryCancelled(worker)) {
@@ -2891,6 +3102,10 @@ export class DaemonSupervisor {
 			await this.syncAgentPeers().catch(() => undefined);
 			this.log(`Worker ${worker.descriptor.workerId} failed after three recovery attempts`);
 		})().finally(() => {
+			// Fresh credentials belong to this recovery attempt, including failed,
+			// cancelled, reconnect-only, and stale-generation paths.
+			worker.recoveryLaunchEnv = undefined;
+			worker.recoveryCreateCommand = undefined;
 			worker.recovery = undefined;
 		});
 		return worker.recovery;
@@ -2905,34 +3120,35 @@ export class DaemonSupervisor {
 		);
 	}
 
+	private reapOrphanedWorkerResources(worker: ResidentWorker): void {
+		const orphanProcessJournalPath = worker.descriptor.orphanProcessJournalPath;
+		if (!orphanProcessJournalPath) return;
+		try {
+			for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, worker.descriptor.pid)) {
+				if (!isOrphanProcessIdentityCurrent(orphan)) continue;
+				const { pid } = orphan;
+				try {
+					process.kill(-pid, "SIGKILL");
+				} catch {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// The detached resource may already have exited.
+					}
+				}
+			}
+			clearOrphanProcessJournal(orphanProcessJournalPath);
+		} catch (error) {
+			this.log(`Could not reap orphaned worker resources: ${String(error)}`);
+		}
+	}
+
 	private async recoverUncertainWorkerOperations(worker: ResidentWorker, killWorkerProcess = true): Promise<void> {
 		await this.assertRecoveryAllowed();
 		if (killWorkerProcess) {
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 		}
-		const orphanProcessJournalPath = worker.descriptor.orphanProcessJournalPath;
-		if (orphanProcessJournalPath) {
-			try {
-				for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, worker.descriptor.pid)) {
-					if (!isOrphanProcessIdentityCurrent(orphan)) {
-						continue;
-					}
-					const { pid } = orphan;
-					try {
-						process.kill(-pid, "SIGKILL");
-					} catch {
-						try {
-							process.kill(pid, "SIGKILL");
-						} catch {
-							// The detached resource may already have exited.
-						}
-					}
-				}
-				clearOrphanProcessJournal(orphanProcessJournalPath);
-			} catch (error) {
-				this.log(`Could not reap orphaned worker resources: ${String(error)}`);
-			}
-		}
+		this.reapOrphanedWorkerResources(worker);
 		const journal = new WorkerRecoveryJournal(worker.descriptor.recoveryJournalPath);
 		const latest = journal.getLatest();
 		const uncertain = latest.filter((record) => record.busy);
@@ -3367,16 +3583,37 @@ export class DaemonSupervisor {
 		});
 	}
 
-	private findWorkerBySessionFile(sessionFile: string): WorkerMatch | undefined {
+	private findWorkerBySessionFile(sessionFile: string): ResidentWorker | undefined {
 		const target = canonicalSessionPath(sessionFile);
+		const matches = new Set<ResidentWorker>();
 		for (const worker of this.workers.values()) {
 			for (const summary of worker.summaries.values()) {
 				if (summary.sessionFile && canonicalSessionPath(summary.sessionFile) === target) {
-					return { worker, summary };
+					matches.add(worker);
 				}
 			}
+			// Summaries are empty until a restarted supervisor reconnects. The durable
+			// root path is authoritative only when internally consistent. Never pick
+			// the first of colliding/corrupt registrations and accidentally launch or
+			// recover beside an existing worker.
+			const descriptorSessionFile = worker.descriptor.sessionFile;
+			const configuredSessionPath = worker.descriptor.createCommand.sessionPath;
+			if (descriptorSessionFile && configuredSessionPath) {
+				const descriptorTarget = canonicalSessionPath(descriptorSessionFile);
+				const configuredTarget = canonicalSessionPath(configuredSessionPath);
+				if (descriptorTarget !== configuredTarget) {
+					throw new Error(`Conflicting resident session paths for worker ${worker.descriptor.workerId}`);
+				}
+			}
+			const authoritativePath = descriptorSessionFile ?? configuredSessionPath;
+			if (authoritativePath && canonicalSessionPath(authoritativePath) === target) {
+				matches.add(worker);
+			}
 		}
-		return undefined;
+		if (matches.size > 1) {
+			throw new Error(`Ambiguous resident session path "${sessionFile}"`);
+		}
+		return matches.values().next().value;
 	}
 
 	private async forwardToWorker(

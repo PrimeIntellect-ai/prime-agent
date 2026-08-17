@@ -47,6 +47,107 @@ export interface AgentSessionRuntimeConfig {
 	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
+/**
+ * Returns a copy suitable for durable daemon state. Runtime authentication can
+ * arrive in the create config, but a descriptor is a recovery recipe rather
+ * than a credential store. Keep this recursive because provider overrides and
+ * extension-owned config may add nested request options over time.
+ */
+export function sanitizeAgentSessionRuntimeConfigForDurableStorage(
+	config: AgentSessionRuntimeConfig,
+): AgentSessionRuntimeConfig {
+	return redactRuntimeConfigValue(config, new WeakMap()) as AgentSessionRuntimeConfig;
+}
+
+function redactRuntimeConfigValue(value: unknown, seen: WeakMap<object, unknown>): unknown {
+	if (!value || typeof value !== "object") {
+		return value;
+	}
+	const prior = seen.get(value);
+	if (prior !== undefined) {
+		return prior;
+	}
+	if (Array.isArray(value)) {
+		const result: unknown[] = [];
+		seen.set(value, result);
+		for (const entry of value) {
+			result.push(redactRuntimeConfigValue(entry, seen));
+		}
+		return result;
+	}
+	const result: Record<string, unknown> = {};
+	seen.set(value, result);
+	for (const [key, entry] of Object.entries(value)) {
+		const normalizedKey = normalizeRuntimeConfigField(key);
+		// Request headers are an open-ended credential surface. Preserve none of
+		// them durably; callers may use arbitrary provider-specific header names.
+		if (normalizedKey.endsWith("headers") || isSecretBearingRuntimeConfigField(normalizedKey)) {
+			continue;
+		}
+		result[key] = redactRuntimeConfigValue(entry, seen);
+	}
+	return result;
+}
+
+function normalizeRuntimeConfigField(key: string): string {
+	return key.replaceAll(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+const SECRET_RUNTIME_CONFIG_FIELDS = new Set([
+	"key",
+	"apikey",
+	"apisecret",
+	"secretkey",
+	"token",
+	"access",
+	"refresh",
+	"expires",
+	"expiresat",
+	"expiresin",
+	"expiry",
+	"oauthaccess",
+	"oauthrefresh",
+	"oauthexpires",
+	"oauthexpiresat",
+	"oauthexpiresin",
+	"accesstoken",
+	"refreshtoken",
+	"bearertoken",
+	"authtoken",
+	"idtoken",
+	"secret",
+	"secretaccesskey",
+	"awssecretaccesskey",
+	"accesskeyid",
+	"awsaccesskeyid",
+	"sessiontoken",
+	"clientsecret",
+	"password",
+	"credential",
+	"credentials",
+	"authorization",
+	"authorizationheader",
+	"proxyauthorization",
+	"auth",
+	"authheader",
+	"cookie",
+	"setcookie",
+	"privatekey",
+	"signingkey",
+]);
+
+function isSecretBearingRuntimeConfigField(normalizedKey: string): boolean {
+	if (SECRET_RUNTIME_CONFIG_FIELDS.has(normalizedKey)) {
+		return true;
+	}
+	// Provider/extension config is open-ended. Match composed credential names
+	// narrowly while preserving product fields such as networkAccess, productAccess,
+	// productKeyId, tokenBudget, and tokenLimit.
+	return /(?:apikey|apisecret|secretaccesskey|accesskeyid|accesstoken|refreshtoken|sessiontoken|clientsecret|bearertoken|authtoken|idtoken|token|password|credential|authorization|cookie|privatekey|signingkey)$/.test(
+		normalizedKey,
+	);
+}
+
 export function mergeAgentSessionRuntimeConfig(
 	base: AgentSessionRuntimeConfig,
 	override?: AgentSessionRuntimeConfig,

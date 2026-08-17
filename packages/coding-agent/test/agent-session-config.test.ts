@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
+import {
+	type AgentSessionRuntimeConfig,
+	mergeAgentSessionRuntimeConfig,
+	sanitizeAgentSessionRuntimeConfigForDurableStorage,
+} from "../src/core/agent-session-config.js";
 
 describe("mergeAgentSessionRuntimeConfig", () => {
 	it("applies session overrides without mutating default config", () => {
@@ -167,5 +171,101 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 		expect(mergeAgentSessionRuntimeConfig({ telemetryDisabled: true }, {}).telemetryDisabled).toBe(true);
 		expect(mergeAgentSessionRuntimeConfig({}, { telemetryDisabled: true }).telemetryDisabled).toBe(true);
 		expect(mergeAgentSessionRuntimeConfig({}, {}).telemetryDisabled).toBeUndefined();
+	});
+	describe("sanitizeAgentSessionRuntimeConfigForDurableStorage", () => {
+		it("removes recursive credential aliases and header containers while preserving product config", () => {
+			const shared = {
+				AWS_ACCESS_KEY_ID: "LEAK_ME_AWS_ID_SNAKE",
+				AWS_SECRET_ACCESS_KEY: "LEAK_ME_AWS_SNAKE",
+				"aws-secret-access-key": "LEAK_ME_AWS_KEBAB",
+				productKeyId: "catalog-key",
+			};
+			const runtimeConfig = {
+				cwd: "/repo",
+				apiKey: "LEAK_ME_TOP",
+				initialGoal: { objective: "keep the configured budget", tokenBudget: 1234 },
+				extensionFlagValues: {
+					provider: {
+						providerApiKey: "LEAK_ME_PROVIDER",
+						openaiApiKey: "LEAK_ME_OPENAI",
+						refresh: "LEAK_ME_REFRESH",
+						OAuth_REFRESH: "LEAK_ME_OAUTH_REFRESH_SNAKE",
+						"oauth-access": "LEAK_ME_OAUTH_ACCESS_KEBAB",
+						OAUTH_EXPIRES: "LEAK_ME_OAUTH_EXPIRES_CASE",
+						ProviderToken: "LEAK_ME_PROVIDER_TOKEN_CASE",
+						apiSecret: "LEAK_ME_API_SECRET",
+						"secret-key": "LEAK_ME_SECRET_KEY_KEBAB",
+						auth: "LEAK_ME_AUTH",
+						access: "LEAK_ME_ACCESS",
+						expires: 123456,
+						expiresAt: 123457,
+						product: "bedrock",
+						networkAccess: "private",
+						productAccess: "enabled",
+						productKeyId: "product-key",
+						tokenLimit: 5678,
+						aws: {
+							accessKeyId: "LEAK_ME_AWS_ID",
+							secretAccessKey: "LEAK_ME_AWS_SECRET",
+							awsSecretAccessKey: "LEAK_ME_AWS_CAMEL",
+							sessions: [{ sessionToken: "LEAK_ME_SESSION", region: "us-east-1" }],
+						},
+						headers: { safe: "LEAK_ME_HEADER" },
+						requestHeaders: { safe: "LEAK_ME_REQUEST_HEADER" },
+						httpHeaders: { safe: "LEAK_ME_HTTP_HEADER" },
+						extraHeaders: { safe: "LEAK_ME_EXTRA_HEADER" },
+						defaultHeaders: { safe: "LEAK_ME_DEFAULT_HEADER" },
+						first: shared,
+						second: shared,
+					},
+				},
+			} as unknown as AgentSessionRuntimeConfig;
+
+			const durable = sanitizeAgentSessionRuntimeConfigForDurableStorage(runtimeConfig);
+
+			expect(durable).toEqual({
+				cwd: "/repo",
+				initialGoal: { objective: "keep the configured budget", tokenBudget: 1234 },
+				extensionFlagValues: {
+					provider: {
+						product: "bedrock",
+						networkAccess: "private",
+						productAccess: "enabled",
+						productKeyId: "product-key",
+						tokenLimit: 5678,
+						aws: { sessions: [{ region: "us-east-1" }] },
+						first: { productKeyId: "catalog-key" },
+						second: { productKeyId: "catalog-key" },
+					},
+				},
+			});
+			const provider = durable.extensionFlagValues?.provider as unknown as Record<string, unknown>;
+			expect(provider.first).toBe(provider.second);
+			expect(runtimeConfig.apiKey).toBe("LEAK_ME_TOP");
+			const liveProvider = runtimeConfig.extensionFlagValues?.provider as unknown as Record<string, unknown>;
+			expect(liveProvider["secret-key"]).toBe("LEAK_ME_SECRET_KEY_KEBAB");
+			expect(liveProvider.auth).toBe("LEAK_ME_AUTH");
+			expect((runtimeConfig.extensionFlagValues?.provider as { first?: unknown }).first).toBe(shared);
+		});
+
+		it("redacts recursive aliases in cyclic config without mutating the source", () => {
+			const cyclic: Record<string, unknown> = {
+				product: "safe",
+				authorizationHeader: "LEAK_ME_AUTH",
+				"X-API-Key": "LEAK_ME_X_API",
+			};
+			cyclic.self = cyclic;
+			const runtimeConfig = { extensionFlagValues: { cyclic } } as unknown as AgentSessionRuntimeConfig;
+
+			const durable = sanitizeAgentSessionRuntimeConfigForDurableStorage(runtimeConfig);
+			const sanitized = durable.extensionFlagValues?.cyclic as unknown as Record<string, unknown>;
+
+			expect(sanitized.product).toBe("safe");
+			expect(sanitized.authorizationHeader).toBeUndefined();
+			expect(sanitized["X-API-Key"]).toBeUndefined();
+			expect(sanitized.self).toBe(sanitized);
+			expect(cyclic.authorizationHeader).toBe("LEAK_ME_AUTH");
+			expect(cyclic.self).toBe(cyclic);
+		});
 	});
 });

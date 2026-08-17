@@ -645,10 +645,17 @@ async function waitForExactProcessExit(
 	}
 }
 
-async function createResidentSession(client: DaemonClient, agentDir: string): Promise<SessionSummary> {
+async function createResidentSession(
+	client: DaemonClient,
+	agentDir: string,
+	sessionPath?: string,
+): Promise<SessionSummary> {
 	const response = await client.request(
 		{
 			type: "create",
+			lifecycle: "resident",
+			...(sessionPath ? { sessionPath } : {}),
+			launchEnv: { TSX_TSCONFIG_PATH: tsconfigPath },
 			config: {
 				agentDir,
 				apiKey: "faux-key",
@@ -775,17 +782,25 @@ describe("ENG-4603 worker recovery convergence", () => {
 		await waitForExactProcessExit(originalWorkerPid, originalWorkerStartId);
 
 		const successorClient = await connectEventually(paths.socketPath);
-		let replacement: DaemonWorkerDescriptor | undefined;
-		const deadline = Date.now() + 30_000;
-		while (Date.now() < deadline) {
+		let failed: DaemonWorkerDescriptor | undefined;
+		const failedDeadline = Date.now() + 30_000;
+		while (Date.now() < failedDeadline) {
 			const candidate = readWorkerDescriptor(paths.descriptorDir);
-			if (candidate.pid !== originalWorkerPid && candidate.lifecycle === "ready") {
-				replacement = candidate;
+			if (candidate.pid === originalWorkerPid && candidate.lifecycle === "failed") {
+				failed = candidate;
 				break;
 			}
 			await delay(25);
 		}
-		if (!replacement) throw new Error("Current supervisor did not publish a replacement worker");
+		if (!failed) throw new Error("Current supervisor did not fail closed for the crashed resident worker");
+
+		const sessionPath = summary.sessionFile;
+		if (!sessionPath) throw new Error("Resident worker did not expose its session file");
+		const recovered = await createResidentSession(successorClient, paths.agentDir, sessionPath);
+		const replacement = readWorkerDescriptor(paths.descriptorDir);
+		expect(recovered.workerPid).toBe(replacement.pid);
+		expect(replacement.pid).not.toBe(originalWorkerPid);
+		expect(replacement.lifecycle).toBe("ready");
 		expect(getProcessStartId(replacement.pid)).toBe(replacement.processStartId);
 		await delay(750);
 		expect(exactProcessIsAlive(replacement.pid, replacement.processStartId)).toBe(true);

@@ -990,7 +990,12 @@ async function restoreDaemonUpdateRestartSession(
 	const createResponse = await client.request(
 		{
 			type: "create",
+			lifecycle: "resident",
 			sessionPath: session.sessionFile,
+			// The protected, single-use update manifest carries the live pre-update
+			// config. Mark this as a fresh recovery capability without copying the
+			// replacement coordinator's ambient environment into the worker.
+			launchEnv: {},
 			config: session.config,
 			...(runtimeMetadata ? { runtimeMetadata } : {}),
 			...(session.clientEnv ? { env: session.clientEnv } : {}),

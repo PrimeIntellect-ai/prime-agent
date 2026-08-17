@@ -6922,6 +6922,10 @@ export class AgentDaemon {
 			cleanup();
 		}
 		this.cronScheduler.stop();
+		// Socket-initiated worker shutdown is as terminal as a signal. The worker
+		// may have started detached tool processes; leaving them behind after the
+		// parent exits makes the supervisor's confirmed worker cleanup incomplete.
+		killTrackedDetachedChildren();
 		for (const state of [...this.sessions.values()]) {
 			await this.closeSession(state, closingReason);
 		}

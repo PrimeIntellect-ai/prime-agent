@@ -1,5 +1,6 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, ServiceTier, TextContent, Transport } from "@earendil-works/pi-ai";
+import { ENV_AGENT_DIR } from "../../config.js";
 import type {
 	AgentSessionMessageDeliveryMode,
 	AgentSessionMessageReceipt,
@@ -199,6 +200,44 @@ export function collectDaemonClientEnv(source: NodeJS.ProcessEnv = process.env):
 		if (value !== undefined) {
 			env[key] = value;
 		}
+	}
+	return Object.keys(env).length > 0 ? env : undefined;
+}
+
+/** Non-secret launch settings allowed to persist in resident worker descriptors. */
+const DAEMON_PERSISTED_LAUNCH_ENV_KEYS = [
+	"HOME",
+	"PATH",
+	"TMPDIR",
+	"TMP",
+	"TEMP",
+	"XDG_CACHE_HOME",
+	"XDG_CONFIG_HOME",
+	"XDG_DATA_HOME",
+	"XDG_RUNTIME_DIR",
+	"XDG_STATE_HOME",
+	"TSX_TSCONFIG_PATH",
+	ENV_AGENT_DIR,
+	"PI_CODING_AGENT_DIR",
+	"PI_OFFLINE",
+	"PI_PACKAGE_DIR",
+	"PI_SKIP_VERSION_CHECK",
+	"DO_NOT_TRACK",
+	"PRIME_AGENT_TELEMETRY",
+	"PRIME_AGENT_TELEMETRY_ENDPOINT",
+	"PRIME_AGENT_TRACES_BASE_URL",
+	"PRIME_AGENT_DOWNLOAD_BASE_URL",
+] as const;
+
+/** Select only explicitly non-secret launch settings for durable storage. */
+export function filterPersistedDaemonLaunchEnv(
+	source: Readonly<Record<string, string>> | undefined,
+): Record<string, string> | undefined {
+	if (!source) return undefined;
+	const env: Record<string, string> = {};
+	for (const key of DAEMON_PERSISTED_LAUNCH_ENV_KEYS) {
+		const value = source[key];
+		if (value !== undefined) env[key] = value;
 	}
 	return Object.keys(env).length > 0 ? env : undefined;
 }

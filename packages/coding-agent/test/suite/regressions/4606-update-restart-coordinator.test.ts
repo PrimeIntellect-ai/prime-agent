@@ -47,13 +47,21 @@ function spawnSupervisor(paths: {
 	registryDir: string;
 	socketPath: string;
 }): SupervisorHandle {
+	const supervisorEnv = { ...process.env };
+	// A fixture supervisor is an independent root. Never let the test runner's
+	// daemon-worker or RLM identity redirect its CLI into this live worker.
+	for (const key of Object.keys(supervisorEnv)) {
+		if (key.startsWith("PRIME_AGENT_INTERNAL_") || key.startsWith("RLM_")) {
+			delete supervisorEnv[key];
+		}
+	}
 	const child = spawn(
 		process.execPath,
 		[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", paths.socketPath, "--offline"],
 		{
 			cwd: paths.agentDir,
 			env: {
-				...process.env,
+				...supervisorEnv,
 				[supervisorRegistryDirEnv]: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
 				ENG_4606_AGENT_DIR: paths.agentDir,

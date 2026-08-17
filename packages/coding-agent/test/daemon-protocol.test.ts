@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.js";
 import {
 	createDaemonCommandEnvelope,
 	createDaemonEventEnvelope,
@@ -16,6 +17,7 @@ import {
 	DAEMON_SCHEMA_REVISION,
 	type DaemonCommand,
 	type DaemonOutbound,
+	filterPersistedDaemonLaunchEnv,
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
@@ -42,6 +44,35 @@ describe("daemon protocol helpers", () => {
 			.digest("hex")
 			.slice(0, 12);
 		expect(DAEMON_SCHEMA_ID).toBe(`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-${digest}`);
+	});
+
+	it("filters resident descriptor launch environment to explicit non-secret settings", () => {
+		expect(
+			filterPersistedDaemonLaunchEnv({
+				HOME: "/home/agent",
+				PATH: "/runtime/bin",
+				TMPDIR: "/tmp/agent",
+				XDG_DATA_HOME: "/home/agent/.local/share",
+				TSX_TSCONFIG_PATH: "/workspace/tsconfig.json",
+				[ENV_AGENT_DIR]: "/home/agent/.prime/agent",
+				PI_OFFLINE: "1",
+				PRIME_AGENT_TRACES_BASE_URL: "https://traces.example.test",
+				OPENAI_API_KEY: "must-not-persist",
+				AWS_SECRET_ACCESS_KEY: "must-not-persist",
+				GH_TOKEN: "must-not-persist",
+				SSH_AUTH_SOCK: "/tmp/must-not-persist.sock",
+			}),
+		).toEqual({
+			HOME: "/home/agent",
+			PATH: "/runtime/bin",
+			TMPDIR: "/tmp/agent",
+			XDG_DATA_HOME: "/home/agent/.local/share",
+			TSX_TSCONFIG_PATH: "/workspace/tsconfig.json",
+			[ENV_AGENT_DIR]: "/home/agent/.prime/agent",
+			PI_OFFLINE: "1",
+			PRIME_AGENT_TRACES_BASE_URL: "https://traces.example.test",
+		});
+		expect(filterPersistedDaemonLaunchEnv({ OPENAI_API_KEY: "must-not-persist" })).toBeUndefined();
 	});
 
 	it("requires compatibility metadata for the heartbeat protocol surface", () => {
