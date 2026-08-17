@@ -14,7 +14,7 @@ import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../
 import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } from "./agent-message.js";
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
-import { FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
+import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
 export interface IPythonCellContentBlock {
@@ -687,10 +687,9 @@ export class IPythonCellComponent implements Component {
 		const rows: string[] = [];
 		edits.forEach((edit, index) => {
 			const { diff: diffText } = generateDiffString(edit.oldStr, edit.newStr, 4, edit.startLine ?? 1);
-			for (const row of diffText.split("\n")) {
-				if (row.startsWith("+")) added++;
-				else if (row.startsWith("-")) removed++;
-			}
+			const counts = countChangedLines(diffText);
+			added += counts.added;
+			removed += counts.removed;
 			if (!this.state.editDiffsExpanded) {
 				return;
 			}

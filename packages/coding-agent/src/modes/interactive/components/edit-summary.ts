@@ -112,9 +112,14 @@ export function formatFileChangeSummaryLine(
 		diffsExpanded === undefined
 			? ""
 			: `${theme.fg("dim", " · ")}${expandCollapseHint("app.edits.expand", diffsExpanded)}`;
-	const suffix = `${theme.fg("dim", " ")}${formatChangeCounts(change)}${hint}`;
+	// Size the path against the wider hint variant ("to collapse") so toggling
+	// ctrl+j never re-truncates it — the summary line is a stable anchor.
+	const widestHint =
+		diffsExpanded === undefined ? "" : `${theme.fg("dim", " · ")}${expandCollapseHint("app.edits.expand", true)}`;
+	const counts = `${theme.fg("dim", " ")}${formatChangeCounts(change)}`;
+	const suffix = `${counts}${hint}`;
 	const safeWidth = Math.max(1, width);
-	const available = Math.max(1, safeWidth - visibleWidth(prefix) - visibleWidth(suffix));
+	const available = Math.max(1, safeWidth - visibleWidth(prefix) - visibleWidth(counts) - visibleWidth(widestHint));
 	const displayPath = cwd === undefined ? rawPath : formatFileChangePath(rawPath, cwd);
 	const path = truncateToWidth(displayPath, available, "…");
 	return truncateToWidth(`${prefix}${theme.fg("muted", path)}${suffix}`, safeWidth, "");
