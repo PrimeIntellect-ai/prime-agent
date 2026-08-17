@@ -222,14 +222,11 @@ describe("compaction continuation", () => {
 		sessionRef.current = harness.session;
 		const largeStep = "x".repeat(3_500);
 		harness.setResponses([
-			{ ...fauxAssistantMessage(`step one done, more to do ${largeStep}`), usage: createUsage(5_000) },
-			{ ...fauxAssistantMessage(`step two done, still more to do ${largeStep}`), usage: createUsage(5_000) },
-			{ ...fauxAssistantMessage(`step three done, still not finished ${largeStep}`), usage: createUsage(5_000) },
-			{
-				...fauxAssistantMessage(fauxToolCall("ipython", { code: "goal.complete" }), { stopReason: "toolUse" }),
-				usage: createUsage(5_000),
-			},
-			{ ...fauxAssistantMessage("Goal complete."), usage: createUsage(5_000) },
+			fauxAssistantMessage(`step one done, more to do ${largeStep}`),
+			fauxAssistantMessage(`step two done, still more to do ${largeStep}`),
+			fauxAssistantMessage(`step three done, still not finished ${largeStep}`),
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "goal.complete" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Goal complete."),
 		]);
 
 		await harness.session.prompt("/goal finish the task");
