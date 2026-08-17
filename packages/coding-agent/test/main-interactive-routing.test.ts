@@ -16,8 +16,8 @@ import {
 	shouldEnsureDaemonBeforeActiveSessionLookup,
 	shouldEnsureInteractiveDaemonForStartup,
 	shouldOpenAgentsViewForDaemonInteractive,
-	shouldRejectBareResume,
 	shouldRejectNonInteractiveAttach,
+	shouldRejectNonInteractiveBareResume,
 	shouldUseDaemonClient,
 	shouldUseDaemonClientRuntime,
 	shouldUseDaemonInteractive,
@@ -127,9 +127,10 @@ describe("interactive startup routing", () => {
 		expect(shouldRejectNonInteractiveAttach("worker", "print")).toBe(true);
 		expect(shouldRejectNonInteractiveAttach("worker", "interactive")).toBe(false);
 		expect(shouldRejectNonInteractiveAttach(undefined, "print")).toBe(false);
-		expect(shouldRejectBareResume(true)).toBe(true);
-		expect(shouldRejectBareResume("session-id")).toBe(false);
-		expect(shouldRejectBareResume(undefined)).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "print")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume(true, "rpc")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume("session-id", "print")).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "interactive")).toBe(false);
 	});
 
 	test("does not start the daemon for attach", () => {
@@ -183,14 +184,14 @@ describe("daemon-backed interactive session manager routing", () => {
 		expect(shouldOpenAgentsViewForDaemonInteractive(decision)).toBe(false);
 	});
 
-	test("bare --resume no longer routes to the agents view (it is rejected at startup)", () => {
+	test.each([false, true])("opens the agents view for bare --resume (onboarding=%s)", (needsOnboarding) => {
 		expect(
 			shouldOpenAgentsViewForDaemonInteractive({
 				useDaemonInteractive: true,
-				needsOnboarding: false,
+				needsOnboarding,
 				resume: true,
 			}),
-		).toBe(false);
+		).toBe(true);
 	});
 
 	test("ensures daemon is available before probing non-path session selectors", () => {
@@ -278,8 +279,8 @@ describe("daemon-backed interactive session manager routing", () => {
 		expect(shouldUseEphemeralSessionManagerForDaemonInteractive(decision)).toBe(false);
 	});
 
-	test("keeps bare --resume off the ephemeral local session manager", () => {
-		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(false);
+	test("uses an ephemeral local session manager for bare --resume", () => {
+		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(true);
 	});
 
 	test("finds an active daemon session by resolved session file", () => {

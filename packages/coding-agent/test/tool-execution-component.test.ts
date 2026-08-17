@@ -1,14 +1,18 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Container, resetCapabilitiesCache, setCapabilities, Text, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { type BashOperations, createBashTool, createBashToolDefinition } from "../src/core/tools/bash.js";
 import { createEditToolDefinition } from "../src/core/tools/edit.js";
 import { createAgentConnectionToolDefinition } from "../src/modes/agent-connection/tool-definition.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../src/modes/interactive/theme/working-icon.js";
 
 function createBaseToolDefinition(name = "custom_tool"): ToolDefinition {
@@ -428,6 +432,189 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered.match(/\bedit\b/g)?.length ?? 0).toBe(1);
 	});
 
+	test("shows the built-in edit diff on collapsed tool calls when edit diffs are expanded", () => {
+		const component = new ToolExecutionComponent(
+			"edit",
+			"tool-4e",
+			{ path: "README.md", oldText: "before", newText: "after" },
+			{},
+			createEditToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [], details: { diff: "-1 before\n+1 after", firstChangedLine: 1 }, isError: false },
+			false,
+		);
+
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).not.toContain("-1 before");
+		expect(collapsed).toContain("+1 -1");
+		// The collapsed `╰─ path +N -M` summary line carries the ctrl+j hint —
+		// and it is the only carrier: the header must not duplicate it.
+		expect(collapsed.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
+		expect(collapsed.split("to expand").length - 1).toBe(1);
+
+		component.setEditDiffsExpanded(true);
+		const withDiffLines = stripAnsi(component.render(120).join("\n")).split("\n");
+		// The summary line stays put; the diff renders under it, indented to its text column.
+		const summaryIndex = withDiffLines.findIndex((line) => line.includes("╰─ README.md +1 -1"));
+		expect(summaryIndex).toBeGreaterThanOrEqual(0);
+		expect(withDiffLines[summaryIndex]).toContain("to collapse");
+		const textColumn = withDiffLines[summaryIndex].indexOf("README.md");
+		const removed = withDiffLines.find((line) => line.includes("-1 before"));
+		const added = withDiffLines.find((line) => line.includes("+1 after"));
+		expect(removed?.startsWith(" ".repeat(textColumn))).toBe(true);
+		expect(added?.startsWith(" ".repeat(textColumn))).toBe(true);
+
+		component.setEditDiffsExpanded(false);
+		const collapsedAgain = stripAnsi(component.render(120).join("\n"));
+		expect(collapsedAgain).not.toContain("-1 before");
+		expect(collapsedAgain).toContain("+1 -1");
+	});
+
+	test("suppresses the built-in edit summary and diff when execution fails", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "pi-edit-failed-"));
+		try {
+			const filePath = join(dir, "sample.txt");
+			await writeFile(filePath, "before\n", "utf8");
+			const component = new ToolExecutionComponent(
+				"edit",
+				"tool-4err",
+				{ path: filePath, edits: [{ oldText: "before", newText: "after" }] },
+
+				{},
+				createEditToolDefinition(dir),
+				createFakeTui(),
+				dir,
+			);
+
+			component.setEditDiffsExpanded(true);
+			const deadline = Date.now() + 2000;
+			while (Date.now() < deadline && !stripAnsi(component.render(120).join("\n")).includes("+1 -1")) {
+				component.setArgsComplete();
+				await new Promise((resolve) => setTimeout(resolve, 5));
+			}
+			expect(stripAnsi(component.render(120).join("\n"))).toContain("+1 -1");
+
+			component.updateResult(
+				{ content: [{ type: "text", text: "Could not edit file: sample.txt." }], isError: true },
+				false,
+			);
+			const rendered = stripAnsi(component.render(120).join("\n"));
+			expect(rendered).not.toContain("╰─");
+			expect(rendered).not.toContain("+1 -1");
+			expect(rendered).not.toContain("-1 before");
+			expect(rendered).not.toContain("+1 after");
+
+			// The header must switch to the error background even though the
+			// async preview itself succeeded before execution failed.
+			const rawRendered = component.render(120).join("\n");
+			expect(rawRendered).toContain(theme.bg("toolErrorBg", "").slice(0, -"\x1b[49m".length));
+			expect(rawRendered).not.toContain(theme.bg("toolSuccessBg", "").slice(0, -"\x1b[49m".length));
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("built-in edit summary truncates a long path to one row and keeps counts and hint", () => {
+		const longPath = "deeply/nested/directory/structure/with/a/really/long/file-name-that-overflows.md";
+		const component = new ToolExecutionComponent(
+			"edit",
+			"tool-4f",
+			{ path: longPath, oldText: "before", newText: "after" },
+			{},
+			createEditToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [], details: { diff: "-1 before\n+1 after", firstChangedLine: 1 }, isError: false },
+			false,
+		);
+		const lines = stripAnsi(component.render(40).join("\n")).split("\n");
+		const summaryLines = lines.filter((line) => line.includes("╰─"));
+		expect(summaryLines.length).toBe(1);
+		expect(summaryLines[0]).toContain("…");
+		expect(summaryLines[0]).toContain("+1 -1");
+		expect(summaryLines[0]).toContain("to expand");
+		for (const line of lines) {
+			expect(line.length).toBeLessThanOrEqual(40);
+		}
+	});
+
+	test("built-in edit diff rows keep the summary text column when a diff line wraps", () => {
+		const component = new ToolExecutionComponent(
+			"edit",
+			"tool-4g",
+			{ path: "README.md", oldText: "before", newText: "after" },
+			{},
+			createEditToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		const longLine =
+			"alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau";
+		component.updateResult(
+			{ content: [], details: { diff: `+1 ${longLine}`, firstChangedLine: 1 }, isError: false },
+			false,
+		);
+		component.setEditDiffsExpanded(true);
+		const lines = stripAnsi(component.render(60).join("\n")).split("\n");
+		const summaryIndex = lines.findIndex((line) => line.includes("╰─ README.md"));
+		expect(summaryIndex).toBeGreaterThanOrEqual(0);
+		const textColumn = lines[summaryIndex].indexOf("README.md");
+		const diffRows: string[] = [];
+		for (let i = summaryIndex + 1; i < lines.length && lines[i].trim() !== ""; i++) {
+			diffRows.push(lines[i]);
+		}
+		// The single logical diff line wraps; every continuation row stays anchored at the text column.
+		expect(diffRows.length).toBeGreaterThan(1);
+		for (const row of diffRows) {
+			expect(row.startsWith(" ".repeat(textColumn))).toBe(true);
+			expect(row[textColumn]).not.toBe(" ");
+		}
+		expect(diffRows.join(" ")).toContain("tau");
+	});
+
+	test("renders exactly one ctrl+j hint before and after the result lands", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "edit-hint-"));
+		const filePath = join(dir, "sample.txt");
+		writeFileSync(filePath, "before\n");
+		try {
+			const component = new ToolExecutionComponent(
+				"edit",
+				"tool-4h",
+				{ path: filePath, oldText: "before", newText: "after" },
+				{},
+				createEditToolDefinition(dir),
+				createFakeTui(),
+				dir,
+			);
+			component.setArgsComplete();
+			component.render(120);
+			// The preview computes asynchronously; poll until it lands.
+			await vi.waitFor(() => {
+				expect(stripAnsi(component.render(120).join("\n"))).toContain("to expand");
+			});
+			// Pre-result: the preview's summary line already carries the hint.
+			const preResult = stripAnsi(component.render(120).join("\n"));
+			expect(preResult.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
+			expect(preResult.split("to expand").length - 1).toBe(1);
+
+			// A successful result keeps a single hint on the summary line.
+			component.updateResult(
+				{ content: [], details: { diff: "-1 before\n+1 after", firstChangedLine: 1 }, isError: false },
+				false,
+			);
+			const settled = stripAnsi(component.render(120).join("\n"));
+			expect(settled.split("\n").find((line) => line.includes("╰─"))).toContain("to expand");
+			expect(settled.split("to expand").length - 1).toBe(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("uses the generic result fallback for legacy-named custom tools", () => {
 		const overrideDefinition: ToolDefinition = {
 			...createBaseToolDefinition("bash"),
@@ -694,14 +881,22 @@ describe("ToolExecutionComponent parity", () => {
 		expect(collapsed).not.toMatch(/1 - before/);
 		expect(collapsed).not.toMatch(/1 \+ after/);
 
+		// Tool expansion shows the full source but never the diff; that belongs to ctrl+j.
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain('hidden_side_effect = "only in full source"');
-		expect(expanded).toContain("before");
-		expect(expanded).toContain("after");
-		const expandedLines = expanded.split("\n");
-		expect(expandedLines.findIndex((line) => line.includes("hidden_side_effect ="))).toBeLessThan(
-			expandedLines.findIndex((line) => /✓ README\.md\s+\+1 -1/.test(line)),
+		expect(expanded).toContain("╰─ README.md +1 -1");
+		expect(expanded).not.toMatch(/1 - before/);
+
+		component.setEditDiffsExpanded(true);
+		const withDiffs = stripAnsi(component.render(120).join("\n"));
+		const withDiffLines = withDiffs.split("\n");
+		expect(withDiffLines.findIndex((line) => line.includes("hidden_side_effect ="))).toBeLessThan(
+			withDiffLines.findIndex((line) => line.includes("╰─ README.md +1 -1")),
 		);
+		// Exactly one summary line — the cell owns the block; no extra component doubles it.
+		expect(withDiffLines.filter((line) => line.includes("╰─ README.md +1 -1")).length).toBe(1);
+		expect(withDiffs).toMatch(/1 - before/);
+		expect(withDiffs).toMatch(/1 \+ after/);
 	});
 });
