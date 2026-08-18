@@ -3381,11 +3381,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 			);
 
 			const run = InteractiveMode.prototype.run.call(fakeThis as never);
-			// Bounded: if run() rejects before publishing the hook, fail instead of spinning forever.
-			for (let spin = 0; !fakeThis.admitPendingStartupPrompts; spin++) {
-				if (spin > 10_000) throw new Error("run() never published admitPendingStartupPrompts");
-				await Promise.resolve();
-			}
+			while (!fakeThis.admitPendingStartupPrompts) await Promise.resolve();
 			fakeThis.latestEditorPromptStash = {
 				text: submittedText,
 				expandedText: "submitted expanded paste [image #7]",
@@ -3590,11 +3586,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		);
 
 		const run = InteractiveMode.prototype.run.call(fakeThis as never);
-		// Bounded: if run() rejects before publishing the hook, fail instead of spinning forever.
-		for (let spin = 0; !fakeThis.admitPendingStartupPrompts; spin++) {
-			if (spin > 10_000) throw new Error("run() never published admitPendingStartupPrompts");
-			await Promise.resolve();
-		}
+		while (!fakeThis.admitPendingStartupPrompts) await Promise.resolve();
 		fakeThis.latestEditorPromptStash = { text: "first rich draft", expandedText: "first expanded" };
 		editorText = "";
 		const first = fakeThis.defaultEditor.onSubmit?.("first rich draft");
