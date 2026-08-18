@@ -18,9 +18,8 @@ const harnesses: Harness[] = [];
 const socketDirs = new Set<string>();
 
 afterEach(async () => {
-	// Wait for killed supervisors to fully exit before removing their
-	// directories; a dying process may still be flushing writes, which makes
-	// recursive removal race into ENOTEMPTY.
+	// Killed processes may still be flushing writes; wait for exit and tolerate
+	// leftover temp entries so teardown races cannot fail the suite.
 	await Promise.all(
 		[...supervisors].map((child) => {
 			if (child.exitCode !== null || child.signalCode !== null) {
@@ -35,21 +34,19 @@ afterEach(async () => {
 		}),
 	);
 	supervisors.clear();
-	// Workers exit asynchronously after their supervisor and may still be
-	// flushing writes; leftover temp entries must not fail the suite.
 	while (harnesses.length > 0) {
 		const harness = harnesses.pop();
 		try {
 			harness?.cleanup();
 		} catch {
-			// Tolerated: the OS reclaims the temp directory.
+			// Tolerated (see teardown note).
 		}
 	}
 	for (const dir of socketDirs) {
 		try {
 			rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 50 });
 		} catch {
-			// Tolerated: the OS reclaims the temp directory.
+			// Tolerated (see teardown note).
 		}
 	}
 	socketDirs.clear();
@@ -104,9 +101,7 @@ function spawnSupervisor(paths: TestPaths): ChildProcess {
 				),
 				[supervisorRegistryDirEnv]: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
-				// Spawned workers can outlive the SIGKILLed supervisor and keep
-				// flushing compile-cache writes into TMPDIR, which makes cleanup
-				// race into ENOTEMPTY; keep their caches out of this test's dirs.
+				// Keeps late compile-cache writes from dying workers out of this test's dirs.
 				NODE_DISABLE_COMPILE_CACHE: "1",
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketDir,
@@ -158,10 +153,8 @@ describe("daemon socket path normalization", () => {
 		const paths = await createPaths("double-slash");
 		spawnSupervisor(paths);
 
-		// Connect using the same double-slash spelling the supervisor was started with.
 		const client = await connectEventually(paths.socketPath);
 
-		// A fresh daemon with no agents should return an empty session list.
 		const response = await client.request({ type: "list" });
 		expect(response.success).toBe(true);
 		expect(requireSessionList(response)).toHaveLength(0);
@@ -176,8 +169,6 @@ describe("daemon socket path normalization", () => {
 		const paths = await createPaths("canonical-connect");
 		spawnSupervisor(paths);
 
-		// The supervisor normalizes the double-slash path; connecting with the
-		// canonical single-slash spelling should also succeed.
 		const canonicalSocketPath = `${paths.socketDir}/daemon.sock`;
 		const client = await connectEventually(canonicalSocketPath);
 

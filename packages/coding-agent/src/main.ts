@@ -1133,8 +1133,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	if (parsed.daemonSocket) {
-		// Normalized only after --cwd applies so a relative socket path resolves
-		// against the requested working directory.
+		// After --cwd so a relative socket path resolves against the requested directory.
 		parsed.daemonSocket = normalizeSocketPath(parsed.daemonSocket);
 	}
 

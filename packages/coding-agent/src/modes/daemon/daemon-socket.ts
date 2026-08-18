@@ -4,11 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 
-/**
- * Canonical socket-path spelling used for hashing, persistence, and identity
- * comparisons. Collapses duplicate/trailing slashes and makes the path
- * absolute; does not resolve symlinks (the socket may not exist yet).
- */
+/** Canonical spelling for hashing and identity comparisons. Does not resolve symlinks (the socket may not exist yet). */
 export function normalizeSocketPath(socketPath: string): string {
 	if (process.platform === "win32") {
 		return socketPath.toLowerCase();
