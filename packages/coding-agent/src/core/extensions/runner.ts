@@ -67,6 +67,7 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"app.model.select",
 	"app.tools.expand",
 	"app.messages.expand",
+	"app.edits.expand",
 	"app.thinking.toggle",
 	"app.subagents.focus",
 	"app.editor.external",
@@ -270,7 +271,6 @@ export class ExtensionRunner {
 			unregisterProvider?: (name: string) => void;
 		},
 	): void {
-		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
@@ -286,7 +286,6 @@ export class ExtensionRunner {
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 
-		// Context actions (required)
 		this.getModel = contextActions.getModel;
 		this.isIdleFn = contextActions.isIdle;
 		this.getSignalFn = contextActions.getSignal;
@@ -297,7 +296,6 @@ export class ExtensionRunner {
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 
-		// Flush provider registrations queued during extension loading
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
 			try {
 				if (providerActions?.registerProvider) {
@@ -315,9 +313,6 @@ export class ExtensionRunner {
 			}
 		}
 		this.runtime.pendingProviderRegistrations = [];
-
-		// From this point on, provider registration/unregistration takes effect immediately
-		// without requiring a /reload.
 		this.runtime.registerProvider = (name, config) => {
 			if (providerActions?.registerProvider) {
 				providerActions.registerProvider(name, config);

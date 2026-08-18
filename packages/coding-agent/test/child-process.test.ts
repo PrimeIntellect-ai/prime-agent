@@ -25,13 +25,11 @@ describe("process liveness", () => {
 	it("treats an exited process as dead", async () => {
 		const child = spawn(process.execPath, ["--eval", "process.exit(0)"], { stdio: "ignore" });
 		await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
-		// Node reaps its own children on exit, so the pid is fully gone.
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
 		expect(isProcessAlive(child.pid!)).toBe(false);
 	});
 
 	it.skipIf(process.platform === "win32")("treats a zombie process as dead", async () => {
-		// A parent that forks and never reaps leaves the child as a zombie.
 		const parent = spawn(
 			"perl",
 			["-e", '$| = 1; my $pid = fork(); if ($pid) { print "$pid\\n"; sleep 30 } else { exit 0 }'],

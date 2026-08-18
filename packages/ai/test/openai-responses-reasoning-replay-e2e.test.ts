@@ -74,22 +74,12 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				reasoningEffort: "high",
 			});
 
-			// The key assertion: no 400 error from orphaned reasoning item
 			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
 			expect(response.errorMessage).toBeFalsy();
-			// Model should respond (text or tool call)
 			expect(response.content.length).toBeGreaterThan(0);
 		});
 
 		it("handles same-provider different-model handoff with tool calls", { retry: 2 }, async () => {
-			// This tests the scenario where:
-			// 1. Model A (gpt-5-mini) generates reasoning + function_call
-			// 2. User switches to Model B (gpt-5.4) - same provider, different model
-			// 3. transform-messages: isSameModel=false, thinking converted to text
-			// 4. But tool call ID still has OpenAI pairing history (fc_xxx paired with rs_xxx)
-			// 5. Without fix: OpenAI returns 400 "function_call without required reasoning item"
-			// 6. With fix: tool calls/results converted to text, conversation continues
-
 			const modelA = getModel("openai", "gpt-5-mini");
 			const modelB = getModel("openai", "gpt-5.4");
 
@@ -104,7 +94,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				timestamp: Date.now(),
 			};
 
-			// Get a real response from Model A with reasoning + tool call
 			const assistantResponse = await complete(
 				modelA,
 				{
@@ -126,7 +115,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				throw new Error("Missing tool call from OpenAI Responses - model did not use the tool");
 			}
 
-			// Provide a tool result
 			const toolResult: Message = {
 				role: "toolResult",
 				toolCallId: toolCallBlock.id,
@@ -142,7 +130,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				timestamp: Date.now(),
 			};
 
-			// Now continue with Model B (different model, same provider)
 			const context: Context = {
 				systemPrompt: "You are a helpful assistant. Answer concisely.",
 				messages: [userMessage, assistantResponse, toolResult, followUp],
@@ -158,12 +145,10 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				},
 			});
 
-			// The key assertion: no 400 error from orphaned function_call
 			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
 			expect(response.errorMessage).toBeFalsy();
 			expect(response.content.length).toBeGreaterThan(0);
 
-			// Log what was sent for debugging
 			const input = capturedPayload?.input as any[];
 			const functionCalls = input?.filter((item: any) => item.type === "function_call") || [];
 			const reasoningItems = input?.filter((item: any) => item.type === "reasoning") || [];
@@ -173,7 +158,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			console.log("- reasoning items:", reasoningItems.length);
 			console.log("- full input:", JSON.stringify(input, null, 2));
 
-			// Verify the model understood the context
 			const responseText = response.content
 				.filter((b) => b.type === "text")
 				.map((b) => (b as any).text)
@@ -182,13 +166,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 		});
 
 		it("handles cross-provider handoff from Anthropic to OpenAI", { retry: 2 }, async () => {
-			// This tests cross-provider handoff:
-			// 1. Anthropic model generates thinking + function_call (toolu_xxx ID)
-			// 2. User switches to OpenAI
-			// 3. transform-messages: isSameModel=false, thinking converted to text
-			// 4. Tool call ID is Anthropic format (toolu_xxx), no OpenAI pairing history
-			// 5. Should work because foreign IDs have no pairing expectation
-
 			const anthropicModel = getModel("anthropic", "claude-sonnet-4-5");
 			const openaiModel = getModel("openai", "gpt-5.4");
 
@@ -204,7 +181,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				timestamp: Date.now(),
 			};
 
-			// Get a real response from Anthropic with thinking + tool call
 			const assistantResponse = await complete(
 				anthropicModel,
 				{
@@ -229,7 +205,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 
 			console.log("Anthropic tool call ID:", toolCallBlock.id);
 
-			// Provide a tool result
 			const toolResult: Message = {
 				role: "toolResult",
 				toolCallId: toolCallBlock.id,
@@ -245,7 +220,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				timestamp: Date.now(),
 			};
 
-			// Now continue with Codex (different provider)
 			const context: Context = {
 				systemPrompt: "You are a helpful assistant. Answer concisely.",
 				messages: [userMessage, assistantResponse, toolResult, followUp],
@@ -261,7 +235,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				},
 			});
 
-			// Log what was sent
 			const input = capturedPayload?.input as any[];
 			const functionCalls = input?.filter((item: any) => item.type === "function_call") || [];
 			const reasoningItems = input?.filter((item: any) => item.type === "reasoning") || [];
@@ -276,12 +249,10 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 				);
 			}
 
-			// The key assertion: no 400 error
 			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
 			expect(response.errorMessage).toBeFalsy();
 			expect(response.content.length).toBeGreaterThan(0);
 
-			// Verify the model understood the context
 			const responseText = response.content
 				.filter((b) => b.type === "text")
 				.map((b) => (b as any).text)

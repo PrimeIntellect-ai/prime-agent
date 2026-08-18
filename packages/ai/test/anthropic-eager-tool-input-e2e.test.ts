@@ -51,8 +51,6 @@ function getProbePriority(model: Model<"anthropic-messages">): number {
 	const cost = model.cost.input + model.cost.output;
 	let priority = cost;
 
-	// Prefer current Claude 4 Haiku routes when present: they are cheap and avoid
-	// stale Claude 3.x aliases that can remain in catalogs after upstream removal.
 	if (modelId.includes("haiku") && (modelId.includes("4-5") || modelId.includes("4.5"))) {
 		priority -= 1000;
 	} else if (modelId.includes("sonnet") && (modelId.includes("4-") || modelId.includes("4."))) {

@@ -1,7 +1,3 @@
-/**
- * Simple chat interface demo using tui.ts
- */
-
 import chalk from "chalk";
 import { CombinedAutocompleteProvider } from "../src/autocomplete.js";
 import { Editor } from "../src/components/editor.js";
@@ -12,21 +8,16 @@ import { ProcessTerminal } from "../src/terminal.js";
 import { TUI } from "../src/tui.js";
 import { defaultEditorTheme, defaultMarkdownTheme } from "./test-themes.js";
 
-// Create terminal
 const terminal = new ProcessTerminal();
 
-// Create TUI
 const tui = new TUI(terminal);
 
-// Create chat container with some initial messages
 tui.addChild(
 	new Text("Welcome to Simple Chat!\n\nType your messages below. Type '/' for commands. Press Ctrl+C to exit."),
 );
 
-// Create editor with autocomplete
 const editor = new Editor(tui, defaultEditorTheme);
 
-// Set up autocomplete provider with slash commands and file completion
 const autocompleteProvider = new CombinedAutocompleteProvider(
 	[
 		{ name: "delete", description: "Delete the last message" },
@@ -38,30 +29,20 @@ editor.setAutocompleteProvider(autocompleteProvider);
 
 tui.addChild(editor);
 
-// Focus the editor
 tui.setFocus(editor);
 
-// Track if we're waiting for bot response
 let isResponding = false;
 
-// Handle message submission
 editor.onSubmit = (value: string) => {
-	// Prevent submission if already responding
 	if (isResponding) {
 		return;
 	}
 
 	const trimmed = value.trim();
 
-	// Handle slash commands
 	if (trimmed === "/delete") {
 		const children = tui.children;
-		// Remove component before editor (if there are any besides the initial text)
 		if (children.length > 3) {
-			// children[0] = "Welcome to Simple Chat!"
-			// children[1] = "Type your messages below..."
-			// children[2...n-1] = messages
-			// children[n] = editor
 			children.splice(children.length - 2, 1);
 		}
 		tui.requestRender();
@@ -70,7 +51,6 @@ editor.onSubmit = (value: string) => {
 
 	if (trimmed === "/clear") {
 		const children = tui.children;
-		// Remove all messages but keep the welcome text and editor
 		children.splice(2, children.length - 3);
 		tui.requestRender();
 		return;
@@ -98,7 +78,6 @@ editor.onSubmit = (value: string) => {
 		setTimeout(() => {
 			tui.removeChild(loader);
 
-			// Simulate a response
 			const responses = [
 				"That's interesting! Tell me more.",
 				"I see what you mean.",
@@ -111,19 +90,15 @@ editor.onSubmit = (value: string) => {
 			];
 			const randomResponse = responses[Math.floor(Math.random() * responses.length)];
 
-			// Add assistant message with no background (transparent)
 			const botMessage = new Markdown(randomResponse, 1, 1, defaultMarkdownTheme);
 			children.splice(children.length - 1, 0, botMessage);
 
-			// Re-enable submit
 			isResponding = false;
 			editor.disableSubmit = false;
 
-			// Request render
 			tui.requestRender();
 		}, 1000);
 	}
 };
 
-// Start the TUI
 tui.start();

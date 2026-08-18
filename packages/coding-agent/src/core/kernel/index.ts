@@ -1,4 +1,3 @@
-// TODO: reconsider persistent kernel vs stateless `python -c` once RLM-1 weights land.
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -422,8 +421,6 @@ function createDeferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
-// ---- wire format ---------------------------------------------------------
-
 function buildMessage(
 	msgType: string,
 	content: Record<string, unknown>,
@@ -476,8 +473,6 @@ function decode(frames: Buffer[]): JupyterMessage | null {
 		return null;
 	}
 }
-
-// ---- connection setup ----------------------------------------------------
 
 const CONNECTION_PORT_KEYS = ["shell_port", "iopub_port", "stdin_port", "control_port", "hb_port"] as const;
 
@@ -543,8 +538,6 @@ function makeConnection(): { info: ConnectionInfo; path: string; tempDir: string
 	return { info, path, tempDir };
 }
 
-// ---- process-wide cleanup -----------------------------------------------
-
 const liveKernels = new Set<KernelManager>();
 let signalHandlersInstalled = false;
 
@@ -581,8 +574,6 @@ function installSignalHandlersOnce(): void {
 		for (const k of liveKernels) k.disposeSync();
 	});
 }
-
-// ---- kernel manager ------------------------------------------------------
 
 export class KernelManager {
 	private readonly options: Pick<
@@ -712,8 +703,9 @@ export class KernelManager {
 				try {
 					rmSync(connection.tempDir, { recursive: true, force: true });
 				} catch {
-					// Leave the temp dir for OS tmp cleanup.
+					// Leave temporary kernel files for OS cleanup.
 				}
+				// A failed fork may leave stale ports; retry with a fresh connection file.
 				connection = makeConnection();
 				this.tempDir = connection.tempDir;
 			}
@@ -1385,7 +1377,7 @@ export class KernelManager {
 				process.kill(this.kernelPid, killSignal);
 			}
 		} catch {
-			// Kernel already exited.
+			// The kernel has already exited.
 		}
 		this.kernel = undefined;
 		this.kernelPid = undefined;
@@ -1394,7 +1386,7 @@ export class KernelManager {
 			try {
 				rmSync(this.tempDir, { recursive: true, force: true });
 			} catch {
-				// Leave the temp dir for OS tmp cleanup.
+				// Leave temporary kernel files for OS cleanup.
 			}
 		}
 		this.tempDir = undefined;

@@ -77,7 +77,6 @@ export async function execCommand(
 			if (!killed) {
 				killed = true;
 				proc.kill("SIGTERM");
-				// Force kill after 5 seconds if SIGTERM doesn't work
 				forceKillTimeoutId = setTimeout(() => {
 					forceKillTimeoutId = undefined;
 					if (proc.exitCode === null && proc.signalCode === null) {
@@ -87,7 +86,6 @@ export async function execCommand(
 			}
 		};
 
-		// Handle abort signal
 		if (options?.signal) {
 			if (options.signal.aborted) {
 				killProcess();
@@ -96,7 +94,6 @@ export async function execCommand(
 			}
 		}
 
-		// Handle timeout
 		if (options?.timeout && options.timeout > 0) {
 			timeoutId = setTimeout(() => {
 				killProcess();

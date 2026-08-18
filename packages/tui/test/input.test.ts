@@ -12,7 +12,6 @@ describe("Input component", () => {
 			submitted = value;
 		};
 
-		// Type hello, then backslash, then Enter
 		input.handleInput("h");
 		input.handleInput("e");
 		input.handleInput("l");
@@ -21,7 +20,6 @@ describe("Input component", () => {
 		input.handleInput("\\");
 		input.handleInput("\r");
 
-		// Input is single-line, no backslash+Enter workaround
 		assert.strictEqual(submitted, "hello\\");
 	});
 
@@ -88,13 +86,11 @@ describe("Input component", () => {
 			const input = new Input();
 
 			input.setValue("foo bar baz");
-			// Move cursor to end
 			input.handleInput("\x05"); // Ctrl+E
 
 			input.handleInput("\x17"); // Ctrl+W - deletes "baz"
 			assert.strictEqual(input.getValue(), "foo bar ");
 
-			// Move to beginning and yank
 			input.handleInput("\x01"); // Ctrl+A
 			input.handleInput("\x19"); // Ctrl+Y
 			assert.strictEqual(input.getValue(), "bazfoo bar ");
@@ -104,7 +100,6 @@ describe("Input component", () => {
 			const input = new Input();
 
 			input.setValue("hello world");
-			// Move cursor to after "hello "
 			input.handleInput("\x01"); // Ctrl+A
 			for (let i = 0; i < 6; i++) input.handleInput("\x1b[C");
 
@@ -140,7 +135,6 @@ describe("Input component", () => {
 		it("Alt+Y cycles through kill ring after Ctrl+Y", () => {
 			const input = new Input();
 
-			// Create kill ring with multiple entries
 			input.setValue("first");
 			input.handleInput("\x05"); // Ctrl+E
 			input.handleInput("\x17"); // Ctrl+W - deletes "first"
@@ -175,7 +169,6 @@ describe("Input component", () => {
 			input.setValue("other");
 			input.handleInput("\x05"); // Ctrl+E
 
-			// Type something to break the yank chain
 			input.handleInput("x");
 			assert.strictEqual(input.getValue(), "otherx");
 
@@ -272,11 +265,9 @@ describe("Input component", () => {
 			input.handleInput("\x1by"); // Alt+Y - cycles to "second"
 			assert.strictEqual(input.getValue(), "second");
 
-			// Break chain and start fresh
 			input.handleInput("x");
 			input.setValue("");
 
-			// New yank should get "second" (now at end after rotation)
 			input.handleInput("\x19"); // Ctrl+Y
 			assert.strictEqual(input.getValue(), "second");
 		});
@@ -285,7 +276,6 @@ describe("Input component", () => {
 			const input = new Input();
 
 			input.setValue("prefix|suffix");
-			// Position cursor at "|"
 			input.handleInput("\x01"); // Ctrl+A
 			for (let i = 0; i < 6; i++) input.handleInput("\x1b[C"); // Move right 6
 
@@ -308,7 +298,6 @@ describe("Input component", () => {
 			input.handleInput("\x1bd"); // Alt+D - deletes " world"
 			assert.strictEqual(input.getValue(), " test");
 
-			// Yank should get accumulated text
 			input.handleInput("\x19"); // Ctrl+Y
 			assert.strictEqual(input.getValue(), "hello world test");
 		});
@@ -320,7 +309,6 @@ describe("Input component", () => {
 			input.handleInput("\x05"); // Ctrl+E
 			input.handleInput("\x17"); // Ctrl+W - deletes "word"
 			input.setValue("hello world");
-			// Move to middle (after "hello ")
 			input.handleInput("\x01"); // Ctrl+A
 			for (let i = 0; i < 6; i++) input.handleInput("\x1b[C");
 
@@ -331,7 +319,6 @@ describe("Input component", () => {
 		it("handles yank-pop in middle of text", () => {
 			const input = new Input();
 
-			// Create two kill ring entries
 			input.setValue("FIRST");
 			input.handleInput("\x05"); // Ctrl+E
 			input.handleInput("\x17"); // Ctrl+W - deletes "FIRST"
@@ -339,7 +326,6 @@ describe("Input component", () => {
 			input.handleInput("\x05"); // Ctrl+E
 			input.handleInput("\x17"); // Ctrl+W - deletes "SECOND"
 
-			// Set up "hello world" and position cursor after "hello "
 			input.setValue("hello world");
 			input.handleInput("\x01"); // Ctrl+A
 			for (let i = 0; i < 6; i++) input.handleInput("\x1b[C");
@@ -376,11 +362,9 @@ describe("Input component", () => {
 			input.handleInput("d");
 			assert.strictEqual(input.getValue(), "hello world");
 
-			// Undo removes " world"
 			input.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
 			assert.strictEqual(input.getValue(), "hello");
 
-			// Undo removes "hello"
 			input.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
 			assert.strictEqual(input.getValue(), "");
 		});
@@ -534,11 +518,9 @@ describe("Input component", () => {
 			input.handleInput("\x01"); // Ctrl+A
 			for (let i = 0; i < 5; i++) input.handleInput("\x1b[C");
 
-			// Simulate bracketed paste
 			input.handleInput("\x1b[200~beep boop\x1b[201~");
 			assert.strictEqual(input.getValue(), "hellobeep boop world");
 
-			// Single undo should restore entire pre-paste state
 			input.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
 			assert.strictEqual(input.getValue(), "hello world");
 		});
@@ -568,11 +550,9 @@ describe("Input component", () => {
 			input.handleInput("e");
 			assert.strictEqual(input.getValue(), "abcde");
 
-			// Undo removes "de" (typed after movement)
 			input.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
 			assert.strictEqual(input.getValue(), "abc");
 
-			// Undo removes "abc"
 			input.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
 			assert.strictEqual(input.getValue(), "");
 		});

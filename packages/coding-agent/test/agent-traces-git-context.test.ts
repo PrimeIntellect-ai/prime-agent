@@ -31,7 +31,6 @@ describe("activeGitContext", () => {
 	});
 
 	it("ignores a git_state on a sibling branch and uses the active leaf's path", () => {
-		// m1 -> g1(bbb) is one branch; m1 -> m2 -> g2(ccc) is the active branch (g2 is last in file).
 		const body = jsonl(
 			{ type: "message", id: "m1", parentId: null, timestamp: "t", message: {} },
 			{ type: "git_state", id: "g1", parentId: "m1", timestamp: "t", git: { commit: "bbb", branch: "old" } },
@@ -42,7 +41,6 @@ describe("activeGitContext", () => {
 	});
 
 	it("falls back to the header when the active path has no git_state", () => {
-		// Active leaf m2 descends only from the header; g1 lives on an abandoned sibling.
 		const body = jsonl(
 			{ type: "message", id: "m1", parentId: null, timestamp: "t", message: {} },
 			{ type: "git_state", id: "g1", parentId: "m1", timestamp: "t", git: { commit: "bbb", branch: "old" } },

@@ -45,7 +45,7 @@ export interface TerminalSettings {
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
 	fullscreen?: boolean; // default: true (alternate-screen rendering with scrollable transcript)
-	fullscreenMouse?: boolean; // default: true, except false in Ghostty to preserve native Cmd-click links
+	fullscreenMouse?: boolean; // default: true
 }
 
 export interface ImageSettings {
@@ -186,8 +186,6 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 		if (overrideValue === undefined) {
 			continue;
 		}
-
-		// For nested objects, merge recursively
 		if (
 			typeof overrideValue === "object" &&
 			overrideValue !== null &&
@@ -198,7 +196,6 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 		) {
 			(result as Record<string, unknown>)[key] = { ...baseValue, ...overrideValue };
 		} else {
-			// For primitives and arrays, override value wins
 			(result as Record<string, unknown>)[key] = overrideValue;
 		}
 	}
@@ -259,7 +256,6 @@ export class FileSettingsStorage implements SettingsStorage {
 
 		let release: (() => void) | undefined;
 		try {
-			// Only create directory and lock if file exists or we need to write
 			const fileExists = existsSync(path);
 			if (fileExists) {
 				release = this.acquireLockSyncWithRetry(path);
@@ -267,7 +263,6 @@ export class FileSettingsStorage implements SettingsStorage {
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
 			const next = fn(current);
 			if (next !== undefined) {
-				// Only create directory when we actually need to write
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
@@ -396,19 +391,14 @@ export class SettingsManager {
 
 	/** Migrate old settings format to new format */
 	private static migrateSettings(settings: Record<string, unknown>): Settings {
-		// Migrate queueMode -> steeringMode
 		if ("queueMode" in settings && !("steeringMode" in settings)) {
 			settings.steeringMode = settings.queueMode;
 			delete settings.queueMode;
 		}
-
-		// Migrate legacy websockets boolean -> transport enum
 		if (!("transport" in settings) && typeof settings.websockets === "boolean") {
 			settings.transport = settings.websockets ? "websocket" : "sse";
 			delete settings.websockets;
 		}
-
-		// Migrate old skills object format to new array format
 		if (
 			"skills" in settings &&
 			typeof settings.skills === "object" &&
@@ -428,8 +418,6 @@ export class SettingsManager {
 				delete settings.skills;
 			}
 		}
-
-		// Migrate retry.maxDelayMs -> retry.provider.maxRetryDelayMs
 		if (
 			"retry" in settings &&
 			typeof settings.retry === "object" &&
@@ -1120,7 +1108,6 @@ export class SettingsManager {
 	}
 
 	getClearOnShrink(): boolean {
-		// Settings takes precedence, then env var, then default false
 		if (this.settings.terminal?.clearOnShrink !== undefined) {
 			return this.settings.terminal.clearOnShrink;
 		}
@@ -1137,7 +1124,6 @@ export class SettingsManager {
 	}
 
 	getFullscreen(): boolean {
-		// Env var overrides the setting (both directions) for one-off runs
 		if (process.env.PI_FULLSCREEN !== undefined) {
 			return process.env.PI_FULLSCREEN === "1";
 		}
@@ -1154,19 +1140,7 @@ export class SettingsManager {
 	}
 
 	getFullscreenMouse(): boolean {
-		const configured = this.settings.terminal?.fullscreenMouse;
-		if (typeof configured === "boolean") return configured;
-		// Ghostty's native Cmd-click URL handling is suppressed while an
-		// application enables mouse reporting, and SGR cannot encode Command for
-		// the application to reproduce that gesture. Preserve native link clicks
-		// by default; users can explicitly enable fullscreen mouse capture.
-		const termProgram = process.env.TERM_PROGRAM?.toLowerCase();
-		const term = process.env.TERM?.toLowerCase();
-		const isGhostty =
-			termProgram === "ghostty" ||
-			term?.includes("ghostty") === true ||
-			(termProgram === undefined && !!process.env.GHOSTTY_RESOURCES_DIR);
-		return !isGhostty;
+		return this.settings.terminal?.fullscreenMouse ?? true;
 	}
 
 	setFullscreenMouse(enabled: boolean): void {

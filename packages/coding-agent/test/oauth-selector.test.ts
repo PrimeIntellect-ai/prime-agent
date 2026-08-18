@@ -410,14 +410,12 @@ describe("OAuthSelectorComponent", () => {
 			() => {},
 		);
 
-		// Providers tab active first: provider shown, service hidden.
 		let output = stripAnsi(selector.render(120).join("\n"));
 		expect(output).toContain("Providers");
 		expect(output).toContain("MCP Connections");
 		expect(output).toContain("Anthropic");
 		expect(output).not.toContain("Serper");
 
-		// Right arrow switches to the MCP Connections tab.
 		selector.handleInput("\x1b[C");
 		output = stripAnsi(selector.render(120).join("\n"));
 		expect(output).toContain("Serper (web search)");
