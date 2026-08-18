@@ -955,7 +955,10 @@ describe("ENG-4603 worker recovery convergence", () => {
 			};
 			expect(record.pid).toBe(process.pid);
 			expect(record.processStartId).toBe(getProcessStartId(process.pid));
-			const refreshTimer = Reflect.get(first, "refreshTimer") as ReturnType<typeof setInterval> | undefined;
+			const renewal = Reflect.get(first, "renewal") as object | undefined;
+			const refreshTimer = renewal
+				? (Reflect.get(renewal, "refreshTimer") as ReturnType<typeof setInterval> | undefined)
+				: undefined;
 			if (!refreshTimer) throw new Error("Shutdown admission did not start its lease refresh");
 			clearInterval(refreshTimer);
 			let acquired = false;

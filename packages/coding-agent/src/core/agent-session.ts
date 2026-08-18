@@ -1263,6 +1263,7 @@ export class AgentSession {
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
 	private _queuedAutonomousContinuationSnapshots = new WeakMap<AgentMessage, AutonomousRuntimeSnapshot>();
 	private _pendingThresholdCompactionAutonomousMessages: AgentMessage[] = [];
+	private _queuedGoalThresholdContinuation: AgentMessage | undefined;
 	private _pendingAutoRefineReview: { reason: AutoRefineReason; review: AutoRefineReview } | undefined;
 	private _autoRefineBranchVersion = 0;
 	private _autoRefineReviewAbort?: AbortController;
@@ -2209,7 +2210,8 @@ export class AgentSession {
 		}
 
 		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
-		this._continueAfterThresholdCompaction = lastMessage !== undefined && lastMessage.role !== "assistant";
+		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
+		this._continueAfterThresholdCompaction ||= lastMessage !== undefined && lastMessage.role !== "assistant";
 		return true;
 	}
 
@@ -2695,7 +2697,10 @@ export class AgentSession {
 			return false;
 		}
 
-		if (await this._queueAutonomousContinuationForThresholdCompaction(context.message)) {
+		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
+		if (this._queueGoalContinuationForThresholdCompaction(context.message)) {
+			this._continueAfterThresholdCompaction = true;
+		} else if (await this._queueAutonomousContinuationForThresholdCompaction(context.message)) {
 			this._continueAfterThresholdCompaction = true;
 		}
 		return true;
@@ -2757,6 +2762,64 @@ export class AgentSession {
 			}),
 		);
 		return autonomousMessage;
+	}
+
+	// The role heuristic reads an assistant-last threshold stop as "task finished" and
+	// agent.continue() cannot resume from it, so the goal continuation is queued as a session input.
+	private _queueGoalContinuationForThresholdCompaction(message: AssistantMessage): boolean {
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
+			return false;
+		}
+		if (this._goalState.status !== "active" || !this._goalState.objective) {
+			return false;
+		}
+		const alreadyQueued = this._queuedGoalThresholdContinuation;
+		if (
+			alreadyQueued !== undefined &&
+			this._actionStore
+				.unfinishedActions()
+				.some((action) => action.payload.kind === "turn" && primaryDeliveryRecord(action).message === alreadyQueued)
+		) {
+			return true;
+		}
+		try {
+			this._ensureGoalRuntimeActive();
+			this._setGoalState({
+				...this._goalState,
+				continuationsUsed: this._goalState.continuationsUsed + 1,
+				lastReason: undefined,
+				lastError: undefined,
+			});
+			const goalMessage = createGoalContextMessage(this._goalState, "continuation");
+			const normalized = normalizeMessageContent(goalMessage.content);
+			this._admitSessionInput(
+				this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+					message: goalMessage,
+				}),
+			);
+			this._queuedGoalThresholdContinuation = goalMessage;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	// Withdraws a goal continuation queued for a threshold compaction the user cancelled,
+	// rolling back the continuationsUsed increment so the next natural stop re-queues it.
+	private _clearQueuedGoalContinuationAfterCancelledThresholdCompaction(
+		queuedGoalContinuation: AgentMessage | undefined,
+	): void {
+		if (queuedGoalContinuation === undefined) return;
+		const cancelled = this._cancelSessionActions(
+			(action) => action.payload.kind === "turn" && primaryDeliveryRecord(action).message === queuedGoalContinuation,
+			new Error("Queued goal continuation was cleared before delivery."),
+		);
+		this._queuedGoalThresholdContinuation = undefined;
+		// A stale marker (continuation already consumed) matches no action; only an
+		// actual cancellation may roll back its queue-time continuationsUsed increment.
+		if (cancelled.length === 0) return;
+		this._setGoalState({ ...this._goalState, continuationsUsed: this._goalState.continuationsUsed - 1 });
+		this._emitQueueUpdate();
 	}
 
 	private _clearQueuedAutonomousContinuations(
@@ -8094,7 +8157,9 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			if (
+			if (queueAutonomousContinuation && this._queueGoalContinuationForThresholdCompaction(assistantMessage)) {
+				this._continueAfterThresholdCompaction = true;
+			} else if (
 				queueAutonomousContinuation &&
 				(await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage))
 			) {
@@ -8179,12 +8244,15 @@ export class AgentSession {
 			reason === "threshold" && shouldContinueAfterCompaction
 				? this._pendingThresholdCompactionAutonomousMessages.splice(0)
 				: [];
+		const queuedGoalContinuationForThisCompaction =
+			reason === "threshold" && shouldContinueAfterCompaction ? this._queuedGoalThresholdContinuation : undefined;
 		this._continueAfterThresholdCompaction = false;
 
-		// A requested compaction stopped the loop on purpose; don't stall if it fails.
+		// Requested/threshold stop the loop on purpose, so a failed or skipped compaction must not stall it.
+		// Overflow stays excluded: a failed overflow recovery must not re-issue the overflowing request.
 		const resumeAfterFailure = () => {
 			if (
-				reason === "requested" &&
+				(reason === "requested" || reason === "threshold") &&
 				(shouldContinueAfterCompaction || this.agent.hasQueuedMessages() || this.hasPendingSessionWork)
 			) {
 				this._schedulePostCompactionContinue();
@@ -8260,6 +8328,7 @@ export class AgentSession {
 			const aborted =
 				errorMessage === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			if (aborted) {
+				this._clearQueuedGoalContinuationAfterCancelledThresholdCompaction(queuedGoalContinuationForThisCompaction);
 				this._endCompactionUnsuccessfully(
 					reason,
 					"cancelled",

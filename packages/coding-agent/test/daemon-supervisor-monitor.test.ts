@@ -1454,6 +1454,83 @@ describe("daemon worker supervisor monitoring", () => {
 		await stopping;
 	});
 
+	it("keeps a root kill registration through a synchronous shutdown event until exact cleanup", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-root-kill",
+				pid: 123_456,
+				processStartId: "proc:entry",
+				rootActiveSessionId: "root-active",
+				lifecycle: "ready" as const,
+			},
+			summaries: new Map<string, SessionSummary>([
+				[
+					"root-active",
+					{ id: "root-active", sessionId: "root-session", activeSessionId: "root-active" } as SessionSummary,
+				],
+			]),
+			snapshotCache: new Map(),
+			transcriptCaches: new Map(),
+			snapshotGenerations: new Map(),
+			snapshotLoads: new Map(),
+			intentionalStop: false,
+			stopRevision: 0,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const deleteWorkerDescriptor = vi.fn();
+		const stopWorkerUntracked = vi.fn(async (target: typeof worker, removeDescriptor: boolean) => {
+			// The root-kill ownership and this exact stop are both active here.
+			expect(supervisor.workerStopCounts.get(target)).toBe(2);
+			expect(workers.get(target.descriptor.workerId)).toBe(target);
+			workers.delete(target.descriptor.workerId);
+			if (removeDescriptor) deleteWorkerDescriptor(target);
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			workerStopCounts: new Map(),
+			clients: new Set(),
+			shuttingDown: false,
+			streamReconstructor: { observe: vi.fn() },
+			invalidateWorkerSnapshot: vi.fn(),
+			refreshWorkerSummaries: vi.fn(async () => undefined),
+			syncAgentPeers: vi.fn(async () => undefined),
+			persistWorkerStopTombstone: vi.fn(),
+			deleteWorkerDescriptor,
+			broadcastHeartbeatsChanged: vi.fn(),
+			findWorkerForClient: vi.fn(async () => ({
+				worker,
+				summary: worker.summaries.get("root-active"),
+			})),
+			forwardToWorker: vi.fn(async () => {
+				supervisor.handleWorkerFrame(worker, {
+					header: { kind: "outbound", outboundType: "session_closed", activeSessionId: "root-active" },
+					payload: Buffer.from(JSON.stringify({ type: "session_closed", reason: "shutdown" })),
+				});
+				// The event arrives before the forwarded kill resolves.
+				expect(workers.get(worker.descriptor.workerId)).toBe(worker);
+				expect(deleteWorkerDescriptor).not.toHaveBeenCalled();
+				return success(undefined, "kill");
+			}),
+			stopWorkerUntracked,
+		}) as {
+			workers: typeof workers;
+			workerStopCounts: Map<typeof worker, number>;
+			handleCommand(
+				client: DaemonSocketClient,
+				command: { type: "kill"; activeSessionId: string },
+			): Promise<unknown>;
+			handleWorkerFrame(target: typeof worker, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
+		};
+
+		await expect(
+			supervisor.handleCommand({} as DaemonSocketClient, { type: "kill", activeSessionId: "root-active" }),
+		).resolves.toEqual(success(undefined, "kill"));
+		expect(stopWorkerUntracked).toHaveBeenCalledWith(worker, true, false, true, false, undefined);
+		expect(workers.has(worker.descriptor.workerId)).toBe(false);
+		expect(deleteWorkerDescriptor).toHaveBeenCalledWith(worker);
+		expect(supervisor.workerStopCounts.has(worker)).toBe(false);
+	});
+
 	it("cancels an in-flight recovery after an intentional stop tombstone", async () => {
 		vi.useFakeTimers();
 		type RecoveryWorker = {

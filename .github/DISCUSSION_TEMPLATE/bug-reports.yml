@@ -1,0 +1,72 @@
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Search existing Discussions first and do not include API keys, tokens, private prompts, or other sensitive information.
+
+        If this may be a security vulnerability, stop and follow the private reporting instructions in SECURITY.md instead.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Affected area
+      description: Which part of Prime Agent is affected?
+      multiple: true
+      options:
+        - Agent core
+        - AI providers and models
+        - Coding agent and CLI
+        - TUI
+        - Installation or updates
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence that reproduces the problem.
+      placeholder: |
+        1. Run `prime-agent ...`
+        2. ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Prime Agent version
+      description: Include the output of `prime-agent --version`, or the commit if running from source.
+      placeholder: "0.0.0 or commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your operating system, terminal, and any other relevant environment details.
+      placeholder: "macOS 15, Terminal.app"
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add redacted logs, screenshots, or related Discussions if useful.
+    validations:
+      required: false
