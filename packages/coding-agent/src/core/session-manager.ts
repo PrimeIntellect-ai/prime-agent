@@ -923,9 +923,16 @@ interface SessionInfoCacheEntry {
 	info: SessionInfo | null;
 }
 
+interface SessionInfoScan {
+	size: number;
+	mtimeMs: number;
+	promise: Promise<SessionInfo | null>;
+}
+
 // Session files are append-only, so an unchanged (size, mtimeMs) means identical
 // content: cache list metadata and rescan only files that changed.
 const sessionInfoCache = new Map<string, SessionInfoCacheEntry>();
+const sessionInfoScans = new Map<string, SessionInfoScan>();
 
 export async function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	let stats: Awaited<ReturnType<typeof stat>>;
@@ -934,16 +941,38 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 	} catch {
 		return null;
 	}
+	const snapshotSize = Number(stats.size);
 	const cached = sessionInfoCache.get(filePath);
-	if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+	if (cached && cached.size === snapshotSize && cached.mtimeMs === stats.mtimeMs) {
 		return cached.info;
 	}
-	const info = await scanSessionInfo(filePath, stats);
-	sessionInfoCache.set(filePath, { size: stats.size, mtimeMs: stats.mtimeMs, info });
-	return info;
+	const activeScan = sessionInfoScans.get(filePath);
+	if (activeScan) {
+		if (activeScan.size === snapshotSize && activeScan.mtimeMs === stats.mtimeMs) {
+			return activeScan.promise;
+		}
+		await activeScan.promise;
+		return readSessionInfo(filePath);
+	}
+	const scan = scanSessionInfo(filePath, stats, snapshotSize)
+		.then((info) => {
+			sessionInfoCache.set(filePath, { size: snapshotSize, mtimeMs: stats.mtimeMs, info });
+			return info;
+		})
+		.finally(() => {
+			if (sessionInfoScans.get(filePath)?.promise === scan) {
+				sessionInfoScans.delete(filePath);
+			}
+		});
+	sessionInfoScans.set(filePath, { size: snapshotSize, mtimeMs: stats.mtimeMs, promise: scan });
+	return scan;
 }
 
-async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeof stat>>): Promise<SessionInfo | null> {
+async function scanSessionInfo(
+	filePath: string,
+	stats: Awaited<ReturnType<typeof stat>>,
+	snapshotSize: number,
+): Promise<SessionInfo | null> {
 	try {
 		let header: SessionHeader | undefined;
 		let messageCount = 0;
@@ -954,7 +983,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let agentStatus: AgentStatus | undefined;
 		let lastActivityTime: number | undefined;
 
-		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
+		for await (const lineBuffer of readLinesAsBuffers(filePath, { endExclusive: snapshotSize })) {
 			const line = lineBuffer.toString("utf8");
 			if (!line.trim()) continue;
 

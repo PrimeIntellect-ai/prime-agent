@@ -58,4 +58,21 @@ describe("readLinesAsBuffers", () => {
 		expect(concatSpy.mock.calls[0]?.[0]).toHaveLength(0);
 		expect((await lines.next()).done).toBe(true);
 	});
+
+	it("bounds reads to an exclusive snapshot size", async () => {
+		fsMocks.createReadStream.mockReturnValue(Readable.from([Buffer.from("first\n")]));
+
+		const lines = readLinesAsBuffers("/unused", { endExclusive: 42 });
+
+		expect((await lines.next()).value?.toString("utf8")).toBe("first");
+		expect((await lines.next()).done).toBe(true);
+		expect(fsMocks.createReadStream).toHaveBeenCalledWith("/unused", { end: 41 });
+	});
+
+	it("does not open an empty snapshot", async () => {
+		const lines = readLinesAsBuffers("/unused", { endExclusive: 0 });
+
+		expect((await lines.next()).done).toBe(true);
+		expect(fsMocks.createReadStream).not.toHaveBeenCalled();
+	});
 });
