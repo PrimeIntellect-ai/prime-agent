@@ -2776,9 +2776,15 @@ export class AgentSession {
 		const alreadyQueued = this._queuedGoalThresholdContinuation;
 		if (
 			alreadyQueued !== undefined &&
-			this._actionStore
-				.unfinishedActions()
-				.some((action) => action.payload.kind === "turn" && primaryDeliveryRecord(action).message === alreadyQueued)
+			this._actionStore.unfinishedActions().some((action) => {
+				if (action.payload.kind !== "turn" || primaryDeliveryRecord(action).message !== alreadyQueued) return false;
+				return (
+					action.lifecycle.state === "queued" ||
+					action.lifecycle.state === "selected" ||
+					action.lifecycle.state === "preparing" ||
+					action.lifecycle.state === "committing"
+				);
+			})
 		) {
 			return true;
 		}
