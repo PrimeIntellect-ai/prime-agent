@@ -329,9 +329,7 @@ function collectFiles(
 				files.push(fullPath);
 			}
 		}
-	} catch {
-		// Ignore errors
-	}
+	} catch {}
 
 	return files;
 }
@@ -405,9 +403,7 @@ function collectSkillEntries(
 
 			entries.push(...collectSkillEntries(fullPath, mode, ig, root));
 		}
-	} catch {
-		// Ignore errors
-	}
+	} catch {}
 
 	return entries;
 }
@@ -481,9 +477,7 @@ function collectAutoPromptEntries(dir: string): string[] {
 				entries.push(fullPath);
 			}
 		}
-	} catch {
-		// Ignore errors
-	}
+	} catch {}
 
 	return entries;
 }
@@ -518,9 +512,7 @@ function collectAutoThemeEntries(dir: string): string[] {
 				entries.push(fullPath);
 			}
 		}
-	} catch {
-		// Ignore errors
-	}
+	} catch {}
 
 	return entries;
 }
@@ -568,14 +560,10 @@ function resolveExtensionEntries(dir: string): string[] | null {
 function collectAutoExtensionEntries(dir: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
-
-	// First check if this directory itself has explicit extension entries (package.json or index)
 	const rootEntries = resolveExtensionEntries(dir);
 	if (rootEntries) {
 		return rootEntries;
 	}
-
-	// Otherwise, discover extensions from directory contents
 	const ig = ignore();
 	addIgnoreRules(ig, dir, dir);
 
@@ -612,9 +600,7 @@ function collectAutoExtensionEntries(dir: string): string[] {
 				}
 			}
 		}
-	} catch {
-		// Ignore errors
-	}
+	} catch {}
 
 	return entries;
 }
@@ -734,21 +720,15 @@ function applyPatterns(allPaths: string[], patterns: string[], baseDir: string):
 			includes.push(p);
 		}
 	}
-
-	// Step 1: Apply includes (or all if no includes)
 	let result: string[];
 	if (includes.length === 0) {
 		result = [...allPaths];
 	} else {
 		result = allPaths.filter((filePath) => matchesAnyPattern(filePath, includes, baseDir));
 	}
-
-	// Step 2: Apply excludes
 	if (excludes.length > 0) {
 		result = result.filter((filePath) => !matchesAnyPattern(filePath, excludes, baseDir));
 	}
-
-	// Step 3: Force-include (add back from allPaths, overriding exclusions)
 	if (forceIncludes.length > 0) {
 		for (const filePath of allPaths) {
 			if (!result.includes(filePath) && matchesAnyExactPattern(filePath, forceIncludes, baseDir)) {
@@ -756,8 +736,6 @@ function applyPatterns(allPaths: string[], patterns: string[], baseDir: string):
 			}
 		}
 	}
-
-	// Step 4: Force-exclude (remove even if included or force-included)
 	if (forceExcludes.length > 0) {
 		result = result.filter((filePath) => !matchesAnyExactPattern(filePath, forceExcludes, baseDir));
 	}
@@ -867,8 +845,6 @@ export class DefaultPackageManager implements PackageManager {
 		const accumulator = this.createAccumulator();
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
-
-		// Collect all packages with scope (project first so cwd resources win collisions)
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
 		for (const pkg of projectSettings.packages ?? []) {
 			allPackages.push({ pkg, scope: "project" });
@@ -876,8 +852,6 @@ export class DefaultPackageManager implements PackageManager {
 		for (const pkg of globalSettings.packages ?? []) {
 			allPackages.push({ pkg, scope: "user" });
 		}
-
-		// Dedupe: project scope wins over global for same package identity
 		const packageSources = this.dedupePackages(allPackages);
 		await this.resolvePackageSources(packageSources, accumulator, onMissing);
 
@@ -1109,7 +1083,6 @@ export class DefaultPackageManager implements PackageManager {
 			const latestVersion = await this.getLatestNpmVersion(source.name);
 			return latestVersion !== installedVersion;
 		} catch {
-			// Preserve existing update behavior when version lookup fails.
 			return true;
 		}
 	}
@@ -1397,8 +1370,6 @@ export class DefaultPackageManager implements PackageManager {
 		if (isLocalPath(source)) {
 			return { type: "local", path: source };
 		}
-
-		// Try parsing as git URL
 		const gitParsed = parseGitUrl(source);
 		if (gitParsed) {
 			return gitParsed;
@@ -1651,11 +1622,8 @@ export class DefaultPackageManager implements PackageManager {
 			if (!existing) {
 				seen.set(identity, entry);
 			} else if (entry.scope === "project" && existing.scope === "user") {
-				// Project wins over user
 				seen.set(identity, entry);
 			}
-			// If existing is project and new is global, keep existing (project)
-			// If both are same scope, keep first one
 		}
 
 		return Array.from(seen.values());
@@ -1753,7 +1721,6 @@ export class DefaultPackageManager implements PackageManager {
 
 		const target = await this.getLocalGitUpdateTarget(targetDir);
 
-		// Fetch only the ref we will reset to, avoiding unrelated branch/tag noise.
 		await this.runCommand("git", target.fetchArgs, { cwd: targetDir });
 
 		const localHead = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
@@ -1770,7 +1737,6 @@ export class DefaultPackageManager implements PackageManager {
 
 		await this.runCommand("git", ["reset", "--hard", target.ref], { cwd: targetDir });
 
-		// Clean untracked files (extensions should be pristine)
 		await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });
 
 		const packageJsonPath = join(targetDir, "package.json");
@@ -1787,9 +1753,7 @@ export class DefaultPackageManager implements PackageManager {
 			await this.withProgress("pull", sourceStr, `Refreshing ${sourceStr}...`, async () => {
 				await this.updateGit(source, "temporary");
 			});
-		} catch {
-			// Keep cached temporary checkout if refresh fails.
-		}
+		} catch {}
 	}
 
 	private async removeGit(source: GitSource, scope: SourceScope): Promise<void> {
@@ -1972,7 +1936,6 @@ export class DefaultPackageManager implements PackageManager {
 		for (const resourceType of RESOURCE_TYPES) {
 			const dir = join(packageRoot, resourceType);
 			if (existsSync(dir)) {
-				// Collect all files from the directory (all enabled by default)
 				const files = collectResourceFiles(dir, resourceType);
 				for (const f of files) {
 					this.addResource(this.getTargetMap(accumulator, resourceType), f, metadata, true);
@@ -1997,7 +1960,6 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		const dir = join(packageRoot, resourceType);
 		if (existsSync(dir)) {
-			// Collect all files from the directory (all enabled by default)
 			const files = collectResourceFiles(dir, resourceType);
 			for (const f of files) {
 				this.addResource(target, f, metadata, true);
@@ -2015,14 +1977,11 @@ export class DefaultPackageManager implements PackageManager {
 		const { allFiles } = this.collectManifestFiles(packageRoot, resourceType);
 
 		if (userPatterns.length === 0) {
-			// Empty array explicitly disables all resources of this type
 			for (const f of allFiles) {
 				this.addResource(target, f, metadata, false);
 			}
 			return;
 		}
-
-		// Apply user patterns
 		const enabledByUser = applyPatterns(allFiles, userPatterns, packageRoot);
 
 		for (const f of allFiles) {
@@ -2118,16 +2077,10 @@ export class DefaultPackageManager implements PackageManager {
 		baseDir: string,
 	): void {
 		if (entries.length === 0) return;
-
-		// Collect all files from plain entries (non-pattern entries)
 		const { plain, patterns } = splitPatterns(entries);
 		const resolvedPlain = plain.map((p) => this.resolvePathFromBase(p, baseDir));
 		const allFiles = this.collectFilesFromPaths(resolvedPlain, resourceType);
-
-		// Determine which files are enabled based on patterns
 		const enabledPaths = applyPatterns(allFiles, patterns, baseDir);
-
-		// Add all files with their enabled state
 		for (const f of allFiles) {
 			this.addResource(target, f, metadata, enabledPaths.has(f));
 		}
@@ -2252,9 +2205,6 @@ export class DefaultPackageManager implements PackageManager {
 				baseDir: this.bundledSkillsDir,
 			};
 			const builtinEntries = collectAutoSkillEntries(this.bundledSkillsDir, "pi");
-			// Built-in skills (edit, goal, …) are expected to ship with the package. A
-			// packaging slip that drops the skills/ dir from the build output would
-			// otherwise degrade silently to zero skills (ENG-4220); surface it loudly.
 			if (builtinEntries.length === 0) {
 				accumulator.diagnostics.push({
 					type: "warning",
@@ -2266,9 +2216,7 @@ export class DefaultPackageManager implements PackageManager {
 			}
 			const builtinSkillOverrides = [
 				...userOverrides.skills,
-				// Disable the bundled websearch skill unless explicitly enabled…
 				...(this.settingsManager.getBundledWebsearchEnabled() ? [] : ["-websearch/SKILL.md"]),
-				// …and disable any MCP integration the user hasn't logged into.
 				...this.extraBuiltinSkillOverrides(),
 			];
 			addResources("skills", builtinEntries, builtinMetadata, builtinSkillOverrides, this.bundledSkillsDir);
@@ -2301,9 +2249,7 @@ export class DefaultPackageManager implements PackageManager {
 				} else if (stats.isDirectory()) {
 					files.push(...collectResourceFiles(p, resourceType));
 				}
-			} catch {
-				// Ignore errors
-			}
+			} catch {}
 		}
 		return files;
 	}

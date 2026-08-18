@@ -421,8 +421,6 @@ function createDeferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
-// ---- wire format ---------------------------------------------------------
-
 function buildMessage(
 	msgType: string,
 	content: Record<string, unknown>,
@@ -475,8 +473,6 @@ function decode(frames: Buffer[]): JupyterMessage | null {
 		return null;
 	}
 }
-
-// ---- connection setup ----------------------------------------------------
 
 const CONNECTION_PORT_KEYS = ["shell_port", "iopub_port", "stdin_port", "control_port", "hb_port"] as const;
 
@@ -542,8 +538,6 @@ function makeConnection(): { info: ConnectionInfo; path: string; tempDir: string
 	return { info, path, tempDir };
 }
 
-// ---- process-wide cleanup -----------------------------------------------
-
 const liveKernels = new Set<KernelManager>();
 let signalHandlersInstalled = false;
 
@@ -580,8 +574,6 @@ function installSignalHandlersOnce(): void {
 		for (const k of liveKernels) k.disposeSync();
 	});
 }
-
-// ---- kernel manager ------------------------------------------------------
 
 export class KernelManager {
 	private readonly options: Pick<
@@ -710,9 +702,7 @@ export class KernelManager {
 				// collide with it (write the same file / re-bind the same ports).
 				try {
 					rmSync(connection.tempDir, { recursive: true, force: true });
-				} catch {
-					// Leave the temp dir for OS tmp cleanup.
-				}
+				} catch {}
 				connection = makeConnection();
 				this.tempDir = connection.tempDir;
 			}
@@ -1383,18 +1373,14 @@ export class KernelManager {
 				// been recycled by the OS, and a kill would then hit an unrelated process.
 				process.kill(this.kernelPid, killSignal);
 			}
-		} catch {
-			// Kernel already exited.
-		}
+		} catch {}
 		this.kernel = undefined;
 		this.kernelPid = undefined;
 		this.connection = undefined;
 		if (this.tempDir) {
 			try {
 				rmSync(this.tempDir, { recursive: true, force: true });
-			} catch {
-				// Leave the temp dir for OS tmp cleanup.
-			}
+			} catch {}
 		}
 		this.tempDir = undefined;
 		this.startPromise = undefined;

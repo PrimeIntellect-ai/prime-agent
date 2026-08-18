@@ -32,26 +32,15 @@ export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string 
  * - Normalize special Unicode spaces to regular space
  */
 export function normalizeForFuzzyMatch(text: string): string {
-	return (
-		text
-			.normalize("NFKC")
-			// Strip trailing whitespace per line
-			.split("\n")
-			.map((line) => line.trimEnd())
-			.join("\n")
-			// Smart single quotes → '
-			.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-			// Smart double quotes → "
-			.replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-			// Various dashes/hyphens → -
-			// U+2010 hyphen, U+2011 non-breaking hyphen, U+2012 figure dash,
-			// U+2013 en-dash, U+2014 em-dash, U+2015 horizontal bar, U+2212 minus
-			.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
-			// Special spaces → regular space
-			// U+00A0 NBSP, U+2002-U+200A various spaces, U+202F narrow NBSP,
-			// U+205F medium math space, U+3000 ideographic space
-			.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
-	);
+	return text
+		.normalize("NFKC")
+		.split("\n")
+		.map((line) => line.trimEnd())
+		.join("\n")
+		.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+		.replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+		.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+		.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
 }
 
 export interface FuzzyMatchResult {
@@ -94,7 +83,6 @@ export interface AppliedEditsResult {
  * Unicode quotes/dashes normalized to ASCII).
  */
 export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
-	// Try exact match first
 	const exactIndex = content.indexOf(oldText);
 	if (exactIndex !== -1) {
 		return {
@@ -106,7 +94,6 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 		};
 	}
 
-	// Try fuzzy match - work entirely in normalized space
 	const fuzzyContent = normalizeForFuzzyMatch(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
 	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
@@ -274,7 +261,6 @@ export function generateDiffString(
 
 	const oldLines = oldContent.split("\n");
 	const newLines = newContent.split("\n");
-	// Offset by startLine so a snippet shows absolute file line numbers.
 	const maxLineNum = startLine - 1 + Math.max(oldLines.length, newLines.length);
 	const lineNumWidth = String(maxLineNum).length;
 
@@ -291,19 +277,16 @@ export function generateDiffString(
 		}
 
 		if (part.added || part.removed) {
-			// Capture the first changed line (in the new file)
 			if (firstChangedLine === undefined) {
 				firstChangedLine = newLineNum;
 			}
 
-			// Show the change
 			for (const line of raw) {
 				if (part.added) {
 					const lineNum = String(newLineNum).padStart(lineNumWidth, " ");
 					output.push(`+${lineNum} ${line}`);
 					newLineNum++;
 				} else {
-					// removed
 					const lineNum = String(oldLineNum).padStart(lineNumWidth, " ");
 					output.push(`-${lineNum} ${line}`);
 					oldLineNum++;
@@ -311,7 +294,6 @@ export function generateDiffString(
 			}
 			lastWasChange = true;
 		} else {
-			// Context lines - only show a few before/after changes
 			const nextPartIsChange = i < parts.length - 1 && (parts[i + 1].added || parts[i + 1].removed);
 			const hasLeadingChange = lastWasChange;
 			const hasTrailingChange = nextPartIsChange;
@@ -378,7 +360,6 @@ export function generateDiffString(
 					newLineNum++;
 				}
 			} else {
-				// Skip these context lines entirely
 				oldLineNum += raw.length;
 				newLineNum += raw.length;
 			}
@@ -411,7 +392,6 @@ export async function computeEditsDiff(
 	const absolutePath = resolveToCwd(path, cwd);
 
 	try {
-		// Check if file exists and is readable
 		try {
 			await access(absolutePath, constants.R_OK);
 		} catch (error: unknown) {
@@ -419,15 +399,11 @@ export async function computeEditsDiff(
 			return { error: `Could not edit file: ${path}. ${errorMessage}.` };
 		}
 
-		// Read the file
 		const rawContent = await readFile(absolutePath, "utf-8");
-
-		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
 		const { text: content } = stripBom(rawContent);
 		const normalizedContent = normalizeToLF(content);
 		const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
 
-		// Generate the diff
 		return generateDiffString(baseContent, newContent);
 	} catch (err) {
 		return { error: err instanceof Error ? err.message : String(err) };

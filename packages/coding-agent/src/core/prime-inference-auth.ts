@@ -323,9 +323,7 @@ async function readResponseMessage(response: Response): Promise<string> {
 			const message = stringField(parsed, "message");
 			if (message) return message;
 		}
-	} catch {
-		// Fall back to raw text.
-	}
+	} catch {}
 
 	return text.trim();
 }

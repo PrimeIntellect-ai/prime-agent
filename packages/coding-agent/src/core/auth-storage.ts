@@ -819,7 +819,6 @@ export class AuthStorage {
 		providerId: string,
 		options?: { includeFallback?: boolean },
 	): Promise<AuthApiKeyResult> {
-		// Runtime override takes highest priority
 		const runtimeCandidate = this.getRuntimeAuthCandidate(providerId);
 		const runtimeKey = this.runtimeOverrides.get(providerId);
 		if (runtimeKey && runtimeCandidate && !this.isAuthSourceStale(providerId, runtimeCandidate)) {
@@ -883,15 +882,11 @@ export class AuthStorage {
 			if (storedCandidate && !this.isAuthSourceStale(providerId, storedCandidate)) {
 				const provider = getOAuthProvider(providerId);
 				if (!provider) {
-					// Unknown OAuth provider, can't get API key
 					return {};
 				}
-
-				// Check if token needs refresh
 				const needsRefresh = Date.now() >= cred.expires;
 
 				if (needsRefresh) {
-					// Use locked refresh to prevent race conditions
 					try {
 						const result = await this.refreshOAuthTokenWithLock(providerId);
 						if (result) {
@@ -905,12 +900,10 @@ export class AuthStorage {
 						}
 					} catch (error) {
 						this.recordError(error);
-						// Refresh failed - re-read file to check if another instance succeeded
 						this.reload();
 						const updatedCred = this.data[providerId];
 
 						if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
-							// Another instance refreshed successfully, use those credentials
 							const updatedCandidate = this.getStoredAuthCandidate(providerId);
 							return {
 								apiKey: provider.getApiKey(updatedCred),
@@ -920,12 +913,9 @@ export class AuthStorage {
 							};
 						}
 
-						// Refresh truly failed - return undefined so model discovery skips this provider
-						// User can /login to re-authenticate (credentials preserved for retry)
 						return {};
 					}
 				} else {
-					// Token not expired, use current access token
 					return {
 						apiKey: provider.getApiKey(cred),
 						sourceToken: this.getAuthSourceTokenForCandidate(providerId, storedCandidate),
@@ -933,8 +923,6 @@ export class AuthStorage {
 				}
 			}
 		}
-
-		// Other providers preserve auth.json priority over environment variables.
 		if (
 			providerId !== PRIME_INFERENCE_PROVIDER_ID &&
 			envKey &&
@@ -946,8 +934,6 @@ export class AuthStorage {
 				sourceToken: this.getAuthSourceTokenForCandidate(providerId, envCandidate),
 			};
 		}
-
-		// Fall back to custom resolver (e.g., models.json custom providers)
 		if (options?.includeFallback !== false) {
 			const fallbackCandidate = this.getFallbackAuthCandidate(providerId);
 			if (fallbackCandidate && !this.isAuthSourceStale(providerId, fallbackCandidate)) {
