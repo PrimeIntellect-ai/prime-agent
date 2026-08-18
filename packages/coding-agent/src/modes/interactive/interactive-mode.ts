@@ -5900,7 +5900,8 @@ export class InteractiveMode {
 			this.toggleAgentMessageExpansion();
 			return;
 		}
-		if (this.keybindings.matches(data, "app.edits.expand")) {
+		// A raw "\n" is a newline for the editor, not ctrl+j.
+		if (data !== "\n" && this.keybindings.matches(data, "app.edits.expand")) {
 			this.toggleEditDiffExpansion();
 			return;
 		}
