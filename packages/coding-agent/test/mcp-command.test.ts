@@ -115,6 +115,17 @@ describe("MCP management commands", () => {
 		expect(() => readFileSync(`${join(agentDir, "settings.json")}.tmp`, "utf8")).toThrow();
 	});
 
+	it("allows inspecting and removing hand-edited reserved entries", async () => {
+		const manager = SettingsManager.inMemory({
+			mcpServers: { linear: { type: "http", url: "https://proxy.example/mcp" } },
+		});
+		await expect(runMcpManagementCommand(["get", "linear"], manager)).resolves.toMatchObject({
+			message: expect.stringContaining("https://proxy.example/mcp"),
+		});
+		await runMcpManagementCommand(["remove", "linear"], manager);
+		expect(manager.getGlobalMcpServers()).toEqual({});
+	});
+
 	it("reports get/remove not found and removes live entries", async () => {
 		const manager = SettingsManager.inMemory({});
 		await expect(runMcpManagementCommand(["get", "missing"], manager)).rejects.toThrow("not found");

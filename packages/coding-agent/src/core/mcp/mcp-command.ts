@@ -57,6 +57,9 @@ export function parseMcpAddArgs(args: readonly string[]): {
 	force: boolean;
 } {
 	const name = validateName(args[0] ?? "");
+	if (getCatalogEntry(name)) {
+		throw new Error(`MCP server name "${name}" is reserved for a built-in integration.`);
+	}
 	const separator = args.indexOf("--");
 	const optionArgs = args.slice(1, separator === -1 ? undefined : separator);
 	const commandArgs = separator === -1 ? [] : args.slice(separator + 1);
@@ -176,9 +179,6 @@ function validateName(name: string): string {
 		throw new Error(
 			"MCP server names must be 1-64 letters, numbers, underscores, or hyphens and start with a letter or number.",
 		);
-	}
-	if (getCatalogEntry(name)) {
-		throw new Error(`MCP server name "${name}" is reserved for a built-in integration.`);
 	}
 	return name;
 }
