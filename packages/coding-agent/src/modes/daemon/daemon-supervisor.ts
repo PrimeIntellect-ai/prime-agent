@@ -1158,9 +1158,20 @@ export class DaemonSupervisor {
 					if (this.sessionInputPauses.get(entry.pauseId) === entry) this.sessionInputPauses.delete(entry.pauseId);
 				} catch (error) {
 					if (forceCleanupOnFailure) {
-						if (this.sessionInputPauses.get(entry.pauseId) === entry)
-							this.sessionInputPauses.delete(entry.pauseId);
-						entry.worker.client?.close();
+						const workerClient = entry.worker.client;
+						if (workerClient) {
+							workerClient.close();
+							await this.handleWorkerClose(
+								entry.worker,
+								workerClient,
+								error instanceof Error ? error : new Error(String(error)),
+							);
+						} else {
+							this.invalidateWorkerSessionInputPauses(
+								entry.worker,
+								"Session worker became unavailable while releasing an input pause",
+							);
+						}
 					}
 					throw error;
 				}

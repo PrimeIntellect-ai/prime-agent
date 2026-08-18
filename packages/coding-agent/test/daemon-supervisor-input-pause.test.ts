@@ -13,7 +13,7 @@ type ClientFixture = {
 
 type WorkerFixture = {
 	descriptor: { workerId: string };
-	client: { close: ReturnType<typeof vi.fn> };
+	client?: { close: ReturnType<typeof vi.fn> };
 };
 
 type PauseEntry = { owner: ClientFixture; worker: WorkerFixture; pauseId: string };
@@ -30,6 +30,7 @@ type SupervisorInternals = {
 	detachClient: ReturnType<typeof vi.fn>;
 	handleCommand(client: ClientFixture, command: DaemonCommand): Promise<DaemonResponse | undefined>;
 	invalidateWorkerSessionInputPauses(worker: WorkerFixture, reason: string): void;
+	handleWorkerClose(worker: WorkerFixture, client: { close: ReturnType<typeof vi.fn> }, error: Error): Promise<void>;
 };
 
 const tempDirs: string[] = [];
@@ -69,6 +70,11 @@ function createHarness() {
 	});
 	supervisor.detachClient = vi.fn((client: ClientFixture, activeSessionId: string) => {
 		client.attachedActiveSessionIds.delete(activeSessionId);
+	});
+	supervisor.handleWorkerClose = vi.fn(async (closedWorker: WorkerFixture, workerClient, error: Error) => {
+		if (closedWorker.client !== workerClient) return;
+		closedWorker.client = undefined;
+		supervisor.invalidateWorkerSessionInputPauses(closedWorker, error.message);
 	});
 	return { supervisor, worker };
 }
@@ -171,17 +177,22 @@ describe("daemon supervisor session input pause ownership", () => {
 		expect(supervisor.sessionInputPauses.size).toBe(0);
 	});
 
-	it("fails closed when detach cannot release the worker pause", async () => {
+	it("fails closed for every owner when detach cannot release the worker pause", async () => {
 		const { supervisor, worker } = createHarness();
 		const client = addClient(supervisor, "socket-a", "protocol-a");
-		await supervisor.handleCommand(client, acquireCommand("acquire"));
+		const other = addClient(supervisor, "socket-b", "protocol-b");
+		await supervisor.handleCommand(client, acquireCommand("acquire-a"));
+		await supervisor.handleCommand(other, acquireCommand("acquire-b"));
 		supervisor.forwardToWorker.mockRejectedValueOnce(new Error("worker unavailable"));
 
 		await expect(
 			supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "active-1" }),
 		).rejects.toThrow("worker unavailable");
 		expect(supervisor.sessionInputPauses.size).toBe(0);
-		expect(worker.client.close).toHaveBeenCalledTimes(1);
+		expect(supervisor.handleWorkerClose).toHaveBeenCalledTimes(1);
+		expect(worker.client).toBeUndefined();
+		expect(client.socket.destroy).toHaveBeenCalled();
+		expect(other.socket.destroy).toHaveBeenCalled();
 	});
 
 	it("rejects release from a different public client", async () => {
