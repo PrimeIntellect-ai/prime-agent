@@ -24,6 +24,7 @@ type SupervisorInternals = {
 	connectionIds: WeakMap<ClientFixture, string>;
 	protocolClientIds: WeakMap<ClientFixture, string>;
 	sessionInputPauseEpochs: WeakMap<ClientFixture, number>;
+	detachingInputPauseSessions: WeakMap<ClientFixture, Set<string>>;
 	sessionInputPauses: Map<string, PauseEntry>;
 	findWorkerForClient: ReturnType<typeof vi.fn>;
 	forwardToWorker: ReturnType<typeof vi.fn>;
@@ -48,13 +49,10 @@ function createHarness() {
 	}) as unknown as SupervisorInternals;
 	const worker: WorkerFixture = { descriptor: { workerId: "worker-1" }, client: { close: vi.fn() } };
 	supervisor.workers.set(worker.descriptor.workerId, worker);
-	supervisor.findWorkerForClient = vi.fn(async (client: ClientFixture, activeSessionId: string) => {
-		if (!client.attachedActiveSessionIds.has(activeSessionId)) throw new Error("Client is not attached");
-		return {
-			worker,
-			summary: { id: "active-1", activeSessionId: "active-1" },
-		};
-	});
+	supervisor.findWorkerForClient = vi.fn(async () => ({
+		worker,
+		summary: { id: "active-1", activeSessionId: "active-1" },
+	}));
 	let pauseSequence = 0;
 	supervisor.forwardToWorker = vi.fn(async (_worker: WorkerFixture, command: DaemonCommand) => {
 		if (command.type === "acquire_session_input_pause") {
@@ -89,6 +87,7 @@ function addClient(supervisor: SupervisorInternals, socketId: string, protocolId
 	supervisor.connectionIds.set(client, socketId);
 	supervisor.protocolClientIds.set(client, protocolId);
 	supervisor.sessionInputPauseEpochs.set(client, 0);
+	supervisor.detachingInputPauseSessions.set(client, new Set());
 	return client;
 }
 
@@ -143,11 +142,11 @@ describe("daemon supervisor session input pause ownership", () => {
 		await supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "active-1" });
 		expect(supervisor.sessionInputPauses.size).toBe(0);
 		expect(supervisor.detachClient).toHaveBeenCalledWith(client, "active-1");
-		expect(
-			supervisor.forwardToWorker.mock.calls.filter(
-				(call) => (call[1] as DaemonCommand).type === "release_session_input_pause",
-			),
-		).toHaveLength(1);
+		const releaseCalls = supervisor.forwardToWorker.mock.calls.filter(
+			(call) => (call[1] as DaemonCommand).type === "release_session_input_pause",
+		);
+		expect(releaseCalls).toHaveLength(1);
+		expect(releaseCalls[0]?.[2]).toBe(5_000);
 	});
 
 	it("blocks new acquisitions before detach waits for cleanup", async () => {
@@ -170,7 +169,7 @@ describe("daemon supervisor session input pause ownership", () => {
 		});
 		await vi.waitFor(() => expect(supervisor.detachClient).toHaveBeenCalledWith(client, "active-1"));
 		await expect(supervisor.handleCommand(client, acquireCommand("late-acquire"))).rejects.toThrow(
-			"Client is not attached",
+			"Session is detaching",
 		);
 		releaseCleanup();
 		await expect(detach).resolves.toMatchObject({ success: true });

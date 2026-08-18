@@ -137,6 +137,7 @@ type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
 const WORKER_CONNECT_TIMEOUT_MS = 30_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const INPUT_PAUSE_CLEANUP_TIMEOUT_MS = 5_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
 const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 // The whole pre-commit prepare (drain + worker fencing) must finish inside the
@@ -618,6 +619,7 @@ export class DaemonSupervisor {
 	private readonly clients = new Set<DaemonSocketClient>();
 	private readonly connectionIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly sessionInputPauseEpochs = new WeakMap<DaemonSocketClient, number>();
+	private readonly detachingInputPauseSessions = new WeakMap<DaemonSocketClient, Set<string>>();
 	private readonly protocolClientIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly workers = new Map<string, ResidentWorker>();
 	private workerStopCounts?: Map<ResidentWorker, number>;
@@ -1057,6 +1059,7 @@ export class DaemonSupervisor {
 		};
 		this.connectionIds.set(client, client.id);
 		this.sessionInputPauseEpochs.set(client, 0);
+		this.detachingInputPauseSessions.set(client, new Set());
 		this.clients.add(client);
 		void this.ready.then(
 			() => {
@@ -1148,12 +1151,16 @@ export class DaemonSupervisor {
 					return;
 				}
 				try {
-					const response = await this.forwardToWorker(entry.worker, {
-						id: randomUUID(),
-						type: "release_session_input_pause",
-						activeSessionId: entry.activeSessionId,
-						pauseId: entry.pauseId,
-					});
+					const response = await this.forwardToWorker(
+						entry.worker,
+						{
+							id: randomUUID(),
+							type: "release_session_input_pause",
+							activeSessionId: entry.activeSessionId,
+							pauseId: entry.pauseId,
+						},
+						INPUT_PAUSE_CLEANUP_TIMEOUT_MS,
+					);
 					if (!response.success) throw new Error(response.error);
 					if (this.sessionInputPauses.get(entry.pauseId) === entry) this.sessionInputPauses.delete(entry.pauseId);
 				} catch (error) {
@@ -1589,6 +1596,7 @@ export class DaemonSupervisor {
 				const releaseSnapshotReservation = this.reserveSnapshotStream(client, targetActiveSessionId);
 				let releaseTranscript: (() => void) | undefined;
 				client.attachedActiveSessionIds.add(targetActiveSessionId);
+				this.detachingInputPauseSessions?.get(client)?.delete(targetActiveSessionId);
 				try {
 					const attached = await this.attachClient(client, {
 						...command,
@@ -1631,8 +1639,15 @@ export class DaemonSupervisor {
 				}
 			}
 			case "acquire_session_input_pause": {
+				const detachingSessions = this.detachingInputPauseSessions.get(client);
+				if (detachingSessions?.has(command.activeSessionId)) {
+					throw new Error(`Session is detaching: ${command.activeSessionId}`);
+				}
 				const match = await this.findWorkerForClient(client, command.activeSessionId);
 				const activeSessionId = match.summary.activeSessionId ?? match.summary.id;
+				if (detachingSessions?.has(command.activeSessionId) || detachingSessions?.has(activeSessionId)) {
+					throw new Error(`Session is detaching: ${command.activeSessionId}`);
+				}
 				const ownerClientId = this.protocolClientId(client);
 				const connectionId = this.connectionIds.get(client);
 				if (!connectionId) throw new Error("Daemon client connection identity is unavailable");
@@ -1701,11 +1716,16 @@ export class DaemonSupervisor {
 				}
 				return response;
 			}
-			case "detach":
+			case "detach": {
+				if (typeof command.activeSessionId !== "string") throw new Error("Detach requires an active session id");
+				const detachingSessions = this.detachingInputPauseSessions.get(client) ?? new Set<string>();
+				this.detachingInputPauseSessions.set(client, detachingSessions);
+				detachingSessions.add(command.activeSessionId);
 				this.sessionInputPauseEpochs.set(client, (this.sessionInputPauseEpochs.get(client) ?? 0) + 1);
 				this.detachClient(client, command.activeSessionId);
 				await this.releaseClientSessionInputPauses(client, command.activeSessionId, true);
 				return success(command.id, "detach");
+			}
 			case "complete_owned_session": {
 				const match = await this.findWorkerForClient(client, command.activeSessionId);
 				if (match.worker.descriptor.ownerClientId !== this.protocolClientId(client)) {
@@ -3769,6 +3789,7 @@ export class DaemonSupervisor {
 		}
 		const releaseTranscript = transcript?.retain();
 		client.attachedActiveSessionIds.add(activeSessionId);
+		this.detachingInputPauseSessions?.get(client)?.delete(activeSessionId);
 		try {
 			const publicSummary = this.publicSummary(match.worker, result.snapshot.summary);
 			if (publicSummary.streamingMessage?.role === "assistant") {

@@ -77,6 +77,7 @@ function createHarness(
 		clients: new Set(),
 		connectionIds: new WeakMap(),
 		sessionInputPauseEpochs: new WeakMap(),
+		detachingInputPauseSessions: new WeakMap(),
 		protocolClientIds: new WeakMap(),
 		promptAdmissions: new Map(),
 		sessionInputPauses: new Map(),
