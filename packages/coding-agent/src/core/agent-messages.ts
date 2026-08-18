@@ -36,7 +36,6 @@ export interface AgentSessionMessageSender extends Partial<AgentSessionMessageEn
 
 export type AgentMessageDirection = "received" | "sent";
 
-/** Format the directional role/name segment shared by received and sent agent-message UI. */
 export function formatAgentMessageParticipant(
 	direction: AgentMessageDirection,
 	role: AgentFamilyRelationship | undefined,
@@ -114,7 +113,6 @@ export interface AgentSessionMessagePayload {
 	source: typeof AGENT_MESSAGE_SOURCE;
 	message: string;
 	from?: AgentSessionMessageSender;
-	/** Sender relationship from the receiver's point of view. */
 	fromRelationship?: AgentFamilyRelationship;
 	target: AgentSessionMessageEndpoint;
 }
@@ -141,9 +139,7 @@ export interface AgentSessionMessageReceipt {
 	message: string;
 	// Not named "status": the kernel host bridge envelope reserves that key.
 	deliveryStatus: AgentSessionMessageDeliveryStatus;
-	/** Present when deliveryStatus is "delivered": the message reached the target's context. */
 	deliveredAt?: string;
-	/** Present when deliveryStatus is "queued": the message waits behind the target's current work. */
 	queuedAt?: string;
 	deliveryMode?: "steer";
 }
@@ -306,7 +302,6 @@ function isAgentFamilyParent(parent: AgentFamilyCatalogEntry, child: AgentFamily
 	);
 }
 
-/** Pure nuclear-family policy over persisted parent-edge snapshots. */
 export function agentFamilyRelationship(
 	current: AgentFamilyCatalogEntry,
 	target: AgentFamilyCatalogEntry,

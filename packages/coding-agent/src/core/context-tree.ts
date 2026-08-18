@@ -7,19 +7,9 @@ import type { ContextUsage } from "./extensions/index.js";
 import { buildSessionContext, type FileEntry, loadEntriesFromFile, type SessionEntry } from "./session-manager.js";
 import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } from "./usage.js";
 
-/** Resolves a model's context window so disk-only nodes can report utilization. */
 export type ContextWindowResolver = (provider: string, modelId: string) => number | undefined;
 
-/**
- * One agent in the context overview: the main session or an RLM (sub-)agent.
- *
- * `ownUsage` excludes descendant usage (child usage attributions subtracted),
- * so own usage summed over a tree never double-counts. `totalUsage` is the
- * attributed aggregate: own plus all completed descendants, matching what
- * /usage reports for the session.
- */
 export interface ContextTreeNode {
-	/** "root" for the session itself, the RLM child node id (sub-xxxx) otherwise. */
 	id: string;
 	label: string;
 	status: "active" | RlmChildAgentStatus;
@@ -56,7 +46,6 @@ function readUserMessageText(content: unknown): string {
 		.join("\n");
 }
 
-/** Compact a prompt into a one-line label, mirroring compactRlmText in agent-session.ts. */
 function compactLabel(text: string, maxLength = 80): string {
 	const compact = text.replace(/\s+/g, " ").trim();
 	if (compact.length <= maxLength) {

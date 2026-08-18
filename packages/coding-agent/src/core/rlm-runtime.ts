@@ -7,7 +7,6 @@ import type { HostRequestHandler } from "./kernel/index.js";
 export interface RlmRunRequest {
 	prompt: string;
 	kwargs: Record<string, unknown>;
-	/** Source of the IPython cell that issued this rlm.run call, when available. */
 	cellSourceCode?: string;
 }
 
@@ -58,7 +57,6 @@ const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
 
-/** Validate and normalize an orchestrator-supplied subagent session name. */
 export function normalizeRequestedRlmSubagentSessionName(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -76,7 +74,6 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown): string
 	return name;
 }
 
-/** Validate and normalize an orchestrator-supplied subagent model reference. */
 export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -91,7 +88,6 @@ export function normalizeRequestedRlmSubagentModel(value: unknown): string | und
 	return model;
 }
 
-/** Create a readable, collision-resistant default name usable as an agent-message selector. */
 export function createDefaultRlmSubagentSessionName(prompt: string, childId: string): string {
 	const promptSlug = prompt
 		.normalize("NFKD")
@@ -148,7 +144,6 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 		}));
 }
 
-/** Adapt an RlmRunHandler into the typed "rlm.run" handler for the kernel host bridge. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.prompt !== "string") {
@@ -165,7 +160,6 @@ export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHand
 	};
 }
 
-/** Search a bounded authenticated model catalog without adding it to the system prompt. */
 export function createRlmFindModelsHostHandler(handler: RlmFindModelsHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.query !== "string") {
@@ -179,7 +173,6 @@ export function createRlmFindModelsHostHandler(handler: RlmFindModelsHandler): H
 	};
 }
 
-/** Expose the current parent session's RLM child registry to its kernel. */
 export function createRlmListSubagentsHostHandler(handler: RlmListSubagentsHandler): HostRequestHandler {
 	return async () => {
 		const { subagents } = await handler();
@@ -187,7 +180,6 @@ export function createRlmListSubagentsHostHandler(handler: RlmListSubagentsHandl
 	};
 }
 
-/** Delete one direct child selected from the current parent session's registry. */
 export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.target !== "string" || !payload.target.trim()) {
@@ -220,7 +212,6 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmDepth: number;
 	rlmMaxDepth: number;
 	rlmParentNodeId: string;
-	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */
 	onSessionPublished?: (session: AgentSession) => void;
