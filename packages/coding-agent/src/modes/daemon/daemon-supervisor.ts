@@ -11,6 +11,7 @@ import {
 	getCronJobsPath,
 	getDaemonLogPath,
 	getDaemonUpdateRestartManifestPath,
+	getSessionsDir,
 	VERSION,
 } from "../../config.js";
 import {
@@ -41,7 +42,7 @@ import {
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
-import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
+import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
@@ -93,6 +94,7 @@ import {
 	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
+	normalizeSocketPath,
 	prepareDaemonSocketPath,
 	restrictDaemonSocketPath,
 } from "./daemon-socket.js";
@@ -118,6 +120,7 @@ import {
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
+import { createRlmLedgerRegistrySeedSource, RlmSpawnLedger } from "./rlm-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
@@ -423,7 +426,8 @@ function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is 
 	const descriptor = value as Partial<DaemonWorkerDescriptor>;
 	return (
 		descriptor.version === 1 &&
-		descriptor.supervisorSocketPath === socketPath &&
+		typeof descriptor.supervisorSocketPath === "string" &&
+		normalizeSocketPath(descriptor.supervisorSocketPath) === socketPath &&
 		typeof descriptor.workerId === "string" &&
 		Number.isInteger(descriptor.pid) &&
 		(descriptor.pid ?? 0) > 0 &&
@@ -495,7 +499,7 @@ function sortCronJobs(jobs: AgentCronJob[]): AgentCronJob[] {
 }
 
 function descriptorKey(socketPath: string): string {
-	return createHash("sha256").update(socketPath).digest("hex").slice(0, 12);
+	return createHash("sha256").update(normalizeSocketPath(socketPath)).digest("hex").slice(0, 12);
 }
 
 function defaultWorkerDescriptorDir(agentDir: string, socketPath: string): string {
@@ -574,7 +578,7 @@ function mergeSessionLists(active: readonly SessionSummary[], saved: readonly Se
 }
 
 export async function runDaemonSupervisorMode(options: DaemonSupervisorOptions): Promise<never> {
-	const socketPath = options.socketPath ?? defaultDaemonSocketPath();
+	const socketPath = normalizeSocketPath(options.socketPath ?? defaultDaemonSocketPath());
 	const supervisor = new DaemonSupervisor(socketPath, options);
 	await supervisor.start();
 	return new Promise(() => {});
@@ -613,6 +617,7 @@ export class DaemonSupervisor {
 	private readonly pendingSessionNames = new Set<string>();
 	private readonly catalog: DaemonCatalogClient;
 	private readonly settingsManager: SettingsManager;
+	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
@@ -885,7 +890,10 @@ export class DaemonSupervisor {
 	private async assertCurrentOwnership(): Promise<void> {
 		const ownership = this.ownership;
 		if (!ownership) {
-			const error = new Error(`Daemon supervisor generation ${this.generation} no longer owns its registry entry`);
+			const error = new Error(
+				`Daemon supervisor generation ${this.generation} holds no registry ownership (never acquired or already released); ` +
+					`socket: ${this.socketPath}; restart the daemon to recover — sessions are preserved`,
+			);
 			Object.assign(error, { code: "supervisor_generation_stale" as const });
 			throw error;
 		}
@@ -928,6 +936,7 @@ export class DaemonSupervisor {
 				if (!isDaemonWorkerDescriptor(descriptor, this.socketPath)) {
 					continue;
 				}
+				descriptor.supervisorSocketPath = normalizeSocketPath(descriptor.supervisorSocketPath);
 				descriptor.lifecycle = "recovering";
 				descriptor.recoveryJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.recovery.jsonl`);
 				descriptor.orphanProcessJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.orphans.jsonl`);
@@ -955,7 +964,8 @@ export class DaemonSupervisor {
 			) as Partial<PersistedSupervisorConfig>;
 			if (
 				parsed.version !== 1 ||
-				parsed.socketPath !== this.socketPath ||
+				typeof parsed.socketPath !== "string" ||
+				normalizeSocketPath(parsed.socketPath) !== this.socketPath ||
 				!parsed.defaultSessionConfig ||
 				typeof parsed.defaultSessionConfig !== "object" ||
 				typeof parsed.defaultSessionConfig.agentDir !== "string"
@@ -1764,6 +1774,15 @@ export class DaemonSupervisor {
 					await this.assertSupervisorSavedSessionNameAvailable(command.sessionPath, target.name);
 					if (!command.activeSessionId) {
 						await this.catalog.rename(command.sessionPath, command.name);
+						// Third rename write point: an offline saved-session rename
+						// changes the name the ledger carries for that child.
+						await this.rlmSpawnLedger()
+							.appendRenameByChildPath(command.sessionPath, target.name)
+							.catch((error) => {
+								this.log(
+									`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							});
 						return success(command.id, command.type);
 					}
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
@@ -1906,11 +1925,16 @@ export class DaemonSupervisor {
 				return await forward();
 			}
 			this.persistWorkerStopTombstone(match.worker, true);
+			const releaseStopOwnership = this.acquireWorkerStopOwnership(match.worker);
 			let response: DaemonResponse;
 			try {
 				response = await this.forwardToWorker(match.worker, resolvedCommand);
 			} finally {
-				await this.stopWorker(match.worker, true, false, true);
+				try {
+					await this.stopWorker(match.worker, true, false, true);
+				} finally {
+					releaseStopOwnership();
+				}
 			}
 			return response;
 		} finally {
@@ -2021,8 +2045,6 @@ export class DaemonSupervisor {
 			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
 				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
 			}
-			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
-			// the recursive-harness residency/eviction PR will revisit it.
 		}
 		const key = createCommand.sessionPath
 			? canonicalSessionPath(createCommand.sessionPath)
@@ -2033,7 +2055,7 @@ export class DaemonSupervisor {
 		}
 		const opening = (async () => {
 			if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);
-			const savedSiblings = createCommand.sessionPath ? await this.catalog.siblings(createCommand.sessionPath) : [];
+			const savedSiblings = createCommand.sessionPath ? await this.rlmLedgerSiblings(createCommand.sessionPath) : [];
 			const target = savedSiblings.find(
 				(session) => canonicalSessionPath(session.path) === canonicalSessionPath(createCommand.sessionPath!),
 			);
@@ -2161,23 +2183,25 @@ export class DaemonSupervisor {
 		const orphanProcessJournalPath =
 			existing?.descriptor.orphanProcessJournalPath ?? join(this.descriptorDir, `${workerId}.orphans.jsonl`);
 		const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", socketPath]);
+		const workerEnvironment = createCliSubprocessEnv({
+			...process.env,
+			...launchEnv,
+			[DAEMON_WORKER_ROLE_ENV]: "1",
+			[DAEMON_WORKER_TOKEN_ENV]: token,
+			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
+			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
+			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
+			[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
+			[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
+			[SESSION_LEASES_ENABLED_ENV]: "1",
+			[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
+		});
+		delete workerEnvironment.RLM_DEPTH;
 		await this.assertRecoveryAllowed();
 		const child: ChildProcess = spawn(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
-			env: createCliSubprocessEnv({
-				...process.env,
-				...launchEnv,
-				[DAEMON_WORKER_ROLE_ENV]: "1",
-				[DAEMON_WORKER_TOKEN_ENV]: token,
-				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
-				[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
-				[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
-				[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
-				[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
-				[SESSION_LEASES_ENABLED_ENV]: "1",
-				[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
-			}),
+			env: workerEnvironment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
 		});
 		const detachWorkerStderr = child.stderr
@@ -3047,6 +3071,34 @@ export class DaemonSupervisor {
 		});
 	}
 
+	/**
+	 * Supervisor-side view of the spawn ledger for this supervisor's sessions
+	 * dir. Workers hold their own instances over the same file; every read
+	 * re-reads the file, so cross-process freshness is per-operation.
+	 */
+	private rlmSpawnLedger(): RlmSpawnLedger {
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!agentDir) {
+			throw new Error("Daemon supervisor config is missing agentDir");
+		}
+		this.rlmSpawnLedgerInstance ??= new RlmSpawnLedger(
+			agentDir,
+			this.defaultSessionConfig.sessionDir ?? getSessionsDir(agentDir),
+			createRlmLedgerRegistrySeedSource(),
+			(message) => this.log(message),
+		);
+		return this.rlmSpawnLedgerInstance;
+	}
+
+	/**
+	 * Ledger-backed same-parent rows for name reservation and admission. Rows
+	 * carry ledger topology plus best-effort display fields; consumers here
+	 * only need id/path/name/depth/parent.
+	 */
+	private rlmLedgerSiblings(sessionPath: string): Promise<SessionInfo[]> {
+		return this.rlmSpawnLedger().siblings(sessionPath);
+	}
+
 	private async savedSessionNameReservationInput(
 		sessionPath: string,
 		name: string,
@@ -3056,7 +3108,7 @@ export class DaemonSupervisor {
 			.flatMap((worker) => [...worker.summaries.values()])
 			.find((summary) => summary.sessionFile && canonicalSessionPath(summary.sessionFile) === targetPath);
 		if (active) return this.summaryNameReservationInput(active, name);
-		const siblings = await this.catalog.siblings(sessionPath);
+		const siblings = await this.rlmLedgerSiblings(sessionPath);
 		const saved = siblings.find((info) => canonicalSessionPath(info.path) === targetPath);
 		if (!saved) throw new Error(`Session not found: ${sessionPath}`);
 		return {
@@ -3085,7 +3137,7 @@ export class DaemonSupervisor {
 			.flatMap((worker) => [...worker.summaries.values()])
 			.find((summary) => summary.sessionFile && canonicalSessionPath(summary.sessionFile) === targetPath);
 		if (active) return this.assertSupervisorSessionNameAvailable(active, name);
-		const siblings = await this.catalog.siblings(sessionPath);
+		const siblings = await this.rlmLedgerSiblings(sessionPath);
 		const saved = siblings.find((info) => canonicalSessionPath(info.path) === targetPath);
 		if (!saved) throw new Error(`Session not found: ${sessionPath}`);
 		if (saved.parentSessionPath && (saved.rlmDepth ?? 0) > 0) {
@@ -4242,9 +4294,14 @@ export class DaemonSupervisor {
 			!this.shuttingDown
 		) {
 			worker.intentionalStop = true;
-			this.workers.delete(worker.descriptor.workerId);
-			this.deleteWorkerDescriptor(worker);
-			void this.syncAgentPeers().catch(() => undefined);
+			// An exact stop owns its registration and descriptor cleanup until its
+			// tuple assertions complete. A synchronous root shutdown event can arrive
+			// before its request resolves, so leave both intact while it is active.
+			if ((this.workerStopCounts?.get(worker) ?? 0) === 0) {
+				this.workers.delete(worker.descriptor.workerId);
+				this.deleteWorkerDescriptor(worker);
+				void this.syncAgentPeers().catch(() => undefined);
+			}
 		}
 	}
 
@@ -4624,6 +4681,25 @@ export class DaemonSupervisor {
 		return observed === processStartId ? "current" : "replaced";
 	}
 
+	/**
+	 * Keep an exact stop's registration and descriptor authoritative while any
+	 * part of its cleanup is in flight. Root kills acquire this before forwarding
+	 * because a synchronous shutdown event may arrive before the worker replies.
+	 */
+	private acquireWorkerStopOwnership(worker: ResidentWorker): () => void {
+		if (!this.workerStopCounts) this.workerStopCounts = new Map();
+		const stopCounts = this.workerStopCounts;
+		stopCounts.set(worker, (stopCounts.get(worker) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const remaining = (stopCounts.get(worker) ?? 1) - 1;
+			if (remaining === 0) stopCounts.delete(worker);
+			else stopCounts.set(worker, remaining);
+		};
+	}
+
 	private async stopWorker(
 		worker: ResidentWorker,
 		removeDescriptor: boolean,
@@ -4632,15 +4708,11 @@ export class DaemonSupervisor {
 		recoveryCleanup = false,
 		directChild?: { child: ChildProcess; closed: Promise<void> },
 	): Promise<void> {
-		if (!this.workerStopCounts) this.workerStopCounts = new Map();
-		const stopCounts = this.workerStopCounts;
-		stopCounts.set(worker, (stopCounts.get(worker) ?? 0) + 1);
+		const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
 		try {
 			await this.stopWorkerUntracked(worker, removeDescriptor, force, archiveSession, recoveryCleanup, directChild);
 		} finally {
-			const remaining = (stopCounts.get(worker) ?? 1) - 1;
-			if (remaining === 0) stopCounts.delete(worker);
-			else stopCounts.set(worker, remaining);
+			releaseStopOwnership();
 		}
 	}
 
@@ -4929,7 +5001,7 @@ export class DaemonSupervisor {
 		}
 		return {
 			sessionFile,
-			artifactDir: join(dirname(dirname(sessionFile)), "session-artifacts", worker.descriptor.rootSessionId),
+			artifactDir: getSessionArtifactPathForFile(sessionFile, worker.descriptor.rootSessionId),
 		};
 	}
 

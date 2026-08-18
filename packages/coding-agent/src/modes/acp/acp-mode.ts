@@ -17,19 +17,6 @@ import { primeAgentMeta } from "./acp-meta.js";
 import { type AcpStopReason, acpStopReason } from "./acp-stop-reason.js";
 
 /**
- * ACP (Agent Client Protocol) mode.
- *
- * prime-agent acts as an ACP agent over NDJSON on stdio, driving an
- * `AgentConnection` in-process. It deliberately does not shell out to RPC mode
- * and translate: prime-agent's differentiators (IPython-only tools, subagents,
- * autonomous gates) are visible as first-class events here, and a translating
- * adapter is exactly what flattens them away.
- *
- * Capabilities ACP has no native concept for travel in a reverse-domain
- * `_meta` envelope, which vanilla ACP clients ignore.
- */
-
-/**
  * ACP frames must reach real stdout.
  *
  * Startup calls `takeOverStdout()` for every non-interactive mode, which
@@ -383,8 +370,6 @@ export async function runAcpModeWithConnection(
 			}
 		})
 		.onRequest("session/close", async (ctx: any) => {
-			// Releasing the subscription matters: it is the only thing that stops
-			// forwarding events, and closing frees the connection for a new session.
 			const params = ctx.params as { sessionId: string };
 			if (session?.id !== params.sessionId) {
 				throw new Error(`Unknown ACP session: ${params.sessionId}`);

@@ -122,7 +122,6 @@ PY`;
 		const command = `./script.sh <<'EOF'
 hello world
 EOF`;
-		// The .sh suffix must not trigger the bash-interpreter branch; preview the body.
 		expect(previewBashCommand(command)).toEqual({ language: "bash", text: "hello world" });
 	});
 

@@ -141,9 +141,9 @@ export interface AgentSessionMessageReceipt {
 	message: string;
 	// Not named "status": the kernel host bridge envelope reserves that key.
 	deliveryStatus: AgentSessionMessageDeliveryStatus;
-	/** Present when deliveryStatus is "delivered": the message reached the target's context. */
+	/** Present only for delivered messages: when the target context received it. */
 	deliveredAt?: string;
-	/** Present when deliveryStatus is "queued": the message waits behind the target's current work. */
+	/** Present only for queued messages: when it was placed behind current work. */
 	queuedAt?: string;
 	deliveryMode?: "steer";
 }

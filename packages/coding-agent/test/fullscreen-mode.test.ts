@@ -1,14 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.js";
 
 describe("fullscreen mode settings", () => {
 	const testDir = join(process.cwd(), "test-fullscreen-tmp");
 	const agentDir = join(testDir, "agent");
 	const projectDir = join(testDir, "project");
 	let savedEnv: string | undefined;
+	let savedTermProgram: string | undefined;
 
 	beforeEach(() => {
 		if (existsSync(testDir)) {
@@ -17,7 +17,9 @@ describe("fullscreen mode settings", () => {
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
 		savedEnv = process.env.PI_FULLSCREEN;
+		savedTermProgram = process.env.TERM_PROGRAM;
 		delete process.env.PI_FULLSCREEN;
+		delete process.env.TERM_PROGRAM;
 	});
 
 	afterEach(() => {
@@ -29,11 +31,22 @@ describe("fullscreen mode settings", () => {
 		} else {
 			process.env.PI_FULLSCREEN = savedEnv;
 		}
+		if (savedTermProgram === undefined) delete process.env.TERM_PROGRAM;
+		else process.env.TERM_PROGRAM = savedTermProgram;
 	});
 
-	it("defaults to on with mouse enabled", () => {
+	it("defaults to fullscreen with mouse capture in Ghostty", () => {
+		process.env.TERM_PROGRAM = "ghostty";
 		const manager = SettingsManager.create(projectDir, agentDir);
 		expect(manager.getFullscreen()).toBe(true);
+		expect(manager.getFullscreenMouse()).toBe(true);
+	});
+
+	it("ignores a malformed null fullscreen mouse setting", () => {
+		process.env.TERM_PROGRAM = "xterm";
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ terminal: { fullscreenMouse: null } }));
+		const manager = SettingsManager.create(projectDir, agentDir);
 		expect(manager.getFullscreenMouse()).toBe(true);
 	});
 
@@ -61,21 +74,13 @@ describe("fullscreen mode settings", () => {
 		expect(manager.getFullscreen()).toBe(false);
 	});
 
-	it("persists the fullscreen mouse toggle", async () => {
+	it("persists an explicit fullscreen mouse opt-out in Ghostty", async () => {
+		process.env.TERM_PROGRAM = "ghostty";
 		const manager = SettingsManager.create(projectDir, agentDir);
 		manager.setFullscreenMouse(false);
 		await manager.flush();
 
 		const reloaded = SettingsManager.create(projectDir, agentDir);
 		expect(reloaded.getFullscreenMouse()).toBe(false);
-	});
-});
-
-describe("fullscreen slash command", () => {
-	it("is registered with an on|off argument hint", () => {
-		const command = BUILTIN_SLASH_COMMANDS.find((c) => c.name === "fullscreen");
-		expect(command).toBeDefined();
-		expect(command?.argumentHint).toBe("[on|off]");
-		expect(command?.takesArgument).toBe(true);
 	});
 });

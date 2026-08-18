@@ -11,7 +11,7 @@ import {
 	PRIME_INFERENCE_PROVIDER_ID,
 	resolvePrimeAgentTracesBaseUrl,
 } from "./prime-inference-auth.js";
-import type { SessionHeader, SessionManager } from "./session-manager.js";
+import { getSessionArtifactsRoot, type SessionHeader, type SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 
 const MAX_TRACE_BYTES = 20 * 1024 * 1024;
@@ -541,7 +541,7 @@ async function findSessionFilesUnder(root: string, files: Set<string>): Promise<
 
 export async function findAgentTraceFiles(sessionDir: string = getSessionsDir()): Promise<string[]> {
 	const files = new Set<string>();
-	const roots = new Set([resolve(sessionDir), resolve(dirname(sessionDir), "session-artifacts")]);
+	const roots = new Set([resolve(sessionDir), resolve(getSessionArtifactsRoot(sessionDir))]);
 	await Promise.all([...roots].map((root) => findSessionFilesUnder(root, files)));
 	return [...files].sort();
 }

@@ -1,6 +1,3 @@
-// Core TUI interfaces and classes
-
-// Autocomplete support
 export {
 	type AutocompleteItem,
 	type AutocompleteProvider,
@@ -8,7 +5,6 @@ export {
 	CombinedAutocompleteProvider,
 	type SlashCommand,
 } from "./autocomplete.js";
-// Components
 export { Box } from "./components/box.js";
 export { CancellableLoader } from "./components/cancellable-loader.js";
 export { Editor, type EditorOptions, type EditorTheme } from "./components/editor.js";
@@ -27,18 +23,14 @@ export { type SettingItem, SettingsList, type SettingsListTheme } from "./compon
 export { Spacer } from "./components/spacer.js";
 export { Text } from "./components/text.js";
 export { TruncatedText } from "./components/truncated-text.js";
-// Editor component interface (for custom editors)
 export type { EditorComponent, EditorPasteSnapshot } from "./editor-component.js";
-// Fullscreen (alternate-screen) viewport
 export {
 	clippedFullscreenDockHeight,
 	FULLSCREEN_MIN_TRANSCRIPT_ROWS,
 	FullscreenViewport,
 	type ScrollInfo,
 } from "./fullscreen.js";
-// Fuzzy matching
 export { type FuzzyMatch, fuzzyFilter, fuzzyFilterScored, fuzzyMatch, type ScoredItem } from "./fuzzy.js";
-// Keybindings
 export {
 	getKeybindings,
 	type Keybinding,
@@ -51,7 +43,6 @@ export {
 	setKeybindings,
 	TUI_KEYBINDINGS,
 } from "./keybindings.js";
-// Keyboard input handling
 export {
 	decodeKittyPrintable,
 	isKeyRelease,
@@ -64,9 +55,7 @@ export {
 	parseKey,
 	setKittyProtocolActive,
 } from "./keys.js";
-// LaTeX math to Unicode conversion
 export { latexToUnicode } from "./latex.js";
-// SGR mouse event parsing
 export {
 	isMouseSequence,
 	isWheelDown,
@@ -76,12 +65,9 @@ export {
 	type MouseEvent,
 	parseSgrMouseEvent,
 } from "./mouse.js";
-// Render caching
 export { VersionedRenderCache } from "./render-cache.js";
 export type { TableCellSelectionRegion } from "./selection-metadata.js";
-// Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.js";
-// Terminal interface and implementations
 export { ProcessTerminal, type Terminal, type TerminalStopOptions } from "./terminal.js";
 export {
 	bestAnsiColor,
@@ -105,7 +91,6 @@ export {
 	type TerminalBackgroundKind,
 	type TerminalColorMode,
 } from "./terminal-colors.js";
-// Terminal image support
 export {
 	allocateImageId,
 	type CellDimensions,
@@ -148,5 +133,4 @@ export {
 	TUI,
 	type TuiStopOptions,
 } from "./tui.js";
-// Utilities
 export { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.js";

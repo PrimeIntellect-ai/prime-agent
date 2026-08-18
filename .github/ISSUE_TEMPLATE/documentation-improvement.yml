@@ -1,0 +1,47 @@
+---
+name: Accepted documentation work (maintainers)
+description: Track documentation work accepted from GitHub Discussions
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are the maintainer work queue. If a maintainer has not asked you to create this Issue, use GitHub Discussions instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A brief summary of the documentation gap or issue.
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Affected documentation
+      description: Which docs are affected? List file paths, section headings, or URLs.
+      placeholder: |
+        - docs/models.md — "Minimal Example" section
+        - docs/quickstart.md — "Authenticate" section
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong or missing
+      description: Describe what is incorrect, outdated, unclear, or absent. Be specific — quote the text that needs changing if possible.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix
+      description: What should the docs say instead, or what content should be added?
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any other context — links, screenshots, or related issues.
+    validations:
+      required: false

@@ -121,7 +121,6 @@ function buildCompletionValue(
 	return `${openQuote}${path}${closeQuote}`;
 }
 
-// Use fd to walk directory tree (fast, respects .gitignore)
 async function walkDirectoryWithFd(
 	baseDir: string,
 	fdPath: string,
@@ -235,8 +234,6 @@ export interface SlashCommand {
 	argumentHint?: string;
 	sourceTag?: string;
 	takesArgument?: boolean;
-	// Function to get argument completions for this command
-	// Returns null if no argument completion is available
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
 }
 
@@ -247,8 +244,6 @@ export interface AutocompleteSuggestions {
 }
 
 export interface AutocompleteProvider {
-	// Get autocomplete suggestions for current text/cursor position
-	// Returns null if no suggestions available
 	getSuggestions(
 		lines: string[],
 		cursorLine: number,
@@ -256,8 +251,6 @@ export interface AutocompleteProvider {
 		options: { signal: AbortSignal; force?: boolean },
 	): Promise<AutocompleteSuggestions | null>;
 
-	// Apply the selected item
-	// Returns the new text and cursor position
 	applyCompletion(
 		lines: string[],
 		cursorLine: number,
@@ -270,11 +263,9 @@ export interface AutocompleteProvider {
 		cursorCol: number;
 	};
 
-	// Check if file completion should trigger for explicit Tab completion
 	shouldTriggerFileCompletion?(lines: string[], cursorLine: number, cursorCol: number): boolean;
 }
 
-// Combined provider that handles both slash commands and file paths
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	private commands: (SlashCommand | AutocompleteItem)[];
 	private basePath: string;
@@ -419,9 +410,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			};
 		}
 
-		// Check if we're completing a file attachment (prefix starts with "@")
 		if (prefix.startsWith("@")) {
-			// This is a file attachment completion
 			// Don't add space after directories so user can continue autocompleting
 			const isDirectory = item.label.endsWith("/");
 			const suffix = isDirectory ? "" : " ";
@@ -455,7 +444,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			};
 		}
 
-		// For file paths, complete the path
 		const newLine = beforePrefix + item.value + adjustedAfterCursor;
 		const newLines = [...lines];
 		newLines[cursorLine] = newLine;
@@ -471,7 +459,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		};
 	}
 
-	// Extract @ prefix for fuzzy file suggestions
 	private extractAtPrefix(text: string): string | null {
 		const quotedPrefix = extractQuotedPrefix(text);
 		if (quotedPrefix?.startsWith('@"')) {
@@ -488,7 +475,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return null;
 	}
 
-	// Extract a path-like prefix from the text before cursor
 	private extractPathPrefix(text: string, forceExtract: boolean = false): string | null {
 		const quotedPrefix = extractQuotedPrefix(text);
 		if (quotedPrefix) {
@@ -498,19 +484,15 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const lastDelimiterIndex = findLastDelimiter(text);
 		const pathPrefix = lastDelimiterIndex === -1 ? text : text.slice(lastDelimiterIndex + 1);
 
-		// For forced extraction (Tab key), always return something
 		if (forceExtract) {
 			return pathPrefix;
 		}
 
 		// For natural triggers, return if it looks like a path, ends with /, starts with ~/, .
-		// Only return empty string if the text looks like it's starting a path context
 		if (pathPrefix.includes("/") || pathPrefix.startsWith(".") || pathPrefix.startsWith("~/")) {
 			return pathPrefix;
 		}
 
-		// Return empty string only after a space (not for completely empty text)
-		// Empty text should not trigger file suggestions - that's for forced Tab completion
 		if (pathPrefix === "" && text.endsWith(" ")) {
 			return pathPrefix;
 		}
@@ -518,11 +500,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return null;
 	}
 
-	// Expand home directory (~/) to actual home path
 	private expandHomePath(path: string): string {
 		if (path.startsWith("~/")) {
 			const expandedPath = join(homedir(), path.slice(2));
-			// Preserve trailing slash if original path had one
 			return path.endsWith("/") && !expandedPath.endsWith("/") ? `${expandedPath}/` : expandedPath;
 		} else if (path === "~") {
 			return homedir();
@@ -568,7 +548,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return `${toDisplayPath(displayBase)}${normalizedRelativePath}`;
 	}
 
-	// Get file/directory suggestions for a given path prefix
 	private getFileSuggestions(prefix: string): AutocompleteItem[] {
 		try {
 			let searchDir: string;
@@ -576,7 +555,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const { rawPrefix, isAtPrefix, isQuotedPrefix } = parsePathPrefix(prefix);
 			let expandedPrefix = rawPrefix;
 
-			// Handle home directory expansion
 			if (expandedPrefix.startsWith("~")) {
 				expandedPrefix = this.expandHomePath(expandedPrefix);
 			}
@@ -591,7 +569,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				(isAtPrefix && rawPrefix === "");
 
 			if (isRootPrefix) {
-				// Complete from specified position
 				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
 					searchDir = expandedPrefix;
 				} else {
@@ -599,7 +576,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				}
 				searchPrefix = "";
 			} else if (rawPrefix.endsWith("/")) {
-				// If prefix ends with /, show contents of that directory
 				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
 					searchDir = expandedPrefix;
 				} else {
@@ -607,7 +583,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				}
 				searchPrefix = "";
 			} else {
-				// Split into directory and file prefix
 				const dir = dirname(expandedPrefix);
 				const file = basename(expandedPrefix);
 				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
@@ -626,14 +601,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					continue;
 				}
 
-				// Check if entry is a directory (or a symlink pointing to a directory)
 				let isDirectory = entry.isDirectory();
 				if (!isDirectory && entry.isSymbolicLink()) {
 					try {
 						const fullPath = join(searchDir, entry.name);
 						isDirectory = statSync(fullPath).isDirectory();
 					} catch {
-						// Broken symlink or permission error - treat as file
+						// Ignore broken or inaccessible symbolic links.
 					}
 				}
 
@@ -642,16 +616,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const displayPrefix = rawPrefix;
 
 				if (displayPrefix.endsWith("/")) {
-					// If prefix ends with /, append entry to the prefix
 					relativePath = displayPrefix + name;
 				} else if (displayPrefix.includes("/") || displayPrefix.includes("\\")) {
-					// Preserve ~/ format for home directory paths
 					if (displayPrefix.startsWith("~/")) {
 						const homeRelativeDir = displayPrefix.slice(2); // Remove ~/
 						const dir = dirname(homeRelativeDir);
 						relativePath = `~/${dir === "." ? name : join(dir, name)}`;
 					} else if (displayPrefix.startsWith("/")) {
-						// Absolute path - construct properly
 						const dir = dirname(displayPrefix);
 						if (dir === "/") {
 							relativePath = `/${name}`;
@@ -660,13 +631,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 						}
 					} else {
 						relativePath = join(dirname(displayPrefix), name);
-						// path.join normalizes away ./ prefix, preserve it
 						if (displayPrefix.startsWith("./") && !relativePath.startsWith("./")) {
 							relativePath = `./${relativePath}`;
 						}
 					}
 				} else {
-					// For standalone entries, preserve ~/ if original prefix was ~/
 					if (displayPrefix.startsWith("~")) {
 						relativePath = `~/${name}`;
 					} else {
@@ -688,7 +657,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				});
 			}
 
-			// Sort directories first, then alphabetically
 			suggestions.sort((a, b) => {
 				const aIsDir = a.value.endsWith("/");
 				const bIsDir = b.value.endsWith("/");
@@ -699,13 +667,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 			return suggestions;
 		} catch (_e) {
-			// Directory doesn't exist or not accessible
 			return [];
 		}
 	}
 
-	// Score an entry against the query (higher = better match)
-	// isDirectory adds bonus to prioritize folders
 	private scoreEntry(filePath: string, query: string, isDirectory: boolean): number {
 		const fileName = basename(filePath);
 		const lowerFileName = fileName.toLowerCase();
@@ -713,22 +678,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 		let score = 0;
 
-		// Exact filename match (highest)
 		if (lowerFileName === lowerQuery) score = 100;
-		// Filename starts with query
 		else if (lowerFileName.startsWith(lowerQuery)) score = 80;
-		// Substring match in filename
 		else if (lowerFileName.includes(lowerQuery)) score = 50;
-		// Substring match in full path
 		else if (filePath.toLowerCase().includes(lowerQuery)) score = 30;
 
-		// Directories get a bonus to appear first
 		if (isDirectory && score > 0) score += 10;
 
 		return score;
 	}
 
-	// Fuzzy file search using fd (fast, respects .gitignore)
 	private async getFuzzyFileSuggestions(
 		query: string,
 		options: { isQuotedPrefix: boolean; signal: AbortSignal },
@@ -783,7 +742,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		}
 	}
 
-	// Check if we should trigger file completion (called on Tab key)
 	shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
 		return getSlashCommandContext(lines, cursorLine, cursorCol)?.kind !== "name";
 	}

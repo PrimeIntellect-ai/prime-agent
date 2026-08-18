@@ -1,6 +1,5 @@
 import type { AssistantMessage, AssistantMessageEvent } from "../types.js";
 
-// Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private queue: T[] = [];
 	private waiting: ((value: IteratorResult<T>) => void)[] = [];
@@ -25,7 +24,6 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			this.resolveFinalResult(this.extractResult(event));
 		}
 
-		// Deliver to waiting consumer or queue it
 		const waiter = this.waiting.shift();
 		if (waiter) {
 			waiter({ value: event, done: false });
@@ -39,7 +37,6 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		if (result !== undefined) {
 			this.resolveFinalResult(result);
 		}
-		// Notify all waiting consumers that we're done
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.shift()!;
 			waiter({ value: undefined as any, done: true });

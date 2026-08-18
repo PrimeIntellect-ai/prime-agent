@@ -90,7 +90,6 @@ describe("latexToUnicode", () => {
 	it("keeps underscores literal inside text-mode commands", () => {
 		assert.strictEqual(latexToUnicode("\\text{x_i}"), "x_i");
 		assert.strictEqual(latexToUnicode("\\text{learning_rate} = 0.1"), "learning_rate = 0.1");
-		// Math-mode font commands still apply scripts, as TeX does.
 		assert.strictEqual(latexToUnicode("\\mathrm{x_i}"), "xᵢ");
 	});
 });
@@ -109,7 +108,6 @@ describe("Markdown math rendering", () => {
 	});
 
 	it("renders display math with CRLF line endings", () => {
-		// marked normalizes \r\n before tokenizers run; pin that assumption.
 		const lines = renderPlain("\\[\r\nE = mc^2\r\n\\]\r\n");
 		assert.ok(lines.some((line) => line.includes("E = mc²")));
 	});
@@ -125,7 +123,6 @@ describe("Markdown math rendering", () => {
 	});
 
 	it("keeps underscores inside math out of emphasis", () => {
-		// Without math support, marked would turn _k ... x_ into an em token.
 		const lines = renderPlain("\\[ a_k = b_k + x_k \\]");
 		assert.ok(lines.some((line) => line.includes("aₖ = bₖ + xₖ")));
 	});
@@ -165,8 +162,6 @@ describe("Markdown math rendering", () => {
 	});
 
 	it("renders display math indented four spaces instead of treating it as code", () => {
-		// Models often indent display math; 4-space indents would otherwise lex
-		// as an indented code block and show raw TeX verbatim.
 		const lines = renderPlain("Math:\n\n    \\[\n    E = mc^2\n    \\]\n\n    $$\n    a^2 + b^2 = c^2\n    $$");
 		assert.ok(lines.some((line) => line.includes("E = mc²")));
 		assert.ok(lines.some((line) => line.includes("a² + b² = c²")));
@@ -199,8 +194,6 @@ describe("Markdown math rendering", () => {
 	it("falls back to code/codeBlock theme styles", () => {
 		const markdown = new Markdown("$$x + y$$", 0, 0, defaultMarkdownTheme);
 		const lines = markdown.render(80);
-		// defaultMarkdownTheme has no math entries; block math falls back to
-		// codeBlock (green in the test theme).
 		const mathLine = lines.find((line) => stripAnsi(line).includes("x + y"));
 		assert.ok(mathLine);
 		assert.ok(mathLine.includes("\x1b[32m"));

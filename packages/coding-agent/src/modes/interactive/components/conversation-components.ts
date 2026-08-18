@@ -38,6 +38,7 @@ export interface ConversationComponentsOptions {
 	hiddenThinkingLabel?: string;
 	toolsExpanded?: boolean;
 	agentMessagesExpanded?: boolean;
+	editDiffsExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
 }
 
@@ -71,6 +72,7 @@ export function buildConversationComponents(
 	const pendingTools = new Map<string, ToolExecutionComponent>();
 	const expanded = options.toolsExpanded ?? false;
 	const agentMessagesExpanded = options.agentMessagesExpanded ?? false;
+	const editDiffsExpanded = options.editDiffsExpanded ?? false;
 
 	for (const message of messages) {
 		if (message.role === "assistant") {
@@ -102,6 +104,8 @@ export function buildConversationComponents(
 					options.cwd,
 				);
 				tool.setExpanded(expanded);
+				tool.setAgentMessagesExpanded(agentMessagesExpanded);
+				tool.setEditDiffsExpanded(editDiffsExpanded);
 				tool.markExecutionStarted();
 				tool.setArgsComplete();
 				selectLatestToolExpandHint(components, tool);

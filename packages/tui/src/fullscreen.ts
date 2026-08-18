@@ -7,7 +7,7 @@
 
 import type { TableCellSelectionRegion } from "./selection-metadata.js";
 import { isImageLine } from "./terminal-image.js";
-import { sliceByColumn, stripAnsi, visibleWidth } from "./utils.js";
+import { sliceByColumn, stripAnsi, urlAtColumn, visibleWidth } from "./utils.js";
 
 export const FULLSCREEN_MIN_TRANSCRIPT_ROWS = 3;
 
@@ -105,7 +105,6 @@ export class FullscreenViewport {
 		let dockLines = dock;
 		const dockHeight = clippedFullscreenDockHeight(dockLines.length, height);
 		if (dockLines.length > dockHeight) {
-			// bottom of the dock (editor + footer) wins over widgets above it
 			dockLines = dockLines.slice(dockLines.length - dockHeight);
 		}
 		const windowHeight = height - dockLines.length;
@@ -140,7 +139,6 @@ export class FullscreenViewport {
 		return flipped ? { start: b, end: a } : { start: a, end: b };
 	}
 
-	// Per-line selected column span, or null when the line is outside the selection.
 	private selectionSpan(lineIndex: number, sel: { start: SelectionPoint; end: SelectionPoint }): ColumnSpan | null {
 		if (lineIndex < sel.start.line || lineIndex > sel.end.line) return null;
 		return {
@@ -625,6 +623,19 @@ export class FullscreenViewport {
 		return this.orderedSelection() !== null;
 	}
 
+	/**
+	 * OSC 8 hyperlink URL at a screen position in the last painted frame, or
+	 * null when the position is not over a hyperlink. Covers the transcript
+	 * window, the dock, and composited overlays.
+	 */
+	hyperlinkAt(screenRow: number, screenCol: number): string | null {
+		if (screenRow < 0 || screenCol < 0 || this.lastFrameVisibleHeight === 0) return null;
+		if (screenRow >= this.lastFrameVisibleHeight) return null;
+		const line = this.lastFrame[this.lastFrameVisibleStart + screenRow];
+		if (line === undefined || isImageLine(line)) return null;
+		return urlAtColumn(line, screenCol);
+	}
+
 	/** Row-diff a composed frame against the previous one with absolute addressing. */
 	paint(
 		write: (data: string) => void,
@@ -633,7 +644,6 @@ export class FullscreenViewport {
 		height: number,
 		cursorPos: { row: number; col: number } | null,
 	): void {
-		// over-tall frames (overlay overflow) show their bottom `height` lines
 		if (frame.length > height) {
 			frame = frame.slice(frame.length - height);
 		}

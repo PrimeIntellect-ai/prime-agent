@@ -3,7 +3,6 @@ import type { Theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { keyHint } from "./keybinding-hints.js";
 
-/** Loader wrapped with borders for extension UI */
 export class BorderedLoader extends Container {
 	private loader: CancellableLoader | Loader;
 	private cancellable: boolean;

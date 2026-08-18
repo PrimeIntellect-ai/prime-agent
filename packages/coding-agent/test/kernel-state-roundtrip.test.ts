@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
 
-/** Find a python that can launch an ipykernel and has dill, or null to skip. */
 function resolveKernelPython(): string | null {
 	const candidates = [
 		process.env.PRIME_AGENT_KERNEL_PYTHON,
@@ -98,8 +97,6 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		const cfg = { path, manifestPath: join(dir, "shadow.json") };
 		const writer = new KernelManager({ python: python as string, cwd: dir, snapshot: cfg });
 		try {
-			// Shadow builtins the snapshot helper itself relies on (list/print) plus a
-			// plain builtin-named var (id); the helper must still run and capture them.
 			await writer.execute("list = [10, 20]\nprint = 'shadowed'\nid = 99");
 			const snap = await writer.snapshotState();
 			expect(snap).not.toBeNull();
@@ -127,11 +124,9 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 			snapshot: { path: badPath, manifestPath: join(badDir, "corrupt.json") },
 		});
 		try {
-			// A valid dill file that deserializes to a list, not the expected name->bytes dict.
 			await manager.execute(`import dill\nopen(${JSON.stringify(badPath)}, "wb").write(dill.dumps([1, 2, 3]))`);
 			const restore = await manager.restoreState();
 			expect(restore).toBeNull();
-			// The kernel must still be usable after a failed restore.
 			const echo = await manager.execute("print('alive')");
 			expect(echo.stdout.trim()).toBe("alive");
 		} finally {
@@ -144,12 +139,10 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		const listDir = mkdtempSync(join(tmpdir(), "prime-agent-state-list-"));
 		const manager = new KernelManager({ python: python as string, cwd: listDir });
 		try {
-			// A fresh, unstarted kernel reports no names.
 			expect(await manager.listNamespaceNames()).toBeNull();
 			await manager.execute("alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()");
 			const names = await manager.listNamespaceNames();
 			expect(names).toEqual(expect.arrayContaining(["alpha", "helper"]));
-			// Underscore-prefixed names and the live rlm handle must be filtered out.
 			expect(names).not.toContain("_hidden");
 			expect(names).not.toContain("rlm");
 		} finally {

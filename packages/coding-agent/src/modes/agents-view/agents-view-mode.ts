@@ -81,6 +81,7 @@ import {
 	getAgentsViewSummaryIdentity as getSummaryIdentity,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
+	isSubagentSummary,
 	migrateAgentsViewIdentitySet,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
@@ -110,8 +111,6 @@ const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
 const COMPLETED_ROW_ICON = "✓";
 const NEEDS_INPUT_ROW_ICON = "●";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
-// Tags a spawn-code line so finalize can wrap the whole row in a panel
-// background, visually segmenting the program from the agent rows.
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
 
 export interface AgentsViewModeOptions {
@@ -158,7 +157,6 @@ export type AgentsViewPersistentState = {
 	// Ancestor chain to re-expand on return to a nested agent. Kept by sessionId,
 	// not row identity, so it survives an active→persisted identity flip.
 	pendingExpandedAncestorSessionIds?: string[];
-	// Shared with each view instance so in-place expansion mutations survive remounts.
 	expandedSubagentParents?: Set<string>;
 	programShownParents?: Set<string>;
 	statusMessage?: string;
@@ -2552,11 +2550,16 @@ export class AgentsViewMode implements Component, Focusable {
 			: pendingKill
 				? `${keyText("app.agents.delete")} again to ${row.section === "running" ? "stop" : "delete"}`
 				: styleRowTitle(row);
-		// Append the background summary as a dim suffix on the same line, e.g.
-		// "fix auth · Refactoring token validation". Hidden during delete/stop
-		// confirmations so the warning text stands alone.
+		// Keep stable model information ahead of the variable summary so narrow rows truncate the summary first.
 		const summaryText = !pendingDelete && !pendingKill ? row.summary.summary : undefined;
-		const titleContent = summaryText ? `${title} ${theme.fg("dim", `· ${summaryText}`)}` : title;
+		const modelLabel =
+			isSubagentSummary(row.summary) && !pendingDelete && !pendingKill && row.summary.model
+				? `${row.summary.model.provider}/${row.summary.model.id}${row.summary.thinkingLevel && row.summary.thinkingLevel !== "off" ? `:${row.summary.thinkingLevel}` : ""}`
+				: undefined;
+		const suffixes = [modelLabel, summaryText].filter(
+			(suffix): suffix is string => suffix !== undefined && suffix.length > 0,
+		);
+		const titleContent = suffixes.length > 0 ? `${title} ${theme.fg("dim", `· ${suffixes.join(" · ")}`)}` : title;
 		const titleCell = formatTableCell(titleContent, titleWidth);
 		const cells = [
 			icon,

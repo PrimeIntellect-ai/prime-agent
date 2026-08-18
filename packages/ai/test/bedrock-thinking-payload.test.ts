@@ -180,11 +180,9 @@ describe("Application inference profile support", () => {
 			if (event.type === "error") break;
 		}
 
-		// System prompt should have a cache point
 		expect(capturedPayload.system).toHaveLength(2);
 		expect(capturedPayload.system[1]).toHaveProperty("cachePoint");
 
-		// Last user message should have a cache point
 		const lastMsg = capturedPayload.messages[capturedPayload.messages.length - 1];
 		const lastContent = lastMsg.content[lastMsg.content.length - 1];
 		expect(lastContent).toHaveProperty("cachePoint");

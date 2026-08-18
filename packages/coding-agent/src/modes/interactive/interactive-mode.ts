@@ -1,8 +1,3 @@
-/**
- * Interactive mode for the coding agent.
- * Handles TUI rendering and user interaction, delegating agent execution to AgentConnection.
- */
-
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -116,6 +111,7 @@ import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-infe
 import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
+import { resolveSessionPath, SessionSelectorError, SessionSelectorNotFoundError } from "../../core/session-resolver.js";
 import { parseSkillBlock } from "../../core/skill-blocks.js";
 import {
 	BUILTIN_SLASH_COMMANDS,
@@ -265,7 +261,6 @@ import {
 } from "./theme/theme.js";
 import { setWorkingPulseFrame, WORKING_ICON_INTERVAL_MS } from "./theme/working-icon.js";
 
-/** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
 }
@@ -318,6 +313,32 @@ export function styleQueuedMessagePreview(
 
 function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
+}
+
+interface AgentMessagesExpandable {
+	setAgentMessagesExpanded(expanded: boolean): void;
+}
+
+function hasAgentMessagesExpansion(obj: unknown): obj is AgentMessagesExpandable {
+	return (
+		typeof obj === "object" &&
+		obj !== null &&
+		"setAgentMessagesExpanded" in obj &&
+		typeof (obj as AgentMessagesExpandable).setAgentMessagesExpanded === "function"
+	);
+}
+
+interface EditDiffsExpandable {
+	setEditDiffsExpanded(expanded: boolean): void;
+}
+
+function hasEditDiffsExpansion(obj: unknown): obj is EditDiffsExpandable {
+	return (
+		typeof obj === "object" &&
+		obj !== null &&
+		"setEditDiffsExpanded" in obj &&
+		typeof (obj as EditDiffsExpandable).setEditDiffsExpanded === "function"
+	);
 }
 
 class ExpandableText extends Text implements Expandable {
@@ -440,7 +461,7 @@ export class BrandSplashHeader implements Component {
 		};
 		const extraMetadata = this.options.getExtraMetadata?.() ?? [];
 		const hideStartHint = this.options.getHideStartHint?.() ?? false;
-		const startHint = this.options.getStartHint?.() ?? "type to start";
+		const startHint = this.options.getStartHint?.() ?? "type to search sessions";
 		const metaLines = showMeta
 			? [
 					labelled("version", `v${this.version}`),
@@ -744,9 +765,6 @@ export function resolveInteractiveUpdateDaemonSocketPath(
 	return socketFlagIndex === -1 ? activeDaemonSocketPath : (args[socketFlagIndex + 1] ?? activeDaemonSocketPath);
 }
 
-/**
- * Options for InteractiveMode initialization.
- */
 export interface InteractiveInitialPrompt {
 	text: string;
 	images?: ImageContent[];
@@ -896,13 +914,11 @@ export class InteractiveMode {
 	private escapeRepeatTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private anthropicSubscriptionWarningShown = false;
 
-	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
 	private lastGoalAnnouncement: GoalAnnouncementSnapshot | undefined = undefined;
 	private goalTrayTimer: NodeJS.Timeout | undefined = undefined;
 
-	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
 	private sideQuestionComponent: SideQuestionComponent | undefined;
@@ -931,7 +947,6 @@ export class InteractiveMode {
 	private sessionEventGeneration = 0;
 	private fastModeToggleQueue: Promise<void> = Promise.resolve();
 
-	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private ipythonToolComponents = new Map<string, ToolExecutionComponent>();
 	private lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
@@ -946,14 +961,12 @@ export class InteractiveMode {
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
 	private rlmNodeId: string | undefined;
 
-	// Tool output expansion state
 	private toolOutputExpanded = false;
 	private agentMessagesExpanded = false;
+	private editDiffsExpanded = false;
 
-	// Thinking block visibility state
 	private hideThinkingBlock = false;
 
-	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
 	private connectionCommands: AgentConnectionSlashCommand[] = [];
 	private connectionModels: AgentConnectionModel[] = [];
@@ -981,14 +994,11 @@ export class InteractiveMode {
 	private pastedImages = new Map<number, ImageContent>();
 	private nextImageMarkerId = 1;
 
-	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
-	// Auto-compaction state
 	private autoCompactionLoader: Loader | undefined = undefined;
 
-	// Auto-retry state
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
 	private traceUploadAllAbortController: AbortController | undefined = undefined;
@@ -1000,17 +1010,14 @@ export class InteractiveMode {
 	private queueMutationChain: Promise<void> = Promise.resolve();
 	private pendingQueueEdit: symbol | undefined;
 
-	// Shutdown state
 	private shutdownRequested = false;
 
-	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
 	private extensionInput: ExtensionInputComponent | undefined = undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
 	private extensionTerminalInputUnsubscribers = new Set<() => void>();
 	private activeConnectionExtensionUiRequests = new Map<string, { cancelLocal: () => void }>();
 
-	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
@@ -1020,16 +1027,12 @@ export class InteractiveMode {
 	private recapContainer!: Container;
 	private sessionRecap: string | undefined;
 
-	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
 
-	// Header container that holds the built-in or custom header
 	private headerContainer: Container;
 
-	// Built-in header (logo + keybinding hints)
 	private builtInHeader: Component | undefined = undefined;
 
-	// Custom header from extension (undefined = use built-in header)
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private getLocalSessionHost(): InteractiveModeLocalSessionHost {
@@ -1121,10 +1124,8 @@ export class InteractiveMode {
 		this.footer.setAutoCompactEnabled(this.settingsManager.getCompactionEnabled());
 		this.setGoalAnnouncementBaseline(emptyGoalState());
 
-		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 
-		// Register themes from resource loader and initialize
 		setRegisteredThemes(this.uiServices.getThemes());
 		initTheme(this.settingsManager.getTheme(), true);
 	}
@@ -1252,7 +1253,6 @@ export class InteractiveMode {
 	}
 
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
-		// Define commands for autocomplete
 		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.filter(
 			(command) => command.name !== "fast" || this.currentModelSupportsFastMode(),
 		).map((command) => ({
@@ -1295,7 +1295,6 @@ export class InteractiveMode {
 				...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
 			}));
 
-		// Convert extension commands to SlashCommand format
 		const extensionCommands: SlashCommand[] = connectionCommands
 			.filter((cmd) => cmd.source === "extension")
 			.filter((cmd) => !isBuiltinSlashCommandName(cmd.name))
@@ -1308,7 +1307,6 @@ export class InteractiveMode {
 					: undefined,
 			}));
 
-		// Build skill commands from session.skills (if enabled)
 		this.skillCommands.clear();
 		const skillCommandList: SlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
@@ -1355,7 +1353,6 @@ export class InteractiveMode {
 			this.showWarning(formatMissingRipgrepMessage(rgResult));
 		}
 
-		// Add header container as first child
 		this.ui.addChild(this.headerContainer);
 
 		// Brand splash: side-panel layout with structured runtime metadata on the right.
@@ -1377,6 +1374,7 @@ export class InteractiveMode {
 						hint("app.model.select", "to select model"),
 						hint("app.tools.expand", "to expand tools"),
 						hint("app.messages.expand", "to expand agent messages"),
+						hint("app.edits.expand", "to expand edit diffs"),
 						hint("app.thinking.toggle", "to expand thinking"),
 						hint("app.subagents.focus", "to inspect subagents"),
 						hint("app.editor.external", "for external editor"),
@@ -1428,7 +1426,6 @@ export class InteractiveMode {
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();
 
-		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
 		this.fullscreenEnabled =
 			(this.options.forceFullscreen === true || this.settingsManager.getFullscreen()) &&
@@ -1438,31 +1435,23 @@ export class InteractiveMode {
 		}
 		this.isInitialized = true;
 
-		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
 
-		// Render initial messages AFTER showing loaded resources
 		await this.renderInitialMessages();
 
-		// Set up theme file watcher
 		onThemeChange(() => {
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
 			this.ui.requestRender();
 		});
 
-		// Set up git branch watcher (uses provider instead of footer)
 		this.footerDataProvider.onBranchChange(() => {
 			this.ui.requestRender();
 		});
 
-		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
 	}
 
-	/**
-	 * Update terminal title with session name and cwd.
-	 */
 	private updateTerminalTitle(): void {
 		const cwdBasename = path.basename(this.getCurrentCwd());
 		const sessionName = this.getCurrentSessionName();
@@ -1473,12 +1462,9 @@ export class InteractiveMode {
 		}
 	}
 
-	/**
-	 * Run the interactive mode. This is the main entry point.
-	 * Initializes the UI, shows warnings, processes initial messages, and starts the interactive loop.
-	 */
 	async run(): Promise<InteractiveModeRunResult> {
 		await this.init();
+		this.restorePromptStashOnOpen();
 
 		// Global, environment-scoped notices (app update, extension updates, tmux setup)
 		// belong on the agents view, not in a conversation. When the agents view already
@@ -1496,7 +1482,6 @@ export class InteractiveMode {
 			: undefined;
 		const tmuxKeyboardWarningPromise = ownsGlobalStartupNotices ? checkTmuxKeyboardSetup() : undefined;
 
-		// Show startup warnings
 		const {
 			migratedProviders,
 			modelFallbackMessage,
@@ -1803,10 +1788,6 @@ export class InteractiveMode {
 		};
 	}
 
-	// =========================================================================
-	// Extension System
-	// =========================================================================
-
 	private formatDisplayPath(p: string): string {
 		const home = os.homedir();
 		let result = p;
@@ -1840,9 +1821,6 @@ export class InteractiveMode {
 		return this.options.verbose || this.toolOutputExpanded;
 	}
 
-	/**
-	 * Get a short path relative to the package root for display.
-	 */
 	private getShortPath(fullPath: string, sourceInfo?: AgentConnectionSourceInfo): string {
 		const baseDir = sourceInfo?.baseDir;
 		if (baseDir && this.isPackageSource(sourceInfo)) {
@@ -3018,6 +2996,8 @@ export class InteractiveMode {
 				this.getCurrentCwd(),
 			);
 			component.setExpanded(this.toolOutputExpanded);
+			component.setAgentMessagesExpanded(this.agentMessagesExpanded);
+			component.setEditDiffsExpanded(this.editDiffsExpanded);
 			if (this.startedToolCalls.has(latestToolCall.id)) {
 				component.markExecutionStarted();
 			}
@@ -3079,14 +3059,10 @@ export class InteractiveMode {
 		);
 	}
 
-	/**
-	 * Set up keyboard shortcuts registered by extensions.
-	 */
 	private setupExtensionShortcuts(extensionRunner: ExtensionRunner): void {
 		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
 		if (shortcuts.size === 0) return;
 
-		// Create a context for shortcut handlers
 		const localSessionHost = this.getLocalSessionHost();
 		const createContext = (): ExtensionContext => ({
 			ui: this.createExtensionUIContext(),
@@ -3117,12 +3093,9 @@ export class InteractiveMode {
 			getSystemPrompt: () => localSessionHost.getSystemPrompt(),
 		});
 
-		// Set up the extension shortcut handler on the default editor
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
 			for (const [shortcutStr, shortcut] of shortcuts) {
-				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
-					// Run handler async, don't block input
 					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
 						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
 					});
@@ -3133,9 +3106,6 @@ export class InteractiveMode {
 		};
 	}
 
-	/**
-	 * Set extension status text in the footer.
-	 */
 	private setExtensionStatus(key: string, text: string | undefined): void {
 		this.footerDataProvider.setExtensionStatus(key, text);
 		this.ui.requestRender();
@@ -3461,9 +3431,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/**
-	 * Set an extension widget (string array or custom component).
-	 */
 	private setExtensionWidget(
 		key: string,
 		content: string[] | ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined,
@@ -3487,7 +3454,6 @@ export class InteractiveMode {
 		let component: Component & { dispose?(): void };
 
 		if (Array.isArray(content)) {
-			// Wrap string array in a Container with Text components
 			const container = new Container();
 			for (const line of content.slice(0, InteractiveMode.MAX_WIDGET_LINES)) {
 				container.addChild(new Text(line, 1, 0));
@@ -3497,7 +3463,6 @@ export class InteractiveMode {
 			}
 			component = container;
 		} else {
-			// Factory function - create component
 			component = content(this.ui, theme);
 		}
 
@@ -3551,12 +3516,8 @@ export class InteractiveMode {
 		this.setHiddenThinkingLabel();
 	}
 
-	// Maximum total widget lines to prevent viewport overflow
 	private static readonly MAX_WIDGET_LINES = 10;
 
-	/**
-	 * Render all extension widgets to the widget container.
-	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
 		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
@@ -3606,15 +3567,11 @@ export class InteractiveMode {
 		}
 	}
 
-	/**
-	 * Set a custom footer component, or restore the built-in footer.
-	 */
 	private setExtensionFooter(
 		factory:
 			| ((tui: TUI, thm: Theme, footerData: ReadonlyFooterDataProvider) => Component & { dispose?(): void })
 			| undefined,
 	): void {
-		// Dispose existing custom footer
 		if (this.customFooter?.dispose) {
 			this.customFooter.dispose();
 		}
@@ -3636,16 +3593,12 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/**
-	 * Set a custom header component, or restore the built-in header.
-	 */
 	private setExtensionHeader(factory: ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined): void {
 		// Header may not be initialized yet if called during early initialization
 		if (!this.builtInHeader) {
 			return;
 		}
 
-		// Dispose existing custom header
 		if (this.customHeader?.dispose) {
 			this.customHeader.dispose();
 		}
@@ -3655,7 +3608,6 @@ export class InteractiveMode {
 		const index = this.headerContainer.children.indexOf(currentHeader);
 
 		if (factory) {
-			// Create and add custom header
 			this.customHeader = factory(this.ui, theme);
 			if (isExpandable(this.customHeader)) {
 				this.customHeader.setExpanded(this.toolOutputExpanded);
@@ -3667,7 +3619,6 @@ export class InteractiveMode {
 				this.headerContainer.children.unshift(this.customHeader);
 			}
 		} else {
-			// Restore built-in header
 			this.customHeader = undefined;
 			if (isExpandable(this.builtInHeader)) {
 				this.builtInHeader.setExpanded(this.toolOutputExpanded);
@@ -3698,9 +3649,6 @@ export class InteractiveMode {
 		this.extensionTerminalInputUnsubscribers.clear();
 	}
 
-	/**
-	 * Create the ExtensionUIContext for extensions.
-	 */
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
@@ -3758,9 +3706,6 @@ export class InteractiveMode {
 		};
 	}
 
-	/**
-	 * Show a selector for extensions.
-	 */
 	private showExtensionSelector(
 		title: string,
 		options: string[],
@@ -3801,9 +3746,6 @@ export class InteractiveMode {
 		});
 	}
 
-	/**
-	 * Hide the extension selector.
-	 */
 	private hideExtensionSelector(): void {
 		this.extensionSelector?.dispose();
 		this.editorContainer.clear();
@@ -3813,9 +3755,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/**
-	 * Show a confirmation dialog for extensions.
-	 */
 	private async showExtensionConfirm(
 		title: string,
 		message: string,
@@ -3833,9 +3772,6 @@ export class InteractiveMode {
 		return confirmed ? error.issue.fallbackCwd : undefined;
 	}
 
-	/**
-	 * Show a text input for extensions.
-	 */
 	private showExtensionInput(
 		title: string,
 		placeholder?: string,
@@ -3876,9 +3812,6 @@ export class InteractiveMode {
 		});
 	}
 
-	/**
-	 * Hide the extension input.
-	 */
 	private hideExtensionInput(): void {
 		this.extensionInput?.dispose();
 		this.editorContainer.clear();
@@ -3888,9 +3821,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/**
-	 * Show a multi-line editor for extensions (with Ctrl+G support).
-	 */
 	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			this.extensionEditor = new ExtensionEditorComponent(
@@ -3915,9 +3845,6 @@ export class InteractiveMode {
 		});
 	}
 
-	/**
-	 * Hide the extension editor.
-	 */
 	private hideExtensionEditor(): void {
 		this.editorContainer.clear();
 		this.editorContainer.addChild(this.editor);
@@ -3926,10 +3853,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/**
-	 * Set a custom editor component from an extension.
-	 * Pass undefined to restore the default editor.
-	 */
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
 		this.editorComponentFactory = factory;
 		// Snapshot the current editor before replacing it. Paste markers are only
@@ -4026,9 +3949,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/**
-	 * Show a notification for extensions.
-	 */
 	private showExtensionNotify(message: string, type?: "info" | "warning" | "error"): void {
 		if (type === "error") {
 			this.showError(message);
@@ -4139,10 +4059,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	// =========================================================================
-	// Key Handlers
-	// =========================================================================
-
 	private setupKeyHandlers(): void {
 		this.defaultEditor.getHeaderLine = () => this.getQueueSelectionHeader();
 		// Set up handlers on defaultEditor - they use this.editor for text access
@@ -4151,7 +4067,6 @@ export class InteractiveMode {
 			this.handleEscape();
 		};
 
-		// Register app action handlers
 		this.defaultEditor.onAction("app.clear", () => this.handleCtrlC());
 		this.defaultEditor.onAction("app.interrupt", () => this.handleInterruptKey());
 		this.defaultEditor.onAction("app.shortcuts", () => this.showShortcutGuide());
@@ -4165,6 +4080,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.messages.expand", () => this.toggleAgentMessageExpansion());
+		this.defaultEditor.onAction("app.edits.expand", () => this.toggleEditDiffExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
@@ -4202,7 +4118,6 @@ export class InteractiveMode {
 			}
 		};
 
-		// Handle clipboard image paste (triggered on Ctrl+V)
 		this.defaultEditor.onPasteImage = () => {
 			this.handleClipboardImagePaste();
 		};
@@ -4221,6 +4136,27 @@ export class InteractiveMode {
 
 	private snapshotPromptStash(text: string): PromptStash {
 		return this.snapshotPromptStashFrom(this.editor, text);
+	}
+
+	private restorePromptStashOnOpen(): void {
+		if (!this.promptStash?.restoreOnOpen) return;
+		// Land the restore notice in its own status block: init may have just posted
+		// a notice (e.g. compaction) that showStatus would otherwise replace.
+		this.lastStatusText = undefined;
+		this.lastStatusSpacer = undefined;
+		this.restorePromptStashIfEditorEmpty();
+	}
+
+	private stashDraftForAgentsView(): void {
+		const text = this.editor.getText();
+		if (!text.trim()) return;
+		// Head of the durable queue so it restores first on return; an existing
+		// manual stash stays queued behind it and keeps its manual-stash semantics.
+		const existing = [this.promptStashState.stash, ...(this.promptStashState.queuedStashes ?? [])].filter(
+			(stash): stash is PromptStash => stash !== undefined,
+		);
+		this.promptStashState.stash = { ...this.snapshotPromptStash(text), restoreOnOpen: true };
+		this.promptStashState.queuedStashes = existing.length > 0 ? existing : undefined;
 	}
 
 	private handlePromptStash(): void {
@@ -4664,7 +4600,6 @@ export class InteractiveMode {
 					}).catch(() => {});
 				}
 
-				// Handle commands
 				if (commandName === "btw") {
 					this.editor.setText("");
 					await this.handleSideQuestion(commandArgs);
@@ -4833,6 +4768,11 @@ export class InteractiveMode {
 					}
 					this.editor.setText("");
 					await this.handleClearCommand(options);
+					return;
+				}
+				if (commandName === "resume") {
+					this.editor.setText("");
+					await this.handleResumeCommand(commandArgs);
 					return;
 				}
 				if (commandName === "reload" && !commandArgs) {
@@ -5649,7 +5589,6 @@ export class InteractiveMode {
 			}
 
 			case "auto_retry_start": {
-				// Show retry indicator
 				this.stopWorkingLoader();
 				this.statusContainer.clear();
 				this.retryCountdown?.dispose();
@@ -5681,7 +5620,6 @@ export class InteractiveMode {
 					this.retryCountdown.dispose();
 					this.retryCountdown = undefined;
 				}
-				// Stop loader
 				if (this.retryLoader) {
 					this.retryLoader.stop();
 					this.retryLoader = undefined;
@@ -5962,11 +5900,6 @@ export class InteractiveMode {
 	}
 
 	private async openScopedAgentsView(): Promise<void> {
-		if (this.editor.getText().trim()) {
-			this.focusEditor();
-			this.showStatus("Send, stash, or clear your draft before opening agents");
-			return;
-		}
 		if (!this.options.returnToAgentsView) {
 			this.focusEditor();
 			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
@@ -5982,6 +5915,11 @@ export class InteractiveMode {
 		}
 		if (this.keybindings.matches(data, "app.messages.expand")) {
 			this.toggleAgentMessageExpansion();
+			return;
+		}
+		// A raw "\n" is a newline for the editor, not ctrl+j.
+		if (data !== "\n" && this.keybindings.matches(data, "app.edits.expand")) {
+			this.toggleEditDiffExpansion();
 			return;
 		}
 		if (this.keybindings.matches(data, "app.thinking.toggle")) {
@@ -6117,7 +6055,6 @@ export class InteractiveMode {
 		return `${hours}h ${remainingMinutes.toString().padStart(2, "0")}m`;
 	}
 
-	/** Extract text content from a user message */
 	private getUserMessageText(message: Message): string {
 		if (message.role !== "user") return "";
 		const textBlocks =
@@ -6336,14 +6273,12 @@ export class InteractiveMode {
 					}
 					const skillBlock = parseSkillBlock(textContent);
 					if (skillBlock) {
-						// Render skill block (collapsible)
 						const component = new SkillInvocationMessageComponent(
 							skillBlock,
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
-						// Render user message separately if present
 						if (skillBlock.userMessage) {
 							const userComponent = new UserMessageComponent(
 								skillBlock.userMessage,
@@ -6383,7 +6318,6 @@ export class InteractiveMode {
 				break;
 			}
 			case "toolResult": {
-				// Tool results are rendered inline with tool calls, handled separately
 				break;
 			}
 			default: {
@@ -6499,6 +6433,8 @@ export class InteractiveMode {
 							this.getCurrentCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
+						component.setAgentMessagesExpanded(this.agentMessagesExpanded);
+						component.setEditDiffsExpanded(this.editDiffsExpanded);
 						selectLatestToolExpandHint(this.chatContainer.children, component);
 						this.chatContainer.addChild(component);
 						this.registerIpythonToolComponent(content.name, content.id, component);
@@ -6608,10 +6544,6 @@ export class InteractiveMode {
 		const context = await this.agentConnection.getSessionContext();
 		await this.renderSessionContext(context, { clearChat: true });
 	}
-
-	// =========================================================================
-	// Key handlers
-	// =========================================================================
 
 	private handleEscape(): void {
 		this.clearCtrlCExitHint();
@@ -6740,7 +6672,6 @@ export class InteractiveMode {
 	}
 
 	private handleCtrlD(): void {
-		// Only called when editor is empty (enforced by CustomEditor)
 		void this.shutdown();
 	}
 
@@ -6803,10 +6734,6 @@ export class InteractiveMode {
 	}
 
 	private async requestAgentsView(): Promise<void> {
-		if (this.editor.getText().length > 0) {
-			this.showStatus("Send, stash, or clear your draft before opening agents");
-			return;
-		}
 		if (!this.options.returnToAgentsView) {
 			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
 			return;
@@ -6816,6 +6743,7 @@ export class InteractiveMode {
 
 	private async returnToAgentsView(request: InteractiveModeRunResult["type"] = "agents_view"): Promise<void> {
 		if (this.isShuttingDown || this.agentsViewRequest) return;
+		this.stashDraftForAgentsView();
 		this.agentsViewRequest = request;
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
@@ -7249,6 +7177,11 @@ export class InteractiveMode {
 		this.applyChatExpansion();
 	}
 
+	private toggleEditDiffExpansion(): void {
+		this.editDiffsExpanded = !this.editDiffsExpanded;
+		this.applyChatExpansion();
+	}
+
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
 		this.applyChatExpansion();
@@ -7267,6 +7200,12 @@ export class InteractiveMode {
 		for (const child of this.chatContainer.children) {
 			if (isExpandable(child)) {
 				child.setExpanded(this.expansionStateFor(child));
+			}
+			if (hasAgentMessagesExpansion(child)) {
+				child.setAgentMessagesExpanded(this.agentMessagesExpanded);
+			}
+			if (hasEditDiffsExpansion(child)) {
+				child.setEditDiffsExpanded(this.editDiffsExpanded);
 			}
 		}
 		// Expanding/collapsing changes blocks above the viewport, which would
@@ -7353,10 +7292,6 @@ export class InteractiveMode {
 		}
 	}
 
-	// =========================================================================
-	// UI helpers
-	// =========================================================================
-
 	private clearInputBar(): void {
 		this.clearEscapeRepeat();
 		this.clearCtrlCExitHint({ render: false });
@@ -7388,7 +7323,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/** Get all queued messages from the session-owned connection queue. */
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
 		return {
 			steering: [...this.connectionQueue.steering],
@@ -7432,7 +7366,6 @@ export class InteractiveMode {
 		}
 	}
 
-	/** Move pending bash components from pending area to chat */
 	private flushPendingBashComponents(): void {
 		for (const component of this.pendingBashComponents) {
 			this.pendingMessagesContainer.removeChild(component);
@@ -7440,10 +7373,6 @@ export class InteractiveMode {
 		}
 		this.pendingBashComponents = [];
 	}
-
-	// =========================================================================
-	// Selectors
-	// =========================================================================
 
 	/**
 	 * Shows a selector component in place of the editor.
@@ -7861,7 +7790,6 @@ export class InteractiveMode {
 		return scopedModels;
 	}
 
-	/** Update the footer's available provider count from current model candidates */
 	private async updateAvailableProviderCount(): Promise<void> {
 		const models = await this.getModelCandidates();
 		const uniqueProviders = new Set(models.map((m) => m.provider));
@@ -8429,6 +8357,30 @@ export class InteractiveMode {
 		});
 	}
 
+	private async handleResumeCommand(args: string): Promise<void> {
+		const selector = args.trim();
+		if (!selector) {
+			await this.requestAgentsView();
+			return;
+		}
+		let sessionPath: string;
+		try {
+			sessionPath = (await resolveSessionPath(selector, this.getCurrentCwd(), this.connectionState?.sessionDir))
+				.path;
+		} catch (error) {
+			if (error instanceof SessionSelectorError) {
+				const suggestion =
+					error instanceof SessionSelectorNotFoundError && error.suggestion
+						? ` Did you mean '${error.suggestion}'?`
+						: "";
+				this.showError(`${error.message}.${suggestion}`);
+				return;
+			}
+			throw error;
+		}
+		await this.handleResumeSession(sessionPath);
+	}
+
 	private async handleResumeSession(
 		sessionPath: string,
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
@@ -8649,10 +8601,6 @@ export class InteractiveMode {
 			await this.handleReloadCommand();
 		}
 	}
-
-	// =========================================================================
-	// Command handlers
-	// =========================================================================
 
 	private async handleUpdateCommand(args: string): Promise<void> {
 		const entrypoint = process.argv[1];
@@ -9646,9 +9594,6 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/**
-	 * Capitalize keybinding for display (e.g., "ctrl+c" -> "Ctrl+C").
-	 */
 	private capitalizeKey(key: string): string {
 		return key
 			.split("/")
@@ -9661,16 +9606,10 @@ export class InteractiveMode {
 			.join("/");
 	}
 
-	/**
-	 * Get capitalized display string for an app keybinding action.
-	 */
 	private getAppKeyDisplay(action: AppKeybinding): string {
 		return this.capitalizeKey(keyText(action));
 	}
 
-	/**
-	 * Get capitalized display string for an editor keybinding action.
-	 */
 	private getEditorKeyDisplay(action: Keybinding): string {
 		return this.capitalizeKey(keyText(action));
 	}
@@ -9683,6 +9622,7 @@ export class InteractiveMode {
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
+		const expandEdits = this.getAppKeyDisplay("app.edits.expand");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const promptStash = this.getAppKeyDisplay("app.prompt.stash");
@@ -9696,7 +9636,7 @@ export class InteractiveMode {
 
 **Controls**
 \`${selectModel}\` select model · \`/effort\` set reasoning · \`${expandTools}\` tool output
-\`${expandMessages}\` agent messages · \`${toggleThinking}\` thinking blocks · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
+\`${expandMessages}\` agent messages · \`${expandEdits}\` edit diffs · \`${toggleThinking}\` thinking blocks · \`${promptStash}\` stash prompt · \`${externalEditor}\` edit in \`$EDITOR\`
 \`${pasteImage}\` paste image
 
 **Help**
@@ -9735,6 +9675,7 @@ ${shortcutsKey ? `\`${shortcutsKey}\` quick shortcuts · ` : ""}\`/hotkeys\` ful
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const expandMessages = this.getAppKeyDisplay("app.messages.expand");
+		const expandEdits = this.getAppKeyDisplay("app.edits.expand");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const focusSubagents = this.getAppKeyDisplay("app.subagents.focus");
 		const manageHeartbeats = this.getAppKeyDisplay("app.heartbeats.open");
@@ -9784,6 +9725,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 | \`${selectModel}\` | Open model selector |
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${expandMessages}\` | Toggle agent message expansion |
+| \`${expandEdits}\` | Toggle edit diff expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${focusSubagents}\` | Focus the subagent summary / open the scoped agents view |
 | \`${manageHeartbeats}\` | Manage heartbeats |
@@ -9803,6 +9745,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 | \`${viewportFollow}\` | Scroll to bottom and follow output |
 | mouse wheel | Scroll transcript |
 | mouse drag | Select and copy text |
+| mouse click on link | Open link in browser |
 `;
 
 		const shortcuts = this.bindLocalSessionExtensions

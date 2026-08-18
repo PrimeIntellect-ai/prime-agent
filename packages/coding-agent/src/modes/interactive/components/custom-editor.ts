@@ -198,9 +198,11 @@ export class CustomEditor extends Editor {
 			// Fall through to editor handling for delete-char-forward when not empty
 		}
 
-		// Check all other app actions
+		// Check all other app actions. A raw "\n" is Shift+Enter's newline in some
+		// terminals, so it goes to the editor even though it decodes as ctrl+j.
 		for (const [action, handler] of this.actionHandlers) {
 			if (
+				data !== "\n" &&
 				action !== "app.input.clear" &&
 				action !== "app.exit" &&
 				(action !== "app.shortcuts" || this.getText().length === 0) &&
@@ -218,7 +220,7 @@ export class CustomEditor extends Editor {
 			this.keybindings.matches(data, "tui.editor.cursorDown") &&
 			!this.isShowingAutocomplete() &&
 			!this.isHistoryNavigationActive() &&
-			this.isCursorOnLastVisualLine() &&
+			this.isCursorAtEnd() &&
 			this.onMoveBelowPrompt?.()
 		) {
 			return;
@@ -226,6 +228,12 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for editor handling
 		super.handleInput(data);
+	}
+
+	private isCursorAtEnd(): boolean {
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		return cursor.line === lines.length - 1 && cursor.col === (lines[cursor.line]?.length ?? 0);
 	}
 
 	private splitRepeatedKeybinding(data: string, keybinding: AppKeybinding): string[] | undefined {

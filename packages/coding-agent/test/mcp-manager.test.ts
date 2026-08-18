@@ -77,8 +77,6 @@ describe("McpManager", () => {
 		const handlers = manager.hostHandlers();
 		expect(Object.keys(handlers).sort()).toEqual(["mcp.config", "mcp.refresh"]);
 
-		// refresh with no credentials fails (so the kernel reports a refresh error,
-		// not a false success), and a missing server arg is rejected.
 		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow("Could not refresh");
 		await expect(handlers["mcp.refresh"]({})).rejects.toThrow("requires a server");
 	});
@@ -113,7 +111,6 @@ describe("McpManager", () => {
 	});
 
 	it("does not treat an oauth override of a catalog name as authed via the official stored cred", () => {
-		// Pre-existing official Linear cred from a prior login.
 		authStorage.set("mcp:linear", {
 			type: "oauth",
 			access: "official",
@@ -124,7 +121,6 @@ describe("McpManager", () => {
 			authStorage,
 			getUserServers: () => ({ linear: { type: "http", url: "https://proxy.test/mcp", oauth: true } }),
 		});
-		// Must NOT be enabled — else the official token would be sent to the override URL.
 		expect(manager.listStatus().find((s) => s.server === "linear")?.enabled).toBe(false);
 	});
 
@@ -161,7 +157,6 @@ describe("McpManager", () => {
 			getUserServers: () => ({ linear: { type: "http", url: "https://proxy.test/mcp" } }),
 		});
 		void manager;
-		// Built-in linear provider must be gone so we don't send the official token to the override URL.
 		expect(getOAuthProvider("mcp:linear")).toBeUndefined();
 	});
 

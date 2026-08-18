@@ -881,7 +881,8 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("uses OpenRouter reasoning object instead of reasoning_effort", async () => {
-		const model = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const model = { ...baseModel, compat: { ...baseModel.compat, supportsReasoningEffort: true } };
 		let payload: unknown;
 
 		await streamSimple(
@@ -910,5 +911,121 @@ describe("openai-completions tool_choice", () => {
 		};
 		expect(params.reasoning).toEqual({ effort: "high" });
 		expect(params.reasoning_effort).toBeUndefined();
+	});
+
+	it("preserves the OpenRouter model default when reasoning is unspecified", async () => {
+		const model = getModel("openrouter", "deepseek/deepseek-r1")!;
+		let payload: unknown;
+
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{
+				apiKey: "test",
+				onPayload: (params: unknown) => {
+					payload = params;
+				},
+			},
+		).result();
+
+		expect((payload as { reasoning?: unknown }).reasoning).toBeUndefined();
+	});
+
+	it("distinguishes omitted reasoning from explicit off for Prime effort models", async () => {
+		const model = getModel("prime-inference", "moonshotai/kimi-k3")!;
+		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
+		let payload: unknown;
+
+		await streamSimple(model, context, {
+			apiKey: "test",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBeUndefined();
+
+		await streamSimple(model, context, {
+			apiKey: "test",
+			reasoning: "off",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
+	});
+
+	it("serializes explicit off only for models that allow disabling reasoning", async () => {
+		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const effortCompat = { ...baseModel.compat, supportsReasoningEffort: true };
+		const optionalModel = { ...baseModel, compat: effortCompat, thinkingLevelMap: { high: "high" } };
+		const mandatoryModel = {
+			...baseModel,
+			compat: effortCompat,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+		};
+		let payload: unknown;
+		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
+
+		await streamSimple(optionalModel, context, {
+			apiKey: "test",
+			reasoning: "off",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning?: unknown }).reasoning).toEqual({ effort: "none" });
+
+		await streamSimple(mandatoryModel, context, {
+			apiKey: "test",
+			reasoning: "off",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning?: unknown }).reasoning).toEqual({ effort: "high" });
+	});
+
+	it("uses enabled toggles when an OpenRouter model has no effort selector", async () => {
+		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const model = {
+			...baseModel,
+			thinkingLevelMap: {
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+			compat: { ...baseModel.compat, supportsReasoningEffort: false },
+		};
+		let payload: unknown;
+		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
+
+		await streamSimple(model, context, {
+			apiKey: "test",
+			reasoning: "high",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning?: unknown }).reasoning).toEqual({ enabled: true });
+
+		await streamSimple(model, context, {
+			apiKey: "test",
+			reasoning: "off",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning?: unknown }).reasoning).toEqual({ enabled: false });
 	});
 });

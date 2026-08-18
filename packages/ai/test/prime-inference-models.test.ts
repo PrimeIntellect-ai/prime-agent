@@ -16,9 +16,6 @@ describe("Prime Inference models", () => {
 	it("registers the Prime Inference catalog", () => {
 		const modelIds = getModels("prime-inference").map((model) => model.id);
 
-		// Lower bound, not an exact count — the catalog grows with each release and an
-		// exact number breaks on every routine addition. The membership checks below
-		// are the meaningful assertions.
 		expect(modelIds.length).toBeGreaterThanOrEqual(90);
 		expect(modelIds).toEqual(
 			expect.arrayContaining([
@@ -63,22 +60,39 @@ describe("Prime Inference models", () => {
 		expect(getModel("prime-inference", "openai/gpt-4o").featured).toBeUndefined();
 	});
 
+	it("uses mandatory provider efforts for Qwen 3.8 Max", () => {
+		const model = getModel("prime-inference", "qwen/qwen3.8-max");
+
+		expect(model.featured).toBe(true);
+		expect(model.thinkingLevelMap).toEqual({
+			off: null,
+			minimal: "minimal",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: null,
+		});
+		expect(getSupportedThinkingLevels(model)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+	});
+
+	it("uses reasoning toggles for models without effort selectors", () => {
+		for (const provider of ["prime-inference", "openrouter"] as const) {
+			const model = getModel(provider, "qwen/qwen3.7-flash");
+
+			expect(model.compat?.supportsReasoningEffort).toBe(false);
+			expect(getSupportedThinkingLevels(model)).toEqual(["off", "high"]);
+			if (provider === "prime-inference") expect(model.compat?.thinkingFormat).toBe("openrouter");
+		}
+	});
+
 	it("registers Kimi K3 on Prime Inference and OpenRouter", () => {
 		for (const provider of ["prime-inference", "openrouter"] as const) {
 			const model = getModel(provider, "moonshotai/kimi-k3");
 
 			expect(model.api).toBe("openai-completions");
 			expect(model.reasoning).toBe(true);
-			expect(model.thinkingLevelMap).toEqual({
-				off: null,
-				minimal: null,
-				low: null,
-				medium: null,
-				high: null,
-				xhigh: null,
-				max: "max",
-			});
-			expect(getSupportedThinkingLevels(model)).toEqual(["max"]);
+			expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "high", "max"]);
 			expect(model.input).toEqual(["text", "image"]);
 			expect(model.contextWindow).toBe(1048576);
 			expect(model.maxTokens).toBe(1048576);
@@ -94,10 +108,6 @@ describe("Prime Inference models", () => {
 		expect(gemini.input).toEqual(["text", "image"]);
 		expect(gemini.reasoning).toBe(true);
 
-		// Modality and reasoning are read from OpenRouter's published spec for the
-		// same upstream model, but the Prime route enforces a smaller window and
-		// output cap than that spec lists (1M/16k), so the curated override wins
-		// for contextWindow and maxTokens.
 		const nemotronSuper = getModel("prime-inference", "nvidia/nemotron-3-super-120b-a12b");
 		expect(nemotronSuper.reasoning).toBe(true);
 		expect(nemotronSuper.input).toEqual(["text"]);
@@ -118,8 +128,7 @@ describe("Prime Inference models", () => {
 		expect(model.provider).toBe("prime-inference");
 		expect(model.baseUrl).toBe("https://api.pinference.ai/api/v1");
 		expect(model.reasoning).toBe(true);
-		expect(model.thinkingLevelMap).toEqual({ xhigh: "xhigh" });
-		expect(getSupportedThinkingLevels(model)).toContain("xhigh");
+		expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "medium", "high", "xhigh"]);
 		expect(model.input).toEqual(["text", "image"]);
 		expect(model.contextWindow).toBe(1050000);
 		expect(model.maxTokens).toBe(128000);
@@ -141,13 +150,11 @@ describe("Prime Inference models", () => {
 	it("marks known reasoning-capable Prime Inference model families", () => {
 		const opus48 = getModel("prime-inference", "anthropic/claude-opus-4.8");
 		expect(opus48.reasoning).toBe(true);
-		expect(opus48.thinkingLevelMap).toEqual({ xhigh: "xhigh", max: "max" });
-		expect(getSupportedThinkingLevels(opus48)).toContain("xhigh");
-		expect(getSupportedThinkingLevels(opus48)).toContain("max");
+		expect(getSupportedThinkingLevels(opus48)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
 
 		const sonnet5 = getModel("prime-inference", "anthropic/claude-sonnet-5");
 		expect(sonnet5.reasoning).toBe(true);
-		expect(sonnet5.thinkingLevelMap).toEqual({ xhigh: "xhigh", max: "max" });
+		expect(getSupportedThinkingLevels(sonnet5)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
 		expect(sonnet5.input).toEqual(["text", "image"]);
 		expect(sonnet5.contextWindow).toBe(1000000);
 		expect(sonnet5.maxTokens).toBe(128000);
@@ -200,8 +207,6 @@ describe("Prime Inference models", () => {
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.6").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-5").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-haiku-4.5").contextWindow).toBe(200000);
-		// Confirmed against the live API: this route serves a 200k window, not the
-		// larger one the upstream model's published spec lists.
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.5").contextWindow).toBe(200000);
 	});
 

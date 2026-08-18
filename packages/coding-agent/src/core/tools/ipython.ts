@@ -1,4 +1,3 @@
-// TODO: reconsider whether the persistent kernel is needed once RLM-1 weights land.
 import { existsSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";

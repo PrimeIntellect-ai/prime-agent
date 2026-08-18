@@ -1,0 +1,34 @@
+name: Linear ticket
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  linear-ticket:
+    name: Check Linear ticket link
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.type != 'Bot'
+    steps:
+      - name: Require a Linear ticket reference or an explicit opt-out
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const text = `${pr.title}\n${pr.body ?? ""}\n${pr.head.ref}`;
+            const ticket = /\beng-\d+\b|linear\.app\/[\w-]+\/issue\/[a-z]+-\d+/i;
+            if (ticket.test(text)) {
+              core.info("Linear ticket reference found.");
+              return;
+            }
+            core.setFailed(
+              [
+                "No Linear ticket is linked in this pull request.",
+                "Add the ticket ID (e.g. ENG-1234) or a linear.app issue link to the PR title or description,",
+                "or use a branch named after the ticket (e.g. eng-1234).",
+              ].join(" "),
+            );

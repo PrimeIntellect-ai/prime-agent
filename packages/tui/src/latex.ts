@@ -11,7 +11,6 @@
  */
 
 const SYMBOLS: Record<string, string> = {
-	// Greek lowercase
 	alpha: "α",
 	beta: "β",
 	gamma: "γ",
@@ -41,7 +40,6 @@ const SYMBOLS: Record<string, string> = {
 	chi: "χ",
 	psi: "ψ",
 	omega: "ω",
-	// Greek uppercase
 	Gamma: "Γ",
 	Delta: "Δ",
 	Theta: "Θ",
@@ -53,7 +51,6 @@ const SYMBOLS: Record<string, string> = {
 	Phi: "Φ",
 	Psi: "Ψ",
 	Omega: "Ω",
-	// Big operators
 	sum: "∑",
 	prod: "∏",
 	coprod: "∐",
@@ -69,7 +66,6 @@ const SYMBOLS: Record<string, string> = {
 	bigvee: "⋁",
 	bigwedge: "⋀",
 	bigsqcup: "⨆",
-	// Binary operators
 	pm: "±",
 	mp: "∓",
 	times: "×",
@@ -96,7 +92,6 @@ const SYMBOLS: Record<string, string> = {
 	uplus: "⊎",
 	dagger: "†",
 	ddagger: "‡",
-	// Relations
 	leq: "≤",
 	le: "≤",
 	geq: "≥",
@@ -135,7 +130,6 @@ const SYMBOLS: Record<string, string> = {
 	triangleq: "≜",
 	coloneqq: "≔",
 	coloneq: "≔",
-	// Arrows
 	to: "→",
 	rightarrow: "→",
 	leftarrow: "←",
@@ -169,7 +163,6 @@ const SYMBOLS: Record<string, string> = {
 	searrow: "↘",
 	nwarrow: "↖",
 	swarrow: "↙",
-	// Misc
 	infty: "∞",
 	partial: "∂",
 	nabla: "∇",
@@ -203,7 +196,6 @@ const SYMBOLS: Record<string, string> = {
 	prime: "′",
 	therefore: "∴",
 	because: "∵",
-	// Dots
 	dots: "…",
 	ldots: "…",
 	dotsc: "…",
@@ -212,7 +204,6 @@ const SYMBOLS: Record<string, string> = {
 	dotsb: "⋯",
 	vdots: "⋮",
 	ddots: "⋱",
-	// Delimiters
 	langle: "⟨",
 	rangle: "⟩",
 	lceil: "⌈",

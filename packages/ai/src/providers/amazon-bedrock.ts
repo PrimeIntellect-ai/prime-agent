@@ -125,18 +125,14 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			hasConfiguredProfile,
 		);
 
-		// Only pin standard AWS Bedrock runtime endpoints when no region/profile is configured.
-		// This preserves custom endpoints (VPC/proxy) from #3402 without forcing built-in
-		// catalog defaults such as us-east-1 to override AWS_REGION/AWS_PROFILE.
+		// Preserve custom endpoints and AWS region/profile configuration.
 		if (useExplicitEndpoint) {
 			config.endpoint = model.baseUrl;
 		}
 
-		// Resolve bearer token for Bedrock API key auth.
 		const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;
 		const useBearerToken = bearerToken !== undefined && process.env.AWS_BEDROCK_SKIP_AUTH !== "1";
 
-		// in Node.js/Bun environment only
 		if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
 			// Region resolution: explicit option > env vars > SDK default chain.
 			// When AWS_PROFILE is set, we leave region undefined so the SDK can
@@ -149,7 +145,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				config.region = "us-east-1";
 			}
 
-			// Support proxies that don't need authentication
 			if (process.env.AWS_BEDROCK_SKIP_AUTH === "1") {
 				config.credentials = {
 					accessKeyId: "dummy-access-key",
@@ -178,7 +173,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 					httpsAgent: agent,
 				});
 			} else if (process.env.AWS_BEDROCK_FORCE_HTTP1 === "1") {
-				// Some custom endpoints require HTTP/1.1 instead of HTTP/2
 				const nodeHttpHandler = await import("@smithy/node-http-handler");
 				config.requestHandler = new nodeHttpHandler.NodeHttpHandler();
 			}
@@ -321,7 +315,7 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const base = buildBaseOptions(model, options, undefined);
-	if (!options?.reasoning) {
+	if (!options?.reasoning || options.reasoning === "off") {
 		return streamBedrock(model, context, { ...base, reasoning: undefined } satisfies BedrockOptions);
 	}
 
@@ -601,11 +595,8 @@ function supportsPromptCaching(model: Model<"bedrock-converse-stream">): boolean
 		if (typeof process !== "undefined" && process.env.AWS_BEDROCK_FORCE_CACHE === "1") return true;
 		return false;
 	}
-	// Claude 4.x models (opus-4, sonnet-4, haiku-4)
 	if (candidates.some((s) => s.includes("-4-"))) return true;
-	// Claude 3.7 Sonnet
 	if (candidates.some((s) => s.includes("claude-3-7-sonnet"))) return true;
-	// Claude 3.5 Haiku
 	if (candidates.some((s) => s.includes("claude-3-5-haiku"))) return true;
 	return false;
 }
@@ -631,7 +622,6 @@ function buildSystemPrompt(
 
 	const blocks: SystemContentBlock[] = [{ text: sanitizeSurrogates(systemPrompt) }];
 
-	// Add cache point for supported Claude models when caching is enabled
 	if (cacheRetention !== "none" && supportsPromptCaching(model)) {
 		blocks.push({
 			cachePoint: { type: CachePointType.DEFAULT, ...(cacheRetention === "long" ? { ttl: CacheTTL.ONE_HOUR } : {}) },
@@ -686,7 +676,6 @@ function convertMessages(
 				for (const c of m.content) {
 					switch (c.type) {
 						case "text":
-							// Skip empty text blocks
 							if (c.text.trim().length === 0) continue;
 							contentBlocks.push({ text: sanitizeSurrogates(c.text) });
 							break;
@@ -696,7 +685,6 @@ function convertMessages(
 							});
 							break;
 						case "thinking":
-							// Skip empty thinking blocks
 							if (c.thinking.trim().length === 0) continue;
 							// Only Anthropic models support the signature field in reasoningText.
 							// For other models, we omit the signature to avoid errors like:
@@ -729,7 +717,6 @@ function convertMessages(
 							throw new Error("Unknown assistant content type");
 					}
 				}
-				// Skip if all content blocks were filtered out
 				if (contentBlocks.length === 0) {
 					continue;
 				}
@@ -744,7 +731,6 @@ function convertMessages(
 				// Bedrock requires all tool results to be in one message
 				const toolResults: ContentBlock.ToolResultMember[] = [];
 
-				// Add current tool result with all content blocks combined
 				toolResults.push({
 					toolResult: {
 						toolUseId: m.toolCallId,
@@ -757,7 +743,6 @@ function convertMessages(
 					},
 				});
 
-				// Look ahead for consecutive toolResult messages
 				let j = i + 1;
 				while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 					const nextMsg = transformedMessages[j] as ToolResultMessage;
@@ -775,7 +760,6 @@ function convertMessages(
 					j++;
 				}
 
-				// Skip the messages we've already processed
 				i = j - 1;
 
 				result.push({
@@ -931,7 +915,6 @@ function buildAdditionalModelRequestFields(
 						max: 16384, // Budget-based Claude has no max tier, clamp to high
 					};
 
-					// Custom budgets override defaults (xhigh/max not in ThinkingBudgets, use high)
 					const level = options.reasoning === "xhigh" || options.reasoning === "max" ? "high" : options.reasoning;
 					const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[options.reasoning];
 

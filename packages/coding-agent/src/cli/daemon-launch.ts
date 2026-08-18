@@ -15,7 +15,7 @@ import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
 import { isSessionSummaryBusy, type SessionSummary } from "../modes/daemon/daemon-session-list.js";
-import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
+import { defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
@@ -569,7 +569,7 @@ export function maybeStartDaemonEarly(args: readonly string[]): void {
 		return;
 	}
 	const socketIndex = args.indexOf("--daemon-socket");
-	const socketPath =
+	const rawSocketPath =
 		socketIndex !== -1 && args[socketIndex + 1] ? (args[socketIndex + 1] as string) : defaultDaemonSocketPath();
 	const cwdIndex = args.indexOf("--cwd");
 	const cwdArg = cwdIndex !== -1 ? args[cwdIndex + 1] : undefined;
@@ -577,5 +577,5 @@ export function maybeStartDaemonEarly(args: readonly string[]): void {
 	if (spawnCwd && !existsSync(spawnCwd)) {
 		return;
 	}
-	void ensureInteractiveDaemonRunning(socketPath, spawnCwd);
+	void ensureInteractiveDaemonRunning(normalizeSocketPath(rawSocketPath, spawnCwd), spawnCwd);
 }

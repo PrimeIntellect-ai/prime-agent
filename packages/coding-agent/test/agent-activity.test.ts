@@ -73,7 +73,6 @@ describe("AgentActivityTracker", () => {
 	});
 
 	test("updates live from the character estimate when streamed usage is stale", () => {
-		// Anthropic reports usage at message start (~1 token) and then again only at the end.
 		const tracker = new AgentActivityTracker();
 		const message = createAssistantMessage(1);
 		tracker.handleEvent({ type: "message_start", message });

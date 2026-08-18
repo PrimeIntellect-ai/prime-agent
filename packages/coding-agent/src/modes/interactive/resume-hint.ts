@@ -1,7 +1,3 @@
-/**
- * Post-exit hint telling the user how to resume the session they just left.
- */
-
 import { existsSync } from "node:fs";
 import chalk from "chalk";
 import { APP_NAME } from "../../config.js";
@@ -9,13 +5,7 @@ import type { SessionStats } from "../../core/session-stats.js";
 
 export type ResumeHintStats = Pick<SessionStats, "sessionId" | "sessionFile" | "userMessages">;
 
-/**
- * Format the resume hint printed to stdout after the TUI exits.
- *
- * Returns undefined when there is nothing to resume: ephemeral sessions
- * (--no-session) have no session file, and sessions without any user
- * messages may never have been flushed to disk.
- */
+/** Omit ephemeral and unflushed empty sessions because neither can be resumed. */
 export function formatResumeHint(stats: ResumeHintStats | undefined): string | undefined {
 	if (!stats?.sessionFile || stats.userMessages === 0) return undefined;
 	// Persistence is lazy: nothing is written until the first assistant message

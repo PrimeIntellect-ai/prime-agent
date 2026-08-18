@@ -207,12 +207,10 @@ describe("SessionManager append and tree traversal", () => {
 		it("returns tree with branches after branch", () => {
 			const session = SessionManager.inMemory();
 
-			// Build: 1 -> 2 -> 3
 			const id1 = session.appendMessage(userMsg("1"));
 			const id2 = session.appendMessage(assistantMsg("2"));
 			const id3 = session.appendMessage(userMsg("3"));
 
-			// Branch from id2, add new path: 2 -> 4
 			session.branch(id2);
 			const id4 = session.appendMessage(userMsg("4-branch"));
 
@@ -237,15 +235,12 @@ describe("SessionManager append and tree traversal", () => {
 			const _id1 = session.appendMessage(userMsg("root"));
 			const id2 = session.appendMessage(assistantMsg("response"));
 
-			// Branch A
 			session.branch(id2);
 			const idA = session.appendMessage(userMsg("branch-A"));
 
-			// Branch B
 			session.branch(id2);
 			const idB = session.appendMessage(userMsg("branch-B"));
 
-			// Branch C
 			session.branch(id2);
 			const idC = session.appendMessage(userMsg("branch-C"));
 
@@ -267,7 +262,6 @@ describe("SessionManager append and tree traversal", () => {
 			const id3 = session.appendMessage(userMsg("3"));
 			const _id4 = session.appendMessage(assistantMsg("4"));
 
-			// Branch from 2: 2 -> 5 -> 6
 			session.branch(id2);
 			const id5 = session.appendMessage(userMsg("5"));
 			const _id6 = session.appendMessage(assistantMsg("6"));
@@ -278,7 +272,6 @@ describe("SessionManager append and tree traversal", () => {
 
 			const tree = session.getTree();
 
-			// Verify structure
 			const node2 = tree[0].children[0];
 			expect(node2.children).toHaveLength(2); // id3 and id5
 
@@ -409,7 +402,6 @@ describe("SessionManager append and tree traversal", () => {
 			const id2 = session.appendMessage(assistantMsg("msg2"));
 			session.appendMessage(userMsg("msg3"));
 
-			// Branch from 2: 2 -> 4
 			session.branch(id2);
 			session.appendMessage(assistantMsg("msg4-branch"));
 
@@ -434,7 +426,6 @@ describe("createBranchedSession", () => {
 	it("creates new session with path to specified leaf (in-memory)", () => {
 		const session = SessionManager.inMemory();
 
-		// Build: 1 -> 2 -> 3 -> 4
 		const id1 = session.appendMessage(userMsg("1"));
 		const id2 = session.appendMessage(assistantMsg("2"));
 		const id3 = session.appendMessage(userMsg("3"));
@@ -448,7 +439,6 @@ describe("createBranchedSession", () => {
 		const result = session.createBranchedSession(id2);
 		expect(result).toBeUndefined(); // in-memory returns null
 
-		// Session should now only have entries 1 and 2
 		const entries = session.getEntries();
 		expect(entries).toHaveLength(2);
 		expect(entries[0].id).toBe(id1);
@@ -458,12 +448,10 @@ describe("createBranchedSession", () => {
 	it("extracts correct path from branched tree", () => {
 		const session = SessionManager.inMemory();
 
-		// Build: 1 -> 2 -> 3
 		const id1 = session.appendMessage(userMsg("1"));
 		const id2 = session.appendMessage(assistantMsg("2"));
 		session.appendMessage(userMsg("3"));
 
-		// Branch from 2: 2 -> 4 -> 5
 		session.branch(id2);
 		const id4 = session.appendMessage(userMsg("4"));
 		const id5 = session.appendMessage(assistantMsg("5"));
@@ -481,7 +469,6 @@ describe("createBranchedSession", () => {
 		mkdirSync(tempDir, { recursive: true });
 
 		try {
-			// Create a persisted session with a couple of turns
 			const session = SessionManager.create(tempDir, tempDir);
 			const id1 = session.appendMessage(userMsg("first question"));
 			session.appendMessage(assistantMsg("first answer"));
@@ -502,7 +489,6 @@ describe("createBranchedSession", () => {
 			// Now the assistant responds
 			session.appendMessage(assistantMsg("new answer"));
 
-			// File should now exist with exactly one header and no duplicate IDs
 			expect(existsSync(newFile!)).toBe(true);
 			const content = readFileSync(newFile!, "utf-8");
 			const lines = content.trim().split("\n").filter(Boolean);
@@ -535,7 +521,6 @@ describe("createBranchedSession", () => {
 			const newFile = session.createBranchedSession(id2);
 			expect(newFile).toBeDefined();
 
-			// Path includes an assistant, so file should be written immediately
 			expect(existsSync(newFile!)).toBe(true);
 			const content = readFileSync(newFile!, "utf-8");
 			const lines = content.trim().split("\n").filter(Boolean);
