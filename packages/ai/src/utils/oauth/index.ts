@@ -7,9 +7,7 @@
  * - GitHub Copilot
  */
 
-// Anthropic
 export { anthropicOAuthProvider, loginAnthropic, refreshAnthropicToken } from "./anthropic.js";
-// GitHub Copilot
 export {
 	getGitHubCopilotBaseUrl,
 	githubCopilotOAuthProvider,
@@ -17,7 +15,6 @@ export {
 	normalizeDomain,
 	refreshGitHubCopilotToken,
 } from "./github-copilot.js";
-// OpenAI Codex (ChatGPT OAuth)
 export { loginOpenAICodex, openaiCodexOAuthProvider, refreshOpenAICodexToken } from "./openai-codex.js";
 
 export * from "./types.js";
@@ -138,7 +135,6 @@ export async function getOAuthApiKey(
 		return null;
 	}
 
-	// Refresh if expired
 	if (Date.now() >= creds.expires) {
 		try {
 			creds = await provider.refreshToken(creds);

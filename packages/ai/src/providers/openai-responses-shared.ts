@@ -510,7 +510,6 @@ export async function processResponsesStream<TApi extends Api>(
 					: (response?.service_tier ?? options.serviceTier);
 				options.applyServiceTierPricing(output.usage, serviceTier);
 			}
-			// Map status to stop reason
 			output.stopReason = mapStopReason(response?.status);
 			if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 				output.stopReason = "toolUse";
@@ -550,7 +549,6 @@ function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): Sto
 		case "failed":
 		case "cancelled":
 			return "error";
-		// These two are wonky ...
 		case "in_progress":
 		case "queued":
 			return "stop";
