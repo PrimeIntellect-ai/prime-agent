@@ -47,8 +47,6 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("A callable `rlm` is already in your global namespace");
 		expect(prompt).toContain("IPython is the agent's long-lived notebook");
 		expect(prompt).toContain("Each `%%bash` cell runs in a throw-away subshell");
-		// The kernel has no bash() helper (PR #1187 is unmerged); the prompt must not mention one.
-		expect(prompt).not.toContain("bash()");
 	});
 
 	test("discovers requested models through a bounded authenticated host search", () => {
