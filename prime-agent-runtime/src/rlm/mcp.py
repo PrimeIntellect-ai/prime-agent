@@ -175,7 +175,7 @@ class _Registry:
             return await generation.call(tool, arguments)
 
     async def reload(self, server: str | None = None) -> None:
-        names = [server] if server is not None else list(self._generations)
+        names = [server] if server is not None else list(set(self._locks) | set(self._generations))
         for name in names:
             lock = self._locks.setdefault(name, asyncio.Lock())
             async with lock:

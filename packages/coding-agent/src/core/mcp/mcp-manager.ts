@@ -24,12 +24,7 @@ interface ResolvedIntegration {
 	server: string;
 	label: string;
 	config: McpServerConfig;
-	url?: string;
 	usesOAuth: boolean;
-	bearerTokenEnvVar?: string;
-	enabled?: boolean;
-	/** Extra static HTTP headers from the user config. */
-	headers?: Record<string, string>;
 	/** True when this came from Settings.mcpServers (may override a catalog name). */
 	userDeclared?: boolean;
 }
@@ -67,7 +62,6 @@ export class McpManager {
 				server: entry.server,
 				label: entry.label,
 				config: { type: "http", url: entry.url, oauth: true },
-				url: entry.url,
 				usesOAuth: entry.oauth?.kind === "oauth",
 			});
 		}
@@ -76,11 +70,7 @@ export class McpManager {
 				server,
 				label: server,
 				config,
-				url: config.type === "http" ? config.url : undefined,
 				usesOAuth: config.type === "http" && config.oauth === true,
-				bearerTokenEnvVar: config.type === "http" ? config.bearerTokenEnvVar : undefined,
-				enabled: config.enabled,
-				headers: config.type === "http" ? config.headers : undefined,
 				userDeclared: true,
 			});
 		}
@@ -109,7 +99,7 @@ export class McpManager {
 					createMcpOAuthProvider({
 						server: integration.server,
 						label: integration.label,
-						url: integration.url!,
+						url: integration.config.url,
 					}),
 				);
 			} else if (getCatalogEntry(integration.server)) {
@@ -127,11 +117,12 @@ export class McpManager {
 
 	/** True when valid credentials exist for the integration (drives enablement). */
 	private isAuthed(integration: ResolvedIntegration): boolean {
-		if (integration.enabled === false) return false;
+		if (integration.config.enabled === false) return false;
 		if (integration.userDeclared && getCatalogEntry(integration.server)) return false;
 		if (integration.config.type === "stdio") return true;
-		if (!integration.usesOAuth && !integration.bearerTokenEnvVar) return true;
-		if (integration.bearerTokenEnvVar && process.env[integration.bearerTokenEnvVar]?.trim()) {
+		const { bearerTokenEnvVar } = integration.config;
+		if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
+		if (bearerTokenEnvVar && process.env[bearerTokenEnvVar]?.trim()) {
 			return true;
 		}
 		const cred = this.authStorage.get(this.providerId(integration.server));

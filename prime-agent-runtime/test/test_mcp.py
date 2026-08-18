@@ -124,6 +124,37 @@ class McpRegistryTest(unittest.TestCase):
         self.assertTrue(first.closed)
         self.assertIs(second, opened[-1])
 
+    def test_reload_waits_for_in_flight_first_open(self):
+        opening = asyncio.Event()
+        release = asyncio.Event()
+        opened = []
+
+        async def config(_server):
+            return {"type": "http", "url": "a"}
+
+        async def open_generation(generation):
+            opened.append(generation)
+            generation.session = FakeSession([])
+            opening.set()
+            await release.wait()
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                first_open = asyncio.create_task(mcp._registry.get("svc"))
+                await opening.wait()
+                reload_all = asyncio.create_task(mcp._registry.reload())
+                await asyncio.sleep(0)
+                self.assertFalse(reload_all.done())
+                release.set()
+                await first_open
+                await reload_all
+
+        run(scenario())
+        self.assertTrue(opened[0].closed)
+        self.assertNotIn("svc", mcp._registry._generations)
+
     def test_startup_failure_cleanup_and_server_isolation(self):
         async def config(server):
             return {"type": "http", "url": server}

@@ -1221,10 +1221,6 @@ export class SettingsManager {
 		return this.settings.enabledModels;
 	}
 
-	getMcpServers(): Record<string, McpServerConfig> | undefined {
-		return this.settings.mcpServers;
-	}
-
 	/** MCP execution is intentionally restricted to user/global settings. */
 	getGlobalMcpServers(): Record<string, McpServerConfig> | undefined {
 		return structuredClone(this.globalSettings.mcpServers);
