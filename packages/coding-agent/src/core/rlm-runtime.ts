@@ -58,7 +58,6 @@ const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
 
-/** Validate and normalize an orchestrator-supplied subagent session name. */
 export function normalizeRequestedRlmSubagentSessionName(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -92,7 +91,6 @@ export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): Thin
 	return level as ThinkingLevel;
 }
 
-/** Validate and normalize an orchestrator-supplied subagent model reference. */
 export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
