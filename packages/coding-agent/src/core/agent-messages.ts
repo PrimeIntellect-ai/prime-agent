@@ -36,6 +36,7 @@ export interface AgentSessionMessageSender extends Partial<AgentSessionMessageEn
 
 export type AgentMessageDirection = "received" | "sent";
 
+/** Format the directional role/name segment shared by received and sent agent-message UI. */
 export function formatAgentMessageParticipant(
 	direction: AgentMessageDirection,
 	role: AgentFamilyRelationship | undefined,
@@ -305,6 +306,7 @@ function isAgentFamilyParent(parent: AgentFamilyCatalogEntry, child: AgentFamily
 	);
 }
 
+/** Pure nuclear-family policy over persisted parent-edge snapshots. */
 export function agentFamilyRelationship(
 	current: AgentFamilyCatalogEntry,
 	target: AgentFamilyCatalogEntry,

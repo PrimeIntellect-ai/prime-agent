@@ -7,6 +7,7 @@ import type { ContextUsage } from "./extensions/index.js";
 import { buildSessionContext, type FileEntry, loadEntriesFromFile, type SessionEntry } from "./session-manager.js";
 import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } from "./usage.js";
 
+/** Resolves a model's context window so disk-only nodes can report utilization. */
 export type ContextWindowResolver = (provider: string, modelId: string) => number | undefined;
 
 /**
