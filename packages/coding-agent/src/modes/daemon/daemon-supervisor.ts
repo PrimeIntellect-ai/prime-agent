@@ -1770,8 +1770,6 @@ export class DaemonSupervisor {
 					await this.assertSupervisorSavedSessionNameAvailable(command.sessionPath, target.name);
 					if (!command.activeSessionId) {
 						await this.catalog.rename(command.sessionPath, command.name);
-						// Third rename write point: an offline saved-session rename
-						// changes the name the ledger carries for that child.
 						await this.rlmSpawnLedger()
 							.appendRenameByChildPath(command.sessionPath, target.name)
 							.catch((error) => {
@@ -2041,8 +2039,6 @@ export class DaemonSupervisor {
 			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
 				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
 			}
-			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
-			// the recursive-harness residency/eviction PR will revisit it.
 		}
 		const key = createCommand.sessionPath
 			? canonicalSessionPath(createCommand.sessionPath)

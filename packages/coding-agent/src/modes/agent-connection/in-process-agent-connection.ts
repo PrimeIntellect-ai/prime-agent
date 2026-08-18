@@ -290,9 +290,10 @@ export class InProcessAgentConnection implements AgentConnection {
 		this.session.sessionManager.appendLabelChange(entryId, label);
 	}
 
-	async respondToExtensionUiRequest(_requestId: string, _response: AgentConnectionExtensionUiResponse): Promise<void> {
-		// In-process extension UI requests are handled directly by InteractiveMode.
-	}
+	async respondToExtensionUiRequest(
+		_requestId: string,
+		_response: AgentConnectionExtensionUiResponse,
+	): Promise<void> {}
 
 	async prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void> {
 		await new Promise<void>((resolve, reject) => {

@@ -297,12 +297,10 @@ export interface AgentConnectionParentMetadata {
 export interface AgentConnectionSnapshot {
 	state: AgentConnectionState;
 	messages: AgentMessage[];
-	/** In-flight assistant message, kept separate from finalized transcript messages. */
 	streamingMessage?: AgentMessage;
 	sessionContext?: AgentConnectionSessionContext;
 	sessionTree?: { tree: AgentConnectionSessionTreeNode[]; leafId: string | null };
 	parent?: AgentConnectionParentMetadata;
-	/** Live RLM child agents (including grandchildren) known to the host at snapshot time. */
 	children?: AgentConnectionRlmChildAgentSnapshot[];
 	lastEventSequence?: number;
 	lastEventCursor?: AgentConnectionEventCursor;
@@ -348,7 +346,6 @@ export interface AgentConnectionState {
 	scopedModels: AgentConnectionScopedModel[];
 	activeToolNames: string[];
 	contextUsage: SessionStats["contextUsage"];
-	/** One-line recap of the agent's recent work, shown above the prompt. */
 	recap?: string;
 }
 
@@ -434,7 +431,6 @@ export interface AgentConnectionToolDefinition {
 	replayBuiltInToolName?: ReplayBuiltInToolName;
 }
 
-/** Prompt admission failure; only a confirmed cancellation is retry-safe. */
 export class AgentConnectionPromptAdmissionError extends Error {
 	readonly cancelled: boolean;
 
@@ -454,7 +450,6 @@ export interface AgentConnectionPromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	queueIfBusy?: boolean;
 	source?: InputSource;
-	/** Cancel admission while it is still waiting; accepted prompts remain session-owned. */
 	signal?: AbortSignal;
 }
 
@@ -473,7 +468,6 @@ export interface AgentConnectionSideQuestionTurn {
 
 export interface AgentConnectionExecuteBashOptions {
 	excludeFromContext?: boolean;
-	/** Run without recording into the session (side-conversation bash). */
 	transient?: boolean;
 	/**
 	 * Caller-generated id echoed on the run's bash_start/bash_end events, so the
@@ -520,7 +514,6 @@ export interface AgentConnectionQueueState {
 
 export type AgentConnectionQueuedMessageLane = QueuedMessageLane;
 export type AgentConnectionQueuedMessageMutation = QueuedMessageMutation;
-/** "unsupported" is returned only by remote connections whose daemon predates queued-message mutation. */
 export type AgentConnectionQueuedMessageMutationStatus = QueuedMessageMutationStatus | "unsupported";
 
 export interface AgentConnectionHeartbeat {
@@ -547,26 +540,19 @@ export interface AgentConnectionRlmChildAgentActivity {
 export interface AgentConnectionRlmChildAgentSnapshot {
 	id: string;
 	parentId?: string;
-	/** The child's own daemon active-session id, for attaching to it directly. */
 	activeSessionId?: string;
-	/** Stable daemon-visible session name for addressing/displaying the child. */
 	sessionName?: string;
-	/** Exact provider/model selector used by the child. */
 	model?: string;
 	label: string;
 	status: AgentConnectionRlmChildAgentStatus;
 	durationMs?: number;
 	answerPreview?: string;
 	repliedSinceTask?: boolean;
-	/** Number of tool executions the subagent has started so far. */
 	toolUseCount?: number;
-	/** Context size (tokens) of the subagent's latest turn. */
 	tokenCount?: number;
-	/** Latest recap of what the subagent is doing. */
 	recap?: string;
 	sessionDir: string;
 	activity?: AgentConnectionRlmChildAgentActivity;
-	/** Failure reason when status is "error". */
 	error?: string;
 }
 
@@ -589,7 +575,6 @@ export type AgentConnectionSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
-			/** "warning" for benign skips (nothing to compact), "error" for real failures */
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
 	  }
@@ -607,11 +592,8 @@ export type AgentConnectionSessionEvent =
 			cancelled: boolean;
 			truncated: boolean;
 			fullOutputPath?: string;
-			/** Set when execution failed before producing a result (e.g. spawn failure) */
 			errorMessage?: string;
-			/** Set for transient (side-conversation) runs so other attached clients suppress them. */
 			transient?: boolean;
-			/** Echo of the caller-supplied run id, so clients correlate runs by identity. */
 			runId?: string;
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
@@ -684,7 +666,6 @@ export interface AgentConnection {
 	clearAgentMessages(): Promise<number>;
 	getUserMessagesForForking(): Promise<AgentConnectionUserMessage[]>;
 	getLastAssistantText(): Promise<string | undefined>;
-	/** The system prompt currently in effect for the model (with any per-turn extension changes). */
 	getSystemPrompt(): Promise<string>;
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
@@ -696,7 +677,6 @@ export interface AgentConnection {
 	abortSideQuestion(id: string): Promise<boolean>;
 	steer(message: string, images?: ImageContent[]): Promise<void>;
 	followUp(message: string, images?: ImageContent[]): Promise<void>;
-	/** Request cancellation of the active turn and return once the request is accepted. */
 	abort(): Promise<void>;
 	cancelRlmChild(childId: string): Promise<boolean>;
 	waitForIdle(): Promise<void>;
@@ -746,7 +726,6 @@ export interface AgentConnection {
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;
 	deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult>;
 
-	/** Read-only watcher on another live session (a subagent); undefined if the transport can't reach it. */
 	watchSession(activeSessionId: string): Promise<AgentConnectionSessionWatcher | undefined>;
 
 	dispose(): Promise<void>;

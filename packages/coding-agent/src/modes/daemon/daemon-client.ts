@@ -46,7 +46,6 @@ interface PendingDaemonRequest {
 	wireData: string;
 	awaitingReconnect: boolean;
 	acknowledgeResult: boolean;
-	/** Re-checked against the new hello before a reconnect replay. */
 	compatibilities: readonly DaemonCommandCompatibility[];
 }
 
@@ -139,7 +138,6 @@ export class DaemonClient {
 		return this.helloMessage?.serverCapabilities?.includes(capability) === true;
 	}
 
-	/** Wait for the daemon_hello greeting sent on connect. */
 	async waitForHello(timeoutMs = 3000): Promise<DaemonHello> {
 		if (this.helloMessage) {
 			return this.helloMessage;
@@ -251,7 +249,6 @@ export class DaemonClient {
 		socket.destroy();
 	}
 
-	/** Discard a partially recovered transport so the next retry can reconnect cleanly. */
 	resetTransportForReconnect(): void {
 		const socket = this.socket;
 		if (!socket) {
@@ -279,12 +276,10 @@ export class DaemonClient {
 		};
 	}
 
-	/** Keep in-flight command promises alive and resend their stable envelopes after reconnect. */
 	enableRequestRecovery(): void {
 		this.requestRecoveryEnabled = true;
 	}
 
-	/** Reconnect a global/raw daemon client after supervisor replacement. */
 	enableAutoReconnect(options: DaemonClientReconnectOptions): void {
 		this.requestRecoveryEnabled = true;
 		this.reconnectOptions = options;

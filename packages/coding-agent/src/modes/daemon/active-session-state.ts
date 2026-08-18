@@ -9,13 +9,9 @@ export interface DaemonSocketClient {
 	id: string;
 	socket: Socket;
 	attachedActiveSessionIds: Set<string>;
-	/** Session events are dropped while the socket is blocked and replaced with one catch-up snapshot on drain. */
 	catchupActiveSessionIds?: Set<string>;
-	/** A real runtime replacement takes precedence over an ordinary resync for the same queued catch-up. */
 	catchupPurposes?: Map<string, "replacement" | "resync">;
-	/** The single catch-up drain currently serving this client. */
 	catchupPromise?: Promise<void>;
-	/** Delayed retry after transient catch-up snapshot preparation failure. */
 	catchupRetryTimer?: NodeJS.Timeout;
 	backpressured?: boolean;
 	authenticated?: boolean;
@@ -35,13 +31,11 @@ export interface ActiveSessionState {
 	activeSessionId: string;
 	runtime: AgentSessionRuntime;
 	clients: Set<DaemonSocketClient>;
-	/** Attach snapshots in flight: reserved for passivation busyness, but not yet event recipients. */
 	pendingAttaches: number;
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
 	unsubscribe?: () => void;
-	/** Latest background status summary, surfaced in the agents view. */
 	summaryState?: AgentStatus;
 	/**
 	 * Client env (e.g. herdr pane identity), merged over process.env for this

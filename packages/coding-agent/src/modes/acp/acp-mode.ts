@@ -17,19 +17,6 @@ import { primeAgentMeta } from "./acp-meta.js";
 import { type AcpStopReason, acpStopReason } from "./acp-stop-reason.js";
 
 /**
- * ACP (Agent Client Protocol) mode.
- *
- * prime-agent acts as an ACP agent over NDJSON on stdio, driving an
- * `AgentConnection` in-process. It deliberately does not shell out to RPC mode
- * and translate: prime-agent's differentiators (IPython-only tools, subagents,
- * autonomous gates) are visible as first-class events here, and a translating
- * adapter is exactly what flattens them away.
- *
- * Capabilities ACP has no native concept for travel in a reverse-domain
- * `_meta` envelope, which vanilla ACP clients ignore.
- */
-
-/**
  * ACP frames must reach real stdout.
  *
  * Startup calls `takeOverStdout()` for every non-interactive mode, which
@@ -58,7 +45,6 @@ function canonicalCwd(path: string): string {
 	try {
 		canonical = realpathSync(resolved);
 	} catch {
-		// Preserve the previous lexical comparison when a path is missing or inaccessible.
 		canonical = resolved;
 	}
 	return normalizeWindowsDriveLetter(canonical);
@@ -85,14 +71,8 @@ function sameCwd(left: string, right: string): boolean {
 }
 
 export interface AcpModeOptions {
-	/** Bind headless extensions once the connection is live (in-process mode). */
 	bindHeadlessExtensions?: () => Promise<void>;
-	/**
-	 * Transport override. Defaults to NDJSON over stdio; tests supply an
-	 * in-memory stream pair so the protocol runs without a subprocess.
-	 */
 	stream?: ReturnType<typeof acp.ndJsonStream>;
-	/** Skip claiming stdout when the caller supplies its own transport. */
 	ownStdout?: boolean;
 }
 
@@ -102,13 +82,6 @@ interface AcpSessionEntry {
 	unsubscribe: (() => void) | undefined;
 }
 
-/**
- * Split ACP prompt blocks into the text and images prime-agent accepts.
- *
- * Image and embedded-resource blocks are advertised in `initialize`, so they must
- * actually reach the model: dropping them silently would let a client believe a
- * pasted screenshot was accepted.
- */
 function promptContent(blocks: readonly unknown[]): { text: string; images: ImageContent[] } {
 	const texts: string[] = [];
 	const images: ImageContent[] = [];
@@ -127,7 +100,6 @@ function promptContent(blocks: readonly unknown[]): { text: string; images: Imag
 		} else if (typed.type === "image" && typeof typed.data === "string" && typeof typed.mimeType === "string") {
 			images.push({ type: "image", data: typed.data, mimeType: typed.mimeType });
 		} else if (typed.type === "resource" && typeof typed.resource?.text === "string") {
-			// Embedded text resources become context the model can read.
 			const uri = typed.resource.uri ? `${typed.resource.uri}\n` : "";
 			texts.push(`${uri}${typed.resource.text}`);
 		} else if (typed.type === "resource_link" && typeof typed.uri === "string") {
@@ -169,7 +141,6 @@ interface TurnBoundary {
 	keys: Set<string>;
 }
 
-/** Key for a kept message: compaction drops messages, it does not rewrite them. */
 function messageKey(message: unknown): string | undefined {
 	if (typeof message !== "object" || message === null) return undefined;
 	const record = message as { role?: unknown; timestamp?: unknown; stopReason?: unknown; errorMessage?: unknown };
@@ -218,7 +189,6 @@ async function turnFailure(connection: AgentConnection, boundary: TurnBoundary):
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (message?.role !== "assistant") continue;
-		// The newest assistant message predates the turn, so the turn appended none.
 		if (isPreTurn(message, boundary)) return undefined;
 		const assistant = message as { stopReason?: string; errorMessage?: string };
 		if (assistant.stopReason !== "error") return undefined;
@@ -238,7 +208,6 @@ export async function runAcpModeWithConnection(
 	connection: AgentConnection,
 	options: AcpModeOptions = {},
 ): Promise<never> {
-	// ACP owns stdout: any stray write corrupts the JSON-RPC stream.
 	if (options.ownStdout !== false && !options.stream) {
 		takeOverStdout();
 	}
@@ -260,19 +229,13 @@ export async function runAcpModeWithConnection(
 			agentCapabilities: {
 				loadSession: false,
 				promptCapabilities: { image: true, embeddedContext: true },
-				// Advertise close so a client knows it can release the session (and
-				// the single-session slot) instead of dropping the connection.
 				sessionCapabilities: { close: {} },
 			},
 			agentInfo: { name: "prime-agent", title: "Prime Agent", version: VERSION },
-			// Advertise prime-agent extras under a namespaced key: ACP reserves
-			// every object root for future protocol fields.
 			_meta: primeAgentMeta({}),
 		}))
 		.onRequest("session/new", async (ctx: any) => {
 			if (!bound) {
-				// Only latch after a successful bind: a rejected bind must not leave
-				// extensions permanently unavailable for the rest of the process.
 				await options.bindHeadlessExtensions?.();
 				bound = true;
 			}
@@ -320,8 +283,6 @@ export async function runAcpModeWithConnection(
 					notify(update);
 				}
 			});
-			// Claim the single-session slot only once the subscription exists, so a
-			// failed subscribe cannot leave the slot occupied and unusable.
 			entry.unsubscribe = unsubscribe;
 			session = entry;
 			return {
@@ -350,8 +311,6 @@ export async function runAcpModeWithConnection(
 				// themselves rather than how many there were.
 				const priorMessages = turnBoundary(await connection.getMessages());
 				await connection.promptAndWait(text, images.length > 0 ? { images } : undefined);
-				// Autonomous gates continue inside this same prompt turn: the turn is
-				// only over once the gate loop settles.
 				const status = await connection.waitForHeadlessCompletion();
 				const meta = autonomousMeta(status);
 				if (meta) {
@@ -373,7 +332,6 @@ export async function runAcpModeWithConnection(
 				}
 				return { stopReason: acpStopReason({ cancelled: abort.signal.aborted, autonomous: status }) };
 			} catch (error) {
-				// Cancellation is a normal ACP prompt outcome, not a JSON-RPC error.
 				if (abort.signal.aborted) return { stopReason: "cancelled" satisfies AcpStopReason };
 				throw error;
 			} finally {
@@ -383,8 +341,6 @@ export async function runAcpModeWithConnection(
 			}
 		})
 		.onRequest("session/close", async (ctx: any) => {
-			// Releasing the subscription matters: it is the only thing that stops
-			// forwarding events, and closing frees the connection for a new session.
 			const params = ctx.params as { sessionId: string };
 			if (session?.id !== params.sessionId) {
 				throw new Error(`Unknown ACP session: ${params.sessionId}`);

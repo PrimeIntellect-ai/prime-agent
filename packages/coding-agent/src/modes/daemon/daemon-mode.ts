@@ -5874,8 +5874,7 @@ export class AgentDaemon {
 			type: "session_detached",
 			activeSessionId: state.activeSessionId,
 		});
-		// Abandoned new-chat: discard it so it doesn't linger in memory or leave an
-		// empty file. Replaces the old DeferredAgentConnection.
+		// Discard an abandoned empty draft rather than retaining an empty session file.
 		if (this.isDiscardableDraft(state)) {
 			// Re-check after yielding: a client may reattach before the async close
 			// runs, in which case the draft is no longer abandoned and must be kept.

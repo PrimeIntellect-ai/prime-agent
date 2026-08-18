@@ -319,11 +319,7 @@ function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = pro
 	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? join(homedir(), ".prime", "supervisor-owners");
 }
 
-/**
- * Pre-move registry location under $TMPDIR, consulted READ-ONLY while daemons
- * from before the ~/.prime move may still be running; gated off whenever the
- * registry is overridden. Remove after one release.
- */
+/** Read-only legacy registry location, disabled when the registry is overridden. */
 function legacyDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string | undefined {
 	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]
 		? undefined
