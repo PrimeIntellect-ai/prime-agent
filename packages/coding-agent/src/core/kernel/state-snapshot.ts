@@ -58,7 +58,7 @@ export function buildSnapshotCode(outPath: string, manifestPath: string, maxByte
 	// working even when the user namespace shadows names like list/open/print/len.
 	return `
 def _prime_agent_snapshot_state():
-    import builtins as _b, json, os, sys, datetime
+    import builtins as _b, io, json, os, sys, datetime
     try:
         import dill
     except _b.Exception as _err:
@@ -77,31 +77,18 @@ def _prime_agent_snapshot_state():
     # never snapshot them.
     always_skip = {"rlm", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
 
-    def approximate_size(value, limit):
-        # Reject obviously oversized builtin object graphs before dill builds a
-        # same-sized temporary bytes object. This deliberately stays shallow for
-        # arbitrary user classes; the execution timeout remains the final guard.
-        seen = _b.set()
-        stack = [value]
-        size = 0
-        while stack:
-            item = stack.pop()
-            item_id = _b.id(item)
-            if item_id in seen:
-                continue
-            seen.add(item_id)
-            try:
-                size += sys.getsizeof(item)
-            except _b.Exception:
-                pass
-            if size > limit:
-                return size
-            if _b.isinstance(item, _b.dict):
-                stack.extend(item.keys())
-                stack.extend(item.values())
-            elif _b.isinstance(item, (_b.list, _b.tuple, _b.set, _b.frozenset)):
-                stack.extend(item)
-        return size
+    class SnapshotSizeLimitExceeded(_b.Exception):
+        pass
+
+    class SnapshotBuffer(io.BytesIO):
+        def __init__(self, limit):
+            io.BytesIO.__init__(self)
+            self.limit = limit
+
+        def write(self, chunk):
+            if self.tell() + _b.len(chunk) > self.limit:
+                raise SnapshotSizeLimitExceeded()
+            return io.BytesIO.write(self, chunk)
 
     payload = {}
     skipped = []
@@ -113,18 +100,16 @@ def _prime_agent_snapshot_state():
         if name.startswith("_") or name in hidden or name in always_skip:
             continue
         value = ns[name]
-        remaining = ${maxBytes} - total
-        if approximate_size(value, remaining) > remaining:
-            skipped.append({"name": name, "reason": "estimated object graph exceeds snapshot size cap"})
-            continue
+        buffer = SnapshotBuffer(${maxBytes} - total)
         # Modules are pickled by reference and re-imported on restore.
         try:
-            blob = dill.dumps(value)
+            dill.dump(value, buffer)
+            blob = buffer.getvalue()
+        except SnapshotSizeLimitExceeded:
+            skipped.append({"name": name, "reason": "exceeds snapshot size cap"})
+            continue
         except _b.Exception as _err:
             skipped.append({"name": name, "reason": _b.type(_err).__name__ + ": " + _b.str(_err)[:200]})
-            continue
-        if _b.len(blob) > ${maxBytes} or total + _b.len(blob) > ${maxBytes}:
-            skipped.append({"name": name, "reason": "exceeds snapshot size cap"})
             continue
         payload[name] = blob
         total += _b.len(blob)

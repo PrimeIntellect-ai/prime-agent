@@ -37,7 +37,6 @@ const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
 // Cap how long a graceful dispose waits on the final snapshot; the debounced
 // on-disk copy is the fallback if this is exceeded.
 const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
-// Automatic snapshots are best-effort and must never monopolize the single kernel queue.
 const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
@@ -243,12 +242,7 @@ export interface ExecuteResult {
 	sentAgentMessages?: KernelSentAgentMessage[];
 	status: "ok" | "error" | "aborted";
 	error?: { ename: string; evalue: string; traceback: string[] };
-	/** End-to-end time from enqueue through result collection. */
 	durationMs: number;
-	/** Time spent waiting for startup and earlier serialized kernel work. */
-	queueWaitMs?: number;
-	/** Time from dispatch until the kernel result settled. */
-	kernelExecutionMs?: number;
 }
 
 /** Parse a {@link DIFF_DISPLAY_MIME} payload, tolerating malformed input. */
@@ -386,7 +380,6 @@ interface ActiveExecution {
 	requestMsgId: string;
 	/** Source of the cell currently executing; surfaced to rlm.run spawns. */
 	code: string;
-	enqueued: number;
 	started: number;
 	maxChars: number;
 	opts: ExecuteOptions;
@@ -417,23 +410,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-function waitForQueueTurn(previous: Promise<unknown>, signal?: AbortSignal): Promise<boolean> {
-	if (!signal) return previous.then(() => true);
-	if (signal.aborted) return Promise.resolve(false);
-	return new Promise<boolean>((resolve) => {
-		let settled = false;
-		const finish = (acquired: boolean) => {
-			if (settled) return;
-			settled = true;
-			signal.removeEventListener("abort", onAbort);
-			resolve(acquired);
-		};
-		const onAbort = () => finish(false);
-		signal.addEventListener("abort", onAbort, { once: true });
-		previous.then(() => finish(true));
-	});
 }
 
 function createDeferred<T>(): Deferred<T> {
@@ -663,7 +639,6 @@ export class KernelManager {
 		if (options.signal?.aborted) {
 			throw createKernelStartupAbortError();
 		}
-		if (this.state === "running") return;
 		if (!this.startPromise) {
 			this.startPromise = this.doStart({ onBootstrapProgress: options.onBootstrapProgress }).catch((error) => {
 				this.startPromise = undefined;
@@ -905,10 +880,13 @@ export class KernelManager {
 	}
 
 	/** Queue and run a cell, serializing against all other executions. */
-	private async enqueueExecute(code: string, opts: ExecuteOptions): Promise<ExecuteResult> {
-		const enqueued = Date.now();
+	private async enqueueExecute(
+		code: string,
+		opts: ExecuteOptions,
+		executionTimeoutMs?: number,
+	): Promise<ExecuteResult> {
 		if (opts.signal?.aborted) {
-			return { stdout: "", stderr: "", status: "aborted", durationMs: 0, queueWaitMs: 0, kernelExecutionMs: 0 };
+			return { stdout: "", stderr: "", status: "aborted", durationMs: 0 };
 		}
 		await this.start({ signal: opts.signal });
 		if ((this.state as string) === "shutdown") {
@@ -920,43 +898,34 @@ export class KernelManager {
 		this.executionQueue = new Promise<void>((r) => {
 			resolveNext = r;
 		});
-		const acquired = await waitForQueueTurn(prev, opts.signal);
-		if (!acquired) {
-			// Settle this caller immediately, but keep its queue node closed until
-			// the predecessor finishes so later calls cannot overtake active work.
-			void prev.then(resolveNext);
-			return {
-				stdout: "",
-				stderr: "",
-				status: "aborted",
-				durationMs: Date.now() - enqueued,
-				queueWaitMs: Date.now() - enqueued,
-				kernelExecutionMs: 0,
-			};
-		}
+		await prev;
 
+		const started = Date.now();
+		let executionTimeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 		try {
 			await this.waitForActiveExecutionToClearForReuse(opts.signal);
 			if (opts.signal?.aborted) {
-				return {
-					stdout: "",
-					stderr: "",
-					status: "aborted",
-					durationMs: Date.now() - enqueued,
-					queueWaitMs: Date.now() - enqueued,
-					kernelExecutionMs: 0,
-				};
+				return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
 			}
 			if ((this.state as string) === "shutdown") {
 				throw new Error("Kernel has been shut down");
 			}
-			return await this.executeInner(code, opts, enqueued);
+			if (executionTimeoutMs === undefined) {
+				return await this.executeInner(code, opts, started);
+			}
+
+			const controller = new AbortController();
+			executionTimeout = globalThis.setTimeout(() => controller.abort(), executionTimeoutMs);
+			executionTimeout.unref?.();
+			const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
+			return await this.executeInner(code, { ...opts, signal }, started);
 		} finally {
+			if (executionTimeout) globalThis.clearTimeout(executionTimeout);
 			resolveNext();
 		}
 	}
 
-	private async executeInner(code: string, opts: ExecuteOptions, enqueued: number): Promise<ExecuteResult> {
+	private async executeInner(code: string, opts: ExecuteOptions, started: number): Promise<ExecuteResult> {
 		const conn = this.connection!;
 		const shell = this.shell!;
 		const maxChars = opts.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
@@ -977,25 +946,16 @@ export class KernelManager {
 		const requestMsgId = msg.header.msg_id;
 
 		if (opts.signal?.aborted) {
-			return {
-				stdout: "",
-				stderr: "",
-				status: "aborted",
-				durationMs: Date.now() - enqueued,
-				queueWaitMs: Date.now() - enqueued,
-				kernelExecutionMs: 0,
-			};
+			return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
 		}
 		if (this.activeExecution) {
 			throw new Error("Kernel already has an active execution");
 		}
 
-		const started = Date.now();
 		const result = createDeferred<ExecuteResult>();
 		const execution: ActiveExecution = {
 			requestMsgId,
 			code,
-			enqueued,
 			started,
 			maxChars,
 			opts,
@@ -1195,7 +1155,6 @@ export class KernelManager {
 
 			if (execution.opts.signal?.aborted) status = "aborted";
 
-			const completed = Date.now();
 			execution.resolve({
 				stdout,
 				stderr,
@@ -1205,9 +1164,7 @@ export class KernelManager {
 				sentAgentMessages: execution.sentAgentMessages.length > 0 ? execution.sentAgentMessages : undefined,
 				error: execution.error,
 				status,
-				durationMs: completed - execution.enqueued,
-				queueWaitMs: execution.started - execution.enqueued,
-				kernelExecutionMs: completed - execution.started,
+				durationMs: Date.now() - execution.started,
 			});
 		}
 		if (didClearActive) {
@@ -1529,18 +1486,19 @@ export class KernelManager {
 	 * the kernel isn't running or no snapshot target was configured. Never throws.
 	 */
 	async snapshotState(): Promise<SnapshotResult | null> {
+		return this.captureSnapshot();
+	}
+
+	private async captureSnapshot(executionTimeoutMs?: number): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
 		const code = buildSnapshotCode(cfg.path, cfg.manifestPath, cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES);
-		const controller = new AbortController();
-		const timeout = globalThis.setTimeout(() => controller.abort(), SNAPSHOT_EXECUTION_TIMEOUT_MS);
-		timeout.unref?.();
 		try {
-			const r = await this.enqueueExecute(code, {
-				maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS,
-				internal: true,
-				signal: controller.signal,
-			});
+			const r = await this.enqueueExecute(
+				code,
+				{ maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true },
+				executionTimeoutMs,
+			);
 			if (r.status !== "ok") {
 				this.appendKernelDiagnostic(
 					`state snapshot ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
@@ -1551,8 +1509,6 @@ export class KernelManager {
 		} catch (error) {
 			this.appendKernelDiagnostic(`state snapshot error: ${errorMessage(error)}`);
 			return null;
-		} finally {
-			globalThis.clearTimeout(timeout);
 		}
 	}
 
@@ -1604,7 +1560,7 @@ export class KernelManager {
 		if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
 		this.snapshotTimer = globalThis.setTimeout(() => {
 			this.snapshotTimer = undefined;
-			void this.snapshotState();
+			void this.captureSnapshot(SNAPSHOT_EXECUTION_TIMEOUT_MS);
 		}, cfg.debounceMs ?? DEFAULT_SNAPSHOT_DEBOUNCE_MS);
 		if (this.snapshotTimer && typeof this.snapshotTimer === "object" && "unref" in this.snapshotTimer) {
 			this.snapshotTimer.unref();

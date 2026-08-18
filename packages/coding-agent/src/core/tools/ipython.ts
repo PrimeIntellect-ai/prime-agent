@@ -245,10 +245,7 @@ function setWorkingMessage(ctx: ExtensionContext | undefined, message?: string):
 export type IpythonToolInput = Static<typeof ipythonSchema>;
 
 export interface IpythonToolDetails {
-	/** End-to-end time including kernel startup and serialized queue wait. */
 	durationMs?: number;
-	queueWaitMs?: number;
-	kernelExecutionMs?: number;
 	status?: "ok" | "error" | "aborted" | "starting";
 	errorEname?: string;
 	stdout?: string;
@@ -683,8 +680,6 @@ export function createIpythonToolDefinition(
 					content,
 					details: {
 						durationMs: r.durationMs,
-						queueWaitMs: r.queueWaitMs,
-						kernelExecutionMs: r.kernelExecutionMs,
 						status: r.status,
 						errorEname: r.error?.ename,
 						stdout: r.stdout,

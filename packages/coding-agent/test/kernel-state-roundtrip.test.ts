@@ -151,6 +151,38 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		}
 	}, 60_000);
 
+	it("stops serializing a variable once it exceeds the snapshot budget", async () => {
+		const boundedDir = mkdtempSync(join(tmpdir(), "prime-agent-state-bounded-"));
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: boundedDir,
+			snapshot: {
+				path: join(boundedDir, "bounded.dill"),
+				manifestPath: join(boundedDir, "bounded.json"),
+				maxBytes: 8192,
+			},
+		});
+		try {
+			await manager.execute(`pickle_count = 0
+class _Counted:
+    def __reduce__(self):
+        global pickle_count
+        pickle_count += 1
+        return (dict, ())
+large_records = [_Counted() for _ in range(100_000)]
+small_value = 42`);
+
+			const snapshot = await manager.snapshotState();
+			expect(snapshot?.skipped.map(({ name }) => name)).toContain("large_records");
+			expect(snapshot?.saved).toContain("small_value");
+			const count = await manager.execute("print(pickle_count)");
+			expect(Number(count.stdout.trim())).toBeLessThan(100_000);
+		} finally {
+			await manager.dispose();
+			rmSync(boundedDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
 	it("auto-snapshots after a successful execution (debounced)", async () => {
 		const autoDir = mkdtempSync(join(tmpdir(), "prime-agent-state-auto-"));
 		const autoPath = join(autoDir, "auto.dill");
@@ -165,38 +197,6 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		} finally {
 			await manager.dispose();
 			rmSync(autoDir, { recursive: true, force: true });
-		}
-	}, 60_000);
-
-	it("bounds oversized snapshots and queued cancellation", async () => {
-		const testDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-bounds-"));
-		const manager = new KernelManager({
-			python: python as string,
-			cwd: testDir,
-			snapshot: {
-				path: join(testDir, "state.dill"),
-				manifestPath: join(testDir, "state.json"),
-				maxBytes: 1024 * 1024,
-			},
-		});
-		try {
-			await manager.execute("large_records = [{'text': f'{i:08d}' + 'x' * 4088} for i in range(2048)]");
-			expect((await manager.snapshotState())?.skipped.map(({ name }) => name)).toContain("large_records");
-
-			const first = manager.execute("import time; time.sleep(0.5); first_done = True");
-			await new Promise((resolve) => setTimeout(resolve, 50));
-			const controller = new AbortController();
-			const queued = manager.execute("should_not_run = True", { signal: controller.signal });
-			controller.abort();
-			expect(await queued).toMatchObject({ status: "aborted", kernelExecutionMs: 0 });
-
-			const third = manager.execute("print(first_done, 'responsive')");
-			await first;
-			expect((await third).stdout.trim()).toBe("True responsive");
-			expect(await manager.listNamespaceNames()).not.toContain("should_not_run");
-		} finally {
-			await manager.dispose();
-			rmSync(testDir, { recursive: true, force: true });
 		}
 	}, 60_000);
 });
