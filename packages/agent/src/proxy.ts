@@ -3,7 +3,6 @@
  * The server manages auth and proxies requests to LLM providers.
  */
 
-// Internal import for JSON parsing utility
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -16,7 +15,6 @@ import {
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 
-// Create stream class matching ProxyMessageEventStream
 class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
 		super(
@@ -117,7 +115,6 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 	const stream = new ProxyMessageEventStream();
 
 	(async () => {
-		// Initialize the partial message that we'll build up from events
 		const partial: AssistantMessage = {
 			role: "assistant",
 			stopReason: "stop",
