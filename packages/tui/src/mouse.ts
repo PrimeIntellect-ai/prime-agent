@@ -1,9 +1,15 @@
 export interface MouseEvent {
+	/** Base SGR button code with modifier and motion bits removed; wheel up/down are 64/65. */
 	button: number;
+	/** One-based terminal column. */
 	x: number;
+	/** One-based terminal row. */
 	y: number;
+	/** True for SGR `M` reports (press, wheel, or drag), false for release `m`. */
 	press: boolean;
+	/** Whether the SGR motion bit is set. */
 	motion: boolean;
+	/** Modifier bits carried by the SGR report. */
 	shift: boolean;
 	alt: boolean;
 	ctrl: boolean;

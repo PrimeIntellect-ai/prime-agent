@@ -1,6 +1,3 @@
-/**
- */
-
 import { getModels } from "../../models.js";
 import type { Api, Model } from "../../types.js";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.js";
@@ -140,8 +137,6 @@ async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
 	};
 }
 
-/**
- */
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) {
@@ -230,8 +225,6 @@ async function pollForGitHubAccessToken(
 	throw new Error("Device flow timed out");
 }
 
-/**
- */
 export async function refreshGitHubCopilotToken(
 	refreshToken: string,
 	enterpriseDomain?: string,

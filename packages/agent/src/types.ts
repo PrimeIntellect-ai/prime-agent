@@ -36,6 +36,7 @@ export type StreamFn = (
  */
 export type ToolExecutionMode = "sequential" | "parallel";
 
+/** A tool-call content block emitted by an assistant message. */
 export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
 /**
@@ -72,28 +73,43 @@ export interface AfterToolCallResult {
 	terminate?: boolean;
 }
 
+/** Context passed to `beforeToolCall` after arguments are validated. */
 export interface BeforeToolCallContext {
+	/** Assistant message that requested the call. */
 	assistantMessage: AssistantMessage;
+	/** Raw tool-call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
+	/** Validated arguments for the target tool schema. */
 	args: unknown;
+	/** Agent context when this call is prepared. */
 	context: AgentContext;
 }
 
+/** Context passed to `afterToolCall`. */
 export interface AfterToolCallContext {
+	/** Assistant message that requested the call. */
 	assistantMessage: AssistantMessage;
+	/** Raw tool-call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
+	/** Validated arguments for the target tool schema. */
 	args: unknown;
-	/** The executed tool result before any `afterToolCall` overrides are applied. */
+	/** Executed result before any `afterToolCall` overrides. */
 	result: AgentToolResult<any>;
+	/** Whether the executed result is currently treated as an error. */
 	isError: boolean;
+	/** Agent context when this call is finalized. */
 	context: AgentContext;
 }
 
+/** Context passed to `shouldStopAfterTurn` and `getContinuationMessages`. */
 export interface ShouldStopAfterTurnContext {
+	/** Assistant message that completed the turn. */
 	message: AssistantMessage;
+	/** Tool-result messages included in the preceding `turn_end` event. */
 	toolResults: ToolResultMessage[];
+	/** Context after appending the turn's assistant message and tool results. */
 	context: AgentContext;
-	/** Prompt runs include initial prompts; continuations exclude pre-existing context messages. */
+	/** Messages returned by this invocation; prompts include initial prompts, continuations exclude prior context. */
 	newMessages: AgentMessage[];
 }
 
@@ -226,6 +242,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/**
+	 * Tool execution mode. Defaults to `"parallel"`.
+	 * Parallel mode preflights calls sequentially, executes allowed calls concurrently, emits
+	 * `tool_execution_end` in completion order, then emits tool-result messages in assistant source order.
+	 */
 	toolExecution?: ToolExecutionMode;
 
 	/**
@@ -283,25 +304,35 @@ export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessag
  * assigned arrays before storing them.
  */
 export interface AgentState {
+	/** System prompt sent with each model request. */
 	systemPrompt: string;
+	/** Model used for future turns. */
 	model: Model<any>;
+	/** Requested reasoning level for future turns. */
 	thinkingLevel: ThinkingLevel;
+	/** Requested provider service tier for future turns. */
 	serviceTier: ServiceTier;
-	/** Assigning a new array copies the top-level array. */
+	/** Available tools. Assigning a new array copies its top-level array. */
 	set tools(tools: AgentTool<any>[]);
 	get tools(): AgentTool<any>[];
-	/** Assigning a new array copies the top-level array. */
+	/** Conversation transcript. Assigning a new array copies its top-level array. */
 	set messages(messages: AgentMessage[]);
 	get messages(): AgentMessage[];
-	/** This remains true until awaited `agent_end` listeners settle. */
+	/** True while processing a prompt or continuation, including awaited `agent_end` listeners. */
 	readonly isStreaming: boolean;
+	/** Partial assistant message for the active streamed response, if any. */
 	readonly streamingMessage?: AgentMessage;
+	/** Tool-call IDs currently executing. */
 	readonly pendingToolCalls: ReadonlySet<string>;
+	/** Error from the most recent failed or aborted assistant turn, if any. */
 	readonly errorMessage?: string;
 }
 
+/** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
+	/** Text or image content returned to the model. */
 	content: (TextContent | ImageContent)[];
+	/** Structured details for logs or UI rendering. */
 	details: T;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
@@ -310,9 +341,12 @@ export interface AgentToolResult<T> {
 	terminate?: boolean;
 }
 
+/** Callback used by tools to publish partial execution updates. */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
+/** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
+	/** Human-readable label for UI display. */
 	label: string;
 	/**
 	 * Optional compatibility shim for raw tool-call arguments before schema validation.
@@ -336,9 +370,13 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	executionMode?: ToolExecutionMode;
 }
 
+/** Context snapshot passed to the low-level agent loop and tool hooks. */
 export interface AgentContext {
+	/** System prompt included with the request. */
 	systemPrompt: string;
+	/** Transcript visible to the model. */
 	messages: AgentMessage[];
+	/** Tools available for this run. */
 	tools?: AgentTool<any>[];
 }
 
@@ -350,14 +388,18 @@ export interface AgentContext {
  * idle only after those listeners finish.
  */
 export type AgentEvent =
+	/** Starts and ends one agent run; `agent_end` carries all messages produced by that run. */
 	| { type: "agent_start" }
 	| { type: "agent_end"; messages: AgentMessage[] }
+	/** One assistant response and its resulting tool calls. */
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+	/** Lifecycle events for user, assistant, and tool-result messages. */
 	| { type: "message_start"; message: AgentMessage }
 	/** Only emitted for assistant messages during streaming. */
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
+	/** Tool execution events; parallel calls may end in completion rather than source order. */
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };

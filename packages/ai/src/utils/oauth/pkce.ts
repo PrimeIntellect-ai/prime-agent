@@ -3,8 +3,6 @@
  * Works in both Node.js 20+ and browsers.
  */
 
-/**
- */
 function base64urlEncode(bytes: Uint8Array): string {
 	let binary = "";
 	for (const byte of bytes) {

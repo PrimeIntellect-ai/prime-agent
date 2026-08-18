@@ -25,11 +25,13 @@ interface AuthServerMetadata {
 export interface McpOAuthConfig {
 	/** MCP server name; provider id becomes `mcp:<server>`. */
 	server: string;
+	/** Human-readable label shown in OAuth UI; defaults to `server`. */
 	label?: string;
 	/** The MCP endpoint URL — discovery is rooted at its origin. */
 	url: string;
 	/** Pre-registered client id (servers without DCR, e.g. Slack). */
 	clientId?: string;
+	/** Requested OAuth scopes; defaults to the server's advertised scopes. */
 	scopes?: string;
 }
 

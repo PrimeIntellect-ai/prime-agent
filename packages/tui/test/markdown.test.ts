@@ -120,11 +120,13 @@ describe("Markdown component", () => {
 				`1. First item
 
 \`\`\`typescript
+// code block
 \`\`\`
 
 2. Second item
 
 \`\`\`typescript
+// another code block
 \`\`\`
 
 3. Third item`,

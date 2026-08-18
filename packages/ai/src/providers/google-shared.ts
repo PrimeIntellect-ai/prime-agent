@@ -1,5 +1,4 @@
-/**
- */
+/** Shared utilities for Google Generative AI and Vertex providers. */
 
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
 import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.js";
@@ -8,8 +7,7 @@ import { transformMessages } from "./transform-messages.js";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
 
-/**
- */
+/** Thinking level values accepted by Gemini 3 models. */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
 
 type GoogleBudgetThinkingLevel = "minimal" | "low" | "medium" | "high";
@@ -80,14 +78,12 @@ function isValidThoughtSignature(signature: string | undefined): boolean {
 	return base64SignaturePattern.test(signature);
 }
 
-/**
- */
+/** Retains a thought signature only for the originating provider/model and when it is valid base64. */
 function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: string | undefined): string | undefined {
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 
-/**
- */
+/** Whether this Google API model requires tool-call IDs on function calls and responses. */
 export function requiresToolCallId(modelId: string): boolean {
 	return modelId.startsWith("claude-") || modelId.startsWith("gpt-oss-");
 }
@@ -106,8 +102,7 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 	return true;
 }
 
-/**
- */
+/** Converts internal context to Google `Content[]`, preserving replayable signatures only when protocol-valid. */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
 	const normalizeToolCallId = (id: string): string => {
@@ -261,8 +256,6 @@ const JSON_SCHEMA_META_DECLARATIONS = new Set([
 	"definitions", // pre-draft-2019-09 equivalent of $defs
 ]);
 
-/**
- */
 function sanitizeForOpenApi(schema: unknown): unknown {
 	if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
 		return schema;
@@ -302,8 +295,7 @@ export function convertTools(
 	];
 }
 
-/**
- */
+/** Converts the generic tool-choice mode to Google's function-calling mode. */
 export function mapToolChoice(choice: string): FunctionCallingConfigMode {
 	switch (choice) {
 		case "auto":
@@ -317,8 +309,7 @@ export function mapToolChoice(choice: string): FunctionCallingConfigMode {
 	}
 }
 
-/**
- */
+/** Converts Google finish reasons to the shared stop-reason protocol. */
 export function mapStopReason(reason: FinishReason): StopReason {
 	switch (reason) {
 		case FinishReason.STOP:

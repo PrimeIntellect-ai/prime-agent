@@ -28,8 +28,11 @@ export interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
+	/** Renders textual image metadata instead of terminal graphics. */
 	fallbackOnly?: boolean;
+	/** Prefix prepended to textual fallback metadata. */
 	fallbackPrefix?: string;
+	/** Kitty image ID to reuse across updates or animations. */
 	imageId?: number;
 }
 
@@ -60,6 +63,7 @@ export class Image implements Component {
 		this.imageId = options.imageId;
 	}
 
+	/** Returns the Kitty image ID allocated or supplied for this image. */
 	getImageId(): number | undefined {
 		return this.imageId;
 	}
