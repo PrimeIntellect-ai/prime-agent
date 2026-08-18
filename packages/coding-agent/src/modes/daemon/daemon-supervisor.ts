@@ -3808,9 +3808,6 @@ export class DaemonSupervisor {
 		}
 		const releaseTranscript = transcript?.retain();
 		client.attachedActiveSessionIds.add(activeSessionId);
-		const detachingSessions = this.detachingInputPauseSessions?.get(client);
-		detachingSessions?.delete(command.activeSessionId);
-		detachingSessions?.delete(activeSessionId);
 		try {
 			const publicSummary = this.publicSummary(match.worker, result.snapshot.summary);
 			if (publicSummary.streamingMessage?.role === "assistant") {
@@ -3842,6 +3839,9 @@ export class DaemonSupervisor {
 				});
 			}
 			void this.syncWorkerExtensionUi(activeSessionId);
+			const detachingSessions = this.detachingInputPauseSessions?.get(client);
+			detachingSessions?.delete(command.activeSessionId);
+			detachingSessions?.delete(activeSessionId);
 			return { result: publicResult, worker: match.worker, transcript, releaseTranscript };
 		} catch (error) {
 			releaseTranscript?.();
