@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Fixed terminal focus reports being forwarded to focused components as keyboard input.
+- Fixed terminal focus reports being forwarded to focused components as keyboard input ([#1539](https://github.com/PrimeIntellect-ai/prime-agent/pull/1539) by [@felipecsl](https://github.com/felipecsl)).
 
 ## [0.7.3] - 2026-08-17
 
