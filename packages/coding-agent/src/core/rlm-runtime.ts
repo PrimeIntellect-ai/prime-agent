@@ -3,7 +3,7 @@ import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
-import { isValidThinkingLevel, THINKING_LEVELS } from "./thinking-levels.js";
+import { THINKING_LEVELS } from "./thinking-levels.js";
 
 /** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
 export interface RlmRunRequest {
@@ -84,10 +84,10 @@ export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): Thin
 		throw new Error("rlm.run thinking must be a string");
 	}
 	const level = value.trim().toLowerCase();
-	if (!isValidThinkingLevel(level)) {
+	if (!THINKING_LEVELS.includes(level as ThinkingLevel)) {
 		throw new Error(`rlm.run thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
 	}
-	return level;
+	return level as ThinkingLevel;
 }
 
 export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {
