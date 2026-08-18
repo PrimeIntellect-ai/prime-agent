@@ -1,8 +1,3 @@
-/**
- * Proxy stream function for apps that route LLM calls through a server.
- * The server manages auth and proxies requests to LLM providers.
- */
-
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -28,9 +23,6 @@ class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, Assista
 	}
 }
 
-/**
- * Proxy event types - server sends these with partial field stripped to reduce bandwidth.
- */
 export type ProxyAssistantMessageEvent =
 	| { type: "start" }
 	| { type: "text_start"; contentIndex: number }
@@ -69,11 +61,8 @@ type ProxySerializableStreamOptions = Pick<
 >;
 
 export interface ProxyStreamOptions extends ProxySerializableStreamOptions {
-	/** Local abort signal for the proxy request */
 	signal?: AbortSignal;
-	/** Auth token for the proxy server */
 	authToken: string;
-	/** Proxy server URL (e.g., "https://genai.example.com") */
 	proxyUrl: string;
 }
 
@@ -167,9 +156,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					if (errorData.error) {
 						errorMessage = `Proxy error: ${errorData.error}`;
 					}
-				} catch {
-					// Couldn't parse error response
-				}
+				} catch {}
 				throw new Error(errorMessage);
 			}
 
@@ -229,9 +216,6 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 	return stream;
 }
 
-/**
- * Process a proxy event and update the partial message.
- */
 function processProxyEvent(
 	proxyEvent: ProxyAssistantMessageEvent,
 	partial: AssistantMessage,

@@ -36,7 +36,6 @@ export type StreamFn = (
  */
 export type ToolExecutionMode = "sequential" | "parallel";
 
-/** A single tool call content block emitted by an assistant message. */
 export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
 /**
@@ -73,47 +72,31 @@ export interface AfterToolCallResult {
 	terminate?: boolean;
 }
 
-/** Context passed to `beforeToolCall`. */
 export interface BeforeToolCallContext {
-	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
-	/** The raw tool call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
-	/** Validated tool arguments for the target tool schema. */
 	args: unknown;
-	/** Current agent context at the time the tool call is prepared. */
 	context: AgentContext;
 }
 
-/** Context passed to `afterToolCall`. */
 export interface AfterToolCallContext {
-	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
-	/** The raw tool call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
-	/** Validated tool arguments for the target tool schema. */
 	args: unknown;
 	/** The executed tool result before any `afterToolCall` overrides are applied. */
 	result: AgentToolResult<any>;
-	/** Whether the executed tool result is currently treated as an error. */
 	isError: boolean;
-	/** Current agent context at the time the tool call is finalized. */
 	context: AgentContext;
 }
 
-/** Context passed to `shouldStopAfterTurn`. */
 export interface ShouldStopAfterTurnContext {
-	/** The assistant message that completed the turn. */
 	message: AssistantMessage;
-	/** Tool result messages passed to the preceding `turn_end` event. */
 	toolResults: ToolResultMessage[];
-	/** Current agent context after the turn's assistant message and tool results have been appended. */
 	context: AgentContext;
-	/** Messages that this loop invocation will return if it exits at this point. Prompt runs include the initial prompt messages; continuation runs do not include pre-existing context messages. */
+	/** Prompt runs include initial prompts; continuations exclude pre-existing context messages. */
 	newMessages: AgentMessage[];
 }
 
-/** Context passed to `getContinuationMessages`. */
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
@@ -243,15 +226,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
 
-	/**
-	 * Tool execution mode.
-	 * - "sequential": execute tool calls one by one
-	 * - "parallel": preflight tool calls sequentially, then execute allowed tools concurrently;
-	 *   emit `tool_execution_end` in tool completion order after each tool is finalized,
-	 *   then emit tool-result message artifacts later in assistant source order
-	 *
-	 * Default: "parallel"
-	 */
 	toolExecution?: ToolExecutionMode;
 
 	/**
@@ -298,15 +272,8 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
  * }
  * ```
  */
-export interface CustomAgentMessages {
-	// Empty by default - apps extend via declaration merging
-}
+export interface CustomAgentMessages {}
 
-/**
- * AgentMessage: Union of LLM messages + custom messages.
- * This abstraction allows apps to add custom message types while maintaining
- * type safety and compatibility with the base LLM messages.
- */
 export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessages];
 
 /**
@@ -316,39 +283,25 @@ export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessag
  * assigned arrays before storing them.
  */
 export interface AgentState {
-	/** System prompt sent with each model request. */
 	systemPrompt: string;
-	/** Active model used for future turns. */
 	model: Model<any>;
-	/** Requested reasoning level for future turns. */
 	thinkingLevel: ThinkingLevel;
-	/** Requested provider service tier for future turns. */
 	serviceTier: ServiceTier;
-	/** Available tools. Assigning a new array copies the top-level array. */
+	/** Assigning a new array copies the top-level array. */
 	set tools(tools: AgentTool<any>[]);
 	get tools(): AgentTool<any>[];
-	/** Conversation transcript. Assigning a new array copies the top-level array. */
+	/** Assigning a new array copies the top-level array. */
 	set messages(messages: AgentMessage[]);
 	get messages(): AgentMessage[];
-	/**
-	 * True while the agent is processing a prompt or continuation.
-	 *
-	 * This remains true until awaited `agent_end` listeners settle.
-	 */
+	/** This remains true until awaited `agent_end` listeners settle. */
 	readonly isStreaming: boolean;
-	/** Partial assistant message for the current streamed response, if any. */
 	readonly streamingMessage?: AgentMessage;
-	/** Tool call ids currently executing. */
 	readonly pendingToolCalls: ReadonlySet<string>;
-	/** Error message from the most recent failed or aborted assistant turn, if any. */
 	readonly errorMessage?: string;
 }
 
-/** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
-	/** Text or image content returned to the model. */
 	content: (TextContent | ImageContent)[];
-	/** Arbitrary structured details for logs or UI rendering. */
 	details: T;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
@@ -357,12 +310,9 @@ export interface AgentToolResult<T> {
 	terminate?: boolean;
 }
 
-/** Callback used by tools to stream partial execution updates. */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
-/** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
-	/** Human-readable label for UI display. */
 	label: string;
 	/**
 	 * Optional compatibility shim for raw tool-call arguments before schema validation.
@@ -386,13 +336,9 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	executionMode?: ToolExecutionMode;
 }
 
-/** Context snapshot passed into the low-level agent loop. */
 export interface AgentContext {
-	/** System prompt included with the request. */
 	systemPrompt: string;
-	/** Transcript visible to the model. */
 	messages: AgentMessage[];
-	/** Tools available for this run. */
 	tools?: AgentTool<any>[];
 }
 
@@ -404,18 +350,14 @@ export interface AgentContext {
  * idle only after those listeners finish.
  */
 export type AgentEvent =
-	// Agent lifecycle
 	| { type: "agent_start" }
 	| { type: "agent_end"; messages: AgentMessage[] }
-	// Turn lifecycle - a turn is one assistant response + any tool calls/results
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
-	// Message lifecycle - emitted for user, assistant, and toolResult messages
 	| { type: "message_start"; message: AgentMessage }
-	// Only emitted for assistant messages during streaming
+	/** Only emitted for assistant messages during streaming. */
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
-	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
