@@ -7,6 +7,11 @@ export interface McpManagementResult {
 	action: McpManagementAction;
 	message: string;
 	changed: boolean;
+	serverChange?: {
+		name: string;
+		transport: McpServerConfig["type"];
+		verb: "added" | "replaced" | "removed";
+	};
 }
 
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -31,11 +36,17 @@ export async function runMcpManagementCommand(
 	if (action === "remove") {
 		requireCount(args, 2, "mcp remove <name>");
 		const name = validateName(args[1]!);
-		if (!settingsManager.removeGlobalMcpServer(name)) {
+		const config = settingsManager.getGlobalMcpServers()?.[name];
+		if (!config || !settingsManager.removeGlobalMcpServer(name)) {
 			throw new Error(`MCP server "${name}" was not found.`);
 		}
 		await flushGlobalSettings(settingsManager);
-		return { action, message: `Removed MCP server "${name}".`, changed: true };
+		return {
+			action,
+			message: `Removed MCP server "${name}".`,
+			changed: true,
+			serverChange: { name, transport: config.type, verb: "removed" },
+		};
 	}
 	if (action === "add") {
 		const { name, config, force } = parseMcpAddArgs(args.slice(1));
@@ -46,6 +57,7 @@ export async function runMcpManagementCommand(
 			action,
 			message: `${replaced ? "Replaced" : "Added"} MCP server "${name}".`,
 			changed: true,
+			serverChange: { name, transport: config.type, verb: replaced ? "replaced" : "added" },
 		};
 	}
 	throw new Error("Usage: mcp <add|list|get|remove>.");
@@ -141,37 +153,11 @@ export function formatMcpServerList(servers: Record<string, McpServerConfig> | u
 }
 
 export function formatMcpServer(name: string, config: McpServerConfig): string {
-	const lines = [formatMcpServerSummary(name, config)];
-	if (config.type === "http") {
-		const headerNames = Object.keys(config.headers ?? {}).sort();
-		if (headerNames.length > 0) lines.push(`  headers: ${headerNames.join(", ")} (values redacted)`);
-	} else {
-		if (config.args?.length)
-			lines.push(`  args: ${config.args.length} argument${config.args.length === 1 ? "" : "s"} (values hidden)`);
-		if (config.cwd) lines.push(`  cwd: ${config.cwd}`);
-		const env = Object.entries(config.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
-		if (env.length > 0) lines.push(`  env: ${env.map(([child, source]) => `${child}=$${source.env}`).join(", ")}`);
-	}
-	return lines.join("\n");
+	return `${name}: ${config.type}`;
 }
 
 function formatMcpServerSummary(name: string, config: McpServerConfig): string {
-	if (config.type === "stdio") return `${name}: stdio ${config.command}`;
-	const auth = config.bearerTokenEnvVar
-		? `bearer env ${config.bearerTokenEnvVar}`
-		: config.oauth
-			? "OAuth"
-			: "no auth";
-	return `${name}: http ${safeHttpIdentity(config.url)} (${auth})`;
-}
-
-function safeHttpIdentity(value: string): string {
-	try {
-		const url = new URL(value);
-		return `${url.origin}${url.pathname}`;
-	} catch {
-		return "invalid URL";
-	}
+	return formatMcpServer(name, config);
 }
 
 function validateName(name: string): string {

@@ -63,15 +63,14 @@ describe("MCP management commands", () => {
 		}
 	});
 
-	it("redacts header values and shows only environment identities", () => {
+	it("shows only the server name and transport at the public output boundary", () => {
 		const output = formatMcpServer("remote", {
 			type: "http",
-			url: "https://example.com/mcp",
+			url: "https://user.example/private/path",
+			bearerTokenEnvVar: "SECRET_TOKEN",
 			headers: { Authorization: "Bearer secret", "X-Api-Key": "also-secret" },
 		});
-		expect(output).toContain("Authorization, X-Api-Key (values redacted)");
-		expect(output).not.toContain("Bearer secret");
-		expect(output).not.toContain("also-secret");
+		expect(output).toBe("remote: http");
 	});
 
 	it("persists global-only entries and replaces them wholesale with --force", async () => {
@@ -120,7 +119,7 @@ describe("MCP management commands", () => {
 			mcpServers: { linear: { type: "http", url: "https://proxy.example/mcp" } },
 		});
 		await expect(runMcpManagementCommand(["get", "linear"], manager)).resolves.toMatchObject({
-			message: expect.stringContaining("https://proxy.example/mcp"),
+			message: "linear: http",
 		});
 		await runMcpManagementCommand(["remove", "linear"], manager);
 		expect(manager.getGlobalMcpServers()).toEqual({});
@@ -132,7 +131,7 @@ describe("MCP management commands", () => {
 		await expect(runMcpManagementCommand(["remove", "missing"], manager)).rejects.toThrow("not found");
 		await runMcpManagementCommand(["add", "local", "--", "node", "server.js"], manager);
 		await expect(runMcpManagementCommand(["get", "local"], manager)).resolves.toMatchObject({
-			message: expect.stringContaining("args: 1 argument (values hidden)"),
+			message: "local: stdio",
 		});
 		await runMcpManagementCommand(["remove", "local"], manager);
 		expect(manager.getGlobalMcpServers()).toEqual({});

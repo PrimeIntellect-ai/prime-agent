@@ -4,6 +4,7 @@
 
 - Added a pre-imported generic MCP API and shell/TUI commands to manage persistent Streamable HTTP and stdio servers in user settings.
 - Fixed agents overlooking enabled generic MCP connections by advertising their names and pre-imported `mcp` API usage in the system prompt.
+- Fixed `/mcp` management feedback disappearing during resource reload and limited server details in TUI output to names and transports.
 - Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 

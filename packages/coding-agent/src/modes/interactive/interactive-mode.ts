@@ -8692,8 +8692,13 @@ export class InteractiveMode {
 
 		try {
 			const result = await runMcpManagementCommand(argv, this.settingsManager);
-			if (result.changed) {
-				await this.reloadAfterMcpChange(result.message);
+			if (result.changed && result.serverChange) {
+				const { name, transport, verb } = result.serverChange;
+				const successMessage =
+					verb === "removed"
+						? `Removed MCP server "${name}" (${transport}). It is no longer available through mcp.`
+						: `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). Available next turn through mcp.`;
+				await this.reloadAfterMcpChange(result.message, successMessage);
 			} else if (result.action === "list") {
 				const builtins = BUILTIN_MCP_CATALOG.map(
 					(entry) => `${entry.label} (${entry.server}): ${isAuthed(entry.server) ? "connected" : "not connected"}`,
@@ -8709,13 +8714,17 @@ export class InteractiveMode {
 		}
 	}
 
-	private async reloadAfterMcpChange(message: string): Promise<void> {
+	private async reloadAfterMcpChange(message: string, successMessage = message): Promise<void> {
 		if (this.isAgentStreaming() || this.isAgentCompacting()) {
-			this.showStatus(`${message} Run /reload (after the current turn) to activate it.`);
+			this.showStatus(`${message} The change was saved. Run /reload after the current turn to activate it.`);
 			return;
 		}
-		this.showStatus(`${message} Reloading…`);
-		await this.handleReloadCommand();
+		const reloaded = await this.handleReloadCommand();
+		if (reloaded) {
+			this.showStatus(successMessage);
+		} else {
+			this.showWarning(`${message} The change remains saved, but it is not active in this session.`);
+		}
 	}
 
 	private async showLogoutSelector(): Promise<void> {
@@ -8844,14 +8853,14 @@ export class InteractiveMode {
 		await this.handleReloadCommand();
 	}
 
-	private async handleReloadCommand(): Promise<void> {
+	private async handleReloadCommand(): Promise<boolean> {
 		if (this.isAgentStreaming()) {
 			this.showWarning("Wait for the current response to finish before reloading.");
-			return;
+			return false;
 		}
 		if (this.isAgentCompacting()) {
 			this.showWarning("Wait for compaction to finish before reloading.");
-			return;
+			return false;
 		}
 
 		this.resetExtensionUI();
@@ -8922,9 +8931,11 @@ export class InteractiveMode {
 				this.showError(`models.json error: ${modelsJsonError}`);
 			}
 			this.showStatus("Reloaded keybindings, extensions, skills, prompts, themes");
+			return true;
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		}
 	}
 
