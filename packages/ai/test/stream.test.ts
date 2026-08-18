@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getEnvApiKey } from "../src/env-api-keys.js";
-import { getModel } from "../src/models.js";
+import { getModel, getModels } from "../src/models.js";
 import { complete, stream } from "../src/stream.js";
 import type { Api, Context, ImageContent, Model, StreamOptions, Tool, ToolResultMessage } from "../src/types.js";
 import { getKimiCodingTestModel } from "./kimi-test-model.js";
@@ -727,9 +727,10 @@ describe("Generate E2E Tests", () => {
 	);
 
 	describe.skipIf(!hasCloudflareAiGatewayCredentials() || !process.env.ANTHROPIC_API_KEY)(
-		"Cloudflare AI Gateway → Anthropic BYOK (claude-sonnet-4-5 via /anthropic messages)",
+		"Cloudflare AI Gateway → Anthropic BYOK (Claude Sonnet 4.6 via /anthropic messages)",
 		() => {
-			const llm = getModel("cloudflare-ai-gateway", "claude-sonnet-4-5");
+			const llm = getModels("cloudflare-ai-gateway").find((model) => model.name === "Claude Sonnet 4.6");
+			if (!llm) throw new Error("Cloudflare AI Gateway is missing Claude Sonnet 4.6");
 			const options = { headers: { Authorization: `Bearer ${process.env.ANTHROPIC_API_KEY}` } };
 			const thinkingOptions = {
 				...options,

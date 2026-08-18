@@ -96,9 +96,10 @@ import {
 	type IdleEvictionMinutes,
 	type SessionPassivationSnapshot,
 } from "../../core/session-action-store.js";
-import { deleteSessionFile } from "../../core/session-file-actions.js";
+import { deleteSessionArtifacts, deleteSessionFile } from "../../core/session-file-actions.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
 import {
+	getSessionArtifactPathForFile,
 	readSessionInfo,
 	resolveSessionRlmDepth,
 	type SessionInfo,
@@ -953,12 +954,7 @@ export class AgentDaemon {
 	 * ledger seed source has its own equivalent reader).
 	 */
 	private legacyRlmSubagentRegistryPath(parentSessionFile: string, parentSessionId: string): string {
-		return join(
-			dirname(dirname(parentSessionFile)),
-			"session-artifacts",
-			parentSessionId,
-			RLM_SUBAGENT_REGISTRY_FILE,
-		);
+		return join(getSessionArtifactPathForFile(parentSessionFile, parentSessionId), RLM_SUBAGENT_REGISTRY_FILE);
 	}
 
 	private async readLegacyRlmSubagentRegistry(
@@ -1091,8 +1087,12 @@ export class AgentDaemon {
 				sessionFile: parentFile,
 			});
 		} else if (edges.length > 0) {
-			// Only a tombstoned edge: the topology tombstone is already durable
-			// (the display tombstone was written before it), nothing to re-append.
+			// Only tombstoned edges: the tombstones are already durable, nothing
+			// to re-append. A prior deletion may have crashed before its artifact
+			// sweep, so retry it here.
+			for (const tombstoned of edges) {
+				await this.deleteRlmSubagentArtifacts(childId, tombstoned.child);
+			}
 			return;
 		} else {
 			// No edge at all. A pre-ledger child the seed missed may still exist
@@ -1148,6 +1148,20 @@ export class AgentDaemon {
 		// dual-write era it has no other writer to fall back on, so a failed
 		// append is a failed deletion.
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
+		// Deletion boundary: transcript + display tombstone are the durable
+		// record and stay; the nested artifact dir is a runtime cache and goes.
+		await this.deleteRlmSubagentArtifacts(childId, entry.sessionFile);
+	}
+
+	/** Best-effort artifact-dir removal: cache cleanup must never fail a deletion. */
+	private async deleteRlmSubagentArtifacts(childId: string, childSessionFile: string): Promise<void> {
+		try {
+			await deleteSessionArtifacts(childSessionFile);
+		} catch (error) {
+			this.log(
+				`failed to remove artifact dir for deleted RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	/**
@@ -2451,10 +2465,21 @@ export class AgentDaemon {
 						candidate.runtime.metadata.rlmChildId === options.id &&
 						candidate.runtime.session === runtime.session,
 				);
-				if (state) {
-					await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
-				} else {
-					await runtime.session.disposeAsync();
+				try {
+					if (state) {
+						await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
+					} else {
+						await runtime.session.disposeAsync();
+					}
+				} finally {
+					// Sweep even when teardown throws (see deleteRlmSubagentRuntime);
+					// never throws, so it cannot mask a teardown error.
+					if (status === "cancelled" && deletionError === undefined) {
+						const childSessionFile = runtime.session?.sessionFile;
+						if (childSessionFile) {
+							await this.deleteRlmSubagentArtifacts(options.id, childSessionFile);
+						}
+					}
 				}
 				if (deletionError !== undefined) throw deletionError;
 			},
@@ -2495,22 +2520,36 @@ export class AgentDaemon {
 						: undefined;
 				const childSessionFile =
 					persisted?.sessionFile ?? state?.runtime.session.sessionFile ?? legacyFallback?.sessionFile;
-				// Persist the deletion boundary before tearing down the runtime. As with a
-				// resident child, deletion keeps its transcript and artifact tree on disk.
+				// Persist the deletion boundary before tearing down the runtime.
 				await this.recordRlmSubagentDeletion(parentState, childId);
 				const staleSession = state && session && state.runtime.session !== session ? session : undefined;
 				try {
-					if (state) {
-						await this.closeSession(state, "killed", false);
-					} else {
-						await session?.disposeAsync();
+					try {
+						if (state) {
+							await this.closeSession(state, "killed", false);
+						} else {
+							await session?.disposeAsync();
+						}
+					} finally {
+						await staleSession?.disposeAsync();
 					}
 				} finally {
-					await staleSession?.disposeAsync();
-				}
-				// A killed close can join a passivation close that already skipped killed cleanup.
-				if (childSessionFile) {
-					this.cancelScheduledJobsForSessionFile(childSessionFile);
+					// Runs even when teardown throws: the jobs-cancel rewrite and the
+					// kernel dispose's final snapshot flush may have already happened,
+					// resurrecting the artifact dir swept in recordRlmSubagentDeletion.
+					// A killed close can join a passivation close that already skipped
+					// killed cleanup. Neither step may throw here: a jobs-store error
+					// would mask the teardown error and skip the sweep.
+					if (childSessionFile) {
+						try {
+							this.cancelScheduledJobsForSessionFile(childSessionFile);
+						} catch (error) {
+							this.log(
+								`failed to cancel scheduled jobs for deleted RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+						await this.deleteRlmSubagentArtifacts(childId, childSessionFile);
+					}
 				}
 			},
 			disposeRlmSubagentRuntimes: async () => {

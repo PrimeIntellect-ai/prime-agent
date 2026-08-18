@@ -2,6 +2,7 @@ import stripAnsi from "strip-ansi";
 import { describe, expect, test, vi } from "vitest";
 import { AgentsViewMode } from "../../../src/modes/agents-view/agents-view-mode.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
+import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createDeferred as deferred } from "../scheduling.js";
 
 function summary(id: string): SessionSummary {
@@ -469,5 +470,69 @@ describe("#502 unified session view regressions", () => {
 			),
 		);
 		expect(rendered).toMatch(/123456 · 2h\s*$/);
+	});
+
+	test("scoped subagent rows keep model and effort ahead of summaries", () => {
+		initTheme("dark");
+		const subagent = {
+			// Direct children in a scoped Agents View render as agent rows while
+			// retaining their persisted subagent runtime kind.
+			kind: "agent" as const,
+			section: "idle" as const,
+			summary: {
+				...summary("effort-child"),
+				runtimeKind: "subagent" as const,
+				summary: "Investigate a variable background status that can be truncated",
+				model: { provider: "prime-inference", id: "gpt-5.6-terra" } as SessionSummary["model"],
+				thinkingLevel: "high" as SessionSummary["thinkingLevel"],
+			} as SessionSummary,
+			title: "Inspect agents view",
+			subtitle: "",
+			statusLabel: "idle",
+			depth: 1,
+			selectable: true,
+			runningSubagentCount: 0,
+			identity: "effort-child",
+			parentIdentity: "parent",
+		};
+		const harness = {
+			rows: [subagent],
+			selectedIndex: -1,
+			isPendingDeleteRow: () => false,
+			isPendingKillSubagentRow: () => false,
+			getRowIcon: () => "·",
+			formatRowIcon: (_section: string, icon: string) => icon,
+		};
+		const render = (width: number) =>
+			stripAnsi(
+				privateMethod<(this: typeof harness, row: typeof subagent, width: number) => string>("renderRow").call(
+					harness,
+					subagent,
+					width,
+				),
+			);
+
+		const full = render(120);
+		expect(full).toContain(
+			"Inspect agents view · prime-inference/gpt-5.6-terra:high · Investigate a variable background status",
+		);
+		const narrow = render(75);
+		expect(narrow).toContain("prime-inference/gpt-5.6-terra:high");
+		expect(narrow).not.toContain("Investigate a variable background status");
+
+		subagent.summary.summary = "";
+		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+
+		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
+		subagent.summary.runtimeKind = undefined;
+		subagent.summary.rlmChildId = "effort-child";
+		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+
+		subagent.summary.thinkingLevel = "off";
+		subagent.summary.summary = "A later summary";
+		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
+		expect(render(100)).not.toContain(":off");
+
+		expect(render(20)).toHaveLength(20);
 	});
 });
