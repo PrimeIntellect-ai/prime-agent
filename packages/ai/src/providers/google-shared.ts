@@ -347,16 +347,3 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		}
 	}
 }
-
-/**
- */
-export function mapStopReasonString(reason: string): StopReason {
-	switch (reason) {
-		case "STOP":
-			return "stop";
-		case "MAX_TOKENS":
-			return "length";
-		default:
-			return "error";
-	}
-}

@@ -422,19 +422,9 @@ export function getPackageJsonPath(): string {
 	return join(getPackageDir(), "package.json");
 }
 
-/** Get path to README.md */
-export function getReadmePath(): string {
-	return resolve(join(getPackageDir(), "README.md"));
-}
-
 /** Get path to docs directory */
 export function getDocsPath(): string {
 	return resolve(join(getPackageDir(), "docs"));
-}
-
-/** Get path to examples directory */
-export function getExamplesPath(): string {
-	return resolve(join(getPackageDir(), "examples"));
 }
 
 /** Get path to CHANGELOG.md */
@@ -609,19 +599,9 @@ export function appendRotatingLog(logPath: string, message: string, maxBytes: nu
 	}
 }
 
-/** Get path to models.json */
-export function getModelsPath(): string {
-	return join(getAgentDir(), "models.json");
-}
-
 /** Get path to auth.json */
 export function getAuthPath(): string {
 	return join(getAgentDir(), "auth.json");
-}
-
-/** Get path to settings.json */
-export function getSettingsPath(): string {
-	return join(getAgentDir(), "settings.json");
 }
 
 /** Get path to cron jobs store */
@@ -629,19 +609,9 @@ export function getCronJobsPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, "cron-jobs.json");
 }
 
-/** Get path to tools directory */
-export function getToolsDir(): string {
-	return join(getAgentDir(), "tools");
-}
-
 /** Get path to managed binaries directory (fd, rg) */
 export function getBinDir(): string {
 	return join(getAgentDir(), "bin");
-}
-
-/** Get path to prompt templates directory */
-export function getPromptsDir(): string {
-	return join(getAgentDir(), "prompts");
 }
 
 /** Get path to sessions directory */

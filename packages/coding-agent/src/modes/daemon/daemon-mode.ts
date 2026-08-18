@@ -448,15 +448,6 @@ export async function runDaemonMode(options: DaemonModeOptions): Promise<never> 
 	return new Promise(() => {});
 }
 
-export function isTerminalRemoteAgentMessageError(error: unknown): error is Error {
-	return (
-		error instanceof Error &&
-		(error.message.startsWith("Unknown active session:") ||
-			error.message.startsWith("Ambiguous") ||
-			error.message === AGENT_FAMILY_REACH_ERROR)
-	);
-}
-
 export class AgentDaemon {
 	private server?: Server;
 	private shuttingDown = false;
