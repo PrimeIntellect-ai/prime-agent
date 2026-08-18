@@ -313,11 +313,15 @@ describe("ACP mode end to end", () => {
 			releaseBarrier = resolve;
 		});
 		let roster = [{ ...child, status: "done" }];
+		let promptCalls = 0;
 		let connection: any;
 		connection = fakeAcpConnection({
 			initialSnapshot: async () => ({ state: { cwd: process.cwd() }, messages: [], children: [] }),
 			finalSnapshot: async () => ({ state: { cwd: process.cwd() }, messages: [], children: roster }),
-			onPromptAndWait: () => connection.emitChild(child),
+			onPromptAndWait: () => {
+				promptCalls++;
+				if (promptCalls === 1) connection.emitChild(child);
+			},
 			onWaitForHeadlessCompletion: async (options) => {
 				if (options?.waitForRlmQuiescence) await barrier;
 			},
@@ -332,19 +336,19 @@ describe("ACP mode end to end", () => {
 
 		let metadata = updates.map((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
 		expect(metadata.filter((item) => item.phase === "terminalQuiescence")).toHaveLength(0);
-		await expect(
-			client.request("session/prompt", {
-				sessionId: session.sessionId,
-				prompt: [{ type: "text", text: "race the child" }],
-			}),
-		).rejects.toThrow();
+		const nextPrompt = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "wait for the child" }],
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(promptCalls).toBe(1);
 
 		roster = [{ ...child, status: "done" }];
 		connection.emitChild(roster[0]);
 		releaseBarrier();
 		await vi.waitFor(() => {
 			metadata = updates.map((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
-			expect(metadata.filter((item) => item.phase === "terminalQuiescence")).toEqual([
+			expect(metadata.filter((item) => item.phase === "terminalQuiescence" && item.promptTurnId === 1)).toEqual([
 				expect.objectContaining({
 					promptTurnId: 1,
 					outcome: "result",
@@ -354,10 +358,8 @@ describe("ACP mode end to end", () => {
 		});
 		const sequences = metadata.map((item) => item.eventSequence);
 		expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
-		await client.request("session/prompt", {
-			sessionId: session.sessionId,
-			prompt: [{ type: "text", text: "after terminal" }],
-		});
+		await nextPrompt;
+		expect(promptCalls).toBe(2);
 		close();
 	});
 
