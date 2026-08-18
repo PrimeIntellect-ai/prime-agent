@@ -516,25 +516,25 @@ function defaultWorkerDescriptorDir(agentDir: string, socketPath: string): strin
 }
 
 /**
- * Builds that hashed the raw socket spelling stored descriptors under a
- * different key for each non-canonical spelling. Move such a directory to the
- * canonical location once so existing workers stay adoptable after update. The
- * old spelling is unknown here, so candidates are found by reading each
- * namespace's descriptors and comparing their recorded supervisor socket path.
+ * Worker descriptors may live in a namespace keyed by a different spelling of
+ * this supervisor's socket path. When the canonical namespace is empty, adopt
+ * such a directory (found by the socket path its descriptors record) so those
+ * workers stay adoptable. Must only run once socket-path lease and registry
+ * ownership are held: the directory may belong to a live supervisor otherwise.
  */
-function migrateLegacyWorkerDescriptorDir(agentDir: string, socketPath: string, canonicalDir: string): void {
+export function adoptRawSpellingWorkerDescriptorDir(agentDir: string, socketPath: string, canonicalDir: string): void {
 	const root = join(agentDir, "daemon-workers");
 	if (existsSync(canonicalDir) || !existsSync(root)) {
 		return;
 	}
 	const canonicalSocketPath = normalizeSocketPath(socketPath);
 	for (const name of readdirSync(root)) {
-		const legacyDir = join(root, name);
-		if (legacyDir === canonicalDir || !legacyDirBelongsToSocket(legacyDir, canonicalSocketPath)) {
+		const candidateDir = join(root, name);
+		if (candidateDir === canonicalDir || !descriptorDirBelongsToSocket(candidateDir, canonicalSocketPath)) {
 			continue;
 		}
 		try {
-			renameSync(legacyDir, canonicalDir);
+			renameSync(candidateDir, canonicalDir);
 		} catch {
 			// A failed move only means this spelling keeps its old namespace.
 		}
@@ -542,22 +542,28 @@ function migrateLegacyWorkerDescriptorDir(agentDir: string, socketPath: string, 
 	}
 }
 
-function legacyDirBelongsToSocket(legacyDir: string, socketPath: string): boolean {
+function descriptorDirBelongsToSocket(dir: string, canonicalSocketPath: string): boolean {
+	let names: string[];
 	try {
-		for (const name of readdirSync(legacyDir)) {
-			if (!name.endsWith(".json") && name !== SUPERVISOR_CONFIG_FILE_NAME) {
-				continue;
-			}
-			const parsed: unknown = JSON.parse(readFileSync(join(legacyDir, name), "utf8"));
+		names = readdirSync(dir);
+	} catch {
+		return false;
+	}
+	for (const name of names) {
+		if (!name.endsWith(".json") && name !== SUPERVISOR_CONFIG_FILE_NAME) {
+			continue;
+		}
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(join(dir, name), "utf8"));
 			const recorded =
-				(parsed as { supervisorSocketPath?: unknown }).supervisorSocketPath ??
-				(parsed as { socketPath?: unknown }).socketPath;
-			if (typeof recorded === "string" && normalizeSocketPath(recorded) === socketPath) {
+				(parsed as { supervisorSocketPath?: unknown } | null)?.supervisorSocketPath ??
+				(parsed as { socketPath?: unknown } | null)?.socketPath;
+			if (typeof recorded === "string" && normalizeSocketPath(recorded) === canonicalSocketPath) {
 				return true;
 			}
+		} catch {
+			// Skip unreadable entries; later files may still identify the dir.
 		}
-	} catch {
-		// Unreadable entries simply do not participate in migration.
 	}
 	return false;
 }
@@ -692,9 +698,6 @@ export class DaemonSupervisor {
 			throw new Error("Daemon supervisor config is missing agentDir");
 		}
 		this.descriptorDir = options.descriptorDir ?? defaultWorkerDescriptorDir(agentDir, socketPath);
-		if (!options.descriptorDir) {
-			migrateLegacyWorkerDescriptorDir(agentDir, socketPath, this.descriptorDir);
-		}
 		this.supervisorConfigPath = join(this.descriptorDir, SUPERVISOR_CONFIG_FILE_NAME);
 		this.defaultSessionConfig = this.loadPersistedSupervisorConfig() ?? options.defaultSessionConfig;
 		this.snapshotCacheRoot = join(this.descriptorDir, "snapshot-cache", this.generation);
@@ -719,6 +722,10 @@ export class DaemonSupervisor {
 			});
 			await prepareDaemonSocketPath(this.socketPath, this.socketLease);
 
+			// Only the lease/ownership winner may move a raw-spelling descriptor
+			// namespace: doing this earlier could pull the directory out from
+			// under a still-running supervisor when this startup gets rejected.
+			adoptRawSpellingWorkerDescriptorDir(agentDir, this.socketPath, this.descriptorDir);
 			mkdirSync(this.descriptorDir, { recursive: true, mode: 0o700 });
 			chmodSync(this.descriptorDir, 0o700);
 			this.persistSupervisorConfig();

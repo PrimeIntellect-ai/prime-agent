@@ -19,7 +19,7 @@ import {
 	success,
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
-import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { adoptRawSpellingWorkerDescriptorDir, DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	DAEMON_WORKER_STARTUP_GATE_COMMIT,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
@@ -2958,20 +2958,21 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("migrates a legacy raw-spelling descriptor namespace to the canonical directory", () => {
+	it("adopts a raw-spelling descriptor namespace into the canonical directory", () => {
 		if (process.platform === "win32") {
 			return;
 		}
-		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-legacy-migrate-"));
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-adopt-namespace-"));
 		try {
 			const rawSocketPath = `${root}//supervisor.sock`;
 			const now = new Date().toISOString();
-			// A namespace as an old build would have written it: keyed by the raw
-			// spelling's hash, holding a descriptor that records that spelling.
-			const legacyDir = join(root, "daemon-workers", "legacy-raw-key");
-			mkdirSync(legacyDir, { recursive: true });
+			// A namespace keyed by the raw spelling's hash, holding one unreadable
+			// entry (must be skipped) and a descriptor recording that spelling.
+			const rawSpellingDir = join(root, "daemon-workers", "raw-spelling-key");
+			mkdirSync(rawSpellingDir, { recursive: true });
+			writeFileSync(join(rawSpellingDir, "corrupt.json"), "null\n");
 			writeFileSync(
-				join(legacyDir, "worker-1.json"),
+				join(rawSpellingDir, "worker-1.json"),
 				`${JSON.stringify({
 					version: 1,
 					workerId: "worker-1",
@@ -2988,12 +2989,11 @@ describe("daemon worker supervisor monitoring", () => {
 				})}\n`,
 			);
 
-			const supervisor = new DaemonSupervisor(rawSocketPath, {
-				defaultSessionConfig: { cwd: root, agentDir: root },
-			}) as unknown as { descriptorDir: string };
+			const canonicalDir = join(root, "daemon-workers", "canonical-key");
+			adoptRawSpellingWorkerDescriptorDir(root, rawSocketPath, canonicalDir);
 
-			expect(existsSync(join(supervisor.descriptorDir, "worker-1.json"))).toBe(true);
-			expect(existsSync(legacyDir)).toBe(false);
+			expect(existsSync(join(canonicalDir, "worker-1.json"))).toBe(true);
+			expect(existsSync(rawSpellingDir)).toBe(false);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

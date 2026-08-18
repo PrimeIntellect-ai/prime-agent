@@ -35,11 +35,22 @@ afterEach(async () => {
 		}),
 	);
 	supervisors.clear();
+	// Workers exit asynchronously after their supervisor and may still be
+	// flushing writes; leftover temp entries must not fail the suite.
 	while (harnesses.length > 0) {
-		harnesses.pop()?.cleanup();
+		const harness = harnesses.pop();
+		try {
+			harness?.cleanup();
+		} catch {
+			// Tolerated: the OS reclaims the temp directory.
+		}
 	}
 	for (const dir of socketDirs) {
-		rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 50 });
+		try {
+			rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 50 });
+		} catch {
+			// Tolerated: the OS reclaims the temp directory.
+		}
 	}
 	socketDirs.clear();
 }, 60_000);
@@ -93,6 +104,10 @@ function spawnSupervisor(paths: TestPaths): ChildProcess {
 				),
 				[supervisorRegistryDirEnv]: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
+				// Spawned workers can outlive the SIGKILLed supervisor and keep
+				// flushing compile-cache writes into TMPDIR, which makes cleanup
+				// race into ENOTEMPTY; keep their caches out of this test's dirs.
+				NODE_DISABLE_COMPILE_CACHE: "1",
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketDir,
 				TSX_TSCONFIG_PATH: tsconfigPath,
