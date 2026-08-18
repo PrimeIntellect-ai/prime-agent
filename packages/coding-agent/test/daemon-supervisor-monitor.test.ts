@@ -19,7 +19,7 @@ import {
 	success,
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
-import { adoptRawSpellingWorkerDescriptorDir, DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	DAEMON_WORKER_STARTUP_GATE_COMMIT,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
@@ -2955,47 +2955,6 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(loaded.descriptor.supervisorSocketPath).toBe("/tmp/supervisor.sock");
 		} finally {
 			rmSync(descriptorDir, { recursive: true, force: true });
-		}
-	});
-
-	it("adopts a raw-spelling descriptor namespace into the canonical directory", () => {
-		if (process.platform === "win32") {
-			return;
-		}
-		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-adopt-namespace-"));
-		try {
-			const rawSocketPath = `${root}//supervisor.sock`;
-			const now = new Date().toISOString();
-			// A namespace keyed by the raw spelling's hash, holding one unreadable
-			// entry (must be skipped) and a descriptor recording that spelling.
-			const rawSpellingDir = join(root, "daemon-workers", "raw-spelling-key");
-			mkdirSync(rawSpellingDir, { recursive: true });
-			writeFileSync(join(rawSpellingDir, "corrupt.json"), "null\n");
-			writeFileSync(
-				join(rawSpellingDir, "worker-1.json"),
-				`${JSON.stringify({
-					version: 1,
-					workerId: "worker-1",
-					pid: 999_999,
-					socketPath: join(root, "worker-1.sock"),
-					supervisorSocketPath: rawSocketPath,
-					authenticationToken: "token-1",
-					rootActiveSessionId: "active-1",
-					createdAt: now,
-					updatedAt: now,
-					lifecycle: "running",
-					createCommand: { type: "create", config: { cwd: root, agentDir: root } },
-					consecutiveFailures: 0,
-				})}\n`,
-			);
-
-			const canonicalDir = join(root, "daemon-workers", "canonical-key");
-			adoptRawSpellingWorkerDescriptorDir(root, rawSocketPath, canonicalDir);
-
-			expect(existsSync(join(canonicalDir, "worker-1.json"))).toBe(true);
-			expect(existsSync(rawSpellingDir)).toBe(false);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
