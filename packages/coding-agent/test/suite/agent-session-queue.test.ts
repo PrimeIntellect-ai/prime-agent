@@ -2678,13 +2678,19 @@ describe("AgentSession queue characterization", () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("queued input resumed")]);
-		const internals = harness.session as unknown as { _scheduleSessionInputPump(): void };
+		const internals = harness.session as unknown as {
+			_sessionInputPumpRequested: boolean;
+			_scheduleSessionInputPump(): void;
+		};
 		const schedule = vi.spyOn(internals, "_scheduleSessionInputPump").mockImplementation(() => {});
 		await harness.session.followUp("queued before pause");
 		expect(harness.session.getFollowUpMessages()).toEqual(["queued before pause"]);
 		schedule.mockRestore();
 
+		// Model a pump that was requested before the pause invalidated its epoch.
+		internals._sessionInputPumpRequested = true;
 		const pause = harness.session.acquireSessionInputPause();
+		expect(internals._sessionInputPumpRequested).toBe(false);
 		pause.release();
 		await harness.session.waitForIdle();
 		expect(getUserTexts(harness)).toEqual(["queued before pause"]);

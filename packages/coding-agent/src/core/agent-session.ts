@@ -6303,6 +6303,7 @@ export class AgentSession {
 	acquireSessionInputPause(): { release(): void } {
 		const token = Symbol("session-input-admission-pause");
 		this._sessionInputAdmissionPauses.add(token);
+		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
 		let released = false;
 		return {
