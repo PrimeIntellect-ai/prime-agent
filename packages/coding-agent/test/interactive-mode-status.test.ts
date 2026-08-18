@@ -139,19 +139,6 @@ test("tracks refinement lifecycle for the working indicator", () => {
 	expect((fakeThis as unknown as { connectionState: AgentConnectionState }).connectionState.isRefining).toBe(false);
 });
 
-test("shows the refinement result after work finishes", () => {
-	initTheme("dark");
-	const chatContainer = new Container();
-	const fakeThis = {
-		chatContainer,
-		ui: { requestRender: vi.fn() },
-	} as unknown as InteractiveMode;
-
-	InteractiveMode.prototype.showRefinementOutcome.call(fakeThis, "Updated the local memory.");
-
-	expect(normalizeRenderedOutput(chatContainer)).toBe("✓ Refinement complete: Updated the local memory.");
-});
-
 describe("InteractiveMode update notifications", () => {
 	beforeAll(() => {
 		initTheme("dark");

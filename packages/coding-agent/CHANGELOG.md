@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added visible continual-harness refinement status and kept prompts submitted during refinement or compaction queued until they can receive a response.
+- Added visible continual-harness refinement status, durable expandable exact-edit outcomes, and safe prompt continuation across refinement or compaction.
 - Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 

@@ -179,6 +179,7 @@ import {
 	type CustomMessage,
 	createCompactionOutcomeMessage,
 	createHeartbeatPromptMessage,
+	createRefinementOutcomeMessage,
 	createRlmChildFailureMessage,
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
@@ -5896,6 +5897,7 @@ export class AgentSession {
 		const input = action.payload;
 		try {
 			let resultText: string | undefined;
+			let displayResult = true;
 			switch (input.command.name) {
 				case "compact":
 					await this.compact(input.command.args || undefined, {
@@ -5905,8 +5907,9 @@ export class AgentSession {
 				case "refine": {
 					const options = parseRefineCommandOptions(input.command.args);
 					const result = await this.refine(options, { skipAbort: true });
-					const applied = result.appliedEdits.filter((appliedEdit) => appliedEdit.applied).length;
+					const applied = result.appliedEdits.filter((edit) => edit.applied).length;
 					resultText = `Refined continual harness state: ${applied} edit${applied === 1 ? "" : "s"} applied.`;
+					displayResult = false;
 					break;
 				}
 				case "goal":
@@ -5920,7 +5923,7 @@ export class AgentSession {
 					break;
 			}
 			if (resultText) {
-				this._appendDurableSessionCommandMessage(resultText, input.command, true, false);
+				this._appendDurableSessionCommandMessage(resultText, input.command, true, false, displayResult);
 			}
 		} catch (error) {
 			if (error instanceof CompactionSkippedError) return;
@@ -5944,14 +5947,19 @@ export class AgentSession {
 		command: SessionSlashCommand,
 		isResult: boolean,
 		isError = false,
+		display = true,
 	): void {
 		const message: CustomMessage = isResult
-			? createSessionSlashCommandResultMessage(content, {
-					command,
-					success: !isError,
-					severity: isError ? "error" : "info",
-					...(isError ? { error: content.replace(/^Command failed:\s*/, "") } : {}),
-				})
+			? createSessionSlashCommandResultMessage(
+					content,
+					{
+						command,
+						success: !isError,
+						severity: isError ? "error" : "info",
+						...(isError ? { error: content.replace(/^Command failed:\s*/, "") } : {}),
+					},
+					display,
+				)
 			: createSessionSlashCommandMessage(command);
 		// Persist before touching live state so a failed write cannot leave an
 		// unsaved leaf that the next entry would silently parent onto.
@@ -7942,6 +7950,24 @@ export class AgentSession {
 		return { ...plan, baselineState };
 	}
 
+	private _recordRefinementOutcome(result: RefinementResult): void {
+		const message = createRefinementOutcomeMessage(result);
+		try {
+			this.sessionManager.appendCustomMessageEntryWithRollback(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
+		} catch {
+			// The full result is already stored as refinement history. Keep the
+			// expandable outcome visible for this process even if transcript persistence fails.
+		}
+		this.agent.state.messages.push(message);
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
+	}
+
 	/**
 	 * Synchronous application phase: disconnects from the agent, aborts any
 	 * in-flight agent run, applies the refinement plan to disk and memory, then
@@ -8017,6 +8043,7 @@ export class AgentSession {
 			this.sessionManager.appendCustomEntry("prime-agent.refinement", result);
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
+			this._recordRefinementOutcome(result);
 			try {
 				this._emit({ type: "refine_complete", result });
 			} catch {

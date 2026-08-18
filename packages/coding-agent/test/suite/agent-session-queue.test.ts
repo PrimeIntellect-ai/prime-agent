@@ -12,7 +12,11 @@ import {
 	createAgentSessionMessagePrompt,
 } from "../../src/core/agent-messages.js";
 import { type AgentCronJob, shouldDeferHeartbeatCronJob } from "../../src/core/cron-jobs.js";
-import { createSessionSlashCommandMessage } from "../../src/core/messages.js";
+import {
+	createSessionSlashCommandMessage,
+	isRefinementOutcomeMessage,
+	REFINEMENT_OUTCOME_CUSTOM_TYPE,
+} from "../../src/core/messages.js";
 import {
 	applyRefinementProposal,
 	getGlobalHarnessStateDir,
@@ -1062,6 +1066,13 @@ describe("AgentSession queue characterization", () => {
 				["refinement_start", true],
 				["refinement_end", false],
 			]);
+			const outcome = harness.session.messages.find(isRefinementOutcomeMessage);
+			expect(outcome?.details.summary).toBe("no-op");
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom_message" && entry.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE),
+			).toBe(true);
 			expect(
 				harness
 					.eventsOfType("message_end")
@@ -2536,7 +2547,7 @@ describe("AgentSession queue characterization", () => {
 			(entry) => entry.type === "custom_message" && entry.customType === "session_slash_command_result",
 		);
 		expect(inputEntry).toBeDefined();
-		expect(resultEntry).toBeDefined();
+		expect(resultEntry).toMatchObject({ display: false });
 		expect(harness.sessionManager.getBranch(resultEntry!.id).map((entry) => entry.id)).toContain(inputEntry!.id);
 	});
 
