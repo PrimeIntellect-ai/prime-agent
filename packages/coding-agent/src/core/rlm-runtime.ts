@@ -76,6 +76,23 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown): string
 	return name;
 }
 
+const RLM_THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Validate and normalize an orchestrator-supplied subagent thinking level. */
+export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run thinking must be a string");
+	}
+	const level = value.trim().toLowerCase();
+	if (!RLM_THINKING_LEVELS.includes(level as ThinkingLevel)) {
+		throw new Error(`rlm.run thinking must be one of: ${RLM_THINKING_LEVELS.join(", ")}`);
+	}
+	return level as ThinkingLevel;
+}
+
 /** Validate and normalize an orchestrator-supplied subagent model reference. */
 export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {
 	if (value === undefined) {
