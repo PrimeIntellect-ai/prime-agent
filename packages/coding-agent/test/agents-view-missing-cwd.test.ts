@@ -30,7 +30,6 @@ describe("agents view open with a missing session cwd", () => {
 				throw new Error("runtime factory should not be reached when the cwd is missing");
 			};
 
-			// With cwd stripped, the session resolves against its deleted cwd and throws.
 			const stripped = await SessionManager.openAsync(sessionFile, sessionDir);
 			const suppliedLease = new SessionLease(sessionFile, join(root, "missing-cwd-lease"), "lease-token");
 			const releaseLease = vi.spyOn(suppliedLease, "release");
@@ -66,7 +65,6 @@ describe("agents view open with a missing session cwd", () => {
 			const overridden = await SessionManager.openAsync(sessionFile, sessionDir, resumeConfig.cwd);
 			expect(overridden.getCwd()).toBe(launchCwd);
 
-			// The override gets the build past the cwd guard and into the factory.
 			let factoryCwd: string | undefined;
 			const okFactory = async (opts: { cwd: string }) => {
 				factoryCwd = opts.cwd;

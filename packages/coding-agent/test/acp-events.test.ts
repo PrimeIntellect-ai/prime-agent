@@ -8,7 +8,6 @@ import {
 import { PRIME_AGENT_META_NAMESPACE } from "../src/modes/acp/acp-meta.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/types.js";
 
-/** Real streaming shape: the discriminator is on the event, delta is a string. */
 function assistantDelta(type: "text_delta" | "thinking_delta", delta: string): AgentConnectionSessionEvent {
 	return {
 		type: "message_update",
@@ -60,8 +59,6 @@ describe("ACP session event mapping", () => {
 	});
 
 	it("carries rich IPython output from the fields the tool actually reports", () => {
-		// The ipython tool reports media/diffs under `details`, so the mapping must
-		// read those exact fields rather than an invented MIME bundle.
 		const updates = acpUpdatesForSessionEvent({
 			type: "tool_execution_end",
 			toolCallId: "call-1",
@@ -69,7 +66,6 @@ describe("ACP session event mapping", () => {
 			result: {
 				output: "done",
 				details: {
-					// KernelAttachment carries base64 `data`, never a `bytes` field.
 					attachments: [{ mimeType: "image/png", path: "/tmp/plot.png", data: "aGVsbG8=" }],
 					diffs: [{ path: "a.ts" }],
 				},
@@ -120,7 +116,6 @@ describe("ACP session event mapping", () => {
 			{ type: "bash_start", command: "ls", excludeFromContext: false, runId: "r1" } as AgentConnectionSessionEvent,
 			state,
 		);
-		// bash_output carries no runId, so the mapping must remember the active run.
 		const mid = acpUpdatesForSessionEvent(
 			{ type: "bash_output", chunk: "a.ts\n" } as AgentConnectionSessionEvent,
 			state,

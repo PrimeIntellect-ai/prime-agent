@@ -10,8 +10,6 @@ import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/co
 
 let tempDir = "";
 
-// These tests count spawns of a stub python; the default-on forkserver adds an
-// extra spawn + ready handshake the stub never answers, so pin direct-spawn.
 const savedForkFlag = process.env.PRIME_AGENT_KERNEL_FORKSERVER;
 beforeAll(() => {
 	process.env.PRIME_AGENT_KERNEL_FORKSERVER = "0";
@@ -109,7 +107,6 @@ describe("IpythonKernelProvisioner", () => {
 		provisioner.prewarm();
 		expect(provisioner.manager).toBeUndefined();
 
-		// Once the prewarm startup settles, ensure() must launch a second attempt.
 		await vi.waitFor(async () => {
 			await expect(provisioner.ensure()).rejects.toThrow();
 			expect(countRuns()).toBeGreaterThanOrEqual(2);
@@ -333,7 +330,6 @@ describe("IpythonKernelProvisioner", () => {
 		writeFileSync(dill, "payload");
 		writeFileSync(manifest, "{}");
 
-		// listing the namespace must never touch the on-disk snapshot
 		await provisioner.listNamespaceNames();
 
 		expect(existsSync(dill)).toBe(true);
@@ -355,7 +351,6 @@ describe("KernelManager session cleanup during startup", () => {
 
 	it("disposes a kernel that is still booting when its session is cleaned up", async () => {
 		const python = join(tempDir, "python");
-		// Never writes connection ports - stays in the booting phase until killed.
 		writeFileSync(python, ["#!/bin/sh", "sleep 30", ""].join("\n"));
 		chmodSync(python, 0o755);
 		const sessionId = `provisioner-test-${Date.now()}`;

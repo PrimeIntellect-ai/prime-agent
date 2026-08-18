@@ -57,8 +57,6 @@ describe("image markers", () => {
 
 	test("a restored marker still resolves its image (undo-safe)", () => {
 		const pending = new Map([[1, "a"]]);
-		// Marker deleted then brought back (e.g. via editor undo). Because images are
-		// never pruned mid-edit, the restored marker still resolves at submit time.
 		expect(collectMarkedImages(pending, "no marker")).toEqual([]);
 		expect(collectMarkedImages(pending, "back [image #1]")).toEqual(["a"]);
 	});

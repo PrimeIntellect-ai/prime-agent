@@ -163,7 +163,6 @@ describe("herdrAgentStateExtension", () => {
 		process.env.HERDR_SOCKET_PATH = join(tempDir, "h.sock");
 		process.env.HERDR_PANE_ID = "w1:p1";
 
-		// The loader reports the file-based integration as loaded: defer.
 		let loadedPaths = [join(tempDir, "extensions", "herdr-agent-state.ts")];
 		const factory = createHerdrAgentStateExtension(() => loadedPaths);
 		const { pi, handlers, busHandlers } = createMockPi();
@@ -171,8 +170,6 @@ describe("herdrAgentStateExtension", () => {
 		expect(handlers.size).toBe(0);
 		expect(busHandlers.size).toBe(0);
 
-		// Loaded paths are consulted per invocation, so a /reload after the
-		// file-based integration is removed or disabled re-enables the built-in.
 		loadedPaths = [];
 		const second = createMockPi();
 		factory(second.pi);
@@ -204,21 +201,17 @@ describe("herdrAgentStateExtension", () => {
 		await waitForRequests(1);
 		expect(requests[0]?.params.agent_session_path).toBe("/tmp/parent.jsonl");
 
-		// Inline RLM children rebind the same handlers with their own ctx; their
-		// events must not flip the pane state or release the parent's pane.
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, childCtx);
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, childCtx);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(requests).toHaveLength(1);
 
-		// The bound parent still reports normally.
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, parentCtx);
 		await waitForRequests(2);
 		expect(requests[1]?.params.state).toBe("working");
 	});
 
 	it("reports lifecycle state to the herdr socket", async () => {
-		// Unix socket paths must stay under ~104 chars; use a short base dir.
 		const tempDir = join(tmpdir(), `hrd-${Math.random().toString(36).slice(2, 8)}`);
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
@@ -231,7 +224,6 @@ describe("herdrAgentStateExtension", () => {
 		process.env.HERDR_SOCKET_PATH = socketPath;
 		process.env.HERDR_PANE_ID = "w1:p1";
 		process.env.HERDR_PI_IDLE_DEBOUNCE_MS = "10";
-		// Isolate from any real agent dir that may contain the file-based integration.
 		process.env.PRIME_AGENT_CODING_AGENT_DIR = tempDir;
 
 		const { pi, handlers } = createMockPi();
@@ -265,8 +257,6 @@ describe("herdrAgentStateExtension", () => {
 		await waitForRequests(3);
 		expect(requests[2]?.params.state).toBe("idle");
 
-		// Session replacement must not release: the successor session re-reports,
-		// and a racing release could clear the successor's fresh report.
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "new" }, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(requests).toHaveLength(3);
@@ -295,8 +285,6 @@ describe("herdrAgentStateExtension", () => {
 		expect(busHandlers.get("herdr:blocked")).toHaveLength(1);
 
 		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
-		// Replacement shutdowns must also unsubscribe, or every /reload and /new
-		// stacks another live listener on the shared bus.
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "new" }, ctx);
 		expect(busHandlers.get("herdr:blocked")).toHaveLength(0);
 	});
@@ -318,7 +306,6 @@ describe("herdrAgentStateExtension", () => {
 		const { pi, handlers } = createMockPi();
 		herdrAgentStateExtension(pi);
 
-		// Reload mid-turn: the fresh reporter's session_start sees a busy session.
 		const ctx = {
 			sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" },
 			isIdle: () => false,
@@ -327,7 +314,6 @@ describe("herdrAgentStateExtension", () => {
 		await waitForRequests(1);
 		expect(requests[0]?.params.state).toBe("working");
 
-		// The turn's real end must still be honored (agentActive was seeded).
 		handlers.get("agent_end")?.[0]?.({ type: "agent_end", messages: [] }, ctx);
 		await waitForRequests(2);
 		expect(requests[1]?.params.state).toBe("idle");
@@ -353,7 +339,6 @@ describe("herdrAgentStateExtension", () => {
 		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
 		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
-		// End with a retryable provider error: enters the retry hold (working).
 		handlers.get("agent_end")?.[0]?.(
 			{
 				type: "agent_end",
@@ -361,12 +346,8 @@ describe("herdrAgentStateExtension", () => {
 			},
 			ctx,
 		);
-		// A blocked event lands during the hold, cancelling the retry timer...
 		const blocked = busHandlers.get("herdr:blocked")?.[0];
 		blocked?.({ active: true, label: "permission needed" });
-		// ...and when the block lifts, the pane must settle to blocked (failed
-		// retry), not stick at working forever. Intermediate states coalesce in
-		// the latest-wins queue, so assert on the settled final report.
 		blocked?.({ active: false });
 
 		await waitForRequests(2);
@@ -397,9 +378,6 @@ describe("herdrAgentStateExtension", () => {
 		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
 		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
-		// The agent's auto-retry classifies almost every provider error as
-		// retryable, so an error the old pattern list missed must still hold
-		// working (not flip idle) while a retry may be pending.
 		handlers.get("agent_end")?.[0]?.(
 			{
 				type: "agent_end",
@@ -408,8 +386,6 @@ describe("herdrAgentStateExtension", () => {
 			ctx,
 		);
 
-		// No retry arrives: after the grace window the pane settles to blocked
-		// with the error message, never reporting idle in between.
 		await waitForRequests(3);
 		expect(requests.map((r) => r.params.state)).toEqual(["idle", "working", "blocked"]);
 		expect(requests.at(-1)?.params.message).toContain("unexpected provider failure");
@@ -434,16 +410,11 @@ describe("herdrAgentStateExtension", () => {
 		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
 		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
-		// Quit while the working report may still be in flight; the release must
-		// be the final write, with no report reclaiming the pane afterwards.
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, ctx);
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
 
 		await waitForRequests(2);
 		await new Promise((resolve) => setTimeout(resolve, 100));
-		// Still-queued reports are dropped by the release, so the exact report
-		// count depends on send timing; the invariant is that the release is the
-		// last write and nothing reclaims the pane after it.
 		expect(requests.at(-1)?.method).toBe("pane.release_agent");
 		expect(requests.filter((r) => r.method === "pane.release_agent")).toHaveLength(1);
 	});
@@ -468,9 +439,6 @@ describe("herdrAgentStateExtension", () => {
 		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
 		await waitForRequests(1);
 
-		// Replacement shutdown: no release (the successor re-reports), and the
-		// old instance must go quiet - a late report with its process-wide seq
-		// would outrank and stomp the successor's state.
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "new" }, ctx);
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 100));
@@ -495,8 +463,6 @@ describe("herdrAgentStateExtension", () => {
 
 		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
 
-		// Two instances, as after a session replacement: the successor's seq must
-		// exceed everything the predecessor sent, or herdr drops its reports.
 		const first = createMockPi();
 		herdrAgentStateExtension(first.pi);
 		first.handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
