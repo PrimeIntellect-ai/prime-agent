@@ -47,7 +47,6 @@ export interface GoogleOptions extends StreamOptions {
 	};
 }
 
-// Counter for generating unique tool call IDs
 let toolCallCounter = 0;
 
 export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions> = (
@@ -178,7 +177,6 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 								currentBlock = null;
 							}
 
-							// Generate unique ID if not provided or if it's a duplicate
 							const providedId = part.functionCall.id;
 							const needsNewId =
 								!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);

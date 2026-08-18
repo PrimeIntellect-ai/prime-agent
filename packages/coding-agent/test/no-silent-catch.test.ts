@@ -2,12 +2,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 
-/**
- * Guardrail for ENG-4422: errors must never be swallowed without a trace.
- * An empty `catch {}` is only acceptable with a comment explaining why the
- * swallow is intentional (which this scan permits), or better, a log call.
- */
-
 const REPO_ROOT = resolve(__dirname, "..", "..", "..");
 const EMPTY_CATCH = /catch(\s*\([^)]*\))?\s*\{\s*\}/g;
 

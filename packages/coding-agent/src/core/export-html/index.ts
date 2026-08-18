@@ -113,8 +113,6 @@ function generateThemeVars(themeName?: string): string {
 	for (const [key, value] of Object.entries(colors)) {
 		lines.push(`--${key}: ${value};`);
 	}
-
-	// Use explicit theme export colors if available, otherwise derive from userMessageBg
 	const themeExport = getThemeExportColors(themeName);
 	const userMessageBg = colors.userMessageBg || "#343541";
 	const derivedColors = deriveExportColors(userMessageBg);
@@ -154,11 +152,7 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const bodyBg = themeExport.pageBg ?? derivedExportColors.pageBg;
 	const containerBg = themeExport.cardBg ?? derivedExportColors.cardBg;
 	const infoBg = themeExport.infoBg ?? derivedExportColors.infoBg;
-
-	// Base64 encode session data to avoid escaping issues
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
-
-	// Build the CSS with theme variables injected
 	const css = templateCss
 		.replace("{{THEME_VARS}}", themeVars)
 		.replace("{{BODY_BG}}", bodyBg)
@@ -188,8 +182,6 @@ function preRenderCustomTools(
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
-
-		// Find tool calls in assistant messages
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
 				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
@@ -200,11 +192,8 @@ function preRenderCustomTools(
 				}
 			}
 		}
-
-		// Find tool results
 		if (msg.role === "toolResult" && msg.toolCallId) {
 			const toolName = msg.toolName || "";
-			// Only render if we have a pre-rendered call OR it's not template-rendered
 			const existing = renderedTools[msg.toolCallId];
 			if (existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
 				const rendered = toolRenderer.renderResult(
@@ -248,12 +237,9 @@ export async function exportSessionToHtml(
 	}
 
 	const entries = sm.getEntries();
-
-	// Pre-render custom tools if a tool renderer is provided
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
 	if (opts.toolRenderer) {
 		renderedTools = preRenderCustomTools(entries, opts.toolRenderer);
-		// Only include if we actually rendered something
 		if (Object.keys(renderedTools).length === 0) {
 			renderedTools = undefined;
 		}

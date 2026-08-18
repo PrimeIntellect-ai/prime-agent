@@ -27,12 +27,10 @@ export class KillRing {
 		}
 	}
 
-	/** Get most recent entry without modifying the ring. */
 	peek(): string | undefined {
 		return this.ring.length > 0 ? this.ring[this.ring.length - 1] : undefined;
 	}
 
-	/** Move last entry to front (for yank-pop cycling). */
 	rotate(): void {
 		if (this.ring.length > 1) {
 			const last = this.ring.pop()!;

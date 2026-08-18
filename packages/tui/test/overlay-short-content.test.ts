@@ -20,18 +20,14 @@ class SimpleOverlay implements Component {
 
 describe("TUI overlay with short content", () => {
 	it("should render overlay when content is shorter than terminal height", async () => {
-		// Terminal has 24 rows, but content only has 3 lines
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = new TUI(terminal);
 
-		// Only 3 lines of content
 		tui.addChild(new SimpleContent(["Line 1", "Line 2", "Line 3"]));
 
-		// Show overlay centered - should be around row 10 in a 24-row terminal
 		const overlay = new SimpleOverlay();
 		tui.showOverlay(overlay);
 
-		// Trigger render
 		tui.start();
 		await terminal.waitForRender();
 

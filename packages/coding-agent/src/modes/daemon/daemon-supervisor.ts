@@ -2041,8 +2041,6 @@ export class DaemonSupervisor {
 			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
 				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
 			}
-			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
-			// the recursive-harness residency/eviction PR will revisit it.
 		}
 		const key = createCommand.sessionPath
 			? canonicalSessionPath(createCommand.sessionPath)

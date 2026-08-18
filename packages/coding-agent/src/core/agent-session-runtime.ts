@@ -20,24 +20,11 @@ import { SessionManager } from "./session-manager.js";
 
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";
 
-/**
- * Result returned by runtime creation.
- *
- * The caller gets the created session, its cwd-bound services, and all
- * diagnostics collected during setup.
- */
 export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResult {
 	services: AgentSessionServices;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
 
-/**
- * Creates a full runtime for a target cwd and session manager.
- *
- * The factory closes over process-global fixed inputs, recreates cwd-bound
- * services for the effective cwd, resolves session options against those
- * services, and finally creates the AgentSession.
- */
 export type CreateAgentSessionRuntimeFactory = (options: {
 	cwd: string;
 	agentDir: string;
@@ -57,10 +44,8 @@ export interface AgentSessionRuntimeMetadata {
 	parentSessionFile?: string;
 	rlmChildId?: string;
 	rlmParentNodeId?: string;
-	/** Runtime restored from an already-persisted completed registry entry. */
 	rehydratedCompleted?: boolean;
 	prompt?: string;
-	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	sessionDir?: string;
 }
@@ -76,13 +61,6 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 		.join("");
 }
 
-/**
- * Owns the current AgentSession plus its cwd-bound services.
- *
- * Session replacement methods tear down the current runtime first, then create
- * and apply the next runtime. If creation fails, the error is propagated to the
- * caller. The caller is responsible for user-facing error handling.
- */
 export class AgentSessionRuntime implements SubagentRuntimeHost {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
 	private readonly sessionReplacedListeners = new Set<(session: AgentSession) => void | Promise<void>>();
@@ -751,12 +729,6 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 }
 
-/**
- * Create the initial runtime from a runtime factory and initial session target.
- *
- * The same factory is stored on the returned AgentSessionRuntime and reused for
- * later /new, resume, /fork, and import flows.
- */
 export async function createAgentSessionRuntime(
 	createRuntime: CreateAgentSessionRuntimeFactory,
 	options: {

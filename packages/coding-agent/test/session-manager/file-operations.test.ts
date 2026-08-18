@@ -497,7 +497,6 @@ describe("findMostRecentSession", () => {
 		const file2 = join(tempDir, "newer.jsonl");
 
 		writeFileSync(file1, '{"type":"session","id":"old","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
-		// Small delay to ensure different mtime
 		await new Promise((r) => setTimeout(r, 10));
 		writeFileSync(file2, '{"type":"session","id":"new","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
 
@@ -534,12 +533,10 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 
 		const sm = SessionManager.open(emptyFile, tempDir);
 
-		// Should have created a new session with valid header
 		expect(sm.getSessionId()).toBeTruthy();
 		expect(sm.getHeader()).toBeTruthy();
 		expect(sm.getHeader()?.type).toBe("session");
 
-		// File should now contain a valid header
 		const content = readFileSync(emptyFile, "utf-8");
 		const lines = content.trim().split("\n").filter(Boolean);
 		expect(lines.length).toBe(1);
@@ -550,7 +547,6 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 
 	it("truncates and rewrites file without valid header", () => {
 		const noHeaderFile = join(tempDir, "no-header.jsonl");
-		// File with messages but no session header (corrupted state)
 		writeFileSync(
 			noHeaderFile,
 			'{"type":"message","id":"abc","parentId":"orphaned","timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":"test"}}\n',
@@ -558,12 +554,10 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 
 		const sm = SessionManager.open(noHeaderFile, tempDir);
 
-		// Should have created a new session with valid header
 		expect(sm.getSessionId()).toBeTruthy();
 		expect(sm.getHeader()).toBeTruthy();
 		expect(sm.getHeader()?.type).toBe("session");
 
-		// File should now contain only a valid header (old content truncated)
 		const content = readFileSync(noHeaderFile, "utf-8");
 		const lines = content.trim().split("\n").filter(Boolean);
 		expect(lines.length).toBe(1);
@@ -578,7 +572,6 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 
 		const sm = SessionManager.open(explicitPath, tempDir);
 
-		// The session file path should be preserved
 		expect(sm.getSessionFile()).toBe(explicitPath);
 	});
 
@@ -586,11 +579,9 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		const corruptedFile = join(tempDir, "corrupted.jsonl");
 		writeFileSync(corruptedFile, "garbage content\n");
 
-		// First open recovers the file
 		const sm1 = SessionManager.open(corruptedFile, tempDir);
 		const sessionId = sm1.getSessionId();
 
-		// Second open should load the recovered file successfully
 		const sm2 = SessionManager.open(corruptedFile, tempDir);
 		expect(sm2.getSessionId()).toBe(sessionId);
 		expect(sm2.getHeader()?.type).toBe("session");

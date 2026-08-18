@@ -11,7 +11,6 @@
  * - Reset (0)
  */
 
-// Standard ANSI color palette (0-15)
 const ANSI_COLORS = [
 	"#000000", // 0: black
 	"#800000", // 1: red
@@ -35,12 +34,10 @@ const ANSI_COLORS = [
  * Convert 256-color index to hex.
  */
 function color256ToHex(index: number): string {
-	// Standard colors (0-15)
 	if (index < 16) {
 		return ANSI_COLORS[index];
 	}
 
-	// Color cube (16-231): 6x6x6 = 216 colors
 	if (index < 232) {
 		const cubeIndex = index - 16;
 		const r = Math.floor(cubeIndex / 36);
@@ -51,7 +48,6 @@ function color256ToHex(index: number): string {
 		return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 	}
 
-	// Grayscale (232-255): 24 shades
 	const gray = 8 + (index - 232) * 10;
 	const grayHex = gray.toString(16).padStart(2, "0");
 	return `#${grayHex}${grayHex}${grayHex}`;
@@ -113,7 +109,6 @@ function applySgrCode(params: number[], style: TextStyle): void {
 		const code = params[i];
 
 		if (code === 0) {
-			// Reset all
 			style.fg = null;
 			style.bg = null;
 			style.bold = false;
@@ -129,7 +124,6 @@ function applySgrCode(params: number[], style: TextStyle): void {
 		} else if (code === 4) {
 			style.underline = true;
 		} else if (code === 22) {
-			// Reset bold/dim
 			style.bold = false;
 			style.dim = false;
 		} else if (code === 23) {
@@ -137,16 +131,12 @@ function applySgrCode(params: number[], style: TextStyle): void {
 		} else if (code === 24) {
 			style.underline = false;
 		} else if (code >= 30 && code <= 37) {
-			// Standard foreground colors
 			style.fg = ANSI_COLORS[code - 30];
 		} else if (code === 38) {
-			// Extended foreground color
 			if (params[i + 1] === 5 && params.length > i + 2) {
-				// 256-color: 38;5;N
 				style.fg = color256ToHex(params[i + 2]);
 				i += 2;
 			} else if (params[i + 1] === 2 && params.length > i + 4) {
-				// RGB: 38;2;R;G;B
 				const r = params[i + 2];
 				const g = params[i + 3];
 				const b = params[i + 4];
@@ -154,19 +144,14 @@ function applySgrCode(params: number[], style: TextStyle): void {
 				i += 4;
 			}
 		} else if (code === 39) {
-			// Default foreground
 			style.fg = null;
 		} else if (code >= 40 && code <= 47) {
-			// Standard background colors
 			style.bg = ANSI_COLORS[code - 40];
 		} else if (code === 48) {
-			// Extended background color
 			if (params[i + 1] === 5 && params.length > i + 2) {
-				// 256-color: 48;5;N
 				style.bg = color256ToHex(params[i + 2]);
 				i += 2;
 			} else if (params[i + 1] === 2 && params.length > i + 4) {
-				// RGB: 48;2;R;G;B
 				const r = params[i + 2];
 				const g = params[i + 3];
 				const b = params[i + 4];
@@ -174,22 +159,17 @@ function applySgrCode(params: number[], style: TextStyle): void {
 				i += 4;
 			}
 		} else if (code === 49) {
-			// Default background
 			style.bg = null;
 		} else if (code >= 90 && code <= 97) {
-			// Bright foreground colors
 			style.fg = ANSI_COLORS[code - 90 + 8];
 		} else if (code >= 100 && code <= 107) {
-			// Bright background colors
 			style.bg = ANSI_COLORS[code - 100 + 8];
 		}
-		// Ignore unrecognized codes
 
 		i++;
 	}
 }
 
-// Match ANSI escape sequences: ESC[ followed by params and ending with 'm'
 const ANSI_REGEX = /\x1b\[([\d;]*)m/g;
 
 /**
@@ -201,31 +181,25 @@ export function ansiToHtml(text: string): string {
 	let lastIndex = 0;
 	let inSpan = false;
 
-	// Reset regex state
 	ANSI_REGEX.lastIndex = 0;
 
 	let match = ANSI_REGEX.exec(text);
 	while (match !== null) {
-		// Add text before this escape sequence
 		const beforeText = text.slice(lastIndex, match.index);
 		if (beforeText) {
 			result += escapeHtml(beforeText);
 		}
 
-		// Parse SGR parameters
 		const paramStr = match[1];
 		const params = paramStr ? paramStr.split(";").map((p) => parseInt(p, 10) || 0) : [0];
 
-		// Close existing span if we have one
 		if (inSpan) {
 			result += "</span>";
 			inSpan = false;
 		}
 
-		// Apply the codes
 		applySgrCode(params, style);
 
-		// Open new span if we have any styling
 		if (hasStyle(style)) {
 			result += `<span style="${styleToInlineCSS(style)}">`;
 			inSpan = true;
@@ -235,13 +209,11 @@ export function ansiToHtml(text: string): string {
 		match = ANSI_REGEX.exec(text);
 	}
 
-	// Add remaining text
 	const remainingText = text.slice(lastIndex);
 	if (remainingText) {
 		result += escapeHtml(remainingText);
 	}
 
-	// Close any open span
 	if (inSpan) {
 		result += "</span>";
 	}

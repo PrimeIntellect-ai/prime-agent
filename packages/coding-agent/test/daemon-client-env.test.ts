@@ -31,7 +31,6 @@ describe("withClientEnv", () => {
 		});
 		expect(seenPane).toBe("w2:p1");
 		expect(seenTab).toBe("t1");
-		// The daemon's ambient value must not mix into a partial client env.
 		expect(seenWorkspace).toBeUndefined();
 		expect(process.env.HERDR_PANE_ID).toBe("original");
 		expect(process.env.HERDR_TAB_ID).toBeUndefined();
@@ -90,10 +89,7 @@ describe("withClientEnv", () => {
 	it("execEnvForSession pins keys independent of active env windows", async () => {
 		const baseline = execEnvForSession();
 		await withClientEnv({ HERDR_PANE_ID: "window-only" }, async () => {
-			// An env-less session's exec env is the daemon's startup base, not
-			// whatever another session's window put in process.env.
 			expect(execEnvForSession()).toStrictEqual(baseline);
-			// A session with env gets exactly its values; missing keys are unset.
 			expect(execEnvForSession({ HERDR_PANE_ID: "w9:p9" })).toStrictEqual({
 				HERDR_ENV: undefined,
 				HERDR_PANE_ID: "w9:p9",

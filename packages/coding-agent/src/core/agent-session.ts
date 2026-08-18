@@ -1,18 +1,3 @@
-/**
- * AgentSession - Core abstraction for agent lifecycle and session management.
- *
- * This class is shared between all run modes (interactive, print, rpc).
- * It encapsulates:
- * - Agent state access
- * - Event subscription with automatic session persistence
- * - Model and thinking level management
- * - Compaction (manual and auto)
- * - Bash execution
- * - Session switching and branching
- *
- * Modes use this class and add their own I/O layer on top.
- */
-
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -292,31 +277,23 @@ export interface RlmChildAgentSnapshot {
 	id: string;
 	parentId?: string;
 	activeSessionId?: string;
-	/** Stable daemon-visible session name for addressing/displaying the child. */
 	sessionName?: string;
-	/** Exact provider/model selector used by the child. */
 	model?: string;
 	label: string;
 	status: RlmChildAgentStatus;
 	durationMs?: number;
 	answerPreview?: string;
-	/** Number of tool executions the subagent has started so far. */
 	toolUseCount?: number;
-	/** Context size (tokens) of the subagent's latest turn. */
 	tokenCount?: number;
-	/** Latest recap of what the subagent is doing, from the summarizer. */
 	recap?: string;
 	sessionDir: string;
 	activity?: RlmChildAgentActivity;
-	/** Child sent at least one explicit agent message since task admission. */
 	repliedSinceTask?: boolean;
-	/** Failure reason when status is "error". */
 	error?: string;
 }
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
 
-/** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| AgentEvent
 	| {
@@ -340,7 +317,6 @@ export type AgentSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
-			/** "warning" for benign skips (nothing to compact), "error" for real failures */
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
 	  }
@@ -379,20 +355,15 @@ export type AgentSessionEvent =
 			cancelled: boolean;
 			truncated: boolean;
 			fullOutputPath?: string;
-			/** Set when execution failed before producing a result (e.g. spawn failure) */
 			errorMessage?: string;
-			/** Set for transient (side-conversation) runs so other attached clients suppress them. */
 			transient?: boolean;
-			/** Echo of the caller-supplied run id, so clients correlate runs by identity. */
 			runId?: string;
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
 	| { type: "refine_failed"; error: string };
 
-/** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
-/** Payload of the bash_end event for a user-initiated bash command */
 type UserBashEndDetails = {
 	exitCode: number | undefined;
 	cancelled: boolean;
@@ -401,12 +372,7 @@ type UserBashEndDetails = {
 	errorMessage?: string;
 };
 
-/** Thrown when compaction is skipped for a benign reason (surfaced as a warning, not an error) */
 export class CompactionSkippedError extends Error {}
-
-// ============================================================================
-// Types
-// ============================================================================
 
 export interface AgentSessionConfig {
 	agent: Agent;
@@ -414,19 +380,12 @@ export interface AgentSessionConfig {
 	settingsManager: SettingsManager;
 	serviceTierPreference?: ServiceTier;
 	cwd: string;
-	/** Config dir backing credentials (auth.json); exported to the kernel for skills. */
 	agentDir?: string;
-	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
-	/** Resource loader for skills, prompts, themes, context files, system prompt */
 	resourceLoader: ResourceLoader;
-	/** SDK custom tools registered outside extensions */
 	customTools?: ToolDefinition[];
-	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Initial active built-in tool names. Default: [ipython] */
 	initialActiveToolNames?: string[];
-	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
 	/**
 	 * Whether the built-in long-running goals feature is available: the bundled
@@ -434,9 +393,7 @@ export interface AgentSessionConfig {
 	 * Default: true.
 	 */
 	includeGoals?: boolean;
-	/** Daemon-backed agent-to-agent messaging bridge. Omitted for local-only sessions. */
 	agentMessageController?: AgentSessionMessageController;
-	/** Daemon-backed read-only active-session observation bridge. Omitted for local-only sessions. */
 	agentObserveController?: AgentObserveController;
 	/**
 	 * Whether the bundled compact skill and its compact.* host handlers are
@@ -460,32 +417,16 @@ export interface AgentSessionConfig {
 	 * a definition-first registry even when callers provide plain AgentTool instances.
 	 */
 	baseToolsOverride?: Record<string, AgentTool>;
-	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
-	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Current RLM recursion depth. Root sessions default to RLM_DEPTH or 0. */
 	rlmDepth?: number;
-	/** Maximum RLM recursion depth. Defaults to RLM_MAX_DEPTH or 1. */
 	rlmMaxDepth?: number;
-	/** Directory exposed to the kernel as RLM_SESSION_DIR. */
 	rlmSessionDir?: string;
-	/** Node id for this session when it is itself an RLM child. */
 	rlmParentNodeId?: string;
-	/** Parent agent name/id shown in child communication doctrine. */
 	rlmParentAgent?: string;
-	/** Host responsible for creating RLM subagent runtimes. */
 	subagentRuntimeHost?: SubagentRuntimeHost;
-	/** Host-side autonomous continuation policy. */
 	autonomous?: AgentAutonomousConfig;
-	/**
-	 * Boot the IPython kernel in the background as soon as the session is created,
-	 * so the first ipython tool call doesn't pay the kernel cold start.
-	 *
-	 * Only applies to main agents (rlmDepth 0); subagent kernels stay lazy. Default: false.
-	 */
 	prewarmIpythonKernel?: boolean;
-	/** Test/extension hook for automatic refine review decisions. Defaults to the model-backed review gate. */
 	autoRefineReviewer?: AutoRefineReviewer;
 	/**
 	 * When true, auto-refine runs synchronously between turns at the
@@ -533,42 +474,26 @@ export type SerializedBackgroundPlanResult =
 	| { status: "invalidated"; branchVersion: number }
 	| {
 			status: "failure";
-			/** True when the background plan was for an explicit refine.run (skipReview). */
 			explicit: boolean;
-			/** Original options for the failed plan, to allow re-queue on explicit failure. */
 			options: { instructions?: string; rollbackId?: string; global?: boolean };
 			branchVersion: number;
 	  };
 
 export type AutoRefineReviewer = (request: AutoRefineReviewRequest, signal?: AbortSignal) => Promise<AutoRefineReview>;
 
-/** Options for AgentSession.prompt() */
 export interface PromptOptions {
-	/** Whether to expand file-based prompt templates (default: true) */
 	expandPromptTemplates?: boolean;
-	/** Image attachments */
 	images?: ImageContent[];
-	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
 	streamingBehavior?: "steer" | "followUp";
-	/** Coalesce follow-up queueing so only one pending follow-up exists for this key. */
 	followUpQueueKey?: string;
-	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
-	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean, queued?: boolean) => void;
-	/** Queue instead of starting immediately when the session is idle but already has queued work. */
 	queueIfBusy?: boolean;
-	/** Start queued work when no agent turn is currently running. */
 	resumeIfIdle?: boolean;
-	/** Host-generated prompt that must bypass extension/slash/template input interception. */
 	internalPrompt?: boolean;
-	/** Prevent host-driven prompts from causing autonomous continuation injection. */
 	suppressAutonomousContinuation?: boolean;
-	/** Skip extension input handlers for replaying already-accepted input. */
 	skipInputHandlers?: boolean;
-	/** Cancel this prompt while it is waiting for direct-turn admission. */
 	signal?: AbortSignal;
-	/** Internal host hook fired at the direct-turn ownership commit point. */
 	admissionCommitted?: () => void;
 	agentMessageId?: string;
 	content?: (TextContent | ImageContent)[];
@@ -669,13 +594,11 @@ type QueuedSessionAction = SessionAction<PreparedTurnPayload | PreparedCommandPa
 
 interface PreparedPromptPreparation {
 	result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>;
-	/** Base system prompt captured at emitBeforeAgentStart, for stale-base refresh at handoff. */
 	basePromptSnapshot: string;
 }
 
 class DeferredSessionInputError extends Error {}
 
-/** Wrap a preflight callback so only the first report wins. */
 function oncePreflight(
 	preflightResult: ((success: boolean, queued?: boolean) => void) | undefined,
 ): (success: boolean, queued?: boolean) => void {
@@ -875,10 +798,6 @@ interface AgentMessageDeferred {
 	reject: (error: Error) => void;
 }
 
-/**
- * Per-agent-message settlement record: `delivery` settles when the prompt reaches agent state,
- * `completion` when its turn (or command) finishes. Settled deferreds are removed immediately.
- */
 interface AgentMessageOutcome {
 	delivery?: AgentMessageDeferred;
 	completion?: AgentMessageDeferred;
@@ -894,12 +813,10 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
-/** Result from cycleModel() */
 export interface ModelCycleResult {
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;
-	/** Whether cycling through scoped models (--models flag) or all available */
 	isScoped: boolean;
 }
 
@@ -943,15 +860,10 @@ interface RlmChildRun {
 	error?: string;
 	abort: () => void;
 	publication: AgentMessageDeferred;
-	/** Child session, once its runtime exists. Used to cancel nested child runs. */
 	session?: AgentSession;
-	/** True once the detached run task has finished its catch and cleanup paths. */
 	settled: boolean;
-	/** Selector snapshot for a delete admitted while runtime startup was still pending. */
 	detachedDeletion?: RlmSubagentRegistryEntry;
-	/** Re-emits the run's rlm_child_update snapshot with its current status. */
 	emitUpdate?: () => void;
-	/** Idempotent child-event forwarder cleanup, once the child runtime exists. */
 	unsubscribe?: () => void;
 }
 
@@ -959,14 +871,8 @@ interface RlmSubagentModelSelection {
 	model: Model<Api>;
 }
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-/** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/** Cap on the post-compaction kernel namespace probe so a wedged kernel can't stall recovery. */
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 
@@ -1078,10 +984,6 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 	parentUsage.totalTokens = parentContextTokens;
 }
 
-// ============================================================================
-// AgentSession Class
-// ============================================================================
-
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1093,7 +995,6 @@ export class AgentSession {
 		thinkingLevel?: ThinkingLevel;
 	}>;
 
-	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _lastSessionActionSnapshot: SessionActionSnapshot = {
@@ -1106,7 +1007,6 @@ export class AgentSession {
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
 	private readonly _actionStore = new ActionStore<QueuedSessionAction>();
 	private _sessionInputPump: Promise<void> = Promise.resolve();
-	// Coalesces wakes so overlapping submissions cannot start competing pumps.
 	private _sessionInputPumpRequested = false;
 	// Invalidates preparation when a branch pause starts and finishes before its next await resumes.
 	private _sessionInputPumpEpoch = 0;
@@ -1122,7 +1022,6 @@ export class AgentSession {
 	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
 	// Checkpoint and handoff waiters share lifecycle-edge notifications to avoid polling.
 	private readonly _sessionInputCheckpointWaiters = new Set<() => void>();
-	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
 	private _goalState: GoalState = emptyGoalState();
@@ -1133,7 +1032,6 @@ export class AgentSession {
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
 
-	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _compactionOperation: Promise<void> | undefined = undefined;
@@ -1143,11 +1041,9 @@ export class AgentSession {
 	private _pendingRequestedCompaction: { customInstructions?: string } | undefined;
 	private _pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
 
-	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 	private _branchSummaryOperation: Promise<void> | undefined = undefined;
 
-	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
 	private _retryPromise: Promise<void> | undefined = undefined;
@@ -1158,13 +1054,11 @@ export class AgentSession {
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
 	private readonly _unpersistedCompactionOutcomes: CustomMessage[] = [];
 
-	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _userBashRunning = false;
 	private _userBashAbortRequested = false;
 	private _pendingBashMessages: BashExecutionMessage[] = [];
 
-	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _execEnvProvider?: () => Record<string, string | undefined> | undefined;
 	private _turnIndex = 0;
@@ -1238,16 +1132,13 @@ export class AgentSession {
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
 
-	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 
-	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
-	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private _assistantTurnsSinceAutoRefine = 0;
@@ -1270,17 +1161,9 @@ export class AgentSession {
 	private _autoRefineReviewAbort?: AbortController;
 	private _refineAbortController?: AbortController;
 	private readonly _autoRefineReviewer?: AutoRefineReviewer;
-	/** When true, auto-refine runs synchronously between turns (serialized mode). */
 	private readonly _serializedRefine: boolean;
-	/** Settles (never rejects) after a planned refine waits for idle and finishes applying. */
 	private _refineInFlight?: Promise<void>;
-	/** Settles when the background planning LLM pass completes. Planning does not block turn entry points. */
 	private _refinePlanInFlight?: Promise<void>;
-	/**
-	 * Settles when a serialized-mode background planning pass completes.
-	 * Planning starts at assistant message_end (overlapping tool execution)
-	 * and is awaited at shouldStopAfterTurn before applying.
-	 */
 	private _serializedPlanInFlight?: Promise<SerializedBackgroundPlanResult | undefined>;
 	private _serializedPlanClaim?: Promise<void>;
 	private _serializedExplicitRefineOptions?: {
@@ -1354,8 +1237,6 @@ export class AgentSession {
 			this._goalAccountingStartedAt = Date.now();
 		}
 
-		// Always subscribe to agent events for internal handling
-		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentTurnHook();
@@ -1385,7 +1266,6 @@ export class AgentSession {
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
-	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
 	}
@@ -1485,11 +1365,6 @@ export class AgentSession {
 		this.agent.shouldStopAfterTurn = (context) => this._shouldStopAfterTurn(context);
 	}
 
-	// =========================================================================
-	// Event Subscription
-	// =========================================================================
-
-	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
 		for (const l of this._eventListeners) {
 			try {
@@ -2004,7 +1879,6 @@ export class AgentSession {
 		return true;
 	}
 
-	/** Append custom messages returned by before_agent_start extension handlers. */
 	private _appendBeforeAgentStartMessages(
 		messages: AgentMessage[],
 		result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>,
@@ -2243,7 +2117,6 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "plan") {
-				// Fix 4: Validate branchVersion before applying the plan.
 				if (bgResult.branchVersion !== this._autoRefineBranchVersion) {
 					if (!this._pendingRequestedRefine) {
 						this._lastAutoRefineReviewAt = Date.now();
@@ -2277,9 +2150,8 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "failure") {
-				// Fix 3: Background review or planning failed. Stamp cooldown
-				// without a synchronous retry (the discriminated contract says no duplicate boundary
-				// model call). A separately queued refine.run may still be serviced below.
+				// Background review or planning failure stamps cooldown without a synchronous retry.
+				// A separately queued refine.run may still be serviced below.
 				if (branchVersion === this._autoRefineBranchVersion) {
 					this._lastAutoRefineReviewAt = Date.now();
 				}
@@ -2378,7 +2250,6 @@ export class AgentSession {
 		await this._runSerializedAutoRefineReview("turn_interval", branchVersion);
 	}
 
-	/** Run automatic review and, when approved, refinement at a serialized turn boundary. */
 	private async _runSerializedAutoRefineReview(
 		reason: "compact" | "turn_interval",
 		branchVersion: number,
@@ -2495,7 +2366,7 @@ export class AgentSession {
 			return;
 		}
 
-		// Bug 4 fix: Also start background planning for a pending agent-callable
+		// Start background planning for a pending agent-callable
 		// refine.run request, so its plan is ready at the shouldStopAfterTurn
 		// boundary. The pending request is consumed (cleared) here so the
 		// boundary doesn't re-plan it. Explicit refine.run skips the review gate.
@@ -3303,7 +3174,6 @@ export class AgentSession {
 		return autonomousMessage ? [autonomousMessage] : [];
 	}
 
-	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	private _agentMessageOutcome(agentMessageId: string): AgentMessageOutcome {
@@ -3325,7 +3195,6 @@ export class AgentSession {
 		return outcome.delivery.promise;
 	}
 
-	/** Resolve (no error) or reject an existing leg of an agent message outcome. */
 	private _settleAgentMessage(
 		agentMessageId: string | undefined,
 		leg: "delivery" | "completion",
@@ -3344,7 +3213,6 @@ export class AgentSession {
 		else deferred.resolve();
 	}
 
-	/** Reject both currently registered legs of an agent message outcome. */
 	private _rejectAgentMessage(agentMessageId: string | undefined, error: Error): void {
 		if (agentMessageId === undefined) return;
 		this._settleAgentMessage(agentMessageId, "delivery", error);
@@ -3380,7 +3248,6 @@ export class AgentSession {
 			);
 	}
 
-	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = (event: AgentEvent): void => {
 		this._createRetryPromiseForAgentEnd(event);
 		if (event.type === "message_start" || event.type === "message_end") {
@@ -3537,7 +3404,6 @@ export class AgentSession {
 			this._overflowRecovery = "idle";
 		}
 
-		// Emit to extensions first
 		await this._emitExtensionEvent(event);
 		if (event.type === "message_start" || event.type === "message_end") {
 			const cleared = this._capturingCancelledAction(event.message);
@@ -3550,14 +3416,10 @@ export class AgentSession {
 
 		this._addLoginGuidanceToAuthError(event);
 
-		// Notify all listeners
 		this._emit(event);
 
-		// Handle session persistence
 		if (event.type === "message_end") {
-			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
 				this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
@@ -3569,12 +3431,9 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
 			}
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
-			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
 
@@ -3624,7 +3483,6 @@ export class AgentSession {
 			return;
 		}
 
-		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
 			const msg =
 				this._lastAssistantMessage ??
@@ -3635,7 +3493,6 @@ export class AgentSession {
 				return;
 			}
 
-			// Check for retryable errors first (overloaded, rate limit, server errors)
 			const concreteAuthFailure = this._isConcreteProviderAuthFailure(msg);
 			const retryConcreteAuthFailure =
 				concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
@@ -3678,7 +3535,6 @@ export class AgentSession {
 		);
 	}
 
-	/** Resolve the pending retry promise */
 	private _resolveRetry(): void {
 		if (this._retryResolve) {
 			this._retryResolve();
@@ -3688,7 +3544,6 @@ export class AgentSession {
 		}
 	}
 
-	/** Find the last assistant message in agent state (including aborted ones) */
 	private _findLastAssistantMessage(): AssistantMessage | undefined {
 		const messages = this.agent.state.messages;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -3716,7 +3571,6 @@ export class AgentSession {
 		Object.assign(targetRecord, replacement);
 	}
 
-	/** Emit extension events based on agent events */
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
@@ -3804,7 +3658,6 @@ export class AgentSession {
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this._eventListeners.push(listener);
 
-		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this._eventListeners.indexOf(listener);
 			if (index !== -1) {
@@ -3889,9 +3742,7 @@ export class AgentSession {
 			} else if (this._refinePlanInFlight) {
 				await this._refinePlanInFlight;
 			} else if (this._serializedPlanInFlight) {
-				// Fix 5: Await the background plan and apply a ready "plan"
-				// result before teardown so the refinement is persisted.
-				// Do NOT discard a ready plan.
+				// Await the background plan and apply a ready "plan" result before teardown.
 				await this._consumeSerializedBackgroundPlan(async (bgResult) => {
 					if (bgResult?.status === "plan" && bgResult.branchVersion === this._autoRefineBranchVersion) {
 						try {
@@ -4109,21 +3960,14 @@ export class AgentSession {
 		this._disposeCallbacks.add(callback);
 	}
 
-	// =========================================================================
-	// Read-only State Access
-	// =========================================================================
-
-	/** Full agent state */
 	get state(): AgentState {
 		return this.agent.state;
 	}
 
-	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
 	}
 
-	/** Current thinking level */
 	get thinkingLevel(): ThinkingLevel {
 		return this.agent.state.thinkingLevel;
 	}
@@ -4132,32 +3976,22 @@ export class AgentSession {
 		return this.agent.state.serviceTier;
 	}
 
-	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming;
 	}
 
-	/** Current effective system prompt (includes any per-turn extension modifications) */
 	get systemPrompt(): string {
 		return this.agent.state.systemPrompt;
 	}
 
-	/** Current retry attempt (0 if not retrying) */
 	get retryAttempt(): number {
 		return this._retryAttempt;
 	}
 
-	/**
-	 * Get the names of currently active tools.
-	 * Returns the names of tools currently set on the agent.
-	 */
 	getActiveToolNames(): string[] {
 		return this.agent.state.tools.map((t) => t.name);
 	}
 
-	/**
-	 * Get all configured tools with name, description, parameter schema, and source metadata.
-	 */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
 			name: definition.name,
@@ -4171,12 +4005,6 @@ export class AgentSession {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
-	/**
-	 * Set active tools by name.
-	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
-	 * Also rebuilds the system prompt to reflect the new tool set.
-	 * Changes take effect on the next agent turn.
-	 */
 	setActiveToolsByName(toolNames: string[]): void {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
@@ -4194,12 +4022,10 @@ export class AgentSession {
 		}
 		this.agent.state.tools = tools;
 
-		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
-	/** Whether compaction or branch summarization is currently running */
 	get isCompacting(): boolean {
 		return (
 			this._autoCompactionAbortController !== undefined ||
@@ -4208,7 +4034,6 @@ export class AgentSession {
 		);
 	}
 
-	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
 	}
@@ -4222,10 +4047,6 @@ export class AgentSession {
 		return context;
 	}
 
-	/**
-	 * Merge disclosures whose session-file append failed into a rebuilt message
-	 * list at their timestamp position, where they appeared live.
-	 */
 	private _mergeUnpersistedCompactionOutcomes(messages: AgentMessage[]): void {
 		for (const outcome of this._unpersistedCompactionOutcomes) {
 			let insertAt = messages.length;
@@ -4236,37 +4057,30 @@ export class AgentSession {
 		}
 	}
 
-	/** Current steering mode */
 	get steeringMode(): "all" | "one-at-a-time" {
 		return this.agent.steeringMode;
 	}
 
-	/** Current follow-up mode */
 	get followUpMode(): "all" | "one-at-a-time" {
 		return this.agent.followUpMode;
 	}
 
-	/** Current session file path, or undefined if sessions are disabled */
 	get sessionFile(): string | undefined {
 		return this.sessionManager.getSessionFile();
 	}
 
-	/** Current session ID */
 	get sessionId(): string {
 		return this.sessionManager.getSessionId();
 	}
 
-	/** Current RLM spawn depth for this session. */
 	get rlmDepth(): number {
 		return this._rlmDepth;
 	}
 
-	/** Current absolute RLM spawn-depth cap. */
 	get rlmMaxDepth(): number {
 		return this._rlmMaxDepth;
 	}
 
-	/** Current session display name, if set */
 	get sessionName(): string | undefined {
 		return this.sessionManager.getSessionName();
 	}
@@ -4302,7 +4116,6 @@ export class AgentSession {
 		this._autonomousContinuationSuppressedMessages.add(message);
 	}
 
-	/** Scoped models for cycling (from --models flag) */
 	get scopedModels(): ReadonlyArray<{
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
@@ -4310,12 +4123,10 @@ export class AgentSession {
 		return this._scopedModels;
 	}
 
-	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
 	}
 
-	/** File-based prompt templates */
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
 		return this._resourceLoader.getPrompts().prompts;
 	}
@@ -4384,10 +4195,6 @@ export class AgentSession {
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
-
-	// =========================================================================
-	// Prompting
-	// =========================================================================
 
 	private _refreshExtensionSystemPrompt(extensionPrompt: string, baseSnapshot: string): string {
 		if (this._baseSystemPrompt === baseSnapshot) {
@@ -4525,7 +4332,6 @@ export class AgentSession {
 		return this._prompt(text, options);
 	}
 
-	/** Resolve once the session has accepted ownership, before queued or active execution completes. */
 	async promptUntilAccepted(text: string, options?: PromptOptions): Promise<void> {
 		return this._prompt(text, { ...options, returnAfterAccepted: true });
 	}
@@ -4900,7 +4706,6 @@ export class AgentSession {
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;
 		} catch (err) {
-			// Emit error like extension commands do
 			this._extensionRunner.emitError({
 				extensionPath: skill.filePath,
 				event: "skill_expansion",
@@ -5952,9 +5757,6 @@ export class AgentSession {
 		this._emit({ type: "message_end", message });
 	}
 
-	/**
-	 * Throw an error if the text is an extension command.
-	 */
 	private _throwIfExtensionCommand(text: string): void {
 		const commandName = parseSlashCommand(text)?.name ?? "";
 		const command = this._extensionRunner.getCommand(commandName);
@@ -6050,7 +5852,6 @@ export class AgentSession {
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void> {
-		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
 
@@ -6070,7 +5871,6 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
 		await this._prompt(text, {
 			expandPromptTemplates: false,
 			streamingBehavior: options?.deliverAs,
@@ -6080,11 +5880,6 @@ export class AgentSession {
 		});
 	}
 
-	/**
-	 * Clear all queued messages and return them.
-	 * Useful for restoring to editor when user aborts.
-	 * @returns Object with steering and followUp arrays
-	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
 		const clearable = this._actionStore
 			.clearableActions()
@@ -6674,9 +6469,6 @@ export class AgentSession {
 		this.agent.abort();
 	}
 
-	/**
-	 * Abort current operation and wait for agent to become idle.
-	 */
 	async abort(): Promise<void> {
 		const compactionOperation = this._compactionOperation;
 		const branchSummaryOperation = this._branchSummaryOperation;
@@ -6717,10 +6509,6 @@ export class AgentSession {
 		}
 	}
 
-	// =========================================================================
-	// Model Management
-	// =========================================================================
-
 	private async _emitModelSelect(
 		nextModel: Model<any>,
 		previousModel: Model<any> | undefined,
@@ -6754,11 +6542,6 @@ export class AgentSession {
 		return promise;
 	}
 
-	/**
-	 * Set model directly.
-	 * Validates that the model is available, saves to session and settings.
-	 * @throws Error if the model is not available
-	 */
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
 		if (!this._modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
@@ -6774,7 +6557,6 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
-		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
@@ -6808,12 +6590,6 @@ export class AgentSession {
 		return undefined;
 	}
 
-	/**
-	 * Cycle to next/previous model.
-	 * Uses scoped models (from --models flag) if available, otherwise all available models.
-	 * @param direction - "forward" (default) or "backward"
-	 * @returns The new model info, or undefined if only one model available
-	 */
 	async cycleModel(
 		direction: "forward" | "backward" = "forward",
 		options: ModelSelectOptions = {},
@@ -6844,15 +6620,10 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 		const serviceTier = this._getServiceTierForModelSwitch();
 
-		// Apply model
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
-		// Apply thinking level.
-		// - Explicit scoped model thinking level overrides current session level
-		// - Undefined scoped model thinking level inherits the current session preference
-		// setThinkingLevel clamps to model capabilities.
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
@@ -6892,7 +6663,6 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
-		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
@@ -6911,20 +6681,10 @@ export class AgentSession {
 		};
 	}
 
-	// =========================================================================
-	// Thinking Level Management
-	// =========================================================================
-
-	/**
-	 * Set thinking level.
-	 * Clamps to model capabilities based on available thinking levels.
-	 * Saves to session and settings only if the level actually changes.
-	 */
 	setThinkingLevel(level: ThinkingLevel): void {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
-		// Only persist if actually changing
 		const previousLevel = this.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
 
@@ -6987,10 +6747,6 @@ export class AgentSession {
 		});
 	}
 
-	/**
-	 * Cycle to next thinking level.
-	 * @returns New level, or undefined if model doesn't support thinking
-	 */
 	cycleThinkingLevel(): ThinkingLevel | undefined {
 		if (!this.supportsThinking()) return undefined;
 
@@ -7003,18 +6759,11 @@ export class AgentSession {
 		return nextLevel;
 	}
 
-	/**
-	 * Get available thinking levels for current model.
-	 * The provider will clamp to what the specific model supports internally.
-	 */
 	getAvailableThinkingLevels(): ThinkingLevel[] {
 		if (!this.model) return THINKING_LEVELS;
 		return getSupportedThinkingLevels(this.model) as ThinkingLevel[];
 	}
 
-	/**
-	 * Check if current model supports thinking/reasoning.
-	 */
 	supportsThinking(): boolean {
 		return !!this.model?.reasoning;
 	}
@@ -7033,14 +6782,9 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
-	// Added to history (not a nextTurn message) so it also reaches the continue()-driven
-	// auto-compaction resume, which never injects nextTurn messages.
 	private async _notifyKernelStateAfterCompaction(): Promise<void> {
 		const provisioner = this._ipythonKernelProvisioner;
-		// No kernel means no state to remind about; only stay silent in that case.
 		if (!provisioner?.hasRunningKernel) return;
-		// Bound the probe so a wedged kernel can't stall recovery, and abort it on timeout so
-		// the kernel's serialized execution queue isn't left occupied by a never-resolving cell.
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
 		if (typeof timer === "object" && "unref" in timer) timer.unref();
@@ -7050,8 +6794,6 @@ export class AgentSession {
 		} finally {
 			clearTimeout(timer);
 		}
-		// null is a listing failure/timeout; only claim state survived if the kernel is still up
-		// (it may have died in the window since the check above).
 		if (names === null && !provisioner.hasRunningKernel) return;
 		const detail =
 			names === null
@@ -7071,7 +6813,6 @@ export class AgentSession {
 			display: false,
 			timestamp: Date.now(),
 		} satisfies CustomMessage;
-		// Insert before a trailing assistant error so overflow-retry cleanup can still strip it.
 		const messages = this.agent.state.messages;
 		const last = messages[messages.length - 1];
 		const insertBeforeError = last?.role === "assistant" && (last as AssistantMessage).stopReason === "error";
@@ -7085,11 +6826,6 @@ export class AgentSession {
 		this._emit({ type: "message_end", message });
 	}
 
-	/**
-	 * Tell the model when a resumed session revived its IPython kernel state, so it
-	 * knows which variables are actually available instead of assuming the kernel is
-	 * the one it left. Delivered as context before the next turn.
-	 */
 	private _onIpythonStateRestored(result: RestoreResult): void {
 		const lines = ["<ipython_state_restored>"];
 		if (result.restored.length > 0) {
@@ -7118,37 +6854,16 @@ export class AgentSession {
 		).catch(() => {});
 	}
 
-	// =========================================================================
-	// Queue Mode Management
-	// =========================================================================
-
-	/**
-	 * Set steering message mode.
-	 * Saves to settings.
-	 */
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
 		this.agent.steeringMode = mode;
 		this.settingsManager.setSteeringMode(mode);
 	}
 
-	/**
-	 * Set follow-up message mode.
-	 * Saves to settings.
-	 */
 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
 		this.agent.followUpMode = mode;
 		this.settingsManager.setFollowUpMode(mode);
 	}
 
-	// =========================================================================
-	// Compaction
-	// =========================================================================
-
-	/**
-	 * Manually compact the session context.
-	 * Aborts current agent operation first.
-	 * @param customInstructions Optional instructions for the compaction summary
-	 */
 	async compact(customInstructions?: string, options: { skipAbort?: boolean } = {}): Promise<CompactionResult> {
 		if (options.skipAbort && this.isStreaming) {
 			throw new Error("Cannot compact without aborting while the agent is running.");
@@ -7301,7 +7016,6 @@ export class AgentSession {
 		this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
-		// Get the saved compaction entry for the extension event
 		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
 			| CompactionEntry
 			| undefined;
@@ -7325,9 +7039,6 @@ export class AgentSession {
 		await Promise.allSettled(childIds.map((childId) => this.deleteRlmSubagent(childId)));
 	}
 
-	/**
-	 * Cancel in-progress compaction (manual or auto).
-	 */
 	abortCompaction(): void {
 		this._compactionAbortController?.abort();
 		this._autoCompactionAbortController?.abort();
@@ -7375,7 +7086,6 @@ export class AgentSession {
 		// _planRefine or _reviewAutoRefine call settles via signal abort
 		// rather than hanging forever.
 		this._refineAbortController?.abort();
-		// Await and clear serialized background plan if in flight.
 		if (this._serializedPlanInFlight) {
 			await this._consumeSerializedBackgroundPlan(async () => false);
 		}
@@ -7456,7 +7166,6 @@ export class AgentSession {
 		}, 100);
 	}
 
-	/** Whether any snapshot of scheduled continuation messages is still session-owned. */
 	private _sessionOwnsScheduledContinuations(continuationMessages: AgentMessage[]): boolean {
 		return continuationMessages.some((message) => this._postCompactionContinuationMessages.includes(message));
 	}
@@ -7785,7 +7494,6 @@ export class AgentSession {
 		const refineAbort = new AbortController();
 		this._refineAbortController = refineAbort;
 
-		// Background planning phase — does NOT block turn entry points
 		const planRun = this._planRefine(options, refineAbort.signal);
 		const planSettled = planRun.then(
 			() => undefined,
@@ -8034,9 +7742,6 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Cancel in-progress branch summarization.
-	 */
 	abortBranchSummary(): void {
 		this._branchSummaryAbortController?.abort();
 	}
@@ -8152,7 +7857,6 @@ export class AgentSession {
 			return await this._runAutoCompaction("overflow", true);
 		}
 
-		// Case 2: Model-requested (compact skill); runs even with auto-compaction off.
 		if (this._pendingRequestedCompaction !== undefined) {
 			return await this._runAutoCompaction("requested", false);
 		}
@@ -8182,7 +7886,6 @@ export class AgentSession {
 	 * Internal: Run automatic (threshold/overflow) or model-requested compaction
 	 * with events.
 	 */
-	/** Emit an unsuccessful compaction_end and durably record the outcome. */
 	private _endCompactionUnsuccessfully(
 		reason: CompactionOutcomeReason,
 		outcome: CompactionOutcome,
@@ -8375,14 +8078,10 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Toggle auto-compaction setting.
-	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
-	/** Whether auto-compaction is enabled */
 	get autoCompactionEnabled(): boolean {
 		return this.settingsManager.getCompactionEnabled();
 	}
@@ -8834,7 +8533,6 @@ export class AgentSession {
 		return skills;
 	}
 
-	/** Typed handlers for host requests arriving from the IPython kernel comm bridge. */
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
@@ -8950,7 +8648,6 @@ export class AgentSession {
 		// visible here so MCP skill gating sees the new credentials.
 		this._modelRegistry.authStorage.reload();
 		resetApiProviders();
-		// Re-read mcpServers and re-register user MCP providers from the reloaded settings.
 		this._mcpManager?.refresh();
 		await this._resourceLoader.reload();
 		this._buildRuntime({
@@ -9057,7 +8754,6 @@ export class AgentSession {
 		return this._rlmSessionDir;
 	}
 
-	/** Context size (tokens) of this session's latest assistant turn, for live subagent display. */
 	_contextTokensForCurrentMessages(): number | undefined {
 		const last = this._findLastAssistantMessage();
 		return last ? calculateContextTokens(last.usage) : undefined;
@@ -9214,7 +8910,6 @@ export class AgentSession {
 		return true;
 	}
 
-	/** Status of a direct RLM child run, while the run is still tracked. */
 	getRlmChildRunStatus(childId: string): RlmChildAgentStatus | undefined {
 		return this._activeRlmChildRuns.get(childId)?.status;
 	}
@@ -9239,7 +8934,6 @@ export class AgentSession {
 		return run.session?.sessionId;
 	}
 
-	/** Current direct-child registry for the model-facing rlm.list_subagents API. */
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {
 		return this._buildRlmSubagentList(await this._agentMessageController?.listAgents());
 	}
@@ -9343,7 +9037,6 @@ export class AgentSession {
 		return matches[0]!;
 	}
 
-	/** Delete an inactive direct or nested child by its registry child id without affecting active runs. */
 	async deleteInactiveRlmSubagent(
 		childId: string,
 		isExternallyRunning: () => boolean = () => false,
@@ -9385,7 +9078,6 @@ export class AgentSession {
 		return result.outcome === "skipped_running" ? "running" : "deleted";
 	}
 
-	/** Delete a running, retained, or passive direct child selected from this parent session's registry. */
 	async deleteRlmSubagent(target: string): Promise<RlmDeleteSubagentResult> {
 		const inFlight = [...this._deletingRlmChildren.values()].filter(({ subagent }) =>
 			this._rlmSubagentMatchesTarget(subagent, target),
@@ -9598,7 +9290,6 @@ export class AgentSession {
 		return true;
 	}
 
-	/** Stop retaining an idle daemon child without deleting its durable registry row. */
 	releaseRlmChildSession(childId: string, session: AgentSession): (() => void) | false {
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run?.session === session && run.status === "done") {
@@ -9633,7 +9324,6 @@ export class AgentSession {
 		return false;
 	}
 
-	// Inline (non-daemon) mode only; daemon clients attach to the child session directly.
 	getRlmChildSession(childId: string): AgentSession | undefined {
 		const direct = this._activeRlmChildRuns.get(childId)?.session ?? this._rlmChildSessions.get(childId);
 		if (direct) {
@@ -9654,12 +9344,6 @@ export class AgentSession {
 		return undefined;
 	}
 
-	/**
-	 * Cancel a single RLM child run by id, searching nested child sessions.
-	 *
-	 * @returns true when a running or queued run was cancelled; false when the
-	 * id is unknown or the run already finished.
-	 */
 	cancelRlmChildRun(childId: string, reason = "Cancelled by user"): boolean {
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run) {
@@ -9670,7 +9354,6 @@ export class AgentSession {
 				return true;
 			}
 		}
-		// A finished, retained child can still have a running nested subagent.
 		for (const retained of this._rlmChildSessions.values()) {
 			if (retained.cancelRlmChildRun(childId, reason)) {
 				return true;
@@ -10129,18 +9812,9 @@ export class AgentSession {
 		return this._startRlmChildRun(prompt, kwargs, spawnCode);
 	}
 
-	// =========================================================================
-	// Auto-Retry
-	// =========================================================================
-
-	/**
-	 * Check if an error is retryable (overloaded, rate limit, server errors).
-	 * Context overflow errors are NOT retryable (handled by compaction instead).
-	 */
 	private _isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
-		// Context overflow is handled by compaction, not retry
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
 
@@ -10305,10 +9979,6 @@ export class AgentSession {
 		this._retryAuthFailureSources = [];
 	}
 
-	/**
-	 * Handle retryable errors with exponential backoff.
-	 * @returns true if retry was initiated, false if max retries exceeded or disabled
-	 */
 	private async _handleRetryableError(
 		message: AssistantMessage,
 		options?: {
@@ -10324,8 +9994,6 @@ export class AgentSession {
 			return false;
 		}
 
-		// Retry promise is created synchronously in _handleAgentEvent for agent_end.
-		// Keep a defensive fallback here in case a future refactor bypasses that path.
 		if (!this._retryPromise) {
 			this._retryPromise = new Promise((resolve) => {
 				this._retryResolve = resolve;
@@ -10336,7 +10004,6 @@ export class AgentSession {
 
 		if (this._retryAttempt > settings.maxRetries) {
 			this._markProviderAuthStaleForRetryFailure(message, options);
-			// Max retries exceeded, emit final failure and reset
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
@@ -10359,18 +10026,15 @@ export class AgentSession {
 			errorMessage: message.errorMessage || "Unknown error",
 		});
 
-		// Remove error message from agent state (keep in session for history)
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 			this.agent.state.messages = messages.slice(0, -1);
 		}
 
-		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
 		try {
 			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {
-			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this._retryAttempt;
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._retryAttempt = 0;
@@ -10387,19 +10051,13 @@ export class AgentSession {
 		}
 		this._retryAbortController = undefined;
 
-		// Retry via continue() - use setTimeout to break out of event handler chain
 		setTimeout(() => {
-			this.agent.continue().catch(() => {
-				// Retry failed - will be caught by next agent_end
-			});
+			this.agent.continue().catch(() => {});
 		}, 0);
 
 		return true;
 	}
 
-	/**
-	 * Cancel in-progress retry.
-	 */
 	abortRetry(): void {
 		if (this._retryAbortController) {
 			this._retryAbortController.abort();
@@ -10420,10 +10078,6 @@ export class AgentSession {
 		this._resolveRetry();
 	}
 
-	/**
-	 * Wait for any in-progress retry to complete.
-	 * Returns immediately if no retry is in progress.
-	 */
 	private async waitForRetry(): Promise<void> {
 		if (!this._retryPromise) {
 			return;
@@ -10433,12 +10087,10 @@ export class AgentSession {
 		await this.agent.waitForIdle();
 	}
 
-	/** Whether auto-retry is currently in progress */
 	get isRetrying(): boolean {
 		return this._retryPromise !== undefined;
 	}
 
-	/** Whether an accepted prompt is still running or waiting for retry completion. */
 	get hasAcceptedPromptInFlight(): boolean {
 		return this._actionStore
 			.unfinishedActions()
@@ -10450,21 +10102,13 @@ export class AgentSession {
 			);
 	}
 
-	/** Whether auto-retry is enabled */
 	get autoRetryEnabled(): boolean {
 		return this.settingsManager.getRetryEnabled();
 	}
 
-	/**
-	 * Toggle auto-retry setting.
-	 */
 	setAutoRetryEnabled(enabled: boolean): void {
 		this.settingsManager.setRetryEnabled(enabled);
 	}
-
-	// =========================================================================
-	// Bash Execution
-	// =========================================================================
 
 	/**
 	 * Execute a bash command.
@@ -10485,7 +10129,6 @@ export class AgentSession {
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
-		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
@@ -10646,10 +10289,6 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Record a bash execution result in session history.
-	 * Used by executeBash and by extensions that handle bash execution themselves.
-	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
@@ -10665,13 +10304,10 @@ export class AgentSession {
 
 		// If agent is streaming, defer adding to avoid breaking tool_use/tool_result ordering
 		if (this.isStreaming) {
-			// Queue for later - will be flushed on agent_end
 			this._pendingBashMessages.push(bashMessage);
 		} else {
-			// Add to agent state immediately
 			this.agent.state.messages.push(bashMessage);
 
-			// Save to session
 			this.sessionManager.appendMessage(bashMessage);
 		}
 	}
@@ -10688,7 +10324,6 @@ export class AgentSession {
 		this._bashAbortController?.abort();
 	}
 
-	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
 		return this._bashAbortController !== undefined || this._userBashRunning;
 	}
@@ -10706,26 +10341,18 @@ export class AgentSession {
 		if (this._pendingBashMessages.length === 0) return;
 
 		for (const bashMessage of this._pendingBashMessages) {
-			// Add to agent state
 			this.agent.state.messages.push(bashMessage);
 
-			// Save to session
 			this.sessionManager.appendMessage(bashMessage);
 		}
 
 		this._pendingBashMessages = [];
 	}
 
-	// =========================================================================
-	// Session Management
-	// =========================================================================
-
-	/** Current RLM max-depth value and the source that supplied it. */
 	getRlmMaxDepthStatus(): RlmMaxDepthStatus {
 		return { maxDepth: this._rlmMaxDepth, source: this._rlmMaxDepthSource };
 	}
 
-	/** Persist and immediately apply a per-chat RLM max-depth override. */
 	async setRlmMaxDepth(maxDepth: number, options: { global?: boolean } = {}): Promise<SetRlmMaxDepthResult> {
 		if (!isNonNegativeInteger(maxDepth)) {
 			throw new Error("RLM max depth must be a non-negative integer.");
@@ -10758,7 +10385,6 @@ export class AgentSession {
 		};
 	}
 
-	/** Set a display name for the current session. */
 	setSessionName(name: string): void {
 		this.sessionManager.appendSessionInfo(name);
 		this._emit({
@@ -10766,10 +10392,6 @@ export class AgentSession {
 			name: this.sessionManager.getSessionName(),
 		});
 	}
-
-	// =========================================================================
-	// Tree Navigation
-	// =========================================================================
 
 	/**
 	 * Navigate to a different node in the session tree.
@@ -10825,7 +10447,6 @@ export class AgentSession {
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
 	}> {
-		// Model required for summarization
 		if (options.summarize && !this.model) {
 			throw new Error("No model available for summarization");
 		}
@@ -10877,14 +10498,12 @@ export class AgentSession {
 		// about to persist harness/session entries for the current branch.
 		await this._invalidatePendingAutoRefineForBranchChange();
 
-		// Collect entries to summarize (from old leaf to common ancestor)
 		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
 			this.sessionManager,
 			oldLeafId,
 			targetId,
 		);
 
-		// Prepare event data - mutable so extensions can override
 		let customInstructions = options.customInstructions;
 		let replaceInstructions = options.replaceInstructions;
 		let label = options.label;
@@ -10900,7 +10519,6 @@ export class AgentSession {
 			label,
 		};
 
-		// Set up abort controller for summarization
 		this._branchSummaryAbortController = new AbortController();
 		let resolveBranchSummaryOperation: () => void = () => {};
 		const branchSummaryOperation = new Promise<void>((resolve) => {
@@ -10912,7 +10530,6 @@ export class AgentSession {
 			let extensionSummary: { summary: string; details?: unknown } | undefined;
 			let fromExtension = false;
 
-			// Emit session_before_tree event
 			if (this._extensionRunner.hasHandlers("session_before_tree")) {
 				const result = (await this._extensionRunner.emit({
 					type: "session_before_tree",
@@ -10929,7 +10546,6 @@ export class AgentSession {
 					fromExtension = true;
 				}
 
-				// Allow extensions to override instructions and label
 				if (result?.customInstructions !== undefined) {
 					customInstructions = result.customInstructions;
 				}
@@ -10941,7 +10557,6 @@ export class AgentSession {
 				}
 			}
 
-			// Run default summarizer if needed
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
@@ -10973,16 +10588,13 @@ export class AgentSession {
 				summaryDetails = extensionSummary.details;
 			}
 
-			// Determine the new leaf position based on target type
 			let newLeafId: string | null;
 			let editorText: string | undefined;
 
 			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
 				editorText = this._extractUserMessageText(targetEntry.message.content);
 			} else if (targetEntry.type === "custom_message") {
-				// Custom message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
 				editorText =
 					typeof targetEntry.content === "string"
@@ -10992,15 +10604,11 @@ export class AgentSession {
 								.map((c) => c.text)
 								.join("");
 			} else {
-				// Non-user message: leaf = selected node
 				newLeafId = targetId;
 			}
 
-			// Switch leaf (with or without summary)
-			// Summary is attached at the navigation target position (newLeafId), not the old branch
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
-				// Create summary at target position (can be null for root)
 				const summaryId = this.sessionManager.branchWithSummary(
 					newLeafId,
 					summaryText,
@@ -11009,24 +10617,19 @@ export class AgentSession {
 				);
 				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
 
-				// Attach label to the summary entry
 				if (label) {
 					this.sessionManager.appendLabelChange(summaryId, label);
 				}
 			} else if (newLeafId === null) {
-				// No summary, navigating to root - reset leaf
 				this.sessionManager.resetLeaf();
 			} else {
-				// No summary, navigating to non-root
 				this.sessionManager.branch(newLeafId);
 			}
 
-			// Attach label to target entry when not summarizing (no summary entry to label)
 			if (label && !summaryText) {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 			this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
@@ -11035,7 +10638,6 @@ export class AgentSession {
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
-			// Emit session_tree event
 			await this._extensionRunner.emit({
 				type: "session_tree",
 				newLeafId: this.sessionManager.getLeafId(),
@@ -11043,8 +10645,6 @@ export class AgentSession {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
-
-			// Emit to custom tools
 
 			return { editorText, cancelled: false, summaryEntry };
 		} finally {
@@ -11056,9 +10656,6 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Get all user messages from session for fork selector.
-	 */
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
 		const entries = this.sessionManager.getEntries();
 		const result: Array<{ entryId: string; text: string }> = [];
@@ -11087,9 +10684,6 @@ export class AgentSession {
 		return "";
 	}
 
-	/**
-	 * Get session statistics.
-	 */
 	getSessionStats(): SessionStats {
 		const state = this.state;
 		const userMessages = state.messages.filter((m) => m.role === "user").length;
@@ -11181,7 +10775,6 @@ export class AgentSession {
 		};
 	}
 
-	/** RLM session dir holding sub-* child sessions, without creating directories. */
 	private _rlmSessionDirForReading(): string | undefined {
 		return this._rlmSessionDir ?? this.sessionManager.getSessionArtifactDir();
 	}
@@ -11243,7 +10836,6 @@ export class AgentSession {
 	async exportToHtml(outputPath?: string): Promise<string> {
 		const themeName = this.settingsManager.getTheme();
 
-		// Create tool renderer if we have an extension runner (for custom tool HTML rendering)
 		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
 			getToolDefinition: (name) => this.getToolDefinition(name),
 			theme,
@@ -11293,10 +10885,6 @@ export class AgentSession {
 		return filePath;
 	}
 
-	// =========================================================================
-	// Utilities
-	// =========================================================================
-
 	/**
 	 * Get text content of last assistant message.
 	 * Useful for /copy command.
@@ -11340,16 +10928,10 @@ export class AgentSession {
 		return context;
 	}
 
-	/**
-	 * Check if extensions have handlers for a specific event type.
-	 */
 	hasExtensionHandlers(eventType: string): boolean {
 		return this._extensionRunner.hasHandlers(eventType);
 	}
 
-	/**
-	 * Get the extension runner (for setting UI context and error handlers).
-	 */
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
 	}

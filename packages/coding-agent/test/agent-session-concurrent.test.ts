@@ -1,7 +1,3 @@
-/**
- * Tests for AgentSession concurrent prompt guard.
- */
-
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +20,6 @@ import { SettingsManager } from "../src/core/settings-manager.js";
 import type { BuildSystemPromptOptions } from "../src/core/system-prompt.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
-// Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
 		super(
@@ -82,7 +77,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 
-		// Use a stream function that responds to abort
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -112,7 +106,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		// Set a runtime API key so validation passes
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
 		session = new AgentSession({
@@ -195,37 +188,27 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should throw when prompt() called while streaming", async () => {
 		createSession();
 
-		// Start first prompt (don't await, it will block until abort)
 		const firstPrompt = session.prompt("First message");
-
-		// Wait a tick for isStreaming to be set
 		await new Promise((resolve) => setTimeout(resolve, 10));
-
-		// Verify we're streaming
 		expect(session.isStreaming).toBe(true);
 
-		// Second prompt should reject
 		await expect(session.prompt("Second message")).rejects.toThrow(
 			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 		);
 
-		// Cleanup
 		await session.abort();
-		await firstPrompt.catch(() => {}); // Ignore abort error
+		await firstPrompt.catch(() => {});
 	});
 
 	it("should allow steer() while streaming", async () => {
 		createSession();
 
-		// Start first prompt
 		const firstPrompt = session.prompt("First message");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		// steer should work while streaming
 		expect(() => session.steer("Steering message")).not.toThrow();
 		expect(session.queuedActionCount).toBe(1);
 
-		// Cleanup
 		await session.abort();
 		await firstPrompt.catch(() => {});
 	});
@@ -233,15 +216,12 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should allow followUp() while streaming", async () => {
 		createSession();
 
-		// Start first prompt
 		const firstPrompt = session.prompt("First message");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		// followUp should work while streaming
 		expect(() => session.followUp("Follow-up message")).not.toThrow();
 		expect(session.queuedActionCount).toBe(1);
 
-		// Cleanup
 		await session.abort();
 		await firstPrompt.catch(() => {});
 	});
@@ -488,7 +468,6 @@ describe("AgentSession concurrent prompt guard", () => {
 	});
 
 	it("should allow prompt() after previous completes", async () => {
-		// Create session with a stream that completes immediately
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -522,13 +501,8 @@ describe("AgentSession concurrent prompt guard", () => {
 			resourceLoader: createTestResourceLoader(),
 		});
 
-		// First prompt completes
 		await session.prompt("First message");
-
-		// Should not be streaming anymore
 		expect(session.isStreaming).toBe(false);
-
-		// Second prompt should work
 		await expect(session.prompt("Second message")).resolves.not.toThrow();
 	});
 

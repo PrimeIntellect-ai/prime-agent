@@ -10,7 +10,6 @@ import {
 	snapshotPathIn,
 } from "../src/core/kernel/state-snapshot.js";
 
-// Kept in sync with the marker the Python helpers print.
 const MARKER = "__PRIME_AGENT_KERNEL_STATE__";
 
 describe("kernel state snapshot paths", () => {
@@ -95,7 +94,6 @@ describe("buildSnapshotCode", () => {
 	it("uses dill, an atomic write, and skips internal handles", () => {
 		expect(code).toContain("import dill");
 		expect(code).toContain("os.replace");
-		// rlm and the IPython display names must never be serialized.
 		expect(code).toContain('"rlm"');
 		expect(code).toContain(`print(${JSON.stringify(MARKER)}`);
 	});

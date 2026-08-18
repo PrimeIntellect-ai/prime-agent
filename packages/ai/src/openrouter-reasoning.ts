@@ -33,14 +33,6 @@ function enabledOnlyCapabilities(mandatory: boolean): OpenRouterReasoningCapabil
 	};
 }
 
-/**
- * Normalize the reasoning capability metadata published by OpenRouter.
- *
- * The top-level reasoning object is only trusted after supported_parameters
- * confirms that the route accepts reasoning controls. An omitted
- * supported_efforts field means the route exposes an enabled toggle but no
- * effort selector; null means every gateway effort is accepted.
- */
 export function getOpenRouterReasoningCapabilities(model: unknown): OpenRouterReasoningCapabilities | undefined {
 	if (!isRecord(model)) return undefined;
 	const supportedParameters = Array.isArray(model.supported_parameters) ? model.supported_parameters : [];

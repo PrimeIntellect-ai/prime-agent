@@ -34,8 +34,6 @@ const IPYTHON_CONTROL_PROMPT = [
 	"",
 	"When running shell commands from IPython, use `%%bash` cells. If you use `%%bash`, it must be the first line of the code cell: no comments, spaces, blank lines, imports, or Python statements before it. Avoid `!cmd` shell escapes for project commands so shell behavior is explicit and multi-line commands share one shell context.",
 	"",
-	"If the runtime provides a documented async `bash()` helper, use `await bash(...)` only for short, bounded work that completes in the current turn; do not wrap it in `asyncio.create_task`. For background work, or work that must survive a kernel restart, session rotation, or teardown, use a managed job with a durable receipt instead.",
-	"",
 	"Important: do not install dependencies into the IPython kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. For example, in a Python repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, or the active project interpreter from the repo root. Treat failures from that native environment as the relevant result.",
 	"",
 	"Use Python for reading, searching, and editing files — it gives you reusable variables you can slice, filter, and act on without re-reading. Always assign read/search results to named variables so you can revisit them later.",

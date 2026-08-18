@@ -1,7 +1,3 @@
-/**
- * Reusable countdown timer for dialog components.
- */
-
 import type { TUI } from "@earendil-works/pi-tui";
 
 export class CountdownTimer {
