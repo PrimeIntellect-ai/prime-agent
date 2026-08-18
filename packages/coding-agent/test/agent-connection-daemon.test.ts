@@ -2407,6 +2407,20 @@ describe("DaemonAgentConnection", () => {
 		);
 	});
 
+	it("reacquires a cached input pause after the daemon socket closes", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("session_input_pause");
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.attach();
+
+		const firstPause = await connection.acquireSessionInputPause("lease-1");
+		fakeClient.disconnectForReconnect("shutdown");
+		const secondPause = await connection.acquireSessionInputPause("lease-1");
+
+		expect(secondPause).not.toBe(firstPause);
+		expect(fakeClient.requests.filter((request) => request.type === "acquire_session_input_pause")).toHaveLength(2);
+	});
+
 	it("capability-gates the strong RLM completion barrier", async () => {
 		const oldDaemonClient = new FakeDaemonClient();
 		const oldConnection = new DaemonAgentConnection(asDaemonClient(oldDaemonClient), "active-old");

@@ -264,6 +264,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 		this.captureDaemonLogPath();
 		this.unsubscribeDaemonClose = this.client.onClose((error) => {
+			this.sessionInputPauses.clear();
 			this.rejectSnapshotAssemblies(error);
 			if (this.disposed || this.terminalCloseEmitted) {
 				return;
