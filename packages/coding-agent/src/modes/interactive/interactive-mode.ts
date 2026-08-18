@@ -1464,6 +1464,7 @@ export class InteractiveMode {
 
 	async run(): Promise<InteractiveModeRunResult> {
 		await this.init();
+		this.restorePromptStashOnOpen();
 
 		// Global, environment-scoped notices (app update, extension updates, tmux setup)
 		// belong on the agents view, not in a conversation. When the agents view already
@@ -4137,6 +4138,27 @@ export class InteractiveMode {
 		return this.snapshotPromptStashFrom(this.editor, text);
 	}
 
+	private restorePromptStashOnOpen(): void {
+		if (!this.promptStash?.restoreOnOpen) return;
+		// Land the restore notice in its own status block: init may have just posted
+		// a notice (e.g. compaction) that showStatus would otherwise replace.
+		this.lastStatusText = undefined;
+		this.lastStatusSpacer = undefined;
+		this.restorePromptStashIfEditorEmpty();
+	}
+
+	private stashDraftForAgentsView(): void {
+		const text = this.editor.getText();
+		if (!text.trim()) return;
+		// Head of the durable queue so it restores first on return; an existing
+		// manual stash stays queued behind it and keeps its manual-stash semantics.
+		const existing = [this.promptStashState.stash, ...(this.promptStashState.queuedStashes ?? [])].filter(
+			(stash): stash is PromptStash => stash !== undefined,
+		);
+		this.promptStashState.stash = { ...this.snapshotPromptStash(text), restoreOnOpen: true };
+		this.promptStashState.queuedStashes = existing.length > 0 ? existing : undefined;
+	}
+
 	private handlePromptStash(): void {
 		const text = this.editor.getText();
 		if (!text.trim()) {
@@ -5878,11 +5900,6 @@ export class InteractiveMode {
 	}
 
 	private async openScopedAgentsView(): Promise<void> {
-		if (this.editor.getText().trim()) {
-			this.focusEditor();
-			this.showStatus("Send, stash, or clear your draft before opening agents");
-			return;
-		}
 		if (!this.options.returnToAgentsView) {
 			this.focusEditor();
 			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
@@ -6717,10 +6734,6 @@ export class InteractiveMode {
 	}
 
 	private async requestAgentsView(): Promise<void> {
-		if (this.editor.getText().length > 0) {
-			this.showStatus("Send, stash, or clear your draft before opening agents");
-			return;
-		}
 		if (!this.options.returnToAgentsView) {
 			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
 			return;
@@ -6730,6 +6743,7 @@ export class InteractiveMode {
 
 	private async returnToAgentsView(request: InteractiveModeRunResult["type"] = "agents_view"): Promise<void> {
 		if (this.isShuttingDown || this.agentsViewRequest) return;
+		this.stashDraftForAgentsView();
 		this.agentsViewRequest = request;
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();

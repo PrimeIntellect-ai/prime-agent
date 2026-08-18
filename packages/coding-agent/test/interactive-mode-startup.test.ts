@@ -8,6 +8,7 @@ import {
 	InteractiveMode,
 	START_HINTS,
 } from "../src/modes/interactive/interactive-mode.js";
+import type { PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("InteractiveMode startup hints", () => {
@@ -91,7 +92,7 @@ describe("InteractiveMode startup hints", () => {
 		expect(returnToAgentsView).toHaveBeenCalledOnce();
 	});
 
-	it("explains why a draft blocks the destructive agents-view handoff", async () => {
+	it("no longer blocks the agents-view handoff on a draft", async () => {
 		const returnToAgentsView = vi.fn(async () => {});
 		const showStatus = vi.fn();
 		const mode = Object.assign(
@@ -101,8 +102,51 @@ describe("InteractiveMode startup hints", () => {
 
 		await Reflect.get(InteractiveMode.prototype, "requestAgentsView").call(mode);
 
-		expect(returnToAgentsView).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith("Send, stash, or clear your draft before opening agents");
+		expect(returnToAgentsView).toHaveBeenCalledOnce();
+		expect(showStatus).not.toHaveBeenCalled();
+	});
+
+	it("no longer blocks the scoped agents-view handoff on a draft", async () => {
+		const returnToAgentsView = vi.fn(async () => {});
+		const showStatus = vi.fn();
+		const mode = Object.assign(
+			createMode(false, true, () => "scoped draft"),
+			{ returnToAgentsView, showStatus },
+		);
+
+		await Reflect.get(InteractiveMode.prototype, "openScopedAgentsView").call(mode);
+
+		expect(returnToAgentsView).toHaveBeenCalledWith("scoped_agents_view");
+		expect(showStatus).not.toHaveBeenCalled();
+	});
+
+	it("stashes the draft once per agents-view handoff even when re-requested mid-teardown", async () => {
+		const promptStashState: PromptStashState = {};
+		let resolveDispose!: () => void;
+		const disposePromise = new Promise<void>((resolve) => {
+			resolveDispose = resolve;
+		});
+		const mode = Object.assign(
+			createMode(false, true, () => "draft prompt"),
+			{
+				promptStashState,
+				pastedImages: new Map(),
+				isShuttingDown: false,
+				agentsViewRequest: undefined,
+				unregisterSignalHandlers: vi.fn(),
+				teardownSessionUi: vi.fn(async () => {}),
+				agentConnection: { dispose: vi.fn(() => disposePromise) },
+			},
+		);
+		const returnToAgentsView = Reflect.get(InteractiveMode.prototype, "returnToAgentsView");
+
+		const firstHandoff = returnToAgentsView.call(mode);
+		await returnToAgentsView.call(mode);
+
+		expect(promptStashState.stash).toMatchObject({ text: "draft prompt", restoreOnOpen: true });
+		expect(promptStashState.queuedStashes).toBeUndefined();
+		resolveDispose();
+		await firstHandoff;
 	});
 
 	it("opens the shared session view on back navigation for process-local chats", async () => {
