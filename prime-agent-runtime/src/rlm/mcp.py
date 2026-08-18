@@ -114,6 +114,7 @@ class _Generation:
         return _seconds(self.config.get("callTimeoutMs"), _DEFAULT_CALL_TIMEOUT)
 
     async def open(self) -> None:
+        startup_failure: Exception | None = None
         try:
             async with asyncio.timeout(self.startup_timeout):
                 read, write = await self._open_transport()
@@ -131,15 +132,20 @@ class _Generation:
                     # must retain structurally.
                     if self._stderr is None or _is_exception_group(exc):
                         raise
-                    await self.close()
-                    raise self._startup_error(exc) from exc
-                if self._stderr is not None:
+                    startup_failure = exc
+                if startup_failure is None and self._stderr is not None:
                     # Keep draining the pipe for the life of a successful server,
                     # but never retain or expose post-startup stderr.
                     self._stderr.stop_capture()
         except BaseException:
             await self.close()
             raise
+        if startup_failure is not None:
+            # Teardown is deliberately outside the startup deadline: otherwise a
+            # late handshake failure can become a bare TimeoutError and lose its
+            # actionable (already bounded and redacted) diagnostic.
+            await self.close()
+            raise self._startup_error(startup_failure) from startup_failure
 
     def _startup_error(self, exc: Exception) -> McpStartupError:
         assert self._stderr is not None

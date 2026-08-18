@@ -243,6 +243,37 @@ class McpRegistryTest(unittest.TestCase):
 
         run(scenario())
 
+    def test_startup_cleanup_does_not_consume_handshake_deadline(self):
+        generation = mcp._Generation("svc", {"type": "stdio", "startupTimeoutMs": 10})
+        generation._stderr = mock.Mock()
+        generation._stderr.tail.return_value = "ImportError: useful detail"
+
+        class FailedSession:
+            async def initialize(self):
+                raise RuntimeError("Connection closed")
+
+        async def open_transport():
+            return object(), object()
+
+        class SessionContext:
+            async def __aenter__(self):
+                return FailedSession()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        async def slow_close():
+            await asyncio.sleep(0.03)
+
+        async def scenario():
+            with mock.patch.object(generation, "_open_transport", open_transport), mock.patch.object(
+                generation, "close", slow_close
+            ), mock.patch("mcp.ClientSession", return_value=SessionContext()):
+                with self.assertRaisesRegex(mcp.McpStartupError, "useful detail"):
+                    await generation.open()
+
+        run(scenario())
+
     def test_short_secret_omits_all_child_details(self):
         generation = mcp._Generation("svc", {"type": "stdio"})
         generation._stderr = mock.Mock()
