@@ -306,7 +306,36 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
-	it("applies an explicit valid thinking level to the child", async () => {
+	it.each([
+		{ childReasoning: true, thinking: "low" as const },
+		{ childReasoning: false, thinking: "off" as const },
+	])("applies an explicit $thinking thinking level to the child", async ({ childReasoning, thinking }) => {
+		const harness = await createHarness({
+			provider,
+			models: [
+				{ id: "parent-model", reasoning: true },
+				{ id: "child-model", reasoning: childReasoning },
+			],
+		});
+		try {
+			harness.session.setThinkingLevel("high");
+			harness.setResponses([fauxAssistantMessage("child answer")]);
+
+			await harness.session.runRlmChild("use explicit effort", {
+				model: `${provider}/child-model`,
+				thinking,
+			});
+			await vi.waitFor(async () => {
+				const childEntry = (await harness.session.listRlmSubagents()).subagents[0];
+				const child = harness.session.getRlmChildSession(childEntry!.rlm_child_id);
+				expect(child?.thinkingLevel).toBe(thinking);
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("inherits the parent thinking level when no override is supplied", async () => {
 		const harness = await createHarness({
 			provider,
 			models: [
@@ -316,16 +345,13 @@ describe("ENG-4649 subagent model selection", () => {
 		});
 		try {
 			harness.session.setThinkingLevel("high");
-			harness.setResponses([fauxAssistantMessage("low-effort child answer")]);
+			harness.setResponses([fauxAssistantMessage("child answer")]);
 
-			await harness.session.runRlmChild("think a little", {
-				model: `${provider}/child-model`,
-				thinking: "low",
-			});
+			await harness.session.runRlmChild("inherit effort", { model: `${provider}/child-model` });
 			await vi.waitFor(async () => {
 				const childEntry = (await harness.session.listRlmSubagents()).subagents[0];
 				const child = harness.session.getRlmChildSession(childEntry!.rlm_child_id);
-				expect(child?.thinkingLevel).toBe("low");
+				expect(child?.thinkingLevel).toBe("high");
 			});
 		} finally {
 			harness.cleanup();
