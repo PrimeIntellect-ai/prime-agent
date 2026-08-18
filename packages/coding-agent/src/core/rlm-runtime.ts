@@ -38,6 +38,13 @@ export interface RlmDeleteSubagentResult {
 	outcome?: "deleted" | "skipped_running";
 }
 
+export type RlmInterruptSubagentOutcome = "interrupted" | "idle" | "terminal" | "not_found";
+
+export interface RlmInterruptSubagentResult {
+	subagent: RlmSubagentRegistryEntry | null;
+	outcome: RlmInterruptSubagentOutcome;
+}
+
 export interface RlmModelMatch {
 	provider: string;
 	id: string;
@@ -52,6 +59,7 @@ export interface RlmFindModelsResult {
 export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
+export type RlmInterruptSubagentHandler = (target: string) => Promise<RlmInterruptSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
 
 const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
@@ -187,6 +195,17 @@ export function createRlmListSubagentsHostHandler(handler: RlmListSubagentsHandl
 	};
 }
 
+/** Interrupt the active execution of one retained direct child without deleting it. */
+export function createRlmInterruptSubagentHostHandler(handler: RlmInterruptSubagentHandler): HostRequestHandler {
+	return async (payload) => {
+		if (typeof payload.target !== "string" || !payload.target.trim()) {
+			throw new Error("rlm.interrupt_subagent target must be a non-empty string");
+		}
+		const result = await handler(payload.target.trim());
+		return result as unknown as Record<string, unknown>;
+	};
+}
+
 /** Delete one direct child selected from the current parent session's registry. */
 export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHandler): HostRequestHandler {
 	return async (payload) => {
@@ -236,6 +255,8 @@ export interface SubagentRuntimeHost {
 		options: CreateRlmSubagentRuntimeOptions,
 		status: "done" | "error" | "cancelled",
 	) => Promise<void>;
+	/** Interrupt only the operation active when the host observes it; passive children return false. */
+	interruptRlmSubagentRuntime?(childId: string, session?: AgentSession): boolean;
 	/** Close or remove the host-owned child; session is absent when a persisted child is still passive. */
 	deleteRlmSubagentRuntime(childId: string, session?: AgentSession): Promise<void>;
 	disposeRlmSubagentRuntimes?(): Promise<void>;

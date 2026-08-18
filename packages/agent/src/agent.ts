@@ -322,9 +322,15 @@ export class Agent {
 		return this.activeRun?.abortController.signal;
 	}
 
-	/** Abort the current run, if one is active. */
-	abort(): void {
-		this.activeRun?.abortController.abort();
+	/**
+	 * Abort the current run, optionally only if it still owns the observed signal.
+	 * The conditional form cannot abort a successor run admitted after observation.
+	 */
+	abort(expectedSignal?: AbortSignal): boolean {
+		const run = this.activeRun;
+		if (!run || (expectedSignal !== undefined && run.abortController.signal !== expectedSignal)) return false;
+		run.abortController.abort();
+		return true;
 	}
 
 	/**

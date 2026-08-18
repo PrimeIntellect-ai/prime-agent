@@ -7,7 +7,7 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
@@ -48,6 +48,12 @@ class RLMSubagent:
     session_name: str
     session_dir: Path
     status: str
+
+
+@dataclass(frozen=True)
+class RLMInterruptResult:
+    subagent: RLMSubagent | None
+    outcome: Literal["interrupted", "idle", "terminal", "not_found"]
 
 
 def _install_control_comm_handlers() -> None:
@@ -216,17 +222,39 @@ async def list_subagents() -> list[RLMSubagent]:
     return [_subagent_from_payload(entry) for entry in entries]
 
 
-async def delete_subagent(target: str | RLMSubagent) -> RLMSubagent:
-    """Delete one running or retained direct child from the current parent session."""
+def _subagent_selector(target: str | RLMSubagent) -> str:
     if isinstance(target, RLMSubagent):
-        selector = target.rlm_child_id
-    elif isinstance(target, str):
+        return target.rlm_child_id
+    if isinstance(target, str):
         selector = target.strip()
         if not selector:
             raise ValueError("target must not be empty")
-    else:
-        raise TypeError(f"target must be str or RLMSubagent, got {type(target).__name__}")
-    payload = await host_request("rlm.delete_subagent", {"target": selector})
+        return selector
+    raise TypeError(f"target must be str or RLMSubagent, got {type(target).__name__}")
+
+
+async def interrupt_subagent(target: str | RLMSubagent) -> RLMInterruptResult:
+    """Interrupt a direct child's active execution while retaining the child.
+
+    The outcome is ``interrupted`` when the observed execution was aborted,
+    ``idle`` when the retained child had no active execution, ``terminal`` for
+    an errored child, and ``not_found`` when no direct child matches. A later
+    follow-up can start a new turn after an interrupted or idle outcome.
+    """
+    payload = await host_request("rlm.interrupt_subagent", {"target": _subagent_selector(target)})
+    outcome = payload.get("outcome")
+    if outcome not in {"interrupted", "idle", "terminal", "not_found"}:
+        raise RuntimeError("rlm.interrupt_subagent returned an invalid outcome")
+    raw_subagent = payload.get("subagent")
+    subagent = None if raw_subagent is None else _subagent_from_payload(raw_subagent, "rlm.interrupt_subagent")
+    if (outcome == "not_found") != (subagent is None):
+        raise RuntimeError("rlm.interrupt_subagent returned an inconsistent subagent")
+    return RLMInterruptResult(subagent=subagent, outcome=outcome)
+
+
+async def delete_subagent(target: str | RLMSubagent) -> RLMSubagent:
+    """Delete one running or retained direct child from the current parent session."""
+    payload = await host_request("rlm.delete_subagent", {"target": _subagent_selector(target)})
     return _subagent_from_payload(payload.get("subagent"), "rlm.delete_subagent")
 
 
@@ -294,6 +322,9 @@ class _RLMCallable:
     async def list_subagents(self) -> list[RLMSubagent]:
         return await list_subagents()
 
+    async def interrupt_subagent(self, target: str | RLMSubagent) -> RLMInterruptResult:
+        return await interrupt_subagent(target)
+
     async def delete_subagent(self, target: str | RLMSubagent) -> RLMSubagent:
         return await delete_subagent(target)
 
@@ -319,12 +350,14 @@ __all__ = [
     "McpIntegration",
     "McpToolError",
     "NotEnabled",
+    "RLMInterruptResult",
     "RLMModel",
     "RLMSpawnHandle",
     "RLMSubagent",
     "RefinementEvent",
     "delete_subagent",
     "find_models",
+    "interrupt_subagent",
     "get_harness_state",
     "harness",
     "host_request",

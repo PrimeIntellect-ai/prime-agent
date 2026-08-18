@@ -97,9 +97,11 @@ for child in children:
     print(child.session_name, child.status, child.active_session_id)
 ```
 
-Successfully completed daemon-backed children remain addressable while their parent session is open. Delete a child only when its context is no longer needed:
+Successfully completed daemon-backed children remain addressable while their parent session is open. Interrupt only the currently observed execution while retaining the child for a later follow-up, and delete it only when its context is no longer needed:
 
 ```python
+result = await rlm.interrupt_subagent(children[0])
+print(result.outcome)  # interrupted, idle, terminal, or not_found
 await rlm.delete_subagent(children[0])
 ```
 

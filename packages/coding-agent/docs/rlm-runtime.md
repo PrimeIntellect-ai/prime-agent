@@ -66,7 +66,7 @@ sequenceDiagram
 | `src/core/kernel/index.ts` | ZeroMQ sockets, Jupyter framing, execution, comm dispatch, interrupt, and shutdown. |
 | `src/core/tools/ipython.ts` | Agent tool wrapper, lazy kernel provisioning, namespace bootstrap, and output shaping. |
 | `src/core/agent-session.ts` | RLM policy, child creation, registry, usage attribution, cancellation, and goal handlers. |
-| `src/core/rlm-runtime.ts` | Typed request/spawn-handle validation for `rlm.run`, model discovery, list, and delete. |
+| `src/core/rlm-runtime.ts` | Typed request/spawn-handle validation for `rlm.run`, model discovery, list, interrupt, and delete. |
 | `prime-agent-runtime/src/rlm/` | Python shim, handle types, callable `rlm`, and session-backed harness state. |
 
 The Python side does not call providers or implement an agent loop.
@@ -131,6 +131,7 @@ rlm
 run(prompt: str, **kwargs)
 find_models(query: str = "", limit: int = 8)
 list_subagents()
+interrupt_subagent(selector)
 delete_subagent(selector)
 host_request(request_type: str, payload: dict | None = None)
 RLMSpawnHandle
@@ -188,7 +189,7 @@ The TypeScript parent maintains the authoritative direct-child registry. `await 
 
 This registry survives kernel restart, compaction, and parent restore. Successfully completed daemon-backed children are rehydrated from the parent artifact registry. Inline children remain inspectable in the current process but have no active-session ID.
 
-The parent can continue a retained daemon child with `await agent_message.send(..., receiver_role="child", receiver_name=child.session_name)`. `rlm.delete_subagent()` accepts an exact child ID, active-session ID, session ID, or unique name. Deletion cancels or closes the runtime, writes a durable tombstone, and removes the child from messaging and observation. It does not erase the transcript or artifacts on disk.
+The parent can continue a retained daemon child with `await agent_message.send(..., receiver_role="child", receiver_name=child.session_name)`. `rlm.interrupt_subagent()` and `rlm.delete_subagent()` accept an exact child ID, active-session ID, session ID, or unique name. Interrupt aborts only the execution observed in that child, retains its session and descendants, and reports `interrupted`, `idle`, `terminal`, or `not_found`; a later follow-up starts a new turn. Delete cancels or closes the runtime, writes a durable tombstone, and removes the child from messaging and observation. Neither operation erases the transcript or artifacts on disk.
 
 Registry scope follows the parent transcript. An unrelated new parent session does not inherit children.
 

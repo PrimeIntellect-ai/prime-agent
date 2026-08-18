@@ -28,6 +28,7 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import {
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
+	createRlmInterruptSubagentHostHandler,
 	createRlmRunHostHandler,
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
@@ -332,6 +333,88 @@ describe("AgentSession rlm recursion", () => {
 			subagent,
 			outcome: "skipped_running",
 		});
+	});
+
+	it("validates and preserves interrupt host outcomes", async () => {
+		const subagent = {
+			rlm_child_id: "running-child",
+			active_session_id: "running-session",
+			session_id: "running-session",
+			session_name: "running-worker",
+			session_dir: join(tempDir, "running-child"),
+			status: "running" as const,
+		};
+		const handler = vi.fn(async () => ({ subagent, outcome: "interrupted" as const }));
+		const hostHandler = createRlmInterruptSubagentHostHandler(handler);
+		await expect(hostHandler({ target: "  running-child  " })).resolves.toEqual({
+			subagent,
+			outcome: "interrupted",
+		});
+		expect(handler).toHaveBeenCalledWith("running-child");
+		await expect(hostHandler({ target: " " })).rejects.toThrow("non-empty string");
+	});
+
+	it("interrupts only a direct child's active execution and retains it for follow-up", async () => {
+		let childRuns = 0;
+		let descendantSignal: AbortSignal | undefined;
+		const abortableStream =
+			(onSignal?: (signal: AbortSignal | undefined) => void): StreamFn =>
+			(_model, _context, options) => {
+				const stream = createAssistantMessageEventStream();
+				onSignal?.(options?.signal);
+				const poll = () => {
+					if (options?.signal?.aborted) {
+						stream.push({ type: "error", reason: "aborted", error: assistantMessage("aborted") });
+					} else {
+						setTimeout(poll, 1);
+					}
+				};
+				poll();
+				return stream;
+			};
+		const child = createSession({
+			rlmSessionDir: join(tempDir, "child"),
+			streamFn: (_model, context, options) => {
+				childRuns++;
+				if (childRuns > 1) {
+					const stream = createAssistantMessageEventStream();
+					queueMicrotask(() =>
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: assistantMessage(`done: ${userText(context)}`),
+						}),
+					);
+					return stream;
+				}
+				return abortableStream()(_model, context, options);
+			},
+		});
+		child.setSessionName("retained-child");
+		const descendant = createSession({
+			rlmSessionDir: join(tempDir, "descendant"),
+			streamFn: abortableStream((signal) => {
+				descendantSignal = signal;
+			}),
+		});
+		expect(child.registerRlmChildSession("grandchild", descendant)).toBe(true);
+		const root = createSession();
+		expect(root.registerRlmChildSession("direct-child", child)).toBe(true);
+
+		const childTurn = child.prompt("first turn");
+		const descendantTurn = descendant.prompt("independent descendant turn");
+		await waitFor(() => child.isStreaming && descendant.isStreaming);
+		await expect(root.interruptRlmSubagent("retained-child")).resolves.toMatchObject({ outcome: "interrupted" });
+		await childTurn;
+		expect(descendantSignal?.aborted).toBe(false);
+		expect((await root.listRlmSubagents()).subagents).toHaveLength(1);
+		await expect(root.interruptRlmSubagent("retained-child")).resolves.toMatchObject({ outcome: "idle" });
+		await child.prompt("follow-up");
+		expect(child.getLastAssistantText()).toContain("done: follow-up");
+		await expect(root.interruptRlmSubagent("grandchild")).resolves.toEqual({ subagent: null, outcome: "not_found" });
+
+		descendant.requestAbort();
+		await descendantTurn;
 	});
 
 	it("persists RLM_DEPTH for a fresh session and reports the seeded depth", () => {
@@ -1185,6 +1268,52 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("interrupts an initial child task without a terminal notice and keeps it resumable", async () => {
+		let calls = 0;
+		const root = createSession({
+			streamFn: (_model, context, options) => {
+				calls++;
+				const stream = createAssistantMessageEventStream();
+				if (calls > 1) {
+					queueMicrotask(() =>
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: assistantMessage(`resumed: ${userText(context)}`),
+						}),
+					);
+				} else {
+					const poll = () => {
+						if (options?.signal?.aborted) {
+							stream.push({ type: "error", reason: "aborted", error: assistantMessage("aborted") });
+						} else setTimeout(poll, 1);
+					};
+					poll();
+				}
+				return stream;
+			},
+		});
+
+		const spawned = await root.runRlmChild("interrupt me", { name: "interrupt-worker" });
+		await vi.waitFor(async () => {
+			expect((await root.listRlmSubagents()).subagents[0]?.status).toBe("running");
+			expect(root.getRlmChildSession(spawned.rlm_child_id)?.isStreaming).toBe(true);
+		});
+		await expect(root.interruptRlmSubagent(spawned.rlm_child_id)).resolves.toMatchObject({ outcome: "interrupted" });
+		await vi.waitFor(async () => {
+			expect((await root.listRlmSubagents()).subagents[0]?.status).toBe("completed");
+		});
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+		const child = root.getRlmChildSession(spawned.rlm_child_id);
+		if (!child) throw new Error("Interrupted child was not retained");
+		await child.prompt("follow-up");
+		expect(child.getLastAssistantText()).toContain("resumed: follow-up");
+	});
+
 	it("injects exactly one cancellation notice when a child run is cancelled", async () => {
 		let releaseChild: () => void = () => {};
 		const release = new Promise<void>((resolve) => {
@@ -1505,11 +1634,16 @@ describe("AgentSession rlm recursion", () => {
 
 		const handlers = inspectable._createKernelHostHandlers();
 		const listHandler = handlers["rlm.list_subagents"];
+		const interruptHandler = handlers["rlm.interrupt_subagent"];
 		const deleteHandler = handlers["rlm.delete_subagent"];
-		if (!listHandler || !deleteHandler) {
+		if (!listHandler || !interruptHandler || !deleteHandler) {
 			throw new Error("Missing RLM subagent registry host handlers");
 		}
 		await expect(listHandler({})).resolves.toEqual(expectedRegistry);
+		await expect(interruptHandler({ target: expectedSessionName })).resolves.toEqual({
+			subagent: expectedRegistry.subagents[0],
+			outcome: "idle",
+		});
 		await expect(deleteHandler({ target: expectedSessionName })).resolves.toEqual({
 			subagent: expectedRegistry.subagents[0],
 		});
@@ -1578,6 +1712,14 @@ describe("AgentSession rlm recursion", () => {
 		];
 
 		expect(await root.listRlmSubagents()).toEqual({ subagents: expected });
+		await expect(root.interruptRlmSubagent("failed-worker")).resolves.toEqual({
+			subagent: expected[0],
+			outcome: "terminal",
+		});
+		await expect(root.interruptRlmSubagent("finished-worker")).resolves.toEqual({
+			subagent: expected[1],
+			outcome: "idle",
+		});
 		await expect(root.deleteRlmSubagent("finished-worker")).resolves.toEqual({ subagent: expected[1] });
 		expect(deleteRlmSubagentRuntime).toHaveBeenCalledWith("finished-child", undefined);
 		expect(await root.listRlmSubagents()).toEqual({ subagents: [expected[0]] });

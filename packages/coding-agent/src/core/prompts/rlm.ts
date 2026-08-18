@@ -169,7 +169,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			parts.push("Inspect files a child wrote when you need to collect its work without an observation capability.");
 		}
 		parts.push(
-			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
+			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Interrupt only a direct child’s current execution with `await rlm.interrupt_subagent(child)` while retaining it for follow-up; delete it explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
 		);
 	}
 

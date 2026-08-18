@@ -58,6 +58,9 @@ except Exception as _prime_agent_rlm_error:
         async def list_subagents(self):
             self._raise_missing()
 
+        async def interrupt_subagent(self, target):
+            self._raise_missing()
+
         async def delete_subagent(self, target):
             self._raise_missing()
 

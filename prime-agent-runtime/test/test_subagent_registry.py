@@ -131,6 +131,57 @@ class RlmSubagentRegistryTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "invalid model entry"):
                 asyncio.run(rlm_module.find_models("opus"))
 
+    def test_interrupts_subagent_object_and_parses_truthful_outcome(self) -> None:
+        subagent = rlm_module.RLMSubagent(
+            rlm_child_id="sub-a1b2c3d4",
+            active_session_id="active-child",
+            session_id="session-child",
+            session_name="api-reviewer",
+            session_dir=Path("/tmp/parent/sub-a1b2c3d4"),
+            status="running",
+        )
+        host_request = AsyncMock(
+            return_value={
+                "subagent": {
+                    "rlm_child_id": subagent.rlm_child_id,
+                    "active_session_id": subagent.active_session_id,
+                    "session_id": subagent.session_id,
+                    "session_name": subagent.session_name,
+                    "session_dir": str(subagent.session_dir),
+                    "status": subagent.status,
+                },
+                "outcome": "interrupted",
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(rlm_module.rlm.interrupt_subagent(subagent))
+
+        self.assertEqual(result.outcome, "interrupted")
+        self.assertEqual(result.subagent, subagent)
+        host_request.assert_awaited_once_with("rlm.interrupt_subagent", {"target": subagent.rlm_child_id})
+
+    def test_interrupt_reports_not_found_and_rejects_inconsistent_responses(self) -> None:
+        host_request = AsyncMock(return_value={"subagent": None, "outcome": "not_found"})
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(rlm_module.interrupt_subagent(" missing "))
+        self.assertEqual(result.outcome, "not_found")
+        self.assertIsNone(result.subagent)
+        host_request.assert_awaited_once_with("rlm.interrupt_subagent", {"target": "missing"})
+
+        for payload in (
+            {"subagent": None, "outcome": "interrupted"},
+            {"subagent": None, "outcome": "unknown"},
+        ):
+            with patch.object(rlm_module, "host_request", AsyncMock(return_value=payload)):
+                with self.assertRaisesRegex(RuntimeError, "invalid outcome|inconsistent subagent"):
+                    asyncio.run(rlm_module.interrupt_subagent("missing"))
+
+        with self.assertRaisesRegex(ValueError, "target must not be empty"):
+            asyncio.run(rlm_module.interrupt_subagent("   "))
+        with self.assertRaisesRegex(TypeError, "target must be str or RLMSubagent"):
+            asyncio.run(rlm_module.interrupt_subagent(123))
+
     def test_deletes_subagent_by_name_through_host(self) -> None:
         deleted_payload = {
             "rlm_child_id": "sub-a1b2c3d4",

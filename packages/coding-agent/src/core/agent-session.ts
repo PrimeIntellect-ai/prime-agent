@@ -219,6 +219,7 @@ import {
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
 	createRlmFindModelsHostHandler,
+	createRlmInterruptSubagentHostHandler,
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
@@ -226,6 +227,7 @@ import {
 	normalizeRequestedRlmSubagentSessionName,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
+	type RlmInterruptSubagentResult,
 	type RlmListSubagentsResult,
 	type RlmSpawnHandle,
 	type RlmSubagentRegistryEntry,
@@ -946,6 +948,8 @@ interface RlmChildRun {
 	session?: AgentSession;
 	/** True once the detached run task has finished its catch and cleanup paths. */
 	settled: boolean;
+	/** The initial task was explicitly interrupted and must not emit a completion notice. */
+	interrupted?: boolean;
 	/** Selector snapshot for a delete admitted while runtime startup was still pending. */
 	detachedDeletion?: RlmSubagentRegistryEntry;
 	/** Re-emits the run's rlm_child_update snapshot with its current status. */
@@ -6653,6 +6657,12 @@ export class AgentSession {
 		return this._resourceLoader;
 	}
 
+	/** Interrupt exactly the model/tool run observed at call time without touching queues or descendants. */
+	interruptCurrentExecution(): boolean {
+		const operation = this.agent.signal;
+		return operation !== undefined && this.agent.abort(operation);
+	}
+
 	requestAbort(): void {
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
@@ -8841,6 +8851,7 @@ export class AgentSession {
 			})),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
+			"rlm.interrupt_subagent": createRlmInterruptSubagentHostHandler((target) => this.interruptRlmSubagent(target)),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
 			"model.info": async () => ({
 				id: this.model?.id ?? null,
@@ -9338,6 +9349,27 @@ export class AgentSession {
 			throw new Error(`RLM subagent selector "${target}" is ambiguous in the current parent session`);
 		}
 		return matches[0]!;
+	}
+
+	/** Interrupt only the active execution of a retained direct child. */
+	async interruptRlmSubagent(target: string): Promise<RlmInterruptSubagentResult> {
+		const matches = (await this.listRlmSubagents()).subagents.filter((entry) =>
+			this._rlmSubagentMatchesTarget(entry, target),
+		);
+		if (matches.length > 1) {
+			throw new Error(`RLM subagent selector "${target}" is ambiguous in the current parent session`);
+		}
+		const subagent = matches[0];
+		if (!subagent) return { subagent: null, outcome: "not_found" };
+		if (subagent.status === "error") return { subagent, outcome: "terminal" };
+
+		const run = this._activeRlmChildRuns.get(subagent.rlm_child_id);
+		const session = run?.session ?? this._rlmChildSessions.get(subagent.rlm_child_id);
+		const interrupted = this._subagentRuntimeHost?.interruptRlmSubagentRuntime
+			? this._subagentRuntimeHost.interruptRlmSubagentRuntime(subagent.rlm_child_id, session)
+			: (session?.interruptCurrentExecution() ?? false);
+		if (interrupted && run) run.interrupted = true;
+		return { subagent, outcome: interrupted ? "interrupted" : "idle" };
 	}
 
 	/** Delete an inactive direct or nested child by its registry child id without affecting active runs. */
@@ -9991,7 +10023,7 @@ export class AgentSession {
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
 				emitChildUpdate();
-				if (!run.detachedDeletion && child._parentReplyCount === parentReplyCountBeforeRun) {
+				if (!run.detachedDeletion && !run.interrupted && child._parentReplyCount === parentReplyCountBeforeRun) {
 					const lastAssistantText = child.getLastAssistantText();
 					await deliverTerminalMessageToParent(
 						createRlmChildTerminalNoticeMessage({

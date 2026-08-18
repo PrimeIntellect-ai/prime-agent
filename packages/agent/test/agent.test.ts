@@ -272,6 +272,46 @@ describe("Agent", () => {
 		expect(receivedSignal?.aborted).toBe(true);
 	});
 
+	it("does not abort a successor run with a stale observed signal", async () => {
+		const signals: AbortSignal[] = [];
+		let invocation = 0;
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				invocation++;
+				const stream = new MockAssistantStream();
+				if (invocation === 1) {
+					queueMicrotask(() =>
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("first") }),
+					);
+				} else {
+					const checkAbort = () => {
+						if (options?.signal?.aborted) {
+							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+						} else {
+							setTimeout(checkAbort, 1);
+						}
+					};
+					checkAbort();
+				}
+				return stream;
+			},
+		});
+		agent.subscribe((event, signal) => {
+			if (event.type === "agent_start") signals.push(signal);
+		});
+
+		expect(agent.abort()).toBe(false);
+		await agent.prompt("first");
+		const successor = agent.prompt("second");
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(signals).toHaveLength(2);
+		expect(agent.abort(signals[0])).toBe(false);
+		expect(signals[1]?.aborted).toBe(false);
+		expect(agent.abort(signals[1])).toBe(true);
+		await successor;
+		expect(signals[1]?.aborted).toBe(true);
+	});
+
 	it("should update state with mutators", () => {
 		const agent = new Agent();
 
