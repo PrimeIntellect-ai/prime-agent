@@ -736,7 +736,7 @@ export interface AgentConnection {
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;
 	deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult>;
 
-/** Read-only live-session watcher; unavailable transports return undefined. */
+	/** Read-only live-session watcher; unavailable transports return undefined. */
 	watchSession(activeSessionId: string): Promise<AgentConnectionSessionWatcher | undefined>;
 
 	dispose(): Promise<void>;
