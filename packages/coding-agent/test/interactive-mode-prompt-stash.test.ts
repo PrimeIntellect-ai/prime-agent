@@ -353,6 +353,25 @@ describe("InteractiveMode prompt stash", () => {
 		expect(reopenedMode.promptStashState.stash).toBeUndefined();
 	});
 
+	it("lands the on-open restore notice in a fresh status block", () => {
+		const store = new ClientPromptStashStore();
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "draft" });
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		// init() may have just posted a status (e.g. a compaction notice); showStatus
+		// replaces the anchored last status, so the restore must drop the anchor first.
+		const priorStatus = { setText: vi.fn() };
+		(reopenedMode as { lastStatusText?: unknown }).lastStatusText = priorStatus;
+		(reopenedMode as { lastStatusSpacer?: unknown }).lastStatusSpacer = { spacer: true };
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("draft");
+		expect((reopenedMode as { lastStatusText?: unknown }).lastStatusText).toBeUndefined();
+		expect((reopenedMode as { lastStatusSpacer?: unknown }).lastStatusSpacer).toBeUndefined();
+		expect(priorStatus.setText).not.toHaveBeenCalled();
+	});
+
 	it("queues an existing manual stash behind the agents-view auto-stash", () => {
 		const store = new ClientPromptStashStore();
 		const state = store.forSession("session-a");

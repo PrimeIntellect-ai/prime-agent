@@ -4139,7 +4139,12 @@ export class InteractiveMode {
 	}
 
 	private restorePromptStashOnOpen(): void {
-		if (this.promptStash?.restoreOnOpen) this.restorePromptStashIfEditorEmpty();
+		if (!this.promptStash?.restoreOnOpen) return;
+		// Land the restore notice in its own status block: init may have just posted
+		// a notice (e.g. compaction) that showStatus would otherwise replace.
+		this.lastStatusText = undefined;
+		this.lastStatusSpacer = undefined;
+		this.restorePromptStashIfEditorEmpty();
 	}
 
 	private stashDraftForAgentsView(): void {
