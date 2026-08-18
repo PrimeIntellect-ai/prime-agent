@@ -64,7 +64,7 @@ export function parseMcpAddArgs(args: readonly string[]): {
 	let oauth = false;
 	let force = false;
 	let cwd: string | undefined;
-	const env: Record<string, { env: string }> = {};
+	const env: Record<string, { env: string }> = Object.create(null);
 	const seenOptions = new Set<string>();
 
 	for (let index = 0; index < optionArgs.length; index++) {

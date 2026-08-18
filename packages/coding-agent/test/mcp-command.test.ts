@@ -33,6 +33,22 @@ describe("MCP management commands", () => {
 		});
 	});
 
+	it("accepts environment names inherited from Object.prototype", () => {
+		const { config } = parseMcpAddArgs([
+			"local",
+			"--env",
+			"__proto__=PROTO_SOURCE",
+			"--env",
+			"constructor=CONSTRUCTOR_SOURCE",
+			"--",
+			"node",
+		]);
+		expect(config).toMatchObject({
+			type: "stdio",
+			env: { __proto__: { env: "PROTO_SOURCE" }, constructor: { env: "CONSTRUCTOR_SOURCE" } },
+		});
+	});
+
 	it("validates transport, URL, names, auth, and stdio environment syntax", () => {
 		for (const args of [
 			["bad name", "--url", "https://example.com/mcp"],
