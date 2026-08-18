@@ -5190,7 +5190,7 @@ export class AgentSession {
 		if (this._sessionInputAdmissionPauses.size > 0) {
 			throw new Error("Cannot admit a session action while session input admission is paused.");
 		}
-		if (this.unfinishedActionCount > 0 && this._sessionInputPumpSuspended) {
+		if (this._sessionInputPumpSuspended) {
 			throw new Error("Cannot admit a session action while queued session input is suspended.");
 		}
 	}
@@ -6342,7 +6342,7 @@ export class AgentSession {
 		const waitSignal = signal ? AbortSignal.any([signal, disposeSignal]) : disposeSignal;
 		while (true) {
 			this._assertSessionActionAdmissionAvailable();
-			if (this._queuedWorkPauses.size > 0 || this._sessionInputPumpSuspended) {
+			if (this._queuedWorkPauses.size > 0) {
 				let wake = () => {};
 				const pauseReleased = new Promise<void>((resolve) => {
 					wake = resolve;
@@ -6362,7 +6362,7 @@ export class AgentSession {
 			}
 			const fence = await this._acquireSessionActionCommitFence(signal);
 			try {
-				if (this._queuedWorkPauses.size === 0 && !this._sessionInputPumpSuspended) {
+				if (this._queuedWorkPauses.size === 0) {
 					this._assertSessionActionAdmissionAvailable();
 					return fence;
 				}

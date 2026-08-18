@@ -4403,11 +4403,13 @@ export class AgentDaemon {
 			}
 
 			case "acquire_session_input_pause": {
-				const existing = [...this.sessionInputPauses].find(([, entry]) => entry.leaseKey === command.leaseKey);
+				const existing = [...this.sessionInputPauses].find(
+					([, entry]) =>
+						entry.owner === client &&
+						entry.activeSessionId === command.activeSessionId &&
+						entry.leaseKey === command.leaseKey,
+				);
 				if (existing) {
-					if (existing[1].owner !== client || existing[1].activeSessionId !== command.activeSessionId) {
-						throw new Error(`Session input pause key is owned by another client: ${command.leaseKey}`);
-					}
 					return success(command.id, "acquire_session_input_pause", { pauseId: existing[0] });
 				}
 				const state = this.getSessionState(command.activeSessionId);

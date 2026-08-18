@@ -2682,7 +2682,7 @@ describe("AgentSession queue characterization", () => {
 		const lateAgentMessage = harness.session.acceptAgentMessagePrompt(
 			agentPromptText("agentmsg_after_abort", "late child result"),
 		);
-		const lateRejection = expect(lateAgentMessage).rejects.toThrow("invalidated before admission");
+		const lateRejection = expect(lateAgentMessage).rejects.toThrow("queued session input is suspended");
 		await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 		await harness.session.prompt("explicit user resume");
@@ -2698,7 +2698,7 @@ describe("AgentSession queue characterization", () => {
 		const lateAgentMessage = harness.session.acceptAgentMessagePrompt(
 			agentPromptText("agentmsg_resume_queue", "late child result"),
 		);
-		const lateRejection = expect(lateAgentMessage).rejects.toThrow("invalidated before admission");
+		const lateRejection = expect(lateAgentMessage).rejects.toThrow("queued session input is suspended");
 		await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 		harness.session.resumeQueuedWork();
