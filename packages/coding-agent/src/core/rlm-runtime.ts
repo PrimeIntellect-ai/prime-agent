@@ -78,7 +78,6 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown): string
 
 const RLM_THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/** Validate and normalize an orchestrator-supplied subagent thinking level. */
 export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
 	if (value === undefined) {
 		return undefined;
