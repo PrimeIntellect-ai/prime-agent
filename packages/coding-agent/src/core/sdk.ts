@@ -354,6 +354,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
+		hostRequestHandlers: options.hostRequestHandlers,
 		modelRegistry,
 		mcpManager,
 		initialActiveToolNames,

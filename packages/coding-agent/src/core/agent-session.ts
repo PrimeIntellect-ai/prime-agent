@@ -154,7 +154,13 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
-import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
+import {
+	assertHostRequestHandler,
+	type HostRequestExecutionContext,
+	type HostRequestHandlers,
+	type KernelSentAgentMessage,
+	type RegisteredHostRequestHandlers,
+} from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
@@ -411,6 +417,8 @@ export interface AgentSessionConfig {
 	 * (refresh, begin_login) are exposed to the kernel.
 	 */
 	mcpManager?: McpManager;
+	/** Additional trusted kernel host handlers registered for the session lifetime. */
+	hostRequestHandlers?: RegisteredHostRequestHandlers;
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -499,6 +507,8 @@ export interface PromptOptions {
 	agentMessageId?: string;
 	content?: (TextContent | ImageContent)[];
 	customMessage?: CustomMessage;
+	/** Host-only value available to kernel host handlers for this admitted execution. */
+	runContext?: unknown;
 }
 
 interface InternalPromptOptions extends PromptOptions {
@@ -868,6 +878,12 @@ interface RlmChildRun {
 	unsubscribe?: () => void;
 }
 
+interface AgentRunScope {
+	readonly executionId: string;
+	readonly runContext: unknown;
+	readonly controller: AbortController;
+}
+
 interface RlmSubagentModelSelection {
 	model: Model<Api>;
 }
@@ -1018,6 +1034,8 @@ export class AgentSession {
 	private _sessionActionCommitOwner: symbol | undefined;
 	private _pendingSessionActionFenceWaiters = 0;
 	private readonly _sessionActionCommitContext = new AsyncLocalStorage<symbol>();
+	private readonly _actionRunScopes = new WeakMap<QueuedSessionAction, AgentRunScope>();
+	private readonly _executionRunScopes = new Map<string, AgentRunScope>();
 	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
 	// Checkpoint and handoff waiters share lifecycle-edge notifications to avoid polling.
 	private readonly _sessionInputCheckpointWaiters = new Set<() => void>();
@@ -1079,6 +1097,7 @@ export class AgentSession {
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
 	private _mcpManager?: McpManager;
+	private readonly _hostRequestHandlers: RegisteredHostRequestHandlers;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -1190,6 +1209,8 @@ export class AgentSession {
 		this._agentMessageController = config.agentMessageController;
 		this._agentObserveController = config.agentObserveController;
 		this._mcpManager = config.mcpManager;
+		this._hostRequestHandlers = Object.freeze({ ...config.hostRequestHandlers });
+		for (const handler of Object.values(this._hostRequestHandlers)) assertHostRequestHandler(handler);
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		const headerRlmDepth = this.sessionManager.getHeader()?.rlmDepth;
@@ -1603,6 +1624,7 @@ export class AgentSession {
 			}
 		}
 		for (const action of actions) {
+			this._releaseRunScope(action, error.message);
 			const ticket = this._actionStore.ticketFor(action);
 			if (
 				action.payload.kind === "turn" &&
@@ -4438,6 +4460,7 @@ export class AgentSession {
 					options?.executionPolicy ??
 					(visibleQueued ? this._turnExecutionPolicy("queued") : this._turnExecutionPolicy("injected")),
 				queueVisible: visibleQueued,
+				runContext: options?.runContext,
 			});
 			const result = this._admitSessionInput(action, {
 				immediatelyEligible: !visibleQueued,
@@ -4591,6 +4614,7 @@ export class AgentSession {
 					queueVisible: visibleQueued,
 					acceptedAgentMessage,
 					acceptedBeforeCompletion: options?.returnAfterAccepted === true,
+					runContext: options?.runContext,
 				});
 				if (action.suppressAutonomousContinuation) {
 					this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
@@ -5075,6 +5099,7 @@ export class AgentSession {
 			queueVisible?: boolean;
 			acceptedAgentMessage?: boolean;
 			acceptedBeforeCompletion?: boolean;
+			runContext?: unknown;
 		},
 	): QueuedSessionAction {
 		const id = randomUUID();
@@ -5104,7 +5129,7 @@ export class AgentSession {
 			acceptedAgentMessage: options.acceptedAgentMessage ?? false,
 			acceptedBeforeCompletion: options.acceptedBeforeCompletion ?? false,
 		};
-		return {
+		const action: QueuedSessionAction = {
 			id,
 			source: options.source ?? "internal",
 			delivery: this._deliveryPolicy(schedule),
@@ -5120,6 +5145,33 @@ export class AgentSession {
 			agentMessageId: options.agentMessageId,
 			suppressAutonomousContinuation: options.suppressAutonomousContinuation,
 		};
+		this._actionRunScopes.set(action, {
+			executionId: id,
+			runContext: options.runContext,
+			controller: new AbortController(),
+		});
+		return action;
+	}
+
+	private _releaseRunScope(action: QueuedSessionAction, reason: string): void {
+		const scope = this._actionRunScopes.get(action);
+		if (!scope) return;
+		this._actionRunScopes.delete(action);
+		this._executionRunScopes.delete(scope.executionId);
+		scope.controller.abort(reason);
+	}
+
+	private _hostRequestContextForExecution(executionId?: string): HostRequestExecutionContext | undefined {
+		const scope = executionId ? this._executionRunScopes.get(executionId) : undefined;
+		return scope ? { runContext: scope.runContext, signal: scope.controller.signal } : undefined;
+	}
+
+	private _activeRunExecutionId(): string | undefined {
+		for (const action of this._actionStore.activeActions()) {
+			const scope = this._actionRunScopes.get(action);
+			if (scope) return scope.executionId;
+		}
+		return undefined;
 	}
 
 	private _createSessionCommandAction(
@@ -5179,10 +5231,12 @@ export class AgentSession {
 		ticket?: ActionTicket;
 	} {
 		if (this._disposed || this._disposing) {
+			this._releaseRunScope(action, "run rejected before admission");
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
+			this._releaseRunScope(action, "run coalesced before admission");
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
 				this._rejectAgentMessage(
 					action.agentMessageId,
@@ -5234,6 +5288,7 @@ export class AgentSession {
 			suppressAutonomousContinuation?: boolean;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
+			runContext?: unknown;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
@@ -5341,7 +5396,8 @@ export class AgentSession {
 					if (
 						!next ||
 						next.payload.kind !== "turn" ||
-						!turnExecutionPoliciesEqual(first.payload.executionPolicy, next.payload.executionPolicy)
+						!turnExecutionPoliciesEqual(first.payload.executionPolicy, next.payload.executionPolicy) ||
+						this._actionRunScopes.get(first) !== this._actionRunScopes.get(next)
 					) {
 						break;
 					}
@@ -5436,6 +5492,7 @@ export class AgentSession {
 								action.lifecycle.state === "failed" ||
 								action.lifecycle.state === "cancelled")
 						) {
+							this._releaseRunScope(action, "run completed");
 							this._actionStore.releaseTerminal(action);
 						}
 					}
@@ -5648,9 +5705,16 @@ export class AgentSession {
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
-					return turns.some((action) => action.suppressAutonomousContinuation)
-						? this._runWithAutonomousContinuationSuppressed(() => this.agent.prompt(preparedMessages))
-						: this.agent.prompt(preparedMessages);
+					const prompt = (executionId: string) =>
+						turns.some((action) => action.suppressAutonomousContinuation)
+							? this._runWithAutonomousContinuationSuppressed(() =>
+									this.agent.prompt(preparedMessages, { executionId }),
+								)
+							: this.agent.prompt(preparedMessages, { executionId });
+					const runScope = this._actionRunScopes.get(turns[0]);
+					if (!runScope) throw new Error("Prepared turn is missing its execution scope");
+					this._executionRunScopes.set(runScope.executionId, runScope);
+					return prompt(runScope.executionId);
 				});
 			} finally {
 				commitFence.release();
@@ -7208,7 +7272,7 @@ export class AgentSession {
 
 		this._postCompactionContinuationScheduled = false;
 		try {
-			await this.agent.continue();
+			await this.agent.continue({ executionId: this._activeRunExecutionId() });
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -8433,7 +8497,9 @@ export class AgentSession {
 			this._ipythonKernelProvisioner = new IpythonKernelProvisioner(this._cwd, {
 				env: this._rlmKernelEnv(),
 				sessionId: this.sessionId,
+				recursionDepth: this._rlmDepth,
 				hostHandlers: this._createKernelHostHandlers(),
+				getHostRequestContext: (executionId) => this._hostRequestContextForExecution(executionId),
 				pythonSkills,
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
@@ -8442,6 +8508,7 @@ export class AgentSession {
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
 					provisioner: this._ipythonKernelProvisioner,
+					getHostRequestContext: (executionId) => this._hostRequestContextForExecution(executionId),
 					commandPrefix: this.settingsManager.getShellCommandPrefix(),
 					shellPath: this.settingsManager.getShellPath(),
 					onLateSentAgentMessage: (toolCallId, message) =>
@@ -8534,8 +8601,8 @@ export class AgentSession {
 
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
-			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
-				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
+			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }, context) => ({
+				...(await this._startRlmChildRun(prompt, kwargs, cellSourceCode, context?.runContext)),
 			})),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
@@ -8632,6 +8699,10 @@ export class AgentSession {
 		}
 		if (this._mcpManager) {
 			Object.assign(handlers, this._mcpManager.hostHandlers());
+		}
+		for (const [type, handler] of Object.entries(this._hostRequestHandlers)) {
+			if (handlers[type]) throw new Error(`Host request handler "${type}" conflicts with a built-in handler`);
+			handlers[type] = (payload, context) => handler(payload, context!);
 		}
 		return handlers;
 	}
@@ -8805,6 +8876,7 @@ export class AgentSession {
 			customTools: [...this._customTools],
 			includeGoals: this._includeGoals,
 			includeCompactSkill: this._includeCompactSkill,
+			hostRequestHandlers: this._hostRequestHandlers,
 			rlmDepth: this._rlmDepth + 1,
 			rlmMaxDepth: this._rlmMaxDepth,
 			rlmParentNodeId: options.id,
@@ -8868,6 +8940,7 @@ export class AgentSession {
 			allowedToolNames: options.allowedToolNames,
 			includeGoals: options.includeGoals,
 			includeCompactSkill: options.includeCompactSkill,
+			hostRequestHandlers: options.hostRequestHandlers,
 			rlmDepth: options.rlmDepth,
 			rlmMaxDepth: options.rlmMaxDepth,
 			rlmSessionDir: options.sessionDir,
@@ -9446,6 +9519,7 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		runContext?: unknown,
 	): Promise<RlmSpawnHandle> {
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
@@ -9554,6 +9628,7 @@ export class AgentSession {
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
 			}),
+			runContext,
 			onSessionPublished: publishChildSession,
 		};
 
@@ -9680,6 +9755,7 @@ export class AgentSession {
 					expandPromptTemplates: false,
 					source: "extension",
 					customMessage: spawnMessage,
+					runContext: subagentOptions.runContext,
 				});
 				if (run.error) throw new Error(run.error);
 				run.status = "done";
@@ -10050,8 +10126,9 @@ export class AgentSession {
 		}
 		this._retryAbortController = undefined;
 
+		const executionId = this._activeRunExecutionId();
 		setTimeout(() => {
-			this.agent.continue().catch(() => {});
+			this.agent.continue({ executionId }).catch(() => {});
 		}, 0);
 
 		return true;

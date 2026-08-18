@@ -2,7 +2,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
-import type { HostRequestHandler } from "./kernel/index.js";
+import type { HostRequestContext, HostRequestHandler, RegisteredHostRequestHandlers } from "./kernel/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 
 /** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
@@ -50,7 +50,7 @@ export interface RlmFindModelsResult {
 	models: RlmModelMatch[];
 }
 
-export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
+export type RlmRunHandler = (request: RlmRunRequest, context?: HostRequestContext) => Promise<Record<string, unknown>>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -163,17 +163,20 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 
 /** Adapt an RlmRunHandler into the typed `rlm.run` kernel host handler. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
-	return async (payload) => {
+	return async (payload, context) => {
 		if (typeof payload.prompt !== "string") {
 			throw new Error("rlm.run prompt must be a string");
 		}
 		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
 		const cellSourceCode = typeof payload.cellSourceCode === "string" ? payload.cellSourceCode : undefined;
-		const result = await handler({
-			prompt: payload.prompt,
-			kwargs,
-			cellSourceCode,
-		});
+		const result = await handler(
+			{
+				prompt: payload.prompt,
+				kwargs,
+				cellSourceCode,
+			},
+			context,
+		);
 		return result as unknown as Record<string, unknown>;
 	};
 }
@@ -230,9 +233,12 @@ export interface CreateRlmSubagentRuntimeOptions {
 	customTools: ToolDefinition[];
 	includeGoals: boolean;
 	includeCompactSkill: boolean;
+	hostRequestHandlers?: RegisteredHostRequestHandlers;
 	rlmDepth: number;
 	rlmMaxDepth: number;
 	rlmParentNodeId: string;
+	/** Host-only context inherited from the spawning execution. */
+	runContext?: unknown;
 	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */

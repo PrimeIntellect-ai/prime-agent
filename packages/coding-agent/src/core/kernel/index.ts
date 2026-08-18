@@ -54,21 +54,21 @@ export class KernelBusyAfterInterruptError extends Error {
 /** Comm target the kernel-side `rlm.host_request` shim opens for typed host requests. */
 export const HOST_COMM_TARGET = "host.request";
 
-/**
- * Handles one typed request from Python code running in the kernel.
- * The returned record is sent back verbatim as the comm reply payload.
- *
- * This legacy unary compatibility alias remains the dispatcher and registration
- * contract while context-aware handlers are staged separately below.
- */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export type HostRequestPayload = Record<string, unknown>;
+
+/** Safe host-owned metadata associated with the admitted execution. */
+export interface HostRequestInvocationMetadata<RunContext = unknown> {
+	readonly sessionId?: string;
+	readonly recursionDepth: number;
+	readonly runContext: RunContext | undefined;
+}
 
 /**
  * Per-call authority supplied by the host-request dispatcher.
  * `requestId` is an opaque host-minted correlation token and `isCurrent()`
  * lets an implementation reject work after its authority is revoked.
  */
-export interface HostRequestContext {
+export interface HostRequestContext<RunContext = unknown> extends HostRequestInvocationMetadata<RunContext> {
 	readonly requestId: string;
 	readonly generation: number;
 	readonly signal: AbortSignal;
@@ -78,58 +78,88 @@ export interface HostRequestContext {
 const hostRequestHandlerBrand = Symbol("hostRequestHandler");
 
 /** A context-aware implementation that must receive dispatcher authority. */
-export type HostRequestHandlerImplementation = (
-	payload: Record<string, unknown>,
-	context: HostRequestContext,
+export type HostRequestHandlerImplementation<RunContext = unknown> = (
+	payload: HostRequestPayload,
+	context: HostRequestContext<RunContext>,
 ) => Promise<Record<string, unknown>>;
 
-/** A factory-minted, context-aware host-request handler capability. */
-type HostRequestHandlerCapability = HostRequestHandlerImplementation & { readonly [hostRequestHandlerBrand]: true };
+/** Handles one typed request from Python code running in the kernel. */
+export type HostRequestHandler = (
+	payload: HostRequestPayload,
+	context?: HostRequestContext,
+) => Promise<Record<string, unknown>>;
+
+/** A factory-minted handler accepted by the public AgentSession registration API. */
+export type RegisteredHostRequestHandler = HostRequestHandlerImplementation & {
+	readonly [hostRequestHandlerBrand]: true;
+};
+
+export type RegisteredHostRequestHandlers = Readonly<Record<string, RegisteredHostRequestHandler>>;
 
 /** Runtime provenance cannot be recreated by copying the nominal symbol property. */
 const factoryCreatedHostRequestHandlers = new WeakSet<object>();
+const dispatcherCreatedHostRequestContexts = new WeakSet<object>();
 
 function assertGenuineHostRequestContext(context: unknown): asserts context is HostRequestContext {
-	if (
-		typeof context !== "object" ||
-		context === null ||
-		typeof (context as HostRequestContext).requestId !== "string" ||
-		!(context as HostRequestContext).requestId ||
-		!Number.isSafeInteger((context as HostRequestContext).generation) ||
-		typeof (context as HostRequestContext).isCurrent !== "function" ||
-		typeof (context as HostRequestContext).signal !== "object" ||
-		(context as HostRequestContext).signal === null ||
-		typeof (context as HostRequestContext).signal.aborted !== "boolean" ||
-		typeof (context as HostRequestContext).signal.addEventListener !== "function"
-	) {
+	if (typeof context !== "object" || context === null || !dispatcherCreatedHostRequestContexts.has(context)) {
 		throw new Error("host request context is invalid");
 	}
+}
+
+function mintHostRequestContext(
+	requestId: string,
+	generation: number,
+	controller: AbortController,
+	metadata: HostRequestInvocationMetadata,
+): HostRequestContext {
+	let current = true;
+	const context = Object.freeze({
+		requestId,
+		generation,
+		signal: controller.signal,
+		sessionId: metadata.sessionId,
+		recursionDepth: metadata.recursionDepth,
+		runContext: metadata.runContext,
+		isCurrent: () => current && !controller.signal.aborted,
+	});
+	dispatcherCreatedHostRequestContexts.add(context);
+	controller.signal.addEventListener(
+		"abort",
+		() => {
+			current = false;
+		},
+		{ once: true },
+	);
+	return context;
 }
 
 /**
  * Creates a branded wrapper rather than mutating its implementation. Both its
  * generic shape and runtime arity reject unary callbacks before they can run.
  */
-export function createHostRequestHandler<T extends HostRequestHandlerImplementation>(
+export function createHostRequestHandler<
+	RunContext = unknown,
+	T extends HostRequestHandlerImplementation<RunContext> = HostRequestHandlerImplementation<RunContext>,
+>(
 	implementation: T,
 	..._unaryRejection: Parameters<T> extends [unknown, unknown, ...unknown[]]
 		? []
 		: ["host request handlers must accept payload and context"]
-): HostRequestHandlerCapability {
+): RegisteredHostRequestHandler {
 	if (implementation.length < 2) throw new Error("host request handlers must accept payload and context");
-	const handler = async (payload: Record<string, unknown>, context: HostRequestContext) => {
+	const handler = async (payload: HostRequestPayload, context: HostRequestContext) => {
 		assertGenuineHostRequestContext(context);
-		return implementation(payload, context);
+		return implementation(payload, context as HostRequestContext<RunContext>);
 	};
 	factoryCreatedHostRequestHandlers.add(handler);
-	return Object.defineProperty(handler, hostRequestHandlerBrand, { value: true }) as HostRequestHandlerCapability;
+	return Object.defineProperty(handler, hostRequestHandlerBrand, { value: true }) as RegisteredHostRequestHandler;
 }
 
 /** Reject copied-symbol and raw-function forgeries before they observe authenticated payloads. */
-export function assertHostRequestHandler(value: unknown): asserts value is HostRequestHandlerCapability {
+export function assertHostRequestHandler(value: unknown): asserts value is RegisteredHostRequestHandler {
 	if (
 		typeof value !== "function" ||
-		(value as Partial<HostRequestHandlerCapability>)[hostRequestHandlerBrand] !== true ||
+		(value as Partial<RegisteredHostRequestHandler>)[hostRequestHandlerBrand] !== true ||
 		!factoryCreatedHostRequestHandlers.has(value)
 	) {
 		throw new Error("host request handler is not a dispatcher-created capability");
@@ -138,6 +168,12 @@ export function assertHostRequestHandler(value: unknown): asserts value is HostR
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
+
+/** In-memory execution scope used to correlate kernel comms with one admitted run. */
+export interface HostRequestExecutionContext<RunContext = unknown> {
+	readonly runContext: RunContext | undefined;
+	readonly signal: AbortSignal;
+}
 
 /** Where and how to persist the kernel's user namespace so it survives resume. */
 export interface KernelSnapshotConfig {
@@ -157,6 +193,7 @@ export interface KernelManagerOptions {
 	cwd?: string;
 	env?: Record<string, string>;
 	sessionId?: string;
+	recursionDepth?: number;
 	hostHandlers?: HostRequestHandlers;
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
@@ -179,6 +216,8 @@ export interface ExecuteOptions {
 	maxOutputChars?: number;
 	/** Synthetic host cell (snapshot/restore/list); excluded from lastCellCode attribution. */
 	internal?: boolean;
+	/** Host-only context for requests opened by this cell; never sent to Python. */
+	hostRequestContext?: HostRequestExecutionContext;
 }
 
 /** MIME tag the `edit` skill emits diff payloads under, via `display_data`. */
@@ -578,7 +617,7 @@ function installSignalHandlersOnce(): void {
 export class KernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
+		"python" | "cwd" | "env" | "sessionId" | "recursionDepth" | "hostHandlers" | "pythonSkills" | "snapshot"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
@@ -607,6 +646,9 @@ export class KernelManager {
 	// attribute their spawning program.
 	private lastCellCode?: string;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	private readonly activeHostRequestControllers = new Map<string, AbortController>();
+	private readonly executionHostRequestContexts = new Map<string, HostRequestExecutionContext>();
+	private hostRequestGeneration = 0;
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Memoized so concurrent callers all await the same in-flight startup. */
 	private startPromise?: Promise<void>;
@@ -619,6 +661,7 @@ export class KernelManager {
 			cwd: options.cwd,
 			env: options.env,
 			sessionId: options.sessionId,
+			recursionDepth: options.recursionDepth,
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
@@ -929,6 +972,12 @@ export class KernelManager {
 			this.options.username,
 		);
 		const requestMsgId = msg.header.msg_id;
+		if (opts.hostRequestContext) {
+			this.executionHostRequestContexts.set(requestMsgId, opts.hostRequestContext);
+			const clearContext = () => this.executionHostRequestContexts.delete(requestMsgId);
+			opts.hostRequestContext.signal.addEventListener("abort", clearContext, { once: true });
+			if (opts.hostRequestContext.signal.aborted) clearContext();
+		}
 
 		if (opts.signal?.aborted) {
 			return { stdout: "", stderr: "", status: "aborted", durationMs: Date.now() - started };
@@ -1265,6 +1314,8 @@ export class KernelManager {
 		if (msgType === "comm_close") {
 			this.commTargets.delete(commId);
 			this.handledHostRequestCommIds.delete(commId);
+			this.activeHostRequestControllers.get(commId)?.abort("host request comm was closed");
+			this.activeHostRequestControllers.delete(commId);
 			return;
 		}
 
@@ -1275,28 +1326,40 @@ export class KernelManager {
 			}
 			this.commTargets.set(commId, targetName);
 			if (targetName === HOST_COMM_TARGET) {
-				this.startHostRequestFromComm(commId, content.data);
+				this.startHostRequestFromComm(commId, content.data, incoming);
 			}
 			return;
 		}
 
 		const targetName = this.commTargets.get(commId);
 		if (msgType === "comm_msg" && targetName === HOST_COMM_TARGET) {
-			this.startHostRequestFromComm(commId, content.data);
+			this.startHostRequestFromComm(commId, content.data, incoming);
 		}
 	}
 
-	private startHostRequestFromComm(commId: string, data: unknown): void {
+	private startHostRequestFromComm(commId: string, data: unknown, incoming: JupyterMessage): void {
 		if (this.handledHostRequestCommIds.has(commId)) {
 			return;
 		}
 		this.handledHostRequestCommIds.add(commId);
+		const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+		const executionContext = parentMessageId ? this.executionHostRequestContexts.get(parentMessageId) : undefined;
+		const controller = new AbortController();
+		this.activeHostRequestControllers.set(commId, controller);
+		const abortFromRun = () => controller.abort("host request run completed");
+		executionContext?.signal.addEventListener("abort", abortFromRun, { once: true });
+		if (executionContext?.signal.aborted) abortFromRun();
+		const context = mintHostRequestContext(uuid(), ++this.hostRequestGeneration, controller, {
+			sessionId: this.options.sessionId,
+			recursionDepth: this.options.recursionDepth ?? 0,
+			runContext: executionContext?.runContext,
+		});
 
 		const task = (async () => {
 			try {
-				const result = await this.handleHostRequest(data);
+				const result = await this.handleHostRequest(data, context);
 				try {
-					await this.sendCommMessage(commId, { status: "ok", ...result });
+					await this.sendCommMessage(commId, { ...result, status: "ok" });
 				} catch (replyError) {
 					this.appendKernelDiagnostic(
 						`failed to send host request ok reply for comm ${commId}: ${errorMessage(replyError)}`,
@@ -1305,11 +1368,17 @@ export class KernelManager {
 			} catch (error) {
 				this.appendKernelDiagnostic(`host request failed for comm ${commId}: ${errorMessage(error)}`);
 				try {
-					await this.sendCommMessage(commId, { status: "error", error: errorMessage(error) });
+					await this.sendCommMessage(commId, { error: errorMessage(error), status: "error" });
 				} catch (replyError) {
 					this.appendKernelDiagnostic(
 						`failed to send host request error reply for comm ${commId}: ${errorMessage(replyError)}`,
 					);
+				}
+			} finally {
+				executionContext?.signal.removeEventListener("abort", abortFromRun);
+				controller.abort("host request settled");
+				if (this.activeHostRequestControllers.get(commId) === controller) {
+					this.activeHostRequestControllers.delete(commId);
 				}
 			}
 		})();
@@ -1319,7 +1388,7 @@ export class KernelManager {
 		});
 	}
 
-	private async handleHostRequest(data: unknown): Promise<Record<string, unknown>> {
+	private async handleHostRequest(data: unknown, context: HostRequestContext): Promise<Record<string, unknown>> {
 		if (!isRecord(data)) {
 			throw new Error("host request payload must be an object");
 		}
@@ -1335,7 +1404,7 @@ export class KernelManager {
 		// the in-flight execution; detached spawns (asyncio.create_task) fire after
 		// the scheduling cell goes idle, so fall back to that last cell's source.
 		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-		return handler({ ...data, cellSourceCode });
+		return handler({ ...data, cellSourceCode }, context);
 	}
 
 	private async sendCommMessage(commId: string, data: Record<string, unknown>): Promise<void> {
@@ -1356,6 +1425,11 @@ export class KernelManager {
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
+		for (const controller of this.activeHostRequestControllers.values()) {
+			controller.abort("kernel stopped");
+		}
+		this.activeHostRequestControllers.clear();
+		this.executionHostRequestContexts.clear();
 		if (this.forkedLivenessTimer) {
 			globalThis.clearInterval(this.forkedLivenessTimer);
 			this.forkedLivenessTimer = undefined;

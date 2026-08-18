@@ -31,6 +31,10 @@ the call travels through a Jupyter comm target named `host.request`. `KernelMana
 
 The same bridge supports other typed host requests. Bundled Python skills such as `goal` call `rlm.host_request("goal.get", ...)`; state and policy remain in the TypeScript host.
 
+Embedders may register additional handlers when constructing an `AgentSession`. The handler table is session-lifetime configuration, while each `prompt()` or `promptAndWait()` admission may carry a distinct host-only `runContext`. `KernelManager` correlates a comm with its originating tool execution and supplies the handler with a dispatcher-minted context containing the session ID, recursion depth, run context, cancellation signal, request ID, and generation. These fields are not read from the Python payload, so model-generated code cannot select another run's context or spoof host metadata.
+
+An `rlm.run` child receives the spawning execution's run context, and repeats that propagation for nested children. The value remains in host memory: it is not added to agent messages, action recovery snapshots, session JSONL, or the revivable IPython namespace. Terminal completion, failure, cancellation, and kernel teardown revoke the associated handler contexts. The daemon can retain handlers configured by its embedder, but its remote prompt protocol intentionally does not serialize arbitrary run-context objects.
+
 ## Delegation Flow
 
 ```mermaid
@@ -252,6 +256,8 @@ Exact artifact files are created only when their features are used. Non-persiste
 IPython executes model-generated Python and shell-magics with the worker's OS permissions. The kernel boundary isolates protocol and lifecycle concerns; it is not a security sandbox. Installed Python packages, skills, and extensions are trusted code. Use an external sandbox or restricted execution environment when the workspace or generated code is untrusted.
 
 Provider credentials are resolved by the TypeScript host. The bounded model catalog crosses into Python as metadata; the full auth store does not.
+
+Run-scoped host context follows the same boundary: Python sees only the explicit handler result. The context object itself never crosses into the kernel process.
 
 ## Failure Modes
 

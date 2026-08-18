@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added typed session-lifetime kernel host-handler registration with host-only per-prompt run context, cancellation metadata, isolated execution correlation, and recursive child inheritance without persistence.
 - Added a `thinking` option to `rlm.run` for spawning subagents with an explicit reasoning level; invalid levels for the resolved child model fail spawn.
 - Changed opening the agents view (full or scoped) with a draft prompt to auto-stash the draft instead of refusing; the draft is restored into the editor when the session is reopened.
 - Fixed Shift+Enter no longer inserting a newline in terminals that send a literal `\n` (for example a Ghostty `shift+enter=text:\n` mapping): the byte decoded as `ctrl+j` and triggered the new edit-diff toggle instead of the editor newline.

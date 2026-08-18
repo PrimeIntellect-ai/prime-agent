@@ -2580,6 +2580,7 @@ export class AgentDaemon {
 					customTools: options.customTools,
 					includeGoals: options.includeGoals,
 					includeCompactSkill: options.includeCompactSkill,
+					hostRequestHandlers: options.hostRequestHandlers,
 					agentMessageController: this.createAgentMessageController(() => stateRef),
 					agentObserveController: this.createAgentObserveController(() => stateRef),
 					rlmHeartbeatController: {

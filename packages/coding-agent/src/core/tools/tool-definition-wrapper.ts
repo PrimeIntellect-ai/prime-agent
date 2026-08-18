@@ -13,8 +13,8 @@ export function wrapToolDefinition<TDetails = unknown>(
 		parameters: definition.parameters,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
-		execute: (toolCallId, params, signal, onUpdate) =>
-			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
+		execute: (toolCallId, params, signal, onUpdate, executionContext) =>
+			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext, executionContext),
 	};
 }
 
@@ -40,6 +40,7 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
 		parameters: tool.parameters as any,
 		prepareArguments: tool.prepareArguments,
 		executionMode: tool.executionMode,
-		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
+		execute: async (toolCallId, params, signal, onUpdate, _ctx, executionContext) =>
+			tool.execute(toolCallId, params, signal, onUpdate, executionContext),
 	};
 }
