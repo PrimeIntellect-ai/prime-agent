@@ -28,10 +28,8 @@ export interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
-	/** Render metadata instead of terminal graphics. */
 	fallbackOnly?: boolean;
 	fallbackPrefix?: string;
-	/** Kitty image ID. If provided, reuses this ID (for animations/updates). */
 	imageId?: number;
 }
 
@@ -62,7 +60,6 @@ export class Image implements Component {
 		this.imageId = options.imageId;
 	}
 
-	/** Get the Kitty image ID used by this image (if any). */
 	getImageId(): number | undefined {
 		return this.imageId;
 	}
@@ -99,7 +96,6 @@ export class Image implements Component {
 			});
 
 			if (result) {
-				// Store the image ID for later cleanup
 				if (result.imageId) {
 					this.imageId = result.imageId;
 				}

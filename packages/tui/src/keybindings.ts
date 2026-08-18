@@ -5,7 +5,6 @@ import { type KeyId, matchesKey } from "./keys.js";
  * Downstream packages can add keybindings via declaration merging.
  */
 export interface Keybindings {
-	// Editor navigation and editing
 	"tui.editor.cursorUp": true;
 	"tui.editor.cursorDown": true;
 	"tui.editor.cursorLeft": true;
@@ -27,17 +26,14 @@ export interface Keybindings {
 	"tui.editor.yank": true;
 	"tui.editor.yankPop": true;
 	"tui.editor.undo": true;
-	// Generic input actions
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
 	"tui.input.tab": true;
 	"tui.input.copy": true;
-	// Fullscreen transcript viewport
 	"tui.viewport.pageUp": true;
 	"tui.viewport.pageDown": true;
 	"tui.viewport.top": true;
 	"tui.viewport.follow": true;
-	// Generic selection actions
 	"tui.select.up": true;
 	"tui.select.down": true;
 	"tui.select.pageUp": true;

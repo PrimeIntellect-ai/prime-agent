@@ -13,15 +13,12 @@ import { Loader } from "./loader.js";
 export class CancellableLoader extends Loader {
 	private abortController = new AbortController();
 
-	/** Called when user presses Escape */
 	onAbort?: () => void;
 
-	/** AbortSignal that is aborted when user presses Escape */
 	get signal(): AbortSignal {
 		return this.abortController.signal;
 	}
 
-	/** Whether the loader was aborted */
 	get aborted(): boolean {
 		return this.abortController.signal.aborted;
 	}

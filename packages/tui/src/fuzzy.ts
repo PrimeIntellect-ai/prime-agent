@@ -31,24 +31,20 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 			if (textLower[i] === normalizedQuery[queryIndex]) {
 				const isWordBoundary = i === 0 || /[\s\-_./:]/.test(textLower[i - 1]!);
 
-				// Reward consecutive matches
 				if (lastMatchIndex === i - 1) {
 					consecutiveMatches++;
 					score -= consecutiveMatches * 5;
 				} else {
 					consecutiveMatches = 0;
-					// Penalize gaps
 					if (lastMatchIndex >= 0) {
 						score += (i - lastMatchIndex - 1) * 2;
 					}
 				}
 
-				// Reward word boundary matches
 				if (isWordBoundary) {
 					score -= 10;
 				}
 
-				// Slight penalty for later matches
 				score += i * 0.1;
 
 				lastMatchIndex = i;
