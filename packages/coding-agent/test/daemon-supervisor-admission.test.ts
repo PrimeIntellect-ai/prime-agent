@@ -75,8 +75,11 @@ function createHarness(
 		},
 		workers: new Map(),
 		clients: new Set(),
+		connectionIds: new WeakMap(),
+		sessionInputPauseEpochs: new WeakMap(),
 		protocolClientIds: new WeakMap(),
 		promptAdmissions: new Map(),
+		sessionInputPauses: new Map(),
 		mutationDrain: new MutationDrainLatch(),
 		commandJournal: options.commandJournal ?? {
 			lookup: vi.fn(() => undefined),
