@@ -247,7 +247,7 @@ export class MenuPanel extends Container {
 		const hasSubtitle = subtitle !== undefined && subtitle.length > 0;
 		const hasHeader = hasTitle || hasSubtitle;
 		if (hasTitle) {
-			lines.push(surfaceLine(theme.bold(theme.fg("text", this.title)), safeWidth));
+			lines.push(...surfaceWrappedLines(theme.bold(theme.fg("text", this.title)), safeWidth));
 		}
 		if (hasSubtitle) {
 			lines.push(...surfaceWrappedLines(theme.fg("muted", subtitle), safeWidth));

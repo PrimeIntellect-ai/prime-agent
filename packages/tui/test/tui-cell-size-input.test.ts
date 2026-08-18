@@ -58,6 +58,21 @@ describe("TUI cell size responses", () => {
 		});
 	});
 
+	it("consumes terminal focus reports instead of forwarding them as keyboard input", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const recorder = new InputRecorder();
+
+		tui.setFocus(recorder);
+		tui.start();
+
+		terminal.sendInput("\x1b[O");
+		terminal.sendInput("\x1b[I");
+
+		assert.deepStrictEqual(recorder.inputs, []);
+		tui.stop();
+	});
+
 	it("consumes cell size responses and still forwards later user input", () => {
 		withImageTerminal(() => {
 			setCellDimensions({ widthPx: 9, heightPx: 18 });

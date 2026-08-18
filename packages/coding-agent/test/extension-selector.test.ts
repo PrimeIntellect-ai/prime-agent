@@ -18,6 +18,23 @@ describe("ExtensionSelectorComponent", () => {
 		initTheme("dark");
 	});
 
+	it("wraps a long single-line prompt to the available width", () => {
+		const prompt =
+			"This long question must remain fully visible when the daemon client renders it in a narrow terminal window.";
+		const selector = new ExtensionSelectorComponent(prompt, ["Yes", "No"], vi.fn(), vi.fn(), {
+			getRows: () => 24,
+		});
+
+		const outputLines = selector.render(40).map((line) => stripAnsi(line));
+		const promptEnd = outputLines.findIndex((line, index) => index > 1 && line.trim() === "");
+		const renderedPrompt = outputLines
+			.slice(1, promptEnd)
+			.map((line) => line.trim())
+			.join(" ");
+
+		expect(renderedPrompt).toBe(prompt);
+	});
+
 	it("renders a multiline prompt with compact option rows", () => {
 		const selector = new ExtensionSelectorComponent(
 			[

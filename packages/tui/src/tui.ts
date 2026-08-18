@@ -26,6 +26,8 @@ import {
 } from "./utils.js";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+const TERMINAL_FOCUS_IN = "\x1b[I";
+const TERMINAL_FOCUS_OUT = "\x1b[O";
 
 function extractKittyImageIds(line: string): number[] {
 	const sequenceStart = line.indexOf(KITTY_SEQUENCE_PREFIX);
@@ -877,6 +879,8 @@ export class TUI extends Container {
 			}
 			data = current;
 		}
+
+		if (data === TERMINAL_FOCUS_IN || data === TERMINAL_FOCUS_OUT) return;
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.consumeCellSizeResponse(data)) {
