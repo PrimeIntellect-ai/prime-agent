@@ -111,8 +111,6 @@ const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
 const COMPLETED_ROW_ICON = "✓";
 const NEEDS_INPUT_ROW_ICON = "●";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
-// Tags a spawn-code line so finalize can wrap the whole row in a panel
-// background, visually segmenting the program from the agent rows.
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
 
 export interface AgentsViewModeOptions {
@@ -159,7 +157,6 @@ export type AgentsViewPersistentState = {
 	// Ancestor chain to re-expand on return to a nested agent. Kept by sessionId,
 	// not row identity, so it survives an active→persisted identity flip.
 	pendingExpandedAncestorSessionIds?: string[];
-	// Shared with each view instance so in-place expansion mutations survive remounts.
 	expandedSubagentParents?: Set<string>;
 	programShownParents?: Set<string>;
 	statusMessage?: string;
