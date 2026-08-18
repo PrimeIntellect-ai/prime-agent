@@ -9,6 +9,7 @@ import { join } from "node:path";
 
 /** Default ceiling on a snapshot payload. Over-cap variables are skipped + reported. */
 export const DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024;
+export const DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024;
 
 /** Base filename for the kernel snapshot within a session's artifact directory. */
 const KERNEL_STATE_BASENAME = "kernel-state";
@@ -53,7 +54,12 @@ function pyStr(value: string): string {
  * Python that serializes the user namespace to `outPath` (atomic write) and a
  * sibling `.json` manifest, then prints a single marker line with the result.
  */
-export function buildSnapshotCode(outPath: string, manifestPath: string, maxBytes: number): string {
+export function buildSnapshotCode(
+	outPath: string,
+	manifestPath: string,
+	maxBytes: number,
+	maxVariableBytes = DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+): string {
 	// All builtins are sourced via the locally-imported _b alias so the helper keeps
 	// working even when the user namespace shadows names like list/open/print/len.
 	return `
@@ -100,7 +106,7 @@ def _prime_agent_snapshot_state():
         if name.startswith("_") or name in hidden or name in always_skip:
             continue
         value = ns[name]
-        buffer = SnapshotBuffer(${maxBytes} - total)
+        buffer = SnapshotBuffer(_b.min(${maxVariableBytes}, ${maxBytes} - total))
         # Modules are pickled by reference and re-imported on restore.
         try:
             dill.dump(value, buffer)

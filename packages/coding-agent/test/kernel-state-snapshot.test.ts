@@ -4,6 +4,7 @@ import {
 	buildRestoreCode,
 	buildSnapshotCode,
 	DEFAULT_SNAPSHOT_MAX_BYTES,
+	DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 	manifestPathIn,
 	parseRestoreResult,
 	parseSnapshotResult,
@@ -89,6 +90,7 @@ describe("buildSnapshotCode", () => {
 		expect(code).toContain('"/state/sess.dill"');
 		expect(code).toContain('"/state/sess.json"');
 		expect(code).toContain(String(DEFAULT_SNAPSHOT_MAX_BYTES));
+		expect(code).toContain(String(DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES));
 	});
 
 	it("uses dill, an atomic write, and skips internal handles", () => {

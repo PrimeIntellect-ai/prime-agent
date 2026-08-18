@@ -14,6 +14,7 @@ import {
 	buildRestoreCode,
 	buildSnapshotCode,
 	DEFAULT_SNAPSHOT_MAX_BYTES,
+	DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 	parseListNamesResult,
 	parseRestoreResult,
 	parseSnapshotResult,
@@ -146,8 +147,10 @@ export interface KernelSnapshotConfig {
 	path: string;
 	/** Absolute path for the JSON manifest written alongside the payload. */
 	manifestPath: string;
-	/** Skip variables (and abort the payload) above this many bytes. Default 256 MiB. */
+	/** Maximum aggregate snapshot size. Default 256 MiB. */
 	maxBytes?: number;
+	/** Maximum serialized size of one variable. Default 16 MiB. */
+	maxVariableBytes?: number;
 	/** Debounce window for the auto-snapshot after a successful execution. Default 1500 ms. */
 	debounceMs?: number;
 }
@@ -1492,7 +1495,12 @@ export class KernelManager {
 	private async captureSnapshot(executionTimeoutMs?: number): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
-		const code = buildSnapshotCode(cfg.path, cfg.manifestPath, cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES);
+		const code = buildSnapshotCode(
+			cfg.path,
+			cfg.manifestPath,
+			cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
+			cfg.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+		);
 		try {
 			const r = await this.enqueueExecute(
 				code,

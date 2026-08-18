@@ -151,7 +151,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		}
 	}, 60_000);
 
-	it("stops serializing a variable once it exceeds the snapshot budget", async () => {
+	it("caps each variable without reducing the aggregate snapshot budget", async () => {
 		const boundedDir = mkdtempSync(join(tmpdir(), "prime-agent-state-bounded-"));
 		const manager = new KernelManager({
 			python: python as string,
@@ -159,7 +159,8 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 			snapshot: {
 				path: join(boundedDir, "bounded.dill"),
 				manifestPath: join(boundedDir, "bounded.json"),
-				maxBytes: 8192,
+				maxBytes: 64 * 1024,
+				maxVariableBytes: 8 * 1024,
 			},
 		});
 		try {
@@ -170,11 +171,15 @@ class _Counted:
         pickle_count += 1
         return (dict, ())
 large_records = [_Counted() for _ in range(100_000)]
-small_value = 42`);
+large_text = "x" * 16_384
+small_text_one = "a" * 6_000
+small_text_two = "b" * 6_000`);
 
 			const snapshot = await manager.snapshotState();
-			expect(snapshot?.skipped.map(({ name }) => name)).toContain("large_records");
-			expect(snapshot?.saved).toContain("small_value");
+			expect(snapshot?.skipped.map(({ name }) => name)).toEqual(
+				expect.arrayContaining(["large_records", "large_text"]),
+			);
+			expect(snapshot?.saved).toEqual(expect.arrayContaining(["small_text_one", "small_text_two"]));
 			const count = await manager.execute("print(pickle_count)");
 			expect(Number(count.stdout.trim())).toBeLessThan(100_000);
 		} finally {
