@@ -2674,6 +2674,22 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["allowed prompt"]);
 	});
 
+	it("reschedules previously queued input when an admission pause releases", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("queued input resumed")]);
+		const internals = harness.session as unknown as { _scheduleSessionInputPump(): void };
+		const schedule = vi.spyOn(internals, "_scheduleSessionInputPump").mockImplementation(() => {});
+		await harness.session.followUp("queued before pause");
+		expect(harness.session.getFollowUpMessages()).toEqual(["queued before pause"]);
+		schedule.mockRestore();
+
+		const pause = harness.session.acquireSessionInputPause();
+		pause.release();
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["queued before pause"]);
+	});
+
 	it("does not admit a late agent message across an abort and explicit resume", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

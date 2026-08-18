@@ -6311,6 +6311,8 @@ export class AgentSession {
 				released = true;
 				this._sessionInputAdmissionPauses.delete(token);
 				this._sessionInputPumpEpoch++;
+				this._notifySessionInputCheckpointChange();
+				this._scheduleSessionInputPump();
 			},
 		};
 	}
