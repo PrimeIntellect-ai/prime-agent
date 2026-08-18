@@ -7,9 +7,6 @@ const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	maxPrimaryColumnWidth: 32,
 };
 
-/**
- * Component that renders a theme selector
- */
 export class ThemeSelectorComponent extends Container {
 	private selectList: SelectList;
 	private onPreview: (themeName: string) => void;
@@ -23,7 +20,6 @@ export class ThemeSelectorComponent extends Container {
 		super();
 		this.onPreview = onPreview;
 
-		// Get available themes and create select items
 		const themes = getAvailableThemes();
 		const themeItems: SelectItem[] = themes.map((name) => ({
 			value: name,
@@ -31,13 +27,10 @@ export class ThemeSelectorComponent extends Container {
 			description: name === currentTheme ? "(current)" : undefined,
 		}));
 
-		// Add top border
 		this.addChild(new DynamicBorder());
 
-		// Create selector
 		this.selectList = new SelectList(themeItems, 10, getSelectListTheme(), THEME_SELECT_LIST_LAYOUT);
 
-		// Preselect current theme
 		const currentIndex = themes.indexOf(currentTheme);
 		if (currentIndex !== -1) {
 			this.selectList.setSelectedIndex(currentIndex);
@@ -57,7 +50,6 @@ export class ThemeSelectorComponent extends Container {
 
 		this.addChild(this.selectList);
 
-		// Add bottom border
 		this.addChild(new DynamicBorder());
 	}
 

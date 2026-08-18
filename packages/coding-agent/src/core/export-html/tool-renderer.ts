@@ -114,7 +114,6 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 				const lines = component.render(width);
 				return ansiLinesToHtml(lines);
 			} catch {
-				// On error, return undefined so HTML export can fall back to structured result rendering
 				return undefined;
 			}
 		},
@@ -132,15 +131,12 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					return undefined;
 				}
 
-				// Build AgentToolResult from content array
-				// Cast content since session storage uses generic object types
 				const agentToolResult = {
 					content: result as (TextContent | ImageContent)[],
 					details,
 					isError,
 				};
 
-				// Render collapsed
 				const collapsedComponent = toolDef.renderResult(
 					agentToolResult,
 					{ expanded: false, isPartial: false },
@@ -150,7 +146,6 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 				renderedResultComponents.set(toolCallId, collapsedComponent);
 				const collapsed = ansiLinesToHtml(trimRenderedResultLines(collapsedComponent.render(width)));
 
-				// Render expanded
 				const expandedComponent = toolDef.renderResult(
 					agentToolResult,
 					{ expanded: true, isPartial: false },
@@ -165,7 +160,6 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					expanded,
 				};
 			} catch {
-				// On error, return undefined so HTML export can fall back to structured result rendering
 				return undefined;
 			}
 		},

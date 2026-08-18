@@ -1,6 +1,5 @@
 import type { ContextUsage } from "./extensions/index.js";
 
-/** Session statistics for the /session command and connection snapshots. */
 export interface SessionStats {
 	sessionFile: string | undefined;
 	sessionId: string;

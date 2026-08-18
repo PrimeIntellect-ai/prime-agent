@@ -32,8 +32,6 @@
       display: flex;
       min-height: 100vh;
     }
-
-    /* Sidebar */
     #sidebar {
       width: var(--sidebar-width);
       min-width: var(--sidebar-width);
@@ -242,8 +240,6 @@
       color: var(--muted);
       flex-shrink: 0;
     }
-
-    /* Main content */
     #content {
       flex: 1;
       min-width: 0;
@@ -258,8 +254,6 @@
       width: 100%;
       max-width: 800px;
     }
-
-    /* Help bar */
     .help-bar {
       font-size: 11px;
       color: var(--warning);
@@ -299,8 +293,6 @@
       background: var(--hover);
       border-color: var(--borderAccent);
     }
-
-    /* Header */
     .header {
       background: var(--container-bg);
       border-radius: 4px;
@@ -338,8 +330,6 @@
       color: var(--text);
       flex: 1;
     }
-
-    /* Messages */
     #messages {
       display: flex;
       flex-direction: column;
@@ -364,8 +354,6 @@
       padding: 0;
       position: relative;
     }
-
-    /* Copy link button - appears on hover */
     .copy-link-btn {
       position: absolute;
       top: 8px;
@@ -403,8 +391,6 @@
       color: white;
       border-color: var(--success, #22c55e);
     }
-
-    /* Highlight effect for deep-linked messages */
     .user-message.highlight,
     .assistant-message.highlight {
       animation: highlight-pulse 2s ease-out;
@@ -455,8 +441,6 @@
       color: var(--thinkingText);
       font-style: italic;
     }
-
-    /* Tool execution */
     .tool-execution {
       padding: var(--line-height);
       border-radius: 4px;
@@ -576,8 +560,6 @@
     .expand-hint {
       color: var(--toolOutput);
     }
-
-    /* Diff */
     .tool-diff {
       font-size: 11px;
       overflow-x: auto;
@@ -587,8 +569,6 @@
     .diff-added { color: var(--toolDiffAdded); }
     .diff-removed { color: var(--toolDiffRemoved); }
     .diff-context { color: var(--toolDiffContext); }
-
-    /* Model change */
     .model-change {
       padding: 0 var(--line-height);
       color: var(--dim);
@@ -599,8 +579,6 @@
       color: var(--borderAccent);
       font-weight: bold;
     }
-
-    /* Compaction / Branch Summary - matches customMessage colors from TUI */
     .compaction {
       background: var(--customMessageBg);
       border-radius: 4px;
@@ -631,8 +609,6 @@
     .compaction.expanded .compaction-content {
       display: block;
     }
-
-    /* System prompt */
     .system-prompt {
       background: var(--customMessageBg);
       padding: var(--line-height);
@@ -691,8 +667,6 @@
       color: var(--muted);
       margin-top: 4px;
     }
-
-    /* Tools list */
     .tools-list {
       background: var(--customMessageBg);
       padding: var(--line-height);
@@ -777,8 +751,6 @@
       color: var(--dim);
       margin-left: 8px;
     }
-
-    /* Hook/custom messages */
     .hook-message {
       background: var(--customMessageBg);
       color: var(--customMessageText);
@@ -790,8 +762,6 @@
       color: var(--customMessageLabel);
       font-weight: bold;
     }
-
-    /* Skill invocation - matches compaction style (clickable, collapsed by default) */
     .skill-invocation {
       background: var(--customMessageBg);
       border-radius: 4px;
@@ -829,8 +799,6 @@
     .skill-user-entry {
       position: relative;
     }
-
-    /* Branch summary */
     .branch-summary {
       background: var(--customMessageBg);
       padding: var(--line-height);
@@ -841,8 +809,6 @@
       font-weight: bold;
       color: var(--borderAccent);
     }
-
-    /* Error */
     .error-text {
       color: var(--error);
       padding: 0 var(--line-height);
@@ -850,8 +816,6 @@
     .tool-error {
       color: var(--error);
     }
-
-    /* Images */
     .message-images {
       margin-bottom: 12px;
     }
@@ -862,8 +826,6 @@
       border-radius: 4px;
       margin: var(--line-height) 0;
     }
-
-    /* Markdown content */
     .markdown-content h1,
     .markdown-content h2,
     .markdown-content h3,
@@ -954,24 +916,18 @@
       max-width: 100%;
       border-radius: 4px;
     }
-
-    /* Syntax highlighting */
     .hljs { background: transparent; color: var(--text); }
     .hljs-comment, .hljs-quote { color: var(--syntaxComment); }
     .hljs-keyword, .hljs-selector-tag { color: var(--syntaxKeyword); }
     .hljs-number, .hljs-literal { color: var(--syntaxNumber); }
     .hljs-string, .hljs-doctag { color: var(--syntaxString); }
-    /* Function names: hljs v11 uses .hljs-title.function_ compound class */
     .hljs-function, .hljs-title, .hljs-title.function_, .hljs-section, .hljs-name { color: var(--syntaxFunction); }
-    /* Types: hljs v11 uses .hljs-title.class_ for class names */
     .hljs-type, .hljs-class, .hljs-title.class_, .hljs-built_in { color: var(--syntaxType); }
     .hljs-attr, .hljs-variable, .hljs-variable.language_, .hljs-params, .hljs-property { color: var(--syntaxVariable); }
     .hljs-meta, .hljs-meta .hljs-keyword, .hljs-meta .hljs-string { color: var(--syntaxKeyword); }
     .hljs-operator { color: var(--syntaxOperator); }
     .hljs-punctuation { color: var(--syntaxPunctuation); }
     .hljs-subst { color: var(--text); }
-
-    /* Footer */
     .footer {
       margin-top: 48px;
       padding: 20px;
@@ -979,8 +935,6 @@
       color: var(--dim);
       font-size: 10px;
     }
-
-    /* Mobile */
     #hamburger {
       display: none;
       position: fixed;

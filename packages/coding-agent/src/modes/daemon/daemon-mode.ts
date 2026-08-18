@@ -448,15 +448,6 @@ export async function runDaemonMode(options: DaemonModeOptions): Promise<never> 
 	return new Promise(() => {});
 }
 
-export function isTerminalRemoteAgentMessageError(error: unknown): error is Error {
-	return (
-		error instanceof Error &&
-		(error.message.startsWith("Unknown active session:") ||
-			error.message.startsWith("Ambiguous") ||
-			error.message === AGENT_FAMILY_REACH_ERROR)
-	);
-}
-
 export class AgentDaemon {
 	private server?: Server;
 	private shuttingDown = false;
@@ -5874,6 +5865,7 @@ export class AgentDaemon {
 			type: "session_detached",
 			activeSessionId: state.activeSessionId,
 		});
+		// Discard an abandoned empty draft rather than retaining an empty session file.
 		// Abandoned new-chat: discard it so it doesn't linger in memory or leave an
 		// empty file. Replaces the old DeferredAgentConnection.
 		if (this.isDiscardableDraft(state)) {

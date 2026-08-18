@@ -197,11 +197,9 @@ describe("TUI resize handling", () => {
 
 			const initialRedraws = tui.fullRedraws;
 
-			// Resize height
 			terminal.resize(40, 15);
 			await terminal.waitForRender();
 
-			// Should have triggered a full redraw
 			assert.ok(tui.fullRedraws > initialRedraws, "Height change should trigger full redraw");
 
 			const viewport = terminal.getViewport();
@@ -252,11 +250,9 @@ describe("TUI resize handling", () => {
 
 		const initialRedraws = tui.fullRedraws;
 
-		// Resize width
 		terminal.resize(60, 10);
 		await terminal.waitForRender();
 
-		// Should have triggered a full redraw
 		assert.ok(tui.fullRedraws > initialRedraws, "Width change should trigger full redraw");
 
 		tui.stop();
@@ -271,25 +267,21 @@ describe("TUI content shrinkage", () => {
 		const component = new TestComponent();
 		tui.addChild(component);
 
-		// Start with many lines
 		component.lines = ["Line 0", "Line 1", "Line 2", "Line 3", "Line 4", "Line 5"];
 		tui.start();
 		await terminal.waitForRender();
 
 		const initialRedraws = tui.fullRedraws;
 
-		// Shrink to fewer lines
 		component.lines = ["Line 0", "Line 1"];
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		// Should have triggered a full redraw to clear empty rows
 		assert.ok(tui.fullRedraws > initialRedraws, "Content shrinkage should trigger full redraw");
 
 		const viewport = terminal.getViewport();
 		assert.ok(viewport[0]?.includes("Line 0"), "First line preserved");
 		assert.ok(viewport[1]?.includes("Line 1"), "Second line preserved");
-		// Lines below should be empty (cleared)
 		assert.strictEqual(viewport[2]?.trim(), "", "Line 2 should be cleared");
 		assert.strictEqual(viewport[3]?.trim(), "", "Line 3 should be cleared");
 
@@ -307,7 +299,6 @@ describe("TUI content shrinkage", () => {
 		tui.start();
 		await terminal.waitForRender();
 
-		// Shrink to single line
 		component.lines = ["Only line"];
 		tui.requestRender();
 		await terminal.waitForRender();
@@ -330,13 +321,11 @@ describe("TUI content shrinkage", () => {
 		tui.start();
 		await terminal.waitForRender();
 
-		// Shrink to empty
 		component.lines = [];
 		tui.requestRender();
 		await terminal.waitForRender();
 
 		const viewport = terminal.getViewport();
-		// All lines should be empty
 		assert.strictEqual(viewport[0]?.trim(), "", "Line 0 should be cleared");
 		assert.strictEqual(viewport[1]?.trim(), "", "Line 1 should be cleared");
 
@@ -351,24 +340,19 @@ describe("TUI differential rendering", () => {
 		const component = new TestComponent();
 		tui.addChild(component);
 
-		// Initial render: 5 identical lines
 		component.lines = ["Line 0", "Line 1", "Line 2", "Line 3", "Line 4"];
 		tui.start();
 		await terminal.waitForRender();
 
-		// Shrink to 3 lines, all identical to before (no content changes in remaining lines)
 		component.lines = ["Line 0", "Line 1", "Line 2"];
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		// cursorRow should be 2 (last line of new content)
-		// Verify by doing another render with a change on line 1
 		component.lines = ["Line 0", "CHANGED", "Line 2"];
 		tui.requestRender();
 		await terminal.waitForRender();
 
 		const viewport = terminal.getViewport();
-		// Line 1 should show "CHANGED", proving cursor tracking was correct
 		assert.ok(viewport[1]?.includes("CHANGED"), `Expected "CHANGED" on line 1, got: ${viewport[1]}`);
 
 		tui.stop();
@@ -380,12 +364,10 @@ describe("TUI differential rendering", () => {
 		const component = new TestComponent();
 		tui.addChild(component);
 
-		// Initial render
 		component.lines = ["Header", "Working...", "Footer"];
 		tui.start();
 		await terminal.waitForRender();
 
-		// Simulate spinner animation - only middle line changes
 		const spinnerFrames = ["|", "/", "-", "\\"];
 		for (const frame of spinnerFrames) {
 			component.lines = ["Header", `Working ${frame}`, "Footer"];
@@ -444,7 +426,6 @@ describe("TUI differential rendering", () => {
 		tui.start();
 		await terminal.waitForRender();
 
-		// Change only first line
 		component.lines = ["CHANGED", "Line 1", "Line 2", "Line 3"];
 		tui.requestRender();
 		await terminal.waitForRender();
@@ -468,7 +449,6 @@ describe("TUI differential rendering", () => {
 		tui.start();
 		await terminal.waitForRender();
 
-		// Change only last line
 		component.lines = ["Line 0", "Line 1", "Line 2", "CHANGED"];
 		tui.requestRender();
 		await terminal.waitForRender();
@@ -492,7 +472,6 @@ describe("TUI differential rendering", () => {
 		tui.start();
 		await terminal.waitForRender();
 
-		// Change lines 1 and 3, keep 0, 2, 4 the same
 		component.lines = ["Line 0", "CHANGED 1", "Line 2", "CHANGED 3", "Line 4"];
 		tui.requestRender();
 		await terminal.waitForRender();
@@ -513,7 +492,6 @@ describe("TUI differential rendering", () => {
 		const component = new TestComponent();
 		tui.addChild(component);
 
-		// Start with content
 		component.lines = ["Line 0", "Line 1", "Line 2"];
 		tui.start();
 		await terminal.waitForRender();
@@ -521,12 +499,10 @@ describe("TUI differential rendering", () => {
 		let viewport = terminal.getViewport();
 		assert.ok(viewport[0]?.includes("Line 0"), "Initial content rendered");
 
-		// Clear to empty
 		component.lines = [];
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		// Add content back - this should work correctly even after empty state
 		component.lines = ["New Line 0", "New Line 1"];
 		tui.requestRender();
 		await terminal.waitForRender();
@@ -648,17 +624,12 @@ describe("TUI differential rendering", () => {
 });
 
 describe("TUI viewport-preserving render", () => {
-	// Regression: pressing Ctrl+O to expand all tool output changed lines above
-	// the viewport, which forced a full redraw that cleared scrollback and
-	// replayed the whole transcript from the top. requestRenderPreservingViewport
-	// repaints only the visible viewport in place and leaves scrollback alone.
 	it("repaints in place without clearing scrollback when content above the viewport grows", async () => {
 		const terminal = new LoggingVirtualTerminal(40, 10);
 		const tui = new TUI(terminal);
 		const component = new TestComponent();
 		tui.addChild(component);
 
-		// More lines than the viewport, so the top scrolls into scrollback.
 		component.lines = Array.from({ length: 30 }, (_, i) => `Line ${i}`);
 		tui.start();
 		await terminal.waitForRender();
@@ -666,8 +637,6 @@ describe("TUI viewport-preserving render", () => {
 
 		const initialRedraws = tui.fullRedraws;
 
-		// "Expand" a block near the top: insert lines after Line 2 so the first
-		// changed line is far above the viewport.
 		const expanded = [...component.lines];
 		expanded.splice(3, 0, "Expanded A", "Expanded B", "Expanded C");
 		component.lines = expanded;
@@ -679,12 +648,9 @@ describe("TUI viewport-preserving render", () => {
 		assert.ok(!writes.includes("\x1b[3J"), "Must not clear scrollback");
 		assert.ok(!writes.includes("\x1b[2J"), "Must not clear the screen");
 
-		// The viewport stays anchored at the latest content (the bottom).
 		const viewport = terminal.getViewport();
 		assert.ok(viewport[viewport.length - 1]?.includes("Line 29"), "Latest line stays at the bottom");
 
-		// Scrollback above the viewport is untouched — it still holds the
-		// pre-toggle lines rather than being replayed.
 		const scrollback = terminal.getScrollBuffer();
 		assert.ok(
 			scrollback.some((l) => l.includes("Line 0")),
@@ -700,15 +666,11 @@ describe("TUI viewport-preserving render", () => {
 		const component = new TestComponent();
 		tui.addChild(component);
 
-		// Tall transcript: viewport anchored at the bottom with history in scrollback.
 		component.lines = Array.from({ length: 30 }, (_, i) => `Line ${i}`);
 		tui.start();
 		await terminal.waitForRender();
 		terminal.clearWrites();
 
-		// Collapse to a handful of lines that fit on screen (e.g. a rebuild after
-		// compaction). Redraw the visible screen, but preserve terminal scrollback
-		// so users can still read long prior output.
 		component.lines = ["Summary A", "Summary B", "Summary C"];
 		tui.requestRender();
 		await terminal.waitForRender();
@@ -735,7 +697,6 @@ describe("TUI viewport-preserving render", () => {
 		await terminal.waitForRender();
 		terminal.clearWrites();
 
-		// Expand near the top so the repaint takes the viewport-preserving path.
 		const expanded = [...component.lines];
 		expanded.splice(6, 0, "Expanded A", "Expanded B", "Expanded C");
 		component.lines = expanded;
@@ -811,7 +772,6 @@ describe("TUI viewport-preserving render", () => {
 		tui.start();
 		await terminal.waitForRender();
 
-		// Collapse (content shrinks) via the preserving path.
 		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
 		tui.requestRenderPreservingViewport();
 		await terminal.waitForRender();
@@ -819,8 +779,6 @@ describe("TUI viewport-preserving render", () => {
 		const redrawsAfterCollapse = tui.fullRedraws;
 		terminal.clearWrites();
 
-		// A subsequent plain render with unchanged content must not re-trigger a
-		// clearOnShrink full redraw.
 		tui.requestRender();
 		await terminal.waitForRender();
 
@@ -833,19 +791,11 @@ describe("TUI viewport-preserving render", () => {
 
 describe("TUI above-viewport changes on a tall transcript", () => {
 	it("repaints in place instead of clearing scrollback when off-screen content changes", async () => {
-		// Reproduces the attach-then-stream flicker: when a transcript is taller
-		// than the viewport and content above the visible window changes (e.g. an
-		// off-screen tool result resolving while the model streams), the renderer
-		// used to replay the whole transcript on every change, flickering and
-		// scrolling from the top. It should now repaint only the visible window
-		// in place, leaving scrollback and history intact.
 		const terminal = new LoggingVirtualTerminal(40, 10);
 		const tui = new TUI(terminal);
 		const component = new TestComponent();
 		tui.addChild(component);
 
-		// 30 lines into a 10-row terminal: viewport anchored at the bottom, with
-		// lines 0-19 living in scrollback above the visible window.
 		component.lines = Array.from({ length: 30 }, (_, i) => `Line ${i}`);
 		tui.start();
 		await terminal.waitForRender();
@@ -853,8 +803,6 @@ describe("TUI above-viewport changes on a tall transcript", () => {
 		assert.ok(terminal.getViewport().join("\n").includes("Line 29"), "Latest line visible after initial paint");
 		terminal.clearWrites();
 
-		// Mutate several lines above the viewport, as off-screen tool results would
-		// while the model is streaming.
 		for (const i of [3, 7, 12]) {
 			component.lines[i] = `Line ${i} (updated)`;
 			tui.requestRender();
@@ -873,10 +821,6 @@ describe("TUI above-viewport changes on a tall transcript", () => {
 	});
 
 	it("preserves scrollback when a still-tall transcript shrinks (rebuild/compaction)", async () => {
-		// A rebuild or compaction can replace the transcript with fewer lines that
-		// still exceed the viewport. It still needs a full screen redraw, but must
-		// not delete terminal scrollback because long prior output should remain
-		// readable.
 		const terminal = new LoggingVirtualTerminal(40, 10);
 		const tui = new TUI(terminal);
 		const component = new TestComponent();
@@ -887,8 +831,6 @@ describe("TUI above-viewport changes on a tall transcript", () => {
 		await terminal.waitForRender();
 		terminal.clearWrites();
 
-		// Replace with a shorter transcript that is still taller than the 10-row
-		// viewport (15 lines), as a compaction would.
 		component.lines = Array.from({ length: 15 }, (_, i) => `Rebuilt ${i}`);
 		tui.requestRender();
 		await terminal.waitForRender();

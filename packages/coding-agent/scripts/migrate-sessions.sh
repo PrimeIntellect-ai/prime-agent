@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 #
 # Migrate sessions from ~/.pi/agent/*.jsonl to proper session directories.
-# This fixes sessions created by the bug in v0.30.0 where sessions were
-# saved to ~/.pi/agent/ instead of ~/.pi/agent/sessions/<encoded-cwd>/.
-#
 # Usage: ./migrate-sessions.sh [--dry-run]
 #
 

@@ -6,7 +6,6 @@
 import { execSync, spawnSync } from "child_process";
 import { getShellConfig } from "../utils/shell.js";
 
-// Cache for shell command results (persists for process lifetime)
 const commandResultCache = new Map<string, string | undefined>();
 
 /**

@@ -14,11 +14,6 @@ import stripAnsi from "strip-ansi";
 import { sanitizeBinaryOutput } from "../utils/shell.js";
 import type { BashOperations } from "./tools/bash.js";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.js";
-
-// ============================================================================
-// Types
-// ============================================================================
-
 export interface BashExecutorOptions {
 	/** Callback for streaming output chunks (already sanitized) */
 	onChunk?: (chunk: string) => void;
@@ -38,11 +33,6 @@ export interface BashResult {
 	/** Path to temp file containing full output (if output exceeded truncation threshold) */
 	fullOutputPath?: string;
 }
-
-// ============================================================================
-// Implementation
-// ============================================================================
-
 /**
  * Execute a bash command using custom BashOperations.
  * Used for remote execution (SSH, containers, etc.).
@@ -77,11 +67,7 @@ export async function executeBashWithOperations(
 
 	const onData = (data: Buffer) => {
 		totalBytes += data.length;
-
-		// Sanitize: strip ANSI, replace binary garbage, normalize newlines
 		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
-
-		// Start writing to temp file if exceeds threshold
 		if (totalBytes > DEFAULT_MAX_BYTES) {
 			ensureTempFile();
 		}
@@ -89,16 +75,12 @@ export async function executeBashWithOperations(
 		if (tempFileStream) {
 			tempFileStream.write(text);
 		}
-
-		// Keep rolling buffer
 		outputChunks.push(text);
 		outputBytes += text.length;
 		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
 			const removed = outputChunks.shift()!;
 			outputBytes -= removed.length;
 		}
-
-		// Stream to callback
 		if (options?.onChunk) {
 			options.onChunk(text);
 		}
@@ -128,7 +110,6 @@ export async function executeBashWithOperations(
 			fullOutputPath: tempFilePath,
 		};
 	} catch (err) {
-		// Check if it was an abort
 		if (options?.signal?.aborted) {
 			const fullOutput = outputChunks.join("");
 			const truncationResult = truncateTail(fullOutput);

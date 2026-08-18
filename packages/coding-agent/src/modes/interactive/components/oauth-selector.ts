@@ -51,13 +51,10 @@ const PROVIDER_LIST_RESERVED_ROWS = 7;
 const TAB_BAR_RESERVED_ROWS = 2;
 const PROVIDER_SCROLL_INDICATOR_ROWS = 1;
 
-/**
- * Component that renders an auth provider selector
- */
 export class OAuthSelectorComponent extends Container implements Focusable {
 	private searchInput: MenuSearchInput;
 
-	// Focusable implementation - propagate to search input for IME cursor positioning
+	// Delegate focus to the search input so its IME cursor remains positioned correctly.
 	private _focused = false;
 	get focused(): boolean {
 		return this._focused;
@@ -146,11 +143,9 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		panel.addChild(this.searchInput);
 		panel.addChild(new Spacer(1));
 
-		// Create list container
 		this.listContainer = new MenuList({ compact: () => this.listLayout.compact });
 		panel.addChild(this.listContainer);
 
-		// Initial render
 		this.filterProviders("");
 	}
 
@@ -312,7 +307,6 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new TruncatedText(scrollInfo, 1, 0));
 		}
 
-		// Show "no providers" if empty
 		if (this.filteredProviders.length === 0) {
 			const message =
 				this.allProviders.length === 0
@@ -368,14 +362,11 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		// Up arrow
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredProviders.length === 0) return;
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
 			this.updateList();
-		}
-		// Down arrow
-		else if (kb.matches(keyData, "tui.select.down")) {
+		} else if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredProviders.length === 0) return;
 			this.selectedIndex = Math.min(this.filteredProviders.length - 1, this.selectedIndex + 1);
 			this.updateList();
@@ -394,20 +385,14 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			kb.matches(keyData, "tui.editor.cursorRight")
 		) {
 			this.switchCategory(1);
-		}
-		// Enter
-		else if (kb.matches(keyData, "tui.select.confirm")) {
+		} else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selectedProvider = this.filteredProviders[this.selectedIndex];
 			if (selectedProvider) {
 				this.onSelectCallback(selectedProvider);
 			}
-		}
-		// Escape or Ctrl+C
-		else if (kb.matches(keyData, "tui.select.cancel")) {
+		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();
-		}
-		// Pass everything else to search input
-		else {
+		} else {
 			this.searchInput.handleInput(keyData);
 			this.filterProviders(this.searchInput.getValue());
 		}

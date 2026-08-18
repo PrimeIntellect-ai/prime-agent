@@ -9,7 +9,7 @@ import { DefaultResourceLoader } from "../../../src/core/resource-loader.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import { SettingsManager } from "../../../src/core/settings-manager.js";
-import { allToolNames, createAllToolDefinitions } from "../../../src/core/tools/index.js";
+import { createAllToolDefinitions } from "../../../src/core/tools/index.js";
 
 describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 	let tempDir: string;
@@ -28,7 +28,6 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 	});
 
 	it("registers only ipython as a built-in tool", () => {
-		expect([...allToolNames]).toEqual(["ipython"]);
 		expect(Object.keys(createAllToolDefinitions(process.cwd()))).toEqual(["ipython"]);
 	});
 

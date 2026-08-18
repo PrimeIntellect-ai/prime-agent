@@ -301,9 +301,6 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
-/**
- * Main loop logic shared by agentLoop and agentLoopContinue.
- */
 async function runLoop(
 	currentContext: AgentContext,
 	newMessages: AgentMessage[],
@@ -314,17 +311,14 @@ async function runLoop(
 ): Promise<void> {
 	let firstTurn = true;
 	let lastTurn: Parameters<NonNullable<AgentLoopConfig["getContinuationMessages"]>>[0] | undefined;
-	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = await pollMessagesUnlessAborted(config.getSteeringMessages, signal);
 
 	const shouldStopBeforeTurn = (): boolean => !firstTurn && (config.shouldStopBeforeTurn?.() ?? false);
 
-	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
 		throwIfAborted(signal);
 		let hasMoreToolCalls = true;
 
-		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
 			throwIfAborted(signal);
 			if (!firstTurn) {
@@ -333,7 +327,6 @@ async function runLoop(
 				firstTurn = false;
 			}
 
-			// Process pending messages (inject before next assistant response)
 			if (pendingMessages.length > 0) {
 				for (const message of pendingMessages) {
 					await emit({ type: "message_start", message });
@@ -344,7 +337,6 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			// Stream assistant response
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
 			newMessages.push(message);
 
@@ -354,7 +346,6 @@ async function runLoop(
 				return;
 			}
 
-			// Check for tool calls
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
@@ -419,7 +410,6 @@ async function runLoop(
 			}
 		}
 
-		// Agent would stop here. Check for follow-up messages.
 		if (shouldStopBeforeTurn()) break;
 		const followUpMessagesResult = await settlePostTurn(
 			pollMessagesUnlessAborted(config.getFollowUpMessages, signal),
@@ -431,7 +421,6 @@ async function runLoop(
 		}
 		const followUpMessages = followUpMessagesResult.value;
 		if (followUpMessages.length > 0) {
-			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
 			continue;
 		}
@@ -453,17 +442,12 @@ async function runLoop(
 			continue;
 		}
 
-		// No more messages, exit
 		break;
 	}
 
 	await emit({ type: "agent_end", messages: newMessages });
 }
 
-/**
- * Stream an assistant response from the LLM.
- * This is where AgentMessage[] gets transformed to Message[] for the LLM.
- */
 async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
@@ -487,24 +471,20 @@ async function streamAssistantResponse(
 
 	try {
 		throwIfAborted(signal);
-		// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 		let messages = context.messages;
 		if (config.transformContext) {
 			messages = await maybePromiseWithAbort(config.transformContext(messages, signal), signal);
 		}
 
-		// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 		const llmMessages = await maybePromiseWithAbort(config.convertToLlm(messages), signal);
 
 		const streamFunction = streamFn || streamSimple;
 
-		// Resolve API key (important for expiring tokens)
 		const resolvedApiKey =
 			(config.getApiKey
 				? await maybePromiseWithAbort(config.getApiKey(config.model.provider), signal)
 				: undefined) || config.apiKey;
 
-		// Build LLM context immediately before starting the provider call.
 		const llmContext: Context = {
 			systemPrompt: config.getSystemPrompt?.() ?? context.systemPrompt,
 			messages: llmMessages,
@@ -602,9 +582,6 @@ async function streamAssistantResponse(
 	}
 }
 
-/**
- * Execute tool calls from an assistant message.
- */
 async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
