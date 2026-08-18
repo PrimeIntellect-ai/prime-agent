@@ -1021,6 +1021,7 @@ export class AgentSession {
 	private _sessionInputArrivalEpoch = 0;
 	// Persists abort/restart suspension after the initiating call returns.
 	private _sessionInputPumpSuspended = false;
+	private _sessionInputSuspendedForUpdateRestart = false;
 	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private readonly _sessionInputAdmissionPauses = new Set<symbol>();
@@ -5844,6 +5845,7 @@ export class AgentSession {
 				});
 			}
 		} else if (options?.triggerTurn) {
+			if (!this._sessionInputSuspendedForUpdateRestart) this._resumeSessionInputAdmission();
 			const admissionFence = await this._acquireDirectTurnAdmissionFence();
 			try {
 				const normalized = normalizeMessageContent(message.content);
@@ -6414,6 +6416,7 @@ export class AgentSession {
 	private _resumeSessionInputAdmission(): void {
 		if (!this._sessionInputPumpSuspended) return;
 		this._sessionInputPumpSuspended = false;
+		this._sessionInputSuspendedForUpdateRestart = false;
 		this._sessionInputPumpEpoch++;
 		this._notifySessionInputCheckpointChange();
 	}
@@ -6522,6 +6525,7 @@ export class AgentSession {
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
 		this._sessionInputPumpSuspended = true;
+		this._sessionInputSuspendedForUpdateRestart = false;
 		this._cancelSessionActions(
 			(action) => action.payload.kind === "turn" && !action.payload.queueVisible,
 			new Error("Prompt aborted before delivery."),
@@ -6562,6 +6566,7 @@ export class AgentSession {
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
 		this._sessionInputPumpSuspended = true;
+		this._sessionInputSuspendedForUpdateRestart = true;
 		this._cancelPostCompactionContinue();
 		this.abortRetry();
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");

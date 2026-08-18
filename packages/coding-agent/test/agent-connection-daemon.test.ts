@@ -2356,8 +2356,14 @@ describe("DaemonAgentConnection", () => {
 		await expect(connection.getQueue()).resolves.toEqual({ steering: ["steer"], followUp: ["follow"] });
 		await expect(connection.clearQueue()).resolves.toEqual({ steering: ["cleared"], followUp: [] });
 		await expect(connection.abortAndClearQueue()).resolves.toEqual({ steering: ["aborted"], followUp: ["cleared"] });
-		const inputPause = await connection.acquireSessionInputPause("lease-1");
+		const [inputPause, inputPauseAlias] = await Promise.all([
+			connection.acquireSessionInputPause("lease-1"),
+			connection.acquireSessionInputPause("lease-1"),
+		]);
+		expect(inputPauseAlias).toBe(inputPause);
+		(connection as unknown as { activeSessionId: string }).activeSessionId = "active-2";
 		await inputPause.release();
+		(connection as unknown as { activeSessionId: string }).activeSessionId = "active-1";
 		await connection.waitForIdle();
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

@@ -2644,6 +2644,22 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["queued before abort", "wake after abort"]);
 	});
 
+	it("resumes an explicit custom trigger after an ordinary abort", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("trigger resumed")]);
+		harness.session.requestAbort();
+
+		await harness.session.sendCustomMessage(
+			{ customType: "trigger", content: "resume after abort", display: false },
+			{ triggerTurn: true },
+		);
+		await harness.session.waitForIdle();
+		expect(
+			harness.session.messages.filter((message) => message.role === "custom").map((message) => message.content),
+		).toContain("resume after abort");
+	});
+
 	it("rejects all new session actions while an input admission pause is held", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

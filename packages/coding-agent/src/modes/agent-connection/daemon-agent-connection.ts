@@ -216,6 +216,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly unsubscribeDaemonMessages: () => void;
 	private readonly unsubscribeDaemonClose: () => void;
 	private readonly clientId = `daemon-agent-connection:${randomUUID()}`;
+	private readonly sessionInputPauses = new Map<string, Promise<AgentConnectionSessionInputPause>>();
 	private ownedSessionPromotionTail = Promise.resolve();
 	private lastEventCursor: DaemonEventCursor | undefined;
 	private readonly retiredEventGenerations = new Set<string>();
@@ -601,23 +602,40 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause> {
-		const { pauseId } = await this.requestData<{ pauseId: string }>({
-			type: "acquire_session_input_pause",
-			activeSessionId: this.activeSessionId,
-			leaseKey,
-		});
-		let released = false;
-		return {
-			release: async () => {
-				if (released) return;
-				await this.requestData({
-					type: "release_session_input_pause",
-					activeSessionId: this.activeSessionId,
-					pauseId,
-				});
-				released = true;
-			},
-		};
+		const activeSessionId = this.activeSessionId;
+		const acquisitionKey = JSON.stringify([activeSessionId, leaseKey]);
+		const existing = this.sessionInputPauses.get(acquisitionKey);
+		if (existing) return existing;
+		const acquisition = (async (): Promise<AgentConnectionSessionInputPause> => {
+			const { pauseId } = await this.requestData<{ pauseId: string }>({
+				type: "acquire_session_input_pause",
+				activeSessionId,
+				leaseKey,
+			});
+			let released = false;
+			return {
+				release: async () => {
+					if (released) return;
+					await this.requestData({
+						type: "release_session_input_pause",
+						activeSessionId,
+						pauseId,
+					});
+					released = true;
+					if (this.sessionInputPauses.get(acquisitionKey) === acquisition) {
+						this.sessionInputPauses.delete(acquisitionKey);
+					}
+				},
+			};
+		})();
+		this.sessionInputPauses.set(acquisitionKey, acquisition);
+		try {
+			return await acquisition;
+		} catch (error) {
+			if (this.sessionInputPauses.get(acquisitionKey) === acquisition)
+				this.sessionInputPauses.delete(acquisitionKey);
+			throw error;
+		}
 	}
 
 	async listCronJobs(options: { includeInactive?: boolean } = {}): Promise<AgentCronJob[]> {
