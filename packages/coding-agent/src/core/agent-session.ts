@@ -2242,7 +2242,6 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "plan") {
-				// Fix 4: Validate branchVersion before applying the plan.
 				if (bgResult.branchVersion !== this._autoRefineBranchVersion) {
 					if (!this._pendingRequestedRefine) {
 						this._lastAutoRefineReviewAt = Date.now();
@@ -2276,9 +2275,8 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "failure") {
-				// Fix 3: Background review or planning failed. Stamp cooldown
-				// without a synchronous retry (the discriminated contract says no duplicate boundary
-				// model call). A separately queued refine.run may still be serviced below.
+				// Background review or planning failure stamps cooldown without a synchronous retry.
+				// A separately queued refine.run may still be serviced below.
 				if (branchVersion === this._autoRefineBranchVersion) {
 					this._lastAutoRefineReviewAt = Date.now();
 				}
@@ -2494,7 +2492,7 @@ export class AgentSession {
 			return;
 		}
 
-		// Bug 4 fix: Also start background planning for a pending agent-callable
+		// Start background planning for a pending agent-callable
 		// refine.run request, so its plan is ready at the shouldStopAfterTurn
 		// boundary. The pending request is consumed (cleared) here so the
 		// boundary doesn't re-plan it. Explicit refine.run skips the review gate.
@@ -3888,9 +3886,7 @@ export class AgentSession {
 			} else if (this._refinePlanInFlight) {
 				await this._refinePlanInFlight;
 			} else if (this._serializedPlanInFlight) {
-				// Fix 5: Await the background plan and apply a ready "plan"
-				// result before teardown so the refinement is persisted.
-				// Do NOT discard a ready plan.
+				// Await the background plan and apply a ready "plan" result before teardown.
 				await this._consumeSerializedBackgroundPlan(async (bgResult) => {
 					if (bgResult?.status === "plan" && bgResult.branchVersion === this._autoRefineBranchVersion) {
 						try {
