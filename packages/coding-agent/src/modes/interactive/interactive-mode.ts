@@ -5900,7 +5900,9 @@ export class InteractiveMode {
 			this.toggleAgentMessageExpansion();
 			return;
 		}
-		if (this.keybindings.matches(data, "app.edits.expand")) {
+		// A raw "\n" decodes as ctrl+j but is Shift+Enter's newline in terminals
+		// that map it literally; hand it to the editor instead of toggling diffs.
+		if (data !== "\n" && this.keybindings.matches(data, "app.edits.expand")) {
 			this.toggleEditDiffExpansion();
 			return;
 		}
