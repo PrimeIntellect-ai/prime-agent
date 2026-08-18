@@ -1,7 +1,3 @@
-/**
- * Tests for image processing utilities using Photon.
- */
-
 import { describe, expect, it } from "vitest";
 import { convertToPng } from "../src/utils/image-convert.js";
 import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.js";
@@ -34,9 +30,7 @@ describe("convertToPng", () => {
 		const result = await convertToPng(TINY_JPEG, "image/jpeg");
 		expect(result).not.toBeNull();
 		expect(result!.mimeType).toBe("image/png");
-		// Result should be valid base64
 		expect(() => Buffer.from(result!.data, "base64")).not.toThrow();
-		// PNG magic bytes
 		const buffer = Buffer.from(result!.data, "base64");
 		expect(buffer[0]).toBe(0x89);
 		expect(buffer[1]).toBe(0x50); // 'P'
@@ -79,13 +73,11 @@ describe("resizeImage", () => {
 		const originalBuffer = Buffer.from(LARGE_PNG_200x200, "base64");
 		const originalSize = originalBuffer.length;
 
-		// Set maxBytes to less than the original encoded image size
 		const result = await resizeImage(
 			{ type: "image", data: LARGE_PNG_200x200, mimeType: "image/png" },
 			{ maxWidth: 2000, maxHeight: 2000, maxBytes: Math.floor(LARGE_PNG_200x200.length * 0.9) },
 		);
 
-		// Should have tried to reduce size
 		expect(result).not.toBeNull();
 		const resultBuffer = Buffer.from(result!.data, "base64");
 		expect(resultBuffer.length).toBeLessThan(originalSize);

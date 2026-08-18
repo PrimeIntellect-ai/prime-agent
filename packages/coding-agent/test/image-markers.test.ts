@@ -34,7 +34,6 @@ describe("image markers", () => {
 			[1, "first"],
 			[2, "second"],
 		]);
-		// Markers appear reversed in the text, but paste order is preserved.
 		expect(collectMarkedImages(pending, "[image #2] then [image #1]")).toEqual(["first", "second"]);
 	});
 
@@ -73,7 +72,6 @@ describe("image markers", () => {
 			[3, "cccc"],
 		]);
 		evictImagesToBudget(images, size, 8, new Set());
-		// Oldest (1) evicted; 2 and 3 (8 bytes) fit.
 		expect([...images.keys()]).toEqual([2, 3]);
 	});
 
@@ -83,7 +81,6 @@ describe("image markers", () => {
 			[2, "bbbb"],
 			[3, "cccc"],
 		]);
-		// id 1 is live (kept) so it survives; 2 is evicted to get under budget.
 		evictImagesToBudget(images, size, 8, new Set([1]));
 		expect([...images.keys()]).toEqual([1, 3]);
 	});
