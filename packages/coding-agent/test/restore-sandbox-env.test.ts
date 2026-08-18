@@ -49,7 +49,6 @@ describe("restoreSandboxEnv", () => {
 			value: { bun: "1.2.0", node: "20.0.0" },
 		});
 
-		// Clear env to simulate the bun sandbox bug.
 		const envBackup = { ...process.env };
 		for (const key of Object.keys(process.env)) {
 			delete process.env[key];
@@ -63,7 +62,6 @@ describe("restoreSandboxEnv", () => {
 		expect(process.env.FOO).toBe("bar");
 		expect(process.env.BAZ).toBe("qux");
 
-		// Restore.
 		for (const key of Object.keys(process.env)) {
 			delete process.env[key];
 		}

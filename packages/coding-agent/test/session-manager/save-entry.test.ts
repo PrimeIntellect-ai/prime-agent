@@ -5,13 +5,10 @@ describe("SessionManager.saveCustomEntry", () => {
 	it("saves custom entries and includes them in tree traversal", () => {
 		const session = SessionManager.inMemory();
 
-		// Save a message
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
-		// Save a custom entry
 		const customId = session.appendCustomEntry("my_data", { foo: "bar" });
 
-		// Save another message
 		const msg2Id = session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
@@ -30,7 +27,6 @@ describe("SessionManager.saveCustomEntry", () => {
 			timestamp: 2,
 		});
 
-		// Custom entry should be in entries
 		const entries = session.getEntries();
 		expect(entries).toHaveLength(3);
 
@@ -41,14 +37,12 @@ describe("SessionManager.saveCustomEntry", () => {
 		expect(customEntry.id).toBe(customId);
 		expect(customEntry.parentId).toBe(msgId);
 
-		// Tree structure should be correct
 		const path = session.getBranch();
 		expect(path).toHaveLength(3);
 		expect(path[0].id).toBe(msgId);
 		expect(path[1].id).toBe(customId);
 		expect(path[2].id).toBe(msg2Id);
 
-		// buildSessionContext should work (custom entries skipped in messages)
 		const ctx = session.buildSessionContext();
 		expect(ctx.messages).toHaveLength(2); // only message entries
 	});

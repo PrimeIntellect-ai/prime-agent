@@ -60,8 +60,6 @@ describe("ACP session event mapping", () => {
 	});
 
 	it("carries rich IPython output from the fields the tool actually reports", () => {
-		// The ipython tool reports media/diffs under `details`, so the mapping must
-		// read those exact fields rather than an invented MIME bundle.
 		const updates = acpUpdatesForSessionEvent({
 			type: "tool_execution_end",
 			toolCallId: "call-1",
@@ -120,7 +118,6 @@ describe("ACP session event mapping", () => {
 			{ type: "bash_start", command: "ls", excludeFromContext: false, runId: "r1" } as AgentConnectionSessionEvent,
 			state,
 		);
-		// bash_output carries no runId, so the mapping must remember the active run.
 		const mid = acpUpdatesForSessionEvent(
 			{ type: "bash_output", chunk: "a.ts\n" } as AgentConnectionSessionEvent,
 			state,

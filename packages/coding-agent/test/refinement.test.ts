@@ -677,7 +677,6 @@ describe("harness refinement", () => {
 
 			expect(state.entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} });
 			expect(state.refinements).toEqual([]);
-			// Still usable: a refinement applies and persists cleanly over the bad file.
 			applyRefinementProposal(
 				state,
 				proposal("Recover", [
@@ -1290,7 +1289,6 @@ describe("global refinement history", () => {
 		const dir = makeTempDir();
 		const valid = sampleResult("refine_valid");
 		appendGlobalRefinement(dir, valid);
-		// Corrupt append: a non-JSON line and a JSON object that is not a refinement result.
 		appendFileSync(getRefinementHistoryPath(dir), "not json\n", "utf8");
 		appendFileSync(getRefinementHistoryPath(dir), `${JSON.stringify({ id: "x" })}\n`, "utf8");
 
@@ -1410,7 +1408,6 @@ describe("global refinement history", () => {
 
 		expect(plan.rollbackOf).toBe("refine_rollback_target");
 		expect(plan.rollbackScope).toBe("local");
-		// The entry still exists until the proposal is applied.
 		expect(state.entries.memory.rollback_me).toBeDefined();
 		applyRefinementProposal(state, plan.proposal, { id: plan.id, rollbackOf: plan.rollbackOf });
 		expect(state.entries.memory.rollback_me).toBeUndefined();

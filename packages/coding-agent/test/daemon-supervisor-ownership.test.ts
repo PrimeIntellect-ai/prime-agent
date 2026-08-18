@@ -101,12 +101,9 @@ describe("daemon supervisor ownership registry", () => {
 
 		await persistDaemonStartupFenceFromOwner(paths.socketPath, hello, paths.registryDir, legacyDir);
 
-		// The fence lands in the NEW registry; the legacy record is untouched.
 		expect(readdirSync(join(paths.registryDir, "startup-fences"))).toHaveLength(1);
 		expect(readFileSync(legacyOwnerPath, "utf8")).toBe(legacyBytes);
 
-		// Without a legacy dir the same scan fails: the fallback never fires for
-		// an explicitly provided registry.
 		await expect(persistDaemonStartupFenceFromOwner(paths.socketPath, hello, paths.registryDir)).rejects.toThrow(
 			/does not match/,
 		);
@@ -136,7 +133,6 @@ describe("daemon supervisor ownership registry", () => {
 			assertDaemonSupervisorOwnerCurrent(identity, undefined, paths.registryDir, legacyDir),
 		).resolves.toEqual(expect.any(String));
 
-		// Without the injected legacy dir, an explicit registry never falls back.
 		await expect(assertDaemonSupervisorOwnerCurrent(identity, undefined, paths.registryDir)).rejects.toMatchObject({
 			code: "supervisor_generation_stale",
 		});
@@ -190,7 +186,6 @@ describe("daemon supervisor ownership registry", () => {
 			realpath: false,
 			lockfilePath: join(paths.registryDir, ".guard"),
 		});
-		// The direct renew is now queued behind the held guard.
 		const pending = admission.assertOrRenew();
 		pending.catch(() => undefined);
 		const releasing = admission.release();

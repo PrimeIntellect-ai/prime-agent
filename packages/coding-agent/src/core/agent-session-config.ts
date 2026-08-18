@@ -35,9 +35,7 @@ export interface AgentSessionRuntimeConfig {
 	 * so it survives the appMode="daemon" context switch.
 	 */
 	serializedRefine?: boolean;
-	/** User-facing client mode that created this session. The daemon is transport, not an execution mode. */
 	executionMode?: AgentExecutionMode;
-	/** Opt-out-only policy carried across daemon process boundaries. */
 	telemetryDisabled?: true;
 	/**
 	 * Initial goal to seed when creating a new top-level session (rlmDepth 0).

@@ -51,7 +51,6 @@ function isRlmSubagentDisplayEntry(value: unknown): value is RlmSubagentDisplayE
 	);
 }
 
-/** Atomic write (temp + rename). Throws on failure; callers decide severity. */
 export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): void {
 	const path = rlmSubagentDisplayPath(entry.sessionDir);
 	mkdirSync(entry.sessionDir, { recursive: true });
@@ -72,7 +71,6 @@ export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): vo
 	}
 }
 
-/** Tolerant read: undefined for a missing, malformed, or invalid file. */
 export async function readRlmSubagentDisplayEntry(sessionDir: string): Promise<RlmSubagentDisplayEntry | undefined> {
 	let contents: string;
 	try {

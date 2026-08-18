@@ -33,20 +33,17 @@ import { transformMessages } from "./transform-messages.js";
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
 const MAX_MISTRAL_ERROR_BODY_CHARS = 4000;
 
-/**
- * Provider-specific options for the Mistral API.
- */
+/** Mistral reasoning-effort values. */
 type MistralReasoningEffort = "none" | "high";
 
+/** Provider-specific request options for the Mistral API. */
 export interface MistralOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any" | "required" | { type: "function"; function: { name: string } };
 	promptMode?: "reasoning";
 	reasoningEffort?: MistralReasoningEffort;
 }
 
-/**
- * Stream responses from Mistral using `chat.stream`.
- */
+/** Streams Mistral chat completions through `chat.stream`. */
 export const streamMistral: StreamFunction<"mistral-conversations", MistralOptions> = (
 	model: Model<"mistral-conversations">,
 	context: Context,
@@ -107,9 +104,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 	return stream;
 };
 
-/**
- * Maps provider-agnostic `SimpleStreamOptions` to Mistral options.
- */
+/** Maps provider-agnostic `SimpleStreamOptions` to Mistral request options. */
 export const streamSimpleMistral: StreamFunction<"mistral-conversations", SimpleStreamOptions> = (
 	model: Model<"mistral-conversations">,
 	context: Context,
