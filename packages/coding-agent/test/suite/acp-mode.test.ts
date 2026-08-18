@@ -773,6 +773,45 @@ describe("ACP mode end to end", () => {
 		close();
 	});
 
+	it("reconciles cancellation that arrives during a failed close", async () => {
+		let abortAttempts = 0;
+		let firstAbortStarted!: () => void;
+		let releaseFirstAbort!: () => void;
+		const firstAbortEntered = new Promise<void>((resolve) => {
+			firstAbortStarted = resolve;
+		});
+		const firstAbortGate = new Promise<void>((resolve) => {
+			releaseFirstAbort = resolve;
+		});
+		const connection = fakeAcpConnection({
+			onAbort: async () => {
+				abortAttempts++;
+				if (abortAttempts !== 1) return;
+				firstAbortStarted();
+				await firstAbortGate;
+				throw new Error("transient stop failure");
+			},
+		});
+		const { client, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+
+		const closing = client.request("session/close", { sessionId: session.sessionId });
+		await firstAbortEntered;
+		await client.notify("session/cancel", { sessionId: session.sessionId });
+		releaseFirstAbort();
+		await expect(closing).rejects.toThrow();
+		await vi.waitFor(() => expect(abortAttempts).toBe(2));
+		await expect(
+			client.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "admitted after queued cancellation" }],
+			}),
+		).resolves.toBeDefined();
+		await expect(client.request("session/close", { sessionId: session.sessionId })).resolves.toEqual({});
+		close();
+	});
+
 	it("settles queued updates before close resolves without a post-close notification", async () => {
 		let entered!: () => void;
 		let release!: () => void;

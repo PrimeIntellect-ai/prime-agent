@@ -962,10 +962,7 @@ export async function runAcpModeWithConnection(
 		})
 		.onNotification("session/cancel", async (ctx: any) => {
 			const params = ctx.params as { sessionId: string };
-			if (sessionCloseInFlight) {
-				await sessionCloseTask;
-				return;
-			}
+			while (sessionCloseInFlight) await sessionCloseTask;
 			// Only cancel the addressed session: aborting unconditionally would kill
 			// whichever turn happens to be running, and leave the real turn's
 			// AbortController unmarked so it reports a wrong stop reason.
