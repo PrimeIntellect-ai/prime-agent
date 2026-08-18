@@ -57,6 +57,11 @@ const DEFAULT_MODEL = {
 
 type QueueMode = "all" | "one-at-a-time";
 
+export interface AgentRunOptions {
+	/** Opaque host-owned identifier propagated to tool invocations for this run. */
+	executionId?: string;
+}
+
 type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "pendingToolCalls" | "errorMessage"> & {
 	isStreaming: boolean;
 	streamingMessage?: AgentMessage;
@@ -339,20 +344,27 @@ export class Agent {
 		this.clearSteeringQueue();
 	}
 
-	async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
-	async prompt(input: string, images?: ImageContent[]): Promise<void>;
-	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
+	/** Start a new prompt from text, a single message, or a batch of messages. */
+	async prompt(message: AgentMessage | AgentMessage[], options?: AgentRunOptions): Promise<void>;
+	async prompt(input: string, images?: ImageContent[], options?: AgentRunOptions): Promise<void>;
+	async prompt(
+		input: string | AgentMessage | AgentMessage[],
+		imagesOrOptions?: ImageContent[] | AgentRunOptions,
+		options?: AgentRunOptions,
+	): Promise<void> {
 		if (this.activeRun) {
 			throw new Error(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
 		}
+		const images = Array.isArray(imagesOrOptions) ? imagesOrOptions : undefined;
+		const runOptions = Array.isArray(imagesOrOptions) ? options : imagesOrOptions;
 		const messages = this.normalizePromptInput(input, images);
-		await this.runPromptMessages(messages);
+		await this.runPromptMessages(messages, runOptions);
 	}
 
-	/** The last message must convert to a user or tool-result message. */
-	async continue(): Promise<void> {
+	/** Continue from the current transcript. The last message must convert to a user or tool-result message. */
+	async continue(options?: AgentRunOptions): Promise<void> {
 		if (this.activeRun) {
 			throw new AgentContinueError("busy", "Agent is already processing. Wait for completion before continuing.");
 		}
@@ -360,12 +372,12 @@ export class Agent {
 		const runQueuedMessages = (): Promise<void> | undefined => {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
-				return this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
+				return this.runPromptMessages(queuedSteering, { ...options, skipInitialSteeringPoll: true });
 			}
 
 			const queuedFollowUps = this.followUpQueue.drain();
 			if (queuedFollowUps.length > 0) {
-				return this.runPromptMessages(queuedFollowUps);
+				return this.runPromptMessages(queuedFollowUps, options);
 			}
 
 			return undefined;
@@ -401,7 +413,7 @@ export class Agent {
 			}
 		}
 
-		await this.runContinuation();
+		await this.runContinuation(options);
 	}
 
 	private normalizePromptInput(
@@ -425,7 +437,7 @@ export class Agent {
 
 	private async runPromptMessages(
 		messages: AgentMessage[],
-		options: { skipInitialSteeringPoll?: boolean } = {},
+		options: AgentRunOptions & { skipInitialSteeringPoll?: boolean } = {},
 	): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
@@ -439,11 +451,11 @@ export class Agent {
 		});
 	}
 
-	private async runContinuation(): Promise<void> {
+	private async runContinuation(options: AgentRunOptions = {}): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(
 				this.createContextSnapshot(),
-				this.createLoopConfig(),
+				this.createLoopConfig(options),
 				(event) => this.processEvents(event),
 				signal,
 				this.streamFn,
@@ -459,9 +471,10 @@ export class Agent {
 		};
 	}
 
-	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+	private createLoopConfig(options: AgentRunOptions & { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
+			executionId: options.executionId,
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,

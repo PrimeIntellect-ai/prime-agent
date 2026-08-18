@@ -77,6 +77,14 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.js";
+export {
+	createHostRequestHandler,
+	type HostRequestContext,
+	type HostRequestInvocationMetadata,
+	type HostRequestPayload,
+	type RegisteredHostRequestHandler,
+	type RegisteredHostRequestHandlers,
+} from "./kernel/index.js";
 export type { RefinementResult } from "./refinement/index.js";
 export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";

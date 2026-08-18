@@ -10,6 +10,7 @@
 
 import type {
 	AgentMessage,
+	AgentToolExecutionContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ThinkingLevel,
@@ -445,6 +446,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		signal: AbortSignal | undefined,
 		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
 		ctx: ExtensionContext,
+		executionContext?: AgentToolExecutionContext,
 	): Promise<AgentToolResult<TDetails>>;
 
 	/** Custom rendering for tool call display */

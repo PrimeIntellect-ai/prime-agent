@@ -13,6 +13,8 @@ export function createSyntheticHostRequestContext(): HostRequestContext {
 	return {
 		requestId: `test-host-request-${requestNumber}`,
 		generation: requestNumber,
+		recursionDepth: 0,
+		runContext: undefined,
 		signal: controller.signal,
 		isCurrent: () => !controller.signal.aborted,
 	};

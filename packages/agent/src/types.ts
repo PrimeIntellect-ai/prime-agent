@@ -116,6 +116,8 @@ export interface ShouldStopAfterTurnContext {
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	/** Opaque host-owned identifier propagated to tool invocations for this run. */
+	executionId?: string;
 	model: Model<any>;
 
 	/**
@@ -344,6 +346,11 @@ export interface AgentToolResult<T> {
 /** Callback used by tools to publish partial execution updates. */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
+/** Host-owned metadata for the agent run that invoked a tool. */
+export interface AgentToolExecutionContext {
+	readonly executionId?: string;
+}
+
 /** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
@@ -359,6 +366,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		params: Static<TParameters>,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
+		executionContext?: AgentToolExecutionContext,
 	) => Promise<AgentToolResult<TDetails>>;
 	/**
 	 * Per-tool execution mode override.

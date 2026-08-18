@@ -730,6 +730,7 @@ type PreparedToolCall = {
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
+	executionId?: string;
 };
 
 type ImmediateToolCallOutcome = {
@@ -814,6 +815,7 @@ async function prepareToolCall(
 			toolCall,
 			tool,
 			args: validatedArgs,
+			executionId: config.executionId,
 		};
 	} catch (error) {
 		return {
@@ -835,22 +837,28 @@ async function executePreparedToolCall(
 	try {
 		throwIfAborted(signal);
 		const result = await raceWithAbort(
-			prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
-				if (!acceptingUpdates || signal?.aborted) {
-					return;
-				}
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
-				);
-			}),
+			prepared.tool.execute(
+				prepared.toolCall.id,
+				prepared.args as never,
+				signal,
+				(partialResult) => {
+					if (!acceptingUpdates || signal?.aborted) {
+						return;
+					}
+					updateEvents.push(
+						Promise.resolve(
+							emit({
+								type: "tool_execution_update",
+								toolCallId: prepared.toolCall.id,
+								toolName: prepared.toolCall.name,
+								args: prepared.toolCall.arguments,
+								partialResult,
+							}),
+						),
+					);
+				},
+				{ executionId: prepared.executionId },
+			),
 			signal,
 		);
 		acceptingUpdates = false;

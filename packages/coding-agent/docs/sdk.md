@@ -75,6 +75,7 @@ The session manages agent lifecycle, message history, model state, compaction, a
 interface AgentSession {
   // Send a prompt and wait for completion
   prompt(text: string, options?: PromptOptions): Promise<void>;
+  promptAndWait(text: string, options?: PromptOptions): Promise<void>;
 
   // Queue messages during streaming
   steer(text: string): Promise<void>;
@@ -116,6 +117,50 @@ interface AgentSession {
 ```
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
+
+### Run-scoped kernel host context
+
+Embedders can register additional typed kernel host-request handlers once when they create a session, then attach a host-only context to each admitted prompt execution:
+
+```typescript
+import {
+  createAgentSession,
+  createHostRequestHandler,
+} from "@earendil-works/pi-coding-agent";
+
+interface RequestContext {
+  tenantId: string;
+  credential: { token: string };
+}
+
+const inspectTenant = createHostRequestHandler<RequestContext>(
+  async (payload, { sessionId, recursionDepth, runContext, signal }) => {
+    if (!runContext) throw new Error("This request requires a run context");
+    return {
+      tenantId: runContext.tenantId,
+      query: payload.query,
+      sessionId,
+      recursionDepth,
+      cancelled: signal.aborted,
+    };
+  },
+);
+
+const { session } = await createAgentSession({
+  hostRequestHandlers: { "example.inspect_tenant": inspectTenant },
+});
+
+await session.promptAndWait("Inspect this tenant", {
+  runContext: {
+    tenantId: "tenant-42",
+    credential: { token: process.env.TENANT_TOKEN! },
+  } satisfies RequestContext,
+});
+```
+
+Handler definitions are copied when `AgentSession` is constructed and remain stable for that session. The `runContext` is correlated out of band with the admitted execution, so a Python payload cannot provide or replace it. Recursive children inherit the same value; later prompts on a persistent session may use different values, and separate sessions remain isolated.
+
+Run contexts are memory-only. They are removed and their handler signals are aborted when a run completes, fails, or is cancelled. They are not written to transcripts, queued-action recovery state, session files, or IPython namespace snapshots. Because arbitrary objects are intentionally not serialized, the remote daemon/RPC prompt protocol does not accept `runContext`; use the in-process `AgentSession` API at the host boundary.
 
 ### createAgentSessionRuntime() and AgentSessionRuntime
 

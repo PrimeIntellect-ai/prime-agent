@@ -1,0 +1,1 @@
+- Added typed session-lifetime kernel host-handler registration with host-only per-prompt run context, cancellation metadata, isolated execution correlation, and recursive child inheritance without persistence.

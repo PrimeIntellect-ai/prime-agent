@@ -8,6 +8,7 @@ import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
 import {
 	type ExecuteResult,
+	type HostRequestExecutionContext,
 	type HostRequestHandlers,
 	type KernelAttachment,
 	KernelBusyAfterInterruptError,
@@ -277,8 +278,11 @@ export interface IpythonToolOptions {
 	/** Optional explicit shell path for bare %%bash cells. */
 	shellPath?: string;
 	sessionId?: string;
+	recursionDepth?: number;
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
+	/** Resolves the current admitted run without exposing it to the Python payload. */
+	getHostRequestContext?: (executionId?: string) => HostRequestExecutionContext | undefined;
 	pythonSkills?: readonly PythonSkillRuntimeInfo[];
 	/** Per-session artifact dir where the kernel namespace snapshot is stored. Omit to disable snapshots. */
 	snapshotDir?: string;
@@ -488,6 +492,7 @@ export class IpythonKernelProvisioner {
 				cwd: this.cwd,
 				env: this.options?.env,
 				sessionId: this.options?.sessionId,
+				recursionDepth: this.options?.recursionDepth,
 				hostHandlers: this.options?.hostHandlers,
 				pythonSkills: this.options?.pythonSkills,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
@@ -580,6 +585,7 @@ async function executeWithBusyKernelChoice(
 	onStream: (chunk: string, name: "stdout" | "stderr") => void,
 	onWorkingMessage: (message?: string) => void,
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
+	hostRequestContext: HostRequestExecutionContext | undefined,
 	ctx: ExtensionContext | undefined,
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
 	let kernelRestarted = false;
@@ -593,6 +599,7 @@ async function executeWithBusyKernelChoice(
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
 						: undefined,
+					hostRequestContext,
 				}),
 				kernelRestarted,
 			};
@@ -639,7 +646,7 @@ export function createIpythonToolDefinition(
 		// The kernel is single-threaded — pi must not run two ipython calls in parallel within a batch.
 		executionMode: "sequential",
 		parameters: ipythonSchema,
-		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+		execute: async (toolCallId, params, signal, onUpdate, ctx, executionContext) => {
 			let hasWorkingMessage = false;
 			const setToolWorkingMessage = (message?: string) => {
 				setWorkingMessage(ctx, message);
@@ -669,6 +676,7 @@ export function createIpythonToolDefinition(
 					},
 					setToolWorkingMessage,
 					options?.onLateSentAgentMessage,
+					options?.getHostRequestContext?.(executionContext?.executionId),
 					ctx,
 				);
 
