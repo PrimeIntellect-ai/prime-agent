@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
+import io
 import os
+import re
+import threading
 import time
 from contextlib import AsyncExitStack
 from typing import Any
@@ -13,11 +16,79 @@ from typing import Any
 from . import host_request
 from .mcp_base import _parse_result, _read_auth, _resolve_config_value
 
-__all__ = ["call_tool", "close", "list_tools", "reload"]
+__all__ = ["McpStartupError", "call_tool", "close", "list_tools", "reload"]
 
 _DEFAULT_STARTUP_TIMEOUT = 20.0
 _DEFAULT_CALL_TIMEOUT = 60.0
+_STDERR_BYTE_LIMIT = 8 * 1024
+_STDERR_LINE_LIMIT = 40
 _SAFE_ENV = ("HOME", "PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot", "WINDIR")
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?)")
+_CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+class McpStartupError(RuntimeError):
+    """A stdio server failed while completing the MCP startup handshake."""
+
+
+class _StderrTail(io.TextIOBase):
+    """A pipe-backed, bounded stderr tail that is safe for subprocess writers."""
+
+    def __init__(self) -> None:
+        self._read_fd, self._write_fd = os.pipe()
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._capture = True
+        self._pipe_closed = False
+        self._reader = threading.Thread(target=self._drain, name="mcp-stderr-drain", daemon=True)
+        self._reader.start()
+
+    def fileno(self) -> int:
+        return self._write_fd
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, value: str) -> int:
+        data = value.encode("utf-8", errors="replace")
+        os.write(self._write_fd, data)
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+    def _drain(self) -> None:
+        try:
+            while chunk := os.read(self._read_fd, 4096):
+                with self._lock:
+                    if not self._capture:
+                        continue
+                    self._buffer.extend(chunk)
+                    if len(self._buffer) > _STDERR_BYTE_LIMIT:
+                        del self._buffer[: len(self._buffer) - _STDERR_BYTE_LIMIT]
+                    lines = self._buffer.splitlines(keepends=True)
+                    if len(lines) > _STDERR_LINE_LIMIT:
+                        self._buffer[:] = b"".join(lines[-_STDERR_LINE_LIMIT:])
+        finally:
+            os.close(self._read_fd)
+
+    def stop_capture(self) -> None:
+        with self._lock:
+            self._capture = False
+            self._buffer.clear()
+
+    def tail(self, secrets: tuple[str, ...], private_values: tuple[str, ...] = ()) -> str:
+        with self._lock:
+            raw = bytes(self._buffer)
+        return _sanitize_diagnostic(raw.decode("utf-8", errors="replace"), secrets, private_values)
+
+    def close(self) -> None:
+        if self._pipe_closed:
+            return
+        self._pipe_closed = True
+        os.close(self._write_fd)
+        self._reader.join(timeout=1)
+        super().close()
 
 
 class _Generation:
@@ -29,6 +100,10 @@ class _Generation:
         self.tools: dict[str, dict[str, Any]] = {}
         self.closed = False
         self._call_lock = asyncio.Lock()
+        self._stderr: _StderrTail | None = None
+        self._stderr_secrets: tuple[str, ...] = ()
+        self._stderr_disclosable = True
+        self._diagnostic_private_values: tuple[str, ...] = ()
 
     @property
     def startup_timeout(self) -> float:
@@ -47,11 +122,43 @@ class _Generation:
                 self.session = await self.stack.enter_async_context(
                     ClientSession(read, write, read_timeout_seconds=self.call_timeout)
                 )
-                await self.session.initialize()
-                await self.discover()
+                try:
+                    await self.session.initialize()
+                    await self.discover()
+                except Exception as exc:
+                    # Do not turn cancellation or exception groups into an ordinary
+                    # RuntimeError. Groups can carry cleanup failures that callers
+                    # must retain structurally.
+                    if self._stderr is None or _is_exception_group(exc):
+                        raise
+                    await self.close()
+                    raise self._startup_error(exc) from exc
+                if self._stderr is not None:
+                    # Keep draining the pipe for the life of a successful server,
+                    # but never retain or expose post-startup stderr.
+                    self._stderr.stop_capture()
         except BaseException:
             await self.close()
             raise
+
+    def _startup_error(self, exc: Exception) -> McpStartupError:
+        assert self._stderr is not None
+        if self._stderr_disclosable:
+            original = _sanitize_diagnostic(
+                f"{type(exc).__name__}: {exc}",
+                self._stderr_secrets,
+                self._diagnostic_private_values,
+                byte_limit=1024,
+            ) or type(exc).__name__
+        else:
+            original = f"{type(exc).__name__}: details omitted for safe redaction"
+        stderr = (
+            self._stderr.tail(self._stderr_secrets, self._diagnostic_private_values)
+            if self._stderr_disclosable
+            else ""
+        )
+        detail = f" Stderr tail:\n{stderr}" if stderr else ""
+        return McpStartupError(f"MCP stdio server failed during startup ({original}).{detail}")
 
     async def _open_transport(self):
         kind = self.config.get("type")
@@ -84,8 +191,16 @@ class _Generation:
             raise ValueError(f"MCP server '{self.server}' requires command and string args")
         if cwd is not None and not isinstance(cwd, str):
             raise ValueError(f"MCP server '{self.server}' cwd must be a string")
-        params = StdioServerParameters(command=command, args=args, cwd=cwd, env=_stdio_env(self.config))
-        return await self.stack.enter_async_context(stdio_client(params))
+        env = _stdio_env(self.config)
+        configured_values = _configured_stdio_values(self.config, env)
+        self._stderr_disclosable = not any(0 < len(value) < 4 for value in configured_values)
+        self._stderr_secrets = tuple(
+            sorted({value for value in configured_values if len(value) >= 4}, key=len, reverse=True)
+        )
+        self._diagnostic_private_values = _private_config_values(self.config) + (os.getcwd(),)
+        self._stderr = _StderrTail()
+        params = StdioServerParameters(command=command, args=args, cwd=cwd, env=env)
+        return await self.stack.enter_async_context(stdio_client(params, errlog=self._stderr))
 
     async def discover(self) -> None:
         response = await self.session.list_tools()
@@ -126,10 +241,14 @@ class _Generation:
             return
         async with self._call_lock:
             try:
-                async with asyncio.timeout(5):
-                    await self.stack.aclose()
-            except TimeoutError:
-                pass
+                try:
+                    async with asyncio.timeout(5):
+                        await self.stack.aclose()
+                except TimeoutError:
+                    pass
+            finally:
+                if self._stderr is not None:
+                    self._stderr.close()
             self.closed = True
 
 
@@ -293,6 +412,66 @@ def _stdio_env(config: dict[str, Any]) -> dict[str, str]:
             raise ValueError(f"MCP stdio environment reference for '{key}' is unavailable")
         env[key] = os.environ[source]
     return env
+
+
+def _is_exception_group(exc: BaseException) -> bool:
+    try:
+        return isinstance(exc, BaseExceptionGroup)
+    except NameError:  # pragma: no cover - Python 3.10
+        return False
+
+
+def _configured_stdio_values(config: dict[str, Any], env: dict[str, str]) -> tuple[str, ...]:
+    """Return configured (not ordinarily inherited) env values for this generation."""
+    raw = config.get("env", {})
+    if not isinstance(raw, dict):
+        return ()
+    return tuple(env[key] for key in raw if isinstance(key, str) and key in env)
+
+
+def _private_config_values(config: dict[str, Any]) -> tuple[str, ...]:
+    """Strings an SDK exception must not echo from connection configuration."""
+    values: set[str] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value:
+                values.add(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                collect(key)
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    for key in ("command", "args", "cwd", "url", "headers", "env", "bearerTokenEnvVar"):
+        collect(config.get(key))
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _sanitize_diagnostic(
+    value: str,
+    secrets: tuple[str, ...],
+    private_values: tuple[str, ...] = (),
+    *,
+    byte_limit: int = _STDERR_BYTE_LIMIT,
+) -> str:
+    value = _ANSI_ESCAPE.sub("", value.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " "))
+    value = _CONTROL_CHAR.sub("", value)
+    for secret in secrets:
+        value = value.replace(secret, "[REDACTED]")
+    for private in private_values:
+        if len(private) >= 4:
+            value = value.replace(private, "[REDACTED]")
+        else:
+            value = re.sub(rf"(?<!\w){re.escape(private)}(?!\w)", "[REDACTED]", value)
+    lines = [line.strip() for line in value.splitlines() if line.strip()][-_STDERR_LINE_LIMIT:]
+    value = "\n".join(lines)
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) > byte_limit:
+        value = encoded[-byte_limit:].decode("utf-8", errors="ignore")
+    return value.strip()
 
 
 def _seconds(value: Any, default: float) -> float:

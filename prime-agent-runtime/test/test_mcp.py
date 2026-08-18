@@ -36,6 +36,18 @@ async def main():
 asyncio.run(main())
 """
 
+_FAILING_STDIO_FIXTURE = r"""import os, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(str(os.getpid()))
+secret = os.environ["FIXTURE_SECRET"]
+print("\x1b[31mImportError:\x00 broken " + secret + "\x1b[0m", file=sys.stderr, flush=True)
+for index in range(300):
+    print(f"oversized diagnostic line {index:04d} " + "x" * 100, file=sys.stderr)
+print("sentinel tail " + secret, file=sys.stderr, flush=True)
+raise ImportError("fixture startup crash")
+"""
+
+
 _HTTP_FIXTURE = """from mcp.server.mcpserver import MCPServer
 server = MCPServer("fixture")
 @server.tool(name="http/raw.tool")
@@ -204,6 +216,42 @@ class McpRegistryTest(unittest.TestCase):
                 run(mcp.call_tool("svc", "tool", {"secret": "do-not-print"}))
         self.assertNotIn("do-not-print", str(caught.exception))
 
+    def test_startup_cancellation_is_not_wrapped(self):
+        generation = mcp._Generation("svc", {"type": "stdio"})
+        generation._stderr = mock.Mock()
+
+        class CancelledSession:
+            async def initialize(self):
+                raise asyncio.CancelledError()
+
+        async def open_transport():
+            return object(), object()
+
+        class SessionContext:
+            async def __aenter__(self):
+                return CancelledSession()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        async def scenario():
+            with mock.patch.object(generation, "_open_transport", open_transport), mock.patch(
+                "mcp.ClientSession", return_value=SessionContext()
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await generation.open()
+
+        run(scenario())
+
+    def test_short_secret_omits_all_child_details(self):
+        generation = mcp._Generation("svc", {"type": "stdio"})
+        generation._stderr = mock.Mock()
+        generation._stderr_disclosable = False
+        error = generation._startup_error(RuntimeError("message contains xy"))
+        self.assertNotIn("xy", str(error))
+        self.assertNotIn("message contains", str(error))
+        generation._stderr.tail.assert_not_called()
+
     def test_cancelled_close_can_be_retried(self):
         generation = self.generation({"type": "http"}, [])
 
@@ -258,6 +306,63 @@ class McpRegistryTest(unittest.TestCase):
             return json.loads(result)
 
         return run(scenario())
+
+    def test_real_stdio_startup_diagnostic_is_safe_bounded_and_reaped(self):
+        secret = "stdio-secret-SENTINEL"
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "failing_stdio_server.py"
+            pid_file = Path(tmp) / "child.pid"
+            fixture.write_text(_FAILING_STDIO_FIXTURE)
+            config = {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(fixture), str(pid_file)],
+                "cwd": tmp,
+                "env": {"FIXTURE_SECRET": {"env": "SOURCE_SECRET"}},
+            }
+
+            async def scenario():
+                with mock.patch.dict(os.environ, {"SOURCE_SECRET": secret}, clear=False):
+                    generation = mcp._Generation("svc", config)
+                    with self.assertRaises(mcp.McpStartupError) as caught:
+                        await generation.open()
+                    self.assertTrue(generation.closed)
+                    self.assertEqual(generation.tools, {})
+                    return str(caught.exception)
+
+            diagnostic = run(scenario())
+            pid = int(pid_file.read_text())
+
+        self.assertIn("MCP stdio server failed during startup", diagnostic)
+        self.assertIn("MCPError: Connection closed", diagnostic)
+        self.assertIn("sentinel tail [REDACTED]", diagnostic)
+        self.assertNotIn(secret, diagnostic)
+        self.assertNotIn("\x1b", diagnostic)
+        self.assertNotIn("\x00", diagnostic)
+        self.assertLessEqual(len(diagnostic.encode()), mcp._STDERR_BYTE_LIMIT + 1200)
+        self.assertLessEqual(len(diagnostic.splitlines()), mcp._STDERR_LINE_LIMIT + 1)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_successful_stdio_discards_startup_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "stdio_server.py"
+            fixture.write_text(
+                _STDIO_FIXTURE.replace(
+                    "async def main():",
+                    "print('startup note', file=sys.stderr, flush=True)\nasync def main():",
+                )
+            )
+            config = {"type": "stdio", "command": sys.executable, "args": [str(fixture)]}
+
+            async def scenario():
+                generation = mcp._Generation("svc", config)
+                await generation.open()
+                self.assertIsNotNone(generation._stderr)
+                self.assertEqual(generation._stderr.tail(()), "")
+                await generation.close()
+
+            run(scenario())
 
     def test_real_anonymous_streamable_http(self):
         tmp = tempfile.TemporaryDirectory()
