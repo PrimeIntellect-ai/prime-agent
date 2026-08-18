@@ -5,11 +5,11 @@ import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 
 /** Canonical spelling for hashing and identity comparisons. Does not resolve symlinks (the socket may not exist yet). */
-export function normalizeSocketPath(socketPath: string): string {
+export function normalizeSocketPath(socketPath: string, baseDir?: string): string {
 	if (process.platform === "win32") {
 		return socketPath.toLowerCase();
 	}
-	return resolve(socketPath);
+	return baseDir ? resolve(baseDir, socketPath) : resolve(socketPath);
 }
 
 const DAEMON_SOCKET_MODE = 0o600;

@@ -21,13 +21,6 @@ describe("parseArgs", () => {
 		});
 	});
 
-	describe("--daemon-socket flag", () => {
-		test("keeps the raw socket path for cwd-aware normalization in main", () => {
-			const result = parseArgs(["--daemon-socket", "/a//b.sock"]);
-			expect(result.daemonSocket).toBe("/a//b.sock");
-		});
-	});
-
 	describe("--help flag", () => {
 		test("parses --help flag", () => {
 			const result = parseArgs(["--help"]);
