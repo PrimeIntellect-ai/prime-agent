@@ -13,10 +13,8 @@ describe("wrapTextWithAnsi", () => {
 
 			const wrapped = wrapTextWithAnsi(text, 40);
 
-			// First line should NOT contain underline code - it's just "read this thread"
 			assert.strictEqual(wrapped[0], "read this thread");
 
-			// Second line should start with underline, have URL content
 			assert.strictEqual(wrapped[1].startsWith(underlineOn), true);
 			assert.ok(wrapped[1].includes("https://"));
 		});
@@ -39,12 +37,9 @@ describe("wrapTextWithAnsi", () => {
 
 			const wrapped = wrapTextWithAnsi(text, 30);
 
-			// Middle lines (with underlined content) should end with underline-off, not full reset
-			// Line 1 and 2 contain underlined URL parts
 			for (let i = 1; i < wrapped.length - 1; i++) {
 				const line = wrapped[i];
 				if (line.includes(underlineOn)) {
-					// Should end with underline off, NOT full reset
 					assert.strictEqual(line.endsWith(underlineOff), true);
 					assert.strictEqual(line.endsWith("\x1b[0m"), false);
 				}
@@ -60,12 +55,10 @@ describe("wrapTextWithAnsi", () => {
 
 			const wrapped = wrapTextWithAnsi(text, 15);
 
-			// Each line should have background color
 			for (const line of wrapped) {
 				assert.ok(line.includes(bgBlue));
 			}
 
-			// Middle lines should NOT end with full reset (kills background for padding)
 			for (let i = 0; i < wrapped.length - 1; i++) {
 				assert.strictEqual(wrapped[i].endsWith("\x1b[0m"), false);
 			}
@@ -80,16 +73,13 @@ describe("wrapTextWithAnsi", () => {
 
 			const wrapped = wrapTextWithAnsi(text, 20);
 
-			// All lines should have background color 41 (either as \x1b[41m or combined like \x1b[4;41m)
 			for (const line of wrapped) {
 				const hasBgColor = line.includes("[41m") || line.includes(";41m") || line.includes("[41;");
 				assert.ok(hasBgColor);
 			}
 
-			// Lines with underlined content should use underline-off at end, not full reset
 			for (let i = 0; i < wrapped.length - 1; i++) {
 				const line = wrapped[i];
-				// If this line has underline on, it should end with underline off (not full reset)
 				if (
 					(line.includes("[4m") || line.includes("[4;") || line.includes(";4m")) &&
 					!line.includes(underlineOff)
@@ -139,12 +129,10 @@ describe("wrapTextWithAnsi", () => {
 
 			const wrapped = wrapTextWithAnsi(text, 10);
 
-			// Each continuation line should start with red code
 			for (let i = 1; i < wrapped.length; i++) {
 				assert.strictEqual(wrapped[i].startsWith(red), true);
 			}
 
-			// Middle lines should not end with full reset
 			for (let i = 0; i < wrapped.length - 1; i++) {
 				assert.strictEqual(wrapped[i].endsWith("\x1b[0m"), false);
 			}
@@ -154,17 +142,11 @@ describe("wrapTextWithAnsi", () => {
 
 describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 	it("re-emits OSC 8 open at the start of continuation lines", () => {
-		// A hyperlink whose text is long enough to wrap
 		const url = "https://example.com";
-		// OSC 8 open + text that is 10 visible chars + OSC 8 close
 		const input = `\x1b]8;;${url}\x1b\\0123456789\x1b]8;;\x1b\\`;
 		const lines = wrapTextWithAnsi(input, 6);
 
-		// Every line that contains visible text from inside the hyperlink
-		// should start with the OSC 8 open sequence (or be preceded by it).
 		for (const line of lines) {
-			// If the line has visible content it must begin with the OSC 8 re-open
-			// OR it is the line where the close appeared with no following content.
 			const stripped = line.replace(/\x1b\]8;;[^\x1b\x07]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, "");
 			if (stripped.trim().length > 0) {
 				assert.ok(
@@ -182,7 +164,6 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 
 		for (let i = 0; i < lines.length - 1; i++) {
 			const line = lines[i];
-			// Every non-final line that is inside a hyperlink should end with the close
 			if (line.includes(`\x1b]8;;${url}\x1b\\`)) {
 				assert.ok(
 					line.endsWith("\x1b]8;;\x1b\\"),
@@ -212,8 +193,6 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 		const input = `before \x1b]8;;${url}\x1b\\link\x1b]8;;\x1b\\ after`;
 		const lines = wrapTextWithAnsi(input, 80);
 
-		// With width 80 everything fits on one line; there should be exactly one
-		// OSC 8 open and one OSC 8 close.
 		assert.strictEqual(lines.length, 1);
 		const openCount = (lines[0].match(/\x1b\]8;;https:[^\x1b]+\x1b\\/g) ?? []).length;
 		const closeCount = (lines[0].match(/\x1b\]8;;\x1b\\/g) ?? []).length;

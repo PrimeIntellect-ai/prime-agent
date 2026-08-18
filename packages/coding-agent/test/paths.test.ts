@@ -54,9 +54,7 @@ describe("canonicalizePath", () => {
 		const dir = createTempDir();
 		const target = join(dir, "target.txt");
 		const link = join(dir, "link.txt");
-		// Create a symlink whose target does not exist.
 		symlinkSync(target, link);
-		// realpathSync would throw, so canonicalizePath returns the link path.
 		expect(canonicalizePath(link)).toBe(link);
 	});
 });

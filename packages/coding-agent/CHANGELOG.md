@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 - Fixed daemon socket paths being used verbatim in identity derivations: `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree, and descriptors recorded with a raw path remain adoptable.
+- Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
+- Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
+
+## [0.7.3] - 2026-08-17
+
+- Fixed assistant rendering when provider payloads contain null or sparse content blocks.
+- Added authenticated host-request contracts with per-call request IDs, generation fencing, cancellation signals, and currentness checks.
+- Fixed root daemon shutdown retaining cleanup ownership while kill events are in flight.
+- Changed RLM family discovery to use a daemon-owned append-only spawn ledger with per-child display metadata instead of reconstructing topology from session files.
+- Fixed long-running macOS supervisors losing ownership when system cleanup removed authority records from `$TMPDIR`.
+- Fixed deleted RLM children leaking kernel snapshots while retaining their readable transcript tombstones.
+- Changed Agents View subagent rows to show stable `name · model/effort · summary` metadata.
+- Changed the default Cerebras model to the available `gpt-oss-120b` route and aligned cross-provider handoff fixtures with the generated catalog.
+- Fixed the agent going silent after an automatic context compaction interrupted unfinished work: the tool loop now resumes when a threshold compaction fails or is skipped, and active goals keep continuing after a successful mid-goal threshold compaction.
 - Changed the agents view splash hint from "type to start" to "type to search sessions".
 - Added `app.edits.expand` (`ctrl+j`) to toggle edit diffs; diffs are now shown only by this toggle, and `ctrl+o` no longer affects them.
 - Changed edit rendering so the `╰─ <path> +N -M` summary line is always visible and `ctrl+j` toggles the diff inline beneath it, indented to the summary text.

@@ -2,9 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { complete } from "../src/stream.js";
 import type { Model } from "../src/types.js";
 
-// Router/virtual ids (e.g. OpenRouter `auto`) keep `model` pinned to the
-// requested id and surface the routed concrete id on `responseModel`.
-
 const mockState = vi.hoisted(() => ({
 	chunks: [] as unknown[],
 }));

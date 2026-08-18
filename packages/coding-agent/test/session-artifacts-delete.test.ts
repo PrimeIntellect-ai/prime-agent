@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { deleteSessionFile } from "../src/core/session-file-actions.js";
+import { deleteSessionArtifacts, deleteSessionFile } from "../src/core/session-file-actions.js";
 
 let root = "";
 
@@ -60,6 +60,18 @@ describe("deleteSessionFile removes the session artifact directory", () => {
 		expect(wasSessionRemovedBeforeCallback).toBe(true);
 		expect(wereArtifactsPresentDuringCallback).toBe(true);
 		expect(existsSync(artifactDir)).toBe(false);
+	});
+
+	it("never removes the artifacts root for a degenerate session file name", async () => {
+		const sessionsDir = join(root, "sessions");
+		mkdirSync(sessionsDir, { recursive: true });
+		const artifactsRoot = join(root, "session-artifacts");
+		mkdirSync(join(artifactsRoot, "live-session"), { recursive: true });
+
+		// Basename ".jsonl" strips to an empty id, which would resolve to the root.
+		await deleteSessionArtifacts(join(sessionsDir, ".jsonl"));
+
+		expect(existsSync(join(artifactsRoot, "live-session"))).toBe(true);
 	});
 
 	it("succeeds when the session has no artifact directory", async () => {

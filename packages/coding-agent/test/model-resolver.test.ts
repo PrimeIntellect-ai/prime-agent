@@ -8,7 +8,6 @@ import {
 	resolveModelScopeFromModels,
 } from "../src/core/model-resolver.js";
 
-// Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
 	{
 		id: "claude-sonnet-4-5",
@@ -36,7 +35,6 @@ const mockModels: Model<"anthropic-messages">[] = [
 	},
 ];
 
-// Mock OpenRouter models with colons in IDs
 const mockOpenRouterModels: Model<"anthropic-messages">[] = [
 	{
 		id: "qwen/qwen3-coder:exacto",
@@ -239,7 +237,6 @@ describe("parseModelPattern", () => {
 
 	describe("edge cases", () => {
 		test("empty pattern matches via partial matching", () => {
-			// Empty string is included in all model IDs, so partial matching finds a match
 			const result = parseModelPattern("", allModels);
 			expect(result.model).not.toBeNull();
 			expect(result.thinkingLevel).toBeUndefined();
@@ -247,8 +244,6 @@ describe("parseModelPattern", () => {
 
 		test("pattern ending with colon treats empty suffix as invalid", () => {
 			const result = parseModelPattern("sonnet:", allModels);
-			// Empty string after colon is not a valid thinking level
-			// So it tries to match "sonnet:" which won't match, then tries "sonnet"
 			expect(result.model?.id).toBe("claude-sonnet-4-5");
 			expect(result.warning).toContain("Invalid thinking level");
 		});
@@ -365,8 +360,6 @@ describe("resolveCliModel", () => {
 	});
 
 	test("prefers provider/model split over gateway model with matching id", () => {
-		// When a user writes "zai/glm-5", and both a zai provider model (id: "glm-5")
-		// and a gateway model (id: "zai/glm-5") exist, prefer the zai provider model.
 		const zaiModel: Model<"anthropic-messages"> = {
 			id: "glm-5",
 			name: "GLM-5",
@@ -432,7 +425,7 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider.zai).toBe("glm-5.1");
 		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
 		expect(defaultModelPerProvider["minimax-cn"]).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider.cerebras).toBe("zai-glm-4.7");
+		expect(defaultModelPerProvider.cerebras).toBe("gpt-oss-120b");
 	});
 
 	test("ai-gateway default tracks current model", () => {

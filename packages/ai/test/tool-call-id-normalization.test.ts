@@ -1,15 +1,3 @@
-/**
- * Tool Call ID Normalization Tests
- *
- * Tests that tool call IDs from OpenAI Responses API (github-copilot, openai-codex, opencode)
- * are properly normalized when sent to other providers.
- *
- * OpenAI Responses API generates IDs in format: {call_id}|{id}
- * where {id} can be 400+ chars with special characters (+, /, =).
- *
- * Regression test for: https://github.com/earendil-works/pi-mono/issues/1022
- */
-
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
@@ -17,12 +5,10 @@ import { completeSimple, getEnvApiKey } from "../src/stream.js";
 import type { AssistantMessage, Message, Tool, ToolResultMessage } from "../src/types.js";
 import { resolveApiKey } from "./oauth.js";
 
-// Resolve API keys
 const copilotToken = await resolveApiKey("github-copilot");
 const openrouterKey = getEnvApiKey("openrouter");
 const codexToken = await resolveApiKey("openai-codex");
 
-// Simple echo tool for testing
 const echoToolSchema = Type.Object({
 	message: Type.String({ description: "Message to echo back" }),
 });
@@ -33,15 +19,6 @@ const echoTool: Tool<typeof echoToolSchema> = {
 	parameters: echoToolSchema,
 };
 
-/**
- * Test 1: Live cross-provider handoff
- *
- * 1. Use github-copilot gpt-5.2-codex to generate a tool call
- * 2. Switch to openrouter openai/gpt-5.2-codex and complete
- * 3. Switch to openai-codex gpt-5.2-codex and complete
- *
- * Both should succeed without "call_id too long" errors.
- */
 describe("Tool Call ID Normalization - Live Handoff", () => {
 	it.skipIf(!copilotToken || !openrouterKey)(
 		"github-copilot -> openrouter should normalize pipe-separated IDs",
@@ -49,7 +26,6 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 			const copilotModel = getModel("github-copilot", "gpt-5.2-codex");
 			const openrouterModel = getModel("openrouter", "openai/gpt-5.2-codex");
 
-			// Step 1: Generate tool call with github-copilot
 			const userMessage: Message = {
 				role: "user",
 				content: "Use the echo tool to echo 'hello world'",
@@ -72,13 +48,11 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 			expect(toolCall).toBeDefined();
 			expect(toolCall!.type).toBe("toolCall");
 
-			// Verify it's a pipe-separated ID (OpenAI Responses format)
 			if (toolCall?.type === "toolCall") {
 				expect(toolCall.id).toContain("|");
 				console.log(`Tool call ID from github-copilot: ${toolCall.id.slice(0, 80)}...`);
 			}
 
-			// Create tool result
 			const toolResult: ToolResultMessage = {
 				role: "toolResult",
 				toolCallId: (toolCall as any).id,
@@ -88,7 +62,6 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 				timestamp: Date.now(),
 			};
 
-			// Step 2: Complete with openrouter (uses openai-completions API)
 			const openrouterResponse = await completeSimple(
 				openrouterModel,
 				{
@@ -104,7 +77,6 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 				{ apiKey: openrouterKey },
 			);
 
-			// Should NOT fail with "call_id too long" error
 			expect(openrouterResponse.stopReason, `OpenRouter error: ${openrouterResponse.errorMessage}`).not.toBe(
 				"error",
 			);
@@ -119,7 +91,6 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 			const copilotModel = getModel("github-copilot", "gpt-5.2-codex");
 			const codexModel = getModel("openai-codex", "gpt-5.2-codex");
 
-			// Step 1: Generate tool call with github-copilot
 			const userMessage: Message = {
 				role: "user",
 				content: "Use the echo tool to echo 'test message'",
@@ -141,7 +112,6 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 			const toolCall = assistantResponse.content.find((c) => c.type === "toolCall");
 			expect(toolCall).toBeDefined();
 
-			// Create tool result
 			const toolResult: ToolResultMessage = {
 				role: "toolResult",
 				toolCallId: (toolCall as any).id,
@@ -151,7 +121,6 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 				timestamp: Date.now(),
 			};
 
-			// Step 2: Complete with openai-codex (uses openai-codex-responses API)
 			const codexResponse = await completeSimple(
 				codexModel,
 				{
@@ -167,7 +136,6 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 				{ apiKey: codexToken },
 			);
 
-			// Should NOT fail with ID validation error
 			expect(codexResponse.stopReason, `Codex error: ${codexResponse.errorMessage}`).not.toBe("error");
 			expect(codexResponse.errorMessage).toBeUndefined();
 		},
@@ -175,18 +143,10 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 	);
 });
 
-/**
- * Test 2: Prefilled context with exact failing IDs from issue #1022
- *
- * Uses the exact tool call ID format that caused the error:
- * "call_xxx|very_long_base64_with_special_chars+/="
- */
 describe("Tool Call ID Normalization - Prefilled Context", () => {
-	// Exact tool call ID from issue #1022 JSONL
 	const FAILING_TOOL_CALL_ID =
 		"call_pAYbIr76hXIjncD9UE4eGfnS|t5nnb2qYMFWGSsr13fhCd1CaCu3t3qONEPuOudu4HSVEtA8YJSL6FAZUxvoOoD792VIJWl91g87EdqsCWp9krVsdBysQoDaf9lMCLb8BS4EYi4gQd5kBQBYLlgD71PYwvf+TbMD9J9/5OMD42oxSRj8H+vRf78/l2Xla33LWz4nOgsddBlbvabICRs8GHt5C9PK5keFtzyi3lsyVKNlfduK3iphsZqs4MLv4zyGJnvZo/+QzShyk5xnMSQX/f98+aEoNflEApCdEOXipipgeiNWnpFSHbcwmMkZoJhURNu+JEz3xCh1mrXeYoN5o+trLL3IXJacSsLYXDrYTipZZbJFRPAucgbnjYBC+/ZzJOfkwCs+Gkw7EoZR7ZQgJ8ma+9586n4tT4cI8DEhBSZsWMjrCt8dxKg==";
 
-	// Build prefilled context with the failing ID
 	function buildPrefilledMessages(): Message[] {
 		const userMessage: Message = {
 			role: "user",
@@ -253,7 +213,6 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 				{ apiKey: openrouterKey },
 			);
 
-			// Should NOT fail with "call_id too long" error
 			expect(response.stopReason, `OpenRouter error: ${response.errorMessage}`).not.toBe("error");
 			if (response.errorMessage) {
 				expect(response.errorMessage).not.toContain("call_id");
@@ -279,7 +238,6 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 				{ apiKey: codexToken },
 			);
 
-			// Should NOT fail with ID validation error
 			expect(response.stopReason, `Codex error: ${response.errorMessage}`).not.toBe("error");
 			if (response.errorMessage) {
 				expect(response.errorMessage).not.toContain("id");

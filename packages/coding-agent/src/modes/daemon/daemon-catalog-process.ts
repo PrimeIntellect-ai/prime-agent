@@ -56,14 +56,10 @@ function deserializeSessionInfo(session: SessionInfoWire): SessionInfo {
 	};
 }
 
-/** @internal Exported to pin catalog selector semantics without spawning a catalog process. */
 export function resolveCatalogSessionMatch(
 	sessions: readonly SessionInfo[],
 	selector: string,
 ): SessionInfo | undefined {
-	// Deliberate broadening for create/resume as well as a2a wake: exact names
-	// participate alongside id prefixes. Therefore a name that collides with an
-	// id prefix is now ambiguous instead of the id-prefix match winning.
 	const matches = sessions.filter((session) => session.id.startsWith(selector) || session.name === selector);
 	if (matches.length > 1) {
 		throw new Error(`Ambiguous session selector "${selector}"`);

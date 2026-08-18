@@ -23,10 +23,6 @@ export function replaceTabs(text: string): string {
 	return text.replace(/\t/g, "   ");
 }
 
-export function normalizeDisplayText(text: string): string {
-	return text.replace(/\r/g, "");
-}
-
 export interface TextOutputOptions {
 	/** Whether image fallbacks should parse image dimensions from base64 data. */
 	includeImageDimensions?: boolean;

@@ -2,9 +2,7 @@ import type { TUI } from "../tui.js";
 import { Text } from "./text.js";
 
 export interface LoaderIndicatorOptions {
-	/** Animation frames. Use an empty array to hide the indicator. */
 	frames?: string[];
-	/** Frame interval in milliseconds for animated indicators. */
 	intervalMs?: number;
 }
 

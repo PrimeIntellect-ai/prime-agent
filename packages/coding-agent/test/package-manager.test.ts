@@ -26,7 +26,6 @@ class MockSpawnedProcess extends EventEmitter {
 	}
 }
 
-// Helper to check if a resource is enabled
 const isEnabled = (r: ResolvedResource, pathMatch: string, matchFn: "endsWith" | "includes" = "endsWith") => {
 	const normalizedPath = normalizeForMatch(r.path);
 	const normalizedMatch = normalizeForMatch(pathMatch);
@@ -116,7 +115,6 @@ Content`,
 			settingsManager.setSkillPaths(["skills"]);
 
 			const result = await packageManager.resolve();
-			// Skills with SKILL.md are returned as file paths
 			expect(result.skills.some((r) => r.path === skillFile && r.enabled)).toBe(true);
 		});
 
@@ -213,8 +211,6 @@ Content`,
 					themes: 1,
 				});
 
-				// Project auto-discovered has higher precedence than user auto-discovered,
-				// so the surviving entry should be scoped to project.
 				expect(result.extensions[0].metadata.scope).toBe("project");
 				expect(result.skills[0].metadata.scope).toBe("project");
 				expect(result.prompts[0].metadata.scope).toBe("project");
@@ -241,7 +237,6 @@ Content`,
 		});
 
 		it("should resolve directory with package.json pi.extensions in extensions setting", async () => {
-			// Create a package with pi.extensions in package.json
 			const pkgDir = join(tempDir, "my-extensions-pkg");
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
 			writeFileSync(
@@ -257,12 +252,10 @@ Content`,
 			writeFileSync(join(pkgDir, "extensions", "cost.ts"), "export default function() {}");
 			writeFileSync(join(pkgDir, "extensions", "helper.ts"), "export const x = 1;"); // Not in manifest, shouldn't be loaded
 
-			// Add the directory to extensions setting (not packages setting)
 			settingsManager.setExtensionPaths([pkgDir]);
 
 			const result = await packageManager.resolve();
 
-			// Should find the extensions declared in package.json pi.extensions
 			expect(result.extensions.some((r) => r.path === join(pkgDir, "extensions", "clip.ts") && r.enabled)).toBe(
 				true,
 			);
@@ -270,7 +263,6 @@ Content`,
 				true,
 			);
 
-			// Should NOT find helper.ts (not declared in manifest)
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "helper.ts"))).toBe(false);
 		});
 	});
@@ -482,7 +474,6 @@ Content`,
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
 			expect(result.extensions.some((r) => r.path === join(pkgDir, "src", "index.ts") && r.enabled)).toBe(true);
-			// Skills with SKILL.md are returned as file paths
 			expect(result.skills.some((r) => r.path === join(pkgDir, "skills", "my-skill", "SKILL.md") && r.enabled)).toBe(
 				true,
 			);
@@ -522,10 +513,8 @@ Content`,
 			const extPath = join(tempDir, "ext.ts");
 			writeFileSync(extPath, "export default function() {}");
 
-			// Local paths don't trigger install progress, but we can verify the callback is set
 			await packageManager.resolveExtensionSources([extPath]);
 
-			// For now just verify no errors - npm/git would trigger actual events
 			expect(events.length).toBe(0);
 		});
 	});
@@ -718,16 +707,11 @@ Content`,
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
 
-			// Use public install method which emits progress events
 			try {
 				await packageManager.install("npm:nonexistent-package@1.0.0");
-			} catch {
-				// Expected to fail - package doesn't exist
-			}
+			} catch {}
 
-			// Should have emitted start event before failure
 			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
-			// Should have emitted error event
 			expect(events.some((e) => e.type === "error")).toBe(true);
 		});
 
@@ -738,12 +722,9 @@ Content`,
 			process.env.GIT_TERMINAL_PROMPT = "0";
 
 			try {
-				// This should be parsed as a git source, not throw "unsupported"
 				try {
 					await packageManager.install("https://github.com/nonexistent/repo");
-				} catch {
-					// Expected to fail - repo doesn't exist
-				}
+				} catch {}
 			} finally {
 				if (previousGitTerminalPrompt === undefined) {
 					delete process.env.GIT_TERMINAL_PROMPT;
@@ -752,7 +733,6 @@ Content`,
 				}
 			}
 
-			// Should have attempted clone, not thrown unsupported error
 			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
 		});
 
@@ -893,7 +873,6 @@ Content`,
 			const identity3 = (packageManager as any).getPackageIdentity("git:github.com/user/repo");
 			const identity4 = (packageManager as any).getPackageIdentity("https://github.com/user/repo.git");
 
-			// All should have the same identity (normalized)
 			expect(identity1).toBe("git:github.com/user/repo");
 			expect(identity2).toBe("git:github.com/user/repo");
 			expect(identity3).toBe("git:github.com/user/repo");
@@ -905,16 +884,12 @@ Content`,
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
 			writeFileSync(join(pkgDir, "extensions", "test.ts"), "export default function() {}");
 
-			// Mock the package as if it were cloned from different URL formats
-			// In reality, these would all point to the same local dir after install
 			settingsManager.setPackages([
 				"https://github.com/user/repo",
 				"git:github.com/user/repo",
 				"https://github.com/user/repo.git",
 			]);
 
-			// Since these URLs don't actually exist and we can't clone them,
-			// we verify they produce the same identity
 			const id1 = (packageManager as any).getPackageIdentity("https://github.com/user/repo");
 			const id2 = (packageManager as any).getPackageIdentity("git:github.com/user/repo");
 			const id3 = (packageManager as any).getPackageIdentity("https://github.com/user/repo.git");
@@ -924,7 +899,6 @@ Content`,
 		});
 
 		it("should handle HTTPS URLs with refs in resolve", async () => {
-			// This tests that the ref is properly extracted and stored
 			const parsed = (packageManager as any).parseSource("https://github.com/user/repo@main");
 			expect(parsed.ref).toBe("main");
 			expect(parsed.pinned).toBe(true);
@@ -1090,8 +1064,6 @@ Content`,
 
 	describe("pattern filtering in package filters", () => {
 		it("should apply user filters on top of manifest filters (not replace)", async () => {
-			// Manifest excludes baz.ts, user excludes bar.ts
-			// Result should exclude BOTH
 			const pkgDir = join(tempDir, "layered-pkg");
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
 			writeFileSync(join(pkgDir, "extensions", "foo.ts"), "export default function() {}");
@@ -1107,7 +1079,6 @@ Content`,
 				}),
 			);
 
-			// User filter adds exclusion for bar.ts
 			settingsManager.setPackages([
 				{
 					source: pkgDir,
@@ -1119,11 +1090,8 @@ Content`,
 			]);
 
 			const result = await packageManager.resolve();
-			// foo.ts should be included (not excluded by anyone)
 			expect(result.extensions.some((r) => isEnabled(r, "foo.ts"))).toBe(true);
-			// bar.ts should be excluded (by user)
 			expect(result.extensions.some((r) => isDisabled(r, "bar.ts"))).toBe(true);
-			// baz.ts should be excluded (by manifest)
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "baz.ts"))).toBe(false);
 		});
 
@@ -1224,7 +1192,6 @@ Content`,
 			writeFileSync(join(extDir, "excluded.ts"), "export default function() {}");
 			writeFileSync(join(extDir, "force-back.ts"), "export default function() {}");
 
-			// Exclude all, then force-include one back
 			settingsManager.setExtensionPaths(["extensions", "!extensions/*.ts", "+extensions/force-back.ts"]);
 
 			const result = await packageManager.resolve();
@@ -1287,7 +1254,6 @@ Content`,
 			writeFileSync(join(extDir, "a.ts"), "export default function() {}");
 			writeFileSync(join(extDir, "b.ts"), "export default function() {}");
 
-			// Specifically exclude b.ts, then force it back
 			settingsManager.setExtensionPaths(["extensions", "!extensions/b.ts", "+extensions/b.ts"]);
 
 			const result = await packageManager.resolve();
@@ -1390,18 +1356,15 @@ Content`,
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
 			writeFileSync(join(pkgDir, "extensions", "shared.ts"), "export default function() {}");
 
-			// Same package in both global and project
 			settingsManager.setPackages([pkgDir]); // global
 			settingsManager.setProjectPackages([pkgDir]); // project
 
-			// Debug: verify settings are stored correctly
 			const globalSettings = settingsManager.getGlobalSettings();
 			const projectSettings = settingsManager.getProjectSettings();
 			expect(globalSettings.packages).toEqual([pkgDir]);
 			expect(projectSettings.packages).toEqual([pkgDir]);
 
 			const result = await packageManager.resolve();
-			// Should only appear once (deduped), with project scope
 			const sharedPaths = result.extensions.filter((r) => r.path.includes("shared-pkg"));
 			expect(sharedPaths.length).toBe(1);
 			expect(sharedPaths[0].metadata.scope).toBe("project");
@@ -1424,14 +1387,12 @@ Content`,
 		});
 
 		it("should dedupe SSH and HTTPS URLs for same repo", async () => {
-			// Same repository, different URL formats
 			const httpsUrl = "https://github.com/user/repo";
 			const sshUrl = "git:git@github.com:user/repo";
 
 			const httpsIdentity = (packageManager as any).getPackageIdentity(httpsUrl);
 			const sshIdentity = (packageManager as any).getPackageIdentity(sshUrl);
 
-			// Both should resolve to the same identity
 			expect(httpsIdentity).toBe("git:github.com/user/repo");
 			expect(sshIdentity).toBe("git:github.com/user/repo");
 			expect(httpsIdentity).toBe(sshIdentity);
@@ -1444,7 +1405,6 @@ Content`,
 			const httpsIdentity = (packageManager as any).getPackageIdentity(httpsUrl);
 			const sshIdentity = (packageManager as any).getPackageIdentity(sshUrl);
 
-			// Identity should ignore ref (version)
 			expect(httpsIdentity).toBe("git:github.com/user/repo");
 			expect(sshIdentity).toBe("git:github.com/user/repo");
 			expect(httpsIdentity).toBe(sshIdentity);
@@ -1457,7 +1417,6 @@ Content`,
 			const sshProtocolIdentity = (packageManager as any).getPackageIdentity(sshProtocol);
 			const gitAtIdentity = (packageManager as any).getPackageIdentity(gitAt);
 
-			// Both SSH formats should resolve to same identity
 			expect(sshProtocolIdentity).toBe("git:github.com/user/repo");
 			expect(gitAtIdentity).toBe("git:github.com/user/repo");
 			expect(sshProtocolIdentity).toBe(gitAtIdentity);
@@ -1476,7 +1435,6 @@ Content`,
 
 			const identities = urls.map((url) => (packageManager as any).getPackageIdentity(url));
 
-			// All should produce the same identity
 			const uniqueIdentities = [...new Set(identities)];
 			expect(uniqueIdentities.length).toBe(1);
 			expect(uniqueIdentities[0]).toBe("git:github.com/user/repo");
@@ -1489,7 +1447,6 @@ Content`,
 			const id1 = (packageManager as any).getPackageIdentity(repo1Https);
 			const id2 = (packageManager as any).getPackageIdentity(repo2Ssh);
 
-			// Different repos should have different identities
 			expect(id1).toBe("git:github.com/user/repo1");
 			expect(id2).toBe("git:github.com/user/repo2");
 			expect(id1).not.toBe(id2);
@@ -1498,32 +1455,25 @@ Content`,
 
 	describe("multi-file extension discovery (issue #1102)", () => {
 		it("should only load index.ts from subdirectories, not helper modules", async () => {
-			// Regression test: packages with multi-file extensions in subdirectories
-			// should only load the index.ts entry point, not helper modules like agents.ts
 			const pkgDir = join(tempDir, "multifile-pkg");
 			mkdirSync(join(pkgDir, "extensions", "subagent"), { recursive: true });
 
-			// Main entry point
 			writeFileSync(
 				join(pkgDir, "extensions", "subagent", "index.ts"),
 				`import { helper } from "./agents.js";
 export default function(api) { api.registerTool({ name: "test", description: "test", execute: async () => helper() }); }`,
 			);
-			// Helper module (should NOT be loaded as standalone extension)
 			writeFileSync(
 				join(pkgDir, "extensions", "subagent", "agents.ts"),
 				`export function helper() { return "helper"; }`,
 			);
-			// Top-level extension file (should be loaded)
 			writeFileSync(join(pkgDir, "extensions", "standalone.ts"), "export default function(api) {}");
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
 
-			// Should find the index.ts and standalone.ts
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "subagent/index.ts") && r.enabled)).toBe(true);
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "standalone.ts") && r.enabled)).toBe(true);
 
-			// Should NOT find agents.ts as a standalone extension
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "agents.ts"))).toBe(false);
 		});
 
@@ -1531,7 +1481,6 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			const pkgDir = join(tempDir, "manifest-subdir-pkg");
 			mkdirSync(join(pkgDir, "extensions", "custom"), { recursive: true });
 
-			// Subdirectory with its own manifest
 			writeFileSync(
 				join(pkgDir, "extensions", "custom", "package.json"),
 				JSON.stringify({
@@ -1545,10 +1494,8 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
 
-			// Should find main.ts declared in manifest
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "custom/main.ts") && r.enabled)).toBe(true);
 
-			// Should NOT find utils.ts (not declared in manifest)
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "utils.ts"))).toBe(false);
 		});
 
@@ -1556,10 +1503,8 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			const pkgDir = join(tempDir, "mixed-pkg");
 			mkdirSync(join(pkgDir, "extensions", "complex"), { recursive: true });
 
-			// Top-level extension
 			writeFileSync(join(pkgDir, "extensions", "simple.ts"), "export default function(api) {}");
 
-			// Subdirectory with index.ts + helpers
 			writeFileSync(
 				join(pkgDir, "extensions", "complex", "index.ts"),
 				"import { a } from './a.js'; export default function(api) {}",
@@ -1569,15 +1514,12 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
 
-			// Should find simple.ts and complex/index.ts
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "simple.ts") && r.enabled)).toBe(true);
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "complex/index.ts") && r.enabled)).toBe(true);
 
-			// Should NOT find helper modules
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "complex/a.ts"))).toBe(false);
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "complex/b.ts"))).toBe(false);
 
-			// Total should be exactly 2
 			expect(result.extensions.filter((r) => r.enabled).length).toBe(2);
 		});
 
@@ -1585,16 +1527,13 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			const pkgDir = join(tempDir, "no-entry-pkg");
 			mkdirSync(join(pkgDir, "extensions", "broken"), { recursive: true });
 
-			// Subdirectory with no index.ts and no manifest
 			writeFileSync(join(pkgDir, "extensions", "broken", "helper.ts"), "export const x = 1;");
 			writeFileSync(join(pkgDir, "extensions", "broken", "another.ts"), "export const y = 2;");
 
-			// Valid top-level extension
 			writeFileSync(join(pkgDir, "extensions", "valid.ts"), "export default function(api) {}");
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
 
-			// Should only find the valid top-level extension
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "valid.ts") && r.enabled)).toBe(true);
 			expect(result.extensions.filter((r) => r.enabled).length).toBe(1);
 		});

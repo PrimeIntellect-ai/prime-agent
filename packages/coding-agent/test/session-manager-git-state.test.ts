@@ -61,7 +61,6 @@ describe("SessionManager git state", () => {
 		const entry = sm.getEntries().find((e) => e.type === "git_state");
 		expect(entry).toMatchObject({ type: "git_state", git: { commit: secondSha } });
 
-		// A second call with no further change is a no-op.
 		expect(sm.recordGitStateIfChanged()).toBeUndefined();
 	});
 
@@ -70,7 +69,6 @@ describe("SessionManager git state", () => {
 		const msgId = sm.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 });
 		commit(repoDir, "second");
 
-		// On the main path this appends git_state(secondSha).
 		expect(sm.recordGitStateIfChanged()).toBeDefined();
 
 		// Navigate to before that entry: this branch's nearest git context is the header (firstSha),
@@ -130,7 +128,6 @@ describe("SessionManager git state", () => {
 
 		const forked = SessionManager.forkFrom(sourcePath, repoDir, sessionDir);
 
-		// Header carries the target repo git, not the source's.
 		expect(forked.getHeader()?.git).toEqual({
 			branch: "main",
 			commit: firstSha,

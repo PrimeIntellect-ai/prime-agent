@@ -36,8 +36,6 @@ describe("ACP stop reasons", () => {
 	});
 
 	it("never reports a stopped autonomous run as a clean end_turn", () => {
-		// A wall-clock timeout is not a successful completion; reporting end_turn
-		// would make it indistinguishable from finishing the work.
 		const timedOut = status({ startedAt: Date.now() - 60 * 60 * 1000 });
 		expect(acpStopReason({ cancelled: false, autonomous: timedOut })).toBe("max_turn_requests");
 		expect(acpStopReason({ cancelled: false, autonomous: status({ turnsUsed: 100 }) })).toBe("max_turn_requests");

@@ -105,7 +105,7 @@ function prepareEditArguments(input: unknown): EditToolInput {
 			const parsed = JSON.parse(args.edits);
 			if (Array.isArray(parsed)) args.edits = parsed;
 		} catch {
-			// Not JSON: leave as-is for schema validation to reject.
+			// Leave non-JSON input for schema validation to reject.
 		}
 	}
 
@@ -365,7 +365,6 @@ export function createEditToolDefinition(
 						content: Array<{ type: "text"; text: string }>;
 						details: EditToolDetails | undefined;
 					}>((resolve, reject) => {
-						// Check if already aborted.
 						if (signal?.aborted) {
 							reject(new Error("Operation aborted"));
 							return;
@@ -373,7 +372,6 @@ export function createEditToolDefinition(
 
 						let aborted = false;
 
-						// Set up abort handler.
 						const onAbort = () => {
 							aborted = true;
 							reject(new Error("Operation aborted"));
@@ -383,10 +381,8 @@ export function createEditToolDefinition(
 							signal.addEventListener("abort", onAbort, { once: true });
 						}
 
-						// Perform the edit operation.
 						void (async () => {
 							try {
-								// Check if file exists.
 								try {
 									await ops.access(absolutePath);
 								} catch (error: unknown) {
@@ -399,16 +395,13 @@ export function createEditToolDefinition(
 									return;
 								}
 
-								// Check if aborted before reading.
 								if (aborted) {
 									return;
 								}
 
-								// Read the file.
 								const buffer = await ops.readFile(absolutePath);
 								const rawContent = buffer.toString("utf-8");
 
-								// Check if aborted after reading.
 								if (aborted) {
 									return;
 								}
@@ -423,7 +416,6 @@ export function createEditToolDefinition(
 									path,
 								);
 
-								// Check if aborted before writing.
 								if (aborted) {
 									return;
 								}
@@ -431,12 +423,10 @@ export function createEditToolDefinition(
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 								await ops.writeFile(absolutePath, finalContent);
 
-								// Check if aborted after writing.
 								if (aborted) {
 									return;
 								}
 
-								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
 								}
@@ -452,7 +442,6 @@ export function createEditToolDefinition(
 									details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },
 								});
 							} catch (error: unknown) {
-								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
 								}

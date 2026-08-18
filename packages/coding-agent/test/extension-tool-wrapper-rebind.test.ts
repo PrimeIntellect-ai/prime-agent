@@ -5,8 +5,6 @@ import { wrapRegisteredTools } from "../src/core/extensions/wrapper.js";
 
 const STALE = "This extension ctx is stale after session replacement or reload.";
 
-// Minimal stand-in for a runner whose createContext() throws once invalidated,
-// mirroring assertActive() on the real ExtensionRunner's guarded ctx getters.
 function makeRunner(id: string): ExtensionRunner & { invalidate(): void } {
 	let stale = false;
 	return {
@@ -43,7 +41,6 @@ describe("wrapRegisteredTools runner rebinding", () => {
 		const first = await tool.execute("c1", {}, new AbortController().signal);
 		expect((first.content[0] as { text: string }).text).toBe("first");
 
-		// Session rebuild: old runner invalidated, a fresh one takes its place.
 		runner.invalidate();
 		runner = makeRunner("second");
 
@@ -58,8 +55,6 @@ describe("wrapRegisteredTools runner rebinding", () => {
 		await expect(tool.execute("c1", {}, new AbortController().signal)).resolves.toBeTruthy();
 
 		runner.invalidate();
-		// The ctx is resolved synchronously as an execute() argument, so a stale runner
-		// throws at call time rather than rejecting.
 		expect(() => tool.execute("c2", {}, new AbortController().signal)).toThrow(STALE);
 	});
 });
