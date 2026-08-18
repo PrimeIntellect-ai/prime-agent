@@ -288,6 +288,25 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("accepts the canonical socket path when launched with duplicate slashes", async () => {
+		if (process.platform === "win32") return;
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const socketPath = join(root, "daemon.sock");
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, `${root}//daemon.sock`, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const response = await client.request({ type: "list" });
+
+		expect(response.success).toBe(true);
+		expect(requireSessionList(response.success ? response.data : undefined)).toHaveLength(0);
+		await client.request({ type: "shutdown", force: true });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("creates top-level sessions at depth zero when the supervisor inherits a child depth", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");

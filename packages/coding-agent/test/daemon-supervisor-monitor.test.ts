@@ -3026,7 +3026,7 @@ describe("daemon worker supervisor monitoring", () => {
 			join(descriptorDir, "supervisor-config"),
 			JSON.stringify({
 				version: 1,
-				socketPath,
+				socketPath: `${root}//supervisor.sock`,
 				defaultSessionConfig: { agentDir, cwd: "/persisted/cwd", telemetryDisabled: true },
 			}),
 		);
@@ -3127,6 +3127,90 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(readFileSync(descriptorPath, "utf8")).not.toContain("secret-runtime-diagnostic");
 		} finally {
 			rmSync(descriptorDir, { recursive: true, force: true });
+		}
+	});
+
+	it("adopts persisted worker descriptors recorded with a non-canonical supervisor socket path", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const descriptorDir = mkdtempSync(join(tmpdir(), "prime-supervisor-descriptor-heal-"));
+		try {
+			const now = new Date().toISOString();
+			writeFileSync(
+				join(descriptorDir, "worker-1.json"),
+				`${JSON.stringify({
+					version: 2,
+					workerId: "worker-1",
+					pid: 999_999,
+					socketPath: join(descriptorDir, "worker-1.sock"),
+					supervisorSocketPath: "/tmp//supervisor.sock",
+					authenticationToken: "token-1",
+					rootActiveSessionId: "active-1",
+					createdAt: now,
+					updatedAt: now,
+					lifecycle: "running",
+					sessionDir: "/safe/sessions",
+					telemetryDisabled: true,
+					createCommand: {
+						type: "create",
+						config: { cwd: descriptorDir, agentDir: descriptorDir, apiKey: "secret-api-key" },
+						launchEnv: { PROVIDER_TOKEN: "secret-command-env" },
+					},
+					launchEnv: { PROVIDER_TOKEN: "secret-worker-env" },
+					consecutiveFailures: 0,
+				})}\n`,
+			);
+			const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+				descriptorDir,
+				socketPath: "/tmp/supervisor.sock",
+				workers: new Map(),
+				log: vi.fn(),
+			}) as {
+				workers: Map<string, unknown>;
+				loadWorkerDescriptors(): void;
+			};
+
+			supervisor.loadWorkerDescriptors();
+
+			expect(supervisor.workers.size).toBe(1);
+			const loaded = supervisor.workers.get("worker-1") as {
+				descriptor: Record<string, unknown>;
+			};
+			expect(loaded.descriptor).toMatchObject({
+				version: 2,
+				supervisorSocketPath: "/tmp/supervisor.sock",
+				sessionDir: "/safe/sessions",
+				telemetryDisabled: true,
+			});
+			expect(JSON.stringify(loaded.descriptor)).not.toContain("secret-");
+			const persisted = readFileSync(join(descriptorDir, "worker-1.json"), "utf8");
+			expect(persisted).not.toContain("secret-");
+			expect(JSON.parse(persisted)).toMatchObject({
+				version: 2,
+				supervisorSocketPath: "/tmp/supervisor.sock",
+			});
+		} finally {
+			rmSync(descriptorDir, { recursive: true, force: true });
+		}
+	});
+
+	it("derives the same worker descriptor namespace for equivalent socket path spellings", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-namespace-"));
+		try {
+			const canonical = new DaemonSupervisor(join(root, "supervisor.sock"), {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+			}) as unknown as { descriptorDir: string };
+			const doubled = new DaemonSupervisor(`${root}//supervisor.sock`, {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+			}) as unknown as { descriptorDir: string };
+
+			expect(doubled.descriptorDir).toBe(canonical.descriptorDir);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
