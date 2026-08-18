@@ -3014,6 +3014,48 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("merges persisted host settings into fresh runtime defaults", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-config-merge-"));
+		const descriptorDir = join(root, "workers");
+		const socketPath = join(root, "supervisor.sock");
+		const agentDir = join(root, "agent");
+		mkdirSync(descriptorDir, { recursive: true });
+		writeFileSync(
+			join(descriptorDir, "supervisor-config"),
+			JSON.stringify({
+				version: 1,
+				socketPath,
+				defaultSessionConfig: { agentDir, cwd: "/persisted/cwd", telemetryDisabled: true },
+			}),
+		);
+
+		try {
+			const supervisor = new DaemonSupervisor(socketPath, {
+				descriptorDir,
+				defaultSessionConfig: {
+					agentDir,
+					cwd: "/fresh/cwd",
+					provider: "fresh-provider",
+					model: "fresh-model",
+					apiKey: "fresh-key",
+				},
+			});
+			const config = (supervisor as unknown as { defaultSessionConfig: Record<string, unknown> })
+				.defaultSessionConfig;
+
+			expect(config).toMatchObject({
+				agentDir,
+				cwd: "/persisted/cwd",
+				telemetryDisabled: true,
+				provider: "fresh-provider",
+				model: "fresh-model",
+				apiKey: "fresh-key",
+			});
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("migrates v1 descriptors by lifting only safe host policy fields", () => {
 		const descriptorDir = mkdtempSync(join(tmpdir(), "prime-supervisor-v1-migration-"));
 		const descriptorPath = join(descriptorDir, "worker-v1.json");
