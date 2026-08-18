@@ -53,7 +53,9 @@ function getProcEnv(key: string): string | undefined {
 					_procEnvCache.set(entry.slice(0, idx), entry.slice(idx + 1));
 				}
 			}
-		} catch {}
+		} catch {
+			// /proc/self/environ may not be readable.
+		}
 	}
 
 	return _procEnvCache.get(key);
@@ -212,6 +214,8 @@ export function getPrimeTeamId(): string | undefined {
 			const teamId = (parsed as Record<string, unknown>).team_id;
 			if (typeof teamId === "string" && teamId.trim()) return teamId.trim();
 		}
-	} catch {}
+	} catch {
+		// Treat unreadable or malformed config as no configured team.
+	}
 	return undefined;
 }

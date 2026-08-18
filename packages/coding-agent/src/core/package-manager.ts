@@ -329,7 +329,9 @@ function collectFiles(
 				files.push(fullPath);
 			}
 		}
-	} catch {}
+	} catch {
+		// Ignore unreadable directories during file discovery.
+	}
 
 	return files;
 }
@@ -403,7 +405,9 @@ function collectSkillEntries(
 
 			entries.push(...collectSkillEntries(fullPath, mode, ig, root));
 		}
-	} catch {}
+	} catch {
+		// Ignore unreadable directories during skill discovery.
+	}
 
 	return entries;
 }
@@ -477,7 +481,9 @@ function collectAutoPromptEntries(dir: string): string[] {
 				entries.push(fullPath);
 			}
 		}
-	} catch {}
+	} catch {
+		// Ignore unreadable directories during prompt discovery.
+	}
 
 	return entries;
 }
@@ -512,7 +518,9 @@ function collectAutoThemeEntries(dir: string): string[] {
 				entries.push(fullPath);
 			}
 		}
-	} catch {}
+	} catch {
+		// Ignore unreadable directories during theme discovery.
+	}
 
 	return entries;
 }
@@ -600,7 +608,9 @@ function collectAutoExtensionEntries(dir: string): string[] {
 				}
 			}
 		}
-	} catch {}
+	} catch {
+		// Ignore unreadable directories during extension discovery.
+	}
 
 	return entries;
 }
@@ -1758,7 +1768,9 @@ export class DefaultPackageManager implements PackageManager {
 			await this.withProgress("pull", sourceStr, `Refreshing ${sourceStr}...`, async () => {
 				await this.updateGit(source, "temporary");
 			});
-		} catch {}
+		} catch {
+			// Keep the cached temporary checkout if refresh fails.
+		}
 	}
 
 	private async removeGit(source: GitSource, scope: SourceScope): Promise<void> {
@@ -2258,7 +2270,9 @@ export class DefaultPackageManager implements PackageManager {
 				} else if (stats.isDirectory()) {
 					files.push(...collectResourceFiles(p, resourceType));
 				}
-			} catch {}
+			} catch {
+				// Ignore inaccessible resource paths.
+			}
 		}
 		return files;
 	}

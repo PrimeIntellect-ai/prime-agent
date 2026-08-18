@@ -822,7 +822,9 @@ export class ModelRegistry {
 		let authorizedIds: Set<string> | undefined;
 		try {
 			authorizedIds = await fetchAuthorizedPrivatePrimeInferenceModelIds(apiKey, teamHeaders);
-		} catch {}
+		} catch {
+			// Fall back to the previous authorization below.
+		}
 		// Leave newer state untouched if the credentials changed while fetching.
 		if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
 			return;
@@ -869,7 +871,9 @@ export class ModelRegistry {
 				this.authorizedPrivatePrimeInferenceModelIds = authorizedIds;
 				this.authorizedPrivatePrimeInferenceTeamId = teamId;
 				this.writePrivatePrimeAuthorizationCache({ fingerprint, modelIds: authorizedIds, refreshedAt: Date.now() });
-			} catch {}
+			} catch {
+				// Keep the cached authorization.
+			}
 		};
 		const pending = this.backgroundPrivatePrimeAuthorization?.promise;
 		const promise = (pending ?? Promise.resolve()).then(run);
@@ -929,7 +933,9 @@ export class ModelRegistry {
 			const tmpPath = `${cachePath}.${process.pid}.tmp`;
 			writeFileSync(tmpPath, JSON.stringify({ ...cache, modelIds: [...cache.modelIds] }), { mode: 0o600 });
 			renameSync(tmpPath, cachePath);
-		} catch {}
+		} catch {
+			// A failed cache write only requires a later refetch.
+		}
 	}
 
 	async refreshModelCatalog(): Promise<ModelCatalogSnapshot> {

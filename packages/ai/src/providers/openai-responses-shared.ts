@@ -53,7 +53,9 @@ function parseTextSignature(
 				}
 				return { id: parsed.id };
 			}
-		} catch {}
+		} catch {
+			// Fall through to legacy plain-string handling.
+		}
 	}
 	return { id: signature };
 }

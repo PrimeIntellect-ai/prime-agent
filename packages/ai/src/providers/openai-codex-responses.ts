@@ -542,10 +542,14 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 	} finally {
 		try {
 			await reader.cancel();
-		} catch {}
+		} catch {
+			// The reader may already be closed.
+		}
 		try {
 			reader.releaseLock();
-		} catch {}
+		} catch {
+			// The reader lock may already be released.
+		}
 	}
 }
 

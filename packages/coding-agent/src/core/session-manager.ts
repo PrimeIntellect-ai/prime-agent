@@ -381,7 +381,9 @@ export function parseSessionEntries(content: string): FileEntry[] {
 		try {
 			const entry = JSON.parse(line) as FileEntry;
 			entries.push(entry);
-		} catch {}
+		} catch {
+			// Skip malformed lines.
+		}
 	}
 
 	applyChildUsageAttributions(entries);
@@ -541,7 +543,9 @@ function appendEntryFromBuffer(entries: FileEntry[], buffer: Buffer, start = 0, 
 	if (end <= start) return;
 	try {
 		entries.push(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry);
-	} catch {}
+	} catch {
+		// Skip malformed or blank lines.
+	}
 }
 
 function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
@@ -1088,7 +1092,9 @@ async function listSessionsFromDir(
 				callbacks?.onSession?.(info);
 			}
 		}
-	} catch {}
+	} catch {
+		// Return no sessions when the directory cannot be read.
+	}
 
 	return sessions;
 }
@@ -1178,7 +1184,9 @@ export class SessionManager {
 		if (options?.parentSession && !hasExplicitRlmDepth) {
 			try {
 				parentHeader = readSessionHeader(options.parentSession);
-			} catch {}
+			} catch {
+				// Unavailable parent metadata leaves the child depth unknown.
+			}
 		}
 		if (this.persist) {
 			if (options?.id) {

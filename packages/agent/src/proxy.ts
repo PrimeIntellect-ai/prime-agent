@@ -156,7 +156,9 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					if (errorData.error) {
 						errorMessage = `Proxy error: ${errorData.error}`;
 					}
-				} catch {}
+				} catch {
+					// Keep the status-text fallback when the error body is not JSON.
+				}
 				throw new Error(errorMessage);
 			}
 
