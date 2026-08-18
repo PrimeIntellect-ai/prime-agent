@@ -6572,6 +6572,7 @@ export class AgentSession {
 		this._sessionInputSuspendedForUpdateRestart = true;
 		this._cancelPostCompactionContinue();
 		this.abortRetry();
+		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");
 		this._goalAbortInProgress = this._goalState.status === "active";
 		this.agent.abort();

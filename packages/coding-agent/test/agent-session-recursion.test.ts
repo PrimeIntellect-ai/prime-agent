@@ -118,12 +118,16 @@ interface InspectableRlmRun {
 	status: string;
 	settled: boolean;
 	error?: string;
+	abandonedForQuiescence?: boolean;
+	publication?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
+	settlement?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	detachedDeletion?: Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number];
 	session?: AgentSession;
 }
 
 interface InspectableRlmSession {
 	_activeRlmChildRuns: Map<string, InspectableRlmRun>;
+	_unsettledRlmChildRuns: Set<InspectableRlmRun>;
 	_deletingRlmChildren: Map<
 		string,
 		{
@@ -2405,6 +2409,64 @@ describe("AgentSession rlm recursion", () => {
 		expect(run.status).toBe("cancelled");
 		expect(run.error).toBe("Parent session aborted");
 		expect(promptAndWait).not.toHaveBeenCalled();
+	});
+
+	it("cancels strong quiescence before abandoning children for an update restart", async () => {
+		const deferred = () => {
+			let resolve!: () => void;
+			let reject!: (error: Error) => void;
+			const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+				resolve = resolvePromise;
+				reject = rejectPromise;
+			});
+			promise.catch(() => undefined);
+			return { promise, resolve, reject };
+		};
+		const child = createSession({ rlmSessionDir: join(tempDir, "update-restart-parent") });
+		const childInternals = child as unknown as InspectableRlmSession;
+		childInternals._activeRlmChildRuns.set("live-grandchild", {
+			id: "live-grandchild",
+			prompt: "still working",
+			sessionName: "live-grandchild",
+			sessionDir: join(tempDir, "live-grandchild"),
+			model,
+			abort: () => {},
+			status: "running",
+			settled: false,
+		});
+		const root = createSession();
+		const rootInternals = root as unknown as InspectableRlmSession;
+		const run: InspectableRlmRun = {
+			id: "update-restart-parent",
+			prompt: "parent work",
+			sessionName: "update-restart-parent",
+			sessionDir: join(tempDir, "update-restart-parent"),
+			model,
+			abort: () => {},
+			status: "running",
+			settled: false,
+			publication: deferred(),
+			settlement: deferred(),
+			session: child,
+		};
+		rootInternals._activeRlmChildRuns.set(run.id, run);
+		rootInternals._unsettledRlmChildRuns.add(run);
+
+		const quiescence = root.waitForRlmQuiescence();
+		await Promise.resolve();
+		root.abortForUpdateRestart();
+
+		await expect(quiescence).rejects.toThrow("RLM quiescence wait cancelled");
+		expect(run.abandonedForQuiescence).toBe(true);
+		expect(root.getRlmChildSnapshots()).toEqual(
+			expect.arrayContaining([expect.objectContaining({ id: "live-grandchild", status: "running" })]),
+		);
+
+		rootInternals._activeRlmChildRuns.clear();
+		rootInternals._unsettledRlmChildRuns.clear();
+		childInternals._activeRlmChildRuns.clear();
+		root.dispose();
+		child.dispose();
 	});
 
 	it("does not carry an abandoned queued child into the next strong quiescence lifecycle", async () => {

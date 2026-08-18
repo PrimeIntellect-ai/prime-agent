@@ -928,7 +928,6 @@ export async function runAcpModeWithConnection(
 			const closing = session;
 			try {
 				await closing.cancelTask?.catch(() => undefined);
-				closing.unsubscribe?.();
 				closing.cancelling = true;
 				closing.abort?.abort();
 				const pending = closing.pendingTerminal;
@@ -938,6 +937,7 @@ export async function runAcpModeWithConnection(
 					const inputPauseKey = closing.inputPauseKey;
 					if (!inputPauseKey) throw new Error("Missing ACP close input-pause key");
 					await stopSessionWork(pending, promptTask);
+					closing.unsubscribe?.();
 					// Keep the backing session fenced until a replacement ACP session is admitted.
 					await closing.producer.close();
 					closedInputPause = inputPause;
@@ -954,6 +954,7 @@ export async function runAcpModeWithConnection(
 				if (session === closing) session = undefined;
 				return {};
 			} finally {
+				if (session === closing) closing.cancelling = false;
 				finishClose();
 				sessionCloseTask = undefined;
 				sessionCloseInFlight = false;

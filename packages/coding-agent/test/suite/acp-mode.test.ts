@@ -730,27 +730,46 @@ describe("ACP mode end to end", () => {
 		close();
 	});
 
-	it("keeps a failed close retriable without reopening prompt admission", async () => {
+	it("keeps failed close state fenced and recoverable through cancellation", async () => {
 		let abortAttempts = 0;
+		let unsubscribeAttempts = 0;
 		const connection = fakeAcpConnection({
 			onAbort: () => {
 				abortAttempts++;
 				if (abortAttempts === 1) throw new Error("transient stop failure");
 			},
+			onUnsubscribe: () => {
+				unsubscribeAttempts++;
+			},
 		});
-		const { client, close } = connectAcpClient(connection);
+		const { client, updates, close } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
 
 		await expect(client.request("session/close", { sessionId: session.sessionId })).rejects.toThrow();
+		expect(unsubscribeAttempts).toBe(0);
 		await expect(
 			client.request("session/prompt", {
 				sessionId: session.sessionId,
 				prompt: [{ type: "text", text: "must remain closed to prompts" }],
 			}),
 		).rejects.toThrow();
+
+		await client.notify("session/cancel", { sessionId: session.sessionId });
+		await vi.waitFor(() => expect(abortAttempts).toBe(2));
+		const updatesBeforeHeartbeat = updates.length;
+		connection.emitHeartbeat();
+		await vi.waitFor(() => expect(updates.length).toBeGreaterThan(updatesBeforeHeartbeat));
+		await expect(
+			client.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "admitted after successful reconciliation" }],
+			}),
+		).resolves.toBeDefined();
+
 		await expect(client.request("session/close", { sessionId: session.sessionId })).resolves.toEqual({});
-		expect(abortAttempts).toBe(2);
+		expect(abortAttempts).toBe(3);
+		expect(unsubscribeAttempts).toBe(1);
 		close();
 	});
 
