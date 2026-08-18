@@ -1336,6 +1336,25 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("suppresses a done child's unsettled fallback notice at the cancellation cut", async () => {
+		const root = createSession();
+		let suppressed = false;
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update" && event.child.status === "done") {
+				suppressed = root.cancelRlmChildRun(event.child.id);
+			}
+		});
+
+		await root.runRlmChild("silent child at cancellation cut", { name: "suppressed-worker" });
+		await root.waitForRlmQuiescence();
+		expect(suppressed).toBe(true);
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+	});
+
 	it("does not inject a terminal notice when a parent follow-up resets reply state after a reply", async () => {
 		const child = createSession({
 			depth: 1,
@@ -2377,6 +2396,41 @@ describe("AgentSession rlm recursion", () => {
 		expect(promptAndWait).not.toHaveBeenCalled();
 	});
 
+	it("does not carry an abandoned queued child into the next strong quiescence lifecycle", async () => {
+		let releaseStartup: () => void = () => {};
+		const startupGate = new Promise<void>((resolve) => {
+			releaseStartup = resolve;
+		});
+		const child = createSession({ rlmSessionDir: join(tempDir, "abandoned-queued-child") });
+		const promptAndWait = vi.spyOn(child, "promptAndWait");
+		const root = createSession({
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				stream.push({ type: "done", reason: "stop", message: assistantMessage("next lifecycle done") });
+				return stream;
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					await startupGate;
+					return { session: child };
+				},
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		const spawned = await root.runRlmChild("blocked startup");
+		root.requestAbort();
+		expect(root.cancelRlmChildRun(spawned.rlm_child_id)).toBe(true);
+		await expect(root.waitForRlmQuiescence()).resolves.toBeUndefined();
+		root.resumeQueuedWork();
+		await root.prompt("next lifecycle");
+		await expect(root.waitForRlmQuiescence()).resolves.toBeUndefined();
+
+		releaseStartup();
+		await waitFor(() => !(root as unknown as InspectableRlmSession)._activeRlmChildRuns.has(spawned.rlm_child_id));
+		expect(promptAndWait).not.toHaveBeenCalled();
+	});
+
 	it("does not cancel active rlm children when only the parent turn is interrupted", async () => {
 		let releaseChild: () => void = () => {};
 		const release = new Promise<void>((resolve) => {
@@ -2575,6 +2629,52 @@ describe("AgentSession rlm recursion", () => {
 		expect(disposeChild).not.toHaveBeenCalled();
 		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.size).toBe(0);
 		expect(root.getRlmChildSession(spawned.rlm_child_id)).toBeUndefined();
+	});
+
+	it("keeps deleted live runs in the RLM quiescence barrier until settlement", async () => {
+		let releaseChild: () => void = () => {};
+		const release = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const hostedChild = createSession({
+			rlmSessionDir: join(tempDir, "deleted-live-child"),
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void release.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("child stopped") });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(hostedChild, "abort").mockResolvedValue();
+		const root = createSession({
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				stream.push({ type: "done", reason: "stop", message: assistantMessage("parent acknowledged") });
+				return stream;
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		const spawned = await root.runRlmChild("slow child", { name: "deleted-live-worker" });
+		await waitFor(() => childStarted);
+		let quiesced = false;
+		const quiescence = root.waitForRlmQuiescence().then(() => {
+			quiesced = true;
+		});
+		await root.deleteRlmSubagent(spawned.rlm_child_id);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		await sleep(20);
+		expect(quiesced).toBe(false);
+
+		releaseChild();
+		await quiescence;
+		expect(quiesced).toBe(true);
 	});
 
 	it("does not let completion retention resurrect a child being deleted", async () => {
@@ -2954,6 +3054,8 @@ describe("AgentSession rlm recursion", () => {
 					void nestedRelease.then(() => {
 						stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
 					});
+				} else {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("cancellation acknowledged") });
 				}
 				return stream;
 			},

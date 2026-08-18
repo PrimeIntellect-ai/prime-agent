@@ -5,7 +5,8 @@ import {
 	type AgentSessionMessage,
 	createAgentSessionMessage,
 } from "../../../src/core/agent-messages.js";
-import { createHarness, type Harness } from "../harness.js";
+import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
+import { createHarness, getAssistantTexts, type Harness } from "../harness.js";
 
 function terminalMessage(messages: readonly unknown[]): AgentSessionMessage | undefined {
 	return messages.find(
@@ -91,6 +92,54 @@ describe("#617 subagent terminal agent messages", () => {
 		);
 		expect(terminalMessage(parent.session.messages)?.content).toContain(spawned.rlm_child_id);
 	});
+	it("waits for the parent to consume a child terminal notice", async () => {
+		const childSessionName = "headless-worker";
+		child = await createHarness({
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				sendAgentMessage: async (input) => {
+					const message = createAgentSessionMessage({
+						id: "agentmsg-headless-completion",
+						source: "agent_message",
+						message: input.message,
+						from: {
+							activeSessionId: "child-active",
+							sessionId: child!.session.sessionId,
+							sessionName: childSessionName,
+						},
+						fromRelationship: "child",
+						target: { activeSessionId: "parent-active", sessionId: parent!.session.sessionId },
+					});
+					await parent!.session.acceptAgentMessagePrompt(message.content, { customMessage: message });
+					return {
+						id: message.details.id,
+						source: "agent_message",
+						target: { activeSessionId: "parent-active", sessionId: parent!.session.sessionId },
+						message: input.message,
+						deliveryStatus: "delivered",
+					};
+				},
+			},
+		});
+		parent = await createHarness({
+			serializedRefine: true,
+			rlmDepth: 0,
+			rlmMaxDepth: 1,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child!.session }),
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+		child.setResponses([fauxAssistantMessage("child completed")]);
+		parent.setResponses([fauxAssistantMessage("parent consumed the child result")]);
+
+		await parent.session.runRlmChild("finish without replying", { name: childSessionName });
+		await waitForHeadlessCompletion(parent.session, { waitForRlmQuiescence: true });
+
+		expect(getAssistantTexts(parent)).toEqual(["parent consumed the child result"]);
+		expect(parent.session.hasRunningRlmChildren()).toBe(false);
+	});
+
 	it("falls back to an injected notice when the agent message cannot be delivered", async () => {
 		// A controller that always rejects: the parent must still learn the child
 		// finished. Losing the notice entirely is worse than losing attribution.

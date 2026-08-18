@@ -61,8 +61,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
 // Revision 17 gates authoritative child rosters and transient owned-session recovery context.
-export const DAEMON_SCHEMA_REVISION = 17;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-84d48af53ec6";
+// Revision 18 adds the opt-in RLM quiescence barrier to headless completion.
+export const DAEMON_SCHEMA_REVISION = 19;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-19-29b4f87f83e7";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -103,7 +104,9 @@ export type DaemonServerCapability =
 	| "prompt_admission_cancellation"
 	| "queue_message_mutation"
 	| "authoritative_child_roster"
-	| "owned_session_recovery_context";
+	| "owned_session_recovery_context"
+	| "rlm_quiescence_barrier"
+	| "session_input_pause";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -144,6 +147,8 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"queue_message_mutation",
 	"authoritative_child_roster",
 	"owned_session_recovery_context",
+	"rlm_quiescence_barrier",
+	"session_input_pause",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -508,7 +513,12 @@ export type DaemonCommand =
 	| { id?: string; type: "cancel_rlm_child"; activeSessionId: string; childId: string }
 	| { id?: string; type: "delete_rlm_subagent"; activeSessionId: string; childId: string }
 	| { id?: string; type: "wait_for_idle"; activeSessionId: string }
-	| { id?: string; type: "wait_for_headless_completion"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "wait_for_headless_completion";
+			activeSessionId: string;
+			waitForRlmQuiescence?: boolean;
+	  }
 	| { id?: string; type: "get_session_header"; activeSessionId: string }
 	| { id?: string; type: "get_state"; activeSessionId: string }
 	| { id?: string; type: "get_connection_state"; activeSessionId: string }
@@ -532,6 +542,8 @@ export type DaemonCommand =
 	  }
 	| { id?: string; type: "clear_queue"; activeSessionId: string }
 	| { id?: string; type: "abort_and_clear_queue"; activeSessionId: string }
+	| { id?: string; type: "acquire_session_input_pause"; activeSessionId: string; leaseKey: string }
+	| { id?: string; type: "release_session_input_pause"; activeSessionId: string; pauseId: string }
 	| { id?: string; type: "cron_list"; activeSessionId?: string; includeInactive?: boolean }
 	| { id?: string; type: "heartbeats_list"; activeSessionId?: string }
 	| {
@@ -667,6 +679,16 @@ const OWNED_SESSION_RECOVERY_CONTEXT = {
 	minSchemaRevision: 17,
 	capability: "owned_session_recovery_context",
 } as const;
+const RLM_QUIESCENCE_BARRIER_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 18,
+	capability: "rlm_quiescence_barrier",
+} as const;
+const SESSION_INPUT_PAUSE_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 19,
+	capability: "session_input_pause",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -718,6 +740,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	mutate_queued_message: { minProtocol: 7, minSchemaRevision: 15, capability: "queue_message_mutation" },
 	clear_queue: LEGACY_DAEMON_COMMAND,
 	abort_and_clear_queue: LEGACY_DAEMON_COMMAND,
+	acquire_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
+	release_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
 	cron_list: LEGACY_DAEMON_COMMAND,
 	heartbeats_list: { minProtocol: 7, capability: "heartbeat_catalog" },
 	heartbeat_manage: { minProtocol: 7, capability: "heartbeat_management" },
@@ -781,6 +805,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	if (carriesTelemetryPolicy) requirements.push(TELEMETRY_POLICY_COMMAND);
 	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 		requirements.push(PROMPT_ADMISSION_CANCELLATION_COMMAND);
+	}
+	if (command.type === "wait_for_headless_completion" && command.waitForRlmQuiescence === true) {
+		requirements.push(RLM_QUIESCENCE_BARRIER_COMMAND);
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }

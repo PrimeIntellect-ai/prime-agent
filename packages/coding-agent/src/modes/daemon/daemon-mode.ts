@@ -462,6 +462,10 @@ export class AgentDaemon {
 	private server?: Server;
 	private shuttingDown = false;
 	private readonly updateRestartQueuePauses = new Map<string, { release(): void }>();
+	private readonly sessionInputPauses = new Map<
+		string,
+		{ activeSessionId: string; owner: DaemonSocketClient; leaseKey: string; pause: { release(): void } }
+	>();
 	private readonly mutationDrain = new MutationDrainLatch();
 	private updateRestart?: {
 		id: symbol;
@@ -3342,6 +3346,11 @@ export class AgentDaemon {
 			socket.off("close", cleanup);
 			socket.off("error", cleanup);
 			this.clearClientCatchupRetry(client);
+			for (const [pauseId, entry] of this.sessionInputPauses) {
+				if (entry.owner !== client) continue;
+				entry.pause.release();
+				this.sessionInputPauses.delete(pauseId);
+			}
 			this.detachClient(client);
 			client.detachInput();
 			this.clients.delete(client);
@@ -3945,8 +3954,18 @@ export class AgentDaemon {
 			case "detach": {
 				if (command.activeSessionId) {
 					const state = this.getSessionState(command.activeSessionId);
+					for (const [pauseId, entry] of this.sessionInputPauses) {
+						if (entry.owner !== client || entry.activeSessionId !== command.activeSessionId) continue;
+						entry.pause.release();
+						this.sessionInputPauses.delete(pauseId);
+					}
 					this.detachClientFromSession(client, state);
 				} else {
+					for (const [pauseId, entry] of this.sessionInputPauses) {
+						if (entry.owner !== client) continue;
+						entry.pause.release();
+						this.sessionInputPauses.delete(pauseId);
+					}
 					this.detachClient(client);
 				}
 				return success(command.id, "detach");
@@ -4390,6 +4409,36 @@ export class AgentDaemon {
 				});
 			}
 
+			case "acquire_session_input_pause": {
+				const existing = [...this.sessionInputPauses].find(([, entry]) => entry.leaseKey === command.leaseKey);
+				if (existing) {
+					if (existing[1].owner !== client || existing[1].activeSessionId !== command.activeSessionId) {
+						throw new Error(`Session input pause key is owned by another client: ${command.leaseKey}`);
+					}
+					return success(command.id, "acquire_session_input_pause", { pauseId: existing[0] });
+				}
+				const state = this.getSessionState(command.activeSessionId);
+				const pauseId = randomUUID();
+				this.sessionInputPauses.set(pauseId, {
+					activeSessionId: command.activeSessionId,
+					owner: client,
+					leaseKey: command.leaseKey,
+					pause: state.runtime.session.acquireSessionInputPause(),
+				});
+				return success(command.id, "acquire_session_input_pause", { pauseId });
+			}
+
+			case "release_session_input_pause": {
+				const entry = this.sessionInputPauses.get(command.pauseId);
+				if (!entry) return success(command.id, "release_session_input_pause");
+				if (entry.owner !== client || entry.activeSessionId !== command.activeSessionId) {
+					throw new Error(`Session input pause is owned by another client: ${command.pauseId}`);
+				}
+				this.sessionInputPauses.delete(command.pauseId);
+				entry.pause.release();
+				return success(command.id, "release_session_input_pause");
+			}
+
 			case "wait_for_idle": {
 				const state = this.getSessionState(command.activeSessionId);
 				await state.runtime.session.waitForIdle();
@@ -4401,7 +4450,9 @@ export class AgentDaemon {
 				return success(
 					command.id,
 					"wait_for_headless_completion",
-					await waitForHeadlessCompletion(state.runtime.session),
+					await waitForHeadlessCompletion(state.runtime.session, {
+						waitForRlmQuiescence: command.waitForRlmQuiescence,
+					}),
 				);
 			}
 

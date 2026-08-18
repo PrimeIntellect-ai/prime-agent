@@ -52,6 +52,7 @@ import type {
 	AgentConnectionExecuteBashOptions,
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionForkOptions,
+	AgentConnectionHeadlessCompletionOptions,
 	AgentConnectionHeartbeat,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
@@ -72,6 +73,7 @@ import type {
 	AgentConnectionScopedModel,
 	AgentConnectionSessionContext,
 	AgentConnectionSessionHeader,
+	AgentConnectionSessionInputPause,
 	AgentConnectionSessionListCallbacks,
 	AgentConnectionSessionTreeFlatNode,
 	AgentConnectionSessionTreeNode,
@@ -598,6 +600,26 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 	}
 
+	async acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause> {
+		const { pauseId } = await this.requestData<{ pauseId: string }>({
+			type: "acquire_session_input_pause",
+			activeSessionId: this.activeSessionId,
+			leaseKey,
+		});
+		let released = false;
+		return {
+			release: async () => {
+				if (released) return;
+				await this.requestData({
+					type: "release_session_input_pause",
+					activeSessionId: this.activeSessionId,
+					pauseId,
+				});
+				released = true;
+			},
+		};
+	}
+
 	async listCronJobs(options: { includeInactive?: boolean } = {}): Promise<AgentCronJob[]> {
 		const data = await this.requestData<{ jobs: AgentCronJob[] }>({
 			type: "cron_list",
@@ -956,11 +978,17 @@ export class DaemonAgentConnection implements AgentConnection {
 		);
 	}
 
-	async waitForHeadlessCompletion(): Promise<AgentAutonomousStatus> {
+	async waitForHeadlessCompletion(options?: AgentConnectionHeadlessCompletionOptions): Promise<AgentAutonomousStatus> {
+		if (options?.waitForRlmQuiescence && !this.client.supportsServerCapability("rlm_quiescence_barrier")) {
+			throw new Error(
+				"the daemon is running an older build without RLM quiescence barriers; restart the daemon and try again",
+			);
+		}
 		return this.requestData<AgentAutonomousStatus>(
 			{
 				type: "wait_for_headless_completion",
 				activeSessionId: this.activeSessionId,
+				...(options?.waitForRlmQuiescence ? { waitForRlmQuiescence: true } : {}),
 			},
 			DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
 		);

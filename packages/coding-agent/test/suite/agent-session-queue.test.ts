@@ -2644,6 +2644,53 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["queued before abort", "wake after abort"]);
 	});
 
+	it("rejects all new session actions while an input admission pause is held", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const pause = harness.session.acquireSessionInputPause();
+		await expect(harness.session.prompt("blocked prompt")).rejects.toThrow("input admission is paused");
+		await expect(harness.session.followUp("blocked follow-up")).rejects.toThrow("input admission is paused");
+
+		pause.release();
+		harness.setResponses([fauxAssistantMessage("resumed")]);
+		await harness.session.prompt("allowed prompt");
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["allowed prompt"]);
+	});
+
+	it("does not admit a late agent message across an abort and explicit resume", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("user turn done")]);
+		harness.session.requestAbort();
+		const lateAgentMessage = harness.session.acceptAgentMessagePrompt(
+			agentPromptText("agentmsg_after_abort", "late child result"),
+		);
+		const lateRejection = expect(lateAgentMessage).rejects.toThrow("invalidated before admission");
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+		await harness.session.prompt("explicit user resume");
+		await lateRejection;
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["explicit user resume"]);
+	});
+
+	it("invalidates late agent-message admission when queued work is resumed", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.requestAbort();
+		const lateAgentMessage = harness.session.acceptAgentMessagePrompt(
+			agentPromptText("agentmsg_resume_queue", "late child result"),
+		);
+		const lateRejection = expect(lateAgentMessage).rejects.toThrow("invalidated before admission");
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+		harness.session.resumeQueuedWork();
+		await lateRejection;
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual([]);
+	});
+
 	it("waitForIdle resolves when the queue is cleared while the pump is suspended", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

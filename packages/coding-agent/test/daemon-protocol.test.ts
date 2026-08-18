@@ -189,8 +189,40 @@ describe("daemon protocol helpers", () => {
 			{ minProtocol: 7 },
 		]);
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
-			expect.arrayContaining(["authoritative_child_roster", "owned_session_recovery_context"]),
+			expect.arrayContaining([
+				"authoritative_child_roster",
+				"owned_session_recovery_context",
+				"rlm_quiescence_barrier",
+			]),
 		);
+	});
+
+	it("gates the opt-in RLM quiescence wire field", () => {
+		expect(
+			getDaemonCommandCompatibilities({
+				type: "wait_for_headless_completion",
+				activeSessionId: "active-1",
+				waitForRlmQuiescence: true,
+			}),
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 18, capability: "rlm_quiescence_barrier" }, { minProtocol: 7 }]);
+		expect(
+			getDaemonCommandCompatibilities({
+				type: "wait_for_headless_completion",
+				activeSessionId: "active-1",
+			}),
+		).toEqual([{ minProtocol: 7 }]);
+	});
+
+	it("capability- and schema-gates session input pause leases", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.acquire_session_input_pause).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 19,
+			capability: "session_input_pause",
+		});
+		expect(DAEMON_COMMAND_COMPATIBILITY.release_session_input_pause).toEqual(
+			DAEMON_COMMAND_COMPATIBILITY.acquire_session_input_pause,
+		);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("session_input_pause");
 	});
 
 	it("version- and capability-gates prompt admission cancellation", () => {

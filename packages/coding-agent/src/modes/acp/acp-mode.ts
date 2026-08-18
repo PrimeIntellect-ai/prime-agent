@@ -15,6 +15,7 @@ import type {
 	AgentConnection,
 	AgentConnectionRlmChildAgentSnapshot,
 	AgentConnectionSessionEvent,
+	AgentConnectionSessionInputPause,
 } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
@@ -112,9 +113,33 @@ export interface AcpModeOptions {
 	ownStdout?: boolean;
 }
 
+interface AcpPendingTerminal {
+	promptTurnId: number;
+	boundary: TurnBoundary;
+	outcome: "result" | "error";
+	abort: AbortController;
+	failure?: string;
+	task?: Promise<void>;
+}
+
+interface AcpInputPauseRelease {
+	promise: Promise<void>;
+	resolve(): void;
+	reject(error: unknown): void;
+}
+
 interface AcpSessionEntry {
 	id: string;
 	abort: AbortController | undefined;
+	cancelling: boolean;
+	cancelTask: Promise<void> | undefined;
+	stopFailure: string | undefined;
+	inputPause: AgentConnectionSessionInputPause | undefined;
+	inputPauseKey: string | undefined;
+	inputPauseRelease: AcpInputPauseRelease | undefined;
+	pendingTerminal: AcpPendingTerminal | undefined;
+	promptTask: Promise<void> | undefined;
+	resolvePromptTask: (() => void) | undefined;
 	unsubscribe: (() => void) | undefined;
 	producer: AcpUpdateProducer;
 }
@@ -136,6 +161,8 @@ class AcpUpdateProducer {
 	private readonly childOriginTurnIds = new Map<string, number>();
 	private readonly terminalChildOriginTurns = new Set<number>();
 	private readonly responseCommittedTurns = new Set<number>();
+	private readonly terminalLifecycleTurns = new Set<number>();
+	private readonly finishedPromptTurns = new Set<number>();
 	private readonly admissionReady: Promise<void>;
 	private releaseAdmission!: () => void;
 	private admissionOpen = false;
@@ -169,12 +196,29 @@ class AcpUpdateProducer {
 		return this.activePromptTurnId;
 	}
 
-	finishPrompt(turnId: number): void {
-		if (this.activePromptTurnId === turnId) this.activePromptTurnId = 0;
+	private cleanupTurn(turnId: number): void {
 		this.responseCommittedTurns.delete(turnId);
 		if (![...this.childOriginTurnIds.values()].some((originTurnId) => originTurnId === turnId)) {
 			this.terminalChildOriginTurns.delete(turnId);
 		}
+	}
+
+	beginTerminalLifecycle(turnId: number): void {
+		this.terminalLifecycleTurns.add(turnId);
+	}
+
+	finishPrompt(turnId: number): void {
+		if (this.activePromptTurnId === turnId) this.activePromptTurnId = 0;
+		if (this.terminalLifecycleTurns.has(turnId)) {
+			this.finishedPromptTurns.add(turnId);
+			return;
+		}
+		this.cleanupTurn(turnId);
+	}
+
+	finishTerminalLifecycle(turnId: number): void {
+		this.terminalLifecycleTurns.delete(turnId);
+		if (this.finishedPromptTurns.delete(turnId)) this.cleanupTurn(turnId);
 	}
 
 	/**
@@ -442,8 +486,11 @@ export async function runAcpModeWithConnection(
 	// session keeps every event unambiguously attributable; a second session/new
 	// is refused rather than silently sharing conversation state, cwd, and queues.
 	let session: AcpSessionEntry | undefined;
+	let closedInputPause: AgentConnectionSessionInputPause | undefined;
+	let closedInputPauseKey: string | undefined;
 	let sessionNewInFlight = false;
 	let sessionCloseInFlight = false;
+	let sessionCloseTask: Promise<void> | undefined;
 	let bound = false;
 
 	const baseStream =
@@ -452,11 +499,19 @@ export async function runAcpModeWithConnection(
 	// commit callback. Observe the outgoing response at the supplied stream
 	// boundary instead. The SDK serializes every write, so opening the producer
 	// after this write resolves puts buffered notifications strictly behind it.
-	let pendingSessionNewResponse: { requestId: unknown; producer: AcpUpdateProducer } | undefined;
+	let pendingSessionNewResponse:
+		| {
+				requestId: unknown;
+				producer: AcpUpdateProducer;
+				entry: AcpSessionEntry;
+				inputPause: AgentConnectionSessionInputPause | undefined;
+		  }
+		| undefined;
 	const failPendingSessionNewResponse = (): void => {
 		const admission = pendingSessionNewResponse;
 		pendingSessionNewResponse = undefined;
 		admission?.producer.failSessionNewAdmission();
+		admission?.entry.inputPauseRelease?.reject(new Error("ACP session/new response was not delivered"));
 	};
 	type AcpStreamMessage = typeof baseStream.writable extends WritableStream<infer TMessage> ? TMessage : never;
 	const stream: typeof baseStream = {
@@ -476,6 +531,24 @@ export async function runAcpModeWithConnection(
 				if (pendingSessionNewResponse && isJsonRpcResponse(message, pendingSessionNewResponse.requestId)) {
 					const admission = pendingSessionNewResponse;
 					pendingSessionNewResponse = undefined;
+					if (admission.inputPause) {
+						try {
+							await admission.inputPause.release();
+							if (admission.entry.inputPause === admission.inputPause) {
+								admission.entry.inputPause = undefined;
+								admission.entry.inputPauseKey = undefined;
+							}
+							if (closedInputPause === admission.inputPause) {
+								closedInputPause = undefined;
+								closedInputPauseKey = undefined;
+							}
+							admission.entry.inputPauseRelease?.resolve();
+							admission.entry.inputPauseRelease = undefined;
+						} catch (error) {
+							admission.entry.stopFailure = error instanceof Error ? error.message : String(error);
+							admission.entry.inputPauseRelease?.reject(error);
+						}
+					}
 					admission.producer.commitSessionNewResponse();
 				}
 			},
@@ -506,6 +579,80 @@ export async function runAcpModeWithConnection(
 				failPendingSessionNewResponse();
 			},
 		}),
+	};
+
+	const cancelOutstandingRlmChildren = async (): Promise<void> => {
+		const children = await connection.getRlmChildSnapshots();
+		const cancellations = await Promise.allSettled(children.map((child) => connection.cancelRlmChild(child.id)));
+		const failed = cancellations.find((result) => result.status === "rejected");
+		if (failed?.status === "rejected") throw failed.reason;
+	};
+	const abortConnectionWork = async (): Promise<void> => {
+		await connection.abortAndClearQueue();
+	};
+	const acquireStopInputPause = async (entry: AcpSessionEntry): Promise<AgentConnectionSessionInputPause> => {
+		if (entry.inputPauseRelease) {
+			await entry.inputPauseRelease.promise.catch(() => undefined);
+			entry.inputPauseRelease = undefined;
+		}
+		const leaseKey = entry.inputPauseKey ?? randomUUID();
+		entry.inputPauseKey = leaseKey;
+		const pause = await connection.acquireSessionInputPause(leaseKey);
+		entry.inputPause = pause;
+		return pause;
+	};
+
+	const stopSessionWork = async (pending?: AcpPendingTerminal, promptTask?: Promise<void>): Promise<void> => {
+		await abortConnectionWork();
+		await connection.waitForIdle();
+		await cancelOutstandingRlmChildren();
+		await pending?.task;
+		await promptTask;
+	};
+
+	const finalizePendingTerminal = (entry: AcpSessionEntry, pending: AcpPendingTerminal): void => {
+		pending.task = (async () => {
+			while (true) {
+				const status = await connection.waitForHeadlessCompletion({ waitForRlmQuiescence: true });
+				if (pending.abort.signal.aborted || session !== entry || entry.pendingTerminal !== pending) return;
+				const finalFailure = await turnFailure(connection, pending.boundary);
+				if (pending.abort.signal.aborted || session !== entry || entry.pendingTerminal !== pending) return;
+				const liveChildren = await connection.getRlmChildSnapshots();
+				if (pending.abort.signal.aborted || session !== entry || entry.pendingTerminal !== pending) return;
+				const terminalQuiescence = quiescenceMeta(status, liveChildren);
+				if (terminalQuiescence.outstandingSubagents !== 0) continue;
+
+				entry.producer.sealTerminal(pending.promptTurnId);
+				const autonomous = autonomousMeta(status);
+				const publication = entry.producer.publish(
+					{
+						sessionUpdate: "session_info_update",
+						_meta: primeAgentMeta({ ...(autonomous ? { autonomous } : {}), quiescence: terminalQuiescence }),
+					},
+					pending.promptTurnId,
+					"terminalQuiescence",
+					finalFailure ? "error" : pending.outcome,
+				);
+				// publish() admits the terminal update synchronously before its first await.
+				// Release the next prompt only after that ordering cut, not after the client
+				// has already observed the notification.
+				if (entry.pendingTerminal === pending) entry.pendingTerminal = undefined;
+				if (entry.abort === pending.abort) entry.abort = undefined;
+				if (!(await publication)) return;
+				await entry.producer.drain();
+				return;
+			}
+		})()
+			.catch((error: unknown) => {
+				if (pending.abort.signal.aborted || entry.pendingTerminal !== pending) return;
+				pending.failure = error instanceof Error ? error.message : String(error);
+			})
+			.finally(() => {
+				entry.producer.finishTerminalLifecycle(pending.promptTurnId);
+				if (!pending.abort.signal.aborted) return;
+				if (entry.pendingTerminal === pending) entry.pendingTerminal = undefined;
+				if (entry.abort === pending.abort) entry.abort = undefined;
+			});
 	};
 
 	const handle = acp
@@ -562,7 +709,32 @@ export async function runAcpModeWithConnection(
 				// while the snapshot request is in flight; the connection remains the
 				// authoritative source used when quiescence is emitted below.
 				const producer = new AcpUpdateProducer(sessionId, ctx.client);
-				const entry: AcpSessionEntry = { id: sessionId, abort: undefined, unsubscribe: undefined, producer };
+				let inputPauseRelease: AcpInputPauseRelease | undefined;
+				if (closedInputPause) {
+					let resolve!: () => void;
+					let reject!: (error: unknown) => void;
+					const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+						resolve = resolvePromise;
+						reject = rejectPromise;
+					});
+					void promise.catch(() => undefined);
+					inputPauseRelease = { promise, resolve, reject };
+				}
+				const entry: AcpSessionEntry = {
+					id: sessionId,
+					abort: undefined,
+					cancelling: false,
+					cancelTask: undefined,
+					stopFailure: undefined,
+					inputPause: closedInputPause,
+					inputPauseKey: closedInputPauseKey,
+					inputPauseRelease,
+					pendingTerminal: undefined,
+					promptTask: undefined,
+					resolvePromptTask: undefined,
+					unsubscribe: undefined,
+					producer,
+				};
 				// Subscribe for the session lifetime, not per prompt turn: prime-agent
 				// subagents are fire-and-forget and keep reporting after the spawning turn
 				// ends, so a turn-scoped subscription would drop their updates. One
@@ -619,7 +791,12 @@ export async function runAcpModeWithConnection(
 				};
 				// The stream wrapper commits this gate after this exact response has
 				// written. Buffered subscription updates retain producer order.
-				pendingSessionNewResponse = { requestId: ctx.requestId, producer: entry.producer };
+				pendingSessionNewResponse = {
+					requestId: ctx.requestId,
+					producer: entry.producer,
+					entry,
+					inputPause: closedInputPause,
+				};
 				return response;
 			} finally {
 				sessionNewInFlight = false;
@@ -630,10 +807,25 @@ export async function runAcpModeWithConnection(
 			const entry = session?.id === params.sessionId ? session : undefined;
 			if (!entry) throw new Error(`Unknown ACP session: ${params.sessionId}`);
 			if (sessionCloseInFlight) throw new Error(`ACP session is closing: ${params.sessionId}`);
+			if (entry.cancelling) throw new Error(`ACP session is cancelling: ${params.sessionId}`);
+			await entry.inputPauseRelease?.promise;
+			if (session !== entry) throw new Error(`Unknown ACP session: ${params.sessionId}`);
+			if (sessionCloseInFlight) throw new Error(`ACP session is closing: ${params.sessionId}`);
+			if (entry.cancelling) throw new Error(`ACP session is cancelling: ${params.sessionId}`);
+			if (entry.stopFailure) throw new Error(`ACP session stop failed: ${entry.stopFailure}`);
+			if (entry.pendingTerminal?.failure) {
+				throw new Error(`ACP lifecycle reconciliation failed: ${entry.pendingTerminal.failure}`);
+			}
 			if (entry.abort) throw new Error("A prompt turn is already running for this ACP session");
 
 			const abort = new AbortController();
 			entry.abort = abort;
+			let resolvePromptTask!: () => void;
+			const promptTask = new Promise<void>((resolve) => {
+				resolvePromptTask = resolve;
+			});
+			entry.promptTask = promptTask;
+			entry.resolvePromptTask = resolvePromptTask;
 			// Allocate the causal turn before the first await, not when an update is
 			// delivered. This prevents late producer events becoming the next turn.
 			const promptTurnId = entry.producer.beginPrompt();
@@ -667,16 +859,11 @@ export async function runAcpModeWithConnection(
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
 				const outcome = failure ? "error" : "result";
-				const terminalQuiescence = quiescenceMeta(status, liveChildren);
-				// Lifecycle completion is authoritative here: unused autonomous
-				// continuation capacity is telemetry, not outstanding work.
-				const terminal = terminalQuiescence.outstandingSubagents === 0;
-				// Completion linearizes here, before either notification is queued. A
-				// cancellation before this cut produces no boundary; a cancellation after
-				// it cannot contradict a durable response boundary. Terminal turns also
-				// move their retained child events to connection scope.
-				if (terminal) entry.producer.sealTerminal(promptTurnId);
-				else entry.producer.commitResponse(promptTurnId);
+				const observedQuiescence = quiescenceMeta(status, liveChildren);
+				// The roster is telemetry at the response cut, not proof of terminality:
+				// a child can publish a terminal status before its result reaches the parent.
+				// Every turn therefore finalizes through the strong settlement barrier.
+				entry.producer.commitResponse(promptTurnId);
 				responseBoundaryEmitted = await entry.producer.publish(
 					{ sessionUpdate: "session_info_update", _meta: primeAgentMeta({}) },
 					promptTurnId,
@@ -687,14 +874,19 @@ export async function runAcpModeWithConnection(
 				const completionUpdateEmitted = await entry.producer.publish(
 					{
 						sessionUpdate: "session_info_update",
-						_meta: primeAgentMeta({ ...(autonomous ? { autonomous } : {}), quiescence: terminalQuiescence }),
+						_meta: primeAgentMeta({ ...(autonomous ? { autonomous } : {}), quiescence: observedQuiescence }),
 					},
 					promptTurnId,
-					terminal ? "terminalQuiescence" : "event",
-					terminal ? outcome : undefined,
+					"event",
 				);
 				if (!completionUpdateEmitted) throw new Error("Failed to publish ACP completion update");
 				await entry.producer.drain();
+				if (!abort.signal.aborted) {
+					entry.producer.beginTerminalLifecycle(promptTurnId);
+					const pending: AcpPendingTerminal = { promptTurnId, boundary: priorMessages, outcome, abort };
+					entry.pendingTerminal = pending;
+					finalizePendingTerminal(entry, pending);
+				}
 				if (failure) throw new Error(`prime-agent turn failed: ${failure}`);
 				return {
 					stopReason: acpStopReason({
@@ -721,7 +913,12 @@ export async function runAcpModeWithConnection(
 				throw error;
 			} finally {
 				entry.producer.finishPrompt(promptTurnId);
-				if (entry.abort === abort) entry.abort = undefined;
+				if (entry.promptTask === promptTask) {
+					entry.promptTask = undefined;
+					entry.resolvePromptTask = undefined;
+					resolvePromptTask();
+				}
+				if (entry.abort === abort && entry.pendingTerminal?.abort !== abort) entry.abort = undefined;
 			}
 		})
 		.onRequest("session/close", async (ctx: any) => {
@@ -736,30 +933,94 @@ export async function runAcpModeWithConnection(
 			// must abort the connection the same way session/cancel does.
 			if (sessionCloseInFlight) throw new Error(`ACP session is already closing: ${params.sessionId}`);
 			sessionCloseInFlight = true;
+			let finishClose!: () => void;
+			sessionCloseTask = new Promise<void>((resolve) => {
+				finishClose = resolve;
+			});
 			const closing = session;
 			try {
+				await closing.cancelTask?.catch(() => undefined);
 				closing.unsubscribe?.();
-				if (closing.abort) {
-					closing.abort.abort();
-					await connection.abort().catch(() => undefined);
+				closing.cancelling = true;
+				closing.abort?.abort();
+				const pending = closing.pendingTerminal;
+				const promptTask = closing.promptTask;
+				try {
+					const inputPause = await acquireStopInputPause(closing);
+					const inputPauseKey = closing.inputPauseKey;
+					if (!inputPauseKey) throw new Error("Missing ACP close input-pause key");
+					await stopSessionWork(pending, promptTask);
+					// Keep the backing session fenced until a replacement ACP session is admitted.
+					await closing.producer.close();
+					closedInputPause = inputPause;
+					closedInputPauseKey = inputPauseKey;
+					if (closing.inputPause === inputPause) {
+						closing.inputPause = undefined;
+						closing.inputPauseKey = undefined;
+					}
+					closing.stopFailure = undefined;
+				} catch (error) {
+					closing.stopFailure = error instanceof Error ? error.message : String(error);
+					throw error;
 				}
-				// Close update admission before draining so an in-flight prompt cannot
-				// enqueue a new boundary after the client observes this session as closed.
-				await closing.producer.close();
 				if (session === closing) session = undefined;
 				return {};
 			} finally {
+				finishClose();
+				sessionCloseTask = undefined;
 				sessionCloseInFlight = false;
 			}
 		})
 		.onNotification("session/cancel", async (ctx: any) => {
 			const params = ctx.params as { sessionId: string };
+			if (sessionCloseInFlight) {
+				await sessionCloseTask;
+				return;
+			}
 			// Only cancel the addressed session: aborting unconditionally would kill
 			// whichever turn happens to be running, and leave the real turn's
 			// AbortController unmarked so it reports a wrong stop reason.
-			if (session?.id !== params.sessionId || !session.abort) return;
-			session.abort.abort();
-			await connection.abort().catch(() => undefined);
+			if (session?.id !== params.sessionId) return;
+			const cancelling = session;
+			if (cancelling.cancelling) {
+				await cancelling.cancelTask;
+				return;
+			}
+			const abort = cancelling.abort;
+			if (!abort && !cancelling.stopFailure && !cancelling.inputPauseRelease) return;
+			const pending = abort && cancelling.pendingTerminal?.abort === abort ? cancelling.pendingTerminal : undefined;
+			const promptTask = cancelling.promptTask;
+			cancelling.cancelling = true;
+			const cancelTask = (async () => {
+				abort?.abort();
+				try {
+					const inputPause = await acquireStopInputPause(cancelling);
+					await stopSessionWork(pending, promptTask);
+					await inputPause.release();
+					if (cancelling.inputPause === inputPause) {
+						cancelling.inputPause = undefined;
+						cancelling.inputPauseKey = undefined;
+					}
+					if (closedInputPause === inputPause) {
+						closedInputPause = undefined;
+						closedInputPauseKey = undefined;
+					}
+					cancelling.inputPauseRelease = undefined;
+					cancelling.stopFailure = undefined;
+					if (pending && cancelling.pendingTerminal === pending) cancelling.pendingTerminal = undefined;
+					if (abort && cancelling.abort === abort) cancelling.abort = undefined;
+				} catch (error) {
+					cancelling.stopFailure = error instanceof Error ? error.message : String(error);
+					throw error;
+				}
+			})();
+			cancelling.cancelTask = cancelTask;
+			try {
+				await cancelTask;
+			} finally {
+				if (cancelling.cancelTask === cancelTask) cancelling.cancelTask = undefined;
+				cancelling.cancelling = false;
+			}
 		})
 		.connect(stream);
 
@@ -769,7 +1030,11 @@ export async function runAcpModeWithConnection(
 	await handle.closed.catch(() => undefined);
 	session?.abort?.abort();
 	session?.unsubscribe?.();
+	await session?.inputPause?.release().catch(() => undefined);
 	session = undefined;
+	await closedInputPause?.release().catch(() => undefined);
+	closedInputPause = undefined;
+	closedInputPauseKey = undefined;
 	await connection.dispose().catch(() => undefined);
 	// Only the real stdio entrypoint owns the process; a caller-supplied transport
 	// (tests, embedding) must never have its host exited from under it.

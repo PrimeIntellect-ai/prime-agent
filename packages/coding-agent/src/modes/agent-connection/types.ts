@@ -632,6 +632,15 @@ export type AgentConnectionEvent =
 export type AgentConnectionEventListener = (event: AgentConnectionEvent) => void | Promise<void>;
 export type AgentConnectionBeforeSessionInvalidateListener = () => void;
 
+export interface AgentConnectionHeadlessCompletionOptions {
+	/** Wait for descendant terminal publication and the parent turns it triggers. */
+	waitForRlmQuiescence?: boolean;
+}
+
+export interface AgentConnectionSessionInputPause {
+	release(): Promise<void>;
+}
+
 export interface AgentConnection {
 	subscribe(listener: AgentConnectionEventListener): () => void;
 	onBeforeSessionInvalidate(listener: AgentConnectionBeforeSessionInvalidateListener): () => void;
@@ -662,6 +671,7 @@ export interface AgentConnection {
 	): Promise<AgentConnectionQueuedMessageMutationStatus>;
 	clearQueue(): Promise<AgentConnectionQueueState>;
 	abortAndClearQueue(): Promise<AgentConnectionQueueState>;
+	acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause>;
 	listCronJobs(options?: { includeInactive?: boolean }): Promise<AgentCronJob[]>;
 	listHeartbeats(): Promise<AgentConnectionHeartbeat[]>;
 	manageHeartbeat(
@@ -701,7 +711,7 @@ export interface AgentConnection {
 	abort(): Promise<void>;
 	cancelRlmChild(childId: string): Promise<boolean>;
 	waitForIdle(): Promise<void>;
-	waitForHeadlessCompletion(): Promise<AgentAutonomousStatus>;
+	waitForHeadlessCompletion(options?: AgentConnectionHeadlessCompletionOptions): Promise<AgentAutonomousStatus>;
 
 	/**
 	 * Run a user-initiated bash command (! / !! prefix). Resolution timing is

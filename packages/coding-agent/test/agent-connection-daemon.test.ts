@@ -281,6 +281,15 @@ class FakeDaemonClient {
 					success: true,
 					data: { steering: ["aborted"], followUp: ["cleared"] },
 				};
+			case "acquire_session_input_pause":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: { pauseId: "pause-1" },
+				};
+			case "release_session_input_pause":
+				return { type: "response", command: command.type, success: true };
 			case "heartbeats_list":
 				return this.serverCapabilities.has("heartbeat_catalog")
 					? { type: "response", command: command.type, success: true, data: { heartbeats: [] } }
@@ -360,6 +369,19 @@ class FakeDaemonClient {
 					},
 				};
 			}
+			case "wait_for_headless_completion":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						enabled: false,
+						continuationsUsed: 0,
+						turnsUsed: 0,
+						tokensUsed: 0,
+						limits: { maxContinuations: 0 },
+					},
+				};
 			case "wait_for_idle":
 			case "set_scoped_models":
 			case "rename_saved_session":
@@ -2327,12 +2349,15 @@ describe("DaemonAgentConnection", () => {
 
 	it("sends queue commands through the daemon protocol", async () => {
 		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("session_input_pause");
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 		await connection.attach();
 
 		await expect(connection.getQueue()).resolves.toEqual({ steering: ["steer"], followUp: ["follow"] });
 		await expect(connection.clearQueue()).resolves.toEqual({ steering: ["cleared"], followUp: [] });
 		await expect(connection.abortAndClearQueue()).resolves.toEqual({ steering: ["aborted"], followUp: ["cleared"] });
+		const inputPause = await connection.acquireSessionInputPause("lease-1");
+		await inputPause.release();
 		await connection.waitForIdle();
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
@@ -2345,14 +2370,26 @@ describe("DaemonAgentConnection", () => {
 			"get_queue",
 			"clear_queue",
 			"abort_and_clear_queue",
+			"acquire_session_input_pause",
+			"release_session_input_pause",
 			"wait_for_idle",
 			"set_scoped_models",
 		]);
 		expect(fakeClient.requests[1]).toMatchObject({ type: "get_queue", activeSessionId: "active-1" });
 		expect(fakeClient.requests[2]).toMatchObject({ type: "clear_queue", activeSessionId: "active-1" });
 		expect(fakeClient.requests[3]).toMatchObject({ type: "abort_and_clear_queue", activeSessionId: "active-1" });
-		expect(fakeClient.requests[4]).toMatchObject({ type: "wait_for_idle", activeSessionId: "active-1" });
+		expect(fakeClient.requests[4]).toMatchObject({
+			type: "acquire_session_input_pause",
+			activeSessionId: "active-1",
+			leaseKey: "lease-1",
+		});
 		expect(fakeClient.requests[5]).toMatchObject({
+			type: "release_session_input_pause",
+			activeSessionId: "active-1",
+			pauseId: "pause-1",
+		});
+		expect(fakeClient.requests[6]).toMatchObject({ type: "wait_for_idle", activeSessionId: "active-1" });
+		expect(fakeClient.requests[7]).toMatchObject({
 			type: "set_scoped_models",
 			activeSessionId: "active-1",
 			scopedModels: [{ model, thinkingLevel: "high" }],
@@ -2362,6 +2399,35 @@ describe("DaemonAgentConnection", () => {
 		await expect(connection.abortAndClearQueue()).rejects.toThrow(
 			"the daemon is running an older build; restart the daemon and try again",
 		);
+	});
+
+	it("capability-gates the strong RLM completion barrier", async () => {
+		const oldDaemonClient = new FakeDaemonClient();
+		const oldConnection = new DaemonAgentConnection(asDaemonClient(oldDaemonClient), "active-old");
+		await oldConnection.attach();
+		await oldConnection.waitForHeadlessCompletion();
+		expect(oldDaemonClient.requests.at(-1)).toEqual({
+			type: "wait_for_headless_completion",
+			activeSessionId: "active-old",
+		});
+		await expect(oldConnection.waitForHeadlessCompletion({ waitForRlmQuiescence: true })).rejects.toThrow(
+			"without RLM quiescence barriers",
+		);
+		expect(oldDaemonClient.requests.map((request) => request.type)).toEqual([
+			"attach",
+			"wait_for_headless_completion",
+		]);
+
+		const newDaemonClient = new FakeDaemonClient();
+		newDaemonClient.serverCapabilities.add("rlm_quiescence_barrier");
+		const newConnection = new DaemonAgentConnection(asDaemonClient(newDaemonClient), "active-new");
+		await newConnection.attach();
+		await newConnection.waitForHeadlessCompletion({ waitForRlmQuiescence: true });
+		expect(newDaemonClient.requests.at(-1)).toMatchObject({
+			type: "wait_for_headless_completion",
+			activeSessionId: "active-new",
+			waitForRlmQuiescence: true,
+		});
 	});
 
 	it("cancels rlm child runs through the daemon protocol", async () => {
