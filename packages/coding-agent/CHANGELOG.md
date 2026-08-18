@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added a pre-imported generic MCP API for persistent Streamable HTTP and stdio servers declared in user settings.
+- Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
 ## [0.7.3] - 2026-08-17
