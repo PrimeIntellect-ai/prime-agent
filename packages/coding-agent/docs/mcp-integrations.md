@@ -33,7 +33,7 @@ credentials in `auth.json`.
 Built-in integrations (Linear, Notion) ship **disabled**. Logging in enables them:
 
 - Open `/login`, switch to **MCP Connections**, pick the integration, and
-  complete OAuth in the browser. `/mcp login <name>` does the same from the CLI.
+  complete OAuth in the browser. `/mcp login <name>` does the same from the TUI command line.
 - Once connected, the integration's skill becomes visible to the model and is
   auto-imported into the kernel.
 - `/mcp` lists integrations and connection status; `/mcp logout <name>`
@@ -72,9 +72,24 @@ result = await linear.list_issues(team="Engineering")
 
 ## Generic MCP servers
 
-Declare generic servers only in user settings at `~/.prime/agent/settings.json`.
-Project `.prime/agent/settings.json` MCP entries are ignored for execution, so a
-repository cannot start a local process or shadow a user server.
+Manage generic servers from either the shell (which exits without starting an
+agent) or the TUI. Both surfaces update only `~/.prime/agent/settings.json`:
+
+```bash
+prime-agent mcp add remote --url https://mcp.example.com/mcp --bearer-token-env-var EXAMPLE_TOKEN
+prime-agent mcp add local --cwd /absolute/path --env TOKEN=EXAMPLE_TOKEN -- node server.js --stdio
+prime-agent mcp list
+prime-agent mcp get remote
+prime-agent mcp remove remote
+```
+
+Use the same forms after `/mcp` in the TUI. Add `--oauth` for the existing OAuth
+login flow and then use `/mcp login <name>`; use `--force` to replace a complete
+existing entry. Static secret values are not accepted: bearer and stdio secrets
+are environment-variable references. Project `.prime/agent/settings.json` MCP
+entries are ignored for execution, so a repository cannot start a local process
+or shadow a user server. Advanced runtime options may still be written directly
+to the user settings file:
 
 ```jsonc
 {

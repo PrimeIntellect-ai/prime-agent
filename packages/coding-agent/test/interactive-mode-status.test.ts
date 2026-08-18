@@ -23,6 +23,7 @@ import { emptyGoalState, type GoalState } from "../src/core/goals.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import { emptyUsage } from "../src/core/usage.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
@@ -965,9 +966,14 @@ describe("InteractiveMode submit handling", () => {
 describe("InteractiveMode MCP command", () => {
 	type McpCommandHarness = {
 		modelRegistry: { authStorage: { get(providerId: string): unknown } };
-		settingsManager: { getMcpServers(): Record<string, unknown> };
+		settingsManager: SettingsManager;
 		showConfigurationMenu(tab: "mcp-connections"): Promise<void>;
 		showStatus(message: string): void;
+		showError(message: string): void;
+		handleReloadCommand(): Promise<void>;
+		reloadAfterMcpChange(message: string): Promise<void>;
+		isAgentStreaming(): boolean;
+		isAgentCompacting(): boolean;
 		handleMcpCommand(args: string | undefined): Promise<void>;
 	};
 	const handleMcpCommand = (InteractiveMode.prototype as unknown as McpCommandHarness).handleMcpCommand;
@@ -985,15 +991,40 @@ describe("InteractiveMode MCP command", () => {
 	test("preserves the explicit /mcp list status output", async () => {
 		const fakeThis = {
 			modelRegistry: { authStorage: { get: vi.fn(() => undefined) } },
-			settingsManager: { getMcpServers: vi.fn(() => ({})) },
+			settingsManager: SettingsManager.inMemory({}),
 			showConfigurationMenu: vi.fn(async () => {}),
 			showStatus: vi.fn(),
+			showError: vi.fn(),
 		} as unknown as McpCommandHarness;
 
 		await handleMcpCommand.call(fakeThis, "list");
 
 		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
-		expect(fakeThis.showStatus).toHaveBeenCalledWith(expect.stringContaining("MCP integrations:"));
+		expect(fakeThis.showStatus).toHaveBeenCalledWith(expect.stringContaining("Built-in MCP integrations:"));
+	});
+
+	test("adds stdio servers and reloads the running session", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = {
+			modelRegistry: { authStorage: { get: vi.fn(() => undefined) } },
+			settingsManager: manager,
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+			handleReloadCommand: vi.fn(async () => {}),
+			reloadAfterMcpChange: (
+				InteractiveMode.prototype as unknown as { reloadAfterMcpChange(message: string): Promise<void> }
+			).reloadAfterMcpChange,
+			isAgentStreaming: vi.fn(() => false),
+			isAgentCompacting: vi.fn(() => false),
+		} as unknown as McpCommandHarness;
+
+		await handleMcpCommand.call(fakeThis, 'add local -- node "server file.js" --stdio');
+
+		expect(manager.getGlobalMcpServers()).toEqual({
+			local: { type: "stdio", command: "node", args: ["server file.js", "--stdio"] },
+		});
+		expect(fakeThis.handleReloadCommand).toHaveBeenCalledOnce();
+		expect(fakeThis.showError).not.toHaveBeenCalled();
 	});
 });
 

@@ -97,6 +97,7 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
+import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
 	bashOutputToText,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
@@ -8656,7 +8657,8 @@ export class InteractiveMode {
 	}
 
 	private async handleMcpCommand(args: string | undefined): Promise<void> {
-		const [sub, server] = (args ?? "").trim().split(/\s+/);
+		const argv = parseCommandArgs((args ?? "").trim());
+		const [sub, server] = argv;
 		if (!sub) {
 			await this.showConfigurationMenu("mcp-connections");
 			return;
@@ -8664,41 +8666,18 @@ export class InteractiveMode {
 
 		const authStorage = this.modelRegistry.authStorage;
 		const isAuthed = (name: string) => authStorage.get(`mcp:${name}`) !== undefined;
-
-		if (sub === "list") {
-			const labels = new Map(BUILTIN_MCP_CATALOG.map((e) => [e.server, e.label]));
-			const names = new Set([...labels.keys(), ...Object.keys(this.settingsManager.getMcpServers() ?? {})]);
-			const lines = [...names].map((name) => {
-				const status = isAuthed(name) ? "connected" : "not connected";
-				return `  ${labels.get(name) ?? name} (${name}) — ${status}`;
-			});
-			this.showStatus(
-				`MCP integrations:\n${lines.join("\n")}\n\nUse /mcp login <name> to connect, /mcp logout <name> to disconnect.`,
-			);
-			return;
-		}
-
 		if (sub === "login") {
-			if (!server) {
+			if (!server || argv.length !== 2) {
 				this.showError("Usage: /mcp login <name> (e.g. /mcp login linear)");
 				return;
 			}
 			const result = await this.createAuthFlows().runMcpLogin(server);
-			if (result.status === "success") {
-				// Enabling the skill needs a reload, which is refused mid-turn; tell the
-				// user to /reload rather than silently leaving creds saved but inactive.
-				if (this.isAgentStreaming() || this.isAgentCompacting()) {
-					this.showStatus(`Connected ${server}. Run /reload (after the current turn) to activate it.`);
-				} else {
-					this.showStatus(`Connected ${server}. Reloading so the integration becomes available…`);
-					await this.handleReloadCommand();
-				}
-			}
+			if (result.status === "success") await this.reloadAfterMcpChange(`Connected ${server}.`);
 			return;
 		}
 
 		if (sub === "logout") {
-			if (!server) {
+			if (!server || argv.length !== 2) {
 				this.showError("Usage: /mcp logout <name>");
 				return;
 			}
@@ -8707,16 +8686,36 @@ export class InteractiveMode {
 				return;
 			}
 			authStorage.logout(`mcp:${server}`);
-			if (this.isAgentStreaming() || this.isAgentCompacting()) {
-				this.showStatus(`Disconnected ${server}. Run /reload (after the current turn) to fully unload it.`);
-			} else {
-				this.showStatus(`Disconnected ${server}. Reloading…`);
-				await this.handleReloadCommand();
-			}
+			await this.reloadAfterMcpChange(`Disconnected ${server}.`);
 			return;
 		}
 
-		this.showError(`Unknown /mcp subcommand: ${sub}. Use list, login, or logout.`);
+		try {
+			const result = await runMcpManagementCommand(argv, this.settingsManager);
+			if (result.changed) {
+				await this.reloadAfterMcpChange(result.message);
+			} else if (result.action === "list") {
+				const builtins = BUILTIN_MCP_CATALOG.map(
+					(entry) => `${entry.label} (${entry.server}): ${isAuthed(entry.server) ? "connected" : "not connected"}`,
+				).join("\n");
+				this.showStatus(
+					`Built-in MCP integrations:\n${builtins}\n\nUser-configured MCP servers:\n${result.message}`,
+				);
+			} else {
+				this.showStatus(result.message);
+			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async reloadAfterMcpChange(message: string): Promise<void> {
+		if (this.isAgentStreaming() || this.isAgentCompacting()) {
+			this.showStatus(`${message} Run /reload (after the current turn) to activate it.`);
+			return;
+		}
+		this.showStatus(`${message} Reloading…`);
+		await this.handleReloadCommand();
 	}
 
 	private async showLogoutSelector(): Promise<void> {
