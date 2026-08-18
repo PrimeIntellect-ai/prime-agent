@@ -1717,10 +1717,10 @@ export class DaemonSupervisor {
 				return response;
 			}
 			case "detach": {
-				if (typeof command.activeSessionId !== "string") throw new Error("Detach requires an active session id");
 				const detachingSessions = this.detachingInputPauseSessions.get(client) ?? new Set<string>();
 				this.detachingInputPauseSessions.set(client, detachingSessions);
-				detachingSessions.add(command.activeSessionId);
+				if (command.activeSessionId) detachingSessions.add(command.activeSessionId);
+				else for (const activeSessionId of client.attachedActiveSessionIds) detachingSessions.add(activeSessionId);
 				this.sessionInputPauseEpochs.set(client, (this.sessionInputPauseEpochs.get(client) ?? 0) + 1);
 				this.detachClient(client, command.activeSessionId);
 				await this.releaseClientSessionInputPauses(client, command.activeSessionId, true);

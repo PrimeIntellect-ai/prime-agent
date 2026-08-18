@@ -66,8 +66,9 @@ function createHarness() {
 		}
 		return { type: "response", command: command.type, success: true } satisfies DaemonResponse;
 	});
-	supervisor.detachClient = vi.fn((client: ClientFixture, activeSessionId: string) => {
-		client.attachedActiveSessionIds.delete(activeSessionId);
+	supervisor.detachClient = vi.fn((client: ClientFixture, activeSessionId?: string) => {
+		if (activeSessionId) client.attachedActiveSessionIds.delete(activeSessionId);
+		else client.attachedActiveSessionIds.clear();
 	});
 	supervisor.handleWorkerClose = vi.fn(async (closedWorker: WorkerFixture, workerClient, error: Error) => {
 		if (closedWorker.client !== workerClient) return;
@@ -192,6 +193,18 @@ describe("daemon supervisor session input pause ownership", () => {
 		expect(worker.client).toBeUndefined();
 		expect(client.socket.destroy).toHaveBeenCalled();
 		expect(other.socket.destroy).toHaveBeenCalled();
+	});
+
+	it("releases all client pauses when detach omits a session id", async () => {
+		const { supervisor } = createHarness();
+		const client = addClient(supervisor, "socket-a", "protocol-a");
+		await supervisor.handleCommand(client, acquireCommand("acquire"));
+
+		await supervisor.handleCommand(client, { id: "detach-all", type: "detach" });
+
+		expect(supervisor.sessionInputPauses.size).toBe(0);
+		expect(client.attachedActiveSessionIds.size).toBe(0);
+		expect(supervisor.detachClient).toHaveBeenCalledWith(client, undefined);
 	});
 
 	it("rejects release from a different public client", async () => {
