@@ -144,6 +144,7 @@ interface KernelExecuteTestApi {
 	start: () => Promise<void>;
 	state: "idle" | "starting" | "running" | "shutdown";
 	activeExecution?: unknown;
+	snapshotState?: () => Promise<null>;
 	shell?: {
 		send(frames: Buffer[]): Promise<void>;
 		close(): void;
@@ -2168,6 +2169,43 @@ describe("AgentSession rlm recursion", () => {
 		);
 	});
 
+	it("removes an unadmitted child directory when host cancellation wins name validation", async () => {
+		let releaseNameCheck: () => void = () => {};
+		const nameCheckGate = new Promise<void>((resolve) => {
+			releaseNameCheck = resolve;
+		});
+		let nameCheckStarted = false;
+		const controller = new AbortController();
+		const root = createSession({
+			agentMessageController: {
+				assertSessionNameAvailable: async () => {
+					nameCheckStarted = true;
+					await nameCheckGate;
+				},
+				listAgents: async () => ({
+					current: { activeSessionId: "parent-active", sessionId: "parent-session" },
+					agents: [],
+				}),
+				sendAgentMessage: async () => {
+					throw new Error("unexpected send");
+				},
+			},
+		});
+
+		const run = root.runRlmChild("cancel during default name validation", {}, undefined, controller.signal);
+		await waitFor(() => nameCheckStarted);
+		const childDirs = readdirSync(tempDir, { recursive: true, encoding: "utf8" }).filter((path) =>
+			basename(path).startsWith("sub-"),
+		);
+		expect(childDirs).toHaveLength(1);
+
+		controller.abort(new Error("host disposed"));
+		releaseNameCheck();
+
+		await expect(run).rejects.toThrow("host disposed");
+		expect(existsSync(join(tempDir, childDirs[0] ?? ""))).toBe(false);
+	});
+
 	it("cancels active rlm children when the parent session is disposed", async () => {
 		let releaseChild: () => void = () => {};
 		const release = new Promise<void>((resolve) => {
@@ -2893,6 +2931,57 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => rootRun.status === "done");
 	});
 
+	it("cancels an admitted child in promptAndWait when its kernel host is disposed", async () => {
+		let releaseChild: () => void = () => {};
+		const release = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const root = createSession({
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				const stream = createAssistantMessageEventStream();
+				if (text === "kernel-owned shard") {
+					childStarted = true;
+					void release.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
+					});
+				}
+				return stream;
+			},
+		});
+		const manager = new KernelManager({
+			python: process.execPath,
+			hostHandlers: (root as unknown as InspectableRlmSession)._createKernelHostHandlers(),
+		});
+		const replies: CapturedCommReply[] = [];
+		const kernel = manager as unknown as KernelCommTestApi;
+		kernel.sendCommMessage = async (commId, data) => {
+			replies.push({ commId, data });
+		};
+
+		try {
+			kernel.handleCommMessage(rlmCommOpen("comm-real-child", "kernel-owned shard"));
+			await waitFor(() => replies.some((reply) => reply.commId === "comm-real-child"));
+			await waitFor(() => childStarted);
+			const runs = (root as unknown as InspectableRlmSession)._activeRlmChildRuns;
+			const run = [...runs.values()][0];
+			if (!run?.session) throw new Error("Missing admitted child session");
+			const childAbort = vi.spyOn(run.session, "abort");
+
+			await manager.dispose();
+
+			expect(run.status).toBe("cancelled");
+			expect(run.error).toBe("IPython kernel disposed");
+			expect(childAbort).toHaveBeenCalledTimes(1);
+			releaseChild();
+			await waitFor(() => !runs.has(run.id));
+		} finally {
+			releaseChild();
+			await manager.dispose();
+		}
+	});
+
 	it("runs parallel rlm comm requests independently", async () => {
 		let active = 0;
 		let maxActive = 0;
@@ -3122,26 +3211,59 @@ print(_result.name)
 		}
 	});
 
-	it("waits for in-flight rlm comm work during dispose and buffers failures", async () => {
+	it.each(["dispose", "shutdown"] as const)(
+		"aborts host work before the final snapshot during %s",
+		async (teardown) => {
+			let hostSignal: AbortSignal | undefined;
+			const manager = new KernelManager({
+				python: process.execPath,
+				snapshot: { path: "/tmp/unused.dill", manifestPath: "/tmp/unused.json" },
+				hostHandlers: {
+					"rlm.run": createRlmRunHostHandler(async (_request, signal) => {
+						hostSignal = signal;
+						await new Promise<void>((resolve) => {
+							if (signal?.aborted) resolve();
+							else signal?.addEventListener("abort", () => resolve(), { once: true });
+						});
+						return {};
+					}),
+				},
+			});
+			const kernel = manager as unknown as KernelCommTestApi & KernelExecuteTestApi;
+			kernel.state = "running";
+			kernel.sendCommMessage = async () => {};
+			kernel.snapshotState = async () => {
+				expect(hostSignal?.aborted).toBe(true);
+				return null;
+			};
+
+			kernel.handleCommMessage(rlmCommOpen(`comm-${teardown}`, "slow child"));
+			await waitFor(() => hostSignal !== undefined);
+
+			if (teardown === "dispose") await manager.dispose();
+			else await manager.shutdown({ snapshot: true });
+
+			expect(hostSignal?.aborted).toBe(true);
+		},
+	);
+
+	it("aborts in-flight rlm comm work during dispose and buffers failures", async () => {
 		let started = false;
 		let handlerSettled = false;
-		let released = false;
-		let releaseChild: () => void = () => {};
-		const release = new Promise<void>((resolve) => {
-			releaseChild = () => {
-				if (released) return;
-				released = true;
-				resolve();
-			};
-		});
+		let receivedSignal: AbortSignal | undefined;
 		const manager = new KernelManager({
 			python: process.execPath,
 			hostHandlers: {
-				"rlm.run": createRlmRunHostHandler(async () => {
+				"rlm.run": createRlmRunHostHandler(async (_request, signal) => {
 					started = true;
+					receivedSignal = signal;
 					try {
-						await release;
-						throw new Error("child failed after dispose");
+						await new Promise<void>((_resolve, reject) => {
+							const onAbort = () => reject(signal?.reason ?? new Error("aborted"));
+							if (signal?.aborted) onAbort();
+							else signal?.addEventListener("abort", onAbort, { once: true });
+						});
+						return {};
 					} finally {
 						handlerSettled = true;
 					}
@@ -3152,21 +3274,11 @@ print(_result.name)
 
 		try {
 			const kernel = manager as unknown as KernelCommTestApi;
-
 			kernel.handleCommMessage(rlmCommOpen("comm-dispose", "slow child"));
 
 			await waitFor(() => started);
-			const disposePromise = manager.dispose();
-			let disposeSettled = false;
-			const trackedDispose = disposePromise.then(() => {
-				disposeSettled = true;
-			});
-
-			await sleep(25);
-			expect(disposeSettled).toBe(false);
-
-			releaseChild();
-			await expectSettlesWithin(trackedDispose, 1000);
+			await expectSettlesWithin(manager.dispose(), 1000);
+			expect(receivedSignal?.aborted).toBe(true);
 			expect(handlerSettled).toBe(true);
 
 			const kernelStderr = (manager as unknown as { kernelStderr: string }).kernelStderr;
@@ -3174,7 +3286,6 @@ print(_result.name)
 			expect(kernelStderr).toContain("[kernel] failed to send host request error reply for comm comm-dispose");
 			expect(stderrSpy).not.toHaveBeenCalled();
 		} finally {
-			releaseChild();
 			await manager.dispose();
 			stderrSpy.mockRestore();
 		}

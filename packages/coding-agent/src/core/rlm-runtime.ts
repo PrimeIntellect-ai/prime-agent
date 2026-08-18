@@ -49,7 +49,7 @@ export interface RlmFindModelsResult {
 	models: RlmModelMatch[];
 }
 
-export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
+export type RlmRunHandler = (request: RlmRunRequest, signal?: AbortSignal) => Promise<Record<string, unknown>>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -150,17 +150,20 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 
 /** Adapt an RlmRunHandler into the typed `rlm.run` kernel host handler. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
-	return async (payload) => {
+	return async (payload, signal) => {
 		if (typeof payload.prompt !== "string") {
 			throw new Error("rlm.run prompt must be a string");
 		}
 		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
 		const cellSourceCode = typeof payload.cellSourceCode === "string" ? payload.cellSourceCode : undefined;
-		const result = await handler({
-			prompt: payload.prompt,
-			kwargs,
-			cellSourceCode,
-		});
+		const result = await handler(
+			{
+				prompt: payload.prompt,
+				kwargs,
+				cellSourceCode,
+			},
+			signal,
+		);
 		return result as unknown as Record<string, unknown>;
 	};
 }
