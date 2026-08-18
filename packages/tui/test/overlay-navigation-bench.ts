@@ -1,8 +1,3 @@
-/**
- * Benchmark focused full-pane overlay navigation. Run with:
- *
- *   npx tsx test/overlay-navigation-bench.ts
- */
 import { performance } from "node:perf_hooks";
 import type { Terminal, TerminalStopOptions } from "../src/terminal.js";
 import { type Component, type Focusable, TUI } from "../src/tui.js";
