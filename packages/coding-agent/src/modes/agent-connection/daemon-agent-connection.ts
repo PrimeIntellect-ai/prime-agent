@@ -217,6 +217,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly unsubscribeDaemonClose: () => void;
 	private readonly clientId = `daemon-agent-connection:${randomUUID()}`;
 	private readonly sessionInputPauses = new Map<string, Promise<AgentConnectionSessionInputPause>>();
+	private sessionInputPauseGeneration = 0;
 	private ownedSessionPromotionTail = Promise.resolve();
 	private lastEventCursor: DaemonEventCursor | undefined;
 	private readonly retiredEventGenerations = new Set<string>();
@@ -264,9 +265,19 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 		this.captureDaemonLogPath();
 		this.unsubscribeDaemonClose = this.client.onClose((error) => {
+			const invalidatedInputPause = this.sessionInputPauses.size > 0;
 			this.sessionInputPauses.clear();
+			this.sessionInputPauseGeneration++;
 			this.rejectSnapshotAssemblies(error);
 			if (this.disposed || this.terminalCloseEmitted) {
+				return;
+			}
+			if (invalidatedInputPause) {
+				this.terminalCloseEmitted = true;
+				void this.emit({
+					type: "closed",
+					error: "Daemon connection closed while session input was paused; the fence was invalidated.",
+				});
 				return;
 			}
 			const closeReason = getDaemonSocketCloseReason(error);
@@ -603,7 +614,9 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause> {
+		if (this.terminalCloseEmitted) throw new Error("Daemon connection is closed; cannot acquire an input pause.");
 		const activeSessionId = this.activeSessionId;
+		const generation = this.sessionInputPauseGeneration;
 		const acquisitionKey = JSON.stringify([activeSessionId, leaseKey]);
 		const existing = this.sessionInputPauses.get(acquisitionKey);
 		if (existing) return existing;
@@ -613,10 +626,25 @@ export class DaemonAgentConnection implements AgentConnection {
 				activeSessionId,
 				leaseKey,
 			});
+			if (generation !== this.sessionInputPauseGeneration || this.terminalCloseEmitted) {
+				try {
+					await this.requestData({
+						type: "release_session_input_pause",
+						activeSessionId,
+						pauseId,
+					});
+				} catch {
+					this.client.close();
+				}
+				throw new Error("Session input pause acquisition was invalidated by a daemon reconnect.");
+			}
 			let released = false;
 			return {
 				release: async () => {
 					if (released) return;
+					if (generation !== this.sessionInputPauseGeneration) {
+						throw new Error("Session input pause was invalidated by a daemon reconnect.");
+					}
 					await this.requestData({
 						type: "release_session_input_pause",
 						activeSessionId,

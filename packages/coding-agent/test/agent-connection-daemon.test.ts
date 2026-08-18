@@ -52,6 +52,7 @@ class FakeDaemonClient {
 	rlmChildrenGate: Promise<void> | undefined;
 	abortBashUnknownCommand = false;
 	abortAndClearQueueUnknownCommand = false;
+	inputPauseAcquireGate: Promise<void> | undefined;
 	cronAddGate: Promise<void> | undefined;
 	promptGate: Promise<void> | undefined;
 	promptError: Error | undefined;
@@ -282,6 +283,7 @@ class FakeDaemonClient {
 					data: { steering: ["aborted"], followUp: ["cleared"] },
 				};
 			case "acquire_session_input_pause":
+				if (this.inputPauseAcquireGate) await this.inputPauseAcquireGate;
 				return {
 					type: "response",
 					command: command.type,
@@ -2407,18 +2409,48 @@ describe("DaemonAgentConnection", () => {
 		);
 	});
 
-	it("reacquires a cached input pause after the daemon socket closes", async () => {
+	it("fails closed when a daemon disconnect invalidates an input pause", async () => {
 		const fakeClient = new FakeDaemonClient();
 		fakeClient.serverCapabilities.add("session_input_pause");
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 		await connection.attach();
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe((event) => {
+			events.push(event);
+		});
 
-		const firstPause = await connection.acquireSessionInputPause("lease-1");
+		const pause = await connection.acquireSessionInputPause("lease-1");
 		fakeClient.disconnectForReconnect("shutdown");
-		const secondPause = await connection.acquireSessionInputPause("lease-1");
 
-		expect(secondPause).not.toBe(firstPause);
-		expect(fakeClient.requests.filter((request) => request.type === "acquire_session_input_pause")).toHaveLength(2);
+		await expect(pause.release()).rejects.toThrow("invalidated by a daemon reconnect");
+		await expect(connection.acquireSessionInputPause("lease-1")).rejects.toThrow("connection is closed");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "closed",
+				error: expect.stringContaining("fence was invalidated"),
+			}),
+		);
+	});
+
+	it("releases an input pause whose acquisition resolves after disconnect", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("session_input_pause");
+		let releaseAcquire!: () => void;
+		fakeClient.inputPauseAcquireGate = new Promise<void>((resolve) => {
+			releaseAcquire = resolve;
+		});
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.attach();
+
+		const acquisition = connection.acquireSessionInputPause("lease-1");
+		await vi.waitFor(() =>
+			expect(fakeClient.requests.some((request) => request.type === "acquire_session_input_pause")).toBe(true),
+		);
+		fakeClient.disconnectForReconnect("shutdown");
+		releaseAcquire();
+
+		await expect(acquisition).rejects.toThrow("acquisition was invalidated by a daemon reconnect");
+		expect(fakeClient.requests.filter((request) => request.type === "release_session_input_pause")).toHaveLength(1);
 	});
 
 	it("capability-gates the strong RLM completion barrier", async () => {

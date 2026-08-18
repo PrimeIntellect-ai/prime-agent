@@ -341,6 +341,15 @@ interface SupervisorPromptAdmission {
 	workerActiveSessionId?: string;
 }
 
+interface SupervisorSessionInputPause {
+	owner: DaemonSocketClient;
+	worker: ResidentWorker;
+	activeSessionId: string;
+	requestedActiveSessionId: string;
+	leaseKey: string;
+	pauseId: string;
+}
+
 function throwIfAdmissionCancelled(admission: SupervisorPromptAdmission | undefined): void {
 	if (admission?.status === "cancelled") throw new PromptAdmissionCancelledError();
 }
@@ -607,12 +616,15 @@ export class DaemonSupervisor {
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
 	private readonly mutationDrain = new MutationDrainLatch();
 	private readonly clients = new Set<DaemonSocketClient>();
+	private readonly connectionIds = new WeakMap<DaemonSocketClient, string>();
+	private readonly sessionInputPauseEpochs = new WeakMap<DaemonSocketClient, number>();
 	private readonly protocolClientIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly workers = new Map<string, ResidentWorker>();
 	private workerStopCounts?: Map<ResidentWorker, number>;
 	private readonly openingWorkers = new Map<string, Promise<ResidentWorker>>();
 	/** Public admission ids are scoped to the socket that registered them. */
 	private readonly promptAdmissions = new Map<DaemonSocketClient, Map<string, SupervisorPromptAdmission>>();
+	private readonly sessionInputPauses = new Map<string, SupervisorSessionInputPause>();
 	private readonly signalCleanupHandlers: Array<() => void> = [];
 	private readonly descriptorDir: string;
 	private readonly generation = randomUUID();
@@ -1043,6 +1055,8 @@ export class DaemonSupervisor {
 			supportsExtensionUi: false,
 			capabilities: new Set(DAEMON_DEFAULT_CLIENT_CAPABILITIES),
 		};
+		this.connectionIds.set(client, client.id);
+		this.sessionInputPauseEpochs.set(client, 0);
 		this.clients.add(client);
 		void this.ready.then(
 			() => {
@@ -1076,6 +1090,11 @@ export class DaemonSupervisor {
 			}
 			cleaned = true;
 			client.detachInput();
+			this.sessionInputPauseEpochs.set(client, (this.sessionInputPauseEpochs.get(client) ?? 0) + 1);
+			const ownerClientId = this.protocolClientId(client);
+			void this.releaseClientSessionInputPauses(client, undefined, true).catch((error: unknown) =>
+				this.log(`Failed to release input pauses for disconnected client ${ownerClientId}: ${String(error)}`),
+			);
 			this.clients.delete(client);
 			this.cancelWaitingPromptAdmissionsForClient(client);
 			for (const activeSessionId of [...client.attachedActiveSessionIds]) {
@@ -1108,6 +1127,57 @@ export class DaemonSupervisor {
 
 	private protocolClientId(client: DaemonSocketClient): string {
 		return this.protocolClientIds.get(client) ?? client.id;
+	}
+
+	private async releaseClientSessionInputPauses(
+		owner: DaemonSocketClient,
+		activeSessionId?: string,
+		forceCleanupOnFailure = false,
+	): Promise<void> {
+		const entries = [...this.sessionInputPauses.values()].filter(
+			(entry) =>
+				entry.owner === owner &&
+				(activeSessionId === undefined ||
+					entry.activeSessionId === activeSessionId ||
+					entry.requestedActiveSessionId === activeSessionId),
+		);
+		await Promise.all(
+			entries.map(async (entry) => {
+				if (this.workers.get(entry.worker.descriptor.workerId) !== entry.worker || !entry.worker.client) {
+					if (this.sessionInputPauses.get(entry.pauseId) === entry) this.sessionInputPauses.delete(entry.pauseId);
+					return;
+				}
+				try {
+					const response = await this.forwardToWorker(entry.worker, {
+						id: randomUUID(),
+						type: "release_session_input_pause",
+						activeSessionId: entry.activeSessionId,
+						pauseId: entry.pauseId,
+					});
+					if (!response.success) throw new Error(response.error);
+					if (this.sessionInputPauses.get(entry.pauseId) === entry) this.sessionInputPauses.delete(entry.pauseId);
+				} catch (error) {
+					if (forceCleanupOnFailure) {
+						if (this.sessionInputPauses.get(entry.pauseId) === entry)
+							this.sessionInputPauses.delete(entry.pauseId);
+						entry.worker.client?.close();
+					}
+					throw error;
+				}
+			}),
+		);
+	}
+
+	private invalidateWorkerSessionInputPauses(worker: ResidentWorker, reason: string): void {
+		const owners = new Set<DaemonSocketClient>();
+		for (const [pauseId, entry] of this.sessionInputPauses) {
+			if (entry.worker !== worker) continue;
+			this.sessionInputPauses.delete(pauseId);
+			owners.add(entry.owner);
+		}
+		for (const owner of owners) {
+			owner.socket.destroy(new Error(reason));
+		}
 	}
 
 	private scheduleOwnedWorkerCleanupForClient(clientId: string): void {
@@ -1549,8 +1619,81 @@ export class DaemonSupervisor {
 					throw error;
 				}
 			}
+			case "acquire_session_input_pause": {
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				const activeSessionId = match.summary.activeSessionId ?? match.summary.id;
+				const ownerClientId = this.protocolClientId(client);
+				const connectionId = this.connectionIds.get(client);
+				if (!connectionId) throw new Error("Daemon client connection identity is unavailable");
+				const acquisitionEpoch = this.sessionInputPauseEpochs.get(client) ?? 0;
+				const existing = [...this.sessionInputPauses.values()].find(
+					(entry) =>
+						entry.owner === client &&
+						entry.worker === match.worker &&
+						entry.activeSessionId === activeSessionId &&
+						entry.leaseKey === command.leaseKey,
+				);
+				if (existing) {
+					return success(command.id, command.type, { pauseId: existing.pauseId });
+				}
+				const response = await this.forwardToWorker(match.worker, {
+					...command,
+					activeSessionId,
+					leaseKey: JSON.stringify([connectionId, ownerClientId, command.leaseKey]),
+				});
+				if (!response.success) return response;
+				const pauseId = (response.data as { pauseId?: unknown } | undefined)?.pauseId;
+				if (typeof pauseId !== "string") throw new Error("Worker returned an invalid session input pause id");
+				if (!this.clients.has(client) || (this.sessionInputPauseEpochs.get(client) ?? 0) !== acquisitionEpoch) {
+					try {
+						const release = await this.forwardToWorker(match.worker, {
+							id: randomUUID(),
+							type: "release_session_input_pause",
+							activeSessionId,
+							pauseId,
+						});
+						if (!release.success) throw new Error(release.error);
+					} catch (error) {
+						match.worker.client?.close();
+						throw error;
+					}
+					throw new Error("Session input pause acquisition was invalidated before completion");
+				}
+				this.sessionInputPauses.set(pauseId, {
+					owner: client,
+					worker: match.worker,
+					activeSessionId,
+					requestedActiveSessionId: command.activeSessionId,
+					leaseKey: command.leaseKey,
+					pauseId,
+				});
+				return response;
+			}
+			case "release_session_input_pause": {
+				const entry = this.sessionInputPauses.get(command.pauseId);
+				if (!entry) return success(command.id, command.type);
+				if (entry.owner !== client) {
+					throw new Error(`Session input pause is owned by another client: ${command.pauseId}`);
+				}
+				if (
+					command.activeSessionId !== entry.activeSessionId &&
+					command.activeSessionId !== entry.requestedActiveSessionId
+				) {
+					throw new Error(`Session input pause belongs to another session: ${command.pauseId}`);
+				}
+				const response = await this.forwardToWorker(entry.worker, {
+					...command,
+					activeSessionId: entry.activeSessionId,
+				});
+				if (response.success && this.sessionInputPauses.get(command.pauseId) === entry) {
+					this.sessionInputPauses.delete(command.pauseId);
+				}
+				return response;
+			}
 			case "detach":
+				this.sessionInputPauseEpochs.set(client, (this.sessionInputPauseEpochs.get(client) ?? 0) + 1);
 				this.detachClient(client, command.activeSessionId);
+				await this.releaseClientSessionInputPauses(client, command.activeSessionId, true);
 				return success(command.id, "detach");
 			case "complete_owned_session": {
 				const match = await this.findWorkerForClient(client, command.activeSessionId);
@@ -2139,6 +2282,7 @@ export class DaemonSupervisor {
 			}
 			worker.intentionalStop = true;
 			await this.recoverUncertainWorkerOperations(worker, false);
+			this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 			this.workers.delete(worker.descriptor.workerId);
 			this.deleteWorkerDescriptor(worker);
 			await this.syncAgentPeers().catch(() => undefined);
@@ -2556,6 +2700,7 @@ export class DaemonSupervisor {
 			return;
 		}
 		worker.client = undefined;
+		this.invalidateWorkerSessionInputPauses(worker, "Session worker disconnected while input was paused");
 		const interrupted = new Map<string, Set<string>>();
 		for (const [activeSessionId, generations] of worker.snapshotGenerations ?? []) {
 			for (const generation of generations.values()) {
@@ -4375,6 +4520,7 @@ export class DaemonSupervisor {
 			// tuple assertions complete. A synchronous root shutdown event can arrive
 			// before its request resolves, so leave both intact while it is active.
 			if ((this.workerStopCounts?.get(worker) ?? 0) === 0) {
+				this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 				this.workers.delete(worker.descriptor.workerId);
 				this.deleteWorkerDescriptor(worker);
 				void this.syncAgentPeers().catch(() => undefined);
@@ -4936,6 +5082,7 @@ export class DaemonSupervisor {
 			await this.finalizeArchivedWorkerStop(worker);
 			assertStopStillApplies();
 		}
+		this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 		this.workers.delete(worker.descriptor.workerId);
 		if (removeDescriptor) {
 			this.deleteWorkerDescriptor(worker);
