@@ -20,11 +20,7 @@ export function resolveConfigValue(config: string): string | undefined {
 	return resolveEnvOrLiteral(config);
 }
 
-/**
- * An unset env var falls back to the literal config string (e.g. a pasted API key).
- * A SET but empty env var means "explicitly no credential": report it as missing
- * instead of leaking the variable name as the credential value.
- */
+/** Unset env var: fall back to the literal string. Set-but-empty: missing credential, never the var name. */
 function resolveEnvOrLiteral(config: string): string | undefined {
 	const envValue = process.env[config];
 	if (envValue !== undefined) {
