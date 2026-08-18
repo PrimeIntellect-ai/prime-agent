@@ -220,6 +220,7 @@ function createExistingLaunchWorker(root: string, descriptorDir: string) {
 function createSupervisorSnapshotState() {
 	return {
 		clients: new Set<object>(),
+		sessionInputPauses: new Map(),
 		pendingReplacementSnapshots: new WeakMap<object, Map<string, unknown>>(),
 	};
 }
@@ -1681,6 +1682,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const deleteWorkerDescriptor = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers,
+			sessionInputPauses: new Map(),
 			processIdentity: vi.fn(() => "gone"),
 			recoverUncertainWorkerOperations,
 			deleteWorkerDescriptor,
