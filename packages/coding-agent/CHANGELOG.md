@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Changed opening the agents view (full or scoped) with a draft prompt to auto-stash the draft instead of refusing; the draft is restored into the editor when the session is reopened.
+- Removed a system prompt paragraph referring to an async `bash()` kernel helper and managed jobs that do not exist in the runtime.
 - Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
