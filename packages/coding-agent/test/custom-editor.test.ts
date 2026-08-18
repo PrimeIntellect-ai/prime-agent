@@ -78,6 +78,30 @@ describe("CustomEditor", () => {
 		expect(editor.getText()).toBe("/");
 	});
 
+	it("inserts a newline for a raw \\n byte instead of firing the ctrl+j edit-diff action", () => {
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
+		const toggleEditDiffs = vi.fn();
+		editor.onAction("app.edits.expand", toggleEditDiffs);
+
+		editor.handleInput("a");
+		editor.handleInput("\n");
+		editor.handleInput("b");
+
+		expect(toggleEditDiffs).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("a\nb");
+	});
+
+	it("still fires the edit-diff action for kitty CSI-u ctrl+j", () => {
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
+		const toggleEditDiffs = vi.fn();
+		editor.onAction("app.edits.expand", toggleEditDiffs);
+
+		editor.handleInput("\x1b[106;5u");
+
+		expect(toggleEditDiffs).toHaveBeenCalledOnce();
+		expect(editor.getText()).toBe("");
+	});
+
 	it("routes Escape through its handler while dismissing autocomplete", async () => {
 		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
 		const handler = vi.fn();
