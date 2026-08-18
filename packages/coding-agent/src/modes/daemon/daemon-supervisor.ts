@@ -1591,19 +1591,26 @@ export class DaemonSupervisor {
 				const target = await this.findWorkerForClient(client, command.targetActiveSessionId);
 				const targetActiveSessionId = target.summary.activeSessionId ?? target.summary.id;
 				if (targetActiveSessionId === command.activeSessionId) {
+					const detachingSessions = this.detachingInputPauseSessions?.get(client);
+					detachingSessions?.delete(command.activeSessionId);
+					detachingSessions?.delete(command.targetActiveSessionId);
+					detachingSessions?.delete(targetActiveSessionId);
 					return success(command.id, command.type, { cancelled: false });
 				}
 				const targetWasAttached = client.attachedActiveSessionIds.has(targetActiveSessionId);
 				const releaseSnapshotReservation = this.reserveSnapshotStream(client, targetActiveSessionId);
 				let releaseTranscript: (() => void) | undefined;
 				client.attachedActiveSessionIds.add(targetActiveSessionId);
-				this.detachingInputPauseSessions?.get(client)?.delete(targetActiveSessionId);
 				try {
 					const attached = await this.attachClient(client, {
 						...command,
 						type: "attach",
 						activeSessionId: targetActiveSessionId,
 					});
+					const detachingSessions = this.detachingInputPauseSessions?.get(client);
+					detachingSessions?.delete(command.activeSessionId);
+					detachingSessions?.delete(command.targetActiveSessionId);
+					detachingSessions?.delete(targetActiveSessionId);
 					if (client.capabilities.has("chunked_snapshot")) {
 						const transcript =
 							attached.transcript ?? this.getOrCreateTranscriptCache(attached.worker, attached.result);
@@ -3801,7 +3808,9 @@ export class DaemonSupervisor {
 		}
 		const releaseTranscript = transcript?.retain();
 		client.attachedActiveSessionIds.add(activeSessionId);
-		this.detachingInputPauseSessions?.get(client)?.delete(activeSessionId);
+		const detachingSessions = this.detachingInputPauseSessions?.get(client);
+		detachingSessions?.delete(command.activeSessionId);
+		detachingSessions?.delete(activeSessionId);
 		try {
 			const publicSummary = this.publicSummary(match.worker, result.snapshot.summary);
 			if (publicSummary.streamingMessage?.role === "assistant") {

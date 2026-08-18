@@ -9,6 +9,7 @@ type ClientFixture = {
 	id: string;
 	socket: { destroy: ReturnType<typeof vi.fn> };
 	attachedActiveSessionIds: Set<string>;
+	capabilities: Set<string>;
 };
 
 type WorkerFixture = {
@@ -28,6 +29,9 @@ type SupervisorInternals = {
 	sessionInputPauses: Map<string, PauseEntry>;
 	findWorkerForClient: ReturnType<typeof vi.fn>;
 	forwardToWorker: ReturnType<typeof vi.fn>;
+	attachClient: ReturnType<typeof vi.fn>;
+	reserveSnapshotStream: ReturnType<typeof vi.fn>;
+	write: ReturnType<typeof vi.fn>;
 	detachClient: ReturnType<typeof vi.fn>;
 	handleCommand(client: ClientFixture, command: DaemonCommand): Promise<DaemonResponse | undefined>;
 	invalidateWorkerSessionInputPauses(worker: WorkerFixture, reason: string): void;
@@ -66,6 +70,9 @@ function createHarness() {
 		}
 		return { type: "response", command: command.type, success: true } satisfies DaemonResponse;
 	});
+	supervisor.attachClient = vi.fn(async () => ({ worker, result: { activeSessionId: "active-1" } }));
+	supervisor.reserveSnapshotStream = vi.fn(() => vi.fn());
+	supervisor.write = vi.fn();
 	supervisor.detachClient = vi.fn((client: ClientFixture, activeSessionId?: string) => {
 		if (activeSessionId) client.attachedActiveSessionIds.delete(activeSessionId);
 		else client.attachedActiveSessionIds.clear();
@@ -83,6 +90,7 @@ function addClient(supervisor: SupervisorInternals, socketId: string, protocolId
 		id: protocolId,
 		socket: { destroy: vi.fn() },
 		attachedActiveSessionIds: new Set(["active-1"]),
+		capabilities: new Set<string>(),
 	};
 	supervisor.clients.add(client);
 	supervisor.connectionIds.set(client, socketId);
@@ -124,6 +132,30 @@ describe("daemon supervisor session input pause ownership", () => {
 		});
 		expect(supervisor.sessionInputPauses.has("pause-1")).toBe(false);
 		expect(supervisor.sessionInputPauses.has("pause-2")).toBe(true);
+	});
+
+	it("clears stable and live detach selectors after reattach", async () => {
+		const { supervisor } = createHarness();
+		const client = addClient(supervisor, "socket-a", "protocol-a");
+		const detachingSessions = supervisor.detachingInputPauseSessions.get(client)!;
+		detachingSessions.add("stable-id");
+
+		await supervisor.handleCommand(client, {
+			id: "reattach",
+			type: "reattach",
+			activeSessionId: "old-active",
+			targetActiveSessionId: "stable-id",
+		});
+
+		expect(detachingSessions.has("stable-id")).toBe(false);
+		await expect(
+			supervisor.handleCommand(client, {
+				id: "acquire",
+				type: "acquire_session_input_pause",
+				activeSessionId: "stable-id",
+				leaseKey: "shared-key",
+			}),
+		).resolves.toMatchObject({ success: true, data: { pauseId: "pause-1" } });
 	});
 
 	it("reacquires a fresh worker pause while the prior pause is releasing", async () => {
