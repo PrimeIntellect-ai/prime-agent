@@ -428,6 +428,7 @@ describe("ACP mode end to end", () => {
 		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
 		connection.emitHeartbeat();
 		await enteredPublish;
+		connection.emitHeartbeat();
 		const closing = client.request("session/close", { sessionId: session.sessionId });
 		await Promise.resolve();
 		let closed = false;
@@ -444,9 +445,9 @@ describe("ACP mode end to end", () => {
 		).rejects.toThrow();
 		release();
 		await closing;
-		expect(updates).toHaveLength(1);
+		expect(updates).toHaveLength(2);
 		await Promise.resolve();
-		expect(updates).toHaveLength(1);
+		expect(updates).toHaveLength(2);
 		close();
 	});
 

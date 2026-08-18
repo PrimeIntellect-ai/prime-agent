@@ -276,9 +276,9 @@ class AcpUpdateProducer {
 
 	async close(): Promise<void> {
 		this.admissionClosed = true;
-		this.admissionOpen = false;
 		this.releaseAdmission();
 		await this.tail;
+		this.admissionOpen = false;
 	}
 }
 
