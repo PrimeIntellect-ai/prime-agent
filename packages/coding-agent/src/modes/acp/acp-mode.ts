@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { Readable } from "node:stream";
-import { isDeepStrictEqual } from "node:util";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -754,8 +753,7 @@ export async function runAcpModeWithConnection(
 					// request is in flight. Do not turn a failed read into an empty roster.
 					const initialSnapshot = await connection.getInitialSnapshot();
 					for (const child of initialSnapshot.children ?? []) {
-						const observed = observedChildren.get(child.id);
-						if (observed !== undefined && isDeepStrictEqual(observed, child)) continue;
+						if (observedChildren.has(child.id)) continue;
 						observedChildren.set(child.id, child);
 						const event = { type: "rlm_child_update", child } as const;
 						const turnId = producer.turnForEvent(event);
@@ -855,7 +853,10 @@ export async function runAcpModeWithConnection(
 				// Every turn therefore finalizes through the strong settlement barrier.
 				entry.producer.commitResponse(promptTurnId);
 				responseBoundaryEmitted = await entry.producer.publish(
-					{ sessionUpdate: "session_info_update", _meta: primeAgentMeta({}) },
+					{
+						sessionUpdate: "session_info_update",
+						_meta: primeAgentMeta({ terminalQuiescenceExpected: true }),
+					},
 					promptTurnId,
 					"responseBoundary",
 					outcome,
@@ -893,7 +894,10 @@ export async function runAcpModeWithConnection(
 				// it never gets an invented terminal-quiescence update.
 				if (!responseBoundaryEmitted) {
 					await entry.producer.publish(
-						{ sessionUpdate: "session_info_update", _meta: primeAgentMeta({}) },
+						{
+							sessionUpdate: "session_info_update",
+							_meta: primeAgentMeta({ terminalQuiescenceExpected: false }),
+						},
 						promptTurnId,
 						"responseBoundary",
 						"error",

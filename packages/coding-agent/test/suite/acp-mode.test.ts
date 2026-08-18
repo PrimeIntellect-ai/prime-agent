@@ -234,7 +234,7 @@ describe("ACP mode end to end", () => {
 		);
 		expect(new Set(correlated.map((meta) => meta.eventSequence)).size).toBe(correlated.length);
 		expect(correlated.filter((meta) => meta.phase === "responseBoundary")).toEqual([
-			expect.objectContaining({ outcome: "result" }),
+			expect.objectContaining({ outcome: "result", terminalQuiescenceExpected: true }),
 		]);
 		const terminalIndex = correlated.findIndex((meta) => meta.phase === "terminalQuiescence");
 		expect(terminalIndex).toBeGreaterThan(correlated.findIndex((meta) => meta.phase === "responseBoundary"));
@@ -513,7 +513,7 @@ describe("ACP mode end to end", () => {
 		close();
 	});
 
-	it("buffers subscription updates until the session/new response commits", async () => {
+	it("keeps a live child update newer than the in-flight initial snapshot", async () => {
 		let emitChild: (child: any) => void = () => {};
 		let releaseSnapshot!: () => void;
 		let snapshotEventEmitted!: () => void;
@@ -525,7 +525,7 @@ describe("ACP mode end to end", () => {
 		});
 		const connection = fakeAcpConnection({
 			initialSnapshot: async () => {
-				emitChild({ id: "during-snapshot", label: "during snapshot", status: "running", sessionDir: "/tmp/child" });
+				emitChild({ id: "during-snapshot", label: "during snapshot", status: "done", sessionDir: "/tmp/child" });
 				snapshotEventEmitted();
 				await snapshotReleased;
 				return {
@@ -552,7 +552,15 @@ describe("ACP mode end to end", () => {
 		await vi.waitFor(() => expect(updates).toHaveLength(1));
 		expect(updates[0]).toMatchObject({
 			sessionId: session.sessionId,
-			update: { _meta: { [PRIME_AGENT_META_NAMESPACE]: { eventSequence: 1, promptTurnId: 0 } } },
+			update: {
+				_meta: {
+					[PRIME_AGENT_META_NAMESPACE]: {
+						eventSequence: 1,
+						promptTurnId: 0,
+						subagents: [expect.objectContaining({ id: "during-snapshot", status: "done" })],
+					},
+				},
+			},
 		});
 		close();
 	});
@@ -600,6 +608,7 @@ describe("ACP mode end to end", () => {
 				promptTurnId: 1,
 				phase: "responseBoundary",
 				outcome: "error",
+				terminalQuiescenceExpected: false,
 			}),
 		);
 		expect(metadata.find((meta) => meta.phase === "terminalQuiescence")).toBeUndefined();

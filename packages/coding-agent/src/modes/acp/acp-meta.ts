@@ -106,6 +106,8 @@ export interface PrimeAgentSessionMeta {
 	 * causal completion signal.
 	 */
 	outcome?: PrimeAgentResponseOutcome;
+	/** Whether an accepted response boundary promises a later terminal-quiescence envelope. */
+	terminalQuiescenceExpected?: boolean;
 	/** Present when a client-requested cwd differs from the agent's real cwd. */
 	cwd?: PrimeAgentCwdMeta;
 	/** Set when the session's heartbeat or cron schedule changed. */
