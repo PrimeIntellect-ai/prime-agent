@@ -93,6 +93,9 @@ jobs:
                 echo "Retrying production v${production_version} for ${GITHUB_SHA_VALUE}."
               fi
               publish_production=true
+            elif ! git show-ref --verify --quiet "refs/tags/v${production_version}"; then
+              echo "Production v${production_version} has no tag; retrying the failed release."
+              publish_production=true
             else
               echo "Package version is unchanged at ${production_version}; only beta will advance."
             fi
@@ -131,7 +134,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -171,7 +174,7 @@ jobs:
 
       - name: Upload production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: prime-agent-production
           path: packages/coding-agent/release/production/artifacts/*
@@ -179,7 +182,7 @@ jobs:
 
       - name: Upload beta artifacts
         if: env.PUBLISH_BETA == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: prime-agent-beta
           path: packages/coding-agent/release/beta/artifacts/*
@@ -211,14 +214,14 @@ jobs:
 
       - name: Download production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: prime-agent-production
           path: release-artifacts/production
 
       - name: Download beta artifacts
         if: env.PUBLISH_BETA == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: prime-agent-beta
           path: release-artifacts/beta

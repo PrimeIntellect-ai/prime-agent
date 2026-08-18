@@ -12,6 +12,9 @@ import type {
 	DaemonSavedSessionInfo,
 	DaemonSavedSessionListCommand,
 } from "./daemon-protocol.js";
+import { deserializeSavedSessionInfo } from "./saved-session-info.js";
+
+export { deserializeSavedSessionInfo } from "./saved-session-info.js";
 
 export type DaemonSavedSessionCatalogContext = { activeSessionId: string } | { cwd: string; sessionDir?: string };
 
@@ -71,21 +74,4 @@ export async function deleteDaemonSavedSession(
 		throw deserializeDaemonError(response);
 	}
 	return response.data as DaemonDeleteSavedSessionResult;
-}
-
-export function deserializeSavedSessionInfo(session: DaemonSavedSessionInfo): AgentConnectionSavedSessionInfo {
-	return {
-		path: session.path,
-		id: session.id,
-		cwd: session.cwd,
-		name: session.name,
-		state: session.state,
-		parentSessionPath: session.parentSessionPath,
-		created: new Date(session.created),
-		modified: new Date(session.modified),
-		messageCount: session.messageCount,
-		firstMessage: session.firstMessage,
-		allMessagesText: session.allMessagesText,
-		agentStatus: session.agentStatus,
-	};
 }

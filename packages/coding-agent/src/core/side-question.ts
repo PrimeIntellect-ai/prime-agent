@@ -1,4 +1,5 @@
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -10,13 +11,23 @@ export interface SideQuestionEvent {
 	errorMessage?: string;
 }
 
+export interface SideQuestionTurn {
+	question: string;
+	answer: string;
+}
+
 export interface SideQuestionRun {
 	done: Promise<void>;
 	abort(): void;
 }
 
 const SIDE_QUESTION_INSTRUCTION =
-	"Answer this one side question using only the conversation context above. Do not use tools and do not ask a follow-up question.";
+	"Answer this side question using only the conversation context above. Do not use tools. The user may send follow-up side questions; none of this side conversation is added to the main session.";
+
+function sideQuestionPrompt(question: string, isFirstTurn: boolean): string {
+	const body = isFirstTurn ? `${SIDE_QUESTION_INSTRUCTION}\n\n${question}` : question;
+	return `<side_question>\n${body}\n</side_question>`;
+}
 
 function readAssistantText(message: AgentMessage): string {
 	if (message.role !== "assistant") {
@@ -33,17 +44,45 @@ export function startSideQuestion(
 	id: string,
 	question: string,
 	onEvent: (event: SideQuestionEvent) => void | Promise<void>,
+	previousTurns: SideQuestionTurn[] = [],
 ): SideQuestionRun {
 	const model = parent.state.model;
 	if (!model) {
 		throw new Error("Select a model before asking a side question");
 	}
 
+	// Each turn re-clones the live main conversation, so follow-ups always see
+	// the newest main-thread context; earlier side turns are replayed after it.
+	const previousTurnMessages: AgentMessage[] = previousTurns.flatMap((turn, index) => [
+		{
+			role: "user",
+			content: [{ type: "text", text: sideQuestionPrompt(turn.question, index === 0) }],
+			timestamp: Date.now(),
+		} satisfies UserMessage,
+		{
+			role: "assistant",
+			content: [{ type: "text", text: turn.answer }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		} satisfies AssistantMessage,
+	]);
+
 	const sideAgent = new Agent({
 		initialState: {
 			model,
 			systemPrompt: parent.state.systemPrompt,
-			messages: structuredClone(parent.state.messages),
+			messages: [...structuredClone(parent.state.messages), ...previousTurnMessages],
 			thinkingLevel: "off",
 			serviceTier: parent.state.serviceTier,
 			tools: [],
@@ -80,7 +119,7 @@ export function startSideQuestion(
 		await emit("running");
 	});
 
-	const prompt = `<side_question>\n${SIDE_QUESTION_INSTRUCTION}\n\n${question}\n</side_question>`;
+	const prompt = sideQuestionPrompt(question, previousTurns.length === 0);
 	const done = Promise.resolve()
 		.then(() => emit("running"))
 		.then(async () => {

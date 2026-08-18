@@ -16,6 +16,10 @@ async function waitForAsyncRender(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function getFauxModels(harness: Harness, count: number) {
+	return Array.from({ length: count }, (_, index) => harness.getModel(`faux-${index + 1}`)!);
+}
+
 describe("ModelSelectorComponent", () => {
 	const harnesses: Harness[] = [];
 
@@ -181,7 +185,7 @@ describe("ModelSelectorComponent", () => {
 			() => {},
 			() => {},
 			undefined,
-			{ getRows: () => 12 },
+			{ availableModels: getFauxModels(harness, 12), getRows: () => 12 },
 		);
 
 		await waitForAsyncRender();
@@ -280,7 +284,7 @@ describe("ModelSelectorComponent", () => {
 			() => {},
 			() => {},
 			undefined,
-			{ getRows: () => 16 },
+			{ availableModels: getFauxModels(harness, 12), getRows: () => 16 },
 		);
 
 		await waitForAsyncRender();
@@ -290,11 +294,11 @@ describe("ModelSelectorComponent", () => {
 
 		expect(lines.length).toBeLessThanOrEqual(16);
 		expect(output).toContain("Scope: ");
-		expect(output).toContain("Shift+Tab scope");
+		expect(output).toContain(`${process.platform === "darwin" ? "Option" : "Alt"}+S scope`);
 		expect(output).toContain("(all/scoped)");
 		expect(output).not.toContain("(1/12)");
 
-		selector.handleInput("\x1b[Z");
+		selector.handleInput("\x1bs");
 		lines = selector.render(120);
 		output = stripAnsi(lines.join("\n"));
 

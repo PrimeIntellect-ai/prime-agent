@@ -1,15 +1,15 @@
 # Extension Examples
 
-Example extensions for pi-coding-agent.
+Example extensions for Prime Agent.
 
 ## Usage
 
 ```bash
-# Load an extension with --extension flag
-pi --extension examples/extensions/permission-gate.ts
+# From the repository root, load an extension with --extension
+./prime-agent.sh --extension packages/coding-agent/examples/extensions/permission-gate.ts
 
 # Or copy to extensions directory for auto-discovery
-cp permission-gate.ts ~/.pi/agent/extensions/
+cp permission-gate.ts ~/.prime/agent/extensions/
 ```
 
 ## Examples
@@ -96,7 +96,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `mac-system-theme.ts` | Syncs pi theme with macOS dark/light mode |
+| `mac-system-theme.ts` | Syncs the Prime Agent theme with macOS dark/light mode |
 
 ### Resources
 
@@ -123,7 +123,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `custom-provider-anthropic/` | Custom Anthropic provider with OAuth support and custom streaming implementation |
-| `custom-provider-gitlab-duo/` | GitLab Duo provider using pi-ai's built-in Anthropic/OpenAI streaming via proxy |
+| `custom-provider-gitlab-duo/` | GitLab Duo provider using the inherited `@earendil-works/pi-ai` streaming API through a proxy |
 
 ### External Dependencies
 

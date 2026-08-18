@@ -22,12 +22,12 @@ import {
 } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
-import { getAgentDir, VERSION } from "../config.js";
+import { getAgentDir } from "../config.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -372,6 +372,27 @@ function readOpenAICodexAccountId(token: string): string | undefined {
 	}
 }
 
+/**
+ * The Codex backend gates its model catalog on the reported client version: it answers HTTP 200 with a
+ * catalog that grows as the version rises, so a low version yields a silently empty or partial list rather
+ * than an error. Prime Agent's own package version is far below the Codex CLI's version line, so it must
+ * report a supported Codex client version here instead.
+ *
+ * Shipping a new Codex model takes two edits, and both are required:
+ * 1. Add the model to `codexModels` in `packages/ai/scripts/generate-models.ts` and regenerate. That list is
+ *    explicit, not fetched, so an unlisted model does not exist for Prime Agent at all.
+ * 2. Raise this constant to a Codex CLI release whose catalog includes that model. `getExecutableModels()`
+ *    below intersects the registry with the discovered catalog, so a listed model the catalog omits is
+ *    dropped.
+ *
+ * Skipping step 2 fails silently and asymmetrically: `rlm` subagent delegation and `find_models()` resolve
+ * through `getExecutableModels()` and lose the model, while `/model` reads the unfiltered `getAvailable()`
+ * and keeps offering it.
+ *
+ * Catalog behaviour measured 2026-08-13; see #702.
+ */
+const OPENAI_CODEX_CLIENT_VERSION = "0.147.0";
+
 function openAICodexModelsUrl(baseUrl: string): string {
 	const normalized = baseUrl.replace(/\/+$/, "");
 	let path: string;
@@ -383,7 +404,7 @@ function openAICodexModelsUrl(baseUrl: string): string {
 		path = `${normalized}/codex/models`;
 	}
 	const url = new URL(path);
-	url.searchParams.set("client_version", VERSION);
+	url.searchParams.set("client_version", OPENAI_CODEX_CLIENT_VERSION);
 	return url.toString();
 }
 
@@ -401,6 +422,26 @@ function readOpenAICodexModelIds(value: unknown): Set<string> {
 	);
 }
 
+const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE = "prime-inference-private-models.json";
+const PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS = 5 * 60_000;
+const PRIVATE_PRIME_BACKGROUND_REFRESH_TIMEOUT_MS = 3_000;
+
+interface PrivatePrimeAuthorizationCache {
+	fingerprint: string;
+	modelIds: Set<string>;
+	refreshedAt: number;
+}
+
+function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): string {
+	return createHash("sha256").update(apiKey).update("\0").update(teamId).digest("hex");
+}
+
+function isOfflineModeEnabled(): boolean {
+	const value = process.env.PI_OFFLINE;
+	if (!value) return false;
+	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
+}
+
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -415,6 +456,7 @@ export class ModelRegistry {
 	private authorizedPrivatePrimeInferenceTeamId: string | undefined;
 	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
+	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
 	private loadError: string | undefined = undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
@@ -778,20 +820,143 @@ export class ModelRegistry {
 			return;
 		}
 
-		try {
-			this.authorizedPrivatePrimeInferenceModelIds = await fetchAuthorizedPrivatePrimeInferenceModelIds(
-				apiKey,
-				teamHeaders,
-			);
+		const fingerprint = privatePrimeAuthorizationFingerprint(apiKey, teamId);
+		const cached = this.readPrivatePrimeAuthorizationCache();
+		if (cached?.fingerprint === fingerprint) {
+			// Serve the persisted authorization decision so startup and model lists
+			// don't block on the network. A stale cache refreshes in the background
+			// and the updated ids apply to subsequent lookups in this process.
+			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.modelIds);
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
-		} catch {
-			if (teamId === previousTeamId) {
-				this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
-				this.authorizedPrivatePrimeInferenceTeamId = teamId;
-			} else {
-				this.authorizedPrivatePrimeInferenceModelIds.clear();
-				this.authorizedPrivatePrimeInferenceTeamId = undefined;
+			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
+			if (cacheIsFresh || isOfflineModeEnabled()) {
+				return;
 			}
+			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
+			return;
+		}
+		if (isOfflineModeEnabled()) {
+			this.authorizedPrivatePrimeInferenceModelIds.clear();
+			this.authorizedPrivatePrimeInferenceTeamId = undefined;
+			return;
+		}
+
+		let authorizedIds: Set<string> | undefined;
+		try {
+			authorizedIds = await fetchAuthorizedPrivatePrimeInferenceModelIds(apiKey, teamHeaders);
+		} catch {
+			// Fall back to the previous authorization below.
+		}
+		// Leave newer state untouched if the credentials changed while fetching.
+		if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
+			return;
+		}
+		if (authorizedIds) {
+			this.authorizedPrivatePrimeInferenceModelIds = authorizedIds;
+			this.authorizedPrivatePrimeInferenceTeamId = teamId;
+			this.writePrivatePrimeAuthorizationCache({ fingerprint, modelIds: authorizedIds, refreshedAt: Date.now() });
+		} else if (teamId === previousTeamId) {
+			this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
+			this.authorizedPrivatePrimeInferenceTeamId = teamId;
+		} else {
+			this.authorizedPrivatePrimeInferenceModelIds.clear();
+			this.authorizedPrivatePrimeInferenceTeamId = undefined;
+		}
+	}
+
+	/**
+	 * Stale cache hits refresh in the background; failures keep the cached ids.
+	 * Refreshes for the same credentials are deduped, a changed-credentials
+	 * refresh is queued after the in-flight one, and a result is only applied
+	 * if the credentials it was fetched with are still current.
+	 */
+	private startBackgroundPrivatePrimeAuthorizationRefresh(
+		apiKey: string,
+		teamHeaders: Record<string, string>,
+		teamId: string,
+		fingerprint: string,
+	): void {
+		if (this.backgroundPrivatePrimeAuthorization?.fingerprint === fingerprint) {
+			return;
+		}
+		const run = async () => {
+			try {
+				const authorizedIds = await fetchAuthorizedPrivatePrimeInferenceModelIds(
+					apiKey,
+					teamHeaders,
+					undefined,
+					PRIVATE_PRIME_BACKGROUND_REFRESH_TIMEOUT_MS,
+				);
+				if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
+					return;
+				}
+				this.authorizedPrivatePrimeInferenceModelIds = authorizedIds;
+				this.authorizedPrivatePrimeInferenceTeamId = teamId;
+				this.writePrivatePrimeAuthorizationCache({ fingerprint, modelIds: authorizedIds, refreshedAt: Date.now() });
+			} catch {
+				// Keep the cached ids.
+			}
+		};
+		const pending = this.backgroundPrivatePrimeAuthorization?.promise;
+		const promise = (pending ?? Promise.resolve()).then(run);
+		this.backgroundPrivatePrimeAuthorization = { fingerprint, promise };
+		void promise.finally(() => {
+			if (this.backgroundPrivatePrimeAuthorization?.promise === promise) {
+				this.backgroundPrivatePrimeAuthorization = undefined;
+			}
+		});
+	}
+
+	private async currentPrivatePrimeAuthorizationFingerprint(): Promise<string | undefined> {
+		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
+		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
+		return apiKey && teamId ? privatePrimeAuthorizationFingerprint(apiKey, teamId) : undefined;
+	}
+
+	private privatePrimeAuthorizationCachePath(): string | undefined {
+		if (!this.modelsJsonPath) {
+			return undefined;
+		}
+		return join(dirname(this.modelsJsonPath), PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE);
+	}
+
+	private readPrivatePrimeAuthorizationCache(): PrivatePrimeAuthorizationCache | undefined {
+		const cachePath = this.privatePrimeAuthorizationCachePath();
+		if (!cachePath) {
+			return undefined;
+		}
+		try {
+			const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<
+				Omit<PrivatePrimeAuthorizationCache, "modelIds"> & { modelIds: string[] }
+			>;
+			if (
+				typeof parsed.fingerprint !== "string" ||
+				!Array.isArray(parsed.modelIds) ||
+				typeof parsed.refreshedAt !== "number"
+			) {
+				return undefined;
+			}
+			return {
+				fingerprint: parsed.fingerprint,
+				modelIds: new Set(parsed.modelIds),
+				refreshedAt: parsed.refreshedAt,
+			};
+		} catch {
+			return undefined;
+		}
+	}
+
+	private writePrivatePrimeAuthorizationCache(cache: PrivatePrimeAuthorizationCache): void {
+		const cachePath = this.privatePrimeAuthorizationCachePath();
+		if (!cachePath) {
+			return;
+		}
+		try {
+			const tmpPath = `${cachePath}.${process.pid}.tmp`;
+			writeFileSync(tmpPath, JSON.stringify({ ...cache, modelIds: [...cache.modelIds] }), { mode: 0o600 });
+			renameSync(tmpPath, cachePath);
+		} catch {
+			// Caching is best effort; a failed write just means the next startup refetches.
 		}
 	}
 

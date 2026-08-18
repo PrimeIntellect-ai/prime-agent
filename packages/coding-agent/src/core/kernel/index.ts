@@ -58,8 +58,84 @@ export const HOST_COMM_TARGET = "host.request";
 /**
  * Handles one typed request from Python code running in the kernel.
  * The returned record is sent back verbatim as the comm reply payload.
+ *
+ * This legacy unary compatibility alias remains the dispatcher and registration
+ * contract while context-aware handlers are staged separately below.
  */
 export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+/**
+ * Per-call authority supplied by the host-request dispatcher.
+ * `requestId` is an opaque host-minted correlation token and `isCurrent()`
+ * lets an implementation reject work after its authority is revoked.
+ */
+export interface HostRequestContext {
+	readonly requestId: string;
+	readonly generation: number;
+	readonly signal: AbortSignal;
+	isCurrent(): boolean;
+}
+
+const hostRequestHandlerBrand = Symbol("hostRequestHandler");
+
+/** A context-aware implementation that must receive dispatcher authority. */
+export type HostRequestHandlerImplementation = (
+	payload: Record<string, unknown>,
+	context: HostRequestContext,
+) => Promise<Record<string, unknown>>;
+
+/** A factory-minted, context-aware host-request handler capability. */
+type HostRequestHandlerCapability = HostRequestHandlerImplementation & { readonly [hostRequestHandlerBrand]: true };
+
+/** Runtime provenance cannot be recreated by copying the nominal symbol property. */
+const factoryCreatedHostRequestHandlers = new WeakSet<object>();
+
+function assertGenuineHostRequestContext(context: unknown): asserts context is HostRequestContext {
+	if (
+		typeof context !== "object" ||
+		context === null ||
+		typeof (context as HostRequestContext).requestId !== "string" ||
+		!(context as HostRequestContext).requestId ||
+		!Number.isSafeInteger((context as HostRequestContext).generation) ||
+		typeof (context as HostRequestContext).isCurrent !== "function" ||
+		typeof (context as HostRequestContext).signal !== "object" ||
+		(context as HostRequestContext).signal === null ||
+		typeof (context as HostRequestContext).signal.aborted !== "boolean" ||
+		typeof (context as HostRequestContext).signal.addEventListener !== "function"
+	) {
+		throw new Error("host request context is invalid");
+	}
+}
+
+/**
+ * Creates a branded wrapper rather than mutating its implementation. Both its
+ * generic shape and runtime arity reject unary callbacks before they can run.
+ */
+export function createHostRequestHandler<T extends HostRequestHandlerImplementation>(
+	implementation: T,
+	..._unaryRejection: Parameters<T> extends [unknown, unknown, ...unknown[]]
+		? []
+		: ["host request handlers must accept payload and context"]
+): HostRequestHandlerCapability {
+	if (implementation.length < 2) throw new Error("host request handlers must accept payload and context");
+	const handler = async (payload: Record<string, unknown>, context: HostRequestContext) => {
+		assertGenuineHostRequestContext(context);
+		return implementation(payload, context);
+	};
+	factoryCreatedHostRequestHandlers.add(handler);
+	return Object.defineProperty(handler, hostRequestHandlerBrand, { value: true }) as HostRequestHandlerCapability;
+}
+
+/** Reject copied-symbol and raw-function forgeries before they observe authenticated payloads. */
+export function assertHostRequestHandler(value: unknown): asserts value is HostRequestHandlerCapability {
+	if (
+		typeof value !== "function" ||
+		(value as Partial<HostRequestHandlerCapability>)[hostRequestHandlerBrand] !== true ||
+		!factoryCreatedHostRequestHandlers.has(value)
+	) {
+		throw new Error("host request handler is not a dispatcher-created capability");
+	}
+}
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
@@ -145,6 +221,7 @@ export interface KernelSentAgentMessage {
 	id: string;
 	message: string;
 	deliveryStatus: "delivered" | "queued";
+	receiverRole?: "parent" | "sibling" | "child";
 	target: {
 		activeSessionId: string;
 		sessionId: string;
@@ -204,7 +281,7 @@ function parseSentAgentMessage(payload: unknown): KernelSentAgentMessage | undef
 	if (!isRecord(payload) || !isRecord(payload.target)) {
 		return undefined;
 	}
-	const { id, message, deliveryStatus, target } = payload;
+	const { id, message, deliveryStatus, receiverRole, target } = payload;
 	const { activeSessionId, sessionId, sessionName } = target;
 	if (
 		typeof id !== "string" ||
@@ -219,6 +296,7 @@ function parseSentAgentMessage(payload: unknown): KernelSentAgentMessage | undef
 		id,
 		message,
 		deliveryStatus,
+		...(receiverRole === "parent" || receiverRole === "sibling" || receiverRole === "child" ? { receiverRole } : {}),
 		target: {
 			activeSessionId,
 			sessionId,

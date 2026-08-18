@@ -1,6 +1,8 @@
-# Using Pi
+# Using Prime Agent
 
 This page collects day-to-day usage details that do not fit on the quickstart page.
+
+Prime Agent is built around one model-facing tool: a persistent IPython kernel. The kernel retains Python state across turns and acts as a control environment for file operations, project commands, installed Python skills, MCP-backed skills, and recursive subagents. The TypeScript host remains responsible for provider calls, session state, tool execution, scheduling, and child-agent lifecycles.
 
 ## Interactive Mode
 
@@ -37,26 +39,28 @@ Type `/` in the editor to open command completion. Extensions can register custo
 |---------|-------------|
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
+| `/effort` | Set the reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
-| `/resume` | Pick from previous sessions |
+| `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session file, ID, and message counts |
-| `/traces [status\|on\|off\|upload\|login]` | Manage opt-in Prime Agent trace sharing |
-| `/usage` | Show token, cost, and context usage |
+| `/traces [status\|on\|off\|preview\|upload-current\|upload-all\|login]` | Preview, upload, or manage opt-in trace sharing |
+| `/usage`, `/context` | Show the parent and subagent context, token, and cost breakdown |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
+| `/refine [instructions]` | Refine or roll back session-backed harness state |
 | `/copy` | Copy last assistant message to clipboard |
-| `/btw <question>`, `/side <question>` | Ask one inline side question without adding it to the session |
+| `/btw <question>`, `/side <question>` | Ask an inline side question without adding it to the session; replies continue the side conversation, esc returns |
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
-| `/quit` | Quit pi |
+| `/quit` | Quit Prime Agent |
 
 ## Message Queue
 
@@ -64,23 +68,25 @@ You can submit messages while the agent is still working:
 
 - **Enter** queues a steering message, delivered after the current assistant turn finishes executing its tool calls.
 - **Alt+Enter** queues a follow-up message, delivered after the agent finishes all work.
-- **Ctrl+C** interrupts the current operation and briefly shows the exit hint; press it again while the hint is visible to exit.
+- **Ctrl+C** interrupts the current operation and briefly shows the exit hint; press it again while the hint is visible to exit. Queued messages are kept and resume after your next submit or edit.
 - **Escape** clears the input bar without interrupting the agent.
-- **Alt+Up** retrieves queued messages back to the editor.
+- **Alt+Up / Alt+Down** browse queued messages one at a time and return to the untouched draft.
+- While browsing, **Enter** applies the edit as steering input and **Alt+Enter** applies it as a follow-up; submitting an empty edit deletes the item.
+- **Ctrl+Option+Up / Ctrl+Option+Down** move the selected item earlier or later within its queue.
 
-On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described in [Terminal setup](terminal-setup.md) if you want pi to receive the shortcut.
+On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described in [Terminal setup](terminal-setup.md) if you want Prime Agent to receive the shortcut.
 
 Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpMode`.
 
 ## Sessions
 
-Sessions are saved automatically to `~/.pi/agent/sessions/`, organized by working directory.
+Sessions are saved automatically as flat JSONL files under `~/.prime/agent/sessions/`. Each session header records its working directory, which the session picker uses for project-scoped views.
 
 ```bash
-pi -c                  # Continue most recent session
-pi -r [path|id]        # Browse sessions or resume one directly
-pi --no-session        # Ephemeral mode; do not save
-pi --fork <path|id>    # Fork a session into a new session file
+prime-agent -c                  # Continue most recent session
+prime-agent -r [path|id]        # Browse sessions or resume one directly
+prime-agent --no-session        # Ephemeral mode; do not save
+prime-agent --fork <path|id>    # Fork a session into a new session file
 ```
 
 Useful session commands:
@@ -94,11 +100,42 @@ Useful session commands:
 
 See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
+## Agents and Recursive Subagents
+
+Normal interactive sessions are persistent agents backed by isolated worker processes. Closing the TUI detaches the client; use `prime-agent agents`, `prime-agent list`, or `prime-agent attach <agent>` to find and reattach to running work. `prime-agent stop <agent>` stops one root agent, while `prime-agent shutdown` stops all workers and the local supervisor.
+
+Within a session, the model can delegate through the `rlm` callable already available in IPython:
+
+```python
+# Spawn independent children. Each call returns at admission with a child handle,
+# never the child's answer.
+review = await rlm(
+    "Review authentication and reply to the parent with findings.",
+    name="auth-reviewer",
+)
+tests = await rlm("Find missing regression tests and reply to the parent.", name="test-reviewer")
+docs = await rlm("Find stale public documentation and reply to the parent.", name="docs-reviewer")
+
+# Children reply from their own sessions with:
+# await agent_message.send(message, receiver_role="parent")
+# Their replies arrive here as ordinary agent messages.
+
+# Recover handles and follow up with a retained child.
+children = await rlm.list_subagents()
+await agent_message.send(
+    "Also check authorization boundaries.",
+    receiver_role="child",
+    receiver_name=review.name,
+)
+```
+
+Children inherit the parent model unless the user requests another model. They run as TypeScript `AgentSession` instances under the same root worker and can use the same provider, tools, skills, session storage, and scheduling system. See [RLM Runtime Architecture](rlm-runtime.md).
+
 ## Context Files
 
-Pi loads `AGENTS.md` or `CLAUDE.md` at startup from:
+Prime Agent loads `AGENTS.md` or `CLAUDE.md` at startup from:
 
-- `~/.pi/agent/AGENTS.md` for global instructions
+- `~/.prime/agent/AGENTS.md` for global instructions
 - parent directories, walking up from the current working directory
 - the current directory
 
@@ -108,8 +145,8 @@ Use context files for project conventions, commands, safety rules, and preferenc
 
 Replace the default system prompt with:
 
-- `.pi/SYSTEM.md` for a project
-- `~/.pi/agent/SYSTEM.md` globally
+- `.prime/agent/SYSTEM.md` for a project
+- `~/.prime/agent/SYSTEM.md` globally
 
 Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location.
 
@@ -119,12 +156,10 @@ Use `/export [file]` to write a session to HTML.
 
 Use `/share` to upload a private GitHub gist with a shareable HTML link.
 
-If you use pi for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). It publishes sessions to Hugging Face datasets.
-
 ## CLI Reference
 
 ```bash
-pi [options] [@files...] [messages...]
+prime-agent [options] [@files...] [messages...]
 ```
 
 ### Shell Commands
@@ -149,7 +184,7 @@ prime-agent update [--force]
 prime-agent config
 ```
 
-See [Pi Packages](packages.md) for package sources and security notes.
+See [Prime Agent Packages](packages.md) for package sources and security notes.
 
 ### Modes
 
@@ -160,10 +195,10 @@ See [Pi Packages](packages.md) for package sources and security notes.
 | `--mode json` | Output all events as JSON lines; see [JSON mode](json.md) |
 | `--mode rpc` | RPC mode over stdin/stdout; see [RPC mode](rpc.md) |
 
-In print mode, pi also reads piped stdin and merges it into the initial prompt:
+In print mode, Prime Agent also reads piped stdin and merges it into the initial prompt:
 
 ```bash
-cat README.md | pi -p "Summarize this text"
+cat README.md | prime-agent -p "Summarize this text"
 ```
 
 ### Model Options
@@ -217,21 +252,49 @@ Built-in tools: `ipython`.
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings. Example:
 
 ```bash
-pi --no-extensions -e ./my-extension.ts
+prime-agent --no-extensions -e ./my-extension.ts
 ```
 
 ### Autonomous Options
 
-| Option | Description |
-|--------|-------------|
-| `--autonomous` | Continue until host-observable terminal evidence exists |
-| `--autonomous-gate <command>` | Run a command before autonomous mode may finish; repeatable |
-| `--autonomous-gate-retries <n>` | Maximum retries for each failed gate; default is 3 |
-| `--autonomous-gate-timeout-ms <n>` | Timeout for each gate command |
-| `--autonomous-max-continuations <n>` | Maximum autonomous follow-up messages; default is 3 |
-| `--autonomous-max-turns <n>` | Maximum assistant turns; default is 12 |
-| `--autonomous-max-tokens <n>` | Maximum tokens; default is 80000 |
-| `--autonomous-timeout-ms <n>` | Maximum wall-clock duration; default is 1800000 milliseconds |
+Autonomous mode is a host policy for unattended work. It starts disabled. `--autonomous` enables it, and supplying any `--autonomous-*` sub-option also enables it. The host starts each enabled run with fresh continuation, turn, token, and elapsed-time counters.
+
+| Option | Behavior, units, and default |
+|--------|------------------------------|
+| `--autonomous` | Enable autonomous continuations. With no gates, the host keeps requesting work until a limit prevents another continuation. |
+| `--autonomous-gate <command>` | Add a shell command that must pass before the run can finish. Repeatable commands run in CLI order; the default is no gates. |
+| `--autonomous-gate-retries <n>` | Set the per-gate retry limit. Default: `3`. A failed gate can continue while its recorded attempt is at most this value; the next failed attempt exhausts the gate. |
+| `--autonomous-gate-timeout-ms <n>` | Set the timeout for each gate process in milliseconds. Default: `300000` (5 minutes). A timed-out gate is failed and its process tree is stopped. |
+| `--autonomous-max-continuations <n>` | Set the maximum host-injected follow-up messages. Default: `3`. |
+| `--autonomous-max-turns <n>` | Set the maximum assistant responses counted while autonomous mode is enabled. Default: `12`. |
+| `--autonomous-max-tokens <n>` | Set the maximum accumulated tokens. Default: `80000`; accounting includes input, output, and cache-write tokens, but excludes cache-read tokens. |
+| `--autonomous-timeout-ms <n>` | Set the maximum elapsed autonomous time in milliseconds. Default: `1800000` (30 minutes). |
+
+All `<n>` values must be positive integers: zero, negative, fractional, and non-numeric values are rejected. Value-taking autonomous flags require a separate argument, not `--flag=value`. A missing value is rejected, and a following long option is not consumed as a value. Repeating a numeric flag uses its last value; repeating `--autonomous-gate` appends another gate.
+
+After each assistant response, configured gates run before the ordinary continuation limits are evaluated. All gates must pass for the run to finish. A failed gate supplies bounded command output to the next continuation so the agent can repair it; Prime Agent avoids rerunning an unchanged failed gate and advances its attempt count instead. A passing gate permits completion even if a continuation, turn, token, or time limit has otherwise been reached. If a gate does not pass, or if there are no gates, the host can inject another continuation only while all four limits remain below their configured values. Limits are checked in this order: continuations, turns, tokens, then elapsed time. Reaching one prevents another automatic continuation; it does not imply task success.
+
+For example, this noninteractive run uses a locally available model configuration, skips startup network operations, and bounds every autonomous budget while requiring the project check to pass:
+
+```bash
+prime-agent -p \
+  --autonomous \
+  --autonomous-gate "npm run check" \
+  --autonomous-gate-retries 2 \
+  --autonomous-gate-timeout-ms 300000 \
+  --autonomous-max-continuations 3 \
+  --autonomous-max-turns 12 \
+  --autonomous-max-tokens 80000 \
+  --autonomous-timeout-ms 1800000 \
+  --model openai/gpt-5.1-codex \
+  --offline \
+  --thinking high \
+  "Fix the failing check and report the verified result."
+```
+
+`--offline` disables startup network operations; it does not supply model credentials or make provider inference offline. Choose a model already configured for the local environment.
+
+Goals are separate from autonomous mode: `--goal <objective>` starts a persistent goal only for a new root session with no existing goal state, while autonomous mode decides whether the host should inject another continuation. `--goal-token-budget <n>` is a positive-integer token budget for that initial goal and requires `--goal`.
 
 ### Other Options
 
@@ -251,58 +314,65 @@ pi --no-extensions -e ./my-extension.ts
 Prefix files with `@` to include them in the message:
 
 ```bash
-pi @prompt.md "Answer this"
-pi -p @screenshot.png "What's in this image?"
-pi @code.ts @test.ts "Review these files"
+prime-agent @prompt.md "Answer this"
+prime-agent -p @screenshot.png "What's in this image?"
+prime-agent @code.ts @test.ts "Review these files"
 ```
 
 ### Examples
 
 ```bash
 # Interactive with initial prompt
-pi "List all .ts files in src/"
+prime-agent "List all .ts files in src/"
 
 # Non-interactive
-pi -p "Summarize this codebase"
+prime-agent -p "Summarize this codebase"
 
 # Non-interactive with piped stdin
-cat README.md | pi -p "Summarize this text"
+cat README.md | prime-agent -p "Summarize this text"
 
 # Different model
-pi --provider openai --model gpt-4o "Help me refactor"
+prime-agent --provider openai --model gpt-4o "Help me refactor"
 
 # Model with provider prefix
-pi --model openai/gpt-4o "Help me refactor"
+prime-agent --model openai/gpt-4o "Help me refactor"
 
 # Model with thinking level shorthand
-pi --model sonnet:high "Solve this complex problem"
+prime-agent --model sonnet:high "Solve this complex problem"
 
 # Limit model cycling
-pi --models "claude-*,gpt-4o"
+prime-agent --models "claude-*,gpt-4o"
 
 # Restrict to the built-in IPython tool
-pi --tools ipython -p "Review the code"
+prime-agent --tools ipython -p "Review the code"
 ```
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `PI_CODING_AGENT_DIR` | Override config directory; default is `~/.pi/agent` |
-| `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
+| `PRIME_AGENT_CODING_AGENT_DIR` | Override config directory; default is `~/.prime/agent` |
+| `PRIME_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
+| `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Legacy alias for `PRIME_AGENT_SESSION_DIR` |
 | `PI_PACKAGE_DIR` | Override package directory, useful for Nix/Guix store paths |
 | `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
 | `PI_SKIP_VERSION_CHECK` | Skip the Prime Agent version update check at startup. This prevents the release manifest request |
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
+| `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing when it has `agent_traces` scope |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
+| `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `ipykernel` instead of bootstrapping `~/.prime/agent/kernel-venv` |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
+
+The remaining `PI_*` variables are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.prime/agent` configuration path.
 
 ## Design Principles
 
-Pi keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
+Prime Agent keeps the model-facing tool surface small while making the IPython runtime powerful and composable. The built-in `ipython` tool provides durable state, project command execution, Python skills, MCP-backed integrations, and the native `rlm` delegation API without presenting each capability as a separate model tool.
 
-It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+Recursive subagents are a core capability, not an optional extension. The TypeScript host owns every parent and child agent loop so recursion uses the same provider, session, tool, skill, scheduling, usage-accounting, and recovery infrastructure. The Python `rlm` package is a thin host bridge rather than a separate agent implementation.
 
-For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).
+Extensions, skills, prompt templates, themes, and Prime Agent packages remain the primary customization surfaces. They can add project-specific workflows, custom tools and UI, permission policies, provider integrations, and orchestration patterns around the built-in runtime.
+
+Prime Agent preserves MIT attribution to pi-mono for its upstream lineage, but upstream Pi product claims and limitations do not describe the current Prime Agent architecture.

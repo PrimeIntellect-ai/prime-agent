@@ -10,6 +10,7 @@ import type {
 	ChatCompletionSystemMessageParam,
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
+import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
 import { getEnvApiKey, getPrimeTeamId } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
@@ -77,6 +78,8 @@ function isImageContentBlock(block: { type: string }): block is ImageContent {
 export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	/** Explicit reasoning toggle. undefined preserves the provider/model default. */
+	reasoningEnabled?: boolean;
 }
 
 interface OpenAICompatCacheControl {
@@ -138,9 +141,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const compat = getCompat(model);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
+			const cacheControl = getCompatCacheControl(compat, cacheRetention);
+			const cacheWriteCost =
+				cacheControl && hasStandardAnthropicCachePricing(model)
+					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
+					: undefined;
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
-			let params = buildParams(model, context, options, compat, cacheRetention);
+			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
@@ -270,7 +278,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.responseModel ||= chunk.model;
 				}
 				if (chunk.usage) {
-					output.usage = parseChunkUsage(chunk.usage, model);
+					output.usage = parseChunkUsage(chunk.usage, model, cacheWriteCost);
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
@@ -279,7 +287,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
 				if (!chunk.usage && (choice as any).usage) {
-					output.usage = parseChunkUsage((choice as any).usage, model);
+					output.usage = parseChunkUsage((choice as any).usage, model, cacheWriteCost);
 				}
 
 				if (choice.finish_reason) {
@@ -424,13 +432,16 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+	const requestedReasoning = options?.reasoning;
+	const reasoningSpecified = requestedReasoning !== undefined;
+	const clampedReasoning = reasoningSpecified ? clampThinkingLevel(model, requestedReasoning) : undefined;
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
 	const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
 
 	return streamOpenAICompletions(model, context, {
 		...base,
 		reasoningEffort,
+		reasoningEnabled: reasoningSpecified ? clampedReasoning !== "off" : undefined,
 		toolChoice,
 	} satisfies OpenAICompletionsOptions);
 };
@@ -501,9 +512,9 @@ function buildParams(
 	options?: OpenAICompletionsOptions,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention),
+	cacheControl: OpenAICompatCacheControl | undefined = getCompatCacheControl(compat, cacheRetention),
 ) {
 	const messages = convertMessages(model, context, compat);
-	const cacheControl = getCompatCacheControl(compat, cacheRetention);
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
 		model: model.id,
@@ -571,22 +582,27 @@ function buildParams(
 				model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
 		}
 	} else if (compat.thinkingFormat === "openrouter" && model.reasoning) {
-		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
-		const openRouterParams = params as typeof params & { reasoning?: { effort?: string } };
-		if (options?.reasoningEffort) {
+		// OpenRouter distinguishes an omitted reasoning preference (use the model
+		// default), an explicit toggle, and an explicit effort selection.
+		const openRouterParams = params as typeof params & { reasoning?: { enabled?: boolean; effort?: string } };
+		if (options?.reasoningEffort && compat.supportsReasoningEffort) {
 			openRouterParams.reasoning = {
 				effort: model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort,
 			};
-		} else if (model.thinkingLevelMap?.off !== null) {
-			openRouterParams.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
+		} else if (options?.reasoningEnabled === true) {
+			openRouterParams.reasoning = { enabled: true };
+		} else if (options?.reasoningEnabled === false && model.thinkingLevelMap?.off !== null) {
+			openRouterParams.reasoning = compat.supportsReasoningEffort
+				? { effort: model.thinkingLevelMap?.off ?? "none" }
+				: { enabled: false };
 		}
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
 		(params as any).reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-	} else if (!options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
+	} else if (options?.reasoningEnabled === false && model.reasoning && compat.supportsReasoningEffort) {
 		const offValue = model.thinkingLevelMap?.off;
-		if (typeof offValue === "string") {
-			(params as any).reasoning_effort = offValue;
+		if (offValue !== null) {
+			(params as any).reasoning_effort = offValue ?? "none";
 		}
 	}
 
@@ -1004,6 +1020,7 @@ function parseChunkUsage(
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 	},
 	model: Model<"openai-completions">,
+	cacheWriteCost?: number,
 ): AssistantMessage["usage"] {
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const reportedCachedTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
@@ -1028,7 +1045,7 @@ function parseChunkUsage(
 		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
-	calculateCost(model, usage);
+	calculateCost(model, usage, cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost });
 	return usage;
 }
 
@@ -1092,7 +1109,9 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
-	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
+	const isAnthropicModel = model.id.startsWith("anthropic/");
+	const cacheControlFormat =
+		isAnthropicModel && (provider === "openrouter" || isPrimeInference) ? "anthropic" : undefined;
 
 	return {
 		supportsStore: !isNonStandard,

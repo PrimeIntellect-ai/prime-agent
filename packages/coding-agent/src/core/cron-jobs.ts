@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
+import { getSessionArtifactPathForFile } from "./session-manager.js";
 
 export type AgentCronJobStatus = "active" | "paused" | "completed" | "cancelled";
 export type AgentCronScheduleKind = "once" | "cron" | "interval";
@@ -77,6 +78,7 @@ export interface AgentCronDispatch {
 
 export interface AgentCronSchedulerHooks {
 	runJob: (job: AgentCronJob) => Promise<AgentCronJobRunResult | undefined>;
+	beginDispatch?: (dispatch: AgentCronDispatch) => (() => void) | undefined;
 	now?: () => Date;
 	onError?: (job: AgentCronJob, error: unknown) => void;
 }
@@ -87,8 +89,8 @@ export interface HeartbeatCronSessionActivity {
 	isRefining?: boolean;
 	isRetrying?: boolean;
 	isBashRunning: boolean;
-	hasAcceptedPromptInFlight?: boolean;
-	pendingMessageCount: number;
+	hasPendingSessionWork: boolean;
+	unfinishedActionCount: number;
 }
 
 interface CronJobsFile {
@@ -763,6 +765,16 @@ export class AgentCronJobStore {
 		return recovered;
 	}
 
+	recoverInterruptedDispatchesById(dispatchIds: readonly string[], now = new Date()): AgentCronJob[] {
+		const recovered: AgentCronJob[] = [];
+		const interruptedDispatchIds = new Set(dispatchIds);
+		this.mutateStates((state) => {
+			recoverInterruptedInState(state, now, recovered, interruptedDispatchIds);
+			return [];
+		});
+		return recovered;
+	}
+
 	getDueJob(id: string, now = new Date()): AgentCronJob | undefined {
 		return this.readJobs().find((job) => job.id === id && isDueJob(job, now));
 	}
@@ -904,9 +916,7 @@ export function migrateLegacyCronJobsToSessionArtifacts(
 	const jobsByArtifact = new Map<string, AgentCronJob[]>();
 	for (const job of jobs) {
 		const artifactPath = join(
-			dirname(dirname(resolve(job.sessionFile))),
-			"session-artifacts",
-			job.sessionId,
+			getSessionArtifactPathForFile(resolve(job.sessionFile), job.sessionId),
 			SESSION_SCHEDULED_JOBS_FILENAME,
 		);
 		const grouped = jobsByArtifact.get(artifactPath) ?? [];
@@ -957,48 +967,70 @@ export class AgentCronScheduler {
 	}
 
 	async runDue(now = this.now()): Promise<number> {
-		if (this.running) {
+		if (this.running || (this.stopped && this.hasStarted)) {
 			return 0;
 		}
 		this.running = true;
-		let dispatches: AgentCronDispatch[] = [];
+		const dispatches: Array<{ dispatch: AgentCronDispatch; endDispatch?: () => void }> = [];
+		let claimedDispatches: AgentCronDispatch[] | undefined;
 		try {
-			dispatches = this.store.claimDue(now, this.now());
+			claimedDispatches = this.store.claimDue(now, this.now());
+			for (const dispatch of claimedDispatches) {
+				dispatches.push({ dispatch, endDispatch: this.hooks.beginDispatch?.(dispatch) });
+			}
+		} catch (error) {
+			for (const claimed of dispatches) claimed.endDispatch?.();
+			if (claimedDispatches) {
+				this.store.recoverInterruptedDispatchesById(
+					claimedDispatches.map((dispatch) => dispatch.id),
+					this.now(),
+				);
+			}
+			throw error;
 		} finally {
 			this.running = false;
 			if (!this.stopped) {
 				this.scheduleNext();
 			}
 		}
-		const results = await Promise.all(dispatches.map((dispatch) => this.queueDispatch(dispatch)));
+		const results = await Promise.all(
+			dispatches.map(({ dispatch, endDispatch }) => this.queueDispatch(dispatch, endDispatch)),
+		);
 		return results.filter((result) => result !== "skipped").length;
 	}
 
-	private queueDispatch(dispatch: AgentCronDispatch): Promise<AgentCronJobRunResult | undefined> {
+	private queueDispatch(
+		dispatch: AgentCronDispatch,
+		endDispatch?: () => void,
+	): Promise<AgentCronJobRunResult | undefined> {
 		const laneKey = dispatch.job.activeSessionId;
 		const previous = this.dispatchLanes.get(laneKey) ?? Promise.resolve();
 		const task = previous
 			.catch(() => undefined)
 			.then(async (): Promise<AgentCronJobRunResult | undefined> => {
-				const job = this.store.getClaimedJob(dispatch.job.id);
-				if (!job) {
-					this.store.recordDispatchResult(dispatch.id, { now: this.now(), outcome: "skipped" });
-					return "skipped";
-				}
-				let runResult: AgentCronJobRunResult | undefined;
-				let error: unknown;
 				try {
-					runResult = await this.hooks.runJob(job);
-				} catch (runError) {
-					error = runError;
-					this.hooks.onError?.(job, runError);
+					const job = this.store.getClaimedJob(dispatch.job.id);
+					if (!job) {
+						this.store.recordDispatchResult(dispatch.id, { now: this.now(), outcome: "skipped" });
+						return "skipped";
+					}
+					let runResult: AgentCronJobRunResult | undefined;
+					let error: unknown;
+					try {
+						runResult = await this.hooks.runJob(job);
+					} catch (runError) {
+						error = runError;
+						this.hooks.onError?.(job, runError);
+					}
+					this.store.recordDispatchResult(dispatch.id, {
+						now: this.now(),
+						outcome: runResult === "skipped" && error === undefined ? "skipped" : "ran",
+						error,
+					});
+					return runResult;
+				} finally {
+					endDispatch?.();
 				}
-				this.store.recordDispatchResult(dispatch.id, {
-					now: this.now(),
-					outcome: runResult === "skipped" && error === undefined ? "skipped" : "ran",
-					error,
-				});
-				return runResult;
 			});
 		const lane = task.then(
 			() => undefined,
@@ -1327,8 +1359,8 @@ export function shouldDeferHeartbeatCronJob(job: AgentCronJob, activity: Heartbe
 		activity.isRefining === true ||
 		activity.isRetrying === true ||
 		activity.isBashRunning ||
-		activity.hasAcceptedPromptInFlight === true ||
-		activity.pendingMessageCount > 0;
+		activity.hasPendingSessionWork ||
+		(!activity.isStreaming && activity.unfinishedActionCount > 0);
 	if (busyBesidesStreaming) {
 		return true;
 	}
@@ -1568,12 +1600,20 @@ function claimDueInState(state: CronJobsState, dueAt: Date, claimedAt: Date): Ag
 	return dispatches;
 }
 
-function recoverInterruptedInState(state: CronJobsState, now: Date, recovered: AgentCronJob[]): void {
-	if (state.dispatches.length === 0) {
+function recoverInterruptedInState(
+	state: CronJobsState,
+	now: Date,
+	recovered: AgentCronJob[],
+	dispatchIds?: ReadonlySet<string>,
+): void {
+	const interrupted = dispatchIds
+		? state.dispatches.filter((dispatch) => dispatchIds.has(dispatch.id))
+		: state.dispatches;
+	if (interrupted.length === 0) {
 		return;
 	}
-	const interruptedIds = new Set(state.dispatches.map((dispatch) => dispatch.jobId));
-	state.dispatches = [];
+	const interruptedIds = new Set(interrupted.map((dispatch) => dispatch.jobId));
+	state.dispatches = dispatchIds ? state.dispatches.filter((dispatch) => !dispatchIds.has(dispatch.id)) : [];
 	state.jobs = state.jobs.map((job) => {
 		if (!interruptedIds.has(job.id) || job.status !== "active") {
 			return job;

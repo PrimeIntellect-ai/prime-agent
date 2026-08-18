@@ -2,12 +2,10 @@ import { setKeybindings, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
-import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/index.js";
 import { ModelSelectorComponent } from "../src/modes/interactive/components/model-selector.js";
 import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.js";
 import { PrimeTeamSelectorComponent } from "../src/modes/interactive/components/prime-team-selector.js";
 import { ScopedModelsSelectorComponent } from "../src/modes/interactive/components/scoped-models-selector.js";
-import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 
@@ -21,24 +19,6 @@ function moveDown(component: { handleInput(data: string): void }, count: number)
 	for (let index = 0; index < count; index++) {
 		component.handleInput(DOWN);
 	}
-}
-
-function makeSession(index: number): AgentConnectionSavedSessionInfo {
-	return {
-		path: `/tmp/session-${index}.jsonl`,
-		id: `session-${index}`,
-		cwd: "/tmp",
-		name: `Session ${index}`,
-		created: new Date(index),
-		modified: new Date(index),
-		messageCount: 1,
-		firstMessage: "common topic",
-		allMessagesText: "common topic",
-	};
-}
-
-async function flushPromises(): Promise<void> {
-	await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 describe("searchable selector navigation", () => {
@@ -158,28 +138,5 @@ describe("searchable selector navigation", () => {
 		selector.handleInput("\r");
 
 		expect(enabledModelIds).toEqual([`${harness.models[0]?.provider}/faux-1`]);
-	});
-
-	it("selects the first session after the search query changes", async () => {
-		const sessions = Array.from({ length: 12 }, (_, index) => makeSession(index + 1));
-		let selectedPath: string | undefined;
-		const selector = new SessionSelectorComponent(
-			async () => sessions,
-			async () => sessions,
-			(path) => {
-				selectedPath = path;
-			},
-			() => {},
-			() => {},
-			() => {},
-		);
-		await flushPromises();
-
-		const list = selector.getSessionList();
-		moveDown(list, 8);
-		list.handleInput("c");
-		list.handleInput("\r");
-
-		expect(selectedPath).toBe(sessions.at(-1)?.path);
 	});
 });

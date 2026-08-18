@@ -12,8 +12,20 @@
           "path": "quickstart.md"
         },
         {
-          "title": "Using Pi",
+          "title": "Architecture Overview",
+          "path": "architecture.md"
+        },
+        {
+          "title": "Using Prime Agent",
           "path": "usage.md"
+        },
+        {
+          "title": "RLM Programming Model",
+          "path": "rlm.md"
+        },
+        {
+          "title": "Long-Running and Background Agents",
+          "path": "long-running-agents.md"
         },
         {
           "title": "Providers",
@@ -61,7 +73,7 @@
           "path": "themes.md"
         },
         {
-          "title": "Pi Packages",
+          "title": "Prime Agent Packages",
           "path": "packages.md"
         },
         {
@@ -89,6 +101,10 @@
         {
           "title": "SDK",
           "path": "sdk.md"
+        },
+        {
+          "title": "ACP Mode",
+          "path": "acp.md"
         },
         {
           "title": "RPC Mode",
@@ -137,16 +153,16 @@
           "path": "development.md"
         },
         {
-          "title": "AgentConnection Architecture",
-          "path": "agent-connection-readme.md"
+          "title": "Daemon Architecture",
+          "path": "daemon.md"
         },
         {
-          "title": "Kernel and RLM Recursion",
-          "path": "kernel-and-rlm-recursion.md"
+          "title": "Agent Connection Architecture",
+          "path": "agent-connection.md"
         },
         {
-          "title": "/refine Verification Log",
-          "path": "refine-verification-log.md"
+          "title": "RLM Runtime Architecture",
+          "path": "rlm-runtime.md"
         }
       ]
     }

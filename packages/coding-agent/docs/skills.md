@@ -12,6 +12,7 @@ Prime Agent implements the [Agent Skills standard](https://agentskills.io/specif
 - [Built-in Skills](#built-in-skills)
 - [How Skills Work](#how-skills-work)
 - [Python-Backed Skills](#python-backed-skills)
+- [Creating Skills with Prime Agent](#creating-skills-with-prime-agent)
 - [Skill Commands](#skill-commands)
 - [Skill Structure](#skill-structure)
 - [Frontmatter](#frontmatter)
@@ -196,6 +197,38 @@ The model can then call the skill from normal Python or from shell mode:
 await web_search("prime agent")
 !web_search "prime agent" --limit 3
 ```
+
+## Creating Skills with Prime Agent
+
+Prime Agent ships with a built-in `skill-creator` skill that teaches the agent both the Agent Skills format and the Python-backed package contract. You can ask for a skill in normal language:
+
+```text
+Create a project Python-backed skill named release-audit in
+.prime/agent/skills/release-audit. It should expose
+await release_audit(repository, target_version), include concise SKILL.md
+instructions, declare its dependencies, and verify the callable in a fresh
+Prime Agent session.
+```
+
+To force the creation workflow explicitly, invoke the built-in skill command:
+
+```text
+/skill:skill-creator Create a personal markdown skill for reviewing database migrations.
+```
+
+Tell the agent three things:
+
+1. **Scope:** use `.prime/agent/skills/<name>/` for a project skill committed with the repository, or `~/.prime/agent/skills/<name>/` for a personal skill.
+2. **Kind:** ask for a markdown skill when the capability is primarily instructions; ask for a Python-backed skill when the agent should call reusable functionality from IPython.
+3. **Contract:** describe the intended Python call, inputs, output, dependencies, credentials, and verification behavior.
+
+The agent should create `SKILL.md` in both cases. For a Python-backed skill it should also create `pyproject.toml` and `src/<import_name>/__init__.py`, expose a documented callable, and verify that the package imports in the kernel.
+
+Use `/reload` to rediscover new or edited skill metadata. Start a fresh Prime Agent session after adding a Python-backed skill so kernel setup can install and import the package.
+
+### Installed Skills and Continual Harness Skills
+
+An installed Python-backed skill is a real package on disk that adds executable functionality to the kernel. A continual harness skill entry is a persisted description of a reusable Python call, including its reference and argument contract. `/refine` can create or update the latter after a repeated procedure emerges, but it does not replace packaging new functionality with `skill-creator`.
 
 ## Skill Commands
 

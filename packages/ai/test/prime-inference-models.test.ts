@@ -24,17 +24,16 @@ describe("Prime Inference models", () => {
 			expect.arrayContaining([
 				"anthropic/claude-opus-4.7",
 				"anthropic/claude-opus-4.8",
+				"anthropic/claude-opus-5",
 				"anthropic/claude-sonnet-5",
 				"deepseek/deepseek-v4-pro",
 				"google/gemini-2.5-pro",
 				"meta-llama/llama-4-maverick",
 				"minimax/minimax-m3",
 				"moonshotai/kimi-k2.7-code",
-				"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B",
 				"nvidia/nemotron-3-super-120b-a12b",
 				"openai/gpt-5.4",
 				"openai/gpt-5.5",
-				"poolside/laguna-m.1",
 				"qwen/qwen3-coder-next",
 				"qwen/qwen3-vl-235b-a22b-thinking",
 				"x-ai/grok-4.20",
@@ -64,22 +63,39 @@ describe("Prime Inference models", () => {
 		expect(getModel("prime-inference", "openai/gpt-4o").featured).toBeUndefined();
 	});
 
+	it("uses mandatory provider efforts for Qwen 3.8 Max", () => {
+		const model = getModel("prime-inference", "qwen/qwen3.8-max");
+
+		expect(model.featured).toBe(true);
+		expect(model.thinkingLevelMap).toEqual({
+			off: null,
+			minimal: "minimal",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: null,
+		});
+		expect(getSupportedThinkingLevels(model)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+	});
+
+	it("uses reasoning toggles for models without effort selectors", () => {
+		for (const provider of ["prime-inference", "openrouter"] as const) {
+			const model = getModel(provider, "qwen/qwen3.7-flash");
+
+			expect(model.compat?.supportsReasoningEffort).toBe(false);
+			expect(getSupportedThinkingLevels(model)).toEqual(["off", "high"]);
+			if (provider === "prime-inference") expect(model.compat?.thinkingFormat).toBe("openrouter");
+		}
+	});
+
 	it("registers Kimi K3 on Prime Inference and OpenRouter", () => {
 		for (const provider of ["prime-inference", "openrouter"] as const) {
 			const model = getModel(provider, "moonshotai/kimi-k3");
 
 			expect(model.api).toBe("openai-completions");
 			expect(model.reasoning).toBe(true);
-			expect(model.thinkingLevelMap).toEqual({
-				off: null,
-				minimal: null,
-				low: null,
-				medium: null,
-				high: null,
-				xhigh: null,
-				max: "max",
-			});
-			expect(getSupportedThinkingLevels(model)).toEqual(["max"]);
+			expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "high", "max"]);
 			expect(model.input).toEqual(["text", "image"]);
 			expect(model.contextWindow).toBe(1048576);
 			expect(model.maxTokens).toBe(1048576);
@@ -95,14 +111,15 @@ describe("Prime Inference models", () => {
 		expect(gemini.input).toEqual(["text", "image"]);
 		expect(gemini.reasoning).toBe(true);
 
-		// The HF-style ultra id maps onto OpenRouter's short id via alias for
-		// modality/reasoning, but the gateway enforces a 131k window (measured
-		// 2026-07-08), so the curated override wins for contextWindow. OpenRouter
-		// may omit its live output cap, in which case the conservative fallback wins.
-		const ultra = getModel("prime-inference", "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B");
-		expect(ultra.contextWindow).toBe(131072);
-		expect(ultra.maxTokens).toBeGreaterThan(0);
-		expect(ultra.maxTokens).toBeLessThanOrEqual(ultra.contextWindow);
+		// Modality and reasoning are read from OpenRouter's published spec for the
+		// same upstream model, but the Prime route enforces a smaller window and
+		// output cap than that spec lists (1M/16k), so the curated override wins
+		// for contextWindow and maxTokens.
+		const nemotronSuper = getModel("prime-inference", "nvidia/nemotron-3-super-120b-a12b");
+		expect(nemotronSuper.reasoning).toBe(true);
+		expect(nemotronSuper.input).toEqual(["text"]);
+		expect(nemotronSuper.contextWindow).toBe(262144);
+		expect(nemotronSuper.maxTokens).toBe(4096);
 
 		const maverick = getModel("prime-inference", "meta-llama/llama-4-maverick");
 		expect(maverick.contextWindow).toBe(1048576);
@@ -118,8 +135,7 @@ describe("Prime Inference models", () => {
 		expect(model.provider).toBe("prime-inference");
 		expect(model.baseUrl).toBe("https://api.pinference.ai/api/v1");
 		expect(model.reasoning).toBe(true);
-		expect(model.thinkingLevelMap).toEqual({ xhigh: "xhigh" });
-		expect(getSupportedThinkingLevels(model)).toContain("xhigh");
+		expect(getSupportedThinkingLevels(model)).toEqual(["off", "low", "medium", "high", "xhigh"]);
 		expect(model.input).toEqual(["text", "image"]);
 		expect(model.contextWindow).toBe(1050000);
 		expect(model.maxTokens).toBe(128000);
@@ -141,21 +157,19 @@ describe("Prime Inference models", () => {
 	it("marks known reasoning-capable Prime Inference model families", () => {
 		const opus48 = getModel("prime-inference", "anthropic/claude-opus-4.8");
 		expect(opus48.reasoning).toBe(true);
-		expect(opus48.thinkingLevelMap).toEqual({ xhigh: "xhigh", max: "max" });
-		expect(getSupportedThinkingLevels(opus48)).toContain("xhigh");
-		expect(getSupportedThinkingLevels(opus48)).toContain("max");
+		expect(getSupportedThinkingLevels(opus48)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
 
 		const sonnet5 = getModel("prime-inference", "anthropic/claude-sonnet-5");
 		expect(sonnet5.reasoning).toBe(true);
-		expect(sonnet5.thinkingLevelMap).toEqual({ xhigh: "xhigh", max: "max" });
+		expect(getSupportedThinkingLevels(sonnet5)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
 		expect(sonnet5.input).toEqual(["text", "image"]);
 		expect(sonnet5.contextWindow).toBe(1000000);
 		expect(sonnet5.maxTokens).toBe(128000);
 		expect(sonnet5.cost).toEqual({
 			input: 2,
 			output: 10,
-			cacheRead: 0,
-			cacheWrite: 0,
+			cacheRead: 0.2,
+			cacheWrite: 2.5,
 		});
 		expect(getSupportedThinkingLevels(sonnet5)).toContain("xhigh");
 		expect(getSupportedThinkingLevels(sonnet5)).toContain("max");
@@ -186,15 +200,22 @@ describe("Prime Inference models", () => {
 	});
 
 	it("uses route-specific context windows for Prime Inference Claude routes", () => {
-		expect(getModel("prime-inference", "anthropic/claude-fable-5").contextWindow).toBe(1000000);
+		const fable = getModel("prime-inference", "anthropic/claude-fable-5");
+		expect(fable.contextWindow).toBe(1000000);
+		expect(fable.cost).toEqual({
+			input: 10,
+			output: 50,
+			cacheRead: 1,
+			cacheWrite: 12.5,
+		});
 		expect(getModel("prime-inference", "anthropic/claude-opus-4.6").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-opus-4.7").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-opus-4.8").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.6").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-5").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-haiku-4.5").contextWindow).toBe(200000);
-		// Empirically verified: this route rejects prompts above 200k tokens even
-		// though OpenRouter reports 1M for the upstream model.
+		// Confirmed against the live API: this route serves a 200k window, not the
+		// larger one the upstream model's published spec lists.
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.5").contextWindow).toBe(200000);
 	});
 

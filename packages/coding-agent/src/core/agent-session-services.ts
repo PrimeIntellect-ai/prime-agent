@@ -4,6 +4,7 @@ import type { Model, ServiceTier } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
+import type { AgentExecutionMode } from "./agent-session-config.js";
 import { installAgentTraceUpload } from "./agent-traces.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
@@ -17,6 +18,7 @@ import type { SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
+import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -52,6 +54,8 @@ export interface CreateAgentSessionServicesOptions {
 	 * would release the pane while the parent is still running.
 	 */
 	noBuiltinHerdrReporter?: boolean;
+	/** Explicit daemon-carried opt-out; cannot enable telemetry. */
+	telemetryDisabled?: true;
 }
 
 export interface AgentSessionCreationOptions {
@@ -73,10 +77,19 @@ export interface AgentSessionCreationOptions {
 	rlmMaxDepth?: number;
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
+	rlmParentAgent?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	rlmHeartbeatController?: AgentRlmHeartbeatController;
 	prewarmIpythonKernel?: boolean;
 	autonomous?: AgentAutonomousConfig;
+	/** Serialized refine mode for print/headless autonomous runs. */
+	serializedRefine?: boolean;
+	/** User-facing client mode that created the top-level session. */
+	executionMode?: AgentExecutionMode;
+	/** Explicit daemon-carried opt-out; cannot enable telemetry. */
+	telemetryDisabled?: true;
+	/** Initial goal to seed at session creation (rlmDepth 0 only, idempotent). */
+	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
 /**
@@ -202,6 +215,18 @@ export async function createAgentSessionServices(
 	await resourceLoader.reload();
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+	if (
+		!options.telemetryDisabled &&
+		isTelemetryEnabled(settingsManager) &&
+		!settingsManager.getTelemetryNoticeShown()
+	) {
+		diagnostics.push({
+			type: "info",
+			message:
+				"Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
+		});
+		settingsManager.setTelemetryNoticeShown(true);
+	}
 	const extensionsResult = resourceLoader.getExtensions();
 	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
 		try {
@@ -243,7 +268,7 @@ export async function createAgentSessionFromServices(
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
 	});
-	return createAgentSession({
+	const result = await createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
 		authStorage: options.services.authStorage,
@@ -269,10 +294,21 @@ export async function createAgentSessionFromServices(
 		rlmMaxDepth: options.rlmMaxDepth,
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
+		rlmParentAgent: options.rlmParentAgent,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		rlmHeartbeatController: options.rlmHeartbeatController,
 		sessionStartEvent: options.sessionStartEvent,
 		prewarmIpythonKernel: options.prewarmIpythonKernel,
 		autonomous: options.autonomous,
+		serializedRefine: options.serializedRefine,
+		initialGoal: options.initialGoal,
 	});
+	if (result.session.rlmDepth === 0 && !options.telemetryDisabled) {
+		installAgentTelemetry(result.session, {
+			agentDir: options.services.agentDir,
+			settingsManager: options.services.settingsManager,
+			executionMode: options.executionMode,
+		});
+	}
+	return result;
 }

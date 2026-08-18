@@ -10,10 +10,10 @@
 <h1 align="center">Prime Agent CLI</h1>
 
 <p align="center">
-  Terminal coding harness.
+  RLM-native terminal coding and research harness.
 </p>
 
-This workspace still keeps an inherited source package name internally. The distributed release package and command are branded as `prime-agent`.
+Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mono), but it is now developed and distributed independently. This workspace retains inherited `@earendil-works/pi-*` source package identifiers, the `pi` package manifest key, and a source-package `pi` bin entry for internal compatibility. Public releases are currently versioned tarball artifacts installed by the scripts below; release packaging rewrites the application package and command to `prime-agent`. Do not use the inherited npm package as the Prime Agent install path.
 
 ## Table of Contents
 
@@ -43,13 +43,13 @@ This workspace still keeps an inherited source package name internally. The dist
 ## Quick Start
 
 ```bash
-curl -fsSL https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install.sh | sh
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 To install the beta built from the latest commit on `main`:
 
 ```bash
-curl -fsSL https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install-beta.sh | sh
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
 ```
 
 Authenticate with an API key:
@@ -150,7 +150,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/effort` | Set reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
-| `/resume` | Pick from previous sessions |
+| `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new`, `/clear` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (file, ID, messages) |
@@ -161,7 +161,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
 | `/copy` | Copy last assistant message to clipboard |
-| `/btw <question>`, `/side <question>` | Ask one inline side question without adding it to the session |
+| `/btw <question>`, `/side <question>` | Ask an inline side question without adding it to the session; replies continue the side conversation, esc returns |
 | `/export [file]` | Export session to HTML file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files (themes hot-reload automatically) |
@@ -177,9 +177,9 @@ See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json
 
 | Key | Action |
 |-----|--------|
-| Ctrl+C | Clear editor |
-| Ctrl+C twice | Quit |
-| Escape | Cancel/abort |
+| Ctrl+C | Interrupt active work, or show the exit hint when idle |
+| Ctrl+C twice | Exit while the exit hint is visible |
+| Escape | Clear the input without interrupting active work |
 | Escape twice | Open `/tree` |
 | Ctrl+L | Open model selector |
 | Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
@@ -192,8 +192,11 @@ Submit messages while the agent is working:
 
 - **Enter** queues a *steering* message, delivered after the current assistant turn finishes executing its tool calls
 - **Alt+Enter** queues a *follow-up* message, delivered only after the agent finishes all work
-- **Escape** aborts and restores queued messages to editor
-- **Alt+Up** retrieves queued messages back to editor
+- **Ctrl+C** interrupts active work; queued messages are kept and resume after your next submit or edit
+- **Escape** clears the input without interrupting active work
+- **Alt+Up / Alt+Down** browse queued messages individually and return to the editor draft
+- While browsing, **Enter** applies the edit as steering input and **Alt+Enter** applies it as a follow-up; submitting an empty edit deletes the item
+- **Ctrl+Alt+Up / Ctrl+Alt+Down** move the selected item earlier or later within its queue
 
 On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so Prime Agent can receive the follow-up shortcut.
 
@@ -205,7 +208,7 @@ Sessions are stored as JSONL files with a tree structure. Each entry has an `id`
 
 ### Management
 
-Sessions auto-save to `~/.prime/agent/sessions/` organized by working directory.
+Sessions auto-save as flat JSONL files under `~/.prime/agent/sessions/`. Each session header records its working directory, which the searchable session view uses to identify and open saved sessions.
 
 ```bash
 prime-agent -c                  # Continue most recent session
@@ -335,7 +338,7 @@ Credentials are stored once in `~/.prime/agent/auth.json` (under `mcp:<name>`); 
 **Add your own server.** Declare it under `mcpServers` in settings, then ship a tiny Python skill package that subclasses `McpIntegration`:
 
 ```jsonc
-// ~/.prime/settings.json
+// ~/.prime/agent/settings.json
 {
   "mcpServers": {
     "acme": { "type": "http", "url": "https://mcp.acme.com/mcp", "oauth": true }
@@ -379,7 +382,7 @@ The default export can also be `async`. Prime Agent waits for async extension fa
 
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
-- Sub-agents and plan mode
+- Additional orchestration workflows and plan modes
 - Custom compaction and summarization
 - Permission gates and path protection
 - Custom editors and UI components
@@ -494,7 +497,7 @@ Run `prime-agent help` for the command list and `prime-agent help <command>` for
 ### Agent Commands
 
 ```bash
-prime-agent agents                         # Open the agents view
+prime-agent agents                         # Search running, idle, and inactive sessions
 prime-agent list [--all]                   # List active or saved agents
 prime-agent attach <agent>                 # Attach the interactive UI
 prime-agent stop <agent>                   # Stop one agent
@@ -562,7 +565,7 @@ Use `prime-agent model list [search]` to list available models.
 | Option | Description |
 |--------|-------------|
 | `-c`, `--continue` | Continue most recent session |
-| `-r`, `--resume [path\|id]` | Browse and select session, or resume a specific session file or partial UUID |
+| `-r`, `--resume [path\|id]` | Open the searchable session view, or resume a specific session file or partial UUID |
 | `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
@@ -594,6 +597,23 @@ Available built-in tools: `ipython`
 | `--no-context-files`, `-nc` | Disable AGENTS.md and CLAUDE.md context file discovery |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings.json (e.g., `--no-extensions -e ./my-ext.ts`).
+
+### Autonomous Options
+
+Autonomous mode is disabled by default. `--autonomous` or any of its sub-options enables host-managed continuations for unattended work.
+
+| Option | Description |
+|--------|-------------|
+| `--autonomous` | Continue until gates pass or a limit prevents another continuation |
+| `--autonomous-gate <command>` | Add a repeatable shell command that must pass before completion |
+| `--autonomous-gate-retries <n>` | Positive per-gate retry limit; default `3` |
+| `--autonomous-gate-timeout-ms <n>` | Positive per-gate timeout in milliseconds; default `300000` |
+| `--autonomous-max-continuations <n>` | Positive host follow-up limit; default `3` |
+| `--autonomous-max-turns <n>` | Positive assistant-turn limit; default `12` |
+| `--autonomous-max-tokens <n>` | Positive token limit; default `80000` |
+| `--autonomous-timeout-ms <n>` | Positive wall-clock limit in milliseconds; default `1800000` |
+
+Gates run before the continuation, turn, token, and wall-clock limits are evaluated; every configured gate must pass for autonomous completion. See the [usage guide](docs/usage.md#autonomous-options) for validation rules, retry behavior, and detailed limit interactions.
 
 ### Other Options
 
@@ -651,10 +671,14 @@ prime-agent --thinking high "Solve this complex problem"
 | Variable | Description |
 |----------|-------------|
 | `PRIME_AGENT_CODING_AGENT_DIR` | Override config directory (default: `~/.prime/agent`) |
-| `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
+| `PRIME_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
+| `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Legacy alias for `PRIME_AGENT_SESSION_DIR` |
 | `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
 | `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
 | `PI_SKIP_VERSION_CHECK` | Skip the Prime Agent version update check at startup. This prevents the release manifest request |
+| `PRIME_AGENT_TELEMETRY` | Override pseudonymous aggregate usage analytics with `1`/`true`/`yes` or `0`/`false`/`no` |
+| `PRIME_AGENT_TELEMETRY_ENDPOINT` | Override the aggregate analytics ingestion endpoint |
+| `DO_NOT_TRACK` | Disable aggregate usage analytics when set to `1`/`true`/`yes` |
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing if it has `agent_traces` scope |
@@ -662,6 +686,8 @@ prime-agent --thinking high "Solve this complex problem"
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `ipykernel` instead of auto-bootstrapping `~/.prime/agent/kernel-venv` |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
+
+The remaining `PI_*` variables in this table are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.prime/agent` configuration path.
 
 ## Contributing & Development
 

@@ -257,7 +257,7 @@ async function runRpcModeWithConnectionInternal(
 					sessionName: state.sessionName,
 					autoCompactionEnabled: state.autoCompactionEnabled,
 					messageCount: state.messageCount,
-					pendingMessageCount: state.pendingMessageCount,
+					sessionActions: state.sessionActions,
 					goal: state.goal,
 				};
 				return success(id, command.type, rpcState);
@@ -339,7 +339,7 @@ async function runRpcModeWithConnectionInternal(
 				return success(
 					id,
 					command.type,
-					await connection.sendAgentMessage(command.targetActiveSessionId, command.message, command.deliveryMode),
+					await connection.sendAgentMessage(command.targetActiveSessionId, command.message),
 				);
 			case "agent_messages_status":
 				return success(id, command.type, await connection.getAgentMessageStatus());

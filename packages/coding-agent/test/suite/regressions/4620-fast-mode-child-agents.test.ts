@@ -3,8 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import { startSideQuestion } from "../../../src/core/side-question.js";
 import type { DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
-import type { DaemonCommand, DaemonResponse } from "../../../src/modes/daemon/daemon-protocol.js";
+import {
+	createDaemonCommandEnvelope,
+	type DaemonCommand,
+	type DaemonResponse,
+} from "../../../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js";
+import { MutationDrainLatch } from "../../../src/modes/daemon/mutation-drain-latch.js";
 import { createHarness } from "../harness.js";
 
 const fastModel = {
@@ -34,6 +39,13 @@ describe("ENG-4620 fast mode child agents", () => {
 			workers: new Map(),
 			clients: new Set(),
 			protocolClientIds: new WeakMap(),
+			mutationDrain: new MutationDrainLatch(),
+			commandJournal: {
+				lookup: vi.fn(() => undefined),
+				begin: vi.fn(() => ({ status: "new" })),
+				recordResult: vi.fn(),
+				acknowledge: vi.fn(),
+			},
 			handleCommand,
 			write,
 			log: vi.fn(),
@@ -46,9 +58,9 @@ describe("ENG-4620 fast mode child agents", () => {
 			serviceTier: "priority",
 		} satisfies DaemonCommand;
 
-		await supervisor.handleLine(client, JSON.stringify(command));
+		await supervisor.handleLine(client, JSON.stringify(createDaemonCommandEnvelope(command, command.id)));
 
-		expect(handleCommand).toHaveBeenCalledWith(client, command);
+		expect(handleCommand.mock.calls[0]?.slice(0, 2)).toEqual([client, command]);
 		expect(write).toHaveBeenCalledWith(
 			client,
 			expect.objectContaining({ command: "set_service_tier", success: true }),
@@ -85,7 +97,12 @@ describe("ENG-4620 fast mode child agents", () => {
 			]);
 
 			const result = await harness.session.runRlmChild("Check fast mode");
-			expect(result.answer).toBe("child answer");
+			expect(result.rlm_child_id).toMatch(/^sub-/);
+			await vi.waitFor(() => {
+				expect(harness.session.getRlmChildSession(result.rlm_child_id)?.getLastAssistantText()).toBe(
+					"child answer",
+				);
+			});
 			expect(result.session_dir).not.toBeNull();
 			const childSessions = await SessionManager.list(harness.tempDir, result.session_dir!);
 			const childSession = SessionManager.open(childSessions[0]!.path, result.session_dir!);

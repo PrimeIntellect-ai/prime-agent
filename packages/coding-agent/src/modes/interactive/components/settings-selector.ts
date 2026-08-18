@@ -10,6 +10,7 @@ import {
 	Spacer,
 	Text,
 } from "@earendil-works/pi-tui";
+import type { IdleEvictionMinutes } from "../../../core/session-action-store.js";
 import type { WarningSettings } from "../../../core/settings-manager.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
@@ -21,16 +22,17 @@ const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 
 const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
-	minimal: "Very brief reasoning (~1k tokens)",
-	low: "Light reasoning (~2k tokens)",
-	medium: "Moderate reasoning (~8k tokens)",
-	high: "Deep reasoning (~16k tokens)",
-	xhigh: "Very deep reasoning (~32k tokens)",
-	max: "Maximum reasoning (unconstrained)",
+	minimal: "Very brief reasoning",
+	low: "Light reasoning",
+	medium: "Moderate reasoning",
+	high: "Deep reasoning",
+	xhigh: "Very deep reasoning",
+	max: "Maximum reasoning",
 };
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	idleEvictionMinutes: IdleEvictionMinutes;
 	showImages: boolean;
 	autoResizeImages: boolean;
 	blockImages: boolean;
@@ -57,6 +59,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onIdleEvictionMinutesChange: (value: IdleEvictionMinutes) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
 	onBlockImagesChange: (blocked: boolean) => void;
@@ -200,6 +203,11 @@ export class SettingsSelectorComponent extends Container {
 		super();
 
 		let currentWarnings = { ...config.warnings };
+		const idleEvictionValues = [30, 60, 90, 180, 360];
+		if (typeof config.idleEvictionMinutes === "number" && !idleEvictionValues.includes(config.idleEvictionMinutes)) {
+			idleEvictionValues.push(config.idleEvictionMinutes);
+			idleEvictionValues.sort((a, b) => a - b);
+		}
 
 		const items: SettingItem[] = [
 			{
@@ -208,6 +216,13 @@ export class SettingsSelectorComponent extends Container {
 				description: "Automatically compact context when it gets too large",
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "idle-eviction-minutes",
+				label: "Idle worker eviction",
+				description: "Stop fully idle agent trees after this many minutes (global daemon policy)",
+				currentValue: String(config.idleEvictionMinutes),
+				values: ["off", ...idleEvictionValues.map(String)],
 			},
 			{
 				id: "steering-mode",
@@ -439,6 +454,9 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "idle-eviction-minutes":
+						callbacks.onIdleEvictionMinutesChange(newValue === "off" ? "off" : Number(newValue));
 						break;
 					case "show-images":
 						callbacks.onShowImagesChange(newValue === "true");

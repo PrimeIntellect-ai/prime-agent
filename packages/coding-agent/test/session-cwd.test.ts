@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseArgs } from "../src/cli/args.js";
+import { SessionSelectorNotFoundError } from "../src/cli/session-resolver.js";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { getMissingSessionCwdIssue, MissingSessionCwdError } from "../src/core/session-cwd.js";
 import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSessionManager } from "../src/main.js";
 
 function createTempDir(name: string): string {
@@ -98,29 +98,26 @@ describe("session cwd handling", () => {
 		writeSessionFile(sessionFile, storedCwd);
 
 		const parsed = parseArgs(["--cwd", explicitCwd, "--resume", sessionFile]);
-		const sessionManager = await createSessionManager(
-			parsed,
-			explicitCwd,
-			sessionDir,
-			SettingsManager.create(explicitCwd, agentDir),
-		);
+		const sessionManager = await createSessionManager(parsed, explicitCwd, sessionDir);
 
 		expect(sessionManager.getCwd()).toBe(explicitCwd);
 	});
 
-	it("restores an unresolved resume selector as prompt text for a fresh session", async () => {
+	it("rejects an unresolved resume selector without converting it to prompt text", async () => {
 		const cwd = createTempDir("pi-session-cwd-resume-fallback");
 		const agentDir = createTempDir("pi-session-cwd-resume-fallback-agent-dir");
 		const sessionDir = createTempDir("pi-session-cwd-resume-fallback-session-dir");
 		cleanupPaths.push(cwd, agentDir, sessionDir);
 
 		const parsed = parseArgs(["--resume", "fix", "the", "bug"]);
-		const sessionManager = await createSessionManager(parsed, cwd, sessionDir, SettingsManager.create(cwd, agentDir));
+		await expect(createSessionManager(parsed, cwd, sessionDir)).rejects.toMatchObject({
+			name: SessionSelectorNotFoundError.name,
+			selector: "fix",
+			suggestion: undefined,
+		});
 
-		expect(sessionManager.getCwd()).toBe(cwd);
-		expect(parsed.resume).toBeUndefined();
-		expect(parsed.resumeSelectorFallback).toBeUndefined();
-		expect(parsed.messages).toEqual(["fix", "the", "bug"]);
+		expect(parsed.resume).toBe("fix");
+		expect(parsed.messages).toEqual(["the", "bug"]);
 	});
 
 	it("throws a controlled error before runtime creation when the stored cwd is missing", async () => {
@@ -146,5 +143,10 @@ describe("session cwd handling", () => {
 			}),
 		).rejects.toBeInstanceOf(MissingSessionCwdError);
 		expect(createRuntimeCalled).toBe(false);
+	});
+
+	it("preserves an explicit catalog directory for in-memory bootstrap sessions", () => {
+		const manager = SessionManager.inMemory("/tmp/project", "/tmp/sessions");
+		expect(manager.getSessionDir()).toBe("/tmp/sessions");
 	});
 });

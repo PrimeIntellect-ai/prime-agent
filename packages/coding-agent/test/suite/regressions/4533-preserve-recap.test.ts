@@ -6,7 +6,6 @@ import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 
 type RecapRenderMode = {
 	recapContainer: Container;
-	childAgentPanelMode?: "detail";
 	sessionRecap?: string;
 	agentRunFileChanges: Map<string, never>;
 	isAgentStreaming: () => boolean;
@@ -125,12 +124,5 @@ describe("ENG-4533 recap layout", () => {
 		expect(lines).toHaveLength(2);
 		expect(visibleWidth(lines[0] ?? "")).toBe(24);
 		expect(stripAnsi(lines[0] ?? "")).toContain("Recap:");
-	});
-
-	it("suppresses the parent recap area in child-agent detail", () => {
-		const mode = createRenderMode("Reviewing the parent session");
-		mode.childAgentPanelMode = "detail";
-
-		expect(render(mode)).toEqual([]);
 	});
 });

@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -951,6 +951,78 @@ describe("AgentCronScheduler", () => {
 		expect(store.list()[0]).not.toHaveProperty("nextRunAt");
 	});
 
+	it("does not claim new jobs after a started scheduler is stopped", async () => {
+		const store = new AgentCronJobStore(makeStorePath(tempDirs));
+		const job = store.create({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "in 1m",
+			prompt: "do not claim",
+			now: start,
+		});
+		const runJob = vi.fn(async () => undefined);
+		const scheduler = new AgentCronScheduler(store, { runJob });
+		scheduler.start();
+		scheduler.stop();
+
+		expect(await scheduler.runDue(new Date("2026-01-01T12:35:00.000Z"))).toBe(0);
+		expect(runJob).not.toHaveBeenCalled();
+		expect(store.list()[0]).toMatchObject({ id: job.id, status: "active", runCount: 0 });
+	});
+
+	it("releases leases and recovers the whole claimed batch when setup fails", async () => {
+		const store = new AgentCronJobStore(makeStorePath(tempDirs));
+		const unrelated = store.create({
+			activeSessionId: "unrelated",
+			sessionId: "unrelated",
+			sessionFile: "/tmp/unrelated.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "every 10s",
+			prompt: "unrelated",
+			now: start,
+		});
+		const [unrelatedDispatch] = store.claimDue(new Date("2026-01-01T12:34:10.000Z"));
+		if (!unrelatedDispatch) throw new Error("Expected unrelated dispatch");
+		const batch = ["active-1", "active-2", "active-3"].map((activeSessionId) =>
+			store.create({
+				activeSessionId,
+				sessionId: activeSessionId,
+				sessionFile: `/tmp/${activeSessionId}.jsonl`,
+				cwd: "/tmp/project",
+				scheduleText: "in 1m",
+				prompt: activeSessionId,
+				now: start,
+			}),
+		);
+		const endDispatch = vi.fn();
+		const beginDispatch = vi.fn((dispatch) => {
+			if (dispatch.job.activeSessionId === "active-2") throw new Error("lease setup failed");
+			return endDispatch;
+		});
+		const scheduler = new AgentCronScheduler(store, {
+			now: () => new Date("2026-01-01T12:35:00.000Z"),
+			runJob: vi.fn(async () => undefined),
+			beginDispatch,
+		});
+
+		await expect(scheduler.runDue(new Date("2026-01-01T12:35:00.000Z"))).rejects.toThrow("lease setup failed");
+		expect(beginDispatch).toHaveBeenCalledTimes(2);
+		expect(endDispatch).toHaveBeenCalledOnce();
+		for (const job of batch) {
+			expect(store.getClaimedJob(job.id)).toBeUndefined();
+			expect(store.list().find((candidate) => candidate.id === job.id)).toMatchObject({
+				status: "completed",
+				lastError: "Interrupted before scheduled operation completion",
+			});
+		}
+		expect(store.getClaimedJob(unrelated.id)).toMatchObject({ id: unrelated.id });
+		expect(store.recordDispatchResult(unrelatedDispatch.id, { outcome: "ran" })).toMatchObject({
+			id: unrelated.id,
+		});
+	});
+
 	it("reschedules recurring jobs after each run", async () => {
 		const store = new AgentCronJobStore(makeStorePath(tempDirs));
 		store.create({
@@ -1280,21 +1352,24 @@ describe("shouldDeferHeartbeatCronJob", () => {
 				shouldDeferHeartbeatCronJob(job, {
 					isStreaming: true,
 					isBashRunning: false,
-					pendingMessageCount: 0,
+					hasPendingSessionWork: false,
+					unfinishedActionCount: 0,
 				}),
 			).toBe(true);
 			expect(
 				shouldDeferHeartbeatCronJob(job, {
 					isStreaming: false,
 					isBashRunning: true,
-					pendingMessageCount: 0,
+					hasPendingSessionWork: false,
+					unfinishedActionCount: 0,
 				}),
 			).toBe(true);
 			expect(
 				shouldDeferHeartbeatCronJob(job, {
 					isStreaming: false,
 					isBashRunning: false,
-					pendingMessageCount: 1,
+					hasPendingSessionWork: false,
+					unfinishedActionCount: 1,
 				}),
 			).toBe(true);
 		}
@@ -1311,7 +1386,8 @@ describe("shouldDeferHeartbeatCronJob", () => {
 					shouldDeferHeartbeatCronJob(job, {
 						isStreaming: true,
 						isBashRunning: false,
-						pendingMessageCount: 0,
+						hasPendingSessionWork: false,
+						unfinishedActionCount: 1,
 					}),
 				).toBe(false);
 			}
@@ -1326,21 +1402,33 @@ describe("shouldDeferHeartbeatCronJob", () => {
 				isStreaming: true,
 				isCompacting: true,
 				isBashRunning: false,
-				pendingMessageCount: 0,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 0,
+			}),
+		).toBe(true);
+		expect(
+			shouldDeferHeartbeatCronJob(job, {
+				isStreaming: false,
+				isRefining: true,
+				isBashRunning: false,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 0,
 			}),
 		).toBe(true);
 		expect(
 			shouldDeferHeartbeatCronJob(job, {
 				isStreaming: false,
 				isBashRunning: true,
-				pendingMessageCount: 0,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 0,
 			}),
 		).toBe(true);
 		expect(
 			shouldDeferHeartbeatCronJob(job, {
 				isStreaming: false,
 				isBashRunning: false,
-				pendingMessageCount: 1,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 1,
 			}),
 		).toBe(true);
 		expect(
@@ -1348,15 +1436,16 @@ describe("shouldDeferHeartbeatCronJob", () => {
 				isStreaming: false,
 				isRetrying: true,
 				isBashRunning: false,
-				pendingMessageCount: 0,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 0,
 			}),
 		).toBe(true);
 		expect(
 			shouldDeferHeartbeatCronJob(job, {
-				isStreaming: false,
+				isStreaming: true,
 				isBashRunning: false,
-				hasAcceptedPromptInFlight: true,
-				pendingMessageCount: 0,
+				hasPendingSessionWork: true,
+				unfinishedActionCount: 2,
 			}),
 		).toBe(true);
 	});
@@ -1365,7 +1454,7 @@ describe("shouldDeferHeartbeatCronJob", () => {
 		expect(
 			shouldDeferHeartbeatCronJob(
 				{ ...baseJob, source: "heartbeat" },
-				{ isStreaming: false, isBashRunning: false, pendingMessageCount: 0 },
+				{ isStreaming: false, isBashRunning: false, hasPendingSessionWork: false, unfinishedActionCount: 0 },
 			),
 		).toBe(false);
 	});
@@ -1374,7 +1463,7 @@ describe("shouldDeferHeartbeatCronJob", () => {
 		expect(
 			shouldDeferHeartbeatCronJob(
 				{ ...baseJob, source: "cron" },
-				{ isStreaming: true, isBashRunning: true, pendingMessageCount: 2 },
+				{ isStreaming: true, isBashRunning: true, hasPendingSessionWork: true, unfinishedActionCount: 2 },
 			),
 		).toBe(false);
 	});

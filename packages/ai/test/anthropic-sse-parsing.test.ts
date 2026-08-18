@@ -78,7 +78,96 @@ function createFakeAnthropicClient(response: Response): Anthropic {
 	} as unknown as Anthropic;
 }
 
+function createCacheUsageEvents(cacheCreation: {
+	ephemeral_5m_input_tokens: number;
+	ephemeral_1h_input_tokens: number;
+}): Array<{ event: string; data: string }> {
+	const cacheWriteTokens = cacheCreation.ephemeral_5m_input_tokens + cacheCreation.ephemeral_1h_input_tokens;
+	return [
+		{
+			event: "message_start",
+			data: JSON.stringify({
+				type: "message_start",
+				message: {
+					id: "msg_cache_test",
+					usage: {
+						input_tokens: 12,
+						output_tokens: 0,
+						cache_read_input_tokens: 0,
+						cache_creation_input_tokens: cacheWriteTokens,
+						cache_creation: cacheCreation,
+					},
+				},
+			}),
+		},
+		{
+			event: "message_delta",
+			data: JSON.stringify({
+				type: "message_delta",
+				delta: { stop_reason: "end_turn" },
+				usage: {
+					input_tokens: 12,
+					output_tokens: 5,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: cacheWriteTokens,
+				},
+			}),
+		},
+		{ event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
+	];
+}
+
 describe("Anthropic raw SSE parsing", () => {
+	it.each([
+		{
+			name: "five-minute writes",
+			cacheRetention: "short" as const,
+			cacheCreation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 },
+			expectedCacheWriteCost: 0.00125,
+		},
+		{
+			name: "one-hour writes",
+			cacheRetention: "long" as const,
+			cacheCreation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1000 },
+			expectedCacheWriteCost: 0.002,
+		},
+		{
+			name: "mixed TTL writes",
+			cacheRetention: "long" as const,
+			cacheCreation: { ephemeral_5m_input_tokens: 250, ephemeral_1h_input_tokens: 750 },
+			expectedCacheWriteCost: 0.0018125,
+		},
+	])("prices $name from the reported Anthropic usage breakdown", async (testCase) => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const response = createSseResponse(createCacheUsageEvents(testCase.cacheCreation));
+		const result = await streamAnthropic(
+			model,
+			{ messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }] },
+			{
+				client: createFakeAnthropicClient(response),
+				cacheRetention: testCase.cacheRetention,
+			},
+		).result();
+
+		expect(result.usage.cacheWrite).toBe(1000);
+		expect(result.usage.cost.cacheWrite).toBeCloseTo(testCase.expectedCacheWriteCost);
+	});
+
+	it("preserves configured cache write pricing for non-Anthropic models", async () => {
+		const model = getModel("minimax", "MiniMax-M2.7-highspeed");
+		const response = createSseResponse(
+			createCacheUsageEvents({ ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 }),
+		);
+		const result = await streamAnthropic(
+			model,
+			{ messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }] },
+			{ client: createFakeAnthropicClient(response) },
+		).result();
+
+		expect(result.usage.cacheWrite).toBe(1000);
+		expect(result.usage.cost.cacheWrite).toBeCloseTo((1000 * model.cost.cacheWrite) / 1_000_000);
+	});
+
 	it("repairs malformed SSE JSON and malformed streamed tool JSON", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		const context: Context = {

@@ -18,7 +18,8 @@ function makeState(
 			session: {
 				isStreaming: opts.working ?? false,
 				isCompacting: false,
-				pendingMessageCount: 0,
+				isSessionActive: opts.working ?? false,
+				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 				messages: Array.from({ length: opts.messages ?? 2 }, () => ({ role: "user", content: "hi" })),
 				state: { streamingMessage: undefined },
 				modelRegistry: {},

@@ -52,13 +52,14 @@ function summary(): SessionSummary {
 		activeSessionId,
 		lifecycle: "live",
 		activity: "idle",
+		isSessionActive: false,
 		sessionId: "session-4602",
 		cwd: "/tmp",
 		isStreaming: false,
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount: 1,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 	};
 }
 
@@ -72,9 +73,15 @@ function streamedResult(messages: AgentMessage[]): DaemonAttachResult {
 			state: { activeSessionId, sessionId: "session-4602" } as DaemonAttachResult["snapshot"]["state"],
 			messages,
 			lastEventSequence: 1,
+			lastEventCursor: { generation: "generation-4602", sequence: 1 },
 		},
-		replay: { status: "complete", toSequence: 1 },
+		replay: {
+			status: "complete",
+			toSequence: 1,
+			toCursor: { generation: "generation-4602", sequence: 1 },
+		},
 		lastEventSequence: 1,
+		lastEventCursor: { generation: "generation-4602", sequence: 1 },
 		snapshotStream: { id: snapshotId, messageCount: messages.length, targetChunkBytes: 512 * 1024 },
 		client: { id: "worker", capabilities: ["chunked_snapshot"] },
 	};
@@ -158,6 +165,7 @@ function snapshotFrames(messages: AgentMessage[]) {
 			snapshotId,
 			chunkCount: 1,
 			lastEventSequence: 1,
+			lastEventCursor: { generation: "generation-4602", sequence: 1 },
 		} satisfies DaemonOutbound,
 	};
 }
@@ -325,13 +333,12 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		expect(worker.snapshotGenerations.has(activeSessionId)).toBe(false);
 	});
 
-	it("quarantines a completed duplicate until exact replacement validation", async () => {
+	it("quarantines a completed duplicate until transcript validation", async () => {
 		const supervisor = new DaemonSupervisor("/tmp/eng-4602-supervisor.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			descriptorDir: "/tmp/eng-4602-supervisor-state",
 		});
 		const { close, worker } = workerHarness();
-		worker.intentionalStop = true;
 		const client = socketClient("public", new PassThrough());
 		const streamSnapshot = vi.fn(async () => {});
 		const internals = supervisor as unknown as {
@@ -368,6 +375,30 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		expect(close).not.toHaveBeenCalled();
 		streamSnapshot.mockClear();
 
+		const refreshedBegin = {
+			...frames.begin,
+			snapshot: {
+				...frames.begin.snapshot,
+				summary: {
+					...frames.begin.snapshot.summary,
+					activity: "working" as const,
+					isSessionActive: true,
+					attachedClients: 2,
+				},
+			},
+		};
+		internals.handleWorkerFrame(worker, frame(refreshedBegin, "replacement"));
+		internals.handleWorkerFrame(worker, frame(frames.chunk, "replacement"));
+		internals.handleWorkerFrame(worker, frame(frames.end, "replacement"));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(worker.snapshotCache.get(activeSessionId)?.snapshot.summary).toMatchObject({
+			activity: "working",
+			isSessionActive: true,
+		});
+		expect(streamSnapshot).toHaveBeenCalledOnce();
+		expect(close).not.toHaveBeenCalled();
+		streamSnapshot.mockClear();
+
 		internals.handleWorkerFrame(worker, frame(frames.begin, "replacement"));
 		internals.handleWorkerFrame(
 			worker,
@@ -392,7 +423,6 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			descriptorDir: "/tmp/eng-4602-supervisor-gate-state",
 		});
 		const { close, request, worker } = workerHarness();
-		worker.intentionalStop = true;
 		const client = socketClient("catchup", new PassThrough());
 		const streamSnapshot = vi.fn(async () => {});
 		const internals = supervisor as unknown as {

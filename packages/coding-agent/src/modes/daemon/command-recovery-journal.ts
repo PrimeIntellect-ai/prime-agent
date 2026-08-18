@@ -59,15 +59,21 @@ export class CommandRecoveryJournal {
 		this.load();
 	}
 
-	begin(clientId: DaemonClientId, commandId: DaemonCommandId, commandType: string): CommandJournalBeginResult {
-		const key = createCommandIdempotencyKey(clientId, commandId);
-		const existing = this.entries.get(key);
+	lookup(
+		clientId: DaemonClientId,
+		commandId: DaemonCommandId,
+	): Exclude<CommandJournalBeginResult, { status: "new" }> | undefined {
+		const existing = this.entries.get(createCommandIdempotencyKey(clientId, commandId));
 		if (existing?.response) {
 			return { status: "complete", response: existing.response };
 		}
-		if (existing) {
-			return { status: "pending" };
-		}
+		return existing ? { status: "pending" } : undefined;
+	}
+
+	begin(clientId: DaemonClientId, commandId: DaemonCommandId, commandType: string): CommandJournalBeginResult {
+		const key = createCommandIdempotencyKey(clientId, commandId);
+		const existing = this.lookup(clientId, commandId);
+		if (existing) return existing;
 		const received: ReceivedRecord = {
 			version: 1,
 			type: "received",

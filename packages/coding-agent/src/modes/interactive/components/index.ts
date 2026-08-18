@@ -7,11 +7,9 @@ export { BashExecutionComponent } from "./bash-execution.js";
 export { BorderedLoader } from "./bordered-loader.js";
 export { BranchSummaryMessageComponent } from "./branch-summary-message.js";
 export {
-	ChildAgentDetailComponent,
-	type ChildAgentInspectorNode,
-	type ChildAgentStatus,
-	ChildAgentSummaryComponent,
-} from "./child-agent-inspector.js";
+	CompactionOutcomeMessageComponent,
+	MalformedCompactionOutcomeMessageComponent,
+} from "./compaction-outcome-message.js";
 export { CompactionSummaryMessageComponent } from "./compaction-summary-message.js";
 export {
 	ConfigurationMenuComponent,
@@ -39,10 +37,10 @@ export { ModelSelectorComponent } from "./model-selector.js";
 export { OAuthSelectorComponent } from "./oauth-selector.js";
 export { PrimeOnboardingSplashComponent } from "./prime-onboarding-splash.js";
 export { type ModelsCallbacks, type ModelsConfig, ScopedModelsSelectorComponent } from "./scoped-models-selector.js";
-export { SessionSelectorComponent } from "./session-selector.js";
 export { type SettingsCallbacks, type SettingsConfig, SettingsSelectorComponent } from "./settings-selector.js";
 export { ShowImagesSelectorComponent } from "./show-images-selector.js";
 export { SkillInvocationMessageComponent } from "./skill-invocation-message.js";
+export { SubagentSummaryLine } from "./subagent-summary-line.js";
 export { ThemeSelectorComponent } from "./theme-selector.js";
 export { ThinkingSelectorComponent } from "./thinking-selector.js";
 export { ToolExecutionComponent, type ToolExecutionOptions } from "./tool-execution.js";

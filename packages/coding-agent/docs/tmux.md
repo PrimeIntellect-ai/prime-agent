@@ -1,6 +1,6 @@
 # tmux Setup
 
-Pi works inside tmux, but tmux strips modifier information from certain keys by default. Without configuration, `Shift+Enter` and `Ctrl+Enter` are usually indistinguishable from plain `Enter`.
+Prime Agent works inside tmux, but tmux strips modifier information from certain keys by default. Without configuration, `Shift+Enter` and `Ctrl+Enter` are usually indistinguishable from plain `Enter`.
 
 ## Recommended Configuration
 
@@ -18,7 +18,7 @@ tmux kill-server
 tmux
 ```
 
-Pi requests extended key reporting automatically when Kitty keyboard protocol is not available. With `extended-keys-format csi-u`, tmux forwards modified keys in CSI-u format, which is the most reliable configuration.
+Prime Agent requests extended key reporting automatically when Kitty keyboard protocol is not available. With `extended-keys-format csi-u`, tmux forwards modified keys in CSI-u format, which is the most reliable configuration.
 
 ## Why `csi-u` Is Recommended
 
@@ -40,7 +40,7 @@ With `extended-keys-format csi-u`, the same keys are forwarded as:
 - `Ctrl+D` → `\x1b[100;5u`
 - `Ctrl+Enter` → `\x1b[13;5u`
 
-Pi supports both formats, but `csi-u` is the recommended tmux setup.
+Prime Agent supports both formats, but `csi-u` is the recommended tmux setup.
 
 ## What This Fixes
 

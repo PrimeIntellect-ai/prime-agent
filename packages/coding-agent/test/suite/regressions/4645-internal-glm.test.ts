@@ -4,7 +4,6 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { ModelRegistry } from "../../../src/core/model-registry.js";
 import { findInitialModel, restoreModelFromSession } from "../../../src/core/model-resolver.js";
-import { getAgentsViewModelArgumentCompletions } from "../../../src/modes/agents-view/agents-view-mode.js";
 import { createHarness, type Harness } from "../harness.js";
 
 describe("ENG-4645 internal GLM configuration", () => {
@@ -178,32 +177,6 @@ describe("ENG-4645 internal GLM configuration", () => {
 		});
 
 		expect(initial.model?.id).toBe("internal/glm-5.2-fast");
-		expect(fetchMock).toHaveBeenCalledOnce();
-	});
-
-	test("refreshes private routes for agents view model autocomplete", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
-		harnesses.push(harness);
-		const fetchMock = vi.fn(
-			async () => new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }), { status: 200 }),
-		);
-		vi.stubGlobal("fetch", fetchMock);
-		const authStorage = AuthStorage.inMemory({
-			"prime-inference": {
-				type: "api_key",
-				key: "prime-key",
-				primeTeam: { teamId: "engineering-team", name: "Prime Engineering" },
-			},
-		});
-		const registry = ModelRegistry.inMemory(authStorage);
-
-		const completions = await getAgentsViewModelArgumentCompletions("internal/glm", registry);
-
-		expect(completions).toContainEqual({
-			value: "prime-inference/internal/glm-5.2-fast",
-			label: "internal/glm-5.2-fast",
-			description: "prime-inference",
-		});
 		expect(fetchMock).toHaveBeenCalledOnce();
 	});
 

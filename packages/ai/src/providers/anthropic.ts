@@ -6,6 +6,7 @@ import type {
 	MessageParam,
 	RawMessageStreamEvent,
 } from "@anthropic-ai/sdk/resources/messages.js";
+import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
@@ -510,7 +511,13 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			let params = buildParams(model, context, isOAuth, options);
+			const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+			const usesAnthropicCachePricing = hasStandardAnthropicCachePricing(model);
+			let cacheWriteCost =
+				cacheControl && usesAnthropicCachePricing
+					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
+					: undefined;
+			let params = buildParams(model, context, isOAuth, options, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
@@ -540,7 +547,18 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage);
+					if (cacheControl && usesAnthropicCachePricing) {
+						cacheWriteCost = getAnthropicCacheWriteCost(
+							model.cost.input,
+							cacheControl.ttl === "1h" ? "1h" : "5m",
+							event.message.usage.cache_creation,
+						);
+					}
+					calculateCost(
+						model,
+						output.usage,
+						cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost },
+					);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
 						const block: Block = {
@@ -685,7 +703,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage);
+					calculateCost(
+						model,
+						output.usage,
+						cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost },
+					);
 				}
 			}
 
@@ -732,6 +754,7 @@ function supportsAdaptiveThinking(modelId: string): boolean {
 	return (
 		modelId.includes("opus-4-6") ||
 		modelId.includes("opus-4.6") ||
+		modelId.includes("opus-5") ||
 		modelId.includes("opus-4-7") ||
 		modelId.includes("opus-4.7") ||
 		modelId.includes("opus-4-8") ||
@@ -789,7 +812,7 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	if (!options?.reasoning) {
+	if (!options?.reasoning || options.reasoning === "off") {
 		return streamAnthropic(model, context, { ...base, thinkingEnabled: false } satisfies AnthropicOptions);
 	}
 
@@ -934,8 +957,8 @@ function buildParams(
 	context: Context,
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
+	cacheControl?: CacheControlEphemeral,
 ): MessageCreateParamsStreaming {
-	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),

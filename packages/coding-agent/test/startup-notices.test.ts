@@ -1,10 +1,6 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
-import {
-	formatPackageUpdateNotice,
-	formatTmuxWarningNotice,
-	formatUpdateAvailableNotice,
-} from "../src/modes/shared/startup-notices.js";
+import { formatTmuxWarningNotice } from "../src/modes/shared/startup-notices.js";
 
 const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 
@@ -15,19 +11,6 @@ function stripAnsi(text: string): string {
 describe("startup notice formatters", () => {
 	beforeAll(() => {
 		initTheme("dark");
-	});
-
-	test("update notice mentions the version and slash update command", () => {
-		const output = stripAnsi(formatUpdateAvailableNotice("1.2.3"));
-		expect(output).toBe("Update available: v1.2.3. Run /update");
-		expect(output).not.toContain("prime-agent update");
-		expect(output).not.toContain("pi update");
-	});
-
-	test("package update notice lists packages and the extensions command", () => {
-		const output = stripAnsi(formatPackageUpdateNotice(["npm:@foo/bar", "npm:@baz/qux"]));
-		expect(output).toBe("Package updates available: npm:@foo/bar, npm:@baz/qux. Run /update --extensions");
-		expect(output).not.toContain("prime-agent update");
 	});
 
 	test("tmux warning notice is prefixed with the warning glyph", () => {

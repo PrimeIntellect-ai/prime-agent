@@ -47,7 +47,7 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 		getText: ({ getKeybinding, isResidentSession }) => {
 			if (!isResidentSession) return undefined;
 			const key = getKeybinding("app.agents.back");
-			return key ? `Hit ${key} for Agents View, where you can manage all your running agents.` : undefined;
+			return key ? `Hit ${key} for Session View: search running, idle, and inactive sessions.` : undefined;
 		},
 	},
 	{
@@ -69,6 +69,10 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 	{
 		id: "refine",
 		getText: () => "Use /refine to turn useful lessons into reusable skills, memory, and prompts.",
+	},
+	{
+		id: "trace-sharing",
+		getText: () => "Share traces with Prime Intellect using /traces on to train open-source LLMs.",
 	},
 	{
 		id: "persistent-ipython",

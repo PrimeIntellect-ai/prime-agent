@@ -326,46 +326,13 @@ describe("AgentSession autonomous mode", () => {
 			suppressAutonomousContinuation: true,
 		});
 		sessionInternals._compactionAbortController = undefined;
-		await harness.session.agent.continue();
+		expect(harness.session.resumeQueuedWork()).toBe(true);
+		await vi.waitFor(() => expect(harness.session.queuedActionCount).toBe(0));
+		await harness.session.waitForSessionInputIdle();
 
 		expect(getAssistantTexts(harness)).toEqual(["Still failing."]);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(0);
 		expect(harness.getPendingResponseCount()).toBe(0);
-	});
-
-	it("preserves autonomous suppression for prompts queued during refinement", async () => {
-		const harness = await createHarness({
-			autonomous: {
-				enabled: true,
-				maxContinuations: 2,
-				gates: {
-					commands: [`${process.execPath} -e "console.error('gate failed'); process.exit(1)"`],
-					maxRetries: 2,
-				},
-			},
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("Still failing."), fauxAssistantMessage("Unexpected continuation.")]);
-		let releaseRefine: (() => void) | undefined;
-		const refineGate = new Promise<void>((resolve) => {
-			releaseRefine = resolve;
-		});
-		const internals = harness.session as unknown as { _refineInFlight?: Promise<void> };
-		internals._refineInFlight = refineGate;
-
-		harness.session.recordHostAutonomousContinuation();
-		await harness.session.prompt("queued host gate follow-up", {
-			internalPrompt: true,
-			suppressAutonomousContinuation: true,
-		});
-		internals._refineInFlight = undefined;
-		releaseRefine?.();
-
-		await vi.waitFor(() => expect(harness.session.pendingMessageCount).toBe(0));
-		expect(getUserTexts(harness)).toEqual(["queued host gate follow-up"]);
-		expect(getAssistantTexts(harness)).toEqual(["Still failing."]);
-		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
-		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
 	it("advances retry budget without rerunning a failed autonomous gate until the workspace changes", async () => {

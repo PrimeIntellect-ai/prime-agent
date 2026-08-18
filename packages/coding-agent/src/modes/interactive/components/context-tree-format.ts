@@ -11,7 +11,7 @@ const MIN_LABEL_WIDTH = 16;
 
 interface ContextTreeRow {
 	node: ContextTreeNode;
-	/** Tree-drawing prefix, e.g. "│ └ ". */
+	/** Tree-drawing prefix, e.g. "│  └─ ". */
 	prefix: string;
 }
 
@@ -40,8 +40,8 @@ function flattenContextTree(root: ContextTreeNode): ContextTreeRow[] {
 	const walk = (children: readonly ContextTreeNode[], ancestors: string): void => {
 		for (const [index, child] of children.entries()) {
 			const isLast = index === children.length - 1;
-			rows.push({ node: child, prefix: `${ancestors}${isLast ? "└ " : "├ "}` });
-			walk(child.children, `${ancestors}${isLast ? "  " : "│ "}`);
+			rows.push({ node: child, prefix: `${ancestors}${isLast ? "└─ " : "├─ "}` });
+			walk(child.children, `${ancestors}${isLast ? "   " : "│  "}`);
 		}
 	};
 	walk(root.children, "");

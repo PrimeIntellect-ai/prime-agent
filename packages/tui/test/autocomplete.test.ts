@@ -124,6 +124,41 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.deepStrictEqual(fresh?.items, [{ value: "new", label: "new", description: "Start a new session" }]);
 		});
 
+		it("keeps argument hints and source tags separate from descriptions", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{
+						name: "compact",
+						description: "Compact the session context",
+						argumentHint: "[instructions]",
+					},
+					{
+						name: "skill:compact",
+						description: "Check context usage",
+						sourceTag: "#builtin",
+					},
+				],
+				"/tmp",
+			);
+
+			const result = await getSuggestions(provider, ["/compact"], 0, 8);
+
+			assert.deepStrictEqual(result?.items, [
+				{
+					value: "compact",
+					label: "compact",
+					description: "Compact the session context",
+					argumentHint: "[instructions]",
+				},
+				{
+					value: "skill:compact",
+					label: "skill:compact",
+					description: "Check context usage",
+					sourceTag: "#builtin",
+				},
+			]);
+		});
+
 		it("suggests skill commands for inline references", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[{ name: "skill:brainstorm", description: "Brainstorm approaches" }],

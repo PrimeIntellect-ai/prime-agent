@@ -75,8 +75,9 @@ class ConfigurationMenuTabBar implements Component {
 			safeWidth,
 		);
 		const tabKey = keyText("tui.input.tab", { primaryOnly: true });
+		const shiftTabKey = keyText("app.configuration.previousTab", { primaryOnly: true });
 		const closeKey = keyText("tui.select.cancel", { primaryOnly: true });
-		const hint = `${theme.fg("dim", tabKey)}${theme.fg("muted", " switch tabs · ")}${theme.fg("dim", closeKey)}${theme.fg("muted", " close")}`;
+		const hint = `${theme.fg("dim", `${tabKey}/${shiftTabKey}`)}${theme.fg("muted", " switch tabs · ")}${theme.fg("dim", closeKey)}${theme.fg("muted", " close")}`;
 		return [...lines, ...wrapTextWithAnsi(hint, safeWidth)];
 	}
 
@@ -228,7 +229,11 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.input.tab")) {
-			this.switchTab();
+			this.switchTab(1);
+			return;
+		}
+		if (kb.matches(keyData, "app.configuration.previousTab")) {
+			this.switchTab(-1);
 			return;
 		}
 		if (
@@ -245,9 +250,9 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		return this.bodies[this.activeTab];
 	}
 
-	private switchTab(): void {
+	private switchTab(direction: 1 | -1): void {
 		const currentIndex = CONFIGURATION_MENU_TABS.indexOf(this.activeTab);
-		const nextIndex = (currentIndex + 1) % CONFIGURATION_MENU_TABS.length;
+		const nextIndex = (currentIndex + direction + CONFIGURATION_MENU_TABS.length) % CONFIGURATION_MENU_TABS.length;
 		this.setActiveTab(CONFIGURATION_MENU_TABS[nextIndex] ?? "providers");
 	}
 }

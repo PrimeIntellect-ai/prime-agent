@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "../core/agent-session.js";
 import {
@@ -5,9 +6,49 @@ import {
 	autonomousLimitReason,
 	buildAutonomousGateFailureContinuation,
 } from "../core/autonomous.js";
+import {
+	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	type CompactionOutcomeMessage,
+	isCompactionOutcomeMessage,
+	isSessionSlashCommandResultMessage,
+	type SessionSlashCommandResultMessage,
+} from "../core/messages.js";
 
 export function latestAutonomousGateAttempt(status: AgentAutonomousStatus): number {
 	return Math.max(status.lastGateFailure?.attempt ?? 0, 0, ...Object.values(status.gateAttempts));
+}
+
+export type HeadlessTerminalResultMessage = AssistantMessage | SessionSlashCommandResultMessage;
+
+export interface HeadlessTerminalResult {
+	primary?: HeadlessTerminalResultMessage;
+	compactionOutcomes: CompactionOutcomeMessage[];
+}
+
+export function selectHeadlessTerminalResult(messages: readonly AgentMessage[]): HeadlessTerminalResult {
+	let index = messages.length - 1;
+	const compactionOutcomes: CompactionOutcomeMessage[] = [];
+	while (index >= 0) {
+		const message = messages[index];
+		if (isCompactionOutcomeMessage(message)) {
+			compactionOutcomes.unshift(message);
+			index--;
+			continue;
+		}
+		// A corrupt outcome is still part of the terminal outcome suffix. Skip it
+		// without letting it hide earlier valid outcomes or their failure status.
+		if (message.role === "custom" && message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) {
+			index--;
+			continue;
+		}
+		break;
+	}
+	const precedingMessage = messages[index];
+	const primary =
+		precedingMessage?.role === "assistant" || isSessionSlashCommandResultMessage(precedingMessage)
+			? precedingMessage
+			: undefined;
+	return { primary, compactionOutcomes };
 }
 
 function shouldContinueAutonomousGates(status: AgentAutonomousStatus): boolean {
@@ -34,7 +75,7 @@ export async function waitForHeadlessCompletion(session: AgentSession): Promise<
 	let lastPromptedProgressKey: string | undefined;
 	let repeatedProgressPrompts = 0;
 	while (true) {
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 		const status = session.getAutonomousStatus();
 		if (!shouldContinueAutonomousGates(status) || !status.lastGateFailure) {
 			return status;
@@ -61,12 +102,11 @@ export async function waitForHeadlessCompletion(session: AgentSession): Promise<
 				suppressAutonomousContinuation: true,
 			},
 		);
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 		await session.refreshAutonomousGates();
-		const lastMessage = session.state.messages.at(-1);
-		if (lastMessage?.role === "assistant") {
-			const assistantMessage = lastMessage as AssistantMessage;
-			if (assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") {
+		const { primary } = selectHeadlessTerminalResult(session.state.messages);
+		if (primary?.role === "assistant") {
+			if (primary.stopReason === "error" || primary.stopReason === "aborted") {
 				const postErrorStatus = session.getAutonomousStatus();
 				if (shouldContinueAutonomousGates(postErrorStatus) && postErrorStatus.lastGateFailure) {
 					continue;

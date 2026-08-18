@@ -692,7 +692,7 @@ class TreeList implements Component {
 
 			let line = cursor + theme.fg("dim", prefix) + foldMarker + pathMarker + label + labelTimestamp + content;
 			if (isSelected) {
-				line = theme.bg("selectedBg", line);
+				line = theme.getSelectionBackgroundColor()(line);
 			}
 			lines.push(truncateToWidth(line, width));
 		}

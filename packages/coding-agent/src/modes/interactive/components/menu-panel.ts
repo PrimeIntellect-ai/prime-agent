@@ -383,9 +383,7 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 	}
 
 	private rowLine(text: string, width: number, selected: boolean): string {
-		const background = selected
-			? (content: string) => theme.bg("selectedBg", content)
-			: theme.getEditorBackgroundColor();
+		const background = selected ? theme.getSelectionBackgroundColor() : theme.getEditorBackgroundColor();
 		return paddedBackgroundLine(text, width, ROW_PADDING_X, background);
 	}
 }

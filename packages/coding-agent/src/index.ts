@@ -93,6 +93,7 @@ export type {
 	MessageRenderOptions,
 	ProviderConfig,
 	ProviderModelConfig,
+	RefineCompleteEvent,
 	RegisteredCommand,
 	RegisteredTool,
 	ResolvedCommand,
@@ -178,6 +179,7 @@ export {
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./core/sdk.js";
+export type { SessionActionSnapshot } from "./core/session-action-store.js";
 export { SessionImportFileNotFoundError } from "./core/session-import-errors.js";
 export {
 	type BranchSummaryEntry,
@@ -315,6 +317,7 @@ export {
 	type DaemonResumeCursor,
 	type DaemonSessionSnapshot,
 	defaultDaemonSocketPath,
+	type InteractiveInitialPrompt,
 	InteractiveMode,
 	type InteractiveModeLocalSessionHost,
 	type InteractiveModeOptions,
@@ -361,7 +364,6 @@ export {
 	type RenderDiffOptions,
 	rawKeyHint,
 	renderDiff,
-	SessionSelectorComponent,
 	type SettingsCallbacks,
 	type SettingsConfig,
 	SettingsSelectorComponent,

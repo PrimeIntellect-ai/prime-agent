@@ -80,6 +80,23 @@ describe("Agent", () => {
 		expect(agent.state.errorMessage).toBeUndefined();
 	});
 
+	it("passes an explicit off reasoning selection to providers", async () => {
+		let reasoning: AgentLoopConfig["reasoning"];
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				reasoning = options?.reasoning;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("hello");
+		expect(reasoning).toBe("off");
+	});
+
 	it("should create an agent instance with custom initial state", () => {
 		const customModel = getModel("openai", "gpt-4o-mini");
 		const agent = new Agent({
@@ -155,6 +172,31 @@ describe("Agent", () => {
 		expect(listenerFinished).toBe(true);
 		expect(promptResolved).toBe(true);
 		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("can commit only a prefix of a prompt batch when a listener fails", async () => {
+		const agent = new Agent();
+		const first: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "first" }],
+			timestamp: Date.now(),
+		};
+		const second: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "second" }],
+			timestamp: Date.now(),
+		};
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.message === first) {
+				throw new Error("listener failed between batched messages");
+			}
+		});
+
+		await agent.prompt([first, second]);
+
+		expect(agent.state.messages).toContain(first);
+		expect(agent.state.messages).not.toContain(second);
+		expect(agent.state.errorMessage).toBe("listener failed between batched messages");
 	});
 
 	it("waitForIdle should wait for async subscribers", async () => {
@@ -376,7 +418,7 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(false);
 	});
 
-	it("should still emit agent_end when failure recovery message listeners throw", async () => {
+	it("should preserve the original failure when the recovery agent_end listener throws", async () => {
 		const agent = new Agent({
 			streamFn: () => {
 				const stream = new MockAssistantStream();
@@ -389,19 +431,23 @@ describe("Agent", () => {
 		const events: string[] = [];
 		agent.subscribe((event) => {
 			events.push(event.type);
+			if (event.type === "agent_end") {
+				throw new Error("agent_end listener failed");
+			}
 			if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "assistant") {
-				throw new Error("listener failed");
+				throw new Error("original listener failure");
 			}
 		});
 
 		await expect(agent.prompt("hello")).resolves.toBeUndefined();
 
 		expect(events).toContain("agent_end");
+		expect(agent.state.errorMessage).toBe("original listener failure");
 		const lastMessage = agent.state.messages.at(-1);
 		expect(lastMessage?.role).toBe("assistant");
 		if (lastMessage?.role === "assistant") {
 			expect(lastMessage.stopReason).toBe("error");
-			expect(lastMessage.errorMessage).toBe("listener failed");
+			expect(lastMessage.errorMessage).toBe("original listener failure");
 		}
 		expect(agent.state.isStreaming).toBe(false);
 	});

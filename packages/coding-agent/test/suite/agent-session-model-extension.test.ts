@@ -367,6 +367,39 @@ describe("AgentSession model and extension characterization", () => {
 		expect(getAssistantTexts(harness)).toContain("accepted");
 	});
 
+	it("keeps streaming injected prompts under turn admission when the turn becomes idle", async () => {
+		const toolStarted = createDeferred();
+		const finishTool = createDeferred();
+		const waitTool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait for release",
+			parameters: Type.Object({}),
+			execute: async () => {
+				toolStarted.resolve();
+				await finishTool.promise;
+				return { content: [{ type: "text", text: "released" }], details: {} };
+			},
+		};
+		const harness = await createHarness({ tools: [waitTool] });
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("turn complete"),
+			fauxAssistantMessage("heartbeat"),
+		]);
+
+		const turn = harness.session.prompt("start");
+		await toolStarted.promise;
+		await harness.session.promptHeartbeat(createHeartbeat(), { streamingBehavior: "followUp" });
+
+		finishTool.resolve();
+		await turn;
+		await harness.session.waitForIdle();
+
+		expect(getAssistantTexts(harness)).toEqual(["", "turn complete", "heartbeat"]);
+	});
+
 	it("includes nextTurn messages queued by pending model_select handlers in injected prompts", async () => {
 		const handlerStarted = createDeferred();
 		const finishHandler = createDeferred();

@@ -321,7 +321,7 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const base = buildBaseOptions(model, options, undefined);
-	if (!options?.reasoning) {
+	if (!options?.reasoning || options.reasoning === "off") {
 		return streamBedrock(model, context, { ...base, reasoning: undefined } satisfies BedrockOptions);
 	}
 
@@ -503,6 +503,7 @@ function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean 
 			s.includes("opus-4-6") ||
 			s.includes("opus-4-7") ||
 			s.includes("opus-4-8") ||
+			s.includes("opus-5") ||
 			s.includes("sonnet-4-6") ||
 			s.includes("sonnet-5") ||
 			s.includes("fable-5") ||

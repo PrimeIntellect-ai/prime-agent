@@ -171,7 +171,7 @@ describe("AgentSession retry and event characterization", () => {
 		await expect(
 			harness.session.prompt("second", { queueIfBusy: true, streamingBehavior: "followUp" }),
 		).resolves.toBeUndefined();
-		expect(harness.session.pendingMessageCount).toBe(1);
+		expect(harness.session.queuedActionCount).toBe(1);
 	});
 
 	it("does not retry when retry is disabled", async () => {
@@ -221,6 +221,33 @@ describe("AgentSession retry and event characterization", () => {
 			);
 		}
 	});
+
+	for (const [name, errorMessage] of [
+		["network finish reason", "Provider finish_reason: network_error"],
+		["content-filter finish reason", "Provider finish_reason: content_filter"],
+		["empty response", "Provider returned an empty response"],
+		["cybersecurity policy flag", "Your request was flagged for cybersecurity risk and cannot be processed."],
+		["usage policy flag", "flagged as potentially violating our usage policy"],
+		["prose-form transient 5xx", "An error occurred while processing your request. You can retry your request."],
+	] as const) {
+		it(`retries ${name}`, async () => {
+			const harness = await createHarness({
+				settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+				fauxAssistantMessage("recovered"),
+			]);
+
+			await harness.session.prompt("test");
+
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(harness.eventsOfType("auto_retry_start").map((event) => event.attempt)).toEqual([1]);
+			expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toEqual([true]);
+			expect(harness.session.isRetrying).toBe(false);
+		});
+	}
 
 	it("retries generic provider errors", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });

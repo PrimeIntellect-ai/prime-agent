@@ -103,6 +103,24 @@ describe("public command routing", () => {
 		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--all", "--json"]]);
 	});
 
+	it("forwards a custom daemon socket when stopping an agent", async () => {
+		await expect(
+			handlePublicCommand(["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "kill", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		]);
+	});
+
+	it("forwards a custom daemon socket when renaming an agent", async () => {
+		await expect(
+			handlePublicCommand(["rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		]);
+	});
+
 	it("separates Prime Agent updates from package updates", async () => {
 		await handlePublicCommand(["update", "--force"]);
 		await handlePublicCommand(["package", "update"]);
@@ -303,16 +321,30 @@ describe("public command routing", () => {
 		});
 	});
 
-	it("formats concise top-level help", () => {
+	it("formats complete top-level help, including autonomous options", () => {
 		const help = formatTopLevelHelp();
 		expect(help).toContain("Options:");
-		expect(help).toContain("-p, --print");
+		expect(help).toContain("Run options:");
+		expect(help).toContain("--mode <text|json|rpc|acp|daemon>");
+		expect(help).toContain("Autonomous options:");
+		for (const option of [
+			"--autonomous",
+			"--autonomous-gate <command>",
+			"--autonomous-gate-retries <n>",
+			"--autonomous-gate-timeout-ms <n>",
+			"--autonomous-max-continuations <n>",
+			"--autonomous-max-turns <n>",
+			"--autonomous-max-tokens <n>",
+			"--autonomous-timeout-ms <n>",
+		]) {
+			expect(help).toContain(option);
+		}
+		expect(help).toContain("default: 300000");
+		expect(help).toContain("default: 1800000");
 		expect(help).toContain("Commands:");
 		expect(help).toContain("shutdown");
-		expect(help).not.toContain("daemon");
 		expect(help).not.toContain("Environment Variables:");
 		expect(help).not.toContain("Examples:");
 		expect(help).not.toContain("Built-in Tool Names:");
-		expect(help).not.toContain("--autonomous");
 	});
 });

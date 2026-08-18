@@ -34,6 +34,7 @@ export async function handlePublicCommand(args: string[]): Promise<PublicCommand
 }
 
 async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
+	args = normalizeLeadingDaemonSocketOption(args);
 	if (args[0] === "help" && isHelpCommandRequest(args.slice(1))) {
 		return printRequestedHelp(args.slice(1));
 	}
@@ -142,6 +143,19 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 		default:
 			return continueWith(args);
 	}
+}
+
+function normalizeLeadingDaemonSocketOption(args: string[]): string[] {
+	const option = args[0];
+	if (option !== "--daemon-socket") {
+		return args;
+	}
+	const socketPath = args[1];
+	const command = args[2];
+	if (socketPath === undefined || (command !== "stop" && command !== "rename")) {
+		return args;
+	}
+	return [command, ...args.slice(3), option, socketPath];
 }
 
 function continueWith(args: string[]): PublicCommandResult {
@@ -362,11 +376,22 @@ function splitOperandsAndOptions(args: string[]): { operands: string[]; options:
 }
 
 function requireOperandCount(args: string[], minimum: number, maximum: number | undefined, command: string): boolean {
-	if (args.some((arg) => arg.startsWith("-") && arg !== "--json")) {
-		fail(`Usage: ${APP_NAME} ${getCommandSpec([command])?.usage ?? command}`);
-		return false;
+	const operands: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg === "--json") {
+			continue;
+		}
+		if (arg === "--socket" || arg === "--daemon-socket") {
+			index++;
+			continue;
+		}
+		if (arg.startsWith("-")) {
+			fail(`Usage: ${APP_NAME} ${getCommandSpec([command])?.usage ?? command}`);
+			return false;
+		}
+		operands.push(arg);
 	}
-	const operands = args.filter((arg) => arg !== "--json");
 	if (operands.length >= minimum && (maximum === undefined || operands.length <= maximum)) {
 		return true;
 	}

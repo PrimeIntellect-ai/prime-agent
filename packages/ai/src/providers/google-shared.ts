@@ -3,7 +3,7 @@
  */
 
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types.js";
+import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -14,6 +14,32 @@ type GoogleApiType = "google-generative-ai" | "google-vertex";
  * Mirrors Google's ThinkingLevel enum values.
  */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+
+type GoogleBudgetThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+export function getGoogleThinkingBudget(
+	modelId: string,
+	effort: GoogleBudgetThinkingLevel,
+	customBudgets?: ThinkingBudgets,
+): number {
+	if (customBudgets?.[effort] !== undefined) {
+		return customBudgets[effort]!;
+	}
+
+	if (modelId.includes("2.5-pro")) {
+		return { minimal: 128, low: 2048, medium: 8192, high: 32768 }[effort];
+	}
+
+	if (modelId.includes("2.5-flash-lite")) {
+		return { minimal: 512, low: 2048, medium: 8192, high: 24576 }[effort];
+	}
+
+	if (modelId.includes("2.5-flash")) {
+		return { minimal: 128, low: 2048, medium: 8192, high: 24576 }[effort];
+	}
+
+	return -1;
+}
 
 /**
  * Determines whether a streamed Gemini `Part` should be treated as "thinking".

@@ -13,6 +13,8 @@ export interface SelectItem {
 	value: string;
 	label: string;
 	description?: string;
+	argumentHint?: string;
+	sourceTag?: string;
 	takesArgument?: boolean;
 }
 
@@ -20,6 +22,8 @@ export interface SelectListTheme {
 	selectedPrefix: (text: string) => string;
 	selectedText: (text: string) => string;
 	description: (text: string) => string;
+	argumentHint?: (text: string) => string;
+	sourceTag?: (text: string) => string;
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
 }
@@ -36,6 +40,8 @@ export interface SelectListLayoutOptions {
 	minPrimaryColumnWidth?: number;
 	maxPrimaryColumnWidth?: number;
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
+	showItemMetadata?: boolean;
+	showDirectionalScrollInfo?: boolean;
 	showSelectedDescription?: boolean;
 }
 
@@ -101,10 +107,10 @@ export class SelectList implements Component {
 			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));
 		}
 
-		// Add scroll indicators if needed
 		if (startIndex > 0 || endIndex < this.filteredItems.length) {
-			const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`;
-			// Truncate if too long for terminal
+			const scrollText = this.layout.showDirectionalScrollInfo
+				? this.formatDirectionalScrollInfo(startIndex, this.filteredItems.length - endIndex)
+				: `  (${this.selectedIndex + 1}/${this.filteredItems.length})`;
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}
 
@@ -149,8 +155,12 @@ export class SelectList implements Component {
 		descriptionSingleLine: string | undefined,
 		primaryColumnWidth: number,
 	): string {
-		const prefix = isSelected ? "→ " : "  ";
+		const prefix = isSelected ? "› " : "  ";
 		const prefixWidth = visibleWidth(prefix);
+
+		if (this.layout.showItemMetadata) {
+			return this.renderMetadataItem(item, isSelected, width, primaryColumnWidth, prefix, prefixWidth);
+		}
 
 		if (descriptionSingleLine && width > 40) {
 			const effectivePrimaryColumnWidth = Math.max(1, Math.min(primaryColumnWidth, width - prefixWidth - 4));
@@ -179,6 +189,58 @@ export class SelectList implements Component {
 		}
 
 		return prefix + truncatedValue;
+	}
+
+	private formatDirectionalScrollInfo(hiddenAbove: number, hiddenBelow: number): string {
+		const indicators = [
+			hiddenAbove > 0 ? `↑ ${hiddenAbove} more` : undefined,
+			hiddenBelow > 0 ? `↓ ${hiddenBelow} more` : undefined,
+		].filter((indicator): indicator is string => indicator !== undefined);
+		return `  ${indicators.join("  ")}`;
+	}
+
+	private renderMetadataItem(
+		item: SelectItem,
+		isSelected: boolean,
+		width: number,
+		primaryColumnWidth: number,
+		prefix: string,
+		prefixWidth: number,
+	): string {
+		const argumentHint = item.argumentHint ? normalizeToSingleLine(item.argumentHint) : undefined;
+		const sourceTag = item.sourceTag ? normalizeToSingleLine(item.sourceTag) : undefined;
+		const hasMetadata = Boolean(argumentHint || sourceTag);
+		const contentWidth = Math.max(1, width - prefixWidth - 2);
+		const showMetadata = hasMetadata && contentWidth > primaryColumnWidth;
+		const effectivePrimaryColumnWidth = showMetadata ? primaryColumnWidth : contentWidth;
+		const maxPrimaryWidth = showMetadata
+			? Math.max(1, effectivePrimaryColumnWidth - PRIMARY_COLUMN_GAP)
+			: effectivePrimaryColumnWidth;
+		const primary = this.truncatePrimary(item, isSelected, maxPrimaryWidth, effectivePrimaryColumnWidth);
+		const styledPrefix = isSelected ? this.theme.selectedPrefix(prefix) : prefix;
+		const styledPrimary = isSelected ? this.theme.selectedText(primary) : primary;
+		if (!showMetadata) {
+			return truncateToWidth(`${styledPrefix}${styledPrimary}`, width, "");
+		}
+
+		const spacing = " ".repeat(Math.max(1, effectivePrimaryColumnWidth - visibleWidth(primary)));
+		let remainingWidth = Math.max(0, width - prefixWidth - visibleWidth(primary) - spacing.length - 2);
+		const metadata: string[] = [];
+		if (argumentHint && remainingWidth > 0) {
+			const truncatedArgumentHint = truncateToWidth(argumentHint, remainingWidth, "…");
+			metadata.push((this.theme.argumentHint ?? this.theme.description)(truncatedArgumentHint));
+			remainingWidth -= visibleWidth(truncatedArgumentHint);
+		}
+		if (sourceTag && remainingWidth > (metadata.length > 0 ? PRIMARY_COLUMN_GAP : 0)) {
+			if (metadata.length > 0) {
+				metadata.push(" ".repeat(PRIMARY_COLUMN_GAP));
+				remainingWidth -= PRIMARY_COLUMN_GAP;
+			}
+			metadata.push(
+				(this.theme.sourceTag ?? this.theme.description)(truncateToWidth(sourceTag, remainingWidth, "…")),
+			);
+		}
+		return truncateToWidth(`${styledPrefix}${styledPrimary}${spacing}${metadata.join("")}`, width, "");
 	}
 
 	private getPrimaryColumnWidth(): number {

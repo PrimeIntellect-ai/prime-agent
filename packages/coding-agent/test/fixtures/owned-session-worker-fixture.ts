@@ -7,13 +7,17 @@ import {
 import { attachJsonlLineReader, serializeJsonLine } from "../../src/modes/rpc/jsonl.js";
 
 const args = process.argv.slice(2);
+if (process.env.PRIME_AGENT_TEST_STDIN_TTY) {
+	Object.defineProperty(process.stdin, "isTTY", { value: process.env.PRIME_AGENT_TEST_STDIN_TTY === "1" });
+}
 const pidPath = process.env.PRIME_AGENT_TEST_OWNED_PID_PATH;
 installOwnedSessionWorkerOwnerWatch();
 
 if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 	if (pidPath) {
-		writeFileSync(pidPath, `${process.pid}\n`);
 		writeFileSync(`${pidPath}.ppid`, `${process.ppid}\n`);
+		writeFileSync(`${pidPath}.profile`, `${process.env.PRIME_AGENT_INTERNAL_OWNED_PROFILE ?? ""}\n`);
+		writeFileSync(pidPath, `${process.pid}\n`);
 		process.once("SIGTERM", () => {
 			writeFileSync(`${pidPath}.terminated`, "terminated\n");
 			process.exit(0);

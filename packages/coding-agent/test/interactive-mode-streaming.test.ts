@@ -35,7 +35,6 @@ type HandleEventThis = {
 	chatContainer: Container;
 	recapContainer: Container;
 	sessionRecap: string | undefined;
-	childAgentPanelMode: undefined;
 	hideThinkingBlock: boolean;
 	hiddenThinkingLabel: string;
 	streamingComponent: AssistantMessageComponent | undefined;
@@ -50,6 +49,8 @@ type HandleEventThis = {
 	stopWorkingLoader(): void;
 	resetPendingToolState(): void;
 	checkShutdownRequested(): Promise<void>;
+	applyOptimisticContextUsage(): void;
+	refreshConnectionContextUsage(): Promise<void>;
 	setSessionHasMessages(hasMessages: boolean): void;
 	clearShortcutGuide(): void;
 	addMessageToChat(): void;
@@ -57,7 +58,7 @@ type HandleEventThis = {
 
 type HandleEvent = (this: HandleEventThis, event: AgentConnectionSessionEvent) => Promise<void>;
 type GetUserInput = (this: {
-	returnToAgentsViewRequested: boolean;
+	agentsViewRequest?: "agents_view" | "scoped_agents_view";
 	onInputCallback?: (text: string | undefined) => void;
 }) => Promise<string | undefined>;
 type HandleSubagentSummaryChatAction = (
@@ -83,7 +84,6 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		chatContainer: new Container(),
 		recapContainer: new Container(),
 		sessionRecap: "Updated files",
-		childAgentPanelMode: undefined,
 		hideThinkingBlock: false,
 		hiddenThinkingLabel: "Thinking...",
 		streamingComponent: undefined,
@@ -100,6 +100,8 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		stopWorkingLoader: vi.fn(),
 		resetPendingToolState: vi.fn(),
 		checkShutdownRequested: vi.fn(async () => {}),
+		applyOptimisticContextUsage: vi.fn(),
+		refreshConnectionContextUsage: vi.fn(async () => {}),
 		setSessionHasMessages: vi.fn(),
 		clearShortcutGuide: vi.fn(),
 		addMessageToChat: vi.fn(),
@@ -169,6 +171,22 @@ describe("InteractiveMode streaming events", () => {
 		expect(renderChat(fakeThis.chatContainer)).toContain("final response");
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
+	});
+
+	test("does not block later compaction events on the agent-end stats refresh", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		let resolveRefresh!: () => void;
+		fakeThis.refreshConnectionContextUsage = vi.fn(
+			() =>
+				new Promise<void>((resolve) => {
+					resolveRefresh = resolve;
+				}),
+		);
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+
+		await expect(handleEvent.call(fakeThis, { type: "agent_end", messages: [] })).resolves.toBeUndefined();
+		expect(fakeThis.refreshConnectionContextUsage).toHaveBeenCalledOnce();
+		resolveRefresh();
 	});
 
 	test("keeps attached partial assistant text when agent_end arrives without message_end", async () => {
@@ -266,7 +284,7 @@ describe("InteractiveMode streaming events", () => {
 	test("resolves input immediately after return to agents view was requested", async () => {
 		const getUserInput = (InteractiveMode.prototype as unknown as { getUserInput: GetUserInput }).getUserInput;
 
-		await expect(getUserInput.call({ returnToAgentsViewRequested: true })).resolves.toBeUndefined();
+		await expect(getUserInput.call({ agentsViewRequest: "agents_view" })).resolves.toBeUndefined();
 	});
 
 	test("forwards typed keys from focused subagent summary back to the editor", () => {
@@ -306,5 +324,30 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.toggleToolOutputExpansion).toHaveBeenCalledOnce();
 		expect(fakeThis.focusEditor).not.toHaveBeenCalled();
 		expect(fakeThis.editor.handleInput).not.toHaveBeenCalled();
+	});
+
+	test("does not pulse renders for background-only subagent work", () => {
+		vi.useFakeTimers();
+		try {
+			const requestRender = vi.fn();
+			const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
+			Object.assign(mode, {
+				connectionState: { isStreaming: false },
+				subagentSnapshots: new Map([["worker", { id: "worker", status: "running" }]]),
+				pulseTimer: undefined,
+				ui: { requestRender },
+			});
+			const updatePulse = Reflect.get(InteractiveMode.prototype, "updateWorkingPulse") as (
+				this: typeof mode,
+			) => void;
+
+			updatePulse.call(mode);
+			vi.advanceTimersByTime(1000);
+
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(Reflect.get(mode, "pulseTimer")).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

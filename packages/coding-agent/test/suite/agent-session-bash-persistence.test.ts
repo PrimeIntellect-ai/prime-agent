@@ -368,16 +368,16 @@ describe("AgentSession bash and persistence characterization", () => {
 		await bashStartedPromise;
 		expect(harness.session.isBashRunning).toBe(true);
 		await harness.session.queueAgentMessagePrompt(agentPrompt, "followUp");
-		expect(harness.session.pendingMessageCount).toBe(1);
+		expect(harness.session.queuedActionCount).toBe(1);
 
 		releaseBash?.();
 		await bashRun;
-		for (let i = 0; i < 10 && harness.session.pendingMessageCount > 0; i++) {
+		for (let i = 0; i < 10 && harness.session.queuedActionCount > 0; i++) {
 			await Promise.resolve();
 		}
 		await delivery;
 
-		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.queuedActionCount).toBe(0);
 	});
 
 	it("drains steering before follow-up prompts after user bash finishes", async () => {
@@ -421,35 +421,62 @@ describe("AgentSession bash and persistence characterization", () => {
 		await bashRun;
 		await steerDelivery;
 		await followUpDelivery;
+		await harness.session.waitForIdle();
 
 		const userTexts = harness.session.messages.filter((message) => message.role === "user").map(getMessageText);
 		expect(userTexts.findIndex((text) => text.includes("steer after bash"))).toBeLessThan(
 			userTexts.findIndex((text) => text.includes("follow-up after bash")),
 		);
-		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.queuedActionCount).toBe(0);
 	});
 
 	it("flushes pending bash output before draining queued prompts", async () => {
-		const harness = await createHarness();
+		let releaseToolExecution: (() => void) | undefined;
+		const toolRelease = new Promise<void>((resolve) => {
+			releaseToolExecution = resolve;
+		});
+		const waitTool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait for release",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await toolRelease;
+				return { content: [{ type: "text", text: "released" }], details: {} };
+			},
+		};
+		const harness = await createHarness({ tools: [waitTool] });
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("after bash")]);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("turn complete"),
+			fauxAssistantMessage("after bash"),
+		]);
+		const toolStarted = new Promise<void>((resolve) => {
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "tool_execution_start" && event.toolName === "wait") {
+					unsubscribe();
+					resolve();
+				}
+			});
+		});
 		const agentPrompt =
 			"Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: agentmsg_flush_bash\n\nqueued after bash";
 		const delivery = harness.session.waitForAgentMessagePromptDelivery("agentmsg_flush_bash");
-		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = true;
+
+		const turn = harness.session.prompt("start");
+		await toolStarted;
 		harness.session.recordBashResult("echo flushed", {
 			output: "flushed output",
 			exitCode: 0,
 			cancelled: false,
 			truncated: false,
 		});
-		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = false;
 		await harness.session.queueAgentMessagePrompt(agentPrompt, "followUp");
-
-		await (
-			harness.session as unknown as { _drainQueuedMessagesAfterBash(): Promise<void> }
-		)._drainQueuedMessagesAfterBash();
+		releaseToolExecution?.();
+		await turn;
 		await delivery;
+		await harness.session.waitForIdle();
 
 		const bashIndex = harness.session.messages.findIndex((message) => message.role === "bashExecution");
 		const userIndex = harness.session.messages.findIndex(

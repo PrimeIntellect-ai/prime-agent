@@ -3,7 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type Message } from "@earendil-work
 import { Container, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AgentCronJob } from "../../../src/core/cron-jobs.js";
+import { type AgentCronJob, shouldDeferHeartbeatCronJob } from "../../../src/core/cron-jobs.js";
 import { createGoalContextMessage, type GoalState } from "../../../src/core/goals.js";
 import { createHeartbeatPromptMessage, HEARTBEAT_PROMPT_CUSTOM_TYPE } from "../../../src/core/messages.js";
 import {
@@ -178,14 +178,14 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 	it("resets overflow recovery state when heartbeat prompt turns start", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as { _overflowRecoveryAttempted: boolean };
-		sessionInternals._overflowRecoveryAttempted = true;
+		const sessionInternals = harness.session as unknown as { _overflowRecovery: string };
+		sessionInternals._overflowRecovery = "attempted";
 		harness.setResponses([fauxAssistantMessage("heartbeat handled")]);
 
 		await harness.session.promptHeartbeat(createHeartbeat());
 		await harness.session.agent.waitForIdle();
 
-		expect(sessionInternals._overflowRecoveryAttempted).toBe(false);
+		expect(sessionInternals._overflowRecovery).toBe("idle");
 	});
 
 	it("keeps pending nextTurn context separate from queued heartbeat prompts", async () => {
@@ -212,8 +212,8 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		let queuedPendingContextText = "";
 		const queueEvents: Array<{ steering: readonly string[]; followUp: readonly string[] }> = [];
 		harness.session.subscribe((event) => {
-			if (event.type === "queue_update") {
-				queueEvents.push({ steering: event.steering, followUp: event.followUp });
+			if (event.type === "session_action_update") {
+				queueEvents.push({ steering: event.actions.steering, followUp: event.actions.followUps });
 			}
 		});
 		harness.setResponses([
@@ -261,6 +261,133 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 				event.followUp.includes("Heartbeat prompt: Check whether the long-running task needs another step."),
 			),
 		).toBe(true);
+	});
+
+	it("orders a heartbeat after an earlier prompt with a slow input handler", async () => {
+		let markInputReached = () => {};
+		const inputReached = new Promise<void>((resolve) => {
+			markInputReached = resolve;
+		});
+		let releaseInput = () => {};
+		const inputGate = new Promise<void>((resolve) => {
+			releaseInput = resolve;
+		});
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", async (event) => {
+						if (event.text !== "ordinary first") return;
+						markInputReached();
+						await inputGate;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const providerOrder: string[] = [];
+		harness.setResponses([
+			(context) => {
+				providerOrder.push(getMessageText(context.messages.at(-1)));
+				return fauxAssistantMessage("first done");
+			},
+			(context) => {
+				providerOrder.push(getMessageText(context.messages.at(-1)));
+				return fauxAssistantMessage("heartbeat done");
+			},
+		]);
+
+		const ordinary = harness.session.prompt("ordinary first");
+		await inputReached;
+		const heartbeat = harness.session.promptHeartbeat(createHeartbeat());
+		releaseInput();
+		await Promise.all([ordinary, heartbeat]);
+		await harness.session.waitForIdle();
+
+		expect(providerOrder).toEqual(["ordinary first", createHeartbeat().prompt]);
+	});
+
+	it("waits for a queued-work pause before admitting a streaming heartbeat", async () => {
+		let markStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		let releaseTurn = () => {};
+		const turnGate = new Promise<void>((resolve) => {
+			releaseTurn = resolve;
+		});
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([
+			async () => {
+				markStarted();
+				await turnGate;
+				return fauxAssistantMessage("original done");
+			},
+			fauxAssistantMessage("heartbeat done"),
+		]);
+
+		const originalTurn = harness.session.prompt("start");
+		await started;
+		const pause = harness.session.acquireQueuedWorkPause();
+		const heartbeat = harness.session.promptHeartbeat(createHeartbeat(), { streamingBehavior: "followUp" });
+		await Promise.resolve();
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toHaveLength(0);
+
+		pause.release();
+		await heartbeat;
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toHaveLength(1);
+		releaseTurn();
+		await originalTurn;
+		await harness.session.waitForIdle();
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toHaveLength(0);
+	});
+
+	it("preserves next-turn context order across queued heartbeat admission", async () => {
+		let markStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		let releaseTurn = () => {};
+		const turnGate = new Promise<void>((resolve) => {
+			releaseTurn = resolve;
+		});
+		const harness = await createHarness();
+		harnesses.push(harness);
+		let deliveredOrder: string[] = [];
+		harness.setResponses([
+			async () => {
+				markStarted();
+				await turnGate;
+				return fauxAssistantMessage("original turn complete");
+			},
+			(context) => {
+				deliveredOrder = context.messages
+					.map(getMessageText)
+					.filter((text) => ["context A", "context B", createHeartbeat().prompt].includes(text));
+				return fauxAssistantMessage("heartbeat handled");
+			},
+		]);
+
+		const originalTurn = harness.session.prompt("start");
+		await started;
+		expect(harness.session.isStreaming).toBe(true);
+		expect(harness.session.unfinishedActionCount).toBe(1);
+		expect(harness.session.hasPendingSessionWork).toBe(false);
+		expect(shouldDeferHeartbeatCronJob(createHeartbeat(), harness.session)).toBe(false);
+		await harness.session.sendCustomMessage(
+			{ customType: "next-turn", content: "context A", display: true, details: {} },
+			{ deliverAs: "nextTurn" },
+		);
+		await harness.session.promptHeartbeat(createHeartbeat(), { streamingBehavior: "followUp" });
+		await harness.session.sendCustomMessage(
+			{ customType: "next-turn", content: "context B", display: true, details: {} },
+			{ deliverAs: "nextTurn" },
+		);
+		releaseTurn();
+		await originalTurn;
+		await harness.session.waitForIdle();
+
+		expect(deliveredOrder).toEqual(["context A", "context B", createHeartbeat().prompt]);
 	});
 
 	it("returns raw text when clearing queued heartbeat prompts while previews remain labeled", async () => {

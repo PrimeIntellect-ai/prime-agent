@@ -2,14 +2,208 @@
 
 ## [Unreleased]
 
-- Added visible refinement status and queued user prompts until refinement finishes.
+- Added visible continual-harness refinement status and kept prompts submitted during refinement or compaction queued until they can receive a response.
+- Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
+- Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
+
+## [0.7.3] - 2026-08-17
+
+- Fixed assistant rendering when provider payloads contain null or sparse content blocks.
+- Added authenticated host-request contracts with per-call request IDs, generation fencing, cancellation signals, and currentness checks.
+- Fixed root daemon shutdown retaining cleanup ownership while kill events are in flight.
+- Changed RLM family discovery to use a daemon-owned append-only spawn ledger with per-child display metadata instead of reconstructing topology from session files.
+- Fixed long-running macOS supervisors losing ownership when system cleanup removed authority records from `$TMPDIR`.
+- Fixed deleted RLM children leaking kernel snapshots while retaining their readable transcript tombstones.
+- Changed Agents View subagent rows to show stable `name · model/effort · summary` metadata.
+- Changed the default Cerebras model to the available `gpt-oss-120b` route and aligned cross-provider handoff fixtures with the generated catalog.
+- Fixed the agent going silent after an automatic context compaction interrupted unfinished work: the tool loop now resumes when a threshold compaction fails or is skipped, and active goals keep continuing after a successful mid-goal threshold compaction.
+- Changed the agents view splash hint from "type to start" to "type to search sessions".
+- Added `app.edits.expand` (`ctrl+j`) to toggle edit diffs; diffs are now shown only by this toggle, and `ctrl+o` no longer affects them.
+- Changed edit rendering so the `╰─ <path> +N -M` summary line is always visible and `ctrl+j` toggles the diff inline beneath it, indented to the summary text.
+- Fixed fullscreen wheel scrolling in Ghostty while retaining application link clicks; set `terminal.fullscreenMouse` to `false` to use native Cmd-click instead.
+- Changed the agents view to sort idle and inactive sessions by last message time, newest first, while keeping running agents in stable creation order.
+- Fixed `openai-codex` models being invisible to `rlm` subagents and `find_models` because model discovery reported Prime Agent's own version as the Codex client version ([#1375](https://github.com/PrimeIntellect-ai/prime-agent/pull/1375) by [@bilelrais](https://github.com/bilelrais)).
+- Added a working hint that recommends sharing traces with Prime Intellect to help train open-source LLMs.
+- Restored bare `prime-agent --resume` opening the agents view and the `/resume [id|path]` slash command; bare commands open the agents view and an argument resumes that session in place.
+- Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Fixed ctrl+p ("Toggle agent message expansion") only toggling received agent messages; it now expands and collapses sent agent messages together with received ones.
+
+## [0.7.2] - 2026-08-11
+
+- Fixed Down Arrow focusing the Agents View entry before moving a nonempty prompt cursor to the end ([ENG-5147](https://linear.app/primeintellect/issue/ENG-5147/keep-down-arrow-in-the-prompt-until-the-cursor-reaches-the-end)).
+- Added `app.messages.expand` (`ctrl+p`) to collapse or expand agent-to-agent messages separately from `ctrl+o` tool output.
+- Added a `ctrl+t` expand hint to collapsed thinking blocks, matching the tool output hint.
+- Changed expand/collapse hints to a consistent bracketed `(Ctrl+O to expand)` style across tool, message, summary, and error rows.
+- Added a configurable copy action to login dialogs so raw sign-in URLs can be copied without selecting wrapped text ([#643](https://github.com/PrimeIntellect-ai/prime-agent/issues/643)).
+- Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).
+- Changed sent agent messages in the IPython cell UI to show only the message text with a `╰─` gutter when expanded, matching received messages, and hid the raw `agent_message.send` receipt dictionary.
+- Fixed Homebrew installs attempting to self-update their versioned Cellar keg instead of directing users to `brew upgrade prime-agent` ([#844](https://github.com/PrimeIntellect-ai/prime-agent/issues/844))
+- Fixed the agents view collapsing expanded subagent lists when returning from an opened agent ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
+- Kept the subagent summary row visible and selectable while its list is expanded in the agents view, so pressing enter on it collapses the list again ([ENG-5105](https://linear.app/primeintellect/issue/ENG-5105/keep-the-agents-view-state-persistent)).
+- Added in-place editing of queued steering and follow-up messages: Alt+Up/Alt+Down browse the queue from the draft, Enter applies the edit as steering, Alt+Enter as a follow-up, and submitting an empty editor deletes the item; interrupts now preserve the queue ([#838](https://github.com/PrimeIntellect-ai/prime-agent/pull/838)).
+- Fixed workers with no live connection reporting as `ready`; stopping workers now report a `stopping` state, are hidden from live sessions, and no longer receive daemon-wide commands ([#850](https://github.com/PrimeIntellect-ai/prime-agent/pull/850)).
+- Fixed timed-out worker stops stranding dead-but-registered workers ("Session worker is not connected"); stops now finalize in the background once the process exits, and zombie processes are no longer counted as alive ([#851](https://github.com/PrimeIntellect-ai/prime-agent/pull/851)).
+- Fixed sessions becoming permanently unopenable after a stale worker registration was left behind; open/resume now self-heals by finishing the old cleanup and starting a fresh worker ([#852](https://github.com/PrimeIntellect-ai/prime-agent/pull/852)).
+
+## [0.7.1] - 2026-08-07
+
+- Fixed the bundled `websearch` skill description and missing-key guidance omitting the `/login` → **MCP Connections** step required to configure Serper.
+- Fixed `retry_worker` cancelling its own recovery when a stopped session worker left a saved stop marker behind, leaving the session stuck at "Session worker is not connected".
+
+## [0.7.0] - 2026-08-05
+
+### Breaking Changes
+
+- Changed agent messages to always use steering delivery and removed delivery-mode options from the Python, CLI, RPC, and connection APIs. Code passing `mode` to `agent_message.send`, or a delivery mode over the CLI/RPC, must drop it.
+
+### Changed
+
+- Changed self-updates to report the previous and new Prime Agent versions.
+
+### Fixed
+
+- Fixed the subagent summary showing retained children as idle while they run follow-up work.
+
+## [0.6.1] - 2026-08-05
+
+- Added reverse tab navigation to the `/login` configuration menu and moved the model scope shortcut to `Alt+S`.
+- Fixed daemon startup crashes hiding their exit status and daemon log until the startup timeout.
+- Documented the global `idleEvictionMinutes` daemon setting, including its default, valid values, and eviction/passivation behavior ([#621](https://github.com/PrimeIntellect-ai/prime-agent/issues/621)).
+- Fixed top-level `--help` omitting `acp` from the supported `--mode` values ([#620](https://github.com/PrimeIntellect-ai/prime-agent/issues/620)).
+- Fixed `stop` and `rename` becoming prompts when `--daemon-socket` precedes the command ([#622](https://github.com/PrimeIntellect-ai/prime-agent/issues/622)).
+- Fixed subagent terminal notices arriving as anonymous follow-up prompts instead of attributed agent messages, so a parent can now tell which child reported completion, failure, or cancellation, and a busy parent is steered at the next turn boundary rather than waiting to go idle ([#617](https://github.com/PrimeIntellect-ai/prime-agent/issues/617)).
+- Fixed ACP mode reporting a failed turn as a clean `end_turn`. A provider error, expired auth, or unusable model left `session/prompt` resolving with no updates at all, which reads to a client as a successful but empty turn; the turn now fails with the underlying error instead.
+- Fixed ACP cwd mismatch metadata treating symlink aliases such as macOS `/var` and `/private/var` as different directories ([#623](https://github.com/PrimeIntellect-ai/prime-agent/issues/623)).
+
+## [0.6.0] - 2026-08-04
+
+### Breaking Changes
+
+- Changed `rlm(...)` to return at task admission instead of waiting for the child to finish. It now yields a spawn handle (`rlm_child_id`, `name`, `session_dir`, `model`); `RLMResult` and its final answer, usage, and model-fallback warning are gone. A child reports back with `agent_message.send(..., receiver_role="parent")`, which arrives as an ordinary prompt and starts a parent turn. Code that read `result.answer`, or treated `asyncio.gather(...)` over `rlm(...)` as fan-in, must be updated.
+- Changed `agent_message.send` to role-addressed delivery: pass `receiver_role` (`"parent"`, `"sibling"`, `"child"`) plus `receiver_name` for siblings and children. The old positional `send(target, message)` form no longer works, and the separate `roster()` call is now `agent_message.list_agents()`.
+- Narrowed agent reach to the nuclear family: an agent may message or observe only its parent, siblings, and direct children. Top-level sessions are siblings of one another, so agent-to-agent between them still works; grandchildren and cousins must be reached by relaying through the intermediate child. Users are unaffected and still see every session.
+- Requesting an unavailable subagent model now fails the spawn instead of silently falling back to the parent's model with a warning.
+- Bumped the daemon schema revision to 13 for the parent-edge, depth, naming, and passivation wire changes; older clients and daemons are rejected cleanly at connect.
+
+### Added
+
+- Added `--mode acp`: Prime Agent now runs as an [Agent Client Protocol](https://agentclientprotocol.com) agent over NDJSON on stdio, driving an `AgentConnection` in-process. IPython surfaces as an ACP `execute` tool call carrying its cell source, and capabilities ACP has no native concept for (subagents, autonomous gate state, rich IPython output, compaction, goals, heartbeats, continual-harness refinement) travel in a namespaced `ai.primeintellect.prime-agent` `_meta` envelope that vanilla ACP clients ignore. Documented in `docs/acp.md`.
+- Added `/rlm-max-depth` to view or set the recursion cap for the current chat, with `--global` to change the default for new sessions.
+- Added recursive navigation to the agents view: drill into any session's children and back out again, with each chat showing its own depth.
+- Added a family roster via `agent_message.list_agents()`, listing parent, siblings, and children with name, id, depth, and status, including family members currently on disk.
+- Added sibling-unique agent names, enforced at spawn and rename against loaded and unloaded sessions alike. The same name may be reused at different depths.
+- Added an `idleEvictionMinutes` setting (default 90, `off` to disable) controlling idle eviction and passivation.
+
+### Changed
+
+- Changed finished subagents to stay on disk until something touches them, so memory scales with the active frontier rather than every subagent ever spawned. Lists show them without loading them, and attach, message, or transcript read wakes them on demand.
+- Changed sessions to persist their parent edge and derived RLM depth, so tree position no longer has to be inferred from whatever happens to be in memory.
+- Changed the supervisor to stop worker processes whose whole session tree has been idle past the threshold, and to passivate individually idle children inside still-busy workers.
+- Replaced the child-agent inspector with a single subagent summary line under the prompt that opens the agents view scoped to that session's children.
+
+### Fixed
+
+- Fixed `stop` and `rename` rejecting custom daemon socket options.
+- Fixed SIGINT in print mode leaving the session active until liveness reclaim.
+- Fixed daemon startup failing permanently when an interrupted supervisor owner directory contained only stray files.
+- Fixed agents-view fallback notices and scoped live sessions surviving transient refresh failures across chat returns.
+- Fixed stopping completed subagents deleting their retained sessions.
+- Fixed silent or cancelled RLM children leaving parents without a terminal status notice.
+- Added missing argument hints to `/name`, `/model`, `/export`, and `/import` in autocomplete.
+
+## [0.5.1] - 2026-08-04
+
+### Fixed
+
+- Fixed `/refine` failing with an opaque JSON parse error when the refiner exceeded a fixed 4096-token output cap; output budgets now derive from the selected model, and a truncated reply reports the exhausted budget directly.
+
+## [0.5.0] - 2026-08-03
+
+### Breaking Changes
+
+- Reworked session input scheduling into a single session action lifecycle and store (daemon protocol 7, schema revision 8); older clients and daemons are rejected cleanly at connect.
+
+### Changed
+
+- Changed large daemon session loads to stream JSONL history and avoid retaining a second full-file copy in memory.
+- Changed the agents view to render explicit session names in bold and the "(no messages)" placeholder in italics.
+- Changed subagent guidance to retain reusable children and delete completed direct children once they are no longer needed.
+- Changed top-level CLI help and documentation to expose autonomous mode, quality gates, and their limits.
+- Changed daemon and RPC session state to report literal queued actions separately from active scheduler work.
+
+### Fixed
+
+- Fixed the blank line between the recap and the working hint so they render directly above each other.
+- Fixed compaction retaining runtime resources after an explicitly deleted subagent had a transient cleanup failure.
+- Fixed long-running thinking timers to display hours and days instead of unbounded minutes.
+- Fixed overlapping daemon snapshot catch-ups closing healthy workers and preventing new sessions from starting.
+- Fixed active scheduler work being reported as queued in session state.
+- Fixed headless runs completing before queued follow-up work had finished.
+- Fixed `/compact` consuming itself as its own successor action.
+- Fixed daemon parse rejections dropping the command id, which left older clients waiting for a timeout instead of seeing the protocol error.
+- Fixed `--goal` sessions never showing the objective to the model, which made seeded goals invisible to first turns and continuations.
+
+## [0.4.0] - 2026-08-01
+
+### Breaking Changes
+
+- Replaced the recursive daemon `get_session_tree` response with flat nodes linked by `parentId` (protocol 6); clients must support the new response shape.
+- Removed `/resume` and bare `--resume`; browse sessions with left-arrow from a daemon chat, or use `--resume <session-id|path>` for a direct resume.
+
+### Added
+
+- Added `ctrl+n` to start a session from Agents View, and `alt+enter` to queue a reply as a follow-up while Enter steers a streaming session.
+- Added session-owned `/compact`, `/refine`, `/goal`, and `/autonomous` commands with autocomplete to the Agents View reply composer, plus target-scoped `/name` and `/kill` commands.
+- Added optional stable session names and initial prompts to `/new`.
+
+### Changed
+
+- Changed collapsed edit and IPython calls to show compact per-file line-change summaries while retaining full expanded diffs.
+- Changed bare `/effort` to open a selector of the current model's supported reasoning levels, and removed token estimates from reasoning-effort displays.
+- Improved session search ranking to prefer exact session-name and first-message matches before prefix, substring, and transcript fuzzy matches.
+
+### Fixed
+
+- Fixed deeply nested `/tree` sessions overflowing the daemon serializer by transferring and rebuilding the session tree iteratively.
+- Fixed `prime-agent agents` opening a new chat for a process-local session.
+- Fixed daemon startup after an interrupted supervisor leaves an empty ownership directory.
+- Fixed `/effort xhigh` and `/effort max` being rejected before a model is active.
+- Fixed IPython tracebacks emitting ANSI color codes.
+- Fixed selected rows and selectors becoming nearly invisible on terminals whose background matches the selected theme color.
+- Fixed startup waiting on private Prime Inference model authorization by caching authorization locally and refreshing stale entries in the background.
+
+## [0.3.3] - 2026-07-23
+
+- Removed the bundled orchestration heartbeat skill from the model system prompt.
+- Fixed feature hints crowding queued messages and side questions by placing them below the recap and hiding them while messages are queued ([ENG-4741](https://linear.app/primeintellect/issue/ENG-4741/recap-queuefollow-upmessage-hint-looks-cluttered)).
+- Fixed `/btw` truncating long answers by rendering side questions in the scrollable transcript.
+- Changed recognized slash commands to retain accent coloring after submission in live, replayed, and queued TUI surfaces while preserving Markdown arguments.
+- Unified prompt, steering, follow-up, and session-command scheduling under session-owned admission with durable queue state and coordinated update/restart checkpoints.
+- Unified Agents View and session resume into one searchable Running/Idle/Inactive session view with live heartbeat badges.
+- Changed selection cursors from `→` to `›` across model selectors, scoped-models, and the theme default for consistency with tree and user-message selectors.
+- Changed the queued follow-up hint connector from `↳` to `╰─` to match the tool-execution continuation connector.
+- Changed `/context` tree connectors from `├ `/`└ ` to `├─ `/`└─ ` to match the tree selector and session picker.
+- Changed the IPython cell queued marker from `▸` to `◇` to match the subagent and context-tree status icons.
+- Changed slash-command autocomplete to separate argument hints and resource provenance, show only the selected command description, and summarize hidden results directionally.
+- Fixed cancelled extension commands remaining alive when spawned processes ignored SIGTERM ([#458](https://github.com/PrimeIntellect-ai/prime-agent/pull/458) by [@snimu](https://github.com/snimu)).
+- Fixed OAuth browser launch URLs being interpreted by the system shell.
+- Added agent-callable `refine` skill so the model can schedule continual harness refinement from IPython via `await refine.run()` without blocking the current turn ([#504](https://github.com/PrimeIntellect-ai/prime-agent/pull/504) by [@sethkarten](https://github.com/sethkarten)).
+- Changed long live session opens to render a bounded recent transcript tail while preserving full prompt history ([#343](https://github.com/PrimeIntellect-ai/prime-agent/pull/343) by [@sethkarten](https://github.com/sethkarten)).
+- Changed `/refine` to run planning in the background so the conversation is not blocked during the LLM pass ([#497](https://github.com/PrimeIntellect-ai/prime-agent/pull/497) by [@sethkarten](https://github.com/sethkarten)).
+- Added serialized headless refinement and `--goal` / `--goal-token-budget` for seeding durable session goals ([#514](https://github.com/PrimeIntellect-ai/prime-agent/pull/514) by [@sethkarten](https://github.com/sethkarten)).
+- Added multi-turn `/btw` side conversations with transient in-pane bash commands ([#512](https://github.com/PrimeIntellect-ai/prime-agent/pull/512) by [@ilijalichkovski](https://github.com/ilijalichkovski)).
+
+
+## [0.3.2] - 2026-07-20
+
+- Fixed invalid `--resume` session IDs being submitted as prompts, with nearest-session guidance instead ([ENG-4722](https://linear.app/primeintellect/issue/ENG-4722/prime-agent-resume-accepts-incorrect-session-ids)).
 - Changed `/model` to show all public models with authenticated providers first and open provider authentication when an unavailable model is selected ([ENG-4575](https://linear.app/primeintellect/issue/ENG-4575/show-all-models-in-model-and-prompt-auth-on-selection)).
 - Changed the shared configuration menu to cycle tabs with Tab, use Shift+Tab for model scope, show an Escape close hint, preserve arrow-key search editing, and remove the model selector's provider shortcut.
 - Fixed searchable selectors retaining their previous scroll position after the query changed.
 - Changed interactive, print, JSON, RPC, piped-stdin, and no-session clients to use the same daemon-owned runtime while preserving their existing commands, output protocols, and lifecycle behavior ([ENG-4685](https://linear.app/primeintellect/issue/ENG-4685)).
 - Added RPC controls for schedules, heartbeats, agent messaging, and live session observation ([ENG-4685](https://linear.app/primeintellect/issue/ENG-4685)).
 - Fixed daemon-backed headless startup, rollback routing, RPC wire compatibility, and duplicate client runtime preparation ([ENG-4685](https://linear.app/primeintellect/issue/ENG-4685)).
-- Fixed agents with heartbeat-owning subagents appearing completed and showing completion checkmarks in the Agents View.
+- Fixed heartbeat-owning subagents appearing completed, showing completion checkmarks below the prompt, being omitted from active subagent counts, or remaining visible after deletion.
 - Fixed the heartbeat tray and manager showing heartbeats from unrelated sessions.
 - Fixed daemon backpressure triggering redundant catch-up snapshots for events already queued by the socket.
 - Added dedicated stable and beta installers, with stable advancing on version bumps and beta advancing on every commit to `main`.

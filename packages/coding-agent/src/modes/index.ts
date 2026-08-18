@@ -2,6 +2,17 @@
  * Run modes for the coding agent.
  */
 
+export {
+	type AcpModeOptions,
+	acpStopReason,
+	acpToolKind,
+	acpUpdatesForSessionEvent,
+	bashToolCallId,
+	PRIME_AGENT_META_NAMESPACE,
+	primeAgentMeta,
+	runAcpMode,
+	runAcpModeWithConnection,
+} from "./acp/index.js";
 export type {
 	AgentConnection,
 	AgentConnectionArtifactReference,
@@ -22,14 +33,34 @@ export { DaemonAgentConnection, InProcessAgentConnection } from "./agent-connect
 export { type AgentsViewModeOptions, runAgentsViewMode } from "./agents-view/agents-view-mode.js";
 export {
 	type AgentsViewRow,
+	type AgentsViewScopeFrame,
+	type AgentsViewScopeKey,
 	type AgentsViewSection,
 	type AgentsViewSelectionKey,
+	aggregateSessionHeartbeats,
 	buildAgentsViewRows,
+	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
+	createUnattachableChildOpenResult,
+	filterUnifiedSessions,
+	formatHeartbeatBadge,
 	getAgentsViewSelectionKey,
+	getAgentsViewSessionTitle,
+	getUnifiedSessionAncestorSessionIds,
+	hasUnifiedSessionChildren,
+	reconcileUnifiedSessions,
+	resolveAgentsViewLeftResult,
+	resolveAgentsViewScopeFrames,
 	resolveAgentsViewSelectionIndex,
+	resolveAgentsViewSelectionState,
+	scopeToSessionSubtree,
 	sectionTitle,
+	shouldApplyScopeResolution,
 	shouldShowAgentsViewSession,
+	transitionAgentsViewScope,
+	type UnifiedSessionHeartbeat,
+	type UnifiedSessionIndex,
+	type UnifiedSessionRecord,
 } from "./agents-view/agents-view-state.js";
 export {
 	DaemonCapabilityUnavailableError,
@@ -69,6 +100,7 @@ export { resolveAttachModelFallbackMessage } from "./daemon/daemon-session-list.
 export { defaultDaemonSocketPath } from "./daemon/daemon-socket.js";
 export { runDaemonSupervisorMode } from "./daemon/daemon-supervisor.js";
 export {
+	type InteractiveInitialPrompt,
 	InteractiveMode,
 	type InteractiveModeOptions,
 	type InteractiveModeRunResult,

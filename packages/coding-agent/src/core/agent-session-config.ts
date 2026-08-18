@@ -1,6 +1,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 
+export type AgentExecutionMode = "interactive" | "print" | "json" | "rpc" | "acp";
+
 export interface AgentSessionRuntimeConfig {
 	cwd?: string;
 	agentDir?: string;
@@ -26,6 +28,23 @@ export interface AgentSessionRuntimeConfig {
 	noContextFiles?: boolean;
 	autonomous?: AgentAutonomousConfig;
 	extensionFlagValues?: Record<string, boolean | string>;
+	/**
+	 * When true, auto-refine runs synchronously between turns at the
+	 * shouldStopAfterTurn boundary instead of in the background after
+	 * agent_end. Passed from the JSON/print client to the daemon worker
+	 * so it survives the appMode="daemon" context switch.
+	 */
+	serializedRefine?: boolean;
+	/** User-facing client mode that created this session. The daemon is transport, not an execution mode. */
+	executionMode?: AgentExecutionMode;
+	/** Opt-out-only policy carried across daemon process boundaries. */
+	telemetryDisabled?: true;
+	/**
+	 * Initial goal to seed when creating a new top-level session (rlmDepth 0).
+	 * Ignored for subagent sessions and when the branch already has a persisted
+	 * thread_goal_state entry (idempotent restart/rehydration).
+	 */
+	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
 export function mergeAgentSessionRuntimeConfig(
@@ -63,6 +82,10 @@ export function mergeAgentSessionRuntimeConfig(
 			base.extensionFlagValues || override.extensionFlagValues
 				? { ...(base.extensionFlagValues ?? {}), ...(override.extensionFlagValues ?? {}) }
 				: undefined,
+		serializedRefine: override.serializedRefine ?? base.serializedRefine,
+		executionMode: override.executionMode ?? base.executionMode,
+		telemetryDisabled: base.telemetryDisabled || override.telemetryDisabled ? true : undefined,
+		initialGoal: override.initialGoal ?? base.initialGoal,
 	};
 }
 
@@ -78,6 +101,10 @@ function cloneAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): Agen
 		themes: cloneArray(config.themes),
 		autonomous: mergeAutonomousConfig(undefined, config.autonomous),
 		extensionFlagValues: config.extensionFlagValues ? { ...config.extensionFlagValues } : undefined,
+		serializedRefine: config.serializedRefine,
+		executionMode: config.executionMode,
+		telemetryDisabled: config.telemetryDisabled,
+		initialGoal: config.initialGoal ? { ...config.initialGoal } : undefined,
 	};
 }
 

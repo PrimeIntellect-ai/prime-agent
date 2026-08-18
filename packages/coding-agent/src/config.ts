@@ -41,7 +41,7 @@ export const SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE = 75;
 // Install Method Detection
 // =============================================================================
 
-export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+export type InstallMethod = "bun-binary" | "homebrew" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 
 interface SelfUpdateCommandStep {
 	command: string;
@@ -85,6 +85,9 @@ export function detectInstallMethod(): InstallMethod {
 	if (isBunBinary) {
 		return "bun-binary";
 	}
+	if (isHomebrewInstall()) {
+		return "homebrew";
+	}
 
 	const resolvedPath = `${__dirname}\0${process.execPath || ""}`.toLowerCase().replace(/\\/g, "/");
 
@@ -102,6 +105,11 @@ export function detectInstallMethod(): InstallMethod {
 	}
 
 	return "unknown";
+}
+
+function isHomebrewInstall(): boolean {
+	const packageDir = getPackageDir().toLowerCase().replace(/\\/g, "/");
+	return packageDir.includes("/cellar/") && packageDir.includes("/libexec/lib/node_modules/");
 }
 
 function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
@@ -151,6 +159,7 @@ function getSelfUpdateCommandForMethod(
 	const uninstallAfterInstall = isDirectPackageArtifactSpec(updateSpec);
 	switch (method) {
 		case "bun-binary":
+		case "homebrew":
 			return undefined;
 		case "pnpm":
 			return makeSelfUpdateCommand(
@@ -248,6 +257,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 			return roots;
 		}
 		case "bun-binary":
+		case "homebrew":
 		case "unknown":
 			return [];
 	}
@@ -318,6 +328,9 @@ export function getSelfUpdateUnavailableInstruction(
 	const method = detectInstallMethod();
 	if (method === "bun-binary") {
 		return `Download from: https://github.com/PrimeIntellect-ai/prime-agent/releases/latest`;
+	}
+	if (method === "homebrew") {
+		return `Update with: brew upgrade ${APP_NAME}`;
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, updateSpec, npmCommand, updatePackageName);
 	if (command) {

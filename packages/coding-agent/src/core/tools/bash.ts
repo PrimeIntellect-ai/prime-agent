@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
+import { expandCollapseHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
 import { theme } from "../../modes/interactive/theme/theme.js";
 import { waitForChildProcess } from "../../utils/child-process.js";
@@ -232,8 +232,7 @@ function rebuildBashResultRenderComponent(
 					}
 					if (state.cachedSkipped && state.cachedSkipped > 0) {
 						const hint = showExpandHint
-							? theme.fg("muted", `... (${state.cachedSkipped} earlier lines,`) +
-								` ${keyHint("app.tools.expand", "to expand")})`
+							? `${theme.fg("muted", `... ${state.cachedSkipped} earlier lines`)} ${expandCollapseHint("app.tools.expand", false)}`
 							: theme.fg("muted", `... (${state.cachedSkipped} earlier lines)`);
 						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
 					}

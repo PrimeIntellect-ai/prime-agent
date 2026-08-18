@@ -221,6 +221,8 @@ export interface AutocompleteItem {
 	value: string;
 	label: string;
 	description?: string;
+	argumentHint?: string;
+	sourceTag?: string;
 	takesArgument?: boolean;
 }
 
@@ -231,6 +233,7 @@ export interface SlashCommand {
 	aliases?: readonly string[];
 	description?: string;
 	argumentHint?: string;
+	sourceTag?: string;
 	takesArgument?: boolean;
 	// Function to get argument completions for this command
 	// Returns null if no argument completion is available
@@ -314,15 +317,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const commandItems = this.commands.map((cmd) => {
 				const name = "name" in cmd ? cmd.name : cmd.value;
 				const aliases = "aliases" in cmd && cmd.aliases ? cmd.aliases : [];
-				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
-				const desc = cmd.description ?? "";
-				const fullDesc = hint ? (desc ? `${hint} — ${desc}` : hint) : desc;
+				const argumentHint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
+				const sourceTag = "sourceTag" in cmd && cmd.sourceTag ? cmd.sourceTag : undefined;
 				const takesArgument = "takesArgument" in cmd ? cmd.takesArgument === true : false;
 				return {
 					name,
 					searchText: [name, ...aliases].join(" "),
 					label: name,
-					description: fullDesc || undefined,
+					description: cmd.description,
+					argumentHint,
+					sourceTag,
 					takesArgument,
 				};
 			});
@@ -331,6 +335,8 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				value: item.name,
 				label: item.label,
 				...(item.description && { description: item.description }),
+				...(item.argumentHint && { argumentHint: item.argumentHint }),
+				...(item.sourceTag && { sourceTag: item.sourceTag }),
 				...(item.takesArgument && { takesArgument: true }),
 			}));
 

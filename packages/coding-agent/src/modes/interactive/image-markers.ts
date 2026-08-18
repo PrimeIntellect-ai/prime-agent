@@ -16,7 +16,17 @@ export function formatImageMarker(id: number): string {
 
 /** Marker ids that appear in `text`, in order of appearance. */
 export function imageMarkerIds(text: string): number[] {
-	return [...text.matchAll(IMAGE_MARKER_REGEX)].map((match) => Number(match[1]));
+	return [...text.matchAll(IMAGE_MARKER_REGEX)]
+		.map((match) => Number(match[1]))
+		.filter((id) => Number.isSafeInteger(id));
+}
+
+/** Replace every image-marker spelling whose numeric id appears in `remaps`. */
+export function remapImageMarkers(text: string, remaps: ReadonlyMap<number, number>): string {
+	return text.replace(IMAGE_MARKER_REGEX, (marker, id: string) => {
+		const replacement = remaps.get(Number(id));
+		return replacement === undefined ? marker : formatImageMarker(replacement);
+	});
 }
 
 /**

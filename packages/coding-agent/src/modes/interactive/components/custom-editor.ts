@@ -218,7 +218,7 @@ export class CustomEditor extends Editor {
 			this.keybindings.matches(data, "tui.editor.cursorDown") &&
 			!this.isShowingAutocomplete() &&
 			!this.isHistoryNavigationActive() &&
-			this.isCursorOnLastVisualLine() &&
+			this.isCursorAtEnd() &&
 			this.onMoveBelowPrompt?.()
 		) {
 			return;
@@ -226,6 +226,12 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for editor handling
 		super.handleInput(data);
+	}
+
+	private isCursorAtEnd(): boolean {
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		return cursor.line === lines.length - 1 && cursor.col === (lines[cursor.line]?.length ?? 0);
 	}
 
 	private splitRepeatedKeybinding(data: string, keybinding: AppKeybinding): string[] | undefined {

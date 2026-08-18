@@ -141,7 +141,7 @@ function createConnectionState(activeSessionId: string): AgentConnectionState {
 		leafId: `${activeSessionId}-leaf`,
 		autoCompactionEnabled: true,
 		messageCount: 1,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		compactionCount: 0,
 		goal: { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 },
 		scopedModels: [],
@@ -158,6 +158,7 @@ function createAttachResult(activeSessionId: string, messages: AgentMessage[] = 
 		activeSessionId,
 		lifecycle: "live",
 		activity: "idle",
+		isSessionActive: false,
 		sessionId: state.sessionId,
 		sessionFile: state.sessionFile,
 		cwd: state.cwd,
@@ -165,7 +166,7 @@ function createAttachResult(activeSessionId: string, messages: AgentMessage[] = 
 		isCompacting: false,
 		attachedClients: 1,
 		messageCount: messages.length,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 	};
 	return {
 		protocol: DAEMON_PROTOCOL_INFO,

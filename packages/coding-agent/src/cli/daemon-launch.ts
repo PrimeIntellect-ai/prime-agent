@@ -6,19 +6,29 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { appendRotatingLog, expandTildePath, getClientErrorLogPath, VERSION } from "../config.js";
-import { getProcessStartId } from "../core/session-lease.js";
+import { appendRotatingLog, expandTildePath, getClientErrorLogPath, getDaemonLogPath, VERSION } from "../config.js";
+import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
+import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
 import { isSessionSummaryBusy, type SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
+import {
+	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
+	DAEMON_WORKER_ROLE_ENV,
+	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
+	DAEMON_WORKER_TOKEN_ENV,
+} from "../modes/daemon/daemon-worker-protocol.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { createCliSubprocessEnv, formatCurrentCliCommand } from "./subprocess-launch.js";
 
 const DAEMON_STARTUP_TIMEOUT_MS = 30_000;
+const DAEMON_STARTUP_LOG_TAIL_BYTES = 4 * 1024;
+const DAEMON_STARTUP_EXIT_GRACE_MS = 2_000;
 
 export function isDaemonSessionSummary(value: unknown): value is SessionSummary {
 	if (!value || typeof value !== "object") {
@@ -54,7 +64,7 @@ async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promis
 type DaemonVersionProbe =
 	| { status: "absent" }
 	| { status: "current"; hello: DaemonHello }
-	| { status: "stale"; hello?: DaemonHello; compatible: boolean };
+	| { status: "stale"; hello?: DaemonHello };
 
 /** Connect to a running daemon and check whether it matches this client's protocol and app version. */
 export async function probeDaemonVersion(socketPath: string): Promise<DaemonVersionProbe> {
@@ -88,15 +98,11 @@ export async function probeDaemonVersion(socketPath: string): Promise<DaemonVers
 		if (current) {
 			return { status: "current", hello };
 		}
-		return {
-			status: "stale",
-			hello,
-			compatible: hello.protocol.version === 3,
-		};
+		return { status: "stale", hello };
 	} catch {
 		// Connected but no recognizable greeting: assume a stale daemon.
 		logDaemonLaunch(`running daemon on ${socketPath} sent no recognizable hello; treating as stale`);
-		return { status: "stale", compatible: false };
+		return { status: "stale" };
 	} finally {
 		client.close();
 	}
@@ -113,11 +119,7 @@ async function queryActiveDaemonSessions(
 	client: DaemonClient,
 	options: { includeClientOwned?: boolean } = {},
 ): Promise<{ sessions: SessionSummary[]; busyClientOwnedSessionCount: number }> {
-	const hello = await client.waitForHello(2000).catch(() => undefined);
-	const response =
-		hello && hello.protocol.version < DAEMON_PROTOCOL_VERSION
-			? await client.requestLegacy({ type: "list", includeClientOwned: options.includeClientOwned })
-			: await client.request({ type: "list", includeClientOwned: options.includeClientOwned });
+	const response = await client.request({ type: "list", includeClientOwned: options.includeClientOwned });
 	if (!response.success) {
 		throw new Error(response.error);
 	}
@@ -241,11 +243,7 @@ export async function shutdownConnectedDaemonAndWait(
 	let shutdownAccepted = false;
 	const expectedIdentity = processIdentityFromDaemonHello(hello);
 	try {
-		const request =
-			hello && hello.protocol.version < DAEMON_PROTOCOL_VERSION
-				? client.requestLegacy.bind(client)
-				: client.request.bind(client);
-		const response = await request({ type: "shutdown" }).catch(() => undefined);
+		const response = await client.request({ type: "shutdown" }).catch(() => undefined);
 		shutdownAccepted = response?.success === true;
 	} catch {
 		// A connect failure isn't treated as "gone"; waitForDaemonGone is the source of truth.
@@ -301,20 +299,6 @@ export async function probeRunningDaemonSessions(socketPath: string): Promise<Ru
 	}
 }
 
-export async function shouldUseLegacyOwnedSessionWorkerFrontend(socketPath: string): Promise<boolean> {
-	const version = await probeDaemonVersion(socketPath);
-	if (version.status !== "stale") {
-		return false;
-	}
-	const running = await probeRunningDaemonSessions(socketPath);
-	return (
-		running.reachable &&
-		(running.activeSessions === undefined ||
-			(running.busyClientOwnedSessionCount ?? 0) > 0 ||
-			running.activeSessions.some((summary) => isSessionBusy(summary)))
-	);
-}
-
 // Idle-but-loaded sessions reload from disk on the fresh daemon, so only a busy
 // session blocks replacing a stale daemon.
 async function shutdownStaleDaemonIfNotBusy(socketPath: string): Promise<boolean> {
@@ -360,13 +344,7 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 	}
 	if (probe.status === "stale") {
 		const stopped = await shutdownStaleDaemonIfNotBusy(socketPath);
-		if (!stopped) {
-			if (probe.compatible) {
-				logDaemonLaunch(`using compatible legacy daemon on ${socketPath} while busy work completes`);
-				return;
-			}
-			throw new StaleDaemonError(socketPath, probe.hello);
-		}
+		if (!stopped) throw new StaleDaemonError(socketPath, probe.hello);
 	}
 
 	const entrypoint = process.argv[1];
@@ -374,30 +352,107 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 		throw new Error("Cannot determine current CLI entrypoint for daemon launch");
 	}
 
+	// Strip inherited daemon worker/supervisor role env vars so the spawned
+	// daemon supervisor does not inherit worker-mode behavior. Without this,
+	// a CLI running inside a daemon worker (e.g. a test spawned by the Prime
+	// Agent daemon) would launch the supervisor in worker mode, which listens
+	// on the socket but never sends the daemon_hello handshake.
+	const env = createCliSubprocessEnv();
+	delete env[DAEMON_WORKER_ROLE_ENV];
+	delete env[DAEMON_WORKER_TOKEN_ENV];
+	delete env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV];
+	delete env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+	delete env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+	delete env[ORPHAN_PROCESS_JOURNAL_ENV];
+	delete env[SESSION_LEASES_ENABLED_ENV];
+	delete env[SESSION_LEASE_OWNER_ID_ENV];
+
+	const logOffset = currentDaemonLogSize(socketPath);
 	const child = spawn(
 		process.execPath,
 		[...process.execArgv, entrypoint, "--mode", "daemon", "--daemon-socket", socketPath],
 		{
 			cwd: spawnCwd ?? process.cwd(),
 			detached: true,
-			env: createCliSubprocessEnv(),
-			// The daemon writes its own rotating log (see daemon-mode); nothing here
-			// needs its stdout/stderr, so leave them detached.
+			env,
+			// A pipe would tie the daemon's stderr to this short-lived CLI
+			// (EPIPE once it exits); crash details come from the daemon log,
+			// which the supervisor writes to before rethrowing startup errors.
 			stdio: "ignore",
 		},
 	);
+	let childFailure:
+		| { type: "error"; error: Error }
+		| { type: "exit"; code: number | null; signal: NodeJS.Signals | null }
+		| undefined;
+	child.once("error", (error) => {
+		childFailure ??= { type: "error", error };
+	});
+	child.once("exit", (code, signal) => {
+		childFailure ??= { type: "exit", code, signal };
+	});
 	child.unref();
 
+	const throwIfFailed = () => {
+		if (!childFailure) {
+			return;
+		}
+		const logTail = readDaemonLogTail(socketPath, logOffset);
+		if (childFailure.type === "error") {
+			throw new Error(`Failed to spawn Prime Agent daemon: ${childFailure.error.message}.${logTail}`);
+		}
+		const signal = childFailure.signal ? `, signal ${childFailure.signal}` : "";
+		throw new Error(
+			`Prime Agent daemon exited during startup (code ${childFailure.code ?? "unknown"}${signal}).${logTail}`,
+		);
+	};
+
+	// A child exit is not immediately fatal: it may have lost the socket to a
+	// concurrent launcher whose daemon is still booting. Keep probing for a
+	// short grace window before attributing the failure to the exit.
 	const deadline = Date.now() + DAEMON_STARTUP_TIMEOUT_MS;
-	while (Date.now() < deadline) {
+	let exitDeadline: number | undefined;
+	while (Date.now() < Math.min(deadline, exitDeadline ?? Number.POSITIVE_INFINITY)) {
 		const started = await probeDaemonVersion(socketPath);
 		if (started.status === "current") {
 			return;
 		}
+		if (childFailure) {
+			exitDeadline ??= Date.now() + DAEMON_STARTUP_EXIT_GRACE_MS;
+		}
 		await delay(25);
 	}
 
-	throw new Error(`Timed out waiting for daemon to start on ${socketPath}`);
+	throwIfFailed();
+	throw new Error(
+		`Timed out waiting for daemon to start on ${socketPath}.${readDaemonLogTail(socketPath, logOffset)}`,
+	);
+}
+
+function currentDaemonLogSize(socketPath: string): number {
+	try {
+		return statSync(getDaemonLogPath(socketPath)).size;
+	} catch {
+		return 0;
+	}
+}
+
+/** Reads only log content written after `offset`, so stale content from earlier daemon runs is not misattributed to this startup attempt. */
+function readDaemonLogTail(socketPath: string, offset: number): string {
+	const logPath = getDaemonLogPath(socketPath);
+	let tail = "";
+	try {
+		const content = readFileSync(logPath);
+		// A rotation may have shrunk the file below the pre-spawn byte offset.
+		tail = content
+			.subarray(content.length < offset ? 0 : offset)
+			.subarray(-DAEMON_STARTUP_LOG_TAIL_BYTES)
+			.toString("utf8")
+			.trim();
+	} catch {
+		// Missing log means the daemon crashed before logging was set up.
+	}
+	return tail ? ` Recent daemon log (${logPath}):\n${tail}` : ` The daemon wrote nothing to its log (${logPath}).`;
 }
 
 const ensurePromises = new Map<string, Promise<void>>();
@@ -451,6 +506,8 @@ const EARLY_LAUNCH_VALUE_FLAGS = new Set([
 	"--autonomous-max-turns",
 	"--autonomous-max-tokens",
 	"--autonomous-timeout-ms",
+	"--goal",
+	"--goal-token-budget",
 ]);
 
 function findFirstEarlyLaunchPositional(args: readonly string[]): { index: number; value: string } | undefined {

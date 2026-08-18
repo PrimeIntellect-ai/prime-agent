@@ -104,29 +104,31 @@ describe("parseArgs", () => {
 			const sessionPath = "C:\\Users\\me\\session.jsonl";
 			const result = parseArgs(["--resume", sessionPath]);
 			expect(result.resume).toBe(sessionPath);
-			expect(result.resumeSelectorFallback).toBe(sessionPath);
 			expect(result.messages).toEqual([]);
 		});
 
 		test("parses --resume with a slash-containing relative session path", () => {
 			const result = parseArgs(["--resume", "sessions/current"]);
 			expect(result.resume).toBe("sessions/current");
-			expect(result.resumeSelectorFallback).toBe("sessions/current");
 			expect(result.messages).toEqual([]);
 		});
 
-		test("records text after --resume as a selector candidate with message fallback", () => {
+		test("treats the value after --resume as an authoritative selector", () => {
 			const result = parseArgs(["--resume", "fix", "the", "bug"]);
 			expect(result.resume).toBe("fix");
-			expect(result.resumeSelectorFallback).toBe("fix");
 			expect(result.messages).toEqual(["the", "bug"]);
 		});
 
-		test("records text after --resume= as a selector candidate with message fallback", () => {
+		test("treats the value after --resume= as an authoritative selector", () => {
 			const result = parseArgs(["--resume=fix"]);
 			expect(result.resume).toBe("fix");
-			expect(result.resumeSelectorFallback).toBe("fix");
 			expect(result.messages).toEqual([]);
+		});
+
+		test("supports an initial prompt after the bare resume picker", () => {
+			const result = parseArgs(["--resume", "--", "continue", "the", "session"]);
+			expect(result.resume).toBe(true);
+			expect(result.messages).toEqual(["continue", "the", "session"]);
 		});
 
 		test("treats empty --resume values as the bare resume picker flag", () => {
@@ -430,6 +432,13 @@ describe("parseArgs", () => {
 			});
 		});
 
+		test("accepts a gate command that starts with an unknown short flag", () => {
+			const result = parseArgs(["--autonomous-gate", "-x npm test"]);
+
+			expect(result.autonomousGates).toEqual(["-x npm test"]);
+			expect(result.diagnostics).toEqual([]);
+		});
+
 		test.each([
 			"--autonomous-gate",
 			"--autonomous-gate-retries",
@@ -590,6 +599,75 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual([]);
 			expect(result.diagnostics).toEqual([]);
 			expect(result.unknownFlags.size).toBe(0);
+		});
+
+		test("parses --goal as a string", () => {
+			const result = parseArgs(["--goal", "Write a paper"]);
+			expect(result.goal).toBe("Write a paper");
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("parses --goal-token-budget as a positive integer with --goal", () => {
+			const result = parseArgs(["--goal", "test goal", "--goal-token-budget", "50000"]);
+			expect(result.goalTokenBudget).toBe(50000);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("rejects non-positive --goal-token-budget", () => {
+			const result = parseArgs(["--goal-token-budget", "0"]);
+			expect(result.goalTokenBudget).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: "--goal-token-budget must be a positive integer" },
+			]);
+		});
+
+		test("parses --goal and --goal-token-budget together", () => {
+			const result = parseArgs(["--goal", "Fix all bugs", "--goal-token-budget", "100000"]);
+			expect(result.goal).toBe("Fix all bugs");
+			expect(result.goalTokenBudget).toBe(100000);
+		});
+
+		test("trailing --goal without value produces an error", () => {
+			const result = parseArgs(["--goal"]);
+			expect(result.goal).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--goal requires a value" }]);
+		});
+
+		test("trailing --goal-token-budget without value produces an error", () => {
+			const result = parseArgs(["--goal-token-budget"]);
+			expect(result.goalTokenBudget).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--goal-token-budget requires a value" }]);
+		});
+
+		test("--goal followed by --other flag produces an error for --goal", () => {
+			const result = parseArgs(["--goal", "--verbose"]);
+			expect(result.goal).toBeUndefined();
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--goal requires a value" }]);
+		});
+
+		test("--goal accepts a dash-prefixed objective", () => {
+			const result = parseArgs(["--goal", "-p"]);
+
+			expect(result.goal).toBe("-p");
+			expect(result.print).toBeUndefined();
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("--goal-token-budget without --goal produces an error", () => {
+			const result = parseArgs(["--goal-token-budget", "50000"]);
+			expect(result.diagnostics).toContainEqual({
+				type: "error",
+				message: "--goal-token-budget requires --goal",
+			});
+		});
+
+		test("empty --goal value produces an error", () => {
+			const result = parseArgs(["--goal", "  "]);
+			expect(result.goal).toBeUndefined();
+			expect(result.diagnostics).toContainEqual({
+				type: "error",
+				message: "--goal requires a non-empty objective",
+			});
 		});
 	});
 });

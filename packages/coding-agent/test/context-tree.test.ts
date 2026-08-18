@@ -422,8 +422,8 @@ describe("formatContextTree", () => {
 		expect(lines[0]).toBe("Context");
 		expect(output).toContain("Model: anthropic/claude-sonnet-4-5");
 		expect(output).toContain("● main agent");
-		expect(output).toContain("├ ✓ summarize auth module");
-		expect(output).toContain("└ ◆ refactor tests");
+		expect(output).toContain("├─ ✓ summarize auth module");
+		expect(output).toContain("└─ ◆ refactor tests");
 		// Own usage per row: 45200 -> 45k, 12850 -> 13k, 8700 -> 8.7k.
 		expect(output).toContain("45k");
 		expect(output).toContain("$0.84");

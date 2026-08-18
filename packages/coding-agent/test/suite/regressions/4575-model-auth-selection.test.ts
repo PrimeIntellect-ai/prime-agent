@@ -3,10 +3,6 @@ import stripAnsi from "strip-ansi";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
 import type { AgentConnectionModel, AgentConnectionModelCatalog } from "../../../src/modes/agent-connection/types.js";
-import {
-	getAgentsViewModelArgumentCompletions,
-	syncAgentsViewModelMenuAfterAuth,
-} from "../../../src/modes/agents-view/agents-view-mode.js";
 import { ModelSelectorComponent } from "../../../src/modes/interactive/components/model-selector.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
@@ -200,40 +196,6 @@ describe("ENG-4575 model authentication", () => {
 			label: "gpt-5.4",
 			description: "openai",
 		});
-	});
-
-	test("uses the full public catalog for agents view model autocomplete", async () => {
-		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
-		harnesses.push(harness);
-		const publicModel = { ...harness.getModel("base")!, provider: "openai", id: "gpt-5.4" };
-		const refreshModelCatalog = vi.fn(async () => ({ models: [publicModel], configuredProviders: [] }));
-
-		const completions = await getAgentsViewModelArgumentCompletions("gpt-5.4", { refreshModelCatalog });
-
-		expect(refreshModelCatalog).toHaveBeenCalledOnce();
-		expect(completions).toContainEqual({
-			value: "openai/gpt-5.4",
-			label: "gpt-5.4",
-			description: "openai",
-		});
-	});
-
-	test("syncs agents view model rows after provider authentication", async () => {
-		const harness = await createHarness({ models: [{ id: "base", name: "Base", reasoning: true }] });
-		harnesses.push(harness);
-		const model = { ...harness.getModel("base")!, provider: "openai" };
-		const menu = {
-			refreshAuthentication: vi.fn(),
-			updateModels: vi.fn(),
-		};
-
-		syncAgentsViewModelMenuAfterAuth(menu, undefined, {
-			models: [model],
-			configuredProviders: [model.provider],
-		});
-
-		expect(menu.refreshAuthentication).toHaveBeenCalledOnce();
-		expect(menu.updateModels).toHaveBeenCalledWith(undefined, [model], new Set([model.provider]));
 	});
 
 	test("filters shared model argument completions by provider and model id", () => {

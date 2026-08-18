@@ -245,6 +245,8 @@ export interface EditorOptions {
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
+	showItemMetadata: true,
+	showDirectionalScrollInfo: true,
 	showSelectedDescription: true,
 };
 
@@ -466,10 +468,6 @@ export class Editor implements Component, Focusable {
 
 	protected isHistoryNavigationActive(): boolean {
 		return this.historyIndex > -1;
-	}
-
-	protected isCursorOnLastVisualLine(): boolean {
-		return this.isOnLastVisualLine();
 	}
 
 	private navigateHistory(direction: 1 | -1): void {

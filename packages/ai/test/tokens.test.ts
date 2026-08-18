@@ -3,6 +3,7 @@ import { getModel } from "../src/models.js";
 import { stream } from "../src/stream.js";
 import type { Api, Context, Model, StreamOptions } from "../src/types.js";
 import { getKimiCodingTestModel } from "./kimi-test-model.js";
+import { getZaiTestModel } from "./zai-test-model.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
@@ -182,7 +183,7 @@ describe("Token Statistics on Abort", () => {
 	});
 
 	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider", () => {
-		const llm = getModel("zai", "glm-4.5-air");
+		const llm = getZaiTestModel();
 
 		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
 			await testTokensOnAbort(llm);

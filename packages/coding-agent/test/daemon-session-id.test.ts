@@ -78,6 +78,51 @@ describe("resolveDaemonSessionPath", () => {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("resolves the normalized suffix shown by the session list", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-daemon-session-id-"));
+		try {
+			const cwd = join(tempDir, "project");
+			const sessionDir = join(tempDir, "sessions");
+			const sessionId = "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa";
+			const sessionPath = createSavedSession(cwd, sessionDir, sessionId);
+
+			await expect(resolveDaemonSessionPath("AAAAAA-AAAAAA", cwd, sessionDir)).resolves.toBe(sessionPath);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("raises when a saved session suffix matches multiple sessions", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-daemon-session-id-"));
+		try {
+			const cwd = join(tempDir, "project");
+			const sessionDir = join(tempDir, "sessions");
+			createSavedSession(cwd, sessionDir, "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa");
+			createSavedSession(cwd, sessionDir, "029e71ec-e08a-75a9-b573-aaaaaaaaaaaa");
+
+			await expect(resolveDaemonSessionPath("aaaaaaaaaaaa", cwd, sessionDir)).rejects.toThrow(
+				/Ambiguous saved session "aaaaaaaaaaaa"/,
+			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers an exact normalized ID over prefix and suffix matches", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-daemon-session-id-"));
+		try {
+			const cwd = join(tempDir, "project");
+			const sessionDir = join(tempDir, "sessions");
+			const exactPath = createSavedSession(cwd, sessionDir, "abcd");
+			createSavedSession(cwd, sessionDir, "abcd1");
+			createSavedSession(cwd, sessionDir, "1abcd");
+
+			await expect(resolveDaemonSessionPath("AB-CD", cwd, sessionDir)).resolves.toBe(exactPath);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
 });
 
 function makeSessionMap(states: ActiveSessionState[]): Map<string, ActiveSessionState> {
@@ -97,8 +142,9 @@ function makeState(activeSessionId: string, sessionId: string): ActiveSessionSta
 	} as unknown as ActiveSessionState;
 }
 
-function createSavedSession(cwd: string, sessionDir: string, sessionId: string): void {
+function createSavedSession(cwd: string, sessionDir: string, sessionId: string): string {
 	const session = SessionManager.create(cwd, sessionDir);
 	session.newSession({ id: sessionId });
 	session.appendSessionState({ status: "archived" });
+	return session.getSessionFile()!;
 }

@@ -88,6 +88,113 @@ describe("SelectList", () => {
 		assert.equal(shortSelection.at(-1)?.trim(), "Short description");
 	});
 
+	it("shows slash metadata in rows and only the selected description below", () => {
+		const items = [
+			{
+				value: "compact",
+				label: "compact",
+				description: "Compact the session context",
+				argumentHint: "[instructions]",
+			},
+			{
+				value: "skill:compact",
+				label: "skill:compact",
+				description: "Check context usage and compact the conversation",
+				sourceTag: "#builtin",
+			},
+		];
+		const list = new SelectList(items, 5, testTheme, {
+			minPrimaryColumnWidth: 12,
+			maxPrimaryColumnWidth: 32,
+			showItemMetadata: true,
+			showSelectedDescription: true,
+		});
+
+		const rendered = list.render(80);
+
+		assert.match(rendered[0] ?? "", /compact\s+\[instructions\]/);
+		assert.match(rendered[1] ?? "", /skill:compact\s+#builtin/);
+		assert.ok(!rendered[0]?.includes("Compact the session context"));
+		assert.equal(
+			rendered
+				.slice(3)
+				.map((line) => line.trim())
+				.join(" "),
+			"Compact the session context",
+		);
+	});
+
+	it("bounds styled Unicode metadata rows at narrow widths", () => {
+		const items = [
+			{
+				value: "技能:圧縮",
+				label: "技能:圧縮",
+				argumentHint: "[非常に長い指示]",
+				sourceTag: "#builtin",
+			},
+		];
+		const styledTheme = {
+			...testTheme,
+			selectedPrefix: (text: string) => `\x1b[36m${text}\x1b[39m`,
+			selectedText: (text: string) => `\x1b[35m${text}\x1b[39m`,
+			argumentHint: (text: string) => `\x1b[33m${text}\x1b[39m`,
+			sourceTag: (text: string) => `\x1b[32m${text}\x1b[39m`,
+		};
+		const list = new SelectList(items, 5, styledTheme, {
+			minPrimaryColumnWidth: 12,
+			maxPrimaryColumnWidth: 32,
+			showItemMetadata: true,
+		});
+
+		for (const width of [1, 2, 3, 4, 8, 12, 20, 40]) {
+			const rendered = list.render(width);
+			assert.ok(
+				rendered.every((line) => visibleWidth(line) <= width),
+				`render exceeded width ${width}`,
+			);
+		}
+	});
+
+	it("normalizes multiline metadata to a single row", () => {
+		const list = new SelectList(
+			[
+				{
+					value: "review",
+					label: "review",
+					argumentHint: "<first>\n<second>",
+					sourceTag: "#project\nscope",
+				},
+			],
+			5,
+			testTheme,
+			{
+				minPrimaryColumnWidth: 12,
+				maxPrimaryColumnWidth: 32,
+				showItemMetadata: true,
+			},
+		);
+
+		const rendered = list.render(80);
+
+		assert.equal(rendered.length, 1);
+		assert.doesNotMatch(rendered[0] ?? "", /[\r\n]/);
+		assert.match(rendered[0] ?? "", /review\s+<first> <second>\s+#project scope/);
+	});
+
+	it("shows directional hidden counts at the top, middle, and bottom", () => {
+		const items = Array.from({ length: 12 }, (_, index) => ({
+			value: `item-${index}`,
+			label: `item-${index}`,
+		}));
+		const list = new SelectList(items, 5, testTheme, { showDirectionalScrollInfo: true });
+
+		assert.equal(list.render(80).at(-1)?.trim(), "↓ 7 more");
+		list.setSelectedIndex(6);
+		assert.equal(list.render(80).at(-1)?.trim(), "↑ 4 more  ↓ 3 more");
+		list.setSelectedIndex(11);
+		assert.equal(list.render(80).at(-1)?.trim(), "↑ 7 more");
+	});
+
 	it("keeps descriptions aligned when the primary text is truncated", () => {
 		const items = [
 			{ value: "short", label: "short", description: "short description" },

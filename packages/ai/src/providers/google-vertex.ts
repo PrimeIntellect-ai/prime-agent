@@ -18,7 +18,6 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TextContent,
-	ThinkingBudgets,
 	ThinkingContent,
 	ToolCall,
 } from "../types.js";
@@ -33,6 +32,7 @@ import type { GoogleThinkingLevel } from "./google-shared.js";
 import {
 	convertMessages,
 	convertTools,
+	getGoogleThinkingBudget,
 	isThinkingPart,
 	mapStopReason,
 	mapToolChoice,
@@ -307,7 +307,7 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const base = buildBaseOptions(model, options, undefined);
-	if (!options?.reasoning) {
+	if (!options?.reasoning || options.reasoning === "off") {
 		return streamGoogleVertex(model, context, {
 			...base,
 			thinking: { enabled: false },
@@ -332,7 +332,7 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 		...base,
 		thinking: {
 			enabled: true,
-			budgetTokens: getGoogleBudget(geminiModel, effort, options.thinkingBudgets),
+			budgetTokens: getGoogleThinkingBudget(geminiModel.id, effort, options.thinkingBudgets),
 		},
 	} satisfies GoogleVertexOptions);
 };
@@ -542,36 +542,4 @@ function getGemini3ThinkingLevel(
 		case "high":
 			return "HIGH";
 	}
-}
-
-function getGoogleBudget(
-	model: Model<"google-generative-ai">,
-	effort: ClampedThinkingLevel,
-	customBudgets?: ThinkingBudgets,
-): number {
-	if (customBudgets?.[effort] !== undefined) {
-		return customBudgets[effort]!;
-	}
-
-	if (model.id.includes("2.5-pro")) {
-		const budgets: Record<ClampedThinkingLevel, number> = {
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 32768,
-		};
-		return budgets[effort];
-	}
-
-	if (model.id.includes("2.5-flash")) {
-		const budgets: Record<ClampedThinkingLevel, number> = {
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 24576,
-		};
-		return budgets[effort];
-	}
-
-	return -1;
 }

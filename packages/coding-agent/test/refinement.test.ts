@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -15,6 +15,7 @@ import {
 	getRefinementHistory,
 	getRefinementHistoryPath,
 	type HarnessState,
+	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
 	loadHarnessState,
 	mergeHarnessStates,
@@ -138,6 +139,90 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 }
 
 describe("harness refinement", () => {
+	it("rejects an edit when the target entry changed after planning", () => {
+		const harnessStateDir = makeTempDir();
+		const baselineState = loadHarnessState(harnessStateDir);
+		seedEntry(baselineState, "memory");
+		saveHarnessState(harnessStateDir, baselineState);
+		const currentState = loadHarnessState(harnessStateDir);
+		currentState.entries.memory.memory_entry.content = "concurrent kernel content";
+		currentState.entries.memory.memory_entry.version++;
+
+		const result = applyRefinementProposal(
+			currentState,
+			proposal("Update memory", [
+				{
+					action: "update",
+					kind: "memory",
+					id: "memory_entry",
+					title: "Planned title",
+					content: "stale planned content",
+				},
+			]),
+			{ id: "refine_conflict", baselineState },
+		);
+
+		expect(result.appliedEdits).toMatchObject([
+			{ applied: false, error: "entry changed during refinement planning" },
+		]);
+		expect(currentState.entries.memory.memory_entry.content).toBe("concurrent kernel content");
+	});
+
+	it("allows sequential edits to the same entry after the baseline matches once", () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		seedEntry(state, "memory");
+		const baselineState = structuredClone(state);
+
+		const result = applyRefinementProposal(
+			state,
+			proposal("Update memory twice", [
+				{ action: "update", kind: "memory", id: "memory_entry", title: "First", content: "first" },
+				{ action: "update", kind: "memory", id: "memory_entry", title: "Second", content: "second" },
+			]),
+			{ id: "refine_same_entry", baselineState, scope: "local" },
+		);
+
+		expect(result.appliedEdits.map((edit) => edit.applied)).toEqual([true, true]);
+		expect(state.entries.memory.memory_entry.content).toBe("second");
+		expect(state.entries.memory.memory_entry.version).toBe(3);
+	});
+
+	it("infers legacy refinement scope from applied edit snapshots", () => {
+		const state = loadHarnessState(makeTempDir(), "global");
+		seedEntry(state, "memory", "global_memory");
+		const after = { ...state.entries.memory.global_memory, scope: "global" as const };
+		const result: RefinementResult = {
+			...proposal("Legacy global edit", []),
+			id: "legacy",
+			appliedEdits: [
+				{
+					action: "create",
+					kind: "memory",
+					id: "global_memory",
+					applied: true,
+					after,
+				},
+			],
+			harnessStatePath: "",
+		};
+
+		expect(inferRefinementResultScope(result)).toBe("global");
+	});
+
+	it("atomically replaces harness state without leaving temporary files", () => {
+		const harnessStateDir = makeTempDir();
+		const state = loadHarnessState(harnessStateDir);
+		seedEntry(state, "memory");
+
+		const statePath = saveHarnessState(harnessStateDir, state);
+
+		expect(loadHarnessState(harnessStateDir).entries.memory.memory_entry).toBeDefined();
+		expect(readdirSync(harnessStateDir)).toEqual([statePath.split("/").at(-1)]);
+		chmodSync(statePath, 0o600);
+		saveHarnessState(harnessStateDir, state);
+		expect(statSync(statePath).mode & 0o777).toBe(0o600);
+	});
+
 	it("applies create, update, and delete for every editable harness kind", () => {
 		const state = loadHarnessState(makeTempDir());
 
@@ -945,8 +1030,9 @@ describe("harness refinement", () => {
 				"During a local refinement, global entries are read-only context: never propose update or delete edits for them",
 			),
 		});
+		// Budget is derived from the model (8192) rather than a fixed literal.
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
-			maxTokens: 4096,
+			maxTokens: 8192,
 			apiKey: "api-key",
 			headers: { "x-test-header": "1" },
 		});
@@ -959,6 +1045,77 @@ describe("harness refinement", () => {
 		});
 		expect(state.entries.memory.native_validation.content).toBe(
 			"Run validation through the target project environment.",
+		);
+	});
+
+	it("caps the refinement output budget by the model's own maxTokens", async () => {
+		const state = loadHarnessState(makeTempDir());
+		completeSimpleMock.mockResolvedValueOnce(
+			assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "o", edits: [] })),
+		);
+		// A large model must receive the policy ceiling, not its full output width.
+		const wideModel = { ...createRefineModel(false), maxTokens: 128_000 };
+
+		await refineHarness([], state, [], wideModel, "api-key", {});
+
+		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({ maxTokens: 32_000 });
+	});
+
+	it("reports an exhausted output budget instead of a JSON parse error", async () => {
+		const state = loadHarnessState(makeTempDir());
+		// A reply truncated inside the edits array: brace slicing would otherwise
+		// recover a fragment and surface an opaque JSON.parse message.
+		const truncated = `{
+  "summary": "s",
+  "rationale": "r",
+  "expectedOutcome": "o",
+  "edits": [
+    { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" },
+    { "action": "create", "kind": "memory", "id": "b", "title": "t2", "content": "second`;
+		completeSimpleMock.mockResolvedValueOnce({ ...assistantText(truncated), stopReason: "length" });
+
+		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
+			/output budget was exhausted/,
+		);
+	});
+
+	it("rejects a truncated proposal that never reports a length stop reason", async () => {
+		const state = loadHarnessState(makeTempDir());
+		const truncated = `{
+  "summary": "s",
+  "edits": [
+    { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" },
+    { "action": "create", "kind": "memory", "id": "b", "title": "t2", "content": "second`;
+		completeSimpleMock.mockResolvedValueOnce(assistantText(truncated));
+
+		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
+			/stopped before completing its JSON object/,
+		);
+	});
+
+	it("reports truncation when a JSON-only reply is cut after a nested closing brace", async () => {
+		const state = loadHarnessState(makeTempDir());
+		// Ends on "}" so it takes the startsWith/endsWith fast path rather than
+		// the brace-slicing fallback, but is still an incomplete object.
+		const truncated = `{
+  "summary": "s",
+  "edits": [
+    { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" }`;
+		completeSimpleMock.mockResolvedValueOnce(assistantText(truncated));
+
+		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
+			/stopped before completing its JSON object/,
+		);
+	});
+
+	it("reports malformed JSON as invalid rather than as an exhausted budget", async () => {
+		const state = loadHarnessState(makeTempDir());
+		// Complete and balanced, but not valid JSON: this is a model formatting
+		// failure, not a truncation, and must not blame the output budget.
+		completeSimpleMock.mockResolvedValueOnce(assistantText('Here is the result: {"edits": [oops]}'));
+
+		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
+			/did not return valid JSON/,
 		);
 	});
 
@@ -1190,9 +1347,17 @@ describe("global refinement history", () => {
 		// so applying must be the only thing that mutates state.
 		expect(plan.proposal.edits).toHaveLength(1);
 		expect(plan.id).toMatch(/^refine_/);
-		const userPrompt = completeSimpleMock.mock.calls[0][1].messages[0].content[0].text;
+		const request = completeSimpleMock.mock.calls[0][1];
+		const userPrompt = request.messages[0].content[0].text;
 		expect(userPrompt).toContain("Requested refinement scope: local");
 		expect(userPrompt).toContain("Global entries in the overview are read-only context");
+		expect(request.systemPrompt).toContain('handle = await rlm("sub-task")');
+		expect(request.systemPrompt).toContain("never the child's answer");
+		expect(request.systemPrompt).toContain('receiver_role="parent"');
+		expect(request.systemPrompt).toContain("await rlm.list_subagents()");
+		expect(request.systemPrompt).toContain('receiver_role="child"');
+		expect(request.systemPrompt).not.toContain("asyncio.create_task(rlm");
+		expect(request.systemPrompt).not.toContain("asyncio.gather(rlm");
 		expect(state.entries.memory.planned_memory).toBeUndefined();
 		expect(state.refinements).toHaveLength(0);
 

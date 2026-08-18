@@ -26,6 +26,7 @@ import asyncio
 import os as _prime_agent_os
 
 _prime_agent_os.environ["NO_COLOR"] = "1"
+get_ipython().colors = "nocolor"
 
 try:
     import nest_asyncio as _prime_agent_nest_asyncio

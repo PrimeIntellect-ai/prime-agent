@@ -40,6 +40,7 @@ export async function fetchAuthorizedPrivatePrimeInferenceModelIds(
 	apiKey: string,
 	teamHeaders: Record<string, string>,
 	fetchFn: typeof fetch = fetch,
+	timeoutMs: number = PRIVATE_MODEL_REFRESH_TIMEOUT_MS,
 ): Promise<Set<string>> {
 	if (!teamHeaders["X-Prime-Team-ID"]) {
 		return new Set();
@@ -50,7 +51,7 @@ export async function fetchAuthorizedPrivatePrimeInferenceModelIds(
 			Authorization: `Bearer ${apiKey}`,
 			...teamHeaders,
 		},
-		signal: AbortSignal.timeout(PRIVATE_MODEL_REFRESH_TIMEOUT_MS),
+		signal: AbortSignal.timeout(timeoutMs),
 	});
 	if (response.status === 401 || response.status === 403) {
 		return new Set();

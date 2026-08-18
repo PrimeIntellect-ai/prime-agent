@@ -377,8 +377,11 @@ describe("buildSessionContext", () => {
 		const loaded = buildSessionContext(entries);
 		// summary + kept (u2, a2) + after (u3, a3) = 5
 		expect(loaded.messages.length).toBe(5);
-		expect(loaded.messages[0].role).toBe("compactionSummary");
-		expect((loaded.messages[0] as any).summary).toContain("Summary of 1,a,2,b");
+		expect(loaded.messages[0]).toMatchObject({
+			role: "compactionSummary",
+			summary: expect.stringContaining("Summary of 1,a,2,b"),
+			retainedMessageCount: 2,
+		});
 	});
 
 	it("should handle multiple compactions (only latest matters)", () => {

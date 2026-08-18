@@ -84,14 +84,14 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 		it("handles same-provider different-model handoff with tool calls", { retry: 2 }, async () => {
 			// This tests the scenario where:
 			// 1. Model A (gpt-5-mini) generates reasoning + function_call
-			// 2. User switches to Model B (gpt-5.2-codex) - same provider, different model
+			// 2. User switches to Model B (gpt-5.4) - same provider, different model
 			// 3. transform-messages: isSameModel=false, thinking converted to text
 			// 4. But tool call ID still has OpenAI pairing history (fc_xxx paired with rs_xxx)
 			// 5. Without fix: OpenAI returns 400 "function_call without required reasoning item"
 			// 6. With fix: tool calls/results converted to text, conversation continues
 
 			const modelA = getModel("openai", "gpt-5-mini");
-			const modelB = getModel("openai", "gpt-5.2-codex");
+			const modelB = getModel("openai", "gpt-5.4");
 
 			const apiKey = getEnvApiKey("openai");
 			if (!apiKey) {
@@ -181,16 +181,16 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			expect(responseText).toContain("42");
 		});
 
-		it("handles cross-provider handoff from Anthropic to OpenAI Codex", { retry: 2 }, async () => {
+		it("handles cross-provider handoff from Anthropic to OpenAI", { retry: 2 }, async () => {
 			// This tests cross-provider handoff:
 			// 1. Anthropic model generates thinking + function_call (toolu_xxx ID)
-			// 2. User switches to OpenAI Codex
+			// 2. User switches to OpenAI
 			// 3. transform-messages: isSameModel=false, thinking converted to text
 			// 4. Tool call ID is Anthropic format (toolu_xxx), no OpenAI pairing history
 			// 5. Should work because foreign IDs have no pairing expectation
 
 			const anthropicModel = getModel("anthropic", "claude-sonnet-4-5");
-			const codexModel = getModel("openai", "gpt-5.2-codex");
+			const openaiModel = getModel("openai", "gpt-5.4");
 
 			const anthropicApiKey = getEnvApiKey("anthropic");
 			const openaiApiKey = getEnvApiKey("openai");
@@ -253,7 +253,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			};
 
 			let capturedPayload: any = null;
-			const response = await complete(codexModel, context, {
+			const response = await complete(openaiModel, context, {
 				apiKey: openaiApiKey,
 				reasoningEffort: "high",
 				onPayload: (payload) => {
@@ -266,7 +266,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			const functionCalls = input?.filter((item: any) => item.type === "function_call") || [];
 			const reasoningItems = input?.filter((item: any) => item.type === "reasoning") || [];
 
-			console.log("Payload sent to Codex:");
+			console.log("Payload sent to OpenAI:");
 			console.log("- function_calls:", functionCalls.length);
 			console.log("- reasoning items:", reasoningItems.length);
 			if (functionCalls.length > 0) {

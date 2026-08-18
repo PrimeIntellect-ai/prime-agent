@@ -248,9 +248,9 @@ function createExtensionAPI(
 			runtime.appendEntry(customType, data);
 		},
 
-		setSessionName(name: string): void {
+		setSessionName(name: string): void | Promise<void> {
 			runtime.assertActive();
-			runtime.setSessionName(name);
+			return runtime.setSessionName(name);
 		},
 
 		getSessionName(): string | undefined {

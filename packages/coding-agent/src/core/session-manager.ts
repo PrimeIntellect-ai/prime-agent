@@ -3,20 +3,23 @@ import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent,
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
-	createReadStream,
+	chmodSync,
+	chownSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
-import { dirname, join, resolve } from "path";
-import { createInterface } from "readline";
+import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
-import { readFirstLineSync } from "../utils/file-lines.js";
+import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
 	type BashExecutionMessage,
@@ -31,6 +34,8 @@ export const CURRENT_SESSION_VERSION = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
 const SESSION_LIST_PARSE_MAX_LINE_CHARS = 1024 * 1024;
 const SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS = 256;
+const SESSION_STREAMING_LOAD_THRESHOLD_BYTES = 128 * 1024 * 1024;
+const SESSION_ASYNC_PARSE_YIELD_BYTES = 4 * 1024 * 1024;
 
 // Entry types that can represent user intent (vs. daemon bookkeeping like
 // session_state/agent_status/git_state/child_usage_attributed). Used by
@@ -48,6 +53,25 @@ const CONTENT_ENTRY_TYPES = new Set([
 	"branch_summary",
 ]);
 
+function realpathIfPresent(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return path;
+		throw error;
+	}
+}
+
+function statMetadataIfPresent(path: string): { mode: number; uid: number; gid: number } | undefined {
+	try {
+		const { mode, uid, gid } = statSync(path);
+		return { mode: mode & 0o777, uid, gid };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -55,12 +79,16 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
+	/** RLM spawn depth. Optional for backward compatibility. Forks preserve the source depth. */
+	rlmDepth?: number;
 	git?: GitContext;
 }
 
 export interface NewSessionOptions {
 	id?: string;
 	parentSession?: string;
+	/** Explicit RLM spawn depth. An explicitly undefined value suppresses parent derivation. */
+	rlmDepth?: number;
 }
 
 export type SessionPersistListener = (sessionFile: string) => void;
@@ -144,6 +172,7 @@ export interface ChildUsageAttributionEntry extends SessionEntryBase {
 	targetId: string;
 	childUsage: Usage;
 	aggregateUsage: Usage;
+	origin?: "spawn_task" | "agent_message" | "direct_user";
 }
 
 /** Label entry for user-defined bookmarks/markers on entries. */
@@ -237,13 +266,16 @@ export type SessionEntry =
 export type FileEntry = SessionHeader | SessionEntry;
 
 /** Tree node for getTree() - defensive copy of session structure */
-export interface SessionTreeNode {
+export interface SessionTreeFlatNode {
 	entry: SessionEntry;
-	children: SessionTreeNode[];
 	/** Resolved label for this entry, if any */
 	label?: string;
 	/** Timestamp of the latest label change for this entry, if any */
 	labelTimestamp?: string;
+}
+
+export interface SessionTreeNode extends SessionTreeFlatNode {
+	children: SessionTreeNode[];
 }
 
 export interface SessionContext {
@@ -264,6 +296,8 @@ export interface SessionInfo {
 	state?: SessionState;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
+	/** Resolved RLM spawn depth. */
+	rlmDepth: number;
 	created: Date;
 	modified: Date;
 	messageCount: number;
@@ -309,8 +343,19 @@ function createUniqueSessionFileTarget(sessionDir: string): { sessionId: string;
 	throw new Error("Unable to create a unique session file");
 }
 
-function getSessionArtifactPath(sessionDir: string, sessionId: string): string {
-	return join(dirname(sessionDir), "session-artifacts", sessionId);
+/** Root of the artifact tree next to a sessions dir: `<dirname(sessionDir)>/session-artifacts`. */
+export function getSessionArtifactsRoot(sessionDir: string): string {
+	return join(dirname(sessionDir), "session-artifacts");
+}
+
+/** A session's artifact directory: `<dirname(sessionDir)>/session-artifacts/<sessionId>`. */
+export function getSessionArtifactPath(sessionDir: string, sessionId: string): string {
+	return join(getSessionArtifactsRoot(sessionDir), sessionId);
+}
+
+/** {@link getSessionArtifactPath} from a session file; the id defaults to basename minus `.jsonl`. */
+export function getSessionArtifactPathForFile(sessionFile: string, sessionId?: string): string {
+	return getSessionArtifactPath(dirname(sessionFile), sessionId ?? basename(sessionFile).replace(/\.jsonl$/, ""));
 }
 
 /** Generate a unique short ID (8 hex chars, collision-checked) */
@@ -501,39 +546,30 @@ export function buildSessionContext(
 	}
 
 	// Build messages and collect corresponding entries
-	// When there's a compaction, we need to:
-	// 1. Emit summary first (entry = compaction)
-	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
-	// 3. Emit messages after compaction
+	// When there's a compaction, model context remains summary-first while the
+	// summary records where clients should present it among retained messages.
 	const messages: AgentMessage[] = [];
 
-	const appendMessage = (entry: SessionEntry) => {
+	const appendMessage = (entry: SessionEntry, target = messages) => {
 		if (entry.type === "message") {
-			messages.push(entry.message);
+			target.push(entry.message);
 		} else if (entry.type === "custom_message") {
-			messages.push(
+			target.push(
 				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			messages.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
+			target.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
 	};
 
 	if (compaction) {
-		// Emit summary first
-		messages.push(
-			createCompactionSummaryMessage(
-				compaction.summary,
-				compaction.tokensBefore,
-				compaction.timestamp,
-				compaction.customInstructions,
-			),
-		);
-
 		// Find compaction index in path
 		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
 
-		// Emit kept messages (before compaction, starting from firstKeptEntryId)
+		// Collect kept messages (before compaction, starting from firstKeptEntryId).
+		// The context remains summary-first for the model; retainedMessageCount records
+		// the exact chronological presentation boundary for clients.
+		const retainedMessages: AgentMessage[] = [];
 		let foundFirstKept = false;
 		for (let i = 0; i < compactionIdx; i++) {
 			const entry = path[i];
@@ -541,9 +577,20 @@ export function buildSessionContext(
 				foundFirstKept = true;
 			}
 			if (foundFirstKept) {
-				appendMessage(entry);
+				appendMessage(entry, retainedMessages);
 			}
 		}
+
+		messages.push(
+			createCompactionSummaryMessage(
+				compaction.summary,
+				compaction.tokensBefore,
+				compaction.timestamp,
+				compaction.customInstructions,
+				retainedMessages.length,
+			),
+			...retainedMessages,
+		);
 
 		// Emit messages after compaction
 		for (let i = compactionIdx + 1; i < path.length; i++) {
@@ -574,21 +621,41 @@ export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefault
 
 // Decode per line off a Buffer: toString("utf8") on a whole large file is far slower
 // (one giant UTF-16 string). Splitting on 0x0a is UTF-8-safe.
+function appendEntryFromBuffer(entries: FileEntry[], buffer: Buffer, start = 0, end = buffer.length): void {
+	if (end <= start) return;
+	try {
+		entries.push(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry);
+	} catch {
+		// Skip malformed or blank lines.
+	}
+}
+
 function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
 	const entries: FileEntry[] = [];
-	const len = buffer.length;
 	let start = 0;
-	while (start < len) {
+	while (start < buffer.length) {
 		let end = buffer.indexOf(0x0a, start);
-		if (end === -1) end = len;
-		if (end > start) {
-			try {
-				entries.push(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry);
-			} catch {
-				// skip malformed/blank lines
-			}
-		}
+		if (end === -1) end = buffer.length;
+		appendEntryFromBuffer(entries, buffer, start, end);
 		start = end + 1;
+	}
+	return entries;
+}
+
+async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]> {
+	const entries: FileEntry[] = [];
+	let start = 0;
+	let bytesSinceYield = 0;
+	while (start < buffer.length) {
+		let end = buffer.indexOf(0x0a, start);
+		if (end === -1) end = buffer.length;
+		appendEntryFromBuffer(entries, buffer, start, end);
+		bytesSinceYield += end - start + 1;
+		start = end + 1;
+		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
+			bytesSinceYield = 0;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
 	}
 	return entries;
 }
@@ -610,29 +677,25 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 }
 
 // Async loader for the daemon: reads off the event loop and yields while parsing so a
-// large load doesn't freeze other sessions. Identical output to loadEntriesFromFile.
-export async function loadEntriesFromFileAsync(filePath: string): Promise<FileEntry[]> {
+// large load doesn't freeze other sessions. Large files stream to avoid retaining both
+// the full input Buffer and the parsed entry graph at the same time.
+export async function loadEntriesFromFileAsync(
+	filePath: string,
+	options: { streamThresholdBytes?: number } = {},
+): Promise<FileEntry[]> {
 	if (!existsSync(filePath)) return [];
-	const buffer = await readFile(filePath);
+	const streamThresholdBytes = options.streamThresholdBytes ?? SESSION_STREAMING_LOAD_THRESHOLD_BYTES;
+	if ((await stat(filePath)).size < streamThresholdBytes) {
+		return finalizeLoadedEntries(await parseEntriesFromBufferAsync(await readFile(filePath)));
+	}
+
 	const entries: FileEntry[] = [];
-	const len = buffer.length;
-	// yield by bytes, not entry count: parse cost scales with bytes (handles a few huge entries too)
-	const YIELD_BYTES = 4 * 1024 * 1024;
-	let start = 0;
-	let lastYield = 0;
-	while (start < len) {
-		let end = buffer.indexOf(0x0a, start);
-		if (end === -1) end = len;
-		if (end > start) {
-			try {
-				entries.push(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry);
-			} catch {
-				// Skip malformed/blank lines (JSON.parse rejects whitespace-only slices)
-			}
-		}
-		start = end + 1;
-		if (start - lastYield >= YIELD_BYTES) {
-			lastYield = start;
+	let bytesSinceYield = 0;
+	for await (const line of readLinesAsBuffers(filePath)) {
+		appendEntryFromBuffer(entries, line);
+		bytesSinceYield += line.length + 1;
+		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
+			bytesSinceYield = 0;
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	}
@@ -645,6 +708,83 @@ function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined
 		return undefined;
 	}
 	return JSON.parse(firstLine) as Partial<SessionHeader>;
+}
+
+function isValidRlmDepth(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+export function resolveSessionRlmDepth(
+	header: { rlmDepth?: number; parentSession?: string },
+	sessionPath: string,
+): number {
+	return resolveLegacySessionRlmDepth(header, sessionPath, new Set()) ?? legacyChildDepthFromPath(sessionPath);
+}
+
+function resolveLegacySessionRlmDepth(
+	header: { rlmDepth?: number; parentSession?: string },
+	sessionPath: string,
+	visitedPaths: Set<string>,
+): number | undefined {
+	if (isValidRlmDepth(header.rlmDepth)) {
+		return header.rlmDepth;
+	}
+	if (!header.parentSession) {
+		return 0;
+	}
+
+	const resolvedSessionPath = resolve(sessionPath);
+	if (visitedPaths.has(resolvedSessionPath)) {
+		return undefined;
+	}
+	visitedPaths.add(resolvedSessionPath);
+
+	const pathDepth = legacyChildDepthFromPath(sessionPath);
+	const parentSessionPath = resolve(dirname(sessionPath), header.parentSession);
+	try {
+		const parentHeader = readSessionHeader(parentSessionPath);
+		if (parentHeader) {
+			const parentDepth = resolveLegacySessionRlmDepth(parentHeader, parentSessionPath, visitedPaths);
+			if (parentDepth !== undefined) {
+				return pathDepth > 0 ? parentDepth + 1 : parentDepth;
+			}
+		}
+	} catch {
+		// Fall back to artifact ancestry for unavailable or invalid legacy parents.
+	} finally {
+		visitedPaths.delete(resolvedSessionPath);
+	}
+	return pathDepth;
+}
+
+function legacyChildDepthFromPath(sessionPath: string): number {
+	let depth = 0;
+	for (const segment of dirname(sessionPath)
+		.split(/[\\/]+/)
+		.reverse()) {
+		if (!/^sub-[0-9a-f]{8}$/.test(segment)) {
+			break;
+		}
+		depth += 1;
+	}
+	return depth;
+}
+
+function deriveChildRlmDepth(parentHeader: Partial<SessionHeader> | undefined): number | undefined {
+	const depth = parentHeader?.rlmDepth;
+	return isValidRlmDepth(depth) && depth < Number.MAX_SAFE_INTEGER ? depth + 1 : undefined;
+}
+
+function rootRlmDepthFromEnv(): number {
+	const value = process.env.RLM_DEPTH;
+	if (value === undefined || value === "") {
+		return 0;
+	}
+	const parsed = Number(value);
+	if (!/^\d+$/.test(value) || !isValidRlmDepth(parsed)) {
+		throw new Error("RLM_DEPTH must be a non-negative integer");
+	}
+	return parsed;
 }
 
 function isValidSessionFile(filePath: string): boolean {
@@ -891,8 +1031,6 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 
 async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeof stat>>): Promise<SessionInfo | null> {
 	try {
-		const stream = createReadStream(filePath, { encoding: "utf8" });
-		const lines = createInterface({ input: stream, crlfDelay: Infinity });
 		let header: SessionHeader | undefined;
 		let messageCount = 0;
 		let firstMessage = "";
@@ -902,7 +1040,8 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let agentStatus: AgentStatus | undefined;
 		let lastActivityTime: number | undefined;
 
-		for await (const line of lines) {
+		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
+			const line = lineBuffer.toString("utf8");
 			if (!line.trim()) continue;
 
 			// Large tool-result entries can be many MB. They do not carry the
@@ -977,6 +1116,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		if (!header) return null;
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
+		const rlmDepth = resolveSessionRlmDepth(header, filePath);
 		const modified = getSessionModifiedDateFromLastActivity(lastActivityTime, header, stats.mtime);
 
 		return {
@@ -986,6 +1126,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			name,
 			state,
 			parentSessionPath,
+			rlmDepth,
 			created: new Date(header.timestamp),
 			modified,
 			messageCount,
@@ -1117,7 +1258,12 @@ export class SessionManager {
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 			this.sessionId = header?.id ?? createSessionId();
 
-			if (migrateToCurrentVersion(this.fileEntries)) {
+			let shouldRewrite = migrateToCurrentVersion(this.fileEntries);
+			if (header?.parentSession && !isValidRlmDepth(header.rlmDepth)) {
+				header.rlmDepth = resolveSessionRlmDepth(header, this.sessionFile);
+				shouldRewrite = true;
+			}
+			if (shouldRewrite) {
 				this._rewriteFile();
 			}
 
@@ -1133,6 +1279,15 @@ export class SessionManager {
 	newSession(options?: NewSessionOptions): string | undefined {
 		let sessionId = options?.id ?? createSessionId();
 		let sessionFile: string | undefined;
+		const hasExplicitRlmDepth = options !== undefined && Object.hasOwn(options, "rlmDepth");
+		let parentHeader: Partial<SessionHeader> | undefined;
+		if (options?.parentSession && !hasExplicitRlmDepth) {
+			try {
+				parentHeader = readSessionHeader(options.parentSession);
+			} catch {
+				// Legacy-invalid or unavailable parents leave the child depth unknown.
+			}
+		}
 		if (this.persist) {
 			if (options?.id) {
 				sessionFile = getSessionFilePath(this.getSessionDir(), sessionId);
@@ -1149,6 +1304,11 @@ export class SessionManager {
 		this.sessionId = sessionId;
 		const timestamp = new Date().toISOString();
 		const git = this.persist ? (captureGitContext(this.cwd) ?? undefined) : undefined;
+		const rlmDepth = hasExplicitRlmDepth
+			? options?.rlmDepth
+			: options?.parentSession
+				? deriveChildRlmDepth(parentHeader)
+				: rootRlmDepthFromEnv();
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1156,6 +1316,7 @@ export class SessionManager {
 			timestamp,
 			cwd: this.cwd,
 			parentSession: options?.parentSession,
+			rlmDepth,
 			git,
 		};
 		this.fileEntries = [header];
@@ -1195,8 +1356,21 @@ export class SessionManager {
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
-		mkdirSync(dirname(this.sessionFile), { recursive: true });
-		writeFileSync(this.sessionFile, content);
+		const targetPath = realpathIfPresent(this.sessionFile);
+		const directory = dirname(targetPath);
+		mkdirSync(directory, { recursive: true });
+		const tempPath = join(directory, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
+		try {
+			const metadata = statMetadataIfPresent(targetPath);
+			writeFileSync(tempPath, content, metadata === undefined ? undefined : { mode: metadata.mode });
+			if (metadata !== undefined) {
+				chownSync(tempPath, metadata.uid, metadata.gid);
+				chmodSync(tempPath, metadata.mode);
+			}
+			renameSync(tempPath, targetPath);
+		} finally {
+			rmSync(tempPath, { force: true });
+		}
 		this._notifyPersistListeners();
 	}
 
@@ -1248,6 +1422,7 @@ export class SessionManager {
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
+		const previousHeader = this.getHeader();
 		const target = createUniqueSessionFileTarget(dir);
 		this.sessionDir = dir;
 		this.sessionId = target.sessionId;
@@ -1261,6 +1436,8 @@ export class SessionManager {
 			id: this.sessionId,
 			timestamp,
 			cwd: this.cwd,
+			parentSession: previousHeader?.parentSession,
+			rlmDepth: resolveSessionRlmDepth(previousHeader ?? {}, target.sessionFile),
 			git,
 		};
 		this.fileEntries = [header, ...this.getEntries()];
@@ -1271,6 +1448,20 @@ export class SessionManager {
 
 	getSessionArtifactDir(): string | undefined {
 		return this.persist ? getSessionArtifactPath(this.sessionDir, this.sessionId) : undefined;
+	}
+
+	/**
+	 * Force-write all in-memory entries to the session file immediately.
+	 * This bypasses the no-assistant guard in {@link _persist} so that
+	 * pre-model entries (session header, goal state, settings changes)
+	 * are durable on disk before the first assistant response.
+	 * No-op for in-memory (non-persisted) sessions.
+	 */
+	flushNow(): void {
+		if (!this.persist || !this.sessionFile) return;
+		if (this.flushed && existsSync(this.sessionFile)) return;
+		this._rewriteFile();
+		this.flushed = true;
 	}
 
 	_persist(entry: SessionEntry): void {
@@ -1398,8 +1589,18 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Append a custom entry and undo its in-memory index if persistence fails. */
+	appendCustomEntryWithRollback(customType: string, data?: unknown): string {
+		return this._appendEntryWithRollback(() => this.appendCustomEntry(customType, data));
+	}
+
 	/** Append an RLM child usage attribution and update the parent assistant aggregate in memory. */
-	appendChildUsageAttribution(targetId: string, childUsage: Usage, aggregateUsage: Usage): string {
+	appendChildUsageAttribution(
+		targetId: string,
+		childUsage: Usage,
+		aggregateUsage: Usage,
+		origin?: ChildUsageAttributionEntry["origin"],
+	): string {
 		const target = this.byId.get(targetId);
 		if (target?.type !== "message" || target.message.role !== "assistant") {
 			throw new Error(`Assistant message entry ${targetId} not found`);
@@ -1414,6 +1615,7 @@ export class SessionManager {
 			targetId,
 			childUsage: cloneUsage(childUsage),
 			aggregateUsage: cloneUsage(aggregateUsage),
+			...(origin ? { origin } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1592,6 +1794,45 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/**
+	 * Append a custom message, undoing the append if persistence fails so a
+	 * best-effort record never leaves an unsaved leaf for later entries.
+	 */
+	appendCustomMessageEntryWithRollback<T = unknown>(
+		customType: string,
+		content: string | (TextContent | ImageContent)[],
+		display: boolean,
+		details?: T,
+	): string {
+		return this._appendEntryWithRollback(() => this.appendCustomMessageEntry(customType, content, display, details));
+	}
+
+	private _appendEntryWithRollback(append: () => string): string {
+		const previousLeafId = this.leafId;
+		try {
+			const entryId = append();
+			this.flushNow();
+			return entryId;
+		} catch (error) {
+			// The append indexes the entry before persisting it; undo exactly that.
+			if (this.leafId !== null && this.leafId !== previousLeafId) {
+				this.byId.delete(this.leafId);
+				this.fileEntries.pop();
+				this.leafId = previousLeafId;
+				// The failed append may have left a torn line on disk. Restore the file
+				// from the rolled-back entries now; if that also fails (e.g. the disk is
+				// still full), fall back to forcing the next persist to rewrite.
+				this.flushed = false;
+				try {
+					this.flushNow();
+				} catch {
+					this.flushed = false;
+				}
+			}
+			throw error;
+		}
+	}
+
 	// =========================================================================
 	// Tree Traversal
 	// =========================================================================
@@ -1709,20 +1950,27 @@ export class SessionManager {
 	 * A well-formed session has exactly one root (first entry with parentId === null).
 	 * Orphaned entries (broken parent chain) are also returned as roots.
 	 */
+	getFlatTree(): SessionTreeFlatNode[] {
+		return this.getEntries().map((entry) => ({
+			entry,
+			label: this.labelsById.get(entry.id),
+			labelTimestamp: this.labelTimestampsById.get(entry.id),
+		}));
+	}
+
 	getTree(): SessionTreeNode[] {
-		const entries = this.getEntries();
+		const entries = this.getFlatTree();
 		const nodeMap = new Map<string, SessionTreeNode>();
 		const roots: SessionTreeNode[] = [];
 
 		// Create nodes with resolved labels
-		for (const entry of entries) {
-			const label = this.labelsById.get(entry.id);
-			const labelTimestamp = this.labelTimestampsById.get(entry.id);
-			nodeMap.set(entry.id, { entry, children: [], label, labelTimestamp });
+		for (const flatNode of entries) {
+			nodeMap.set(flatNode.entry.id, { ...flatNode, children: [] });
 		}
 
 		// Build tree
-		for (const entry of entries) {
+		for (const flatNode of entries) {
+			const entry = flatNode.entry;
 			const node = nodeMap.get(entry.id)!;
 			if (entry.parentId === null || entry.parentId === entry.id) {
 				roots.push(node);
@@ -1828,6 +2076,7 @@ export class SessionManager {
 			timestamp,
 			cwd: this.cwd,
 			parentSession: this.persist ? previousSessionFile : undefined,
+			rlmDepth: resolveSessionRlmDepth(this.getHeader() ?? {}, previousSessionFile ?? newSessionFile ?? ""),
 			git: this.persist ? (captureGitContext(this.cwd) ?? undefined) : undefined,
 		};
 
@@ -1979,8 +2228,8 @@ export class SessionManager {
 	}
 
 	/** Create an in-memory session (no file persistence) */
-	static inMemory(cwd: string = process.cwd()): SessionManager {
-		return new SessionManager(cwd, "", undefined, false);
+	static inMemory(cwd: string = process.cwd(), sessionDir = ""): SessionManager {
+		return new SessionManager(cwd, sessionDir, undefined, false);
 	}
 
 	/**
@@ -2021,6 +2270,7 @@ export class SessionManager {
 			timestamp,
 			cwd: targetCwd,
 			parentSession: sourcePath,
+			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
 			git: captureGitContext(targetCwd) ?? undefined,
 		};
 		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`);

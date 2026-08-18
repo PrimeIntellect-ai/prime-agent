@@ -1,4 +1,4 @@
-import { extractAnsiCode, visibleWidth } from "./utils.js";
+import { createAnsiCodeExtractor, visibleWidth } from "./utils.js";
 
 const TABLE_MARKER_PREFIX = "\x1b_pi:table:";
 const TABLE_START_MARKER = `${TABLE_MARKER_PREFIX}start\x07`;
@@ -99,9 +99,10 @@ export function extractTableCellSelectionRegions(
 		let clean = "";
 		let activeCell: (CellMarker & { col: number }) | null = null;
 		let offset = 0;
+		const extractAnsi = createAnsiCodeExtractor(source);
 
 		while (offset < source.length) {
-			const ansi = extractAnsiCode(source, offset);
+			const ansi = extractAnsi(offset);
 			if (!ansi) {
 				clean += source[offset];
 				offset++;

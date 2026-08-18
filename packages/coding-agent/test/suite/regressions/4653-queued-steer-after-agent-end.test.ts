@@ -14,7 +14,7 @@ describe("ENG-4653 queued messages after agent end", () => {
 	async function waitForDelivery(harness: Harness, expectedCalls: number): Promise<void> {
 		await vi.waitFor(() => expect(harness.faux.state.callCount).toBe(expectedCalls));
 		await harness.session.agent.waitForIdle();
-		await vi.waitFor(() => expect(harness.session.pendingMessageCount).toBe(0));
+		await vi.waitFor(() => expect(harness.session.queuedActionCount).toBe(0));
 	}
 
 	it("starts a new turn for steering queued from agent_end", async () => {

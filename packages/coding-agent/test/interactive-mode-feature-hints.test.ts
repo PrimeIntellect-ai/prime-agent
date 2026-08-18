@@ -43,7 +43,8 @@ function createMode() {
 		featureHintAnimationTimer: undefined,
 		featureHintComponent: undefined,
 		featureHintRunPending: false,
-		childAgentPanelMode: undefined,
+		connectionQueue: { steering: [], followUp: [] },
+		compactionQueuedMessages: [],
 		options: { returnToAgentsView: true },
 		ui: { requestRender },
 	};
@@ -85,7 +86,7 @@ describe("feature hint deck", () => {
 		const textById = new Map(hints.map((hint) => [hint?.id, hint?.text]));
 
 		expect(textById.get("subagents")).toBe("Prime Agent can delegate tasks to subagents and run them in parallel.");
-		expect(textById.get("agents-view")).toContain("Agents View");
+		expect(textById.get("agents-view")).toContain("Session View");
 		expect(textById.get("session-rewind")).toContain("/tree");
 		expect(textById.get("steering")).toContain("steer");
 		expect(textById.get("agent-messaging")).toContain("message each other");
@@ -169,48 +170,6 @@ describe("InteractiveMode feature hints", () => {
 		expect(featureHintContainer.children).toHaveLength(0);
 		expect(featureHintDeck.next).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
-	});
-
-	it("suspends hints in subagent detail and resumes them in the parent view", () => {
-		const { mode, featureHintContainer, featureHintDeck } = createMode();
-		Reflect.set(mode, "childAgentPanelMode", "detail");
-
-		callPrivate(mode, "startFeatureHintPresentation");
-		vi.advanceTimersByTime(5_000);
-		expect(featureHintContainer.children).toHaveLength(0);
-		expect(featureHintDeck.next).not.toHaveBeenCalled();
-
-		Reflect.set(mode, "childAgentPanelMode", undefined);
-		callPrivate(mode, "resumeFeatureHintPresentation");
-		vi.advanceTimersByTime(5_000);
-		expect(featureHintContainer.children).toHaveLength(1);
-		expect(featureHintDeck.next).toHaveBeenCalledOnce();
-	});
-
-	it("resumes hints when an editor switch closes subagent detail", () => {
-		const resumeFeatureHintPresentation = vi.fn();
-		const defaultEditor = { setText: vi.fn() };
-		const mode = {
-			childAgentPanelMode: "detail",
-			childAgentDetailNodeId: "subagent-1",
-			enteredSessionViaSubagentDetail: true,
-			childAgentDetail: { setBackHintLabel: vi.fn(), setNode: vi.fn() },
-			childAgentSummary: { setHidden: vi.fn() },
-			editor: { getText: () => "draft" },
-			defaultEditor,
-			editorContainer: { clear: vi.fn(), addChild: vi.fn() },
-			ui: { setFocus: vi.fn(), requestRender: vi.fn() },
-			restoreMainAgentView: vi.fn(),
-			updatePendingMessagesDisplay: vi.fn(),
-			resumeFeatureHintPresentation,
-		};
-		Object.setPrototypeOf(mode, InteractiveMode.prototype);
-
-		Reflect.get(InteractiveMode.prototype, "setCustomEditorComponent").call(mode, undefined);
-
-		expect(Reflect.get(mode, "childAgentPanelMode")).toBeUndefined();
-		expect(defaultEditor.setText).toHaveBeenCalledWith("draft");
-		expect(resumeFeatureHintPresentation).toHaveBeenCalledOnce();
 	});
 
 	it("retains the hint and remaining delay when the loader is recreated", () => {

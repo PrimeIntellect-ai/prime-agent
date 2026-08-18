@@ -2,20 +2,22 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { CreateAgentSessionOptions } from "../src/core/sdk.js";
 import {
 	type AppMode,
 	type DaemonInteractiveSessionManagerDecision,
+	daemonServerDefaultSessionConfig,
 	findActiveDaemonSessionSummaryForInteractiveStartup,
 	findActiveDaemonSessionSummaryForSessionFile,
 	type InteractiveDaemonStartupDecision,
 	parseAgentsViewCommand,
 	resolveRuntimeSessionOptions,
-	restoreResumeSelectorFallback,
 	shouldEnsureDaemonBeforeActiveSessionLookup,
 	shouldEnsureInteractiveDaemonForStartup,
 	shouldOpenAgentsViewForDaemonInteractive,
 	shouldRejectNonInteractiveAttach,
+	shouldRejectNonInteractiveBareResume,
 	shouldUseDaemonClient,
 	shouldUseDaemonClientRuntime,
 	shouldUseDaemonInteractive,
@@ -121,10 +123,14 @@ describe("interactive startup routing", () => {
 		).toBe(false);
 	});
 
-	test("rejects attach before non-interactive startup", () => {
+	test("rejects interactive-only selectors before non-interactive startup", () => {
 		expect(shouldRejectNonInteractiveAttach("worker", "print")).toBe(true);
 		expect(shouldRejectNonInteractiveAttach("worker", "interactive")).toBe(false);
 		expect(shouldRejectNonInteractiveAttach(undefined, "print")).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "print")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume(true, "rpc")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume("session-id", "print")).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "interactive")).toBe(false);
 	});
 
 	test("does not start the daemon for attach", () => {
@@ -164,7 +170,6 @@ describe("daemon-backed interactive session manager routing", () => {
 			"resume selector",
 			{ useDaemonInteractive: true, needsOnboarding: false, explicitAgentsView: true, resume: "active-1" },
 		],
-		["resume picker", { useDaemonInteractive: true, needsOnboarding: false, explicitAgentsView: true, resume: true }],
 		[
 			"continue recent",
 			{ useDaemonInteractive: true, needsOnboarding: false, explicitAgentsView: true, continue: true },
@@ -177,6 +182,16 @@ describe("daemon-backed interactive session manager routing", () => {
 
 	test.each(directAttachCases)("does not open agents view for %s", (_label, decision) => {
 		expect(shouldOpenAgentsViewForDaemonInteractive(decision)).toBe(false);
+	});
+
+	test.each([false, true])("opens the agents view for bare --resume (onboarding=%s)", (needsOnboarding) => {
+		expect(
+			shouldOpenAgentsViewForDaemonInteractive({
+				useDaemonInteractive: true,
+				needsOnboarding,
+				resume: true,
+			}),
+		).toBe(true);
 	});
 
 	test("ensures daemon is available before probing non-path session selectors", () => {
@@ -236,13 +251,14 @@ describe("daemon-backed interactive session manager routing", () => {
 					activeSessionId: "active-1",
 					lifecycle: "draft",
 					activity: "idle",
+					isSessionActive: false,
 					sessionId: "session-1",
 					cwd: "/tmp/project",
 					isStreaming: false,
 					isCompacting: false,
 					attachedClients: 0,
 					messageCount: 0,
-					pendingMessageCount: 0,
+					sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 				}),
 			}),
 		).resolves.toMatchObject({ activeSessionId: "active-1" });
@@ -255,7 +271,6 @@ describe("daemon-backed interactive session manager routing", () => {
 	const persistentSelectionCases: Array<[string, DaemonInteractiveSessionManagerDecision]> = [
 		["active daemon attach", { hasActiveDaemonSession: true }],
 		["explicit saved session", { resume: "saved-session-id" }],
-		["resume picker", { resume: true }],
 		["continue recent", { continue: true }],
 		["fork", { fork: "source-session-id" }],
 	];
@@ -264,20 +279,8 @@ describe("daemon-backed interactive session manager routing", () => {
 		expect(shouldUseEphemeralSessionManagerForDaemonInteractive(decision)).toBe(false);
 	});
 
-	test("restores an unresolved resume selector candidate as prompt text", () => {
-		const parsed = {
-			resume: "fix",
-			resumeSelectorFallback: "fix",
-			messages: ["the", "bug"],
-			fileArgs: [],
-			unknownFlags: new Map(),
-			diagnostics: [],
-		};
-
-		expect(restoreResumeSelectorFallback(parsed, "fix")).toBe(true);
-		expect(parsed.resume).toBeUndefined();
-		expect(parsed.resumeSelectorFallback).toBeUndefined();
-		expect(parsed.messages).toEqual(["fix", "the", "bug"]);
+	test("uses an ephemeral local session manager for bare --resume", () => {
+		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(true);
 	});
 
 	test("finds an active daemon session by resolved session file", () => {
@@ -348,6 +351,30 @@ describe("agents view command parsing", () => {
 });
 
 describe("runtime session option resolution", () => {
+	test("keeps verifier goals per session instead of in the daemon fallback", () => {
+		const headlessCreateConfig = {
+			cwd: "/repo",
+			serializedRefine: true,
+			initialGoal: { objective: "solve the verifier task", tokenBudget: 100_000 },
+		};
+
+		expect(headlessCreateConfig.initialGoal).toEqual({
+			objective: "solve the verifier task",
+			tokenBudget: 100_000,
+		});
+		const daemonFallback = daemonServerDefaultSessionConfig(headlessCreateConfig);
+		expect(daemonFallback).toEqual({
+			cwd: "/repo",
+			serializedRefine: true,
+			initialGoal: undefined,
+		});
+		expect(
+			mergeAgentSessionRuntimeConfig(daemonFallback, {
+				initialGoal: headlessCreateConfig.initialGoal,
+			}),
+		).toMatchObject({ initialGoal: headlessCreateConfig.initialGoal });
+	});
+
 	test("preserves daemon-provided RLM heartbeat controller when creating sessions", () => {
 		const preparedModel = { id: "prepared-model" } as unknown as CreateAgentSessionOptions["model"];
 		const runtimeModel = { id: "runtime-model" } as unknown as CreateAgentSessionOptions["model"];
@@ -382,6 +409,12 @@ describe("runtime session option resolution", () => {
 			rlmDepth: 1,
 			rlmSessionDir: "/tmp/rlm-session",
 		});
+	});
+
+	test("preserves the runtime child parent-agent identity", () => {
+		const resolved = resolveRuntimeSessionOptions({}, { rlmDepth: 1, rlmParentAgent: "parent-worker" });
+
+		expect(resolved.rlmParentAgent).toBe("parent-worker");
 	});
 
 	test("deep-merges autonomous runtime session overrides", () => {
@@ -447,7 +480,8 @@ function makeSessionSummary(overrides: Partial<SessionSummary>): SessionSummary 
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount: 0,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		...overrides,
+		isSessionActive: overrides.isSessionActive ?? false,
 	};
 }

@@ -106,6 +106,7 @@ export interface AgentOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	shouldStopBeforeTurn?: () => boolean;
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
@@ -199,6 +200,7 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	public shouldStopBeforeTurn?: () => boolean;
 	public getContinuationMessages?: (
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
@@ -226,6 +228,7 @@ export class Agent {
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
 		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
+		this.shouldStopBeforeTurn = options.shouldStopBeforeTurn;
 		this.getContinuationMessages = options.getContinuationMessages;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
@@ -469,7 +472,7 @@ export class Agent {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			model: this._state.model,
-			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
@@ -481,8 +484,10 @@ export class Agent {
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
+			shouldStopBeforeTurn: () => this.shouldStopBeforeTurn?.() ?? false,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
+			getSystemPrompt: () => this._state.systemPrompt,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
@@ -539,7 +544,7 @@ export class Agent {
 		this._state.errorMessage = failureMessage.errorMessage;
 		await this.processEvents({ type: "message_start", message: failureMessage }).catch(() => undefined);
 		await this.processEvents({ type: "message_end", message: failureMessage }).catch(() => undefined);
-		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+		await this.processEvents({ type: "agent_end", messages: [failureMessage] }).catch(() => undefined);
 	}
 
 	private finishRun(): void {

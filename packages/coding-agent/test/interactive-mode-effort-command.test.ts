@@ -1,7 +1,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { ThinkingSelectorComponent } from "../src/modes/interactive/components/thinking-selector.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -18,12 +19,16 @@ type EffortCommandContext = {
 	updateEditorBorderColor: () => void;
 	getAvailableThinkingLevels: () => ThinkingLevel[];
 	applyThinkingLevel: (level: ThinkingLevel) => void;
+	showThinkingSelector: (levels?: ThinkingLevel[]) => void;
+	showSelector: (create: (done: () => void) => { component: Component; focus: Component }) => void;
+	ui: { requestRender: () => void };
 };
 
 type InteractiveModePrototype = {
 	getAvailableThinkingLevels(this: EffortCommandContext): ThinkingLevel[];
 	getThinkingLevelCompletions(this: EffortCommandContext, prefix: string): AutocompleteItem[] | null;
 	handleEffortCommand(this: EffortCommandContext, arg: string): void;
+	showThinkingSelector(this: EffortCommandContext, levels?: ThinkingLevel[]): void;
 	applyThinkingLevel(this: EffortCommandContext, level: ThinkingLevel): void;
 };
 
@@ -37,7 +42,7 @@ type FastCommandContext = {
 		getState: () => Promise<{ sessionId: string; serviceTier: ServiceTier }>;
 	};
 	footer: { invalidate: () => void };
-	childAgentSummary: { invalidate: () => void };
+	subagentSummaryLine: { invalidate: () => void };
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
 	patchConnectionState: (patch: Record<string, unknown>) => void;
@@ -74,7 +79,7 @@ function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5"
 		fastModeToggleQueue: Promise.resolve(),
 		agentConnection: undefined as never,
 		footer: { invalidate: vi.fn() },
-		childAgentSummary: { invalidate: vi.fn() },
+		subagentSummaryLine: { invalidate: vi.fn() },
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		patchConnectionState: vi.fn((patch: Record<string, unknown>) => {
@@ -109,6 +114,9 @@ function makeContext(overrides: Partial<EffortCommandContext> = {}): EffortComma
 		updateEditorBorderColor: vi.fn(),
 		getAvailableThinkingLevels: () => interactiveModePrototype.getAvailableThinkingLevels.call(context),
 		applyThinkingLevel: (level) => interactiveModePrototype.applyThinkingLevel.call(context, level),
+		showThinkingSelector: (levels) => interactiveModePrototype.showThinkingSelector.call(context, levels),
+		showSelector: vi.fn(),
+		ui: { requestRender: vi.fn() },
 		...overrides,
 	};
 	return context;
@@ -173,15 +181,26 @@ describe("InteractiveMode /effort", () => {
 			);
 		});
 
-		it("shows the current level and choices when called without an argument", () => {
-			const context = makeContext();
+		it("opens the thinking-level selector when called without an argument", () => {
+			let selector: ThinkingSelectorComponent | undefined;
+			const done = vi.fn();
+			const context = makeContext({
+				showSelector: (create) => {
+					selector = create(done).component as ThinkingSelectorComponent;
+				},
+			});
 
 			interactiveModePrototype.handleEffortCommand.call(context, "");
 
 			expect(context.agentConnection.setThinkingLevel).not.toHaveBeenCalled();
-			expect(context.showStatus).toHaveBeenCalledWith(
-				"Thinking level: medium (type a level: off, low, medium, high)",
-			);
+			expect(selector).toBeInstanceOf(ThinkingSelectorComponent);
+			expect(selector?.getSelectList().getSelectedItem()?.value).toBe("medium");
+
+			selector?.getSelectList().setSelectedIndex(3);
+			selector?.getSelectList().onSelect?.(selector.getSelectList().getSelectedItem()!);
+
+			expect(done).toHaveBeenCalledOnce();
+			expect(context.agentConnection.setThinkingLevel).toHaveBeenCalledWith("high");
 		});
 
 		it("reports when the model does not support thinking", () => {
@@ -225,7 +244,7 @@ describe("InteractiveMode /effort", () => {
 				settingsManager: { setDefaultModelAndProvider: (provider: string, id: string) => void };
 				patchConnectionState: (patch: Record<string, unknown>) => void;
 				footer: { invalidate: () => void };
-				childAgentSummary: { invalidate: () => void };
+				subagentSummaryLine: { invalidate: () => void };
 				updateEditorBorderColor: () => void;
 				setupAutocompleteProvider: () => void;
 			};
@@ -253,7 +272,7 @@ describe("InteractiveMode /effort", () => {
 				settingsManager: { setDefaultModelAndProvider: vi.fn() },
 				patchConnectionState,
 				footer: { invalidate: vi.fn() },
-				childAgentSummary: { invalidate: vi.fn() },
+				subagentSummaryLine: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
 				setupAutocompleteProvider,
 			};
@@ -280,7 +299,7 @@ describe("InteractiveMode /effort", () => {
 			expect(context.agentConnection.setServiceTier).toHaveBeenCalledWith("priority");
 			expect(context.patchConnectionState).toHaveBeenCalledWith({ serviceTier: "priority" });
 			expect(context.footer.invalidate).toHaveBeenCalledWith();
-			expect(context.childAgentSummary.invalidate).toHaveBeenCalledWith();
+			expect(context.subagentSummaryLine.invalidate).toHaveBeenCalledWith();
 		});
 
 		it("disables Fast mode when it is already enabled", async () => {

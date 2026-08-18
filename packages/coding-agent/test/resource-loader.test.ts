@@ -468,6 +468,9 @@ Content`,
 			const { skills } = loader.getSkills();
 			const websearch = skills.find((s) => s.name === "websearch");
 			expect(websearch).toBeDefined();
+			expect(websearch?.description).toContain("/login");
+			expect(websearch?.description).toContain("MCP Connections");
+			expect(websearch?.description).toContain("Serper (web search)");
 			expect(websearch?.kind).toBe("python");
 			if (websearch?.kind === "python") {
 				expect(websearch.python.importName).toBe("websearch");

@@ -8,31 +8,26 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import {
-	closeSync,
-	existsSync,
-	fsyncSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-	writeSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname, join, resolve } from "node:path";
-import { getLogger } from "@earendil-works/pi-ai";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	appendRotatingLog,
 	getCronJobsPath,
 	getDaemonLogPath,
 	getDaemonUpdateRestartManifestPath,
+	getSessionsDir,
 	VERSION,
 } from "../../config.js";
 import {
+	AGENT_FAMILY_REACH_ERROR,
 	AGENT_MESSAGE_SOURCE,
+	type AgentFamilyCatalogEntry,
+	type AgentFamilyRelationship,
+	type AgentFamilyRosterResult,
 	type AgentSessionMessageAgentSummary,
 	type AgentSessionMessageController,
 	type AgentSessionMessageDeliveryStatus,
@@ -42,8 +37,12 @@ import {
 	AgentSessionMessageRateLimiter,
 	type AgentSessionMessageReceipt,
 	type AgentSessionMessageSender,
+	agentFamilyRelationship,
+	assertAgentFamilyReach,
 	assertAgentMessageQueueCapacity,
+	assertAgentSessionNameAvailable,
 	assertDirectAgentMessageTarget,
+	buildAgentFamilyRoster,
 	createAgentSessionMessage,
 	createAgentSessionMessageId,
 	createAgentSessionMessageReceipt,
@@ -51,9 +50,10 @@ import {
 	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY,
 	DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
+	formatAgentSessionNameUnavailable,
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
-	resolveAgentSessionMessageStreamingBehavior,
+	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
 import {
 	type AgentObserveAgentSnapshot,
@@ -66,15 +66,14 @@ import {
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
 } from "../../core/agent-observe.js";
-import type { AgentSession, PromptOptions } from "../../core/agent-session.js";
+import { type AgentSession, type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
-	AgentSessionRuntime,
+	type AgentSessionRuntime,
 	type AgentSessionRuntimeMetadata,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
-import { flushAgentTraceUpload } from "../../core/agent-traces.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -90,14 +89,23 @@ import {
 	shouldDeferHeartbeatCronJob,
 } from "../../core/cron-jobs.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
-import type {
-	CreateRlmSubagentRuntimeOptions,
-	RlmSubagentRuntime,
-	SubagentRuntimeHost,
-} from "../../core/rlm-runtime.js";
-import { deleteSessionFile } from "../../core/session-file-actions.js";
-import { acquireSessionLease, type SessionLease } from "../../core/session-lease.js";
-import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
+import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
+import {
+	canPassivateSession,
+	type IdleEvictionMinutes,
+	type SessionPassivationSnapshot,
+} from "../../core/session-action-store.js";
+import { deleteSessionArtifacts, deleteSessionFile } from "../../core/session-file-actions.js";
+import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
+import {
+	getSessionArtifactPathForFile,
+	readSessionInfo,
+	resolveSessionRlmDepth,
+	type SessionInfo,
+	SessionManager,
+} from "../../core/session-manager.js";
+import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
@@ -107,12 +115,13 @@ import {
 	createAgentConnectionState,
 } from "../agent-connection/snapshot.js";
 import { createAgentConnectionToolDefinition } from "../agent-connection/tool-definition.js";
-import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import type { AgentConnectionHeartbeat, AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import { encodePrivateFrame, PrivateFrameDecoder } from "../session-worker/private-framing.js";
 import {
 	type ActiveSessionState,
+	AmbiguousActiveSessionError,
 	createActiveSessionId,
 	type DaemonSocketClient,
 	resolveActiveSessionState,
@@ -129,14 +138,15 @@ import {
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_PROTOCOL_INFO,
 	DAEMON_SCHEMA_ID,
+	DAEMON_SCHEMA_REVISION,
 	DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
+	DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 	type DaemonAttachResult,
 	type DaemonClientCapability,
 	type DaemonClosingReason,
 	type DaemonCommand,
 	type DaemonOutbound,
 	type DaemonResponse,
-	type DaemonSavedSessionInfo,
 	type DaemonSessionClosedReason,
 	type DaemonSessionSnapshot,
 	type DaemonUpdateRestartManifest,
@@ -144,13 +154,19 @@ import {
 	failure,
 	isDaemonCommandEnvelope,
 	isDaemonDialogExtensionUiRequest,
+	isDaemonMutatingCommand,
+	salvageDaemonCommandId,
 	success,
+	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "./daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
+	classifySessionRosterStatus,
+	inactiveLifecycleForSession,
 	isActiveSessionBusy,
+	type SessionSummary,
 	summaryForActiveSession,
 } from "./daemon-session-list.js";
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
@@ -175,6 +191,19 @@ import {
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
+import { MutationDrainLatch } from "./mutation-drain-latch.js";
+import {
+	createRlmLedgerRegistrySeedSource,
+	type RlmLedgerDeleteReason,
+	type RlmLedgerEdge,
+	RlmSpawnLedger,
+} from "./rlm-ledger.js";
+import {
+	readRlmSubagentDisplayEntry,
+	rlmSubagentDisplayPath,
+	writeRlmSubagentDisplayEntry,
+} from "./rlm-subagent-display.js";
+import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import {
 	createSnapshotTranscriptChunks,
 	SNAPSHOT_TARGET_CHUNK_BYTES,
@@ -192,12 +221,22 @@ export interface DaemonModeOptions {
 	};
 }
 
-export type { DaemonCommand, DaemonOutbound, DaemonResponse } from "./daemon-protocol.js";
-export type { SessionActivity, SessionLifecycle, SessionSummary } from "./daemon-session-list.js";
+export type {
+	DaemonCommand,
+	DaemonOutbound,
+	DaemonResponse,
+} from "./daemon-protocol.js";
+export type {
+	SessionActivity,
+	SessionLifecycle,
+	SessionSummary,
+} from "./daemon-session-list.js";
 export { defaultDaemonSocketPath } from "./daemon-socket.js";
 
 const structuredLog = getLogger("coding-agent.daemon");
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
+const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
+const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -209,10 +248,12 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"kill",
 	"rename",
 	"prompt",
+	"cancel_prompt_admission",
 	"prompt_and_wait",
 	"steer",
 	"follow_up",
 	"restore_next_turn",
+	"restore_actions",
 	"append_custom_message",
 	"resume_queue",
 	"send_message",
@@ -227,6 +268,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"execute_bash_and_wait",
 	"abort_bash",
 	"cancel_rlm_child",
+	"delete_rlm_subagent",
 	"wait_for_idle",
 	"wait_for_headless_completion",
 	"get_session_header",
@@ -240,6 +282,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_model_catalog",
 	"get_available_models",
 	"get_queue",
+	"mutate_queued_message",
 	"clear_queue",
 	"abort_and_clear_queue",
 	"cron_list",
@@ -275,6 +318,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"export_html",
 	"export_jsonl",
 	"set_session_name",
+	"get_rlm_max_depth_status",
+	"set_rlm_max_depth",
 	"rename_saved_session",
 	"delete_saved_session",
 	"get_session_context",
@@ -292,6 +337,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 const DAEMON_CLIENT_CAPABILITY_SET: ReadonlySet<string> = new Set(DAEMON_SUPPORTED_CLIENT_CAPABILITIES);
+const CLIENT_CATCHUP_RETRY_MS = 250;
 const UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS = 5000;
 const SUPERVISOR_FENCE_POLL_MS = 250;
 const UPDATE_RESTART_MARKER =
@@ -315,7 +361,7 @@ const RECOVERY_CHECKPOINT_EVENTS: ReadonlySet<string> = new Set([
 	"auto_retry_end",
 	"bash_start",
 	"bash_end",
-	"queue_update",
+	"session_action_update",
 	"rlm_child_update",
 ]);
 
@@ -333,8 +379,13 @@ interface BoundSupervisorGenerationClaim {
 
 const RLM_SUBAGENT_REGISTRY_FILE = "rlm-subagents.jsonl";
 
-interface PersistedRlmSubagentRegistryEntry {
-	type: "rlm_subagent";
+/**
+ * One passive child as the daemon presents it: topology (sessionFile, parent,
+ * depth, name) from the spawn ledger; hydration metadata (prompt, spawnCode,
+ * model, rlmMaxDepth, status, createdAt) from the per-child display file, or
+ * the legacy registry for pre-ledger children without one.
+ */
+interface PassiveRlmSubagentEntry {
 	childId: string;
 	sessionName: string;
 	sessionDir: string;
@@ -346,10 +397,48 @@ interface PersistedRlmSubagentRegistryEntry {
 	rlmParentNodeId?: string;
 	prompt?: string;
 	spawnCode?: string;
+	model?: { provider: string; modelId: string };
 	status: "running" | "completed" | "deleted";
 	createdAt: number;
+}
+
+/**
+ * Legacy per-parent `rlm-subagents.jsonl` entry shape, exactly as the daemon
+ * wrote it before the spawn ledger became topology authority. Read-only:
+ * registries are consumed only as the ledger seed source and as fallback
+ * hydration metadata for pre-ledger children without a display file.
+ */
+interface LegacyRlmSubagentRegistryEntry extends PassiveRlmSubagentEntry {
+	type: "rlm_subagent";
 	updatedAt: string;
 }
+
+/** Spread-ready optional metadata fields shared by display files and legacy registry entries. */
+function rlmSubagentMetadataFields(source: {
+	rlmMaxDepth?: number;
+	rlmParentNodeId?: string;
+	prompt?: string;
+	spawnCode?: string;
+	model?: { provider: string; modelId: string };
+}): Pick<PassiveRlmSubagentEntry, "rlmMaxDepth" | "rlmParentNodeId" | "prompt" | "spawnCode" | "model"> {
+	return {
+		...(source.rlmMaxDepth !== undefined ? { rlmMaxDepth: source.rlmMaxDepth } : {}),
+		...(source.rlmParentNodeId ? { rlmParentNodeId: source.rlmParentNodeId } : {}),
+		...(source.prompt ? { prompt: source.prompt } : {}),
+		...(source.spawnCode ? { spawnCode: source.spawnCode } : {}),
+		...(source.model ? { model: source.model } : {}),
+	};
+}
+
+type PassiveRlmRoot =
+	| { rootParentState: ActiveSessionState; rootInfo?: never }
+	| { rootParentState?: never; rootInfo: SessionInfo };
+
+type PassiveRlmSubagent = PassiveRlmRoot & {
+	entry: PassiveRlmSubagentEntry;
+	info: SessionInfo;
+	chain: PassiveRlmSubagentEntry[];
+};
 
 class RuntimeOpenCancelledError extends Error {}
 class BoundSessionUnavailableError extends Error {}
@@ -361,24 +450,74 @@ export async function runDaemonMode(options: DaemonModeOptions): Promise<never> 
 	return new Promise(() => {});
 }
 
+export function isTerminalRemoteAgentMessageError(error: unknown): error is Error {
+	return (
+		error instanceof Error &&
+		(error.message.startsWith("Unknown active session:") ||
+			error.message.startsWith("Ambiguous") ||
+			error.message === AGENT_FAMILY_REACH_ERROR)
+	);
+}
+
 export class AgentDaemon {
 	private server?: Server;
 	private shuttingDown = false;
-	private updateRestartPreparing = false;
-	private preparedUpdateRestartManifest?: DaemonUpdateRestartManifest;
+	private readonly updateRestartQueuePauses = new Map<string, { release(): void }>();
+	private readonly mutationDrain = new MutationDrainLatch();
+	private updateRestart?: {
+		id: symbol;
+		owner?: DaemonSocketClient;
+		abort: AbortController;
+		deadline?: ReturnType<typeof setTimeout>;
+		phase: "preparing" | "fencing" | "prepared" | "publishing";
+		manifest?: DaemonUpdateRestartManifest;
+		deferredClientEnv: Array<{
+			client: DaemonSocketClient;
+			state: ActiveSessionState;
+			env: Record<string, string>;
+		}>;
+	};
 	private ownsSocketPath = false;
 	private socketIdentity?: DaemonSocketIdentity;
 	private readonly clients = new Set<DaemonSocketClient>();
 	private readonly sessions = new Map<string, ActiveSessionState>();
 	private readonly openingSessions = new Map<string, Promise<ActiveSessionState>>();
-	private readonly rlmRehydrationClaims = new Map<
+	/** Covers path resolution through publication in openingSessions, before the runtime promise exists. */
+	private readonly reservingSessionOpens = new Map<string, Promise<void>>();
+	private readonly bindingCompletions = new Map<string, Promise<void>>();
+	/**
+	 * Resolved-session-file keyed passivations let wake paths join after closeSessionOnce
+	 * removes the live session. This intentionally complements closingSessions: that map
+	 * coalesces every close by transient activeSessionId, while this one identifies the
+	 * passivation-only close reason by the durable identity needed by hydration/opening.
+	 */
+	private readonly passivatingSessions = new Map<string, Promise<void>>();
+	private readonly closingSessions = new Map<
 		string,
-		{ parentState: ActiveSessionState; entry: PersistedRlmSubagentRegistryEntry }
+		{
+			promise: Promise<void>;
+			reason: DaemonSessionClosedReason;
+			descendants: Set<ActiveSessionState>;
+			reasonUpgrade?: Promise<void>;
+		}
 	>();
-	private readonly closingSessions = new Map<string, Promise<void>>();
 	private readonly sideQuestionRuns = new Map<
 		string,
-		{ run: SideQuestionRun; client: DaemonSocketClient; activeSessionId: string }
+		{
+			run: SideQuestionRun;
+			client: DaemonSocketClient;
+			activeSessionId: string;
+		}
+	>();
+	/** Live prompt admissions, keyed by session and caller-generated admission id. */
+	private readonly promptAdmissions = new Map<
+		string,
+		{
+			activeSessionId: string;
+			admissionId: string;
+			controller?: AbortController;
+			status: "waiting" | "owned" | "cancelled";
+		}
 	>();
 	private readonly signalCleanupHandlers: Array<() => void> = [];
 	private readonly cronStore: AgentCronJobStore;
@@ -395,6 +534,7 @@ export class AgentDaemon {
 	// Sessions inserted into `sessions` but still awaiting extension binding;
 	// visible to host controllers during bind, excluded from targeting.
 	private readonly bindingSessions = new Set<string>();
+	private readonly pendingSessionNames = new Set<string>();
 	private restoreActiveSessionId: string | undefined;
 	private supervisorMonitorTimer?: ReturnType<typeof setTimeout>;
 	private supervisorFenceTimer?: ReturnType<typeof setTimeout>;
@@ -417,6 +557,9 @@ export class AgentDaemon {
 		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
+	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
+	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
+	private readonly pendingRlmSpawnAppends = new Map<string, Promise<void>>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -436,6 +579,10 @@ export class AgentDaemon {
 		}
 		this.cronScheduler = new AgentCronScheduler(this.cronStore, {
 			runJob: (job) => this.runCronJob(job),
+			beginDispatch: () => {
+				this.mutationDrain.begin();
+				return () => this.mutationDrain.end();
+			},
 			onError: (job, error) => {
 				this.log(`Cron job ${job.id} failed: ${error instanceof Error ? error.message : String(error)}`);
 			},
@@ -511,7 +658,7 @@ export class AgentDaemon {
 		this.registerSignalHandlers();
 		this.summarizer.start();
 		this.log(`Prime Agent daemon listening on ${this.socketPath}`);
-		// No startup restore: on-disk sessions return only via /resume or --resume.
+		// No startup restore: on-disk sessions return only via --resume or the agents view.
 		if (!this.shuttingDown) {
 			this.cronScheduler.start();
 		}
@@ -564,6 +711,15 @@ export class AgentDaemon {
 		return this.supervisorClaims.size > 0;
 	}
 
+	private revokeSupervisorClaim(client: DaemonSocketClient, expected?: BoundSupervisorGenerationClaim): boolean {
+		if (expected && this.supervisorClaims.get(client) !== expected) return false;
+		if (!this.supervisorClaims.delete(client)) return false;
+		if (this.options.worker && this.updateRestart?.owner === client) {
+			this.cancelPreparedUpdateRestart(this.updateRestart.id);
+		}
+		return true;
+	}
+
 	private clearSupervisorAvailabilityCheck(): void {
 		if (this.supervisorMonitorTimer) {
 			clearTimeout(this.supervisorMonitorTimer);
@@ -593,7 +749,7 @@ export class AgentDaemon {
 					boundClaim.ownerFingerprint,
 				);
 			} catch {
-				client.socket.end();
+				if (this.revokeSupervisorClaim(client, boundClaim)) client.socket.end();
 			}
 		}
 		this.scheduleSupervisorFenceCheck();
@@ -647,7 +803,9 @@ export class AgentDaemon {
 				const token = randomUUID();
 				const candidateDirectory = `${lockDirectory}.candidate-${process.pid}-${token}`;
 				mkdirSync(candidateDirectory, { mode: 0o700 });
-				writeFileSync(join(candidateDirectory, "pid"), `${process.pid}\n`, { mode: 0o600 });
+				writeFileSync(join(candidateDirectory, "pid"), `${process.pid}\n`, {
+					mode: 0o600,
+				});
 				try {
 					renameSync(candidateDirectory, lockDirectory);
 					ownsLock = true;
@@ -759,120 +917,72 @@ export class AgentDaemon {
 		}
 	}
 
-	private rlmSubagentRegistryPath(parentSession: AgentSession): string | undefined {
-		const artifactDir = parentSession.sessionManager.getSessionArtifactDir();
-		if (!artifactDir) {
-			return undefined;
-		}
-		return join(artifactDir, RLM_SUBAGENT_REGISTRY_FILE);
+	/** Root sessions dir that keys this daemon's spawn ledger. */
+	private rlmLedgerSessionsDir(): string {
+		return this.options.defaultSessionConfig.sessionDir ?? getSessionsDir(this.agentDir);
 	}
 
-	private appendRlmSubagentRegistryEntry(
-		parentState: ActiveSessionState,
-		entry: PersistedRlmSubagentRegistryEntry,
-	): boolean {
-		const path = this.rlmSubagentRegistryPath(parentState.runtime.session);
-		if (!path) {
-			return true;
-		}
-		try {
-			mkdirSync(dirname(path), { recursive: true });
-			const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-			const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-			const handle = openSync(path, "a");
-			try {
-				writeSync(handle, `${separator}${JSON.stringify(entry)}\n`);
-				fsyncSync(handle);
-			} finally {
-				closeSync(handle);
-			}
-			return true;
-		} catch (error) {
-			this.log(
-				`failed to persist RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			return false;
-		}
+	/**
+	 * Supervisor-owned spawn ledger for this daemon's sessions dir. Seeded
+	 * lazily from the existing per-parent registries via the same tolerant
+	 * reader the daemon already uses for passive hydration.
+	 */
+	private rlmSpawnLedger(): RlmSpawnLedger {
+		this.rlmSpawnLedgerInstance ??= new RlmSpawnLedger(
+			this.agentDir,
+			this.rlmLedgerSessionsDir(),
+			createRlmLedgerRegistrySeedSource(),
+			(message) => this.log(message),
+		);
+		return this.rlmSpawnLedgerInstance;
 	}
 
-	private recordRlmSubagentRegistryEntry(
-		parentState: ActiveSessionState,
-		input: {
-			childId: string;
-			sessionName: string;
-			sessionDir: string;
-			sessionFile: string;
-			rlmDepth: number;
-			rlmMaxDepth: number;
-			rlmParentNodeId?: string;
-			prompt?: string;
-			spawnCode?: string;
-			status: PersistedRlmSubagentRegistryEntry["status"];
-			createdAt?: number;
-		},
-	): void {
-		const parentSession = parentState.runtime.session;
-		this.appendRlmSubagentRegistryEntry(parentState, {
-			type: "rlm_subagent",
-			childId: input.childId,
-			sessionName: input.sessionName,
-			sessionDir: input.sessionDir,
-			sessionFile: input.sessionFile,
-			parentSessionId: parentSession.sessionId,
-			...(parentSession.sessionFile ? { parentSessionFile: parentSession.sessionFile } : {}),
-			rlmDepth: input.rlmDepth,
-			rlmMaxDepth: input.rlmMaxDepth,
-			...(input.rlmParentNodeId ? { rlmParentNodeId: input.rlmParentNodeId } : {}),
-			...(input.prompt ? { prompt: input.prompt } : {}),
-			...(input.spawnCode ? { spawnCode: input.spawnCode } : {}),
-			status: input.status,
-			createdAt: input.createdAt ?? Date.now(),
-			updatedAt: new Date().toISOString(),
-		});
+	private async appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): Promise<void> {
+		const childId = state.runtime.metadata.rlmChildId;
+		const child = state.runtime.session.sessionFile;
+		if (!childId || !child) return;
+		// Awaited: the supervisor answers sibling-name checks from the ledger,
+		// so the rename must be durable before the reservation is released.
+		await this.rlmSpawnLedger()
+			.appendRename({ childId, child, name })
+			.catch((error) => {
+				this.log(`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`);
+			});
 	}
 
-	private recordRlmSubagentDeletion(parentState: ActiveSessionState, childId: string): void {
-		const latest = this.readLatestRlmSubagentRegistry(parentState, true).find((entry) => entry.childId === childId);
-		if (!latest || latest.status === "deleted") {
-			return;
-		}
-		if (
-			!this.appendRlmSubagentRegistryEntry(parentState, {
-				...latest,
-				status: "deleted",
-				updatedAt: new Date().toISOString(),
-			})
-		) {
-			throw new Error(`Failed to persist deletion for RLM subagent ${childId}`);
-		}
+	/**
+	 * Legacy per-parent registry path. Read-only: consumed solely as fallback
+	 * hydration metadata for pre-ledger children without a display file (the
+	 * ledger seed source has its own equivalent reader).
+	 */
+	private legacyRlmSubagentRegistryPath(parentSessionFile: string, parentSessionId: string): string {
+		return join(getSessionArtifactPathForFile(parentSessionFile, parentSessionId), RLM_SUBAGENT_REGISTRY_FILE);
 	}
 
-	private readLatestRlmSubagentRegistry(
-		parentState: ActiveSessionState,
+	private async readLegacyRlmSubagentRegistry(
+		path: string,
 		throwOnReadError = false,
-	): PersistedRlmSubagentRegistryEntry[] {
-		const path = this.rlmSubagentRegistryPath(parentState.runtime.session);
-		if (!path || !existsSync(path)) {
-			return [];
-		}
-		const latest = new Map<string, PersistedRlmSubagentRegistryEntry>();
+	): Promise<LegacyRlmSubagentRegistryEntry[]> {
 		let lines: string[];
 		try {
-			lines = readFileSync(path, "utf8").split(/\r?\n/);
+			lines = (await readFile(path, "utf8")).split(/\r?\n/);
 		} catch (error) {
-			this.log(`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`);
-			if (throwOnReadError) {
-				throw error;
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				this.log(`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`);
+				if (throwOnReadError) {
+					throw error;
+				}
 			}
 			return [];
 		}
+		const latest = new Map<string, LegacyRlmSubagentRegistryEntry>();
 		for (const line of lines) {
 			const trimmed = line.trim();
 			if (!trimmed) {
 				continue;
 			}
 			try {
-				const entry = JSON.parse(trimmed) as Partial<PersistedRlmSubagentRegistryEntry>;
+				const entry = JSON.parse(trimmed) as Partial<LegacyRlmSubagentRegistryEntry>;
 				if (
 					entry.type !== "rlm_subagent" ||
 					typeof entry.childId !== "string" ||
@@ -885,7 +995,7 @@ export class AgentDaemon {
 				) {
 					continue;
 				}
-				latest.set(entry.childId, entry as PersistedRlmSubagentRegistryEntry);
+				latest.set(entry.childId, entry as LegacyRlmSubagentRegistryEntry);
 			} catch (error) {
 				this.log(
 					`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
@@ -895,6 +1005,402 @@ export class AgentDaemon {
 		return [...latest.values()];
 	}
 
+	/**
+	 * Record a spawned or completed child: topology (the spawn edge) goes to
+	 * the daemon-owned ledger at admission; hydration/display metadata goes to
+	 * the child's per-child display file at both moments.
+	 */
+	private recordRlmSubagentState(
+		parentState: ActiveSessionState,
+		input: {
+			childId: string;
+			sessionName: string;
+			sessionDir: string;
+			sessionFile: string;
+			rlmDepth: number;
+			rlmMaxDepth: number;
+			rlmParentNodeId?: string;
+			prompt?: string;
+			spawnCode?: string;
+			model?: { provider: string; modelId: string };
+			status: "running" | "completed";
+			createdAt?: number;
+		},
+	): boolean {
+		const parentSession = parentState.runtime.session;
+		// Spawn admission is the moment the daemon knows the edge firsthand.
+		// The ledger is the only topology store, so the append's outcome is
+		// load-bearing: the promise is stashed per childId for the admission
+		// path to await — admission fails if the spawn record cannot be made
+		// durable (a swallowed failure would admit a child that listing,
+		// hydration, and a2a wake can never find after passivation).
+		if (input.status === "running" && parentSession.sessionFile) {
+			const spawnAppend = this.rlmSpawnLedger().appendSpawn({
+				childId: input.childId,
+				parent: parentSession.sessionFile,
+				child: input.sessionFile,
+				depth: input.rlmDepth,
+				name: input.sessionName,
+			});
+			// Mark handled so an early rejection cannot surface as an
+			// unhandled-rejection crash before the admission path awaits it.
+			spawnAppend.catch(() => undefined);
+			this.pendingRlmSpawnAppends.set(input.childId, spawnAppend);
+		}
+		try {
+			writeRlmSubagentDisplayEntry({
+				type: "rlm_subagent",
+				childId: input.childId,
+				sessionName: input.sessionName,
+				sessionDir: input.sessionDir,
+				sessionFile: input.sessionFile,
+				...rlmSubagentMetadataFields(input),
+				status: input.status,
+				createdAt: input.createdAt ?? Date.now(),
+				updatedAt: new Date().toISOString(),
+			});
+			return true;
+		} catch (error) {
+			this.log(
+				`failed to persist RLM subagent display entry: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return false;
+		}
+	}
+
+	private async recordRlmSubagentDeletion(
+		parentState: ActiveSessionState,
+		childId: string,
+		reason: RlmLedgerDeleteReason = "user",
+	): Promise<void> {
+		const parentFile = parentState.runtime.session.sessionFile;
+		if (!parentFile) {
+			return;
+		}
+		const parentPath = canonicalSessionPath(parentFile);
+		const edges = (await this.rlmSpawnLedger().edges(true)).filter(
+			(candidate) => candidate.childId === childId && canonicalSessionPath(candidate.parent) === parentPath,
+		);
+		const edge = edges.find((candidate) => !candidate.deleted);
+		let entry: PassiveRlmSubagentEntry | undefined;
+		if (edge) {
+			entry = await this.passiveRlmSubagentEntryForEdge(edge, {
+				sessionId: parentState.runtime.session.sessionId,
+				sessionFile: parentFile,
+			});
+		} else if (edges.length > 0) {
+			// Only tombstoned edges: the tombstones are already durable, nothing
+			// to re-append. A prior deletion may have crashed before its artifact
+			// sweep, so retry it here.
+			for (const tombstoned of edges) {
+				await this.deleteRlmSubagentArtifacts(childId, tombstoned.child);
+			}
+			return;
+		} else {
+			// No edge at all. A pre-ledger child the seed missed may still exist
+			// in the legacy registry; an unreadable registry means the durable
+			// deletion boundary cannot be established, so the deletion fails.
+			const legacy = (
+				await this.readLegacyRlmSubagentRegistry(
+					this.legacyRlmSubagentRegistryPath(parentFile, parentState.runtime.session.sessionId),
+					true,
+				)
+			).find((candidate) => candidate.childId === childId);
+			if (!legacy || legacy.status === "deleted") {
+				// The child never existed under this parent, or its tombstone is
+				// already durable.
+				return;
+			}
+			entry = {
+				childId: legacy.childId,
+				sessionName: legacy.sessionName,
+				sessionDir: legacy.sessionDir,
+				sessionFile: legacy.sessionFile,
+				parentSessionId: parentState.runtime.session.sessionId,
+				parentSessionFile: parentFile,
+				...(legacy.rlmDepth !== undefined ? { rlmDepth: legacy.rlmDepth } : {}),
+				...rlmSubagentMetadataFields(legacy),
+				status: legacy.status,
+				createdAt: legacy.createdAt,
+			};
+		}
+		// Display tombstone first ("deleted deliberately, transcript retained"):
+		// a crash in between leaves a live ledger edge over a deleted display
+		// entry, healed by retrying the deletion; the reverse order could
+		// tombstone the ledger while the display file still claims the child
+		// exists.
+		try {
+			writeRlmSubagentDisplayEntry({
+				type: "rlm_subagent",
+				childId: entry.childId,
+				sessionName: entry.sessionName,
+				sessionDir: entry.sessionDir,
+				sessionFile: entry.sessionFile,
+				...rlmSubagentMetadataFields(entry),
+				status: "deleted",
+				createdAt: entry.createdAt,
+				updatedAt: new Date().toISOString(),
+			});
+		} catch (error) {
+			throw new Error(
+				`Failed to persist deletion for RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		// The ledger delete record is the topology tombstone; unlike the
+		// dual-write era it has no other writer to fall back on, so a failed
+		// append is a failed deletion.
+		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
+		// Deletion boundary: transcript + display tombstone are the durable
+		// record and stay; the nested artifact dir is a runtime cache and goes.
+		await this.deleteRlmSubagentArtifacts(childId, entry.sessionFile);
+	}
+
+	/** Best-effort artifact-dir removal: cache cleanup must never fail a deletion. */
+	private async deleteRlmSubagentArtifacts(childId: string, childSessionFile: string): Promise<void> {
+		try {
+			await deleteSessionArtifacts(childSessionFile);
+		} catch (error) {
+			this.log(
+				`failed to remove artifact dir for deleted RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	/**
+	 * Hydration/display metadata for one live ledger edge: per-child display
+	 * file first, then the legacy registry for pre-ledger children, then
+	 * edge-only defaults. Topology (childId, paths, depth, name) always comes
+	 * from the ledger edge.
+	 */
+	private async passiveRlmSubagentEntryForEdge(
+		edge: RlmLedgerEdge,
+		parent: { sessionId: string; sessionFile: string },
+		legacyRegistryCache?: Map<string, Promise<LegacyRlmSubagentRegistryEntry[]>>,
+	): Promise<PassiveRlmSubagentEntry> {
+		const edgeChild = canonicalSessionPath(edge.child);
+		const base = {
+			childId: edge.childId,
+			sessionName: edge.name,
+			sessionDir: dirname(edge.child),
+			sessionFile: edge.child,
+			parentSessionId: parent.sessionId,
+			parentSessionFile: parent.sessionFile,
+		};
+		// The ledger stores realpath-canonical paths, the rest of the daemon
+		// keys maps by resolve(): present the paths the writer recorded (the
+		// metadata file is validated to describe this same child) so passive
+		// rows keep matching residency, opens, and passivation bookkeeping.
+		const metadataFields = (source: {
+			sessionDir: string;
+			sessionFile: string;
+			rlmMaxDepth?: number;
+			rlmParentNodeId?: string;
+			prompt?: string;
+			spawnCode?: string;
+			model?: { provider: string; modelId: string };
+			status: "running" | "completed" | "deleted";
+			createdAt: number;
+		}) => ({
+			...base,
+			...(canonicalSessionPath(source.sessionFile) === edgeChild
+				? { sessionDir: source.sessionDir, sessionFile: source.sessionFile }
+				: {}),
+			...rlmSubagentMetadataFields(source),
+			status: source.status,
+			createdAt: source.createdAt,
+		});
+		const display = await readRlmSubagentDisplayEntry(dirname(edge.child));
+		if (display && display.childId === edge.childId) {
+			// A display-file child was ledger-spawned: the edge depth is real.
+			return { ...metadataFields(display), rlmDepth: edge.depth };
+		}
+		const registryPath = this.legacyRlmSubagentRegistryPath(parent.sessionFile, parent.sessionId);
+		let registryRead = legacyRegistryCache?.get(registryPath);
+		if (!registryRead) {
+			registryRead = this.readLegacyRlmSubagentRegistry(registryPath);
+			legacyRegistryCache?.set(registryPath, registryRead);
+		}
+		const legacy = (await registryRead).find((entry) => entry.childId === edge.childId);
+		if (legacy) {
+			// A seeded edge's depth may be a parent+1 guess for legacy entries
+			// without one: leave it absent so hydration falls back to the
+			// persisted header depth, exactly as the registry reader did.
+			return { ...metadataFields(legacy), ...(legacy.rlmDepth !== undefined ? { rlmDepth: legacy.rlmDepth } : {}) };
+		}
+		// Ledger-only child (metadata lost): hydratable with defaults.
+		let createdAt = 0;
+		try {
+			createdAt = (await stat(edge.child)).birthtimeMs || 0;
+		} catch {
+			// The stat is display-grade; a failed read keeps the epoch default.
+		}
+		return { ...base, rlmDepth: edge.depth, status: "completed", createdAt };
+	}
+
+	/** List each root's passive (non-resident) descendants from the ledger, without creating runtimes. */
+	private async listPassiveRlmSubagents(
+		savedRoots: SessionInfo[] = [],
+		includeResident = false,
+	): Promise<PassiveRlmSubagent[]> {
+		const residentRoots: Array<{ parentState: ActiveSessionState; sessionFile: string }> = [];
+		for (const parentState of this.sessions.values()) {
+			const parentFile = parentState.runtime.session.sessionFile;
+			// An in-memory session cannot own persisted children.
+			if (parentFile) residentRoots.push({ parentState, sessionFile: parentFile });
+		}
+		const savedRootInfos = savedRoots.filter((rootInfo) => inactiveLifecycleForSession(rootInfo) === "live");
+		if (residentRoots.length === 0 && savedRootInfos.length === 0) return [];
+		const edges = await this.rlmSpawnLedger().edges();
+		const childrenByParent = new Map<string, RlmLedgerEdge[]>();
+		for (const edge of edges) {
+			const parentPath = canonicalSessionPath(edge.parent);
+			const siblings = childrenByParent.get(parentPath) ?? [];
+			siblings.push(edge);
+			childrenByParent.set(parentPath, siblings);
+		}
+		const legacyRegistryCache = new Map<string, Promise<LegacyRlmSubagentRegistryEntry[]>>();
+		const passive: PassiveRlmSubagent[] = [];
+		const visit = async (
+			root: PassiveRlmRoot,
+			parent: { sessionId: string; sessionFile: string },
+			parentChain: PassiveRlmSubagentEntry[],
+			visited: Set<string>,
+		): Promise<void> => {
+			for (const edge of childrenByParent.get(canonicalSessionPath(parent.sessionFile)) ?? []) {
+				// The ledger stores realpath-canonical paths while the rest of the
+				// daemon keys by resolve(): work with the writer-recorded path from
+				// the metadata entry so passive rows keep matching residency,
+				// opens, and passivation bookkeeping.
+				const entry = await this.passiveRlmSubagentEntryForEdge(edge, parent, legacyRegistryCache);
+				const sessionKey = resolve(entry.sessionFile);
+				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
+				visited.add(sessionKey);
+				const info = await readSessionInfo(entry.sessionFile);
+				if (!info) continue;
+				// A resident child walks its own subtree as an outer root below. Avoid
+				// both duplicate rows and attributing its descendants to an ancestor.
+				if (!includeResident && this.findSessionBySessionFile(entry.sessionFile)) continue;
+				const chain = [...parentChain, entry];
+				passive.push({ ...root, entry, info, chain });
+				await visit(root, { sessionId: info.id, sessionFile: entry.sessionFile }, chain, visited);
+			}
+		};
+		const residentRootPaths = new Set<string>();
+		for (const { parentState, sessionFile } of residentRoots) {
+			const parentPath = resolve(sessionFile);
+			residentRootPaths.add(parentPath);
+			await visit(
+				{ rootParentState: parentState },
+				{ sessionId: parentState.runtime.session.sessionId, sessionFile },
+				[],
+				new Set([parentPath]),
+			);
+		}
+		for (const rootInfo of savedRootInfos) {
+			const rootPath = resolve(rootInfo.path);
+			if (residentRootPaths.has(rootPath)) continue;
+			await visit({ rootInfo }, { sessionId: rootInfo.id, sessionFile: rootInfo.path }, [], new Set([rootPath]));
+		}
+		return passive;
+	}
+
+	private async passiveRlmSubagentsByPath(
+		savedRoots: SessionInfo[] = [],
+		includeResident = false,
+	): Promise<Map<string, PassiveRlmSubagent>> {
+		return new Map(
+			(await this.listPassiveRlmSubagents(savedRoots, includeResident)).map((passive) => [
+				resolve(passive.entry.sessionFile),
+				passive,
+			]),
+		);
+	}
+
+	/** Add saved-only descendants discovered by the shared passive-registry walk. */
+	private async buildRlmChildSnapshotsWithPassiveRlmSubagents(
+		rootState: ActiveSessionState,
+	): Promise<AgentConnectionRlmChildAgentSnapshot[]> {
+		const snapshots = buildRlmChildSnapshots(rootState.activeSessionId, [...this.sessions.values()]);
+		const residentParentIds = new Set([
+			rootState.activeSessionId,
+			...snapshots.flatMap((snapshot) => (snapshot.activeSessionId ? [snapshot.activeSessionId] : [])),
+		]);
+		const seenChildIds = new Set(snapshots.map((snapshot) => snapshot.id));
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			if (
+				!passive.rootParentState ||
+				!residentParentIds.has(passive.rootParentState.activeSessionId) ||
+				seenChildIds.has(passive.entry.childId)
+			) {
+				continue;
+			}
+			const parentEntry = passive.chain.at(-2);
+			const parentId = parentEntry?.childId ?? passive.rootParentState.runtime.metadata.rlmChildId;
+			snapshots.push({
+				id: passive.entry.childId,
+				...(parentId ? { parentId } : {}),
+				sessionName: passive.info.name ?? passive.entry.sessionName,
+				model: passive.entry.model ? `${passive.entry.model.provider}/${passive.entry.model.modelId}` : undefined,
+				label: rlmChildLabel(passive.entry.prompt ?? ""),
+				status: passive.entry.status === "completed" ? "done" : "error",
+				sessionDir: passive.entry.sessionDir,
+			});
+			seenChildIds.add(passive.entry.childId);
+		}
+		return snapshots;
+	}
+
+	private async buildSessionListWithPassiveRlmSubagents(
+		activeSessions: ActiveSessionState[],
+		savedSessions: SessionInfo[],
+		scheduledJobs: AgentCronJob[],
+	): Promise<SessionSummary[]> {
+		const passiveByPath = await this.passiveRlmSubagentsByPath(savedSessions);
+		const savedByPath = new Map(savedSessions.map((session) => [resolve(session.path), session]));
+		for (const [path, passive] of passiveByPath) {
+			savedByPath.set(path, passive.info);
+		}
+		return buildSessionList(activeSessions, [...savedByPath.values()], scheduledJobs).map((summary) => {
+			const passive = summary.sessionFile ? passiveByPath.get(resolve(summary.sessionFile)) : undefined;
+			if (!passive || summary.activeSessionId) return summary;
+			const parentEntry = passive.chain.at(-2);
+			return {
+				...summary,
+				runtimeKind: "subagent",
+				...(passive.chain.length === 1 && passive.rootParentState
+					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
+					: {}),
+				parentSessionId: passive.entry.parentSessionId,
+				parentSessionPath:
+					passive.entry.parentSessionFile ??
+					parentEntry?.sessionFile ??
+					passive.rootParentState?.runtime.session.sessionFile ??
+					passive.rootInfo?.path,
+				rlmDepth: passive.entry.rlmDepth ?? passive.info.rlmDepth,
+				rlmChildId: passive.entry.childId,
+				rlmParentNodeId: passive.entry.rlmParentNodeId ?? passive.entry.childId,
+				spawnCode: passive.entry.spawnCode,
+			};
+		});
+	}
+
+	private async findPassiveRlmSubagent(
+		target: string,
+		includeResident = false,
+	): Promise<PassiveRlmSubagent | undefined> {
+		const matches = [...(await this.passiveRlmSubagentsByPath([], includeResident)).values()].filter(
+			({ entry, info }) =>
+				entry.childId === target ||
+				resolve(entry.sessionFile) === resolve(target) ||
+				info.id === target ||
+				(info.name ?? entry.sessionName) === target,
+		);
+		if (matches.length > 1) {
+			throw new Error(`Session selector "${target}" is ambiguous`);
+		}
+		return matches[0];
+	}
+
 	private async addRuntime(
 		runtime: AgentSessionRuntime,
 		name?: string,
@@ -902,30 +1408,38 @@ export class AgentDaemon {
 		onStateCreated?: (state: ActiveSessionState) => void,
 		runtimeOpenGuard?: RuntimeOpenGuard,
 		onStateBound?: (state: ActiveSessionState) => void,
+		restoreActiveSessionId?: string,
 	): Promise<ActiveSessionState> {
-		const restoredActiveSessionId = runtime.metadata.kind === "top-level" ? this.restoreActiveSessionId : undefined;
-		if (restoredActiveSessionId) {
+		const desiredActiveSessionId =
+			runtime.metadata.kind === "top-level" ? this.restoreActiveSessionId : restoreActiveSessionId;
+		if (runtime.metadata.kind === "top-level" && desiredActiveSessionId) {
 			this.restoreActiveSessionId = undefined;
 		}
 		const state: ActiveSessionState = {
 			activeSessionId:
-				restoredActiveSessionId && !this.sessions.has(restoredActiveSessionId)
-					? restoredActiveSessionId
+				desiredActiveSessionId && !this.sessions.has(desiredActiveSessionId)
+					? desiredActiveSessionId
 					: createActiveSessionId(this.sessions),
 			runtime,
 			clients: new Set(),
+			pendingAttaches: 0,
 			extensionUiRequests: new Map(),
 			eventGeneration: createActiveSessionId(),
 			lastEventSequence: 0,
 			clientEnv,
 		};
-		if (name) {
-			state.runtime.session.setSessionName(name);
-		}
 		this.sessions.set(state.activeSessionId, state);
 		this.bindingSessions.add(state.activeSessionId);
+		let completeBinding!: () => void;
+		const bindingCompletion = new Promise<void>((resolveBinding) => {
+			completeBinding = resolveBinding;
+		});
+		this.bindingCompletions.set(state.activeSessionId, bindingCompletion);
 		onStateCreated?.(state);
 		try {
+			if (name) {
+				await this.setStateSessionName(state, name);
+			}
 			await bindActiveSessionState(state, {
 				broadcast: (targetSessionState, message) => this.broadcastToSession(targetSessionState, message),
 				createConnectionState: (targetSessionState) => this.createConnectionState(targetSessionState),
@@ -949,6 +1463,8 @@ export class AgentDaemon {
 			throw error;
 		} finally {
 			this.bindingSessions.delete(state.activeSessionId);
+			this.bindingCompletions.delete(state.activeSessionId);
+			completeBinding();
 		}
 		this.registerCronStoreForState(state);
 		this.rebindCronJobsToState(state);
@@ -1018,6 +1534,116 @@ export class AgentDaemon {
 		const sessionPath = command.sessionPath
 			? await resolveDaemonSessionPath(command.sessionPath, cwd, config.sessionDir)
 			: undefined;
+		const sessionKey = sessionPath ? resolve(sessionPath) : undefined;
+		if (sessionKey && this.findPassivationBySessionFile(sessionKey)) {
+			await this.waitForPassivation(sessionKey);
+			return this.createRuntime(command, runtimeOpenGuard);
+		}
+		const pending = sessionKey ? this.openingSessions.get(sessionKey) : undefined;
+		if (pending && sessionKey) {
+			// Join the in-process open before attempting the filesystem lease. The
+			// creator owns that lease until its runtime is ready.
+			let state: ActiveSessionState;
+			try {
+				state = await pending;
+			} catch (error) {
+				if (!runtimeOpenGuard && error instanceof RuntimeOpenCancelledError) {
+					if (this.openingSessions.get(sessionKey) === pending) {
+						this.openingSessions.delete(sessionKey);
+					}
+					return this.createRuntime(command);
+				}
+				throw error;
+			}
+			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
+				throw new RuntimeOpenCancelledError();
+			}
+			if (command.name) {
+				await this.setStateSessionName(state, command.name);
+			}
+			this.adoptClientEnv(state, clientEnv);
+			this.rebindCronJobsToState(state);
+			return state;
+		}
+
+		const passiveSubagent = sessionPath ? await this.findPassiveRlmSubagent(sessionPath) : undefined;
+		if (passiveSubagent) {
+			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
+				throw new RuntimeOpenCancelledError();
+			}
+			if (command.name) {
+				const normalizedName = command.name.trim();
+				if (!normalizedName) {
+					throw new Error("Session name cannot be empty");
+				}
+				await this.assertFamilySessionNameAvailable({
+					name: normalizedName,
+					depth: passiveSubagent.info.rlmDepth ?? passiveSubagent.entry.rlmDepth ?? 1,
+					parentSessionId: passiveSubagent.entry.parentSessionId,
+					parentSessionPath:
+						passiveSubagent.entry.parentSessionFile ??
+						passiveSubagent.chain.at(-2)?.sessionFile ??
+						passiveSubagent.rootParentState?.runtime.session.sessionFile ??
+						passiveSubagent.rootInfo?.path,
+					ignoreSessionId: passiveSubagent.info.id,
+				});
+			}
+			const state = await this.hydratePassiveRlmSubagent(passiveSubagent, clientEnv);
+			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
+				throw new RuntimeOpenCancelledError();
+			}
+			if (command.name) {
+				await this.setStateSessionName(state, command.name);
+			}
+			if (passiveSubagent.rootParentState) this.adoptClientEnv(passiveSubagent.rootParentState, clientEnv);
+			this.adoptClientEnv(state, clientEnv);
+			return state;
+		}
+
+		// Hydration may have started while the async registry walk above was in
+		// progress. Re-enter so the explicit opener joins its published promise.
+		if (sessionKey && this.openingSessions.has(sessionKey)) {
+			return this.createRuntime(command, runtimeOpenGuard);
+		}
+
+		let releaseOpenReservation = () => {};
+		if (sessionKey) {
+			const reservation = this.reservingSessionOpens.get(sessionKey);
+			if (reservation) {
+				await reservation;
+				return this.createRuntime(command, runtimeOpenGuard);
+			}
+			let release!: () => void;
+			const reserved = new Promise<void>((resolveReservation) => {
+				release = resolveReservation;
+			});
+			this.reservingSessionOpens.set(sessionKey, reserved);
+			let released = false;
+			releaseOpenReservation = () => {
+				if (released) return;
+				released = true;
+				if (this.reservingSessionOpens.get(sessionKey) === reserved) {
+					this.reservingSessionOpens.delete(sessionKey);
+				}
+				release();
+			};
+		}
+
+		const existing = sessionPath ? this.findSessionBySessionFile(sessionPath) : undefined;
+		if (existing) {
+			releaseOpenReservation();
+			await this.waitForBoundSession(existing);
+			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
+				throw new RuntimeOpenCancelledError();
+			}
+			if (command.name) {
+				await this.setStateSessionName(existing, command.name);
+			}
+			this.adoptClientEnv(existing, clientEnv);
+			this.rebindCronJobsToState(existing);
+			return existing;
+		}
+
 		let sessionLease: SessionLease | undefined;
 		let sessionManager: SessionManager;
 		try {
@@ -1031,6 +1657,7 @@ export class AgentDaemon {
 						: SessionManager.create(cwd, config.sessionDir);
 		} catch (error) {
 			sessionLease?.release();
+			releaseOpenReservation();
 			throw error;
 		}
 		const createState = async (): Promise<ActiveSessionState> => {
@@ -1041,6 +1668,7 @@ export class AgentDaemon {
 			const existing = this.findSessionBySessionFile(sessionManager.getSessionFile());
 			if (existing) {
 				sessionLease?.release();
+				await this.waitForBoundSession(existing);
 				// A live runtime already owns this session file; reuse it instead of
 				// starting a second runtime that would interleave writes to one file.
 				// clientEnv adopts the first offered identity (e.g. a pane opening a
@@ -1048,7 +1676,7 @@ export class AgentDaemon {
 				// the creator's identity at load, and swapping it would only make
 				// pi.exec disagree with those captures.
 				if (command.name) {
-					existing.runtime.session.setSessionName(command.name);
+					await this.setStateSessionName(existing, command.name);
 				}
 				this.adoptClientEnv(existing, clientEnv);
 				this.rebindCronJobsToState(existing);
@@ -1111,69 +1739,34 @@ export class AgentDaemon {
 				},
 				runtimeOpenGuard,
 			);
-			const openedSessionFile = state.runtime.session.sessionFile;
-			const rehydrationKey = openedSessionFile ? resolve(openedSessionFile) : undefined;
-			const rehydrationClaim = rehydrationKey ? this.rlmRehydrationClaims.get(rehydrationKey) : undefined;
-			if (rehydrationKey && rehydrationClaim) {
-				if (this.rlmRehydrationClaims.get(rehydrationKey) === rehydrationClaim) {
-					this.rlmRehydrationClaims.delete(rehydrationKey);
-				}
-				await this.closeSession(state, "replaced");
-				return this.rehydrateCompletedRlmSubagent(rehydrationClaim.parentState, rehydrationClaim.entry);
-			}
-			if (state.runtime.metadata.kind === "top-level") {
-				await this.rehydrateCompletedRlmSubagents(state);
-			}
 			return state;
 		};
 
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
+			releaseOpenReservation();
 			return createState();
 		}
-		const sessionKey = resolve(sessionFile);
-		const pending = this.openingSessions.get(sessionKey);
-		if (pending) {
+		const openedSessionKey = resolve(sessionFile);
+		if (this.openingSessions.has(openedSessionKey)) {
 			sessionLease?.release();
-			// Same as the reuse path above: adopt-if-absent, never overwrite the
-			// identity the racing creator's extensions already captured.
-			let state: ActiveSessionState;
-			try {
-				state = await pending;
-			} catch (error) {
-				if (!runtimeOpenGuard && error instanceof RuntimeOpenCancelledError) {
-					if (this.openingSessions.get(sessionKey) === pending) {
-						this.openingSessions.delete(sessionKey);
-					}
-					return this.createRuntime(command);
-				}
-				throw error;
-			}
-			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
-				throw new RuntimeOpenCancelledError();
-			}
-			if (command.name) {
-				state.runtime.session.setSessionName(command.name);
-			}
-			this.adoptClientEnv(state, clientEnv);
-			this.rebindCronJobsToState(state);
-			return state;
+			releaseOpenReservation();
+			return this.createRuntime({ ...command, sessionPath: sessionFile }, runtimeOpenGuard);
 		}
 		const opening = Promise.resolve().then(createState);
-		this.openingSessions.set(sessionKey, opening);
+		this.openingSessions.set(openedSessionKey, opening);
+		releaseOpenReservation();
 		try {
 			return await opening;
 		} finally {
-			if (this.openingSessions.get(sessionKey) === opening) {
-				this.openingSessions.delete(sessionKey);
+			releaseOpenReservation();
+			if (this.openingSessions.get(openedSessionKey) === opening) {
+				this.openingSessions.delete(openedSessionKey);
 			}
 		}
 	}
 
 	private async runCronJob(job: AgentCronJob): Promise<"skipped" | undefined> {
-		if (this.updateRestartPreparing) {
-			return "skipped";
-		}
 		const requirePersistedJob = this.cronStore.list().some((candidate) => candidate.id === job.id);
 		const dueJob = requirePersistedJob ? this.getRunnableCronJob(job.id) : job;
 		if (!dueJob) {
@@ -1181,12 +1774,7 @@ export class AgentDaemon {
 		}
 		const state = await this.getOrCreateCronJobSession(dueJob, requirePersistedJob);
 		const runnableJob = requirePersistedJob ? this.getRunnableCronJob(job.id) : dueJob;
-		if (
-			!state ||
-			!runnableJob ||
-			this.updateRestartPreparing ||
-			!this.isCronJobRunnableForState(runnableJob, state, requirePersistedJob)
-		) {
+		if (!state || !runnableJob || !this.isCronJobRunnableForState(runnableJob, state, requirePersistedJob)) {
 			return "skipped";
 		}
 		const session = state.runtime.session;
@@ -1205,13 +1793,14 @@ export class AgentDaemon {
 			session.isCompacting ||
 			session.isRetrying ||
 			session.isBashRunning ||
-			session.hasAcceptedPromptInFlight ||
-			session.pendingMessageCount > 0;
+			session.unfinishedActionCount > 0;
 		if (!isHeartbeatCronJob(runnableJob) && shouldQueueCronPrompt) {
 			if (!this.isCronJobRunnableForState(runnableJob, state, requirePersistedJob)) {
 				return "skipped";
 			}
-			await session.followUp(runnableJob.prompt, undefined, { resumeIfIdle: true });
+			await session.followUp(runnableJob.prompt, undefined, {
+				resumeIfIdle: true,
+			});
 			return;
 		}
 		const getRunnableJob = (): AgentCronJob | undefined => {
@@ -1241,6 +1830,7 @@ export class AgentDaemon {
 				source: "rpc",
 			},
 			canPrompt,
+			false,
 		);
 		return didPrompt ? undefined : "skipped";
 	}
@@ -1258,25 +1848,29 @@ export class AgentDaemon {
 		message: string,
 		options?: PromptOptions,
 		canPrompt?: () => boolean,
+		waitForCompletion = true,
 	): Promise<boolean> {
 		return this.withAgentMessagePreparingGuard(
 			state,
 			(session, clearPreparing) => {
 				const prompt =
-					options?.agentMessageId === undefined
-						? session.prompt.bind(session)
-						: session.acceptAgentMessagePrompt.bind(session);
+					options?.agentMessageId !== undefined && options.expandPromptTemplates === false
+						? session.acceptAgentMessagePrompt.bind(session)
+						: waitForCompletion
+							? (session.promptAndWait ?? session.prompt).bind(session)
+							: (session.promptUntilAccepted ?? session.prompt).bind(session);
 				return prompt(message, {
 					...options,
-					preflightResult: (didSucceed) => {
+					preflightResult: (didSucceed, queued) => {
 						if (didSucceed && session.isStreaming) {
 							clearPreparing();
 						}
-						options?.preflightResult?.(didSucceed);
+						options?.preflightResult?.(didSucceed, queued);
 					},
 				});
 			},
 			canPrompt,
+			options?.signal,
 		);
 	}
 
@@ -1317,6 +1911,7 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		run: (session: AgentSession, clearPreparing: () => void) => Promise<void>,
 		canRun?: () => boolean,
+		signal?: AbortSignal,
 	): Promise<boolean> {
 		const activeSessionId = state.activeSessionId;
 		this.agentMessagePreparingTargets.set(
@@ -1337,7 +1932,12 @@ export class AgentDaemon {
 			}
 		};
 		try {
-			await this.agentMessageTargetLocks.get(activeSessionId)?.catch(() => undefined);
+			const targetLock = this.agentMessageTargetLocks.get(activeSessionId);
+			if (targetLock)
+				await waitForPromptAdmission(
+					targetLock.catch(() => undefined),
+					signal,
+				);
 			if (this.sessions.get(activeSessionId) !== state || this.closingSessions.has(activeSessionId)) {
 				throw new Error("Target session is closing before prompt delivery");
 			}
@@ -1419,7 +2019,12 @@ export class AgentDaemon {
 
 	private createRlmHeartbeatForState(
 		state: ActiveSessionState,
-		input: { instruction: string; interval?: string; label?: string; deliveryMode?: AgentHeartbeatDeliveryMode },
+		input: {
+			instruction: string;
+			interval?: string;
+			label?: string;
+			deliveryMode?: AgentHeartbeatDeliveryMode;
+		},
 	): AgentCronJob {
 		const session = state.runtime.session;
 		const sessionFile = session.sessionFile;
@@ -1544,7 +2149,11 @@ export class AgentDaemon {
 
 	private cancelScheduledJobsForSession(state: ActiveSessionState): void {
 		const session = state.runtime.session;
-		const target: { activeSessionId: string; sessionId?: string; sessionFile?: string } = {
+		const target: {
+			activeSessionId: string;
+			sessionId?: string;
+			sessionFile?: string;
+		} = {
 			activeSessionId: state.activeSessionId,
 		};
 		if (session?.sessionId) {
@@ -1587,9 +2196,6 @@ export class AgentDaemon {
 		job: AgentCronJob,
 		requirePersistedJob: boolean,
 	): Promise<ActiveSessionState | undefined> {
-		if (this.updateRestartPreparing) {
-			return undefined;
-		}
 		const dueJob = requirePersistedJob ? this.getRunnableCronJob(job.id) : job;
 		if (!dueJob) {
 			return undefined;
@@ -1600,9 +2206,13 @@ export class AgentDaemon {
 			(!requirePersistedJob || activeIdMatch?.runtime.session.sessionId === dueJob.sessionId
 				? activeIdMatch
 				: undefined);
+		const requiresRlmSubagentRestore =
+			dueJob.source === "rlm_heartbeat" &&
+			dueJob.runtimeKind === "subagent" &&
+			current?.runtime.metadata.kind !== "subagent";
 		// A half-bound match falls through to createRuntime, which awaits the
 		// pending create for the same session file instead of prompting mid-bind.
-		if (current && !this.bindingSessions.has(current.activeSessionId)) {
+		if (current && !this.bindingSessions.has(current.activeSessionId) && !requiresRlmSubagentRestore) {
 			this.rebindCronJobsToState(current);
 			const reboundJob = requirePersistedJob ? this.getRunnableCronJob(job.id) : dueJob;
 			return reboundJob && this.isCronJobRunnableForState(reboundJob, current, requirePersistedJob)
@@ -1649,12 +2259,24 @@ export class AgentDaemon {
 		}
 
 		try {
-			const parentState = await this.createRuntime(
+			const residentChild = this.findSessionBySessionFile(job.sessionFile);
+			await this.createRuntime(
 				{ type: "create", sessionPath: parentSessionPath },
 				() => this.getRunnableCronJob(job.id) !== undefined,
 			);
-			await this.rehydrateCompletedRlmSubagents(parentState);
-			const childState = this.findSessionBySessionFile(job.sessionFile);
+			const passiveSubagent = await this.findPassiveRlmSubagent(
+				job.sessionFile,
+				residentChild !== undefined && residentChild.runtime.metadata.kind !== "subagent",
+			);
+			const resident = this.findSessionBySessionFile(job.sessionFile);
+			const childState = passiveSubagent
+				? await this.hydratePassiveRlmSubagent(passiveSubagent)
+				: resident
+					? await this.waitForBoundSession(resident)
+					: undefined;
+			if (passiveSubagent && childState && this.getRunnableCronJob(job.id) === undefined) {
+				throw new RuntimeOpenCancelledError();
+			}
 			if (!childState || childState.runtime.metadata.kind !== "subagent") {
 				this.cancelRlmHeartbeat(job.id);
 				return undefined;
@@ -1663,7 +2285,7 @@ export class AgentDaemon {
 			const reboundJob = this.getRunnableCronJob(job.id);
 			return reboundJob && this.isCronJobRunnableForState(reboundJob, childState, true) ? childState : undefined;
 		} catch (error) {
-			if (error instanceof RuntimeOpenCancelledError) {
+			if (error instanceof RuntimeOpenCancelledError || error instanceof BoundSessionUnavailableError) {
 				return undefined;
 			}
 			throw error;
@@ -1753,21 +2375,116 @@ export class AgentDaemon {
 		return state;
 	}
 
-	private findRuntimeState(runtime: RlmSubagentRuntime): ActiveSessionState | undefined {
-		if (!(runtime instanceof AgentSessionRuntime)) {
-			return undefined;
-		}
-		for (const state of this.sessions.values()) {
-			if (state.runtime === runtime) {
-				return state;
+	private async getOrHydrateBoundSessionState(id: string): Promise<ActiveSessionState> {
+		let lookupError: unknown;
+		try {
+			return this.getBoundSessionState(id);
+		} catch (error) {
+			if (error instanceof BoundSessionUnavailableError) {
+				return this.waitForHydratingChild(this.getSessionState(id), id);
 			}
+			if (error instanceof AmbiguousActiveSessionError) {
+				throw error;
+			}
+			lookupError = error;
 		}
-		return undefined;
+		const passiveSubagent = await this.findPassiveRlmSubagent(id);
+		if (passiveSubagent) {
+			return this.hydratePassiveRlmSubagent(passiveSubagent);
+		}
+		const hydratingChild = [...this.sessions.values()].find(
+			(state) => state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === id,
+		);
+		if (hydratingChild) {
+			return this.waitForHydratingChild(hydratingChild, id);
+		}
+		try {
+			return this.getBoundSessionState(id);
+		} catch (error) {
+			if (error instanceof BoundSessionUnavailableError) {
+				return this.waitForHydratingChild(this.getSessionState(id), id);
+			}
+			if (error instanceof AmbiguousActiveSessionError) throw error;
+			throw lookupError;
+		}
+	}
+
+	private async waitForHydratingChild(state: ActiveSessionState, selector: string): Promise<ActiveSessionState> {
+		const sessionFile = state.runtime.session.sessionFile;
+		if (!sessionFile || !this.findPassivationBySessionFile(sessionFile)) {
+			return this.waitForBoundSession(state);
+		}
+		await this.waitForPassivation(sessionFile);
+		const passive = await this.findPassiveRlmSubagent(sessionFile);
+		return passive ? this.hydratePassiveRlmSubagent(passive) : this.getOrHydrateBoundSessionState(selector);
 	}
 
 	private createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost {
 		return {
 			createRlmSubagentRuntime: async (options) => this.createRlmSubagentRuntime(parentState, options),
+			completeRlmSubagentRuntime: (childId, session) => {
+				const state = [...this.sessions.values()].find(
+					(candidate) =>
+						candidate.runtime.metadata.kind === "subagent" &&
+						candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
+						candidate.runtime.metadata.rlmChildId === childId &&
+						candidate.runtime.session === session,
+				);
+				if (!state?.runtime.session.sessionFile) return false;
+				if (state.runtime.metadata.rehydratedCompleted) return true;
+				const metadata = state.runtime.metadata;
+				const model = session.model;
+				return this.recordRlmSubagentState(parentState, {
+					childId,
+					sessionName: session.sessionName ?? childId,
+					sessionDir: metadata.sessionDir ?? dirname(state.runtime.session.sessionFile),
+					sessionFile: state.runtime.session.sessionFile,
+					rlmDepth: session.rlmDepth,
+					rlmMaxDepth: session.rlmMaxDepth,
+					rlmParentNodeId: metadata.rlmParentNodeId,
+					prompt: metadata.prompt && metadata.prompt.length <= 4096 ? metadata.prompt : undefined,
+					spawnCode: metadata.spawnCode,
+					...(model ? { model: { provider: model.provider, modelId: model.id } } : {}),
+					status: "completed",
+					createdAt: metadata.createdAt,
+				});
+			},
+			releaseRlmSubagentRuntime: async (runtime, options, status) => {
+				// Persist the deletion boundary first, but never let a registry failure
+				// strand the cancelled child as a stale resident session.
+				let deletionError: unknown;
+				if (status === "cancelled") {
+					try {
+						await this.recordRlmSubagentDeletion(parentState, options.id, "revoked");
+					} catch (error) {
+						deletionError = error;
+					}
+				}
+				const state = [...this.sessions.values()].find(
+					(candidate) =>
+						candidate.runtime.metadata.kind === "subagent" &&
+						candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
+						candidate.runtime.metadata.rlmChildId === options.id &&
+						candidate.runtime.session === runtime.session,
+				);
+				try {
+					if (state) {
+						await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
+					} else {
+						await runtime.session.disposeAsync();
+					}
+				} finally {
+					// Sweep even when teardown throws (see deleteRlmSubagentRuntime);
+					// never throws, so it cannot mask a teardown error.
+					if (status === "cancelled" && deletionError === undefined) {
+						const childSessionFile = runtime.session?.sessionFile;
+						if (childSessionFile) {
+							await this.deleteRlmSubagentArtifacts(options.id, childSessionFile);
+						}
+					}
+				}
+				if (deletionError !== undefined) throw deletionError;
+			},
 			deleteRlmSubagentRuntime: async (childId, session) => {
 				const state = [...this.sessions.values()].find(
 					(candidate) =>
@@ -1775,20 +2492,65 @@ export class AgentDaemon {
 						candidate.runtime.metadata.parentActiveSessionId === parentState.activeSessionId &&
 						candidate.runtime.metadata.rlmChildId === childId,
 				);
-				// Persist the deletion boundary before tearing down the runtime. If the write
-				// fails, the live child remains available for the parent to retry instead of
-				// becoming a disposed session that can still rehydrate after a crash.
-				this.recordRlmSubagentDeletion(parentState, childId);
-				if (!state) {
-					await session.disposeAsync();
-					return;
-				}
-				const shouldDisposeStaleSession = state.runtime.session !== session;
+				const parentFile = parentState.runtime.session.sessionFile;
+				const parentPath = parentFile ? canonicalSessionPath(parentFile) : undefined;
+				// Tombstoned edges included: a retried delete must still resolve the
+				// child's path so its scheduled jobs get cancelled.
+				const persistedEdge = parentPath
+					? (await this.rlmSpawnLedger().edges(true)).find(
+							(edge) => edge.childId === childId && canonicalSessionPath(edge.parent) === parentPath,
+						)
+					: undefined;
+				// The writer-recorded path (not the ledger's realpath-canonical one)
+				// keys the cron store and residency maps.
+				const persisted =
+					persistedEdge && parentFile
+						? await this.passiveRlmSubagentEntryForEdge(persistedEdge, {
+								sessionId: parentState.runtime.session.sessionId,
+								sessionFile: parentFile,
+							})
+						: undefined;
+				// Pre-ledger children have no edge at all (tombstoned or live): the
+				// legacy registry (including its tombstones) is the last path source.
+				const legacyFallback =
+					!persisted && !state && parentFile
+						? (
+								await this.readLegacyRlmSubagentRegistry(
+									this.legacyRlmSubagentRegistryPath(parentFile, parentState.runtime.session.sessionId),
+								)
+							).find((entry) => entry.childId === childId)
+						: undefined;
+				const childSessionFile =
+					persisted?.sessionFile ?? state?.runtime.session.sessionFile ?? legacyFallback?.sessionFile;
+				// Persist the deletion boundary before tearing down the runtime.
+				await this.recordRlmSubagentDeletion(parentState, childId);
+				const staleSession = state && session && state.runtime.session !== session ? session : undefined;
 				try {
-					await this.closeSession(state, "killed", false);
+					try {
+						if (state) {
+							await this.closeSession(state, "killed", false);
+						} else {
+							await session?.disposeAsync();
+						}
+					} finally {
+						await staleSession?.disposeAsync();
+					}
 				} finally {
-					if (shouldDisposeStaleSession) {
-						await session.disposeAsync();
+					// Runs even when teardown throws: the jobs-cancel rewrite and the
+					// kernel dispose's final snapshot flush may have already happened,
+					// resurrecting the artifact dir swept in recordRlmSubagentDeletion.
+					// A killed close can join a passivation close that already skipped
+					// killed cleanup. Neither step may throw here: a jobs-store error
+					// would mask the teardown error and skip the sweep.
+					if (childSessionFile) {
+						try {
+							this.cancelScheduledJobsForSessionFile(childSessionFile);
+						} catch (error) {
+							this.log(
+								`failed to cancel scheduled jobs for deleted RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+						await this.deleteRlmSubagentArtifacts(childId, childSessionFile);
 					}
 				}
 			},
@@ -1798,45 +2560,6 @@ export class AgentDaemon {
 					throw cascadeError;
 				}
 			},
-			releaseRlmSubagentRuntime: async (runtime, options, status) => {
-				const state = this.findRuntimeState(runtime);
-				// A successful subagent stays resident so it's still viewable and messageable;
-				// closeChildSessions tears it down with the parent. Errored or cancelled children
-				// would re-seed as "done", so close them immediately.
-				if (state && status === "done") {
-					await flushAgentTraceUpload(state.runtime.session.sessionManager).catch(() => undefined);
-					// Retention can decline if deletion or parent teardown won while the trace
-					// flush was in flight. Persist completion only after retention succeeds, so
-					// a late completion cannot overwrite a durable deletion tombstone.
-					if (options.parentSession.retainFinishedRlmChildSession(options.id, runtime.session)) {
-						if (runtime.session.sessionFile) {
-							this.recordRlmSubagentRegistryEntry(parentState, {
-								childId: options.id,
-								sessionName: runtime.session.sessionName ?? options.sessionName,
-								sessionDir: options.sessionDir,
-								sessionFile: runtime.session.sessionFile,
-								rlmDepth: options.rlmDepth,
-								rlmMaxDepth: options.rlmMaxDepth,
-								rlmParentNodeId: options.rlmParentNodeId,
-								prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
-								spawnCode: options.spawnCode,
-								status: "completed",
-								createdAt: state.runtime.metadata.createdAt,
-							});
-						}
-						return;
-					}
-				}
-				if (state) {
-					await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
-					return;
-				}
-				if (runtime instanceof AgentSessionRuntime) {
-					await runtime.dispose();
-					return;
-				}
-				runtime.session.dispose();
-			},
 		};
 	}
 
@@ -1845,9 +2568,10 @@ export class AgentDaemon {
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
-		if (options.parentSession.sessionFile) {
-			sessionManager.newSession({ parentSession: options.parentSession.sessionFile });
-		}
+		sessionManager.newSession({
+			parentSession: options.parentSession.sessionFile,
+			rlmDepth: options.rlmDepth,
+		});
 		let stateRef: ActiveSessionState | undefined;
 		// Subagents inherit the parent's client env (e.g. herdr pane identity).
 		const runtime = await withClientEnv(parentState.clientEnv, () =>
@@ -1899,6 +2623,7 @@ export class AgentDaemon {
 					rlmMaxDepth: options.rlmMaxDepth,
 					rlmSessionDir: options.sessionDir,
 					rlmParentNodeId: options.rlmParentNodeId,
+					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
 				},
 				runtimeMetadata: {
 					kind: "subagent",
@@ -1914,85 +2639,378 @@ export class AgentDaemon {
 				},
 			}),
 		);
-		await this.addRuntime(
-			runtime,
-			undefined,
-			parentState.clientEnv,
-			(state) => {
-				stateRef = state;
-			},
-			() => options.parentSession.getRlmChildRunStatus(options.id) !== "cancelled",
-			() => {
-				if (runtime.session.sessionName !== options.sessionName) {
-					runtime.session.setSessionName(options.sessionName);
-				}
-				if (runtime.session.sessionFile) {
-					this.recordRlmSubagentRegistryEntry(parentState, {
-						childId: options.id,
-						sessionName: options.sessionName,
-						sessionDir: options.sessionDir,
-						sessionFile: runtime.session.sessionFile,
-						rlmDepth: options.rlmDepth,
-						rlmMaxDepth: options.rlmMaxDepth,
-						rlmParentNodeId: options.rlmParentNodeId,
-						prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
-						spawnCode: options.spawnCode,
-						status: "running",
-						createdAt: runtime.metadata.createdAt,
-					});
-				}
-				options.onSessionPublished?.(runtime.session);
-			},
-		);
+		let state: ActiveSessionState;
+		try {
+			state = await this.addRuntime(
+				runtime,
+				undefined,
+				parentState.clientEnv,
+				(createdState) => {
+					stateRef = createdState;
+				},
+				() => options.parentSession.getRlmChildRunStatus(options.id) !== "cancelled",
+				() => {
+					if (runtime.session.sessionName !== options.sessionName) {
+						runtime.session.setSessionName(options.sessionName);
+					}
+					if (runtime.session.sessionFile) {
+						this.recordRlmSubagentState(parentState, {
+							childId: options.id,
+							sessionName: options.sessionName,
+							sessionDir: options.sessionDir,
+							sessionFile: runtime.session.sessionFile,
+							rlmDepth: options.rlmDepth,
+							rlmMaxDepth: options.rlmMaxDepth,
+							rlmParentNodeId: options.rlmParentNodeId,
+							prompt: options.prompt.length <= 4096 ? options.prompt : undefined,
+							spawnCode: options.spawnCode,
+							model: {
+								provider: options.model.provider,
+								modelId: options.model.id,
+							},
+							status: "running",
+							createdAt: runtime.metadata.createdAt,
+						});
+					}
+					options.onSessionPublished?.(runtime.session);
+				},
+			);
+		} catch (error) {
+			this.pendingRlmSpawnAppends.delete(options.id);
+			throw error;
+		}
+		// Admission is complete only once the spawn record is durably in the
+		// ledger: no self-heal exists for a lost spawn record (seeding only runs
+		// when the ledger file is absent; reconciliation only drops edges). A
+		// failed append therefore FAILS admission — the just-added child is
+		// closed like any other admission failure rather than admitted as a
+		// ghost the ledger-driven listing and hydration could never find.
+		const spawnAppend = this.pendingRlmSpawnAppends.get(options.id);
+		this.pendingRlmSpawnAppends.delete(options.id);
+		try {
+			await spawnAppend;
+		} catch (error) {
+			await this.closeSession(state, "killed", false).catch(() => undefined);
+			// The child was never admitted: no ledger edge exists, so the
+			// display file written at the spawn write point must not remain
+			// claiming a running child.
+			try {
+				rmSync(rlmSubagentDisplayPath(options.sessionDir), { force: true });
+			} catch {
+				// Best-effort: a stale display file without an edge is inert.
+			}
+			throw new Error(
+				`Failed to record RLM subagent spawn for ${options.id}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		return runtime;
 	}
 
-	private isRlmAncestorState(state: ActiveSessionState, candidate: ActiveSessionState): boolean {
-		const visited = new Set<string>();
-		let current: ActiveSessionState | undefined = state;
-		while (current && !visited.has(current.activeSessionId)) {
-			if (current.activeSessionId === candidate.activeSessionId) {
-				return true;
-			}
-			visited.add(current.activeSessionId);
-			const parentId: string | undefined = current.runtime.metadata.parentActiveSessionId;
-			current = parentId ? this.sessions.get(parentId) : undefined;
-		}
-		return false;
+	private async sessionPassivationSnapshot(
+		state: ActiveSessionState,
+		passiveRlmSubagents?: readonly PassiveRlmSubagent[],
+	): Promise<SessionPassivationSnapshot> {
+		const passiveDescendants = passiveRlmSubagents ?? (await this.listPassiveRlmSubagents());
+		const summary = summaryForActiveSession(state);
+		const sessionFile = state.runtime.session.sessionFile;
+		const jobs = this.cronStore
+			.list()
+			.filter(
+				(job) =>
+					job.activeSessionId === state.activeSessionId &&
+					job.status !== "cancelled" &&
+					job.status !== "completed",
+			);
+		const hasPendingAdmission =
+			this.agentMessageAcceptingTargets.has(state.activeSessionId) ||
+			this.agentMessagePreparingTargets.has(state.activeSessionId) ||
+			this.agentMessageTargetLocks.has(state.activeSessionId) ||
+			[...this.promptAdmissions.values()].some(
+				(admission) => admission.activeSessionId === state.activeSessionId && admission.status !== "cancelled",
+			) ||
+			state.runtime.session.hasPendingAdmissionWaiters;
+		return {
+			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true || hasPendingAdmission,
+			attachedClients: state.clients.size + state.pendingAttaches,
+			hasRegisteredHeartbeat: jobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
+			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
+			lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
+			hasParent: state.runtime.metadata.kind === "subagent" && !!state.runtime.metadata.parentActiveSessionId,
+			hasNonPassiveDescendants: getChildActiveSessionStates(this.sessions, state).length > 0,
+			isHydrating:
+				this.bindingSessions.has(state.activeSessionId) ||
+				(sessionFile ? this.openingSessions.has(resolve(sessionFile)) : false) ||
+				passiveDescendants.some(
+					(passive) =>
+						passive.rootParentState === state &&
+						passive.chain.some((entry) => this.openingSessions.has(resolve(entry.sessionFile))),
+				),
+		};
 	}
 
-	private hasRlmSubagentState(parentState: ActiveSessionState, childId: string, sessionFile?: string): boolean {
-		const targetSessionFile = sessionFile ? resolve(sessionFile) : undefined;
-		return [...this.sessions.values()].some((state) => {
-			const existingFile = state.runtime.session.sessionFile;
-			if (targetSessionFile && existingFile && resolve(existingFile) === targetSessionFile) {
-				return true;
+	private async passivateSession(
+		state: ActiveSessionState,
+		idleEvictionMinutes: IdleEvictionMinutes,
+		now: number,
+		selectedSnapshot?: SessionPassivationSnapshot,
+	): Promise<boolean> {
+		const sessionFile = state.runtime.session.sessionFile;
+		const metadata = state.runtime.metadata;
+		if (!sessionFile || metadata.kind !== "subagent" || !metadata.rlmChildId || !metadata.parentActiveSessionId) {
+			return false;
+		}
+		const sessionKey = resolve(sessionFile);
+		const parentActiveSessionId = metadata.parentActiveSessionId;
+		const childId = metadata.rlmChildId;
+		const existing = this.passivatingSessions.get(sessionKey);
+		if (existing) {
+			await existing;
+			return false;
+		}
+		const snapshot = selectedSnapshot ?? (await this.sessionPassivationSnapshot(state));
+		if (!canPassivateSession(snapshot, idleEvictionMinutes, now)) return false;
+
+		// Publish the durable identity before running the close so opens and lazy
+		// hydration can join throughout closeSessionOnce, including after sessions.delete.
+		const passivation = Promise.resolve().then(async () => {
+			// Fence against touches and state changes after candidate selection. This
+			// snapshot is intentionally fresh rather than reusing the sweep snapshot.
+			if (
+				this.shuttingDown ||
+				this.updateRestart !== undefined ||
+				this.sessions.get(state.activeSessionId) !== state ||
+				!canPassivateSession(await this.sessionPassivationSnapshot(state), idleEvictionMinutes, now)
+			) {
+				return;
 			}
-			const metadata = state.runtime.metadata;
-			return (
-				metadata.kind === "subagent" &&
-				metadata.parentActiveSessionId === parentState.activeSessionId &&
-				metadata.rlmChildId === childId
+			const parentState = this.sessions.get(parentActiveSessionId);
+			if (!parentState) return;
+			const idleMinutes = Math.floor((now - snapshot.lastActivityAt) / 60_000);
+			// Detach parent tracking before the standard graceful runtime disposal. The
+			// registry/catalog rows remain the sole passive representation after close.
+			const unsubscribeChild = parentState.runtime.session.releaseRlmChildSession(childId, state.runtime.session);
+			if (!unsubscribeChild) {
+				return;
+			}
+			try {
+				await this.closeSession(state, "shutdown", true, false);
+			} catch (error) {
+				// A pre-removal close failure must not strand a resident child outside its
+				// parent's ownership map or disconnect its event forwarder.
+				if (
+					this.sessions.get(state.activeSessionId) === state &&
+					this.sessions.get(parentActiveSessionId) === parentState &&
+					parentState.runtime.session.registerRlmChildSession(childId, state.runtime.session, unsubscribeChild)
+				) {
+					throw error;
+				}
+				unsubscribeChild();
+				throw error;
+			}
+			unsubscribeChild();
+			this.log(
+				`Passivated idle child sessionId=${state.runtime.session.sessionId} name=${JSON.stringify(state.runtime.session.sessionName ?? "")} idleMinutes=${idleMinutes}`,
 			);
 		});
+		this.passivatingSessions.set(sessionKey, passivation);
+		try {
+			await passivation;
+			return this.sessions.get(state.activeSessionId) !== state;
+		} finally {
+			if (this.passivatingSessions.get(sessionKey) === passivation) {
+				this.passivatingSessions.delete(sessionKey);
+			}
+		}
+	}
+
+	private async passivateIdleChildren(
+		idleEvictionMinutes: IdleEvictionMinutes,
+		now: number,
+		limit: number,
+	): Promise<number> {
+		if (this.shuttingDown || this.updateRestart !== undefined || limit <= 0) return 0;
+		const states = [...this.sessions.values()];
+		const passiveRlmSubagents = await this.listPassiveRlmSubagents();
+		const snapshots = await Promise.all(
+			states.map(async (state) => ({
+				state,
+				snapshot: await this.sessionPassivationSnapshot(state, passiveRlmSubagents),
+			})),
+		);
+		const candidates = snapshots
+			.filter(({ snapshot }) => canPassivateSession(snapshot, idleEvictionMinutes, now))
+			.sort((left, right) => left.snapshot.lastActivityAt - right.snapshot.lastActivityAt)
+			.slice(0, limit);
+		const results = await Promise.all(
+			candidates.map(({ state, snapshot }) => this.passivateSession(state, idleEvictionMinutes, now, snapshot)),
+		);
+		return results.filter(Boolean).length;
+	}
+
+	private findPassivationBySessionFile(sessionFile: string): Promise<void> | undefined {
+		return this.passivatingSessions.get(resolve(sessionFile));
+	}
+
+	private async waitForPassivation(sessionFile: string): Promise<void> {
+		const passivation = this.findPassivationBySessionFile(sessionFile);
+		if (passivation) await passivation.catch(() => {});
+	}
+
+	private async hydratePassiveRlmSubagent(
+		passive: PassiveRlmSubagent,
+		clientEnv?: Record<string, string>,
+	): Promise<ActiveSessionState> {
+		if (this.updateRestart !== undefined) {
+			throw new BoundSessionUnavailableError("Daemon is preparing an update restart");
+		}
+		const isResident = (state: ActiveSessionState): boolean =>
+			this.sessions.get(state.activeSessionId) === state && !this.closingSessions.has(state.activeSessionId);
+		const restartAfterParentChange = async (staleParent: ActiveSessionState): Promise<ActiveSessionState> => {
+			const staleParentFile = staleParent.runtime.session.sessionFile;
+			if (staleParentFile) await this.waitForPassivation(staleParentFile);
+			const refreshed = await this.findPassiveRlmSubagent(passive.entry.sessionFile, true);
+			if (!refreshed) throw new RuntimeOpenCancelledError();
+			const resident = this.findSessionBySessionFile(passive.entry.sessionFile);
+			if (
+				resident &&
+				resident.runtime.metadata.kind === "subagent" &&
+				resident.runtime.metadata.rlmChildId === passive.entry.childId
+			) {
+				return this.waitForBoundSession(resident);
+			}
+			return this.hydratePassiveRlmSubagent(refreshed, clientEnv);
+		};
+		const rootParent = passive.rootParentState;
+		if (!rootParent) {
+			throw new Error(`Cannot hydrate RLM subagent ${passive.entry.childId} without a resident root parent`);
+		}
+		const rootParentFile = rootParent.runtime.session.sessionFile;
+		if (rootParentFile) await this.waitForPassivation(rootParentFile);
+		if (!isResident(rootParent)) {
+			return restartAfterParentChange(rootParent);
+		}
+		let parentState = rootParent;
+		for (const entry of passive.chain) {
+			await this.waitForPassivation(entry.sessionFile);
+			if (!isResident(parentState)) {
+				return restartAfterParentChange(parentState);
+			}
+			const hydratingParent = parentState;
+			const activeSessionId = entry === passive.entry ? passive.info.id : undefined;
+			let hydrated: ActiveSessionState;
+			try {
+				hydrated = await this.rehydrateCompletedRlmSubagent(hydratingParent, entry, activeSessionId, clientEnv);
+			} catch (error) {
+				const passivation = this.findPassivationBySessionFile(entry.sessionFile);
+				if (error instanceof BoundSessionUnavailableError && passivation) {
+					await passivation.catch(() => {});
+					return restartAfterParentChange(hydratingParent);
+				}
+				if (isResident(hydratingParent)) throw error;
+				return restartAfterParentChange(hydratingParent);
+			}
+			if (!isResident(hydratingParent)) {
+				return restartAfterParentChange(hydratingParent);
+			}
+			if (!isResident(hydrated)) {
+				return restartAfterParentChange(hydrated);
+			}
+			parentState = hydrated;
+		}
+		return parentState;
 	}
 
 	private async rehydrateCompletedRlmSubagent(
 		parentState: ActiveSessionState,
-		entry: PersistedRlmSubagentRegistryEntry,
+		entry: PassiveRlmSubagentEntry,
+		restoreActiveSessionId?: string,
+		clientEnv?: Record<string, string>,
 	): Promise<ActiveSessionState> {
+		if (this.updateRestart !== undefined) {
+			throw new BoundSessionUnavailableError("Daemon is preparing an update restart");
+		}
+		const sessionKey = resolve(entry.sessionFile);
+		const reservation = this.reservingSessionOpens.get(sessionKey);
+		if (reservation) {
+			await reservation;
+			return this.rehydrateCompletedRlmSubagent(parentState, entry, restoreActiveSessionId, clientEnv);
+		}
+		const pending = this.openingSessions.get(sessionKey);
+		if (pending) {
+			const state = await pending;
+			if (state.runtime.metadata.kind !== "subagent" || state.runtime.metadata.rlmChildId !== entry.childId) {
+				if (this.openingSessions.get(sessionKey) === pending) this.openingSessions.delete(sessionKey);
+				return this.rehydrateCompletedRlmSubagent(parentState, entry, restoreActiveSessionId, clientEnv);
+			}
+			return this.waitForBoundSession(state);
+		}
+		const existing = this.findSessionBySessionFile(entry.sessionFile);
+		if (existing?.runtime.metadata.kind === "subagent" && existing.runtime.metadata.rlmChildId === entry.childId) {
+			return this.waitForBoundSession(existing);
+		}
+		const hydration = (async () => {
+			if (existing) {
+				await this.closeSession(existing, "replaced");
+			}
+			return this.rehydrateCompletedRlmSubagentOnce(parentState, entry, restoreActiveSessionId, clientEnv);
+		})();
+		// Explicit opens and all lazy triggers share this path-keyed publication,
+		// so no caller can acquire a second lease/runtime while hydration binds.
+		this.openingSessions.set(sessionKey, hydration);
+		try {
+			return await hydration;
+		} finally {
+			if (this.openingSessions.get(sessionKey) === hydration) {
+				this.openingSessions.delete(sessionKey);
+			}
+		}
+	}
+
+	private async waitForBoundSession(state: ActiveSessionState): Promise<ActiveSessionState> {
+		const completion = this.bindingCompletions.get(state.activeSessionId);
+		if (completion) {
+			await completion;
+		}
+		if (this.sessions.get(state.activeSessionId) !== state || this.bindingSessions.has(state.activeSessionId)) {
+			throw new BoundSessionUnavailableError(`Active session ${state.activeSessionId} did not finish initializing`);
+		}
+		if (this.closingSessions.has(state.activeSessionId)) {
+			throw new BoundSessionUnavailableError(`Active session ${state.activeSessionId} is closing`);
+		}
+		return state;
+	}
+
+	private async rehydrateCompletedRlmSubagentOnce(
+		parentState: ActiveSessionState,
+		entry: PassiveRlmSubagentEntry,
+		restoreActiveSessionId?: string,
+		clientEnv?: Record<string, string>,
+	): Promise<ActiveSessionState> {
+		const hydrationEnv = parentState.clientEnv ?? clientEnv;
 		let stateRef: ActiveSessionState | undefined;
 		let runtime: AgentSessionRuntime | undefined;
+		let sessionLease: SessionLease | undefined;
 		try {
+			sessionLease = acquireSessionLease(entry.sessionFile, parentState.runtime.services.agentDir);
 			const sessionManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
-			runtime = await withClientEnv(parentState.clientEnv, () =>
+			const modelRegistry = parentState.runtime.services.modelRegistry;
+			let rehydratedModel: Model<Api> | undefined;
+			if (entry.model) {
+				const resolved = modelRegistry.find(entry.model.provider, entry.model.modelId);
+				if (resolved && (await modelRegistry.canUseModel(resolved))) {
+					rehydratedModel = resolved;
+				}
+			}
+			runtime = await withClientEnv(hydrationEnv, () =>
 				createAgentSessionRuntime(this.options.createRuntime, {
 					cwd: sessionManager.getCwd(),
 					agentDir: parentState.runtime.services.agentDir,
 					sessionManager,
 					sessionStartEvent: { type: "session_start", reason: "startup" },
 					sessionConfig: parentState.runtime.runtimeConfig,
+					sessionLease,
 					sessionOptions: {
+						...(rehydratedModel ? { model: rehydratedModel } : {}),
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),
 						rlmHeartbeatController: {
@@ -2022,8 +3040,15 @@ export class AgentDaemon {
 							},
 						},
 						rlmSessionDir: entry.sessionDir,
-						rlmDepth: entry.rlmDepth ?? 1,
-						rlmMaxDepth: entry.rlmMaxDepth ?? 1,
+						// Registry depth is authoritative (written at spawn); for legacy entries
+						// without it, the shared accessor resolves persisted header depth or the
+						// session file's sub- path before the depth-1 default.
+						rlmDepth:
+							entry.rlmDepth ??
+							(existsSync(entry.sessionFile)
+								? resolveSessionRlmDepth(sessionManager.getHeader() ?? {}, entry.sessionFile)
+								: 1),
+						rlmMaxDepth: entry.rlmMaxDepth,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
 					},
 					runtimeMetadata: {
@@ -2036,22 +3061,44 @@ export class AgentDaemon {
 							: {}),
 						rlmChildId: entry.childId,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
+						rehydratedCompleted: true,
 						...(entry.prompt ? { prompt: entry.prompt } : {}),
 						...(entry.spawnCode ? { spawnCode: entry.spawnCode } : {}),
 						sessionDir: entry.sessionDir,
 					},
 				}),
 			);
-			const state = await this.addRuntime(runtime, undefined, parentState.clientEnv, (createdState) => {
-				stateRef = createdState;
-			});
+			const state = await this.addRuntime(
+				runtime,
+				undefined,
+				hydrationEnv,
+				(createdState) => {
+					stateRef = createdState;
+				},
+				undefined,
+				undefined,
+				restoreActiveSessionId,
+			);
 			// The session transcript is authoritative for mutable metadata such as a
 			// later user-assigned name; the registry value is only the spawn snapshot.
-			if (!parentState.runtime.session.retainFinishedRlmChildSession(entry.childId, runtime.session)) {
+			if (!parentState.runtime.session.registerRlmChildSession(entry.childId, runtime.session)) {
 				await this.closeSession(state, "replaced");
 				throw new RuntimeOpenCancelledError();
 			}
-			await this.rehydrateCompletedRlmSubagents(state);
+			if (
+				this.sessions.get(parentState.activeSessionId) !== parentState ||
+				this.closingSessions.has(parentState.activeSessionId)
+			) {
+				const unsubscribeChild = parentState.runtime.session.releaseRlmChildSession(entry.childId, runtime.session);
+				try {
+					await this.closeSession(state, "replaced");
+				} finally {
+					if (unsubscribeChild) {
+						unsubscribeChild();
+					}
+				}
+				throw new RuntimeOpenCancelledError();
+			}
 			return state;
 		} catch (error) {
 			if (stateRef && this.sessions.get(stateRef.activeSessionId) === stateRef) {
@@ -2059,84 +3106,8 @@ export class AgentDaemon {
 			} else {
 				await runtime?.dispose().catch(() => undefined);
 			}
+			sessionLease?.release();
 			throw error;
-		}
-	}
-
-	private async rehydrateCompletedRlmSubagents(parentState: ActiveSessionState): Promise<void> {
-		for (const entry of this.readLatestRlmSubagentRegistry(parentState)) {
-			if (entry.status !== "completed" || !existsSync(entry.sessionFile)) {
-				continue;
-			}
-			const sessionKey = resolve(entry.sessionFile);
-			const existing = this.findSessionBySessionFile(entry.sessionFile);
-			if (existing && this.isRlmAncestorState(parentState, existing)) {
-				continue;
-			}
-			if (existing && !this.bindingSessions.has(existing.activeSessionId)) {
-				if (existing.runtime.metadata.kind !== "top-level") {
-					continue;
-				}
-				// A stable explicit open has already returned a valid active ID. Notify
-				// its clients before replacing it with the correctly configured child.
-				await this.closeSession(existing, "replaced").catch((error) => {
-					this.log(
-						`failed to replace top-level RLM subagent ${entry.sessionName}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-				});
-			}
-			const pending = this.openingSessions.get(sessionKey);
-			if (pending) {
-				const claim = { parentState, entry };
-				const installedClaim = !this.rlmRehydrationClaims.has(sessionKey);
-				if (installedClaim) {
-					// createRuntime consumes this after binding but before top-level recursive
-					// recovery or promise resolution, so callers receive the child state.
-					this.rlmRehydrationClaims.set(sessionKey, claim);
-				}
-				try {
-					await pending;
-					continue;
-				} catch (error) {
-					this.log(
-						`failed to await completed RLM subagent ${entry.sessionName}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-					// The failed owner completed all runtime cleanup before rejecting. Clear
-					// only that stale claim, then let rehydration retry the persisted child.
-					if (this.openingSessions.get(sessionKey) === pending) {
-						this.openingSessions.delete(sessionKey);
-					}
-					if (this.hasRlmSubagentState(parentState, entry.childId, entry.sessionFile)) {
-						continue;
-					}
-				} finally {
-					if (installedClaim && this.rlmRehydrationClaims.get(sessionKey) === claim) {
-						this.rlmRehydrationClaims.delete(sessionKey);
-					}
-				}
-			}
-			if (this.hasRlmSubagentState(parentState, entry.childId, entry.sessionFile)) {
-				continue;
-			}
-			const opening = this.rehydrateCompletedRlmSubagent(parentState, entry);
-			this.openingSessions.set(sessionKey, opening);
-			try {
-				await opening;
-			} catch (error) {
-				this.log(
-					`failed to rehydrate completed RLM subagent ${entry.sessionName}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-			} finally {
-				if (this.openingSessions.get(sessionKey) === opening) {
-					this.openingSessions.delete(sessionKey);
-				}
-			}
 		}
 	}
 
@@ -2152,12 +3123,14 @@ export class AgentDaemon {
 		};
 		return {
 			listAgents: () => this.createAgentMessageListResult(requireCurrentState()),
+			roster: () => this.createAgentFamilyRoster(requireCurrentState()),
+			assertSessionNameAvailable: (input) => this.assertFamilySessionNameAvailable(input),
+			setSessionName: (name) => this.setStateSessionNameViaSupervisor(requireCurrentState(), name),
 			sendAgentMessage: (input) =>
 				this.sendAgentSessionMessage({
 					targetSelector: input.target,
 					message: input.message,
 					fromState: requireCurrentState(),
-					deliveryMode: input.deliveryMode,
 					origin: "agent",
 				}),
 		};
@@ -2178,29 +3151,70 @@ export class AgentDaemon {
 		};
 	}
 
-	private createAgentObserveListResult(currentState: ActiveSessionState): AgentObserveListResult {
+	private async createAgentObserveListResult(currentState: ActiveSessionState): Promise<AgentObserveListResult> {
+		const agents = this.listTargetableSessionStates(currentState)
+			.filter(
+				(state) =>
+					state.activeSessionId === currentState.activeSessionId ||
+					this.isAgentFamilyReachable(currentState, state),
+			)
+			.map((state) => this.createAgentObserveSummary(state, currentState));
+		const residentIds = new Set(agents.map((agent) => agent.activeSessionId));
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			if (residentIds.has(passive.info.id)) continue;
+			try {
+				assertAgentFamilyReach(this.agentFamilyEntry(currentState), this.passiveAgentFamilyEntry(passive));
+			} catch (error) {
+				if (error instanceof Error && error.message === AGENT_FAMILY_REACH_ERROR) continue;
+				throw error;
+			}
+			agents.push({
+				activeSessionId: passive.info.id,
+				sessionId: passive.info.id,
+				sessionName: passive.info.name ?? passive.entry.sessionName,
+				runtimeKind: "subagent",
+				cwd: passive.info.cwd,
+				status: "idle",
+				isCurrent: false,
+				isStreaming: false,
+				isCompacting: false,
+				attachedClients: 0,
+				messageCount: passive.info.messageCount,
+				queuedCount: 0,
+				isSessionActive: false,
+				...(passive.chain.length === 1 && passive.rootParentState
+					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
+					: {}),
+				parentSessionId: passive.entry.parentSessionId,
+				rlmChildId: passive.entry.childId,
+				...(passive.entry.rlmParentNodeId ? { rlmParentNodeId: passive.entry.rlmParentNodeId } : {}),
+				...(passive.info.firstMessage ? { firstMessage: passive.info.firstMessage } : {}),
+			});
+			residentIds.add(passive.info.id);
+		}
 		return {
 			current: this.createAgentObserveSummary(currentState, currentState),
-			agents: this.listTargetableSessionStates(currentState).map((state) =>
-				this.createAgentObserveSummary(state, currentState),
-			),
+			agents,
 		};
 	}
 
-	private createAgentObserveAgentSnapshot(
+	private async createAgentObserveAgentSnapshot(
 		currentState: ActiveSessionState,
 		target: string,
-	): AgentObserveAgentSnapshot {
+	): Promise<AgentObserveAgentSnapshot> {
+		const targetState = await this.getOrHydrateAuthorizedAgentFamilyTarget(currentState, target);
+		this.assertAgentFamilyReachable(currentState, targetState);
 		return {
-			agent: this.createAgentObserveSummary(this.getBoundSessionState(target), currentState),
+			agent: this.createAgentObserveSummary(targetState, currentState),
 		};
 	}
 
-	private createAgentObserveRecentMessages(
+	private async createAgentObserveRecentMessages(
 		currentState: ActiveSessionState,
 		input: AgentObserveRecentMessagesInput,
-	): AgentObserveRecentMessagesResult {
-		const targetState = this.getBoundSessionState(input.target);
+	): Promise<AgentObserveRecentMessagesResult> {
+		const targetState = await this.getOrHydrateAuthorizedAgentFamilyTarget(currentState, input.target);
+		this.assertAgentFamilyReachable(currentState, targetState);
 		const limit = normalizeObserveLimit(input.limit);
 		const maxChars = normalizeObserveMaxChars(input.maxChars);
 		const messages = targetState.runtime.session.messages;
@@ -2232,11 +3246,7 @@ export class AgentDaemon {
 					: "model"
 				: session.isCompacting
 					? "compacting"
-					: session.isRetrying ||
-							session.isBashRunning ||
-							session.hasAcceptedPromptInFlight ||
-							session.pendingMessageCount > 0 ||
-							session.hasRunningRlmChildren()
+					: session.isSessionActive || session.hasRunningRlmChildren()
 						? "busy"
 						: state.clients.size > 0
 							? "user"
@@ -2253,13 +3263,18 @@ export class AgentDaemon {
 			isCompacting: summary.isCompacting,
 			attachedClients: summary.attachedClients,
 			messageCount: summary.messageCount,
-			pendingMessageCount: summary.pendingMessageCount,
+			queuedCount: summary.sessionActions.queuedCount,
+			isSessionActive: summary.isSessionActive,
 			...(summary.parentActiveSessionId ? { parentActiveSessionId: summary.parentActiveSessionId } : {}),
 			...(summary.parentSessionId ? { parentSessionId: summary.parentSessionId } : {}),
 			...(summary.rlmChildId ? { rlmChildId: summary.rlmChildId } : {}),
 			...(summary.rlmParentNodeId ? { rlmParentNodeId: summary.rlmParentNodeId } : {}),
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
-			...(latest ? { latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, 240) } : {}),
+			...(latest
+				? {
+						latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, 240),
+					}
+				: {}),
 		};
 	}
 
@@ -2282,6 +3297,7 @@ export class AgentDaemon {
 			socketPath: this.socketPath,
 			protocol: DAEMON_PROTOCOL_INFO,
 			schemaId: DAEMON_SCHEMA_ID,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
 			appVersion: VERSION,
 			runtime: getDaemonRuntimeIdentity(),
 			clientId: client.id,
@@ -2328,12 +3344,14 @@ export class AgentDaemon {
 			cleanedUp = true;
 			socket.off("close", cleanup);
 			socket.off("error", cleanup);
+			this.clearClientCatchupRetry(client);
 			this.detachClient(client);
 			client.detachInput();
 			this.clients.delete(client);
-			this.supervisorClaims.delete(client);
+			const wasAuthenticated = client.authenticated === true;
+			this.revokeSupervisorClaim(client);
 			const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
-			if (this.options.worker && client.authenticated === true && supervisorSocketPath) {
+			if (this.options.worker && wasAuthenticated && supervisorSocketPath) {
 				this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 100);
 			}
 		};
@@ -2349,13 +3367,49 @@ export class AgentDaemon {
 		});
 	}
 
+	private promptAdmissionKey(activeSessionId: string, admissionId: string): string {
+		return `${activeSessionId}\0${admissionId}`;
+	}
+
+	/**
+	 * Parse and synchronously register prompt admission before returning a promise.
+	 * This method is intentionally non-async: handleLine invokes it before its first await.
+	 */
+	private parseCommandAndRegisterPromptAdmission(client: DaemonSocketClient, line: string): unknown {
+		const wireValue = JSON.parse(line) as unknown;
+		if (isDaemonCommandEnvelope(wireValue) && wireValue.clientId) client.id = wireValue.clientId;
+		const parsed = (isDaemonCommandEnvelope(wireValue) ? { ...wireValue.command, id: wireValue.id } : wireValue) as {
+			type?: unknown;
+			activeSessionId?: unknown;
+			admissionId?: unknown;
+		};
+		if (parsed.type === "prompt" || parsed.type === "prompt_and_wait") {
+			if (parsed.admissionId !== undefined) {
+				if (typeof parsed.activeSessionId !== "string" || typeof parsed.admissionId !== "string") {
+					throw new Error("Prompt admission requires string activeSessionId and admissionId");
+				}
+				if (parsed.admissionId === "") throw new Error("admissionId must not be empty");
+				const key = this.promptAdmissionKey(parsed.activeSessionId, parsed.admissionId);
+				if (this.promptAdmissions.has(key)) {
+					throw new Error(`Prompt admission id is already in use: ${parsed.admissionId}`);
+				}
+				this.promptAdmissions.set(key, {
+					activeSessionId: parsed.activeSessionId,
+					admissionId: parsed.admissionId,
+					controller: new AbortController(),
+					status: "waiting",
+				});
+			}
+		}
+		return parsed;
+	}
+
 	private async handleLine(client: DaemonSocketClient, line: string): Promise<void> {
 		let command: DaemonCommand;
+		let clearParsedAdmission = () => {};
+		let promptHandlerOwnsAdmission = false;
 		try {
-			const wireValue = JSON.parse(line) as unknown;
-			const parsed = (
-				isDaemonCommandEnvelope(wireValue) ? { ...wireValue.command, id: wireValue.id } : wireValue
-			) as {
+			const parsed = this.parseCommandAndRegisterPromptAdmission(client, line) as {
 				id?: unknown;
 				type?: unknown;
 				token?: unknown;
@@ -2364,13 +3418,28 @@ export class AgentDaemon {
 				supervisorProcessStartId?: unknown;
 				supervisorSocketPath?: unknown;
 				activeSessionId?: unknown;
+				admissionId?: unknown;
 				capabilities?: unknown;
 				supportsExtensionUi?: unknown;
 				job?: unknown;
 			};
-			if (isDaemonCommandEnvelope(wireValue) && wireValue.clientId) {
-				client.id = wireValue.clientId;
-			}
+			const parsedAdmission =
+				(parsed.type === "prompt" || parsed.type === "prompt_and_wait") &&
+				typeof parsed.activeSessionId === "string" &&
+				typeof (parsed as { admissionId?: unknown }).admissionId === "string"
+					? this.promptAdmissions.get(
+							this.promptAdmissionKey(parsed.activeSessionId, (parsed as { admissionId: string }).admissionId),
+						)
+					: undefined;
+			clearParsedAdmission = () => {
+				if (!parsedAdmission) return;
+				const key = this.promptAdmissionKey(parsedAdmission.activeSessionId, parsedAdmission.admissionId);
+				if (this.promptAdmissions.get(key) === parsedAdmission) {
+					this.promptAdmissions.delete(key);
+				}
+			};
+			// Envelope client identity is irrelevant to worker-local prompt admission.
+			// Public supervisor authentication has already bound this socket's identity.
 			if (this.options.worker && client.authenticated !== true) {
 				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
 				if (
@@ -2382,6 +3451,7 @@ export class AgentDaemon {
 					(parsed.supervisorProcessStartId !== undefined && typeof parsed.supervisorProcessStartId !== "string") ||
 					typeof parsed.supervisorSocketPath !== "string"
 				) {
+					clearParsedAdmission();
 					this.write(client, failure(commandId, "worker_auth", "Worker authentication failed"));
 					client.socket.end();
 					return;
@@ -2404,6 +3474,7 @@ export class AgentDaemon {
 				}
 				for (const previous of this.supervisorClaims.keys()) {
 					if (previous !== client) {
+						this.revokeSupervisorClaim(previous);
 						previous.socket.end();
 					}
 				}
@@ -2411,12 +3482,18 @@ export class AgentDaemon {
 				this.supervisorClaims.set(client, { claim, ownerFingerprint });
 				this.clearSupervisorAvailabilityCheck();
 				this.scheduleSupervisorFenceCheck();
-				this.write(client, { id: commandId, type: "response", command: "worker_auth", success: true });
+				this.write(client, {
+					id: commandId,
+					type: "response",
+					command: "worker_auth",
+					success: true,
+				});
 				return;
 			}
 			if (this.options.worker) {
 				const boundClaim = this.supervisorClaims.get(client);
 				if (!boundClaim) {
+					clearParsedAdmission();
 					this.write(
 						client,
 						failure(
@@ -2428,28 +3505,66 @@ export class AgentDaemon {
 					client.socket.end();
 					return;
 				}
+				const claimCheck = this.assertSupervisorClaimCurrent(boundClaim.claim, boundClaim.ownerFingerprint);
+				// Observe the already-running fence check even if admission cancellation
+				// wins the command wait below.
+				void claimCheck.catch(() => {});
 				try {
-					boundClaim.ownerFingerprint = await this.assertSupervisorClaimCurrent(
-						boundClaim.claim,
-						boundClaim.ownerFingerprint,
-					);
-				} catch {
+					const ownerFingerprint = await waitForPromptAdmission(claimCheck, parsedAdmission?.controller?.signal);
+					if (this.supervisorClaims.get(client) !== boundClaim || client.socket.destroyed) {
+						clearParsedAdmission();
+						return;
+					}
+					boundClaim.ownerFingerprint = ownerFingerprint;
+				} catch (error) {
+					const admissionCancelled = error instanceof PromptAdmissionCancelledError;
+					if (admissionCancelled) {
+						// The fence check remains authoritative after cancellation. Its rejection
+						// revokes only the exact binding that initiated it; replacements survive.
+						void claimCheck.catch(() => {
+							if (this.revokeSupervisorClaim(client, boundClaim)) client.socket.end();
+						});
+					}
+					clearParsedAdmission();
+					if (this.supervisorClaims.get(client) !== boundClaim || client.socket.destroyed) return;
 					this.write(
 						client,
 						failure(
 							typeof parsed.id === "string" ? parsed.id : undefined,
 							typeof parsed.type === "string" ? parsed.type : "worker_auth",
-							"supervisor_generation_stale",
+							admissionCancelled ? error : "supervisor_generation_stale",
 						),
 					);
-					client.socket.end();
+					// Cancelling this prompt only abandons its admission wait. A genuine
+					// stale supervisor claim fences only the binding that it checked.
+					if (!admissionCancelled && this.revokeSupervisorClaim(client, boundClaim)) {
+						client.socket.end();
+					}
 					return;
 				}
 			}
 			if (this.options.worker && typeof parsed.type === "string" && parsed.type.startsWith("worker_")) {
-				await this.handleWorkerCommand(client, parsed as DaemonWorkerCommand);
+				const workerCommand = parsed as DaemonWorkerCommand;
+				const updateLifecycle =
+					workerCommand.type === "worker_prepare_update" ||
+					workerCommand.type === "worker_commit_update" ||
+					workerCommand.type === "worker_cancel_update";
+				if (this.updateRestart && !updateLifecycle) {
+					this.write(
+						client,
+						failure(workerCommand.id, workerCommand.type, "Daemon is preparing an update restart"),
+					);
+					return;
+				}
+				if (!updateLifecycle) this.mutationDrain.begin();
+				try {
+					await this.handleWorkerCommand(client, workerCommand);
+				} finally {
+					if (!updateLifecycle) this.mutationDrain.end();
+				}
 				return;
 			}
+
 			if (typeof parsed.type !== "string" || !DAEMON_COMMAND_TYPES.has(parsed.type)) {
 				const commandName = typeof parsed.type === "string" ? parsed.type : "unknown";
 				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
@@ -2458,12 +3573,29 @@ export class AgentDaemon {
 			}
 			command = parsed as DaemonCommand;
 		} catch (error) {
-			this.write(client, failure(undefined, "parse", error, serializeDaemonError(error)));
+			this.write(client, failure(salvageDaemonCommandId(line), "parse", error, serializeDaemonError(error)));
 			return;
 		}
 
+		const mutation = command.type !== "prepare_update_restart" && isDaemonMutatingCommand(command);
+		const restartPhase = this.updateRestart?.phase;
+		// Mirror the supervisor's drain/fence split: abort-style commands stay
+		// admitted only while mutations drain; once the checkpoint is being
+		// captured they could race the snapshot and are rejected too.
+		const restartRejected =
+			restartPhase === "preparing"
+				? !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)
+				: restartPhase !== undefined && command.type !== "shutdown";
+		if (mutation && restartRejected) {
+			clearParsedAdmission();
+			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
+			return;
+		}
+		if (mutation) this.mutationDrain.begin();
 		try {
-			const response = await this.handleCommand(client, command);
+			const response = await this.handleCommand(client, command, () => {
+				promptHandlerOwnsAdmission = true;
+			});
 			if (response) {
 				this.write(client, response);
 			}
@@ -2475,7 +3607,20 @@ export class AgentDaemon {
 				`daemon command "${command.type}" failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
 			);
 			this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
+		} finally {
+			if (!promptHandlerOwnsAdmission) clearParsedAdmission();
+			if (mutation) this.mutationDrain.end();
 		}
+	}
+
+	private writeWorkerSuccess(client: DaemonSocketClient, command: DaemonWorkerCommand, data?: unknown): void {
+		this.write(client, {
+			id: command.id,
+			type: "response",
+			command: command.type,
+			success: true,
+			...(data !== undefined ? { data } : {}),
+		});
 	}
 
 	private async handleWorkerCommand(client: DaemonSocketClient, command: DaemonWorkerCommand): Promise<void> {
@@ -2507,24 +3652,19 @@ export class AgentDaemon {
 					for (const peer of command.peers) {
 						this.remoteAgentPeers.set(peer.activeSessionId, peer);
 					}
-					this.write(client, {
-						id: command.id,
-						type: "response",
-						command: command.type,
-						success: true,
-					});
+					this.writeWorkerSuccess(client, command);
 					return;
 				case "worker_archive_and_shutdown": {
 					for (const state of [...this.sessions.values()]) {
 						await this.closeSession(state, "killed");
 					}
-					this.write(client, {
-						id: command.id,
-						type: "response",
-						command: command.type,
-						success: true,
-					});
+					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
+					return;
+				}
+				case "worker_passivate_idle_children": {
+					const count = await this.passivateIdleChildren(command.idleEvictionMinutes, command.now, command.limit);
+					this.writeWorkerSuccess(client, command, { count });
 					return;
 				}
 				case "worker_deliver_message": {
@@ -2533,49 +3673,56 @@ export class AgentDaemon {
 						message: command.message,
 						sender: command.sender,
 						senderKey: command.sender.activeSessionId ?? `client:${command.sender.clientId}`,
-						deliveryMode: command.deliveryMode,
 						origin: "agent",
 					});
-					this.write(client, {
-						id: command.id,
-						type: "response",
-						command: command.type,
-						success: true,
-						data: receipt,
-					});
+					this.writeWorkerSuccess(client, command, receipt);
 					return;
 				}
 				case "worker_prepare_update": {
-					const manifest = this.prepareUpdateRestartCheckpoint();
-					this.write(client, {
-						id: command.id,
-						type: "response",
-						command: command.type,
-						success: true,
-						data: manifest,
-					});
+					const transaction = this.beginUpdateRestartTransaction(client);
+					const manifest = await this.runUpdateRestartPreparation(transaction);
+					this.writeWorkerSuccess(client, command, manifest);
 					return;
 				}
 				case "worker_commit_update": {
-					const manifest = await this.commitPreparedUpdateRestart();
-					this.write(client, {
-						id: command.id,
-						type: "response",
-						command: command.type,
-						success: true,
-						data: manifest,
-					});
+					const transaction = this.updateRestart;
+					if (!transaction || transaction.phase === "preparing" || transaction.phase === "fencing") {
+						throw new Error("Daemon has no prepared update checkpoint");
+					}
+					if (transaction.phase === "publishing") {
+						throw new Error("Daemon update checkpoint is already committing");
+					}
+					if (transaction.owner !== client)
+						throw new Error("Daemon update checkpoint belongs to another supervisor");
+					if (transaction.deadline) clearTimeout(transaction.deadline);
+					transaction.deadline = undefined;
+					transaction.phase = "publishing";
+					let manifest: DaemonUpdateRestartManifest;
+					try {
+						manifest = await this.commitPreparedUpdateRestart(transaction.id);
+					} catch (error) {
+						if (this.updateRestart === transaction) transaction.phase = "prepared";
+						if (transaction.abort.signal.aborted) this.cancelPreparedUpdateRestart(transaction.id);
+						throw error;
+					}
+					this.writeWorkerSuccess(client, command, manifest);
+					if (!this.supervisorClaims.has(client)) {
+						setImmediate(() => void this.shutdown(0));
+					}
 					return;
 				}
-				case "worker_cancel_update":
-					this.cancelPreparedUpdateRestart();
-					this.write(client, {
-						id: command.id,
-						type: "response",
-						command: command.type,
-						success: true,
-					});
+				case "worker_cancel_update": {
+					const transaction = this.updateRestart;
+					if (transaction && transaction.owner !== client) {
+						throw new Error("Daemon update checkpoint belongs to another supervisor");
+					}
+					if (transaction?.phase === "publishing") {
+						throw new Error("Daemon update checkpoint is already committing");
+					}
+					if (transaction) this.cancelPreparedUpdateRestart(transaction.id);
+					this.writeWorkerSuccess(client, command);
 					return;
+				}
 			}
 		} catch (error) {
 			this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
@@ -2585,9 +3732,23 @@ export class AgentDaemon {
 	private async handleCommand(
 		client: DaemonSocketClient,
 		command: DaemonCommand,
+		onPromptHandlerOwnsAdmission: () => void = () => {},
 	): Promise<DaemonResponse | undefined> {
-		if (this.updateRestartPreparing && command.type !== "shutdown" && command.type !== "ack_result") {
-			throw new Error("Daemon is preparing an update restart");
+		if ("agentMessageId" in command && command.agentMessageId === "") {
+			throw new Error("agentMessageId must not be empty");
+		}
+		if ("admissionId" in command && command.admissionId === "") {
+			throw new Error("admissionId must not be empty");
+		}
+		if ((command.type === "steer" || command.type === "follow_up") && command.expandPromptTemplates !== false) {
+			const replayFields = (["content", "customMessage", "prefixMessages"] as const).filter(
+				(field) => command[field] !== undefined,
+			);
+			if (replayFields.length > 0) {
+				throw new Error(
+					`${command.type} replay fields (${replayFields.join(", ")}) require expandPromptTemplates=false`,
+				);
+			}
 		}
 		switch (command.type) {
 			case "ack_result":
@@ -2597,7 +3758,7 @@ export class AgentDaemon {
 				const scheduledJobs = this.cronStore.list();
 				if (!command.all) {
 					return success(command.id, "list", {
-						sessions: buildSessionList(activeSessions, [], scheduledJobs),
+						sessions: await this.buildSessionListWithPassiveRlmSubagents(activeSessions, [], scheduledJobs),
 					});
 				}
 				const defaultConfig = this.options.defaultSessionConfig;
@@ -2605,7 +3766,11 @@ export class AgentDaemon {
 				if (command.cwd) {
 					const savedSessions = await SessionManager.list(resolve(command.cwd), listSessionDir);
 					return success(command.id, "list", {
-						sessions: buildSessionList(activeSessions, savedSessions, scheduledJobs),
+						sessions: await this.buildSessionListWithPassiveRlmSubagents(
+							activeSessions,
+							savedSessions,
+							scheduledJobs,
+						),
 					});
 				}
 				const savedSessions =
@@ -2613,7 +3778,11 @@ export class AgentDaemon {
 						? await SessionManager.listAll(undefined, listSessionDir)
 						: await SessionManager.listAll();
 				return success(command.id, "list", {
-					sessions: buildSessionList(activeSessions, savedSessions, scheduledJobs),
+					sessions: await this.buildSessionListWithPassiveRlmSubagents(
+						activeSessions,
+						savedSessions,
+						scheduledJobs,
+					),
 				});
 			}
 
@@ -2668,7 +3837,7 @@ export class AgentDaemon {
 			}
 
 			case "attach": {
-				const state = this.getBoundSessionState(command.activeSessionId);
+				const state = await this.getOrHydrateBoundSessionState(command.activeSessionId);
 				if (command.clientId) {
 					client.id = command.clientId;
 				}
@@ -2680,23 +3849,44 @@ export class AgentDaemon {
 				const streamsSnapshot =
 					client.transport === "private-framed" &&
 					daemonClientCapabilitiesForSession(client, state.activeSessionId).has("chunked_snapshot");
-				this.adoptClientEnv(state, filterClientEnv(command.env));
+				// Attach is admitted during update-restart preparation as a read. Env
+				// adoption remains safe while mutations are only draining; after fencing,
+				// defer it until rollback so the checkpoint never omits a live identity.
+				const clientEnv = filterClientEnv(command.env);
+				const deferClientEnv = this.updateRestart && this.updateRestart.phase !== "preparing";
+				if (!deferClientEnv) this.adoptClientEnv(state, clientEnv);
 				const snapshotSignal = streamsSnapshot
 					? markClientSnapshotStreaming(client, state.activeSessionId)
 					: undefined;
-				state.clients.add(client);
-				client.attachedActiveSessionIds.add(state.activeSessionId);
 				let result: DaemonAttachResult;
+				state.pendingAttaches++;
 				try {
-					result = this.createAttachResult(client, state, command);
+					result = await this.createAttachResult(client, state, command);
+					if (
+						this.sessions.get(state.activeSessionId) !== state ||
+						this.closingSessions.has(state.activeSessionId)
+					) {
+						throw new BoundSessionUnavailableError(
+							`Active session ${state.activeSessionId} closed during attach`,
+						);
+					}
 				} catch (error) {
-					state.clients.delete(client);
-					client.attachedActiveSessionIds.delete(state.activeSessionId);
 					removeDaemonClientSessionCapabilities(client, state.activeSessionId);
 					if (streamsSnapshot) {
 						finishClientSnapshotStreaming(client, state.activeSessionId);
 					}
 					throw error;
+				} finally {
+					state.pendingAttaches--;
+				}
+				state.clients.add(client);
+				client.attachedActiveSessionIds.add(state.activeSessionId);
+				if (deferClientEnv && clientEnv) {
+					this.updateRestart?.deferredClientEnv.push({
+						client,
+						state,
+						env: clientEnv,
+					});
 				}
 				if (streamsSnapshot) {
 					const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
@@ -2777,7 +3967,7 @@ export class AgentDaemon {
 				if (!name) {
 					throw new Error("Session name cannot be empty");
 				}
-				state.runtime.session.setSessionName(name);
+				await this.setStateSessionName(state, name);
 				return success(command.id, "rename", summaryForActiveSession(state));
 			}
 
@@ -2791,9 +3981,40 @@ export class AgentDaemon {
 					throw new Error("Session name cannot be empty");
 				}
 				if (state) {
-					state.runtime.session.setSessionName(name);
+					await this.setStateSessionName(state, name);
 				} else {
-					SessionManager.open(command.sessionPath).appendSessionInfo(name);
+					const info = await readSessionInfo(command.sessionPath);
+					if (!info) throw new Error(`Session not found: ${command.sessionPath}`);
+					const depth = info.rlmDepth ?? 0;
+					await this.withSessionNameReservation(
+						{
+							name,
+							depth,
+							...(depth > 0 && info.parentSessionPath ? { parentSessionPath: info.parentSessionPath } : {}),
+						},
+						async () => {
+							await this.assertFamilySessionNameAvailable(
+								{
+									name,
+									depth,
+									...(depth > 0 && info.parentSessionPath
+										? { parentSessionPath: info.parentSessionPath }
+										: {}),
+									ignoreSessionId: info.id,
+								},
+								undefined,
+								true,
+							);
+							SessionManager.open(command.sessionPath).appendSessionInfo(name);
+							await this.rlmSpawnLedger()
+								.appendRenameByChildPath(command.sessionPath, name)
+								.catch((error) => {
+									this.log(
+										`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`,
+									);
+								});
+						},
+					);
 				}
 				return success(command.id, "rename_saved_session");
 			}
@@ -2813,34 +4034,118 @@ export class AgentDaemon {
 				return success(command.id, "delete_saved_session", result);
 			}
 
-			case "prompt": {
-				const state = this.getBoundSessionState(command.activeSessionId);
-				let responseSent = false;
-				const sendSuccessResponse = () => {
-					if (responseSent) {
-						return;
+			case "cancel_prompt_admission": {
+				const admission = this.promptAdmissions.get(
+					this.promptAdmissionKey(command.activeSessionId, command.admissionId),
+				);
+				if (!admission) {
+					return success(command.id, command.type, {
+						status: "unknown" as const,
+					});
+				}
+				if (admission.status === "owned") {
+					return success(command.id, command.type, {
+						status: "owned" as const,
+					});
+				}
+				if (admission.status === "waiting") {
+					admission.status = "cancelled";
+					admission.controller?.abort();
+				}
+				return success(command.id, command.type, {
+					status: "cancelled" as const,
+				});
+			}
+
+			case "prompt":
+			case "prompt_and_wait": {
+				onPromptHandlerOwnsAdmission();
+				const admissionKey = command.admissionId
+					? this.promptAdmissionKey(command.activeSessionId, command.admissionId)
+					: undefined;
+				const admission = admissionKey ? this.promptAdmissions.get(admissionKey) : undefined;
+				if (command.admissionId && !admission) {
+					throw new Error("Prompt admission was not registered during command parsing");
+				}
+				const clearAdmission = () => {
+					if (admissionKey && this.promptAdmissions.get(admissionKey) === admission) {
+						this.promptAdmissions.delete(admissionKey);
 					}
-					responseSent = true;
-					this.write(client, success(command.id, "prompt"));
 				};
-				void this.promptWithAgentMessagePreparingGuard(state, command.message, {
+				const commitAdmission = () => {
+					if (admission?.status === "waiting") admission.status = "owned";
+				};
+				let state: ActiveSessionState;
+				try {
+					if (admission?.status === "cancelled") throw new PromptAdmissionCancelledError();
+					state = this.getBoundSessionState(command.activeSessionId);
+				} catch (error) {
+					clearAdmission();
+					throw error;
+				}
+				const options: PromptOptions = {
 					content: command.content,
 					images: command.images,
 					streamingBehavior: command.streamingBehavior,
+					queueIfBusy: command.queueIfBusy ?? command.streamingBehavior !== undefined,
+					resumeIfIdle: command.streamingBehavior !== undefined,
 					expandPromptTemplates: command.expandPromptTemplates,
-					agentMessageId: command.agentMessageId,
-					customMessage: command.customMessage,
 					skipInputHandlers: command.expandPromptTemplates === false ? true : undefined,
 					source: command.source,
-					preflightResult: (didSucceed) => {
-						if (didSucceed) {
-							this.recordWorkerRecoveryState(state, "prompt_accepted", true);
+					...(admission?.controller
+						? {
+								signal: admission.controller.signal,
+								admissionCommitted: commitAdmission,
+							}
+						: {}),
+				};
+				if (command.type === "prompt_and_wait") {
+					try {
+						await this.promptWithAgentMessagePreparingGuard(state, command.message, {
+							...options,
+							preflightResult: (didSucceed) => {
+								if (didSucceed) this.recordWorkerRecoveryState(state, "prompt_accepted", true);
+							},
+						});
+						return success(command.id, command.type);
+					} finally {
+						clearAdmission();
+					}
+				}
+
+				let responseSent = false;
+				let preflightRejected = false;
+				const sendSuccessResponse = () => {
+					if (responseSent) return;
+					responseSent = true;
+					this.write(client, success(command.id, "prompt"));
+				};
+				void this.promptWithAgentMessagePreparingGuard(
+					state,
+					command.message,
+					{
+						...options,
+						agentMessageId: command.agentMessageId,
+						customMessage: command.customMessage,
+						preflightResult: (didSucceed) => {
+							if (didSucceed) {
+								this.recordWorkerRecoveryState(state, "prompt_accepted", true);
+								sendSuccessResponse();
+							} else {
+								preflightRejected = true;
+							}
+						},
+					},
+					undefined,
+					false,
+				)
+					.then(() => {
+						if (preflightRejected) {
+							const error = new Error("Prompt was not accepted by the session.");
+							this.write(client, failure(command.id, "prompt", error, serializeDaemonError(error)));
+						} else {
 							sendSuccessResponse();
 						}
-					},
-				})
-					.then(() => {
-						sendSuccessResponse();
 					})
 					.catch((error) => {
 						if (responseSent) {
@@ -2848,26 +4153,9 @@ export class AgentDaemon {
 						} else {
 							this.write(client, failure(command.id, "prompt", error, serializeDaemonError(error)));
 						}
-					});
+					})
+					.finally(clearAdmission);
 				return undefined;
-			}
-
-			case "prompt_and_wait": {
-				const state = this.getBoundSessionState(command.activeSessionId);
-				await this.promptWithAgentMessagePreparingGuard(state, command.message, {
-					content: command.content,
-					images: command.images,
-					streamingBehavior: command.streamingBehavior,
-					expandPromptTemplates: command.expandPromptTemplates,
-					skipInputHandlers: command.expandPromptTemplates === false ? true : undefined,
-					source: command.source,
-					preflightResult: (didSucceed) => {
-						if (didSucceed) {
-							this.recordWorkerRecoveryState(state, "prompt_accepted", true);
-						}
-					},
-				});
-				return success(command.id, command.type);
 			}
 
 			case "steer": {
@@ -2893,7 +4181,8 @@ export class AgentDaemon {
 
 			case "follow_up": {
 				const state = this.getBoundSessionState(command.activeSessionId);
-				let queued: boolean;
+				let queued = true;
+				let admitted = true;
 				if (command.expandPromptTemplates === false) {
 					queued = await state.runtime.session.restoreFollowUpMessage(command.message, command.images, {
 						queueKey: command.queueKey,
@@ -2902,14 +4191,16 @@ export class AgentDaemon {
 						customMessage: command.customMessage,
 						prefixMessages: command.prefixMessages,
 					});
+					admitted = queued;
 				} else {
 					queued = await state.runtime.session.followUp(command.message, command.images, {
 						queueKey: command.queueKey,
 						agentMessageId: command.agentMessageId,
 						resumeIfIdle: true,
 					});
+					admitted = queued;
 				}
-				if (queued) {
+				if (admitted) {
 					this.recordWorkerRecoveryState(state, "follow_up_queued", true);
 				}
 				return success(command.id, "follow_up", { queued });
@@ -2921,6 +4212,13 @@ export class AgentDaemon {
 				return success(command.id, "restore_next_turn");
 			}
 
+			case "restore_actions": {
+				const state = this.getSessionState(command.activeSessionId);
+				const restored = await state.runtime.session.restoreSessionActions(command.snapshot);
+				if (restored > 0) this.recordWorkerRecoveryState(state, "actions_restored", true);
+				return success(command.id, "restore_actions", { restored });
+			}
+
 			case "append_custom_message": {
 				const state = this.getSessionState(command.activeSessionId);
 				await state.runtime.session.sendCustomMessage(command.message);
@@ -2929,23 +4227,9 @@ export class AgentDaemon {
 
 			case "resume_queue": {
 				const state = this.getSessionState(command.activeSessionId);
-				let checkedStart = false;
-				let startError: unknown;
-				void state.runtime.session.agent.continue().then(undefined, (error: unknown) => {
-					if (checkedStart) {
-						this.broadcastToSession(
-							state,
-							failure(undefined, "resume_queue", error, serializeDaemonError(error)),
-						);
-					} else {
-						startError = error;
-					}
-				});
-				// Self-update restore must acknowledge that queued work restarted without waiting for it to finish.
-				await Promise.resolve();
-				checkedStart = true;
-				if (startError !== undefined) {
-					return failure(command.id, "resume_queue", startError, serializeDaemonError(startError));
+				if (!state.runtime.session.resumeQueuedWork()) {
+					const error = new Error("No queued work to resume");
+					return failure(command.id, "resume_queue", error, serializeDaemonError(error));
 				}
 				return success(command.id, "resume_queue");
 			}
@@ -2960,8 +4244,7 @@ export class AgentDaemon {
 					fromState,
 					clientId: client.id,
 					senderKey: this.createCliAgentMessageSenderKey(),
-					deliveryMode: command.deliveryMode,
-					origin: "cli",
+					origin: command.agentOrigin === true ? "agent" : "cli",
 				});
 				return success(command.id, "send_message", receipt);
 			}
@@ -3019,6 +4302,7 @@ export class AgentDaemon {
 							this.sideQuestionRuns.delete(event.id);
 						}
 					},
+					command.previousTurns,
 				);
 				this.sideQuestionRuns.set(command.sideQuestionId, {
 					run,
@@ -3052,7 +4336,11 @@ export class AgentDaemon {
 				// Respond before completion (bash can outlive the client request
 				// timeout); output and completion stream via bash_* session events.
 				void state.runtime.session
-					.runUserBash(command.command, { excludeFromContext: command.excludeFromContext })
+					.runUserBash(command.command, {
+						excludeFromContext: command.excludeFromContext,
+						transient: command.transient,
+						runId: command.runId,
+					})
 					.catch((error) => {
 						this.broadcastToSession(
 							state,
@@ -3083,9 +4371,31 @@ export class AgentDaemon {
 				return success(command.id, "cancel_rlm_child", { cancelled });
 			}
 
+			case "delete_rlm_subagent": {
+				const state = this.getSessionState(command.activeSessionId);
+				const isResidentChildRunning = () => {
+					const childState = [...this.sessions.values()].find(
+						(candidate) =>
+							candidate.runtime.metadata.kind === "subagent" &&
+							candidate.runtime.metadata.rlmChildId === command.childId,
+					);
+					return (
+						childState !== undefined &&
+						(childState.runtime.session.isStreaming || childState.runtime.session.unfinishedActionCount > 0)
+					);
+				};
+				const result = isResidentChildRunning()
+					? "running"
+					: await state.runtime.session.deleteInactiveRlmSubagent(command.childId, isResidentChildRunning);
+				return success(command.id, "delete_rlm_subagent", {
+					deleted: result === "deleted",
+					...(result === "running" ? { reason: "running" } : {}),
+				});
+			}
+
 			case "wait_for_idle": {
 				const state = this.getSessionState(command.activeSessionId);
-				await state.runtime.session.agent.waitForIdle();
+				await state.runtime.session.waitForIdle();
 				return success(command.id, "wait_for_idle");
 			}
 
@@ -3117,7 +4427,9 @@ export class AgentDaemon {
 
 			case "get_messages": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_messages", { messages: state.runtime.session.messages });
+				return success(command.id, "get_messages", {
+					messages: state.runtime.session.messages,
+				});
 			}
 
 			case "get_session_stats": {
@@ -3171,6 +4483,17 @@ export class AgentDaemon {
 				});
 			}
 
+			case "mutate_queued_message": {
+				const state = this.getSessionState(command.activeSessionId);
+				const status = state.runtime.session.mutateQueuedMessage(
+					command.lane,
+					command.index,
+					command.expectedText,
+					command.mutation,
+				);
+				return success(command.id, "mutate_queued_message", { status });
+			}
+
 			case "clear_queue": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "clear_queue", state.runtime.session.clearQueue());
@@ -3197,7 +4520,9 @@ export class AgentDaemon {
 			}
 
 			case "heartbeats_list":
-				return success(command.id, "heartbeats_list", { heartbeats: this.listHeartbeats() });
+				return success(command.id, "heartbeats_list", {
+					heartbeats: this.listHeartbeats(),
+				});
 
 			case "heartbeat_manage": {
 				const heartbeat = this.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
@@ -3229,7 +4554,9 @@ export class AgentDaemon {
 			case "heartbeat_get": {
 				const state = this.getSessionState(command.activeSessionId);
 				const heartbeat = this.cronStore.getHeartbeat(state.activeSessionId);
-				return success(command.id, "heartbeat_get", { heartbeat: heartbeat ?? null });
+				return success(command.id, "heartbeat_get", {
+					heartbeat: heartbeat ?? null,
+				});
 			}
 
 			case "heartbeat_set": {
@@ -3242,7 +4569,9 @@ export class AgentDaemon {
 			case "heartbeat_update": {
 				const state = this.getSessionState(command.activeSessionId);
 				const heartbeat = this.updateHeartbeatForState(state, command.action);
-				return success(command.id, "heartbeat_update", { heartbeat: heartbeat ?? null });
+				return success(command.id, "heartbeat_update", {
+					heartbeat: heartbeat ?? null,
+				});
 			}
 
 			case "set_model": {
@@ -3255,7 +4584,9 @@ export class AgentDaemon {
 				if (!model) {
 					throw new Error(`Model not found: ${command.provider}/${command.modelId}`);
 				}
-				await session.setModel(model, { waitForExtensions: !(session.isStreaming || session.isCompacting) });
+				await session.setModel(model, {
+					waitForExtensions: !(session.isStreaming || session.isCompacting),
+				});
 				return success(command.id, "set_model", model);
 			}
 
@@ -3426,8 +4757,19 @@ export class AgentDaemon {
 				if (!name) {
 					throw new Error("Session name cannot be empty");
 				}
-				state.runtime.session.setSessionName(name);
+				await this.setStateSessionName(state, name);
 				return success(command.id, "set_session_name");
+			}
+
+			case "get_rlm_max_depth_status": {
+				const state = this.getSessionState(command.activeSessionId);
+				return success(command.id, "get_rlm_max_depth_status", state.runtime.session.getRlmMaxDepthStatus());
+			}
+
+			case "set_rlm_max_depth": {
+				const state = this.getSessionState(command.activeSessionId);
+				const result = await state.runtime.session.setRlmMaxDepth(command.maxDepth, { global: command.global });
+				return success(command.id, "set_rlm_max_depth", result);
 			}
 
 			case "get_session_context": {
@@ -3440,7 +4782,7 @@ export class AgentDaemon {
 			case "get_session_tree": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_session_tree", {
-					tree: state.runtime.session.sessionManager.getTree(),
+					flatNodes: state.runtime.session.sessionManager.getFlatTree(),
 					leafId: state.runtime.session.sessionManager.getLeafId(),
 				});
 			}
@@ -3516,12 +4858,12 @@ export class AgentDaemon {
 		}
 	}
 
-	private createAttachResult(
+	private async createAttachResult(
 		client: DaemonSocketClient,
 		state: ActiveSessionState,
 		command: Extract<DaemonCommand, { type: "attach" }>,
-	): DaemonAttachResult {
-		const snapshot = this.createSessionSnapshot(state);
+	): Promise<DaemonAttachResult> {
+		const snapshot = await this.createSessionSnapshot(state);
 		const replay =
 			command.resumeCursor?.activeSessionId && command.resumeCursor.activeSessionId !== state.activeSessionId
 				? {
@@ -3531,7 +4873,10 @@ export class AgentDaemon {
 								? command.resumeCursor.sequence
 								: command.resumeCursor.eventSequence,
 						toSequence: state.lastEventSequence,
-						toCursor: { generation: state.eventGeneration, sequence: state.lastEventSequence },
+						toCursor: {
+							generation: state.eventGeneration,
+							sequence: state.lastEventSequence,
+						},
 						reason: "resume_cursor_session_mismatch",
 					}
 				: createDaemonReplayInfo(command.resumeCursor, state.lastEventSequence, state.eventGeneration);
@@ -3546,7 +4891,10 @@ export class AgentDaemon {
 			snapshot,
 			replay,
 			lastEventSequence: state.lastEventSequence,
-			lastEventCursor: { generation: state.eventGeneration, sequence: state.lastEventSequence },
+			lastEventCursor: {
+				generation: state.eventGeneration,
+				sequence: state.lastEventSequence,
+			},
 			client: {
 				id: client.id,
 				capabilities: [...capabilities],
@@ -3554,7 +4902,7 @@ export class AgentDaemon {
 		};
 	}
 
-	private createSessionSnapshot(state: ActiveSessionState): DaemonSessionSnapshot {
+	private async createSessionSnapshot(state: ActiveSessionState): Promise<DaemonSessionSnapshot> {
 		const metadata = state.runtime.metadata;
 		const parent =
 			metadata.parentActiveSessionId || metadata.parentSessionId || metadata.rlmParentNodeId || metadata.rlmChildId
@@ -3565,18 +4913,31 @@ export class AgentDaemon {
 						...(metadata.rlmChildId ? { childId: metadata.rlmChildId } : {}),
 					}
 				: undefined;
-		const children = buildRlmChildSnapshots(state.activeSessionId, [...this.sessions.values()]);
+		let session = state.runtime.session;
+		let children = await this.buildRlmChildSnapshotsWithPassiveRlmSubagents(state);
+		for (
+			let retries = 0;
+			retries < MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES && state.runtime.session !== session;
+			retries++
+		) {
+			session = state.runtime.session;
+			children = await this.buildRlmChildSnapshotsWithPassiveRlmSubagents(state);
+		}
+		session = state.runtime.session;
 		const connectionState = this.createConnectionState(state);
 		return {
 			activeSessionId: state.activeSessionId,
 			summary: summaryForActiveSession(state),
 			state: connectionState,
-			messages: state.runtime.session.messages,
+			messages: session.messages,
 			// Omit duplicate heavy payloads from attach. The client can derive render
 			// context from messages + state, and fetch the full session tree lazily
 			// when the tree/branch selector opens.
 			lastEventSequence: state.lastEventSequence,
-			lastEventCursor: { generation: state.eventGeneration, sequence: state.lastEventSequence },
+			lastEventCursor: {
+				generation: state.eventGeneration,
+				sequence: state.lastEventSequence,
+			},
 			...(parent ? { parent } : {}),
 			...(children.length > 0 ? { children } : {}),
 		};
@@ -3606,6 +4967,16 @@ export class AgentDaemon {
 			finishClientSnapshotStreaming(client, result.activeSessionId);
 			transcript.dispose?.();
 			return;
+		}
+		client.snapshotTransferTails ??= new Map();
+		const previousTransfer = client.snapshotTransferTails.get(result.activeSessionId);
+		let finishTransfer!: () => void;
+		const transfer = new Promise<void>((resolve) => {
+			finishTransfer = resolve;
+		});
+		client.snapshotTransferTails.set(result.activeSessionId, transfer);
+		if (previousTransfer) {
+			await previousTransfer;
 		}
 		const { messages: _messages, ...snapshot } = result.snapshot;
 		const snapshotBegin: DaemonOutbound = {
@@ -3715,6 +5086,10 @@ export class AgentDaemon {
 			await deliverSnapshotFailure(streamError);
 			throw streamError;
 		} finally {
+			finishTransfer();
+			if (client.snapshotTransferTails.get(result.activeSessionId) === transfer) {
+				client.snapshotTransferTails.delete(result.activeSessionId);
+			}
 			finishClientSnapshotStreaming(client, result.activeSessionId);
 			transcript.dispose?.();
 			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
@@ -3824,40 +5199,264 @@ export class AgentDaemon {
 
 	private createAgentMessageAgentSummary(state: ActiveSessionState): AgentSessionMessageAgentSummary {
 		const metadata = state.runtime.metadata;
+		const session = state.runtime.session;
 		return {
 			...this.createAgentSessionMessageEndpoint(state),
 			cwd: state.runtime.cwd,
-			isStreaming: state.runtime.session.isStreaming,
-			pendingMessageCount:
-				state.runtime.session.pendingMessageCount + (state.runtime.session.hasAcceptedPromptInFlight ? 1 : 0),
+			isStreaming: session.isStreaming,
+			unfinishedActionCount: session.unfinishedActionCount,
 			...(metadata.parentActiveSessionId ? { parentActiveSessionId: metadata.parentActiveSessionId } : {}),
+			...(metadata.parentSessionId ? { parentSessionId: metadata.parentSessionId } : {}),
+			...(metadata.parentSessionFile ? { parentSessionPath: metadata.parentSessionFile } : {}),
+			rlmDepth: session.rlmDepth,
+			status: classifySessionRosterStatus({
+				activeSessionId: state.activeSessionId,
+				runtimeKind: metadata.kind,
+				activity: session.isSessionActive ? "working" : "idle",
+				isSessionActive: session.isSessionActive,
+				hasRunningRlmChildren: session.hasRunningRlmChildren?.() ?? false,
+				hasActiveHeartbeat:
+					this.cronStore.getHeartbeat(state.activeSessionId)?.status === "active" ||
+					this.cronStore.listRlmHeartbeats(state.activeSessionId).some((job) => job.status === "active"),
+				isStreaming: session.isStreaming,
+			} as SessionSummary),
 			...(metadata.rlmChildId ? { rlmChildId: metadata.rlmChildId } : {}),
+			...(metadata.sessionDir ? { sessionDir: metadata.sessionDir } : {}),
+			...(session.sessionFile ? { sessionPath: session.sessionFile } : {}),
 		};
 	}
 
-	private createAgentMessageListResult(current: ActiveSessionState): AgentSessionMessageListResult {
+	private async createAgentMessageListResult(current: ActiveSessionState): Promise<AgentSessionMessageListResult> {
 		const localAgents = this.listTargetableSessionStates(current).map((state) =>
 			this.createAgentMessageAgentSummary(state),
 		);
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			const { entry, info } = passive;
+			localAgents.push({
+				// Before hydration the persisted session id is its supervisor-routable id.
+				activeSessionId: info.id,
+				sessionId: info.id,
+				sessionName: info.name ?? entry.sessionName,
+				runtimeKind: "subagent",
+				cwd: info.cwd,
+				isStreaming: false,
+				unfinishedActionCount: 0,
+				...(passive.chain.length === 1 && passive.rootParentState
+					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
+					: {}),
+				parentSessionId: entry.parentSessionId,
+				parentSessionPath:
+					entry.parentSessionFile ??
+					passive.chain.at(-2)?.sessionFile ??
+					passive.rootParentState?.runtime.session.sessionFile ??
+					passive.rootInfo?.path,
+				rlmDepth: info.rlmDepth ?? entry.rlmDepth,
+				status: "inactive",
+				rlmChildId: entry.childId,
+				rlmChildRegistryStatus: entry.status,
+				sessionDir: entry.sessionDir,
+				sessionPath: entry.sessionFile,
+			});
+		}
 		const localIds = new Set(localAgents.map((agent) => agent.activeSessionId));
 		return {
 			current: this.createAgentSessionMessageEndpoint(current),
 			agents: [
 				...localAgents,
 				...[...this.remoteAgentPeers.values()].filter(
-					(peer) => !localIds.has(peer.activeSessionId) && !this.closingSessions.has(peer.activeSessionId),
+					(peer) =>
+						peer.status !== "inactive" &&
+						!localIds.has(peer.activeSessionId) &&
+						!this.closingSessions.has(peer.activeSessionId),
 				),
 			],
 		};
 	}
 
-	private findRemoteAgentPeer(selector: string): AgentSessionMessageAgentSummary | undefined {
-		for (const peer of this.remoteAgentPeers.values()) {
-			if (peer.activeSessionId === selector || peer.sessionId === selector || peer.sessionName === selector) {
-				return peer;
-			}
+	private async createAgentFamilyCatalog(currentState?: ActiveSessionState): Promise<AgentFamilyCatalogEntry[]> {
+		const current =
+			currentState ?? [...this.sessions.values()].find((state) => !this.bindingSessions.has(state.activeSessionId));
+		const listed = current ? await this.createAgentMessageListResult(current) : { agents: [] };
+		const remotePeers = new Set(this.remoteAgentPeers.values());
+		const localAgents = current
+			? [this.createAgentMessageAgentSummary(current), ...listed.agents.filter((agent) => !remotePeers.has(agent))]
+			: listed.agents.filter((agent) => !remotePeers.has(agent));
+		const activePaths = new Set(
+			localAgents.flatMap((agent) => (agent.sessionPath ? [canonicalSessionPath(agent.sessionPath)] : [])),
+		);
+		const savedRoots = (await SessionManager.listAll(undefined, this.options.defaultSessionConfig.sessionDir))
+			.filter(
+				(info) =>
+					(info.rlmDepth ?? (info.parentSessionPath ? -1 : 0)) === 0 &&
+					!activePaths.has(canonicalSessionPath(info.path)),
+			)
+			.map(
+				(info): AgentFamilyCatalogEntry => ({
+					id: info.id,
+					...(info.name ? { name: info.name } : {}),
+					depth: info.rlmDepth ?? 0,
+					status: "inactive",
+					sessionPath: canonicalSessionPath(info.path),
+				}),
+			);
+		const byId = new Map<string, AgentFamilyCatalogEntry>(savedRoots.map((entry) => [entry.id, entry]));
+		const addAgent = (agent: AgentSessionMessageAgentSummary) => {
+			const depth = agent.rlmDepth ?? 0;
+			byId.set(agent.sessionId, {
+				id: agent.sessionId,
+				...(agent.sessionName ? { name: agent.sessionName } : {}),
+				depth,
+				status: agent.status ?? "idle",
+				...(agent.runtimeKind === "subagent"
+					? (() => {
+							const repliedSinceTask = this.findSessionBySessionFile(agent.sessionPath)?.runtime.session
+								.repliedToParentSinceTask;
+							return repliedSinceTask === undefined ? {} : { repliedSinceTask };
+						})()
+					: {}),
+				...(depth > 0 && agent.parentSessionId ? { parentSessionId: agent.parentSessionId } : {}),
+				...(depth > 0 && agent.parentSessionPath
+					? { parentSessionPath: canonicalSessionPath(agent.parentSessionPath) }
+					: {}),
+				...(agent.sessionPath ? { sessionPath: canonicalSessionPath(agent.sessionPath) } : {}),
+			});
+		};
+		for (const peer of this.remoteAgentPeers.values()) addAgent(peer);
+		for (const agent of localAgents) addAgent(agent);
+		for (const state of this.sessions.values()) {
+			const entry = byId.get(state.runtime.session.sessionId);
+			if (entry && state.runtime.session.sessionFile)
+				entry.sessionPath = canonicalSessionPath(state.runtime.session.sessionFile);
 		}
-		return undefined;
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			const entry = byId.get(passive.info.id);
+			if (entry) entry.sessionPath = canonicalSessionPath(passive.entry.sessionFile);
+		}
+		return [...byId.values()];
+	}
+
+	private async createAgentFamilyRoster(currentState: ActiveSessionState): Promise<AgentFamilyRosterResult> {
+		const catalog = await this.createAgentFamilyCatalog(currentState);
+		const current = catalog.find((entry) => entry.id === currentState.runtime.session.sessionId);
+		if (!current) throw new Error("Current agent is missing from the family catalog");
+		return buildAgentFamilyRoster(current, catalog);
+	}
+
+	private async assertFamilySessionNameAvailable(
+		input: {
+			name: string;
+			depth: number;
+			parentSessionId?: string;
+			parentSessionPath?: string;
+			ignoreSessionId?: string;
+		},
+		currentState?: ActiveSessionState,
+		ignorePendingReservation = false,
+	): Promise<void> {
+		if (!ignorePendingReservation && this.pendingSessionNames.has(sessionNameReservationKey(input))) {
+			throw new Error(formatAgentSessionNameUnavailable(input.name, input.depth));
+		}
+		assertAgentSessionNameAvailable(await this.createAgentFamilyCatalog(currentState), {
+			...input,
+			...(input.parentSessionPath ? { parentSessionPath: canonicalSessionPath(input.parentSessionPath) } : {}),
+		});
+	}
+
+	private resolveHeaderParentSessionPath(state: ActiveSessionState): string | undefined {
+		const session = state.runtime.session;
+		const headerParent = session.sessionManager?.getHeader?.()?.parentSession;
+		if (!headerParent || isAbsolute(headerParent)) return headerParent;
+		return session.sessionFile ? resolve(dirname(session.sessionFile), headerParent) : undefined;
+	}
+
+	private async assertStateSessionNameAvailable(state: ActiveSessionState, name: string): Promise<void> {
+		const session = state.runtime.session;
+		const metadata = state.runtime.metadata;
+		const depth = session.rlmDepth ?? 0;
+		const headerParent = depth > 0 ? this.resolveHeaderParentSessionPath(state) : undefined;
+		await this.assertFamilySessionNameAvailable(
+			{
+				name,
+				depth,
+				...(depth > 0 && !headerParent && metadata.parentSessionId
+					? { parentSessionId: metadata.parentSessionId }
+					: {}),
+				...(depth > 0 && (headerParent ?? metadata.parentSessionFile)
+					? { parentSessionPath: headerParent ?? metadata.parentSessionFile }
+					: {}),
+				ignoreSessionId: session.sessionId,
+			},
+			state,
+			true,
+		);
+	}
+
+	private async withSessionNameReservation<T>(
+		input: { name: string; depth: number; parentSessionId?: string; parentSessionPath?: string },
+		action: () => Promise<T>,
+	): Promise<T> {
+		const key = sessionNameReservationKey(input);
+		if (this.pendingSessionNames.has(key)) {
+			throw new Error(formatAgentSessionNameUnavailable(input.name, input.depth));
+		}
+		this.pendingSessionNames.add(key);
+		try {
+			return await action();
+		} finally {
+			this.pendingSessionNames.delete(key);
+		}
+	}
+
+	private async setStateSessionNameViaSupervisor(state: ActiveSessionState, name: string): Promise<void> {
+		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		if (!this.options.worker || !supervisorSocketPath) {
+			return this.setStateSessionName(state, name);
+		}
+		const client = new DaemonClient(supervisorSocketPath);
+		try {
+			await client.connect(1000);
+			await client.waitForHello(1000);
+			const response = await client.request(
+				{
+					type: "set_session_name",
+					activeSessionId: state.activeSessionId,
+					name,
+					workerToken: this.options.worker.authenticationToken,
+				},
+				30_000,
+			);
+			if (!response.success) throw deserializeDaemonError(response);
+		} finally {
+			client.close();
+		}
+	}
+
+	private async setStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
+		const normalizedName = name.trim();
+		if (!normalizedName) {
+			throw new Error("Session name cannot be empty");
+		}
+		const session = state.runtime.session;
+		const metadata = state.runtime.metadata;
+		const depth = session.rlmDepth ?? 0;
+		const headerParent = depth > 0 ? this.resolveHeaderParentSessionPath(state) : undefined;
+		return this.withSessionNameReservation(
+			{
+				name: normalizedName,
+				depth,
+				...(depth > 0 && !headerParent && metadata.parentSessionId
+					? { parentSessionId: metadata.parentSessionId }
+					: {}),
+				...(depth > 0 && (headerParent ?? metadata.parentSessionFile)
+					? { parentSessionPath: headerParent ?? metadata.parentSessionFile }
+					: {}),
+			},
+			async () => {
+				await this.assertStateSessionNameAvailable(state, normalizedName);
+				state.runtime.session.setSessionName(normalizedName);
+				await this.appendRlmLedgerRenameForState(state, normalizedName);
+			},
+		);
 	}
 
 	// Half-bound sessions are hidden from other sessions' listings; the current
@@ -3900,9 +5499,7 @@ export class AgentDaemon {
 		const activeSessionId = targetState.activeSessionId;
 		const reserved = this.agentMessagePendingReservations.get(activeSessionId) ?? 0;
 		assertAgentMessageQueueCapacity(
-			targetState.runtime.session.pendingMessageCount +
-				(targetState.runtime.session.hasAcceptedPromptInFlight ? 1 : 0) +
-				reserved,
+			targetState.runtime.session.unfinishedActionCount + reserved,
 			DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 		);
 		this.agentMessagePendingReservations.set(activeSessionId, reserved + 1);
@@ -3940,6 +5537,115 @@ export class AgentDaemon {
 		}
 	}
 
+	private agentFamilyEntry(state: ActiveSessionState): AgentFamilyCatalogEntry {
+		const metadata = state.runtime.metadata;
+		const depth = state.runtime.session.rlmDepth ?? 0;
+		const headerParent = depth > 0 ? this.resolveHeaderParentSessionPath(state) : undefined;
+		const parentSessionPath = depth > 0 ? (headerParent ?? metadata.parentSessionFile) : undefined;
+		return {
+			id: state.runtime.session.sessionId,
+			...(state.runtime.session.sessionName ? { name: state.runtime.session.sessionName } : {}),
+			depth,
+			status: "running",
+			...(depth > 0 && !headerParent && metadata.parentSessionId
+				? { parentSessionId: metadata.parentSessionId }
+				: {}),
+			...(parentSessionPath ? { parentSessionPath: canonicalSessionPath(parentSessionPath) } : {}),
+			...(state.runtime.session.sessionFile
+				? { sessionPath: canonicalSessionPath(state.runtime.session.sessionFile) }
+				: {}),
+		};
+	}
+
+	private passiveAgentFamilyEntry(passive: PassiveRlmSubagent): AgentFamilyCatalogEntry {
+		const entry = passive.entry;
+		const depth = passive.info.rlmDepth ?? entry.rlmDepth ?? passive.chain.length;
+		const parentSessionPath =
+			depth > 0
+				? (entry.parentSessionFile ??
+					passive.chain.at(-2)?.sessionFile ??
+					passive.rootParentState?.runtime.session.sessionFile ??
+					passive.rootInfo?.path)
+				: undefined;
+		return {
+			id: passive.info.id,
+			name: passive.info.name ?? entry.sessionName,
+			depth,
+			status: "idle",
+			...(depth > 0 && entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
+			...(parentSessionPath ? { parentSessionPath: canonicalSessionPath(parentSessionPath) } : {}),
+			sessionPath: canonicalSessionPath(entry.sessionFile),
+		};
+	}
+
+	private async getOrHydrateAuthorizedAgentFamilyTarget(
+		currentState: ActiveSessionState,
+		target: string,
+	): Promise<ActiveSessionState> {
+		try {
+			return this.getBoundSessionState(target);
+		} catch (error) {
+			if (error instanceof BoundSessionUnavailableError) {
+				const targetState = this.getSessionState(target);
+				this.assertAgentFamilyReachable(currentState, targetState);
+				return this.getOrHydrateBoundSessionState(target);
+			}
+			if (error instanceof AmbiguousActiveSessionError) {
+				const targetState = this.resolveAgentFamilySessionName(currentState, target, error);
+				return this.getOrHydrateBoundSessionState(targetState.activeSessionId);
+			}
+		}
+		const passive = await this.findPassiveRlmSubagent(target);
+		if (!passive) return this.getOrHydrateBoundSessionState(target);
+		assertAgentFamilyReach(this.agentFamilyEntry(currentState), this.passiveAgentFamilyEntry(passive));
+		return this.hydratePassiveRlmSubagent(passive);
+	}
+
+	private resolveAgentFamilySessionName(
+		currentState: ActiveSessionState,
+		target: string,
+		ambiguity: AmbiguousActiveSessionError,
+	): ActiveSessionState {
+		const reachableMatches = new Map(
+			[...this.sessions.values()]
+				.filter((state) => {
+					const session = state.runtime.session;
+					return (
+						(session.sessionId === target || session.sessionName === target) &&
+						(state.activeSessionId === currentState.activeSessionId ||
+							this.isAgentFamilyReachable(currentState, state))
+					);
+				})
+				.map((state) => [state.activeSessionId, state]),
+		).values();
+		const matches = [...reachableMatches];
+		if (matches.length !== 1) throw ambiguity;
+		return matches[0]!;
+	}
+
+	private isAgentFamilyReachable(currentState: ActiveSessionState, targetState: ActiveSessionState): boolean {
+		try {
+			assertAgentFamilyReach(this.agentFamilyEntry(currentState), this.agentFamilyEntry(targetState));
+			return true;
+		} catch (error) {
+			if (error instanceof Error && error.message === AGENT_FAMILY_REACH_ERROR) return false;
+			throw error;
+		}
+	}
+
+	private assertAgentFamilyReachable(currentState: ActiveSessionState, targetState: ActiveSessionState): void {
+		if (currentState.activeSessionId === targetState.activeSessionId) return;
+		assertAgentFamilyReach(this.agentFamilyEntry(currentState), this.agentFamilyEntry(targetState));
+	}
+
+	private agentMessageRelationship(
+		fromState: ActiveSessionState | undefined,
+		targetState: ActiveSessionState,
+	): AgentFamilyRelationship | undefined {
+		if (!fromState) return undefined;
+		return agentFamilyRelationship(this.agentFamilyEntry(targetState), this.agentFamilyEntry(fromState));
+	}
+
 	private async sendAgentSessionMessage(options: {
 		targetSelector: string;
 		message: string;
@@ -3947,34 +5653,62 @@ export class AgentDaemon {
 		sender?: AgentSessionMessageSender;
 		clientId?: string;
 		senderKey?: string;
-		deliveryMode?: AgentSessionMessagePayload["deliveryMode"];
 		origin: "agent" | "cli";
 	}): Promise<AgentSessionMessageReceipt> {
 		if (this.agentMessagesPaused) {
 			throw new Error("Agent messaging is paused");
 		}
 		const targetSelector = assertDirectAgentMessageTarget(options.targetSelector);
+		const message = normalizeAgentSessionMessage(options.message, DEFAULT_AGENT_MESSAGE_MAX_CHARS);
 		let targetState: ActiveSessionState;
 		try {
 			targetState = this.getBoundSessionState(targetSelector);
 		} catch (error) {
 			if (error instanceof BoundSessionUnavailableError) {
-				throw error;
+				if (options.origin === "agent" && options.fromState) {
+					this.assertAgentFamilyReachable(options.fromState, this.getSessionState(targetSelector));
+				}
+				targetState = await this.getOrHydrateBoundSessionState(targetSelector);
+			} else {
+				if (error instanceof AmbiguousActiveSessionError) {
+					if (options.origin !== "agent" || !options.fromState) throw error;
+					const resolved = this.resolveAgentFamilySessionName(options.fromState, targetSelector, error);
+					targetState = await this.getOrHydrateBoundSessionState(resolved.activeSessionId);
+				} else {
+					const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector);
+					if (passiveSubagent) {
+						if (options.origin === "agent" && options.fromState) {
+							assertAgentFamilyReach(
+								this.agentFamilyEntry(options.fromState),
+								this.passiveAgentFamilyEntry(passiveSubagent),
+							);
+						}
+						targetState = await this.hydratePassiveRlmSubagent(passiveSubagent);
+					} else {
+						const hydratingChild = [...this.sessions.values()].find(
+							(state) =>
+								state.runtime.metadata.kind === "subagent" &&
+								state.runtime.metadata.rlmChildId === targetSelector,
+						);
+						if (hydratingChild) {
+							targetState = await this.waitForHydratingChild(hydratingChild, targetSelector);
+						} else if (this.options.worker && options.fromState) {
+							// The supervisor can resolve and wake a saved worker even when it is no longer
+							// present in this worker's resident peer snapshot.
+							return this.sendRemoteAgentSessionMessage(options.fromState, targetSelector, message);
+						} else {
+							throw error;
+						}
+					}
+				}
 			}
-			if (this.options.worker && options.fromState && this.findRemoteAgentPeer(targetSelector)) {
-				return this.sendRemoteAgentSessionMessage(
-					options.fromState,
-					targetSelector,
-					options.message,
-					options.deliveryMode,
-				);
-			}
-			throw error;
 		}
 		if (options.fromState?.activeSessionId === targetState.activeSessionId) {
 			throw new Error("Agent messaging cannot target the sending session");
 		}
-		const message = normalizeAgentSessionMessage(options.message, DEFAULT_AGENT_MESSAGE_MAX_CHARS);
+		if (options.origin === "agent" && options.fromState) {
+			this.assertAgentFamilyReachable(options.fromState, targetState);
+		}
 		const releaseQueueSlot = this.reserveAgentMessageQueueSlot(targetState);
 		const senderKey =
 			options.senderKey ?? options.fromState?.activeSessionId ?? `client:${options.clientId ?? "unknown"}`;
@@ -3991,8 +5725,8 @@ export class AgentDaemon {
 			from:
 				options.sender ??
 				this.createAgentSessionMessageSender(options.fromState, options.clientId ?? options.origin),
+			fromRelationship: this.agentMessageRelationship(options.fromState, targetState),
 			target: this.createAgentSessionMessageEndpoint(targetState),
-			deliveryMode: options.deliveryMode ?? "auto",
 		};
 		try {
 			const { status } = await this.withAgentMessageTargetLock(targetState.activeSessionId, async () => {
@@ -4024,7 +5758,6 @@ export class AgentDaemon {
 		fromState: ActiveSessionState,
 		targetSelector: string,
 		message: string,
-		deliveryMode?: AgentSessionMessagePayload["deliveryMode"],
 	): Promise<AgentSessionMessageReceipt> {
 		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 		if (!supervisorSocketPath) {
@@ -4034,6 +5767,7 @@ export class AgentDaemon {
 		let lastError: unknown;
 		while (Date.now() < deadline && !this.shuttingDown) {
 			const client = new DaemonClient(supervisorSocketPath);
+			let receivedResponse = false;
 			try {
 				await client.connect(1000);
 				await client.waitForHello(1000);
@@ -4043,10 +5777,11 @@ export class AgentDaemon {
 						targetActiveSessionId: targetSelector,
 						message,
 						fromActiveSessionId: fromState.activeSessionId,
-						deliveryMode,
+						agentOrigin: true,
 					},
 					30_000,
 				);
+				receivedResponse = true;
 				if (!response.success) {
 					throw deserializeDaemonError(response);
 				}
@@ -4056,7 +5791,7 @@ export class AgentDaemon {
 				return response.data as AgentSessionMessageReceipt;
 			} catch (error) {
 				lastError = error;
-				if (error instanceof Error && error.message.startsWith("Unknown active session:")) {
+				if (receivedResponse) {
 					throw error;
 				}
 			} finally {
@@ -4076,7 +5811,7 @@ export class AgentDaemon {
 		const reserved = this.agentMessagePendingReservations.get(targetState.activeSessionId) ?? 0;
 		const otherReservations = Math.max(0, reserved - 1);
 		assertAgentMessageQueueCapacity(
-			session.pendingMessageCount + (session.hasAcceptedPromptInFlight ? 1 : 0) + otherReservations,
+			session.unfinishedActionCount + otherReservations,
 			DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 		);
 		const shouldQueue =
@@ -4086,11 +5821,8 @@ export class AgentDaemon {
 			session.isCompacting ||
 			session.isRetrying ||
 			session.isBashRunning ||
-			session.hasAcceptedPromptInFlight ||
-			session.pendingMessageCount > 0;
-		const streamingBehavior =
-			resolveAgentSessionMessageStreamingBehavior(shouldQueue, payload.deliveryMode) ??
-			(payload.deliveryMode === "follow_up" ? "followUp" : "steer");
+			session.unfinishedActionCount > 0;
+		const streamingBehavior = "steer";
 		const message = createAgentSessionMessage(payload);
 		const prompt = message.content;
 
@@ -4099,7 +5831,7 @@ export class AgentDaemon {
 			if (!didQueue) {
 				throw new Error("Agent message was not queued");
 			}
-			// The queued message now counts in pendingMessageCount.
+			// The queued message now counts in unfinishedActionCount.
 			releaseReservation();
 			// Do not await delivery: a queued message delivers only when the target's
 			// turn progresses, and the sender is blocked inside its own turn — awaiting
@@ -4121,7 +5853,10 @@ export class AgentDaemon {
 				},
 			};
 			if (typeof session.acceptAgentMessagePrompt === "function") {
-				await session.acceptAgentMessagePrompt(prompt, { ...promptOptions, customMessage: message });
+				await session.acceptAgentMessagePrompt(prompt, {
+					...promptOptions,
+					customMessage: message,
+				});
 			} else {
 				await session.prompt(prompt, promptOptions);
 			}
@@ -4139,7 +5874,10 @@ export class AgentDaemon {
 		this.abortSideQuestionsFor(client, state.activeSessionId);
 		abortClientSnapshotStreaming(client, state.activeSessionId);
 		detachClientFromActiveSession(client, state);
-		this.write(client, { type: "session_detached", activeSessionId: state.activeSessionId });
+		this.write(client, {
+			type: "session_detached",
+			activeSessionId: state.activeSessionId,
+		});
 		// Abandoned new-chat: discard it so it doesn't linger in memory or leave an
 		// empty file. Replaces the old DeferredAgentConnection.
 		if (this.isDiscardableDraft(state)) {
@@ -4187,47 +5925,10 @@ export class AgentDaemon {
 	private createUpdateRestartSession(state: ActiveSessionState): DaemonUpdateRestartSession | undefined {
 		const session = state.runtime.session;
 		const queue = {
-			steering: [...session.getSteeringQueueSnapshots()].map((message) => ({
-				message: message.text,
-				...(message.content ? { content: message.content } : {}),
-				...(message.images ? { images: message.images } : {}),
-				...(message.queueKey ? { queueKey: message.queueKey } : {}),
-				...(message.agentMessageId ? { agentMessageId: message.agentMessageId } : {}),
-				...(message.customMessage ? { customMessage: message.customMessage } : {}),
-				...(message.prefixMessages ? { prefixMessages: message.prefixMessages } : {}),
-			})),
-			followUp: [...session.getFollowUpQueueSnapshots()].map((message) => ({
-				message: message.text,
-				...(message.content ? { content: message.content } : {}),
-				...(message.images ? { images: message.images } : {}),
-				...(message.queueKey ? { queueKey: message.queueKey } : {}),
-				...(message.agentMessageId ? { agentMessageId: message.agentMessageId } : {}),
-				...(message.customMessage ? { customMessage: message.customMessage } : {}),
-				...(message.prefixMessages ? { prefixMessages: message.prefixMessages } : {}),
-			})),
+			actions: session.getSessionActionRecoverySnapshot(),
 			nextTurn: [...session.getPendingNextTurnMessageSnapshots()],
 		};
-		const acceptedPrompt = session.getAcceptedPromptSnapshot();
-		const restartQueue = {
-			...queue,
-			...(acceptedPrompt
-				? {
-						acceptedPrompt: {
-							message: acceptedPrompt.text,
-							...(acceptedPrompt.content ? { content: acceptedPrompt.content } : {}),
-							...(acceptedPrompt.images ? { images: acceptedPrompt.images } : {}),
-							...(acceptedPrompt.customMessage ? { customMessage: acceptedPrompt.customMessage } : {}),
-							agentMessageId: acceptedPrompt.agentMessageId,
-							nextTurn: acceptedPrompt.nextTurn,
-						},
-					}
-				: {}),
-		};
-		const hasQueuedMessages =
-			restartQueue.steering.length > 0 ||
-			restartQueue.followUp.length > 0 ||
-			restartQueue.nextTurn.length > 0 ||
-			restartQueue.acceptedPrompt !== undefined;
+		const hasQueuedMessages = queue.actions.actions.length > 0 || queue.nextTurn.length > 0;
 		const wasStreaming = session.isStreaming;
 		const wasCompacting = session.isCompacting;
 		const wasBashRunning = session.isBashRunning;
@@ -4241,9 +5942,7 @@ export class AgentDaemon {
 			hadRunningRlmChildren ||
 			wasRetrying ||
 			hadAcceptedPromptInFlight ||
-			restartQueue.steering.length > 0 ||
-			restartQueue.followUp.length > 0 ||
-			restartQueue.acceptedPrompt !== undefined;
+			queue.actions.actions.length > 0;
 		const sessionFile =
 			session.sessionFile ??
 			(hasQueuedMessages || shouldResume
@@ -4265,7 +5964,7 @@ export class AgentDaemon {
 			},
 			runtimeMetadata: state.runtime.metadata,
 			...(state.clientEnv ? { clientEnv: { ...state.clientEnv } } : {}),
-			queue: restartQueue,
+			queue,
 			shouldResume,
 			wasStreaming,
 			wasCompacting,
@@ -4318,47 +6017,110 @@ export class AgentDaemon {
 		return depth;
 	}
 
-	private prepareUpdateRestartCheckpoint(): DaemonUpdateRestartManifest {
-		if (this.updateRestartPreparing) {
-			throw new Error("Daemon is already preparing an update restart");
+	private assertUpdateRestartNotCancelled(transaction: { id: symbol; abort: AbortController }): void {
+		if (transaction.abort.signal.aborted || this.updateRestart?.id !== transaction.id) {
+			throw new Error("Update restart preparation cancelled");
 		}
-		this.updateRestartPreparing = true;
-		// Keep persisted jobs for the replacement daemon, but stop this process
-		// from accepting another scheduled mutation while its checkpoint is held.
+	}
+
+	private beginUpdateRestartTransaction(owner?: DaemonSocketClient): NonNullable<AgentDaemon["updateRestart"]> {
+		if (this.updateRestart) throw new Error("Daemon is already preparing an update restart");
+		const transaction: NonNullable<AgentDaemon["updateRestart"]> = {
+			id: Symbol("update-restart"),
+			...(owner ? { owner } : {}),
+			abort: new AbortController(),
+			phase: "preparing",
+			deferredClientEnv: [],
+		};
+		this.updateRestart = transaction;
 		this.cronScheduler.stop();
+		transaction.deadline = setTimeout(() => {
+			transaction.abort.abort();
+			this.cancelPreparedUpdateRestart(transaction.id);
+		}, UPDATE_RESTART_PREPARE_TIMEOUT_MS);
+		transaction.deadline.unref();
+		return transaction;
+	}
+
+	private async runUpdateRestartPreparation(
+		transaction: NonNullable<AgentDaemon["updateRestart"]>,
+	): Promise<DaemonUpdateRestartManifest> {
 		try {
-			const states = [...this.sessions.values()];
-			const restartSessions = states
-				.map((state) => this.createUpdateRestartSession(state))
-				.filter((session): session is DaemonUpdateRestartSession => session !== undefined)
-				.sort(
-					(left, right) =>
-						this.getUpdateRestartSessionDepth(this.getSessionState(left.activeSessionId)) -
-						this.getUpdateRestartSessionDepth(this.getSessionState(right.activeSessionId)),
-				);
-			const manifest = {
-				createdAt: new Date().toISOString(),
-				sessions: restartSessions,
-			};
-			this.preparedUpdateRestartManifest = manifest;
+			await this.mutationDrain.waitForDrain(0, transaction.abort.signal, "Update restart preparation cancelled");
+			this.assertUpdateRestartNotCancelled(transaction);
+			transaction.phase = "fencing";
+			await this.mutationDrain.waitForDrain(0, transaction.abort.signal, "Update restart preparation cancelled");
+			this.assertUpdateRestartNotCancelled(transaction);
+			const manifest = await this.prepareUpdateRestartCheckpoint(transaction);
+			this.assertUpdateRestartNotCancelled(transaction);
+			transaction.manifest = manifest;
+			transaction.phase = "prepared";
 			return manifest;
 		} catch (error) {
-			this.cancelPreparedUpdateRestart();
+			this.cancelPreparedUpdateRestart(transaction.id);
 			throw error;
 		}
 	}
 
-	private async commitPreparedUpdateRestart(): Promise<DaemonUpdateRestartManifest> {
-		const manifest = this.preparedUpdateRestartManifest;
-		if (!this.updateRestartPreparing || !manifest) {
+	private async prepareUpdateRestartCheckpoint(
+		transaction: NonNullable<AgentDaemon["updateRestart"]>,
+	): Promise<DaemonUpdateRestartManifest> {
+		const signal = transaction.abort.signal;
+		try {
+			const states = [...this.sessions.values()];
+			this.updateRestartQueuePauses.clear();
+			for (const state of states) {
+				this.updateRestartQueuePauses.set(state.activeSessionId, state.runtime.session.acquireQueuedWorkPause());
+			}
+			await Promise.all(states.map((state) => state.runtime.session.waitForSessionInputCheckpoint(signal)));
+			this.assertUpdateRestartNotCancelled(transaction);
+			const snapshottedIds = new Set(states.map((state) => state.activeSessionId));
+			const addedSession = [...this.sessions.keys()].find((activeSessionId) => !snapshottedIds.has(activeSessionId));
+			if (addedSession) throw new Error(`Session ${addedSession} became resident during update preparation`);
+
+			const restartSessions = states
+				.filter((state) => this.sessions.get(state.activeSessionId) === state)
+				.map((state) => this.createUpdateRestartSession(state))
+				.filter((session): session is DaemonUpdateRestartSession => session !== undefined)
+				.sort((left, right) => {
+					const leftState = this.sessions.get(left.activeSessionId);
+					const rightState = this.sessions.get(right.activeSessionId);
+					return (
+						(leftState ? this.getUpdateRestartSessionDepth(leftState) : 0) -
+						(rightState ? this.getUpdateRestartSessionDepth(rightState) : 0)
+					);
+				});
+			this.assertUpdateRestartNotCancelled(transaction);
+			const includedActiveSessionIds = new Set(restartSessions.map((session) => session.activeSessionId));
+			const discardedActiveSessionIds = states
+				.filter(
+					(state) =>
+						this.sessions.get(state.activeSessionId) === state &&
+						!includedActiveSessionIds.has(state.activeSessionId),
+				)
+				.map((state) => state.activeSessionId);
+			return {
+				formatVersion: DAEMON_UPDATE_RESTART_FORMAT_VERSION,
+				createdAt: new Date().toISOString(),
+				sessions: restartSessions,
+				...(discardedActiveSessionIds.length > 0 ? { discardedActiveSessionIds } : {}),
+			};
+		} catch (error) {
+			this.cancelPreparedUpdateRestart(transaction.id);
+			throw error;
+		}
+	}
+
+	private async commitPreparedUpdateRestart(transactionId: symbol): Promise<DaemonUpdateRestartManifest> {
+		const transaction = this.updateRestart;
+		if (transaction?.id !== transactionId || !transaction.manifest) {
 			throw new Error("Daemon has no prepared update checkpoint");
 		}
+		const manifest = transaction.manifest;
 		const restartByActiveSessionId = new Map(manifest.sessions.map((session) => [session.activeSessionId, session]));
 		for (const state of this.sessions.values()) {
 			const restartSession = restartByActiveSessionId.get(state.activeSessionId);
-			if (restartSession) {
-				this.appendUpdateRestartMarker(state, restartSession);
-			}
+			if (restartSession) this.appendUpdateRestartMarker(state, restartSession);
 		}
 		const closeStates = [...this.sessions.values()].sort(
 			(left, right) => this.getUpdateRestartSessionDepth(right) - this.getUpdateRestartSessionDepth(left),
@@ -4368,27 +6130,47 @@ export class AgentDaemon {
 				await this.closeSession(state, restartByActiveSessionId.has(state.activeSessionId) ? "update" : "killed");
 			}
 		}
-		for (const state of [...this.sessions.values()]) {
-			await this.closeSession(state, "killed");
-		}
+		for (const state of [...this.sessions.values()]) await this.closeSession(state, "killed");
 		return manifest;
 	}
 
-	private cancelPreparedUpdateRestart(): void {
-		this.preparedUpdateRestartManifest = undefined;
-		this.updateRestartPreparing = false;
-		if (!this.shuttingDown) {
-			this.cronScheduler.start();
+	private cancelPreparedUpdateRestart(transactionId?: symbol): void {
+		const transaction = this.updateRestart;
+		if (!transaction || (transactionId && transaction.id !== transactionId)) return;
+		if (transaction.deadline) clearTimeout(transaction.deadline);
+		transaction.deadline = undefined;
+		transaction.abort.abort();
+		if (transaction.phase === "publishing") return;
+		this.updateRestart = undefined;
+		for (const deferred of transaction.deferredClientEnv) {
+			if (
+				this.sessions.get(deferred.state.activeSessionId) === deferred.state &&
+				deferred.state.clients.has(deferred.client) &&
+				deferred.client.attachedActiveSessionIds.has(deferred.state.activeSessionId)
+			) {
+				this.adoptClientEnv(deferred.state, deferred.env);
+			}
 		}
+		transaction.deferredClientEnv.length = 0;
+		for (const pause of this.updateRestartQueuePauses.values()) pause.release();
+		this.updateRestartQueuePauses.clear();
+		if (!this.shuttingDown) this.cronScheduler.start();
 	}
 
 	private async prepareUpdateRestart(): Promise<DaemonUpdateRestartManifest> {
-		const manifest = this.prepareUpdateRestartCheckpoint();
+		const transaction = this.beginUpdateRestartTransaction();
 		try {
+			const manifest = await this.runUpdateRestartPreparation(transaction);
+			if (transaction.deadline) clearTimeout(transaction.deadline);
+			transaction.deadline = undefined;
+			transaction.phase = "publishing";
 			this.writeUpdateRestartManifest(manifest);
-			return await this.commitPreparedUpdateRestart();
+			return await this.commitPreparedUpdateRestart(transaction.id);
 		} catch (error) {
-			this.cancelPreparedUpdateRestart();
+			if (this.updateRestart === transaction && transaction.phase === "publishing") {
+				transaction.phase = "prepared";
+			}
+			this.cancelPreparedUpdateRestart(transaction.id);
 			throw error;
 		}
 	}
@@ -4423,26 +6205,115 @@ export class AgentDaemon {
 		return undefined;
 	}
 
+	private abortWaitingPromptAdmissionsForSession(activeSessionId: string): void {
+		for (const admission of this.promptAdmissions.values()) {
+			if (admission.activeSessionId === activeSessionId && admission.status === "waiting") {
+				admission.status = "cancelled";
+				admission.controller?.abort();
+			}
+		}
+	}
+
 	private async closeSession(
 		state: ActiveSessionState,
 		reason: DaemonSessionClosedReason,
 		waitForAbort = true,
+		cascadeChildren = true,
+		descendantCollector?: Set<ActiveSessionState>,
 	): Promise<void> {
+		this.abortWaitingPromptAdmissionsForSession(state.activeSessionId);
 		for (const client of state.clients) {
 			this.abortSideQuestionsFor(client, state.activeSessionId);
 		}
 		const existingClose = this.closingSessions.get(state.activeSessionId);
 		if (existingClose) {
-			await existingClose;
+			const requestedReason = this.isStrongerCloseReason(reason, existingClose.reason)
+				? reason
+				: existingClose.reason;
+			let closeError: unknown;
+			let closeFailed = false;
+			try {
+				await existingClose.promise;
+			} catch (error) {
+				closeError = error;
+				closeFailed = true;
+			}
+			const reasonUpgrade = (existingClose.reasonUpgrade ?? Promise.resolve()).then(() => {
+				if (!this.isStrongerCloseReason(requestedReason, existingClose.reason)) return;
+				try {
+					this.applyReasonUpgrade(state, existingClose.descendants, existingClose.reason, requestedReason);
+				} finally {
+					existingClose.reason = requestedReason;
+				}
+			});
+			existingClose.reasonUpgrade = reasonUpgrade.catch(() => undefined);
+			try {
+				await reasonUpgrade;
+			} finally {
+				descendantCollector?.add(state);
+				for (const descendant of existingClose.descendants) descendantCollector?.add(descendant);
+			}
+			if (closeFailed) throw closeError;
 			return;
 		}
-		const closePromise = Promise.resolve().then(() => this.closeSessionOnce(state, reason, waitForAbort));
-		this.closingSessions.set(state.activeSessionId, closePromise);
+		const descendants = new Set<ActiveSessionState>();
+		const closePromise = Promise.resolve().then(() =>
+			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants),
+		);
+		const close = { promise: closePromise, reason, descendants };
+		this.closingSessions.set(state.activeSessionId, close);
 		try {
 			await closePromise;
 		} finally {
-			this.closingSessions.delete(state.activeSessionId);
+			descendantCollector?.add(state);
+			for (const descendant of descendants) descendantCollector?.add(descendant);
+			if (this.closingSessions.get(state.activeSessionId) === close) {
+				this.closingSessions.delete(state.activeSessionId);
+			}
 		}
+	}
+
+	private closeReasonStrength(reason: DaemonSessionClosedReason): number {
+		if (reason === "killed") return 2;
+		if (reason === "completed" || reason === "replaced") return 1;
+		return 0;
+	}
+
+	private isStrongerCloseReason(candidate: DaemonSessionClosedReason, current: DaemonSessionClosedReason): boolean {
+		return this.closeReasonStrength(candidate) > this.closeReasonStrength(current);
+	}
+
+	private applyReasonUpgrade(
+		state: ActiveSessionState,
+		descendants: ReadonlySet<ActiveSessionState>,
+		from: DaemonSessionClosedReason,
+		to: DaemonSessionClosedReason,
+	): void {
+		let persistError: unknown;
+		let persistenceFailed = false;
+		for (const target of [state, ...descendants]) {
+			try {
+				if (to === "killed") this.cancelScheduledJobsForSession(target);
+			} catch (error) {
+				if (!persistenceFailed) persistError = error;
+				persistenceFailed = true;
+			}
+			try {
+				if (this.closeKeepsResumeEntry(from)) this.archiveSession(target);
+			} catch (error) {
+				if (!persistenceFailed) persistError = error;
+				persistenceFailed = true;
+			}
+		}
+		if (persistenceFailed) throw persistError;
+	}
+
+	private closeKeepsResumeEntry(reason: DaemonSessionClosedReason): boolean {
+		return reason === "shutdown" || reason === "update";
+	}
+
+	private archiveSession(state: ActiveSessionState): void {
+		state.runtime.session.sessionManager.appendSessionState({ status: "archived" });
 	}
 
 	private async abortBashForClose(state: ActiveSessionState): Promise<void> {
@@ -4460,6 +6331,8 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		reason: DaemonSessionClosedReason,
 		waitForAbort: boolean,
+		cascadeChildren: boolean,
+		descendants: Set<ActiveSessionState>,
 	): Promise<void> {
 		if (!this.sessions.has(state.activeSessionId)) {
 			return;
@@ -4472,17 +6345,19 @@ export class AgentDaemon {
 		// Abort in-flight status work before any await/dispose so it can't write
 		// agent_status to a session being torn down.
 		this.summarizer.forget(state.activeSessionId);
-		const cascadeError = await this.closeChildSessions(state, reason, waitForAbort);
+		const cascadeError = cascadeChildren
+			? await this.closeChildSessions(state, reason, waitForAbort, descendants)
+			: undefined;
 		// Empty draft (no messages, config, or jobs): discard rather than persist an
 		// empty session file. Mirrors the detach-time discard so a config-bearing
 		// draft closed via kill/completed is never wiped.
-		const keepsResumeEntry = reason === "shutdown" || reason === "update";
+		const keepsResumeEntry = this.closeKeepsResumeEntry(reason);
 		const isEmptyDraftSession = !keepsResumeEntry && this.isEmptyDraftContent(state);
 		let persistError: unknown;
 		// Clean shutdown leaves the session un-archived so it stays in the resume list.
 		if (!keepsResumeEntry && !isEmptyDraftSession) {
 			try {
-				state.runtime.session.sessionManager.appendSessionState({ status: "archived" });
+				this.archiveSession(state);
 			} catch (error) {
 				persistError = error;
 			}
@@ -4509,6 +6384,9 @@ export class AgentDaemon {
 			await state.runtime.dispose();
 		} catch (error) {
 			disposeError = error;
+		}
+		for (const client of state.clients) {
+			abortClientSnapshotStreaming(client, state.activeSessionId);
 		}
 		this.broadcastToSession(state, { type: "session_closed", activeSessionId: state.activeSessionId, reason });
 		for (const client of state.clients) {
@@ -4538,11 +6416,13 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		reason: DaemonSessionClosedReason,
 		waitForAbort = true,
+		descendants = new Set<ActiveSessionState>(),
 	): Promise<unknown> {
 		let cascadeError: unknown;
 		for (const childState of getChildActiveSessionStates(this.sessions, parentState)) {
+			descendants.add(childState);
 			try {
-				await this.closeSession(childState, reason, waitForAbort);
+				await this.closeSession(childState, reason, waitForAbort, true, descendants);
 			} catch (error) {
 				cascadeError ??= error;
 			}
@@ -4604,66 +6484,7 @@ export class AgentDaemon {
 				client.transport === "private-framed" &&
 				daemonClientCapabilitiesForSession(client, state.activeSessionId).has("chunked_snapshot")
 			) {
-				try {
-					const result = this.createAttachResult(client, state, {
-						type: "attach",
-						activeSessionId: state.activeSessionId,
-					});
-					const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
-					this.write(client, {
-						...sequencedMessage,
-						messages: [],
-						snapshotFollows: true,
-					});
-					const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
-					let transcript: SnapshotTranscriptChunkSource;
-					try {
-						transcript = createSnapshotTranscriptChunks({
-							activeSessionId: state.activeSessionId,
-							snapshotId,
-							messages: result.snapshot.messages,
-							targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-							signal: snapshotSignal,
-						});
-					} catch (error) {
-						finishClientSnapshotStreaming(client, state.activeSessionId);
-						throw error;
-					}
-					void this.streamWorkerSnapshot(
-						client,
-						{
-							...result,
-							messages: result.messages ? [] : undefined,
-							snapshot: { ...result.snapshot, messages: [] },
-							snapshotStream: {
-								id: snapshotId,
-								messageCount: result.snapshot.messages.length,
-								targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-							},
-						},
-						transcript,
-						"replacement",
-						snapshotSignal,
-						true,
-					).catch((error) => {
-						this.log(`could not stream replacement snapshot: ${String(error)}`);
-						this.queueClientCatchup(client, state.activeSessionId, "replacement");
-						if (!client.snapshotStreaming) {
-							void this.catchUpBackpressuredClient(client).catch((catchupError) =>
-								this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),
-							);
-						}
-					});
-				} catch (error) {
-					this.log(`could not prepare replacement snapshot: ${String(error)}`);
-					// Continue below with the complete replacement event.
-					if (client.transport === "private-framed") {
-						this.write(client, sequencedMessage);
-					} else {
-						serialized ??= serializeJsonLine(sequencedMessage);
-						this.writeSerialized(client, serialized, sequencedMessage);
-					}
-				}
+				this.beginReplacementSnapshot(client, state, sequencedMessage);
 				continue;
 			}
 			if (client.transport === "private-framed") {
@@ -4673,6 +6494,83 @@ export class AgentDaemon {
 				this.writeSerialized(client, serialized, sequencedMessage);
 			}
 		}
+	}
+
+	private beginReplacementSnapshot(
+		client: DaemonSocketClient,
+		state: ActiveSessionState,
+		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
+	): void {
+		const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+		// Mark before the registry read so later events queue behind this snapshot.
+		const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
+		void this.prepareReplacementSnapshot(client, state, message, snapshotId, snapshotSignal).catch((error) => {
+			finishClientSnapshotStreaming(client, state.activeSessionId);
+			this.log(`could not prepare replacement snapshot: ${String(error)}`);
+			if (!client.socket.destroyed && this.sessions.get(state.activeSessionId) === state) {
+				this.write(client, message);
+			}
+			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
+				void this.catchUpBackpressuredClient(client).catch((catchupError) =>
+					this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),
+				);
+			}
+		});
+	}
+
+	private async prepareReplacementSnapshot(
+		client: DaemonSocketClient,
+		state: ActiveSessionState,
+		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
+		snapshotId: string,
+		snapshotSignal: AbortSignal,
+	): Promise<void> {
+		const result = await this.createAttachResult(client, state, {
+			type: "attach",
+			activeSessionId: state.activeSessionId,
+		});
+		if (this.sessions.get(state.activeSessionId) !== state) {
+			finishClientSnapshotStreaming(client, state.activeSessionId);
+			if (!client.snapshotStreaming && client.catchupActiveSessionIds?.size) {
+				void this.catchUpBackpressuredClient(client).catch((catchupError) =>
+					this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),
+				);
+			}
+			return;
+		}
+		const transcript = createSnapshotTranscriptChunks({
+			activeSessionId: state.activeSessionId,
+			snapshotId,
+			messages: result.snapshot.messages,
+			targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+			signal: snapshotSignal,
+		});
+		this.write(client, { ...message, messages: [], snapshotFollows: true });
+		void this.streamWorkerSnapshot(
+			client,
+			{
+				...result,
+				messages: result.messages ? [] : undefined,
+				snapshot: { ...result.snapshot, messages: [] },
+				snapshotStream: {
+					id: snapshotId,
+					messageCount: result.snapshot.messages.length,
+					targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+				},
+			},
+			transcript,
+			"replacement",
+			snapshotSignal,
+			true,
+		).catch((error) => {
+			this.log(`could not stream replacement snapshot: ${String(error)}`);
+			this.queueClientCatchup(client, state.activeSessionId, "replacement");
+			if (!client.snapshotStreaming) {
+				void this.catchUpBackpressuredClient(client).catch((catchupError) =>
+					this.log(`could not catch up replacement snapshot: ${String(catchupError)}`),
+				);
+			}
+		});
 	}
 
 	private broadcastGlobal(message: DaemonOutbound): void {
@@ -4708,6 +6606,7 @@ export class AgentDaemon {
 		if (client.snapshotStreaming || client.backpressured) {
 			return Promise.resolve();
 		}
+		this.clearClientCatchupRetry(client);
 		const catchup = this.drainBackpressuredClientCatchupQueue(client).finally(() => {
 			if (client.catchupPromise === catchup) {
 				client.catchupPromise = undefined;
@@ -4717,6 +6616,33 @@ export class AgentDaemon {
 		return catchup;
 	}
 
+	private clearClientCatchupRetry(client: DaemonSocketClient): void {
+		if (!client.catchupRetryTimer) {
+			return;
+		}
+		clearTimeout(client.catchupRetryTimer);
+		client.catchupRetryTimer = undefined;
+	}
+
+	private scheduleClientCatchupRetry(client: DaemonSocketClient): void {
+		if (client.socket.destroyed || client.catchupRetryTimer) {
+			return;
+		}
+		client.catchupRetryTimer = setTimeout(() => {
+			client.catchupRetryTimer = undefined;
+			if (client.socket.destroyed || !client.catchupActiveSessionIds?.size) {
+				return;
+			}
+			if (client.snapshotStreaming || client.backpressured) {
+				this.scheduleClientCatchupRetry(client);
+				return;
+			}
+			void this.catchUpBackpressuredClient(client).catch((error) =>
+				this.log(`could not retry catch-up for client ${client.id}: ${String(error)}`),
+			);
+		}, CLIENT_CATCHUP_RETRY_MS);
+	}
+
 	private async drainBackpressuredClientCatchupQueue(client: DaemonSocketClient): Promise<void> {
 		while (
 			!client.socket.destroyed &&
@@ -4724,13 +6650,15 @@ export class AgentDaemon {
 			!client.backpressured &&
 			client.catchupActiveSessionIds?.size
 		) {
-			await this.drainBackpressuredClientCatchups(client);
+			if ((await this.drainBackpressuredClientCatchups(client)) === "retry-later") {
+				return;
+			}
 		}
 	}
 
-	private async drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<void> {
+	private async drainBackpressuredClientCatchups(client: DaemonSocketClient): Promise<"drained" | "retry-later"> {
 		if (client.socket.destroyed) {
-			return;
+			return "drained";
 		}
 		const pending = [...(client.catchupActiveSessionIds ?? [])].map((activeSessionId) => ({
 			activeSessionId,
@@ -4744,81 +6672,99 @@ export class AgentDaemon {
 			if (!state || !state.clients.has(client)) {
 				continue;
 			}
-			const result = this.createAttachResult(client, state, {
-				type: "attach",
-				activeSessionId,
-			});
-			if (
-				client.transport === "private-framed" &&
-				daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot")
-			) {
-				if (purpose === "replacement") {
-					this.write(client, {
-						type: "session_replaced",
-						activeSessionId,
-						state: result.snapshot.state,
-						messages: [],
-						snapshotFollows: true,
-						meta: createDaemonEventMeta(
-							activeSessionId,
-							state.lastEventSequence,
-							undefined,
-							state.eventGeneration,
-						),
-					});
+			try {
+				const result = await this.createAttachResult(client, state, {
+					type: "attach",
+					activeSessionId,
+				});
+				if (this.sessions.get(activeSessionId) !== state || !state.clients.has(client)) {
+					continue;
 				}
-				const snapshotId = `${activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
-				const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
-				let transcript: SnapshotTranscriptChunkSource;
-				try {
-					transcript = createSnapshotTranscriptChunks({
-						activeSessionId,
-						snapshotId,
-						messages: result.snapshot.messages,
-						targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-						signal: snapshotSignal,
-					});
-				} catch (error) {
-					finishClientSnapshotStreaming(client, activeSessionId);
-					throw error;
-				}
-				await this.streamWorkerSnapshot(
-					client,
-					{
-						...result,
-						messages: result.messages ? [] : undefined,
-						snapshot: { ...result.snapshot, messages: [] },
-						snapshotStream: {
-							id: snapshotId,
-							messageCount: result.snapshot.messages.length,
-							targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-						},
-					},
-					transcript,
-					purpose === "replacement" ? "replacement" : "catchup",
-					snapshotSignal,
-					true,
-				);
-				continue;
-			}
-			const meta = createDaemonEventMeta(activeSessionId, state.lastEventSequence, undefined, state.eventGeneration);
-			const catchup: DaemonOutbound =
-				purpose === "replacement"
-					? {
+				if (
+					client.transport === "private-framed" &&
+					daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot")
+				) {
+					if (purpose === "replacement") {
+						this.write(client, {
 							type: "session_replaced",
 							activeSessionId,
 							state: result.snapshot.state,
+							messages: [],
+							snapshotFollows: true,
+							meta: createDaemonEventMeta(
+								activeSessionId,
+								state.lastEventSequence,
+								undefined,
+								state.eventGeneration,
+							),
+						});
+					}
+					const snapshotId = `${activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
+					let transcript: SnapshotTranscriptChunkSource;
+					try {
+						transcript = createSnapshotTranscriptChunks({
+							activeSessionId,
+							snapshotId,
 							messages: result.snapshot.messages,
-							meta,
-						}
-					: { type: "session_resynced", activeSessionId, snapshot: result.snapshot, meta };
-			if (!this.write(client, catchup)) {
-				for (const remaining of pending.slice(index + 1)) {
+							targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+							signal: snapshotSignal,
+						});
+					} catch (error) {
+						finishClientSnapshotStreaming(client, activeSessionId);
+						throw error;
+					}
+					await this.streamWorkerSnapshot(
+						client,
+						{
+							...result,
+							messages: result.messages ? [] : undefined,
+							snapshot: { ...result.snapshot, messages: [] },
+							snapshotStream: {
+								id: snapshotId,
+								messageCount: result.snapshot.messages.length,
+								targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+							},
+						},
+						transcript,
+						purpose === "replacement" ? "replacement" : "catchup",
+						snapshotSignal,
+						true,
+					);
+					continue;
+				}
+				const meta = createDaemonEventMeta(
+					activeSessionId,
+					state.lastEventSequence,
+					undefined,
+					state.eventGeneration,
+				);
+				const catchup: DaemonOutbound =
+					purpose === "replacement"
+						? {
+								type: "session_replaced",
+								activeSessionId,
+								state: result.snapshot.state,
+								messages: result.snapshot.messages,
+								meta,
+							}
+						: { type: "session_resynced", activeSessionId, snapshot: result.snapshot, meta };
+				if (!this.write(client, catchup)) {
+					for (const remaining of pending.slice(index + 1)) {
+						this.queueClientCatchup(client, remaining.activeSessionId, remaining.purpose);
+					}
+					return "retry-later";
+				}
+			} catch (error) {
+				for (const remaining of pending.slice(index)) {
 					this.queueClientCatchup(client, remaining.activeSessionId, remaining.purpose);
 				}
-				return;
+				this.log(`could not catch up client ${client.id} for ${activeSessionId}: ${String(error)}`);
+				this.scheduleClientCatchupRetry(client);
+				return "retry-later";
 			}
 		}
+		return "drained";
 	}
 
 	private queueClientCatchup(
@@ -4951,6 +6897,10 @@ export class AgentDaemon {
 		this.signalCleanupHandlers.push(() => process.off("exit", exitHandler));
 	}
 
+	private getShutdownClosingReason(): DaemonClosingReason {
+		return this.updateRestart?.phase === "publishing" ? "update" : "shutdown";
+	}
+
 	private async shutdown(exitCode: number): Promise<never> {
 		if (this.shuttingDown) {
 			process.exit(exitCode);
@@ -4965,7 +6915,7 @@ export class AgentDaemon {
 			this.supervisorFenceTimer = undefined;
 		}
 		this.log(`shutting down (exit ${exitCode}); closing ${this.sessions.size} active session(s)`);
-		const closingReason: DaemonClosingReason = this.updateRestartPreparing ? "update" : "shutdown";
+		const closingReason = this.getShutdownClosingReason();
 		for (const client of this.clients) {
 			abortClientSnapshotStreaming(client);
 			this.write(client, { type: "daemon_closing", reason: closingReason });
@@ -4999,23 +6949,6 @@ function hasDaemonOutboundActiveSessionId(
 	message: DaemonOutbound,
 ): message is DaemonOutbound & { activeSessionId: string } {
 	return "activeSessionId" in message && typeof message.activeSessionId === "string";
-}
-
-function serializeSavedSessionInfo(session: SessionInfo): DaemonSavedSessionInfo {
-	return {
-		path: session.path,
-		id: session.id,
-		cwd: session.cwd,
-		name: session.name,
-		state: session.state,
-		parentSessionPath: session.parentSessionPath,
-		created: session.created.toISOString(),
-		modified: session.modified.toISOString(),
-		messageCount: session.messageCount,
-		firstMessage: session.firstMessage,
-		allMessagesText: session.allMessagesText,
-		agentStatus: session.agentStatus,
-	};
 }
 
 export function getChildActiveSessionStates(
@@ -5170,43 +7103,5 @@ export function shouldSendDaemonOutboundToClient(client: DaemonSocketClient, mes
 }
 
 export async function resolveDaemonSessionPath(selector: string, cwd: string, sessionDir?: string): Promise<string> {
-	if (looksLikeSessionPath(selector)) {
-		return selector;
-	}
-
-	const localMatches = (await SessionManager.list(cwd, sessionDir)).filter((session) =>
-		session.id.startsWith(selector),
-	);
-	const localMatch = resolveUniqueSavedSessionMatch(selector, localMatches);
-	if (localMatch) {
-		return localMatch.path;
-	}
-
-	const allSessions =
-		sessionDir !== undefined ? await SessionManager.listAll(undefined, sessionDir) : await SessionManager.listAll();
-	const globalMatches = allSessions.filter((session) => session.id.startsWith(selector));
-	const globalMatch = resolveUniqueSavedSessionMatch(selector, globalMatches);
-	if (globalMatch) {
-		return globalMatch.path;
-	}
-
-	throw new Error(`No session found matching "${selector}"`);
-}
-
-function resolveUniqueSavedSessionMatch(selector: string, matches: readonly SessionInfo[]): SessionInfo | undefined {
-	if (matches.length === 0) {
-		return undefined;
-	}
-	if (matches.length > 1) {
-		throw new Error(
-			`Ambiguous saved session "${selector}": matches ${matches
-				.map((session) => `${session.id}${session.name ? ` (${session.name})` : ""}`)
-				.join(", ")}`,
-		);
-	}
-	return matches[0];
-}
-
-function looksLikeSessionPath(selector: string): boolean {
-	return selector.includes("/") || selector.includes("\\") || selector.endsWith(".jsonl");
+	return (await resolveSessionPath(selector, cwd, sessionDir)).path;
 }

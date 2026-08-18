@@ -10,6 +10,7 @@ export interface PromptStash {
 
 export interface PromptStashState {
 	stash?: PromptStash;
+	queuedStashes?: PromptStash[];
 }
 
 export class ClientPromptStashStore {
@@ -25,7 +26,11 @@ export class ClientPromptStashStore {
 	}
 
 	release(sessionId: string, state: PromptStashState): void {
-		if (state.stash === undefined && this.states.get(sessionId) === state) {
+		if (
+			state.stash === undefined &&
+			(state.queuedStashes?.length ?? 0) === 0 &&
+			this.states.get(sessionId) === state
+		) {
 			this.states.delete(sessionId);
 		}
 	}

@@ -42,8 +42,8 @@ async function bindSession() {
 	const session = runtime.session;
 	await session.bindExtensions({});
 	unsubscribe = session.subscribe((event) => {
-		if (event.type === "queue_update") {
-			console.log("Queued:", event.steering.length + event.followUp.length);
+		if (event.type === "session_action_update") {
+			console.log("Queued:", event.actions.steering.length + event.actions.followUps.length);
 		}
 	});
 	return session;

@@ -21,7 +21,6 @@ describe("InteractiveMode startup hints", () => {
 
 	function createMode(sessionHasMessages = false, returnToAgentsView = false, getEditorText = () => "") {
 		const mode = {
-			childAgentPanelMode: undefined,
 			sessionHasMessages,
 			options: { returnToAgentsView },
 			editor: { getText: getEditorText },
@@ -83,15 +82,90 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(label)).toBe("test-model • high  ? for shortcuts");
 	});
 
+	it("routes session-view requests through the existing agents-view return path", async () => {
+		const returnToAgentsView = vi.fn(async () => {});
+		const mode = Object.assign(createMode(false, true), { returnToAgentsView });
+
+		await Reflect.get(InteractiveMode.prototype, "requestAgentsView").call(mode);
+
+		expect(returnToAgentsView).toHaveBeenCalledOnce();
+	});
+
+	it("explains why a draft blocks the destructive agents-view handoff", async () => {
+		const returnToAgentsView = vi.fn(async () => {});
+		const showStatus = vi.fn();
+		const mode = Object.assign(
+			createMode(false, true, () => "draft prompt"),
+			{ returnToAgentsView, showStatus },
+		);
+
+		await Reflect.get(InteractiveMode.prototype, "requestAgentsView").call(mode);
+
+		expect(returnToAgentsView).not.toHaveBeenCalled();
+		expect(showStatus).toHaveBeenCalledWith("Send, stash, or clear your draft before opening agents");
+	});
+
+	it("opens the shared session view on back navigation for process-local chats", async () => {
+		const requestAgentsView = vi.fn(async () => {});
+		const returnToAgentsView = vi.fn(async () => {});
+		const mode = Object.assign(createMode(false, false), { requestAgentsView, returnToAgentsView });
+
+		const handled = Reflect.get(InteractiveMode.prototype, "handleAgentsBack").call(mode) as boolean;
+
+		expect(handled).toBe(true);
+		expect(requestAgentsView).toHaveBeenCalledOnce();
+		expect(returnToAgentsView).not.toHaveBeenCalled();
+	});
+
+	it("returns to the daemon agents view on back navigation for daemon chats", async () => {
+		const requestAgentsView = vi.fn(async () => {});
+		const returnToAgentsView = vi.fn(async () => {});
+		const mode = Object.assign(createMode(false, true), { requestAgentsView, returnToAgentsView });
+
+		const handled = Reflect.get(InteractiveMode.prototype, "handleAgentsBack").call(mode) as boolean;
+
+		expect(handled).toBe(true);
+		expect(returnToAgentsView).toHaveBeenCalledOnce();
+		expect(requestAgentsView).not.toHaveBeenCalled();
+	});
+
+	it("leaves back navigation to the editor while a draft exists", async () => {
+		const requestAgentsView = vi.fn(async () => {});
+		const mode = Object.assign(
+			createMode(false, false, () => "draft prompt"),
+			{ requestAgentsView },
+		);
+
+		const handled = Reflect.get(InteractiveMode.prototype, "handleAgentsBack").call(mode) as boolean;
+
+		expect(handled).toBe(false);
+		expect(requestAgentsView).not.toHaveBeenCalled();
+	});
+
+	it("explains that the agents view needs the daemon for non-daemon chats", async () => {
+		const showStatus = vi.fn();
+		const shutdown = vi.fn(async () => {});
+		const mode = Object.assign(createMode(false, false), {
+			returnToAgentsView: vi.fn(async () => {}),
+			showStatus,
+			shutdown,
+		});
+
+		await Reflect.get(InteractiveMode.prototype, "requestAgentsView").call(mode);
+
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("needs the daemon"));
+		expect(shutdown).not.toHaveBeenCalled();
+	});
+
 	it("keeps the lowercase agents hint while typing", () => {
 		let editorText = "";
 		const mode = createMode(false, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
-		expect(stripAnsi(getLabel())).toBe("← agents  test-model • high  ? for shortcuts");
+		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high  ? for shortcuts");
 
 		editorText = "draft prompt";
-		expect(stripAnsi(getLabel())).toBe("← agents  test-model • high");
+		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high");
 	});
 
 	it("hides the fresh-chat shortcut hint while the prompt has text", () => {

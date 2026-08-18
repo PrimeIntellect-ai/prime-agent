@@ -45,27 +45,11 @@ describe("agent-message skill over the kernel host bridge", () => {
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [bundledAgentMessageSkill()],
 			hostHandlers: {
-				"agent_message.list": async (payload) => {
-					requests.push({ type: "agent_message.list", payload });
+				"agent_message.list_agents": async (payload) => {
+					requests.push({ type: "agent_message.list_agents", payload });
 					return {
-						current: { activeSessionId: "alpha", sessionId: "session-alpha" },
-						agents: [
-							{
-								activeSessionId: "alpha",
-								sessionId: "session-alpha",
-								cwd: tempDir,
-								isStreaming: false,
-								pendingMessageCount: 0,
-							},
-							{
-								activeSessionId: "beta",
-								sessionId: "session-beta",
-								sessionName: "Beta",
-								cwd: tempDir,
-								isStreaming: true,
-								pendingMessageCount: 1,
-							},
-						],
+						current: { name: "alpha", id: "session-alpha", depth: 0 },
+						entries: [{ relationship: "sibling", name: "Beta", id: "session-beta", depth: 0, status: "idle" }],
 					};
 				},
 				"agent_message.send": async (payload) => {
@@ -73,12 +57,11 @@ describe("agent-message skill over the kernel host bridge", () => {
 					return {
 						id: "agentmsg-test",
 						source: "agent_message",
-						target: { activeSessionId: payload.target, sessionId: "session-beta", sessionName: "Beta" },
+						target: { activeSessionId: payload.receiver_name, sessionId: "session-beta", sessionName: "Beta" },
 						from: { activeSessionId: "alpha", sessionId: "session-alpha" },
 						message: payload.message,
 						deliveryStatus: "queued",
 						queuedAt: "2026-06-16T00:00:00.000Z",
-						deliveryMode: payload.mode,
 					};
 				},
 			},
@@ -88,42 +71,95 @@ describe("agent-message skill over the kernel host bridge", () => {
 		const result = await manager.execute(`
 import json
 agents = await agent_message.list_agents()
-receipt = await agent_message.send("beta", "hello beta", mode="follow_up")
+receipt = await agent_message.send(
+    "hello beta", receiver_role="sibling", receiver_name="beta"
+)
 print(json.dumps({"agents": agents, "receipt": receipt}, sort_keys=True))
 `);
 
 		expect(result.status).toBe("ok");
 		const output = JSON.parse(result.stdout.trim());
-		expect(output.agents.agents).toHaveLength(2);
+		expect(output.agents).toMatchObject({
+			current: { id: "session-alpha", depth: 0 },
+			entries: [{ relationship: "sibling", id: "session-beta", status: "idle" }],
+		});
 		expect(output.receipt).toMatchObject({
 			id: "agentmsg-test",
 			source: "agent_message",
 			message: "hello beta",
 			deliveryStatus: "queued",
-			deliveryMode: "follow_up",
 		});
 		expect(result.sentAgentMessages).toEqual([
 			{
 				id: "agentmsg-test",
 				message: "hello beta",
 				deliveryStatus: "queued",
+				receiverRole: "sibling",
 				target: { activeSessionId: "beta", sessionId: "session-beta", sessionName: "Beta" },
 			},
 		]);
-		expect(requests[0]).toMatchObject({ type: "agent_message.list", payload: { type: "agent_message.list" } });
+		expect(requests[0]).toMatchObject({
+			type: "agent_message.list_agents",
+			payload: { type: "agent_message.list_agents" },
+		});
 		expect(requests[1]).toMatchObject({
 			type: "agent_message.send",
 			payload: {
 				type: "agent_message.send",
-				target: "beta",
 				message: "hello beta",
-				mode: "follow_up",
+				receiver_role: "sibling",
+				receiver_name: "beta",
 			},
 		});
 		expect(requests[1].payload).not.toHaveProperty("from");
 	});
 
-	it("validates mode before sending to the host", async () => {
+	it("emits successful broadcast receipts and leaves short errors in the result", async () => {
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledAgentMessageSkill()],
+			hostHandlers: {
+				"agent_message.send": async (payload) => ({
+					receipts: [
+						{
+							id: "agentmsg-root",
+							source: "agent_message",
+							target: { activeSessionId: "root", sessionId: "session-root" },
+							message: payload.message,
+							deliveryStatus: "delivered",
+							deliveredAt: "2026-08-03T00:00:00.000Z",
+							deliveryMode: payload.mode,
+						},
+						{ target: "sibling", error: "rate limited" },
+					],
+				}),
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+import json
+receipt = await agent_message.send("all", "status")
+print(json.dumps(receipt, sort_keys=True))
+`);
+
+		expect(result.status).toBe("ok");
+		expect(JSON.parse(result.stdout.trim())).toMatchObject({
+			receipts: [
+				{ id: "agentmsg-root", deliveryStatus: "delivered" },
+				{ target: "sibling", error: "rate limited" },
+			],
+		});
+		expect(result.sentAgentMessages).toEqual([
+			{
+				id: "agentmsg-root",
+				message: "status",
+				deliveryStatus: "delivered",
+				target: { activeSessionId: "root", sessionId: "session-root" },
+			},
+		]);
+	});
+
+	it("rejects broadcast combined with role selectors before reaching the host", async () => {
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [bundledAgentMessageSkill()],
 			hostHandlers: {
@@ -136,12 +172,56 @@ print(json.dumps({"agents": agents, "receipt": receipt}, sort_keys=True))
 		const manager = await provisioner.ensure();
 		const result = await manager.execute(`
 try:
-    await agent_message.send("beta", "hello", mode="broadcast")
-except ValueError as error:
-    print(f"ValueError: {error}")
+    await agent_message.send("all", "secret", receiver_role="sibling", receiver_name="beta")
+except TypeError as error:
+    print(f"TypeError: {error}")
 `);
 		expect(result.status).toBe("ok");
-		expect(result.stdout.trim()).toBe('ValueError: mode must be "auto", "follow_up", or "steer"');
+		expect(result.stdout.trim()).toBe("TypeError: broadcast cannot be combined with receiver_role/receiver_name");
+	});
+
+	it("rejects a positional name target before reaching the host", async () => {
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledAgentMessageSkill()],
+			hostHandlers: {
+				"agent_message.send": async () => {
+					throw new Error("should not reach host");
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+try:
+    await agent_message.send("beta", "done")
+except TypeError as error:
+    print(f"TypeError: {error}")
+`);
+		expect(result.status).toBe("ok");
+		expect(result.stdout.trim()).toBe(
+			"TypeError: positional agent_message.send targets are not supported; use receiver_role and receiver_name",
+		);
+	});
+
+	it("does not expose a queueable delivery mode", async () => {
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledAgentMessageSkill()],
+			hostHandlers: {
+				"agent_message.send": async () => {
+					throw new Error("should not reach host");
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+try:
+    await agent_message.send("hello", receiver_role="sibling", receiver_name="beta", mode="broadcast")
+except TypeError as error:
+    print(f"TypeError: {error}")
+`);
+		expect(result.status).toBe("ok");
+		expect(result.stdout.trim()).toContain("TypeError: send() got an unexpected keyword argument 'mode'");
 	});
 
 	it("captures sent messages from detached tasks after the cell is idle", async () => {
@@ -151,7 +231,7 @@ except ValueError as error:
 				"agent_message.send": async (payload) => ({
 					id: "agentmsg-background",
 					source: "agent_message",
-					target: { activeSessionId: payload.target, sessionId: "session-beta", sessionName: "Beta" },
+					target: { activeSessionId: payload.receiver_name, sessionId: "session-beta", sessionName: "Beta" },
 					message: payload.message,
 					deliveryStatus: "delivered",
 					deliveredAt: "2026-07-10T00:00:00.000Z",
@@ -168,7 +248,7 @@ except ValueError as error:
 		const result = await manager.execute(
 			`async def send_later():
     await asyncio.sleep(0.05)
-    await agent_message.send("beta", "background hello")
+    await agent_message.send("background hello", receiver_role="sibling", receiver_name="beta")
 
 background_send = asyncio.create_task(send_later())`,
 			{ onLateSentAgentMessage: (message) => resolveLateMessage(message) },
@@ -180,6 +260,7 @@ background_send = asyncio.create_task(send_later())`,
 			id: "agentmsg-background",
 			message: "background hello",
 			deliveryStatus: "delivered",
+			receiverRole: "sibling",
 			target: { activeSessionId: "beta", sessionId: "session-beta", sessionName: "Beta" },
 		});
 	});

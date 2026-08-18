@@ -27,19 +27,18 @@ interface HeartbeatScopeHarness {
 	heartbeatCatalog: AgentConnectionHeartbeat[];
 	heartbeats: AgentConnectionHeartbeat[];
 	connectionState: { activeSessionId: string; sessionId: string };
-	childAgentSnapshots: Map<string, AgentConnectionRlmChildAgentSnapshot>;
+	subagentSnapshots: Map<string, AgentConnectionRlmChildAgentSnapshot>;
 	heartbeatManager: { setHeartbeats(heartbeats: AgentConnectionHeartbeat[]): void } | undefined;
-	childAgentSummary: { invalidate(): void };
 	ui: { requestRender(): void };
 	scheduleHeartbeatManagerRefresh(): void;
+	updateSubagentSummaryLine(): void;
 	applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void;
 }
 
 interface ChildIdentityUpdateHarness {
-	childAgentSnapshots: Map<string, AgentConnectionRlmChildAgentSnapshot>;
-	childAgentDetailNodeId: string | undefined;
-	refreshChildAgentInspector(): void;
-	updateChildAgentInspector(child: AgentConnectionRlmChildAgentSnapshot): void;
+	subagentSnapshots: Map<string, AgentConnectionRlmChildAgentSnapshot>;
+	refreshSubagentSummary(): void;
+	updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void;
 }
 
 interface HeartbeatRefreshHarness {
@@ -126,7 +125,7 @@ describe("interactive heartbeat management", () => {
 		harness.heartbeatCatalog = [];
 		harness.heartbeats = [];
 		harness.connectionState = { activeSessionId: "active-1", sessionId: "session-1" };
-		harness.childAgentSnapshots = new Map([
+		harness.subagentSnapshots = new Map([
 			[
 				"child-1",
 				{
@@ -139,15 +138,16 @@ describe("interactive heartbeat management", () => {
 			],
 		]);
 		harness.heartbeatManager = { setHeartbeats: vi.fn() };
-		harness.childAgentSummary = { invalidate: vi.fn() };
 		harness.ui = { requestRender: vi.fn() };
 		harness.scheduleHeartbeatManagerRefresh = vi.fn();
+		harness.updateSubagentSummaryLine = vi.fn();
 
 		harness.applyHeartbeatCatalog([own, child, unrelated]);
 
 		expect(harness.heartbeatCatalog).toEqual([own, child, unrelated]);
 		expect(harness.heartbeats).toEqual([own, child]);
 		expect(harness.heartbeatManager.setHeartbeats).toHaveBeenCalledWith([own, child]);
+		expect(harness.updateSubagentSummaryLine).toHaveBeenCalledOnce();
 	});
 
 	it("refreshes heartbeat scope when a known subagent gains its active session id", () => {
@@ -158,14 +158,13 @@ describe("interactive heartbeat management", () => {
 			sessionDir: "/tmp/child-1",
 		};
 		const harness = Object.create(InteractiveMode.prototype) as ChildIdentityUpdateHarness;
-		harness.childAgentSnapshots = new Map([[existing.id, existing]]);
-		harness.childAgentDetailNodeId = undefined;
-		harness.refreshChildAgentInspector = vi.fn();
+		harness.subagentSnapshots = new Map([[existing.id, existing]]);
+		harness.refreshSubagentSummary = vi.fn();
 
-		harness.updateChildAgentInspector({ ...existing, activeSessionId: "active-2" });
+		harness.updateSubagentSummary({ ...existing, activeSessionId: "active-2" });
 
-		expect(harness.childAgentSnapshots.get(existing.id)?.activeSessionId).toBe("active-2");
-		expect(harness.refreshChildAgentInspector).toHaveBeenCalledOnce();
+		expect(harness.subagentSnapshots.get(existing.id)?.activeSessionId).toBe("active-2");
+		expect(harness.refreshSubagentSummary).toHaveBeenCalledOnce();
 	});
 
 	it("refreshes an open manager after the next scheduled run", async () => {

@@ -98,7 +98,7 @@ export async function bindActiveSessionState(
 
 function createCommandContextActions(state: ActiveSessionState): ExtensionCommandContextActions {
 	return {
-		waitForIdle: () => state.runtime.session.agent.waitForIdle(),
+		waitForIdle: () => state.runtime.session.waitForIdle(),
 		newSession: async (options) => state.runtime.newSession(options),
 		fork: async (entryId, options) => {
 			const result = await state.runtime.fork(entryId, options);

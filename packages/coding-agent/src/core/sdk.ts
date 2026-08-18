@@ -104,11 +104,11 @@ export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 
 export {
-	withFileMutationQueue,
-	// Tool factories (for custom cwd)
-	createIpythonTool,
 	createBashTool,
 	createEditTool,
+	// Tool factories (for custom cwd)
+	createIpythonTool,
+	withFileMutationQueue,
 };
 
 // Helper Functions
@@ -391,10 +391,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		rlmMaxDepth: options.rlmMaxDepth,
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
+		rlmParentAgent: options.rlmParentAgent,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		sessionStartEvent: options.sessionStartEvent,
 		prewarmIpythonKernel: options.prewarmIpythonKernel,
 		autonomous: options.autonomous,
+		serializedRefine: options.serializedRefine,
+		initialGoal: options.initialGoal,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

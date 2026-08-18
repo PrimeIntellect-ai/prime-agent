@@ -254,15 +254,10 @@ describe("builtin skills", () => {
 			expect(rlmHeartbeat?.kind === "python" && rlmHeartbeat.python.importName).toBe("rlm_heartbeat");
 		});
 
-		it("loads the bundled orchestration heartbeat skill as a python skill", () => {
+		it("does not ship orchestration heartbeat as a built-in skill", () => {
 			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
 
-			const orchestrationHeartbeat = skills.find((s) => s.name === "orchestration-heartbeat");
-			expect(orchestrationHeartbeat).toBeDefined();
-			expect(orchestrationHeartbeat?.kind).toBe("python");
-			expect(orchestrationHeartbeat?.kind === "python" && orchestrationHeartbeat.python.importName).toBe(
-				"orchestration_heartbeat",
-			);
+			expect(skills.map((skill) => skill.name)).not.toContain("orchestration-heartbeat");
 		});
 
 		it("ships the edit skill as a python skill importable as `edit`", () => {

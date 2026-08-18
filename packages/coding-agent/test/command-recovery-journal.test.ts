@@ -25,6 +25,13 @@ describe("CommandRecoveryJournal", () => {
 		expect(journal.begin("client-a", "command-a", "prompt")).toEqual({ status: "pending" });
 	});
 
+	it("looks up prior commands without inserting new receipts", () => {
+		const journal = new CommandRecoveryJournal(createPath());
+		expect(journal.lookup("client-a", "missing")).toBeUndefined();
+		expect(journal.begin("client-a", "pending", "prompt")).toEqual({ status: "new" });
+		expect(journal.lookup("client-a", "pending")).toEqual({ status: "pending" });
+	});
+
 	it("does not collide when client and command ids contain separators", () => {
 		const journal = new CommandRecoveryJournal(createPath());
 		expect(journal.begin("client:a", "command", "prompt")).toEqual({ status: "new" });

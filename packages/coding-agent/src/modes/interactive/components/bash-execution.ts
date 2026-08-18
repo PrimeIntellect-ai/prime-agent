@@ -12,7 +12,7 @@ import {
 } from "../../../core/tools/truncate.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
-import { keyHint, keyText } from "./keybinding-hints.js";
+import { expandCollapseHint, keyText } from "./keybinding-hints.js";
 import { truncateToVisualLines } from "./visual-truncate.js";
 
 // Preview line limit when not expanded (matches tool execution behavior)
@@ -30,7 +30,7 @@ export class BashExecutionComponent extends Container {
 	private expanded = false;
 	private contentContainer: Container;
 
-	constructor(command: string, ui: TUI, excludeFromContext = false) {
+	constructor(command: string, ui: TUI, excludeFromContext = false, options: { suppressLeadingSpace?: boolean } = {}) {
 		super();
 		this.command = command;
 
@@ -38,8 +38,8 @@ export class BashExecutionComponent extends Container {
 		const colorKey = excludeFromContext ? "dim" : "bashMode";
 		const borderColor = (str: string) => theme.fg(colorKey, str);
 
-		// Add spacer
-		this.addChild(new Spacer(1));
+		// Keep tool activity tight against a preceding agent-message notification.
+		if (!options.suppressLeadingSpace) this.addChild(new Spacer(1));
 
 		// Top border
 		this.addChild(new DynamicBorder(borderColor));
@@ -185,10 +185,10 @@ export class BashExecutionComponent extends Container {
 			// Show how many lines are hidden (collapsed preview)
 			if (hiddenLineCount > 0) {
 				if (this.expanded) {
-					statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
+					statusParts.push(expandCollapseHint("app.tools.expand", true));
 				} else {
 					statusParts.push(
-						`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
+						`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} ${expandCollapseHint("app.tools.expand", false)}`,
 					);
 				}
 			}

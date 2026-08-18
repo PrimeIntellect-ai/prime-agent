@@ -48,6 +48,7 @@ describe("agents view open with a missing session cwd", () => {
 				id: session.getSessionId(),
 				lifecycle: "live",
 				activity: "idle",
+				isSessionActive: false,
 				sessionId: session.getSessionId(),
 				sessionFile,
 				cwd: worktree,
@@ -55,7 +56,7 @@ describe("agents view open with a missing session cwd", () => {
 				isCompacting: false,
 				attachedClients: 0,
 				messageCount: 2,
-				pendingMessageCount: 0,
+				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 			};
 			const { overrideCwd, notice } = resolveAgentsViewOpenCwd(summary, launchCwd);
 			expect(overrideCwd).toBe(launchCwd);

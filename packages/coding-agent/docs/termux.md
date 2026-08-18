@@ -1,6 +1,6 @@
 # Termux (Android) Setup
 
-Pi runs on Android via [Termux](https://termux.dev/), a terminal emulator and Linux environment for Android.
+Prime Agent runs on Android via [Termux](https://termux.dev/), a terminal emulator and Linux environment for Android.
 
 ## Prerequisites
 
@@ -16,14 +16,13 @@ pkg update && pkg upgrade
 # Install dependencies
 pkg install nodejs termux-api git ripgrep
 
-# Install pi
-npm install -g @earendil-works/pi-coding-agent
+# Clone and install Prime Agent from source
+git clone https://github.com/PrimeIntellect-ai/prime-agent.git
+cd prime-agent
+npm ci
 
-# Create config directory
-mkdir -p ~/.pi/agent
-
-# Run pi
-pi
+# Run Prime Agent
+./prime-agent.sh
 ```
 
 ## Clipboard Support
@@ -34,7 +33,7 @@ Image clipboard is not supported on Termux (the `ctrl+v` image paste feature wil
 
 ## Example AGENTS.md for Termux
 
-Create `~/.pi/agent/AGENTS.md` to help the agent understand the Termux environment:
+Create `~/.prime/agent/AGENTS.md` to help the agent understand the Termux environment:
 
 ```markdown
 # Agent Environment: Termux on Android

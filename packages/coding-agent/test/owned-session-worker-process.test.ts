@@ -120,6 +120,35 @@ async function waitForProcessGone(pid: number): Promise<void> {
 }
 
 describe("owned session worker processes", () => {
+	it("routes every headless surface through its real worker profile", async () => {
+		const cases: Array<[string[], string | undefined, string, boolean?]> = [
+			[["-p", "hello"], undefined, "print"],
+			[[], "hello", "print", false],
+			[["--mode", "json"], "", "json"],
+			[["--mode", "rpc"], `${JSON.stringify({ id: "state", type: "get_state" })}\n`, "rpc"],
+			[["--no-session"], undefined, "interactive-ephemeral", true],
+		];
+		for (const [args, stdin, profile, tty] of cases) {
+			const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-routing-"));
+			tempDirs.push(root);
+			const pidPath = join(root, "worker.pid");
+			const frontend = spawnFrontend(
+				args,
+				pidPath,
+				tty === false,
+				tty === undefined ? {} : { PRIME_AGENT_TEST_STDIN_TTY: tty ? "1" : "0" },
+			);
+			if (stdin !== undefined) frontend.stdin?.write(stdin);
+			const workerPid = await waitForWorkerPid(pidPath);
+			expect(readFileSync(`${pidPath}.profile`, "utf8").trim()).toBe(profile);
+			frontend.stdin?.end();
+			if (tty === false) process.kill(workerPid, "SIGKILL");
+			await waitForExit(frontend);
+			children.delete(frontend);
+			await waitForProcessGone(workerPid);
+		}
+	});
+
 	it("keeps RPC framing in the frontend and exits its worker on stdin EOF", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-test-"));
 		tempDirs.push(root);

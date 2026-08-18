@@ -102,6 +102,7 @@ export type {
 	// Provider Registration
 	ProviderConfig,
 	ProviderModelConfig,
+	RefineCompleteEvent,
 	// Commands
 	RegisteredCommand,
 	RegisteredTool,

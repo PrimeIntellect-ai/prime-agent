@@ -90,6 +90,16 @@ afterEach(async () => {
 			await waitForExit(handle).catch(() => undefined);
 		}
 	}
+	// A worker or fixture can publish a replacement owner while the first cleanup
+	// sweep is stopping processes. Discover and stop that exact identity only after
+	// every tracked fixture handle has exited, before removing harness directories.
+	for (const registryDir of cleanupRegistryDirs) {
+		registerOwnerRecordsForCleanup(registryDir);
+	}
+	await cleanupRegisteredProcesses();
+	for (const registryDir of cleanupRegistryDirs) {
+		await removeDeadFixtureOwnerRecords(registryDir);
+	}
 	handles.clear();
 	cleanupProcesses.clear();
 	cleanupRegistryDirs.clear();
@@ -414,7 +424,7 @@ function cleanupProcessState(identity: CleanupProcessIdentity): "exited" | "matc
 	return observedStartId === identity.processStartId ? "matching" : "exited";
 }
 
-function removeDeadFixtureOwnerRecords(registryDir: string): void {
+async function removeDeadFixtureOwnerRecords(registryDir: string): Promise<void> {
 	for (const owner of listOwnerRecords(registryDir)) {
 		if (!owner.processStartId) {
 			throw new Error(`Cannot clean owner ${owner.generation} without an exact process-start identity`);
@@ -424,11 +434,12 @@ function removeDeadFixtureOwnerRecords(registryDir: string): void {
 			processStartId: owner.processStartId,
 			label: `supervisor ${owner.generation}`,
 		};
-		const state = cleanupProcessState(identity);
-		if (state !== "exited") {
-			throw new Error(
-				`Refusing to clean ${identity.label} owner for ${identity.pid} (${identity.processStartId}): ${state}`,
-			);
+		// A supervisor that just acknowledged shutdown can stay observable for a
+		// moment; wait for the exact identity to exit instead of refusing outright.
+		if (cleanupProcessState(identity) !== "exited") {
+			registerCleanupProcess(identity);
+			cleanupSupervisorSockets.add(owner.socketPath);
+			await cleanupRegisteredProcesses();
 		}
 
 		const current = readOwnerRecord(registryDir, owner.generation);
@@ -719,10 +730,13 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 			client.close();
 			await waitForExit(legacyCleanup);
 			await waitForCleanupProcessExit(workerCleanupIdentity);
-			await waitForCleanupProcessExit(successorCleanupIdentity);
+			// Under a fully loaded CI shard, the replacement supervisor can remain
+			// observable after shutdown longer than the helper's general cleanup bound.
+			// Extend only this exact generation/pid/process-start identity's polled wait.
+			await waitForCleanupProcessExit(successorCleanupIdentity, 60_000);
 			registerOwnerRecordsForCleanup(paths.registryDir);
 			await cleanupRegisteredProcesses(client);
-			removeDeadFixtureOwnerRecords(paths.registryDir);
+			await removeDeadFixtureOwnerRecords(paths.registryDir);
 			expect(listOwnerRecords(paths.registryDir)).toEqual([]);
 		} finally {
 			await connection?.dispose().catch(() => undefined);
@@ -889,6 +903,45 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 			writeOwnerRecord(paths.registryDir, originalOwner);
 			await corruptOwner.release();
 		}
+	});
+
+	it("reclaims empty owner directories left by interrupted startup", async () => {
+		const paths = await createPaths();
+		const abandonedDirectory = join(paths.registryDir, "abandoned-owner.owner");
+		mkdirSync(abandonedDirectory, { recursive: true });
+
+		const owner = await acquireDaemonSupervisorOwnership({
+			agentDir: paths.agentDir,
+			appVersion: "test",
+			descriptorDir: paths.descriptorDir,
+			generation: "healthy-owner",
+			registryDir: paths.registryDir,
+			socketPath: paths.socketPath,
+		});
+
+		expect(existsSync(abandonedDirectory)).toBe(false);
+		expect(owner.record.generation).toBe("healthy-owner");
+		await owner.release();
+	});
+
+	it("reclaims owner directories containing only stray files", async () => {
+		const paths = await createPaths();
+		const abandonedDirectory = join(paths.registryDir, "abandoned-owner.owner");
+		mkdirSync(abandonedDirectory, { recursive: true });
+		writeFileSync(join(abandonedDirectory, ".DS_Store"), "stray");
+
+		const owner = await acquireDaemonSupervisorOwnership({
+			agentDir: paths.agentDir,
+			appVersion: "test",
+			descriptorDir: paths.descriptorDir,
+			generation: "healthy-owner",
+			registryDir: paths.registryDir,
+			socketPath: paths.socketPath,
+		});
+
+		expect(existsSync(abandonedDirectory)).toBe(false);
+		expect(owner.record.generation).toBe("healthy-owner");
+		await owner.release();
 	});
 
 	it("persists a fence when immutable scope proves a corrupt owner is unrelated", async () => {

@@ -169,6 +169,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/** Resolves the system prompt immediately before each LLM call. */
+	getSystemPrompt?: () => string;
+
 	/**
 	 * Resolves an API key dynamically for each LLM call.
 	 *
@@ -190,6 +193,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Contract: must not throw or reject. Throwing interrupts the low-level agent loop without producing a normal event sequence.
 	 */
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+
+	/**
+	 * Called synchronously after a completed turn and before polling work for another turn.
+	 * Return true to emit `agent_end` without starting another provider call. Work returned by
+	 * an asynchronous poll owns that boundary; queue owners must suppress stale continuation
+	 * results if their higher-level stop condition changes while generating them.
+	 * The hook is never checked before the initial assistant turn.
+	 */
+	shouldStopBeforeTurn?: () => boolean;
 
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.

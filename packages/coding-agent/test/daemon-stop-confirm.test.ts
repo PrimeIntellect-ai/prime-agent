@@ -18,7 +18,7 @@ function session(overrides: Partial<SessionSummary>): SessionSummary {
 	return {
 		isStreaming: false,
 		isCompacting: false,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		...overrides,
 	} as unknown as SessionSummary;
 }
@@ -55,14 +55,25 @@ describe("confirmDaemonSessionLoss", () => {
 		setTTY(true);
 		const probe: RunningDaemonProbe = {
 			reachable: true,
-			activeSessions: [session({ isStreaming: false }), session({ pendingMessageCount: 0 })],
+			activeSessions: [
+				session({ isStreaming: false }),
+				session({ sessionActions: { queuedCount: 0, steering: [], followUps: [] } }),
+			],
 		};
 		expect(await confirmDaemonSessionLoss(probe, { force: false, copy: COPY })).toBe(true);
 	});
 
 	it("aborts without prompting when not at a TTY and a session is busy", async () => {
 		setTTY(false);
-		const probe: RunningDaemonProbe = { reachable: true, activeSessions: [session({ pendingMessageCount: 2 })] };
+		const probe: RunningDaemonProbe = {
+			reachable: true,
+			activeSessions: [
+				session({
+					isSessionActive: true,
+					sessionActions: { queuedCount: 2, steering: [], followUps: [] },
+				}),
+			],
+		};
 		expect(await confirmDaemonSessionLoss(probe, { force: false, copy: COPY })).toBe(false);
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("hint"));
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("busy:1"));
@@ -89,10 +100,10 @@ describe("confirmDaemonSessionLoss", () => {
 	it("treats compacting and pending-message sessions as busy", async () => {
 		setTTY(false);
 		for (const overrides of [
-			{ isCompacting: true },
-			{ pendingMessageCount: 1 },
-			{ isStreaming: true },
-			{ isBashRunning: true },
+			{ isSessionActive: true, isCompacting: true },
+			{ isSessionActive: true, sessionActions: { queuedCount: 1, steering: [], followUps: [] } },
+			{ isSessionActive: true, isStreaming: true },
+			{ isSessionActive: true, isBashRunning: true },
 			{ hasRunningRlmChildren: true },
 		]) {
 			vi.mocked(console.error).mockClear();

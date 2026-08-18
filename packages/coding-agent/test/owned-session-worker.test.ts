@@ -8,14 +8,6 @@ import {
 } from "../src/cli/owned-session-worker.js";
 
 describe("owned session worker CLI routing", () => {
-	it("routes every headless surface to an owned worker", () => {
-		expect(classifyOwnedSessionWorkerInvocation(["-p", "hello"], true, {})).toBe("print");
-		expect(classifyOwnedSessionWorkerInvocation([], false, {})).toBe("print");
-		expect(classifyOwnedSessionWorkerInvocation(["--mode", "json", "hello"], true, {})).toBe("json");
-		expect(classifyOwnedSessionWorkerInvocation(["--mode", "rpc"], true, {})).toBe("rpc");
-		expect(classifyOwnedSessionWorkerInvocation(["--no-session"], true, {})).toBe("interactive-ephemeral");
-	});
-
 	it("leaves resident interactive and non-session operations in the frontend", () => {
 		expect(classifyOwnedSessionWorkerInvocation([], true, {})).toBeUndefined();
 		expect(classifyOwnedSessionWorkerInvocation(["--mode", "daemon"], false, {})).toBeUndefined();

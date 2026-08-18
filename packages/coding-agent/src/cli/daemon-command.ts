@@ -272,15 +272,24 @@ async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
 	const client = new DaemonClient(parsed.socketPath);
 	await client.connect();
 	try {
-		const sessions = await getLiveSessions(client);
-		const sessionName = sessionArgs.name ?? nextDefaultSessionName(sessions);
-		const response = await client.request({
-			type: "create",
-			name: sessionName,
-			config: sessionArgs.config,
-			sessionPath: sessionArgs.sessionPath,
-			continueRecent: sessionArgs.continueRecent,
-		});
+		const autoName = sessionArgs.name === undefined;
+		const sessions = await getLiveSessions(client, autoName);
+		let sessionName = sessionArgs.name ?? nextDefaultSessionName(sessions);
+		let response: DaemonResponse;
+		while (true) {
+			response = await client.request({
+				type: "create",
+				name: sessionName,
+				config: sessionArgs.config,
+				sessionPath: sessionArgs.sessionPath,
+				continueRecent: sessionArgs.continueRecent,
+			});
+			if (response.success || !autoName || !response.error.includes(`Agent name "${sessionName}" is unavailable`)) {
+				break;
+			}
+			sessions.push({ sessionName } as SessionSummary);
+			sessionName = nextDefaultSessionName(sessions);
+		}
 		const data = requireSuccess(response);
 		if (!isLiveSessionSummary(data)) {
 			throw new Error("Daemon returned an invalid create response");
@@ -381,6 +390,10 @@ function parseSessionArgs(args: string[]): ParsedSessionArgs {
 	}
 
 	const name = nameParts.join(" ").trim();
+	// Validate: --goal-token-budget without --goal is an error.
+	if (config.initialGoal?.tokenBudget !== undefined && !config.initialGoal.objective) {
+		throw new Error("--goal-token-budget requires --goal");
+	}
 	return {
 		daemonArgs,
 		name: name || undefined,
@@ -528,6 +541,30 @@ function parseSessionOption(
 		case "-nc":
 			config.noContextFiles = true;
 			return boolean(arg);
+		case "--goal": {
+			const value = readValue(arg);
+			if (!value.trim()) {
+				throw new Error("--goal requires a non-empty objective");
+			}
+			config.initialGoal = { objective: value, tokenBudget: config.initialGoal?.tokenBudget };
+			// Session-specific flag: do NOT propagate to daemon startup args.
+			// The goal is sent per-create via the config in the daemon request,
+			// so a later no-goal create is not contaminated.
+			return { consumed: 1 };
+		}
+		case "--goal-token-budget": {
+			const value = readValue(arg);
+			const budget = Number(value);
+			if (!Number.isInteger(budget) || budget <= 0) {
+				throw new Error("--goal-token-budget must be a positive integer");
+			}
+			config.initialGoal = {
+				objective: config.initialGoal?.objective ?? "",
+				tokenBudget: budget,
+			};
+			// Session-specific flag: do NOT propagate to daemon startup args.
+			return { consumed: 1 };
+		}
 		case "--foreground":
 		case "--no-detach":
 		case "--background":
@@ -601,8 +638,8 @@ function resolvePathOption(value: string, cwd: string): string {
 	return isLocalPath(expanded) ? resolve(cwd, expanded) : expanded;
 }
 
-async function getLiveSessions(client: DaemonClient): Promise<SessionSummary[]> {
-	const response = await client.request({ type: "list" });
+async function getLiveSessions(client: DaemonClient, all = false): Promise<SessionSummary[]> {
+	const response = await client.request({ type: "list", ...(all ? { all: true } : {}) });
 	const data = requireSuccess(response);
 	const sessions = getSessionSummaries(data);
 	if (!sessions) {
@@ -617,12 +654,20 @@ function nextDefaultSessionName(sessions: SessionSummary[]): string {
 	);
 	const numericNames = [...existingNames]
 		.map((name) => Number.parseInt(name, 10))
-		.filter((value) => Number.isInteger(value) && value > 0);
+		.filter((value) => Number.isSafeInteger(value) && value > 0);
 	let next = numericNames.length > 0 ? Math.max(...numericNames) + 1 : 1;
-	while (existingNames.has(String(next))) {
+	while (Number.isSafeInteger(next)) {
+		if (!existingNames.has(String(next))) {
+			return String(next);
+		}
 		next++;
 	}
-	return String(next);
+
+	let fallback = "session";
+	while (existingNames.has(fallback)) {
+		fallback += "-";
+	}
+	return fallback;
 }
 
 async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
@@ -854,7 +899,6 @@ async function runSend(client: DaemonClient, args: string[], json: boolean): Pro
 		type: "send_message",
 		targetActiveSessionId: parsed.targetActiveSessionId,
 		fromActiveSessionId: parsed.fromActiveSessionId,
-		deliveryMode: parsed.deliveryMode,
 		message: parsed.message,
 	});
 	const data = requireSuccess(response);
@@ -873,13 +917,11 @@ async function runSend(client: DaemonClient, args: string[], json: boolean): Pro
 interface ParsedSendArgs {
 	targetActiveSessionId: string;
 	fromActiveSessionId?: string;
-	deliveryMode?: "auto" | "steer" | "follow_up";
 	message: string;
 }
 
 function parseSendArgs(args: string[]): ParsedSendArgs {
 	let fromActiveSessionId: string | undefined;
-	let deliveryMode: "auto" | "steer" | "follow_up" | undefined;
 	let targetActiveSessionId: string | undefined;
 	let explicitMessage: string | undefined;
 	const messageParts: string[] = [];
@@ -898,27 +940,6 @@ function parseSendArgs(args: string[]): ParsedSendArgs {
 			}
 			fromActiveSessionId = value;
 			index++;
-			continue;
-		}
-		if (parseOptions && arg === "--steer") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "steer";
-			continue;
-		}
-		if (parseOptions && arg === "--follow-up") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "follow_up";
-			continue;
-		}
-		if (parseOptions && arg === "--auto") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "auto";
 			continue;
 		}
 		if (parseOptions && arg === "--message") {
@@ -945,20 +966,15 @@ function parseSendArgs(args: string[]): ParsedSendArgs {
 	}
 
 	if (explicitMessage !== undefined && messageParts.length > 0) {
-		throw new Error(
-			"Usage: prime-agent send [--from <agent>] [--steer|--follow-up] <agent> [--message <message>|<message>]",
-		);
+		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
 	}
 	const message = (explicitMessage ?? messageParts.join(" ")).trim();
 	if (!targetActiveSessionId || !message) {
-		throw new Error(
-			"Usage: prime-agent send [--from <agent>] [--steer|--follow-up] <agent> [--message <message>|<message>]",
-		);
+		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
 	}
 	return {
 		targetActiveSessionId,
 		fromActiveSessionId,
-		deliveryMode,
 		message,
 	};
 }
@@ -1355,7 +1371,9 @@ class DaemonAttachTerminal {
 				this.rl?.prompt();
 				return;
 			case "session_event":
-				this.handleSessionEvent(message.event);
+				if (message.event.type !== "refine_complete") {
+					this.handleSessionEvent(message.event);
+				}
 				return;
 			case "session_replaced":
 				this.isStreaming = message.state.isStreaming;
@@ -1421,10 +1439,12 @@ class DaemonAttachTerminal {
 			case "tool_execution_end":
 				this.writeLine(chalk.dim(`Tool ${event.isError ? "failed" : "finished"}: ${event.toolName}`));
 				return;
-			case "queue_update":
-				if (event.steering.length > 0 || event.followUp.length > 0) {
+			case "session_action_update":
+				if (event.actions.queuedCount > 0) {
 					this.writeLine(
-						chalk.dim(`Queued: ${event.steering.length} steering, ${event.followUp.length} follow-up`),
+						chalk.dim(
+							`Queued: ${event.actions.steering.length} steering, ${event.actions.followUps.length} follow-up`,
+						),
 					);
 				}
 				return;
@@ -1444,7 +1464,6 @@ class DaemonAttachTerminal {
 				this.writeLine(chalk.dim("Refinement started."));
 				return;
 			case "refinement_end":
-				this.writeLine(chalk.dim("Refinement finished."));
 				return;
 			case "auto_retry_start":
 				this.writeLine(chalk.dim(`Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`));
@@ -1457,6 +1476,12 @@ class DaemonAttachTerminal {
 				return;
 			case "goal_update":
 				this.writeLine(chalk.dim(`Goal: ${event.goal.status}`));
+				return;
+			case "refine_failed":
+				this.writeLine(chalk.red(`Refinement failed: ${event.error}`));
+				return;
+			case "refine_complete":
+				this.writeLine(chalk.dim(`Refinement complete: ${event.result.summary}`));
 				return;
 			case "turn_start":
 			case "turn_end":
@@ -1619,12 +1644,18 @@ function isSessionSummary(value: unknown): value is SessionSummary {
 		typeof candidate.cwd === "string" &&
 		typeof candidate.lifecycle === "string" &&
 		typeof candidate.activity === "string" &&
+		typeof candidate.isSessionActive === "boolean" &&
 		typeof candidate.isStreaming === "boolean" &&
 		typeof candidate.isCompacting === "boolean" &&
 		(candidate.isRefining === undefined || typeof candidate.isRefining === "boolean") &&
 		typeof candidate.attachedClients === "number" &&
 		typeof candidate.messageCount === "number" &&
-		typeof candidate.pendingMessageCount === "number"
+		(candidate.unfinishedActionCount === undefined || typeof candidate.unfinishedActionCount === "number") &&
+		typeof candidate.sessionActions === "object" &&
+		candidate.sessionActions !== null &&
+		typeof candidate.sessionActions.queuedCount === "number" &&
+		Array.isArray(candidate.sessionActions.steering) &&
+		Array.isArray(candidate.sessionActions.followUps)
 	);
 }
 

@@ -6,14 +6,14 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import { type AgentAutonomousStatus, type AutonomousLimitReason, autonomousLimitReason } from "../core/autonomous.js";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
 import { killTrackedDetachedChildren } from "../utils/shell.js";
 import { InProcessAgentConnection } from "./agent-connection/in-process-agent-connection.js";
 import type { AgentConnection } from "./agent-connection/types.js";
-import { latestAutonomousGateAttempt } from "./headless-completion.js";
+import { latestAutonomousGateAttempt, selectHeadlessTerminalResult } from "./headless-completion.js";
 
 /**
  * Options for print mode.
@@ -77,11 +77,16 @@ async function runPrintModeWithConnectionInternal(
 		await connection.dispose();
 	};
 
-	for (const signal of ["SIGTERM", ...(process.platform === "win32" ? [] : ["SIGHUP"])] as NodeJS.Signals[]) {
+	for (const signal of [
+		"SIGINT",
+		"SIGTERM",
+		...(process.platform === "win32" ? [] : ["SIGHUP"]),
+	] as NodeJS.Signals[]) {
 		const handler = () => {
 			killTrackedDetachedChildren();
 			void disposeConnection().finally(() => {
-				process.exit(signal === "SIGHUP" ? 129 : 143);
+				const exitCode = signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143;
+				process.exit(exitCode);
 			});
 		};
 		process.on(signal, handler);
@@ -115,19 +120,25 @@ async function runPrintModeWithConnectionInternal(
 
 		const autonomousStatus = await connection.waitForHeadlessCompletion();
 		if (mode === "text") {
-			const lastMessage = (await connection.getMessages()).at(-1);
-			if (lastMessage?.role === "assistant") {
-				const assistantMessage = lastMessage as AssistantMessage;
-				if (assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") {
-					console.error(assistantMessage.errorMessage || `Request ${assistantMessage.stopReason}`);
+			const { primary, compactionOutcomes } = selectHeadlessTerminalResult(await connection.getMessages());
+			if (primary?.role === "assistant") {
+				if (primary.stopReason === "error" || primary.stopReason === "aborted") {
+					console.error(primary.errorMessage || `Request ${primary.stopReason}`);
 					exitCode = 1;
 				} else {
-					for (const content of assistantMessage.content) {
+					for (const content of primary.content) {
 						if (content.type === "text") {
 							writeRawStdout(`${content.text}\n`);
 						}
 					}
 				}
+			} else if (primary) {
+				writeRawStdout(`${primary.content}\n`);
+				if (!primary.details.success || primary.details.severity === "error") exitCode = 1;
+			}
+			for (const outcome of compactionOutcomes) {
+				console.error(outcome.content);
+				if (outcome.details.outcome === "failed") exitCode = 1;
 			}
 		}
 

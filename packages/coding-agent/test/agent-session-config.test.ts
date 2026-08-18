@@ -115,4 +115,57 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 			noTools: false,
 		});
 	});
+
+	it("merges initialGoal from override over base", () => {
+		const defaults: AgentSessionRuntimeConfig = {
+			cwd: "/repo",
+			agentDir: "/agent",
+			initialGoal: { objective: "base goal", tokenBudget: 50000 },
+		};
+		const merged = mergeAgentSessionRuntimeConfig(defaults, {
+			cwd: "/override",
+			initialGoal: { objective: "override goal" },
+		});
+		expect(merged.initialGoal).toEqual({ objective: "override goal" });
+	});
+
+	it("preserves base initialGoal when override omits it", () => {
+		const defaults: AgentSessionRuntimeConfig = {
+			cwd: "/repo",
+			agentDir: "/agent",
+			initialGoal: { objective: "base goal", tokenBudget: 50000 },
+		};
+		const merged = mergeAgentSessionRuntimeConfig(defaults, { model: "openai/gpt-4o" });
+		expect(merged.initialGoal).toEqual({ objective: "base goal", tokenBudget: 50000 });
+	});
+
+	it("clones initialGoal so mutating the original does not affect the merged config", () => {
+		const base: AgentSessionRuntimeConfig = {
+			cwd: "/repo",
+			agentDir: "/agent",
+			initialGoal: { objective: "base goal", tokenBudget: 50000 },
+		};
+		const merged = mergeAgentSessionRuntimeConfig(base);
+		expect(merged.initialGoal).toEqual({ objective: "base goal", tokenBudget: 50000 });
+		// Mutating the original should not affect the clone
+		base.initialGoal!.objective = "mutated";
+		expect(merged.initialGoal?.objective).toBe("base goal");
+	});
+
+	it("preserves and overrides the user-facing execution mode across daemon config merges", () => {
+		const base: AgentSessionRuntimeConfig = {
+			cwd: "/repo",
+			executionMode: "interactive",
+		};
+
+		expect(mergeAgentSessionRuntimeConfig(base, { model: "openai/gpt-4o" }).executionMode).toBe("interactive");
+		expect(mergeAgentSessionRuntimeConfig(base, { executionMode: "rpc" }).executionMode).toBe("rpc");
+		expect(mergeAgentSessionRuntimeConfig(base).executionMode).toBe("interactive");
+	});
+
+	it("keeps the daemon telemetry opt-out monotonic across config merges", () => {
+		expect(mergeAgentSessionRuntimeConfig({ telemetryDisabled: true }, {}).telemetryDisabled).toBe(true);
+		expect(mergeAgentSessionRuntimeConfig({}, { telemetryDisabled: true }).telemetryDisabled).toBe(true);
+		expect(mergeAgentSessionRuntimeConfig({}, {}).telemetryDisabled).toBeUndefined();
+	});
 });
