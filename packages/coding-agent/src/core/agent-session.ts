@@ -4380,6 +4380,7 @@ export class AgentSession {
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
+			genericMcpServers: this._mcpManager?.getEnabledGenericServers(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}

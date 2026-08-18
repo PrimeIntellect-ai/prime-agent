@@ -20,6 +20,8 @@ export interface McpManagerOptions {
 }
 
 /** A resolved integration: a catalog/user entry plus its provider id. */
+const GENERIC_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
 interface ResolvedIntegration {
 	server: string;
 	label: string;
@@ -176,6 +178,20 @@ export class McpManager {
 			};
 		}
 		return handlers;
+	}
+
+	/** Enabled user servers available through the generic kernel API. */
+	getEnabledGenericServers(): string[] {
+		return Array.from(this.integrations.values())
+			.filter(
+				(integration) =>
+					integration.userDeclared &&
+					GENERIC_SERVER_NAME_PATTERN.test(integration.server) &&
+					!getCatalogEntry(integration.server) &&
+					this.isAuthed(integration),
+			)
+			.map((integration) => integration.server)
+			.sort((left, right) => left.localeCompare(right));
 	}
 
 	/** Status for the /mcp list command. */

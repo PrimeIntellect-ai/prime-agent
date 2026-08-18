@@ -142,6 +142,20 @@ describe("McpManager", () => {
 		}
 	});
 
+	it("lists only enabled non-catalog user servers in deterministic order", () => {
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				zebra: { type: "stdio", command: "z" },
+				disabled: { type: "stdio", command: "off", enabled: false },
+				linear: { type: "stdio", command: "reserved" },
+				alpha: { type: "http", url: "https://alpha.test/mcp" },
+			}),
+		});
+
+		expect(manager.getEnabledGenericServers()).toEqual(["alpha", "zebra"]);
+	});
+
 	it("picks up mcpServers added after construction on refresh()", () => {
 		let servers: Record<string, McpServerConfig> = {};
 		const manager = new McpManager({ authStorage, getUserServers: () => servers });
