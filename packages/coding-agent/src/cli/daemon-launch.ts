@@ -577,6 +577,5 @@ export function maybeStartDaemonEarly(args: readonly string[]): void {
 	if (spawnCwd && !existsSync(spawnCwd)) {
 		return;
 	}
-	// Same spelling main uses after --cwd, so both share one ensure entry.
 	void ensureInteractiveDaemonRunning(normalizeSocketPath(rawSocketPath, spawnCwd), spawnCwd);
 }
