@@ -17,8 +17,20 @@ export function resolveConfigValue(config: string): string | undefined {
 	if (config.startsWith("!")) {
 		return executeCommand(config);
 	}
+	return resolveEnvOrLiteral(config);
+}
+
+/**
+ * An unset env var falls back to the literal config string (e.g. a pasted API key).
+ * A SET but empty env var means "explicitly no credential": report it as missing
+ * instead of leaking the variable name as the credential value.
+ */
+function resolveEnvOrLiteral(config: string): string | undefined {
 	const envValue = process.env[config];
-	return envValue || config;
+	if (envValue !== undefined) {
+		return envValue || undefined;
+	}
+	return config;
 }
 
 function executeWithConfiguredShell(command: string): { executed: boolean; value: string | undefined } {
@@ -91,8 +103,7 @@ export function resolveConfigValueUncached(config: string): string | undefined {
 	if (config.startsWith("!")) {
 		return executeCommandUncached(config);
 	}
-	const envValue = process.env[config];
-	return envValue || config;
+	return resolveEnvOrLiteral(config);
 }
 
 export function resolveConfigValueOrThrow(config: string, description: string): string {
