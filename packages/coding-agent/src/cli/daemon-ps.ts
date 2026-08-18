@@ -1015,7 +1015,7 @@ function findAllTrackedWorkers(): TrackedWorker[] {
 	return workers;
 }
 
-export function isTrackedWorkerDescriptor(value: unknown): value is DaemonWorkerDescriptor {
+function isTrackedWorkerDescriptor(value: unknown): value is DaemonWorkerDescriptor {
 	if (!value || typeof value !== "object") {
 		return false;
 	}
