@@ -34,7 +34,9 @@ function cleanupDetachedChild(pidFile: string): void {
 	if (Number.isFinite(pid) && pid > 0) {
 		try {
 			execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
-		} catch {}
+		} catch {
+			// The detached Windows child may already have exited.
+		}
 	}
 }
 

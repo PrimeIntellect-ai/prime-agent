@@ -720,6 +720,7 @@ function applyPatterns(allPaths: string[], patterns: string[], baseDir: string):
 			includes.push(p);
 		}
 	}
+	// Apply patterns in order: includes, excludes, force-includes, then force-excludes.
 	let result: string[];
 	if (includes.length === 0) {
 		result = [...allPaths];
@@ -845,6 +846,7 @@ export class DefaultPackageManager implements PackageManager {
 		const accumulator = this.createAccumulator();
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
+		// Project resources win collisions with global resources.
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
 		for (const pkg of projectSettings.packages ?? []) {
 			allPackages.push({ pkg, scope: "project" });
@@ -852,6 +854,7 @@ export class DefaultPackageManager implements PackageManager {
 		for (const pkg of globalSettings.packages ?? []) {
 			allPackages.push({ pkg, scope: "user" });
 		}
+		// Deduplicate by package identity after recording project precedence.
 		const packageSources = this.dedupePackages(allPackages);
 		await this.resolvePackageSources(packageSources, accumulator, onMissing);
 
@@ -1083,6 +1086,7 @@ export class DefaultPackageManager implements PackageManager {
 			const latestVersion = await this.getLatestNpmVersion(source.name);
 			return latestVersion !== installedVersion;
 		} catch {
+			// Preserve the existing update policy when version lookup fails.
 			return true;
 		}
 	}
@@ -1737,6 +1741,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		await this.runCommand("git", ["reset", "--hard", target.ref], { cwd: targetDir });
 
+		// Extension checkouts must be pristine after an update.
 		await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });
 
 		const packageJsonPath = join(targetDir, "package.json");
@@ -1976,6 +1981,7 @@ export class DefaultPackageManager implements PackageManager {
 	): void {
 		const { allFiles } = this.collectManifestFiles(packageRoot, resourceType);
 
+		// An explicit empty list disables this resource type.
 		if (userPatterns.length === 0) {
 			for (const f of allFiles) {
 				this.addResource(target, f, metadata, false);
@@ -2205,6 +2211,7 @@ export class DefaultPackageManager implements PackageManager {
 				baseDir: this.bundledSkillsDir,
 			};
 			const builtinEntries = collectAutoSkillEntries(this.bundledSkillsDir, "pi");
+			// Bundled skills must ship with the package; warn instead of silently exposing none.
 			if (builtinEntries.length === 0) {
 				accumulator.diagnostics.push({
 					type: "warning",
@@ -2216,7 +2223,9 @@ export class DefaultPackageManager implements PackageManager {
 			}
 			const builtinSkillOverrides = [
 				...userOverrides.skills,
+				// Web search stays disabled until explicitly enabled.
 				...(this.settingsManager.getBundledWebsearchEnabled() ? [] : ["-websearch/SKILL.md"]),
+				// MCP integration skills stay disabled until their authentication is available.
 				...this.extraBuiltinSkillOverrides(),
 			];
 			addResources("skills", builtinEntries, builtinMetadata, builtinSkillOverrides, this.bundledSkillsDir);

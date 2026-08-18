@@ -113,6 +113,7 @@ export interface AgentSessionMessagePayload {
 	source: typeof AGENT_MESSAGE_SOURCE;
 	message: string;
 	from?: AgentSessionMessageSender;
+	/** Sender relationship from the receiver's point of view. */
 	fromRelationship?: AgentFamilyRelationship;
 	target: AgentSessionMessageEndpoint;
 }
@@ -139,7 +140,9 @@ export interface AgentSessionMessageReceipt {
 	message: string;
 	// Not named "status": the kernel host bridge envelope reserves that key.
 	deliveryStatus: AgentSessionMessageDeliveryStatus;
+	/** Present only for delivered messages: when the target context received it. */
 	deliveredAt?: string;
+	/** Present only for queued messages: when it was placed behind current work. */
 	queuedAt?: string;
 	deliveryMode?: "steer";
 }

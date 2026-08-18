@@ -3,6 +3,14 @@ import type { AgentConnectionSessionEvent } from "../agent-connection/types.js";
 import type { PrimeAgentIpythonMeta, PrimeAgentSessionMeta } from "./acp-meta.js";
 import { primeAgentMeta } from "./acp-meta.js";
 
+/**
+ * Translate prime-agent session events into ACP `session/update` payloads.
+ *
+ * Kept as a pure function so the mapping is testable without a live ACP client
+ * or a running agent. Returning an array lets one prime-agent event fan out to
+ * several ACP updates (or none, for events ACP has no place for).
+ */
+
 export type AcpToolKind = "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "other";
 export type AcpToolStatus = "pending" | "in_progress" | "completed" | "failed";
 
@@ -11,6 +19,7 @@ export interface AcpSessionUpdate {
 	[key: string]: unknown;
 }
 
+/** prime-agent's model-facing tool is IPython; bash is the secondary escape hatch. */
 export const IPYTHON_TOOL_NAME = "ipython";
 
 export function acpToolKind(toolName: string): AcpToolKind {
@@ -28,6 +37,7 @@ export function acpToolKind(toolName: string): AcpToolKind {
 	}
 }
 
+/** Decoded byte length of a base64 payload, without materializing it. */
 function base64ByteLength(data: string): number {
 	const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
 	return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
@@ -37,6 +47,13 @@ function textContent(text: string): { type: "text"; text: string } {
 	return { type: "text", text };
 }
 
+/**
+ * Map one streaming assistant event to an ACP chunk.
+ *
+ * The delta discriminator lives on the event itself (`text_delta` /
+ * `thinking_delta`) and carries a plain string, so reasoning and visible answer
+ * text are distinct ACP update kinds a client can render or hide separately.
+ */
 function assistantDeltaUpdates(event: AssistantMessageEvent): AcpSessionUpdate[] {
 	if (event.type === "thinking_delta" && event.delta.length > 0) {
 		return [{ sessionUpdate: "agent_thought_chunk", content: textContent(event.delta) }];
@@ -47,6 +64,7 @@ function assistantDeltaUpdates(event: AssistantMessageEvent): AcpSessionUpdate[]
 	return [];
 }
 
+/** Extract the IPython cell source so a client can show what is executing. */
 function ipythonCellSource(args: unknown): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
 	const code = (args as { code?: unknown }).code;
@@ -72,6 +90,13 @@ function toolResultText(result: unknown): string | undefined {
 	return undefined;
 }
 
+/**
+ * Rich IPython output that ACP has no content type for.
+ *
+ * The ipython tool reports media and diffs under `details` (images additionally
+ * ride along as ACP image content blocks); mirror those exact fields rather than
+ * inventing a MIME bundle the tool never produces.
+ */
 function ipythonRichOutput(result: unknown): PrimeAgentIpythonMeta | undefined {
 	if (!result || typeof result !== "object") return undefined;
 	const details = (result as { details?: unknown }).details;
@@ -80,6 +105,10 @@ function ipythonRichOutput(result: unknown): PrimeAgentIpythonMeta | undefined {
 	const meta: PrimeAgentIpythonMeta = {};
 	if (Array.isArray(attachments) && attachments.length > 0) {
 		meta.attachments = attachments.map((attachment) => {
+			// KernelAttachment exposes mimeType, base64 `data`, and an optional path.
+			// Report the decoded size rather than a `bytes` field the kernel never
+			// sends, and never inline the payload: ACP already carries images as
+			// content blocks, so duplicating them here would bloat every update.
 			const typed = (attachment ?? {}) as { mimeType?: unknown; path?: unknown; data?: unknown };
 			return {
 				...(typeof typed.mimeType === "string" ? { mimeType: typed.mimeType } : {}),
@@ -140,6 +169,8 @@ export function acpUpdatesForSessionEvent(
 			];
 		}
 
+		// Bash runs outside the tool-call lifecycle, so it gets a synthetic tool
+		// call keyed by run id to keep incremental output addressable.
 		case "bash_start":
 			state.activeBashRunId = event.runId;
 			return [
@@ -173,6 +204,8 @@ export function acpUpdatesForSessionEvent(
 				},
 			];
 
+		// Compaction, subagents, goals and recaps have no ACP equivalent: surface
+		// them as namespaced metadata rather than distorting a standard update.
 		case "compaction_end":
 			return [
 				{
@@ -205,6 +238,10 @@ export function acpUpdatesForSessionEvent(
 				},
 			];
 
+		// Goals, continual-harness refinement, and agent-to-agent messaging are
+		// prime-agent concepts with no ACP counterpart. They are still part of a
+		// turn's observable behavior, so they surface as namespaced metadata
+		// instead of being dropped.
 		case "goal_update":
 			return [
 				{

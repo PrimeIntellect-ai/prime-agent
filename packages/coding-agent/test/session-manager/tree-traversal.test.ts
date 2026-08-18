@@ -256,6 +256,7 @@ describe("SessionManager append and tree traversal", () => {
 		it("handles deep branching", () => {
 			const session = SessionManager.inMemory();
 
+			// Main path: 1 -> 2 -> 3 -> 4
 			const _id1 = session.appendMessage(userMsg("1"));
 			const id2 = session.appendMessage(assistantMsg("2"));
 			const id3 = session.appendMessage(userMsg("3"));
@@ -265,6 +266,7 @@ describe("SessionManager append and tree traversal", () => {
 			const id5 = session.appendMessage(userMsg("5"));
 			const _id6 = session.appendMessage(assistantMsg("6"));
 
+			// Branch from 5: 5 -> 7
 			session.branch(id5);
 			const _id7 = session.appendMessage(userMsg("7"));
 
@@ -395,6 +397,7 @@ describe("SessionManager append and tree traversal", () => {
 		it("returns messages from current branch only", () => {
 			const session = SessionManager.inMemory();
 
+			// Main: 1 -> 2 -> 3
 			session.appendMessage(userMsg("msg1"));
 			const id2 = session.appendMessage(assistantMsg("msg2"));
 			session.appendMessage(userMsg("msg3"));
@@ -428,9 +431,11 @@ describe("createBranchedSession", () => {
 		const id3 = session.appendMessage(userMsg("3"));
 		session.appendMessage(assistantMsg("4"));
 
+		// Branch from 3: 3 -> 5
 		session.branch(id3);
 		const _id5 = session.appendMessage(userMsg("5"));
 
+		// Create branched session from id2 (should only have 1 -> 2)
 		const result = session.createBranchedSession(id2);
 		expect(result).toBeUndefined(); // in-memory returns null
 
@@ -451,6 +456,7 @@ describe("createBranchedSession", () => {
 		const id4 = session.appendMessage(userMsg("4"));
 		const id5 = session.appendMessage(assistantMsg("5"));
 
+		// Create branched session from id5 (should have 1 -> 2 -> 4 -> 5)
 		session.createBranchedSession(id5);
 
 		const entries = session.getEntries();
@@ -469,13 +475,18 @@ describe("createBranchedSession", () => {
 			session.appendMessage(userMsg("second question"));
 			session.appendMessage(assistantMsg("second answer"));
 
+			// Fork from the very first user message (no assistant in the branched path)
 			const newFile = session.createBranchedSession(id1);
 			expect(newFile).toBeDefined();
 
+			// The branched path has no assistant, so the file should not exist yet
+			// (deferred to _persist on first assistant, matching newSession() contract)
 			expect(existsSync(newFile!)).toBe(false);
 
+			// Simulate extension adding entry before assistant (like preset on turn_start)
 			session.appendCustomEntry("preset-state", { name: "plan" });
 
+			// Now the assistant responds
 			session.appendMessage(assistantMsg("new answer"));
 
 			expect(existsSync(newFile!)).toBe(true);
@@ -506,6 +517,7 @@ describe("createBranchedSession", () => {
 			session.appendMessage(userMsg("second question"));
 			session.appendMessage(assistantMsg("second answer"));
 
+			// Fork including the assistant message
 			const newFile = session.createBranchedSession(id2);
 			expect(newFile).toBeDefined();
 

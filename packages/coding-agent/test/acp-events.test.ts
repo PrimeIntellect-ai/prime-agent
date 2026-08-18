@@ -8,6 +8,7 @@ import {
 import { PRIME_AGENT_META_NAMESPACE } from "../src/modes/acp/acp-meta.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/types.js";
 
+/** Real streaming shape: the discriminator is on the event, delta is a string. */
 function assistantDelta(type: "text_delta" | "thinking_delta", delta: string): AgentConnectionSessionEvent {
 	return {
 		type: "message_update",
@@ -66,6 +67,7 @@ describe("ACP session event mapping", () => {
 			result: {
 				output: "done",
 				details: {
+					// KernelAttachment carries base64 `data`, never a `bytes` field.
 					attachments: [{ mimeType: "image/png", path: "/tmp/plot.png", data: "aGVsbG8=" }],
 					diffs: [{ path: "a.ts" }],
 				},

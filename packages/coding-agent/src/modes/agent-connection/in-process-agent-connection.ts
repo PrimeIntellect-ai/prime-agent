@@ -293,7 +293,9 @@ export class InProcessAgentConnection implements AgentConnection {
 	async respondToExtensionUiRequest(
 		_requestId: string,
 		_response: AgentConnectionExtensionUiResponse,
-	): Promise<void> {}
+	): Promise<void> {
+		// In-process extension UI requests are handled directly by InteractiveMode.
+	}
 
 	async prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void> {
 		await new Promise<void>((resolve, reject) => {

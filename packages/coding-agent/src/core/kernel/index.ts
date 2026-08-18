@@ -702,7 +702,10 @@ export class KernelManager {
 				// collide with it (write the same file / re-bind the same ports).
 				try {
 					rmSync(connection.tempDir, { recursive: true, force: true });
-				} catch {}
+				} catch {
+					// Leave temporary kernel files for OS cleanup.
+				}
+				// A failed fork may leave stale ports; retry with a fresh connection file.
 				connection = makeConnection();
 				this.tempDir = connection.tempDir;
 			}
@@ -1373,14 +1376,18 @@ export class KernelManager {
 				// been recycled by the OS, and a kill would then hit an unrelated process.
 				process.kill(this.kernelPid, killSignal);
 			}
-		} catch {}
+		} catch {
+			// The kernel has already exited.
+		}
 		this.kernel = undefined;
 		this.kernelPid = undefined;
 		this.connection = undefined;
 		if (this.tempDir) {
 			try {
 				rmSync(this.tempDir, { recursive: true, force: true });
-			} catch {}
+			} catch {
+				// Leave temporary kernel files for OS cleanup.
+			}
 		}
 		this.tempDir = undefined;
 		this.startPromise = undefined;

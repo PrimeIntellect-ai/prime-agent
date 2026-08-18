@@ -15,9 +15,12 @@ import { ENV_AGENT_DIR, getDaemonLogPath, VERSION } from "../src/config.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
 
 interface FakeDaemonOptions {
+	/** Sessions returned for a `list` command. */
 	sessions?: Array<Record<string, unknown>>;
 	busyClientOwnedSessionCount?: number;
+	/** When true, the `list` command responds with a failure. */
 	failList?: boolean;
+	/** When false, the server ignores `shutdown` and stays up. */
 	respondToShutdown?: boolean;
 	protocolVersion?: number;
 	appVersion?: string;
@@ -360,6 +363,8 @@ describe("ensureInteractiveDaemonRunning", () => {
 
 		try {
 			const ensurePromise = ensureInteractiveDaemonRunning(socketPath);
+			// Let the child exit first, then bring up the winning daemon inside
+			// the exit grace window.
 			await new Promise((resolve) => setTimeout(resolve, 300));
 			await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 			await expect(ensurePromise).resolves.toBeUndefined();

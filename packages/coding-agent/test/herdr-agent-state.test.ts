@@ -163,6 +163,7 @@ describe("herdrAgentStateExtension", () => {
 		process.env.HERDR_SOCKET_PATH = join(tempDir, "h.sock");
 		process.env.HERDR_PANE_ID = "w1:p1";
 
+		// The loader reports the file-based integration as loaded: defer.
 		let loadedPaths = [join(tempDir, "extensions", "herdr-agent-state.ts")];
 		const factory = createHerdrAgentStateExtension(() => loadedPaths);
 		const { pi, handlers, busHandlers } = createMockPi();
@@ -170,6 +171,8 @@ describe("herdrAgentStateExtension", () => {
 		expect(handlers.size).toBe(0);
 		expect(busHandlers.size).toBe(0);
 
+		// Loaded paths are consulted per invocation, so a /reload after the
+		// file-based integration is removed or disabled re-enables the built-in.
 		loadedPaths = [];
 		const second = createMockPi();
 		factory(second.pi);
@@ -201,11 +204,14 @@ describe("herdrAgentStateExtension", () => {
 		await waitForRequests(1);
 		expect(requests[0]?.params.agent_session_path).toBe("/tmp/parent.jsonl");
 
+		// Inline RLM children rebind the same handlers with their own ctx; their
+		// events must not flip the pane state or release the parent's pane.
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, childCtx);
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, childCtx);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(requests).toHaveLength(1);
 
+		// The bound parent still reports normally.
 		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, parentCtx);
 		await waitForRequests(2);
 		expect(requests[1]?.params.state).toBe("working");
@@ -346,8 +352,12 @@ describe("herdrAgentStateExtension", () => {
 			},
 			ctx,
 		);
+		// A blocked event lands during the hold, cancelling the retry timer...
 		const blocked = busHandlers.get("herdr:blocked")?.[0];
 		blocked?.({ active: true, label: "permission needed" });
+		// ...and when the block lifts, the pane must settle to blocked (failed
+		// retry), not stick at working forever. Intermediate states coalesce in
+		// the latest-wins queue, so assert on the settled final report.
 		blocked?.({ active: false });
 
 		await waitForRequests(2);
@@ -415,6 +425,9 @@ describe("herdrAgentStateExtension", () => {
 
 		await waitForRequests(2);
 		await new Promise((resolve) => setTimeout(resolve, 100));
+		// Still-queued reports are dropped by the release, so the exact report
+		// count depends on send timing; the invariant is that the release is the
+		// last write and nothing reclaims the pane after it.
 		expect(requests.at(-1)?.method).toBe("pane.release_agent");
 		expect(requests.filter((r) => r.method === "pane.release_agent")).toHaveLength(1);
 	});
@@ -463,6 +476,8 @@ describe("herdrAgentStateExtension", () => {
 
 		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
 
+		// Two instances, as after a session replacement: the successor's seq must
+		// exceed everything the predecessor sent, or herdr drops its reports.
 		const first = createMockPi();
 		herdrAgentStateExtension(first.pi);
 		first.handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);

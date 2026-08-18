@@ -54,6 +54,7 @@ const PROVIDER_SCROLL_INDICATOR_ROWS = 1;
 export class OAuthSelectorComponent extends Container implements Focusable {
 	private searchInput: MenuSearchInput;
 
+	// Delegate focus to the search input so its IME cursor remains positioned correctly.
 	private _focused = false;
 	get focused(): boolean {
 		return this._focused;

@@ -146,6 +146,9 @@ describe("AssistantMessageComponent", () => {
 });
 
 describe("AssistantMessageComponent streaming identity", () => {
+	// updateContent applied incrementally (as during daemon streaming) must render
+	// byte-identical to a fresh component built from the final message. Guards the
+	// reconcile-instead-of-rebuild optimization.
 	function expectIdentity(component: AssistantMessageComponent, message: AssistantMessage, width = 90) {
 		const incremental = component.render(width);
 		const fresh = new AssistantMessageComponent(message).render(width);
@@ -239,6 +242,7 @@ describe("AssistantMessageComponent streaming identity", () => {
 		expect(expanded).toContain("Thinking... (Ctrl+T to collapse)");
 		expect(expanded).toContain("Some detail about the options.");
 
+		// A whitespace-only trace falls back to the label instead of an empty recap.
 		expect(thinkingRecap("   \n\t\n", "Thinking...")).toBe("Thinking...");
 	});
 
@@ -246,6 +250,9 @@ describe("AssistantMessageComponent streaming identity", () => {
 		initTheme("dark");
 		setKeybindings(new KeybindingsManager());
 
+		// Unescaped, the first recap "X|1:text:1" makes this signature identical
+		// to the next structure's (recap "X" plus a real text block), so the
+		// rebuild that renders the new text block would be skipped.
 		const component = new AssistantMessageComponent(undefined, true);
 		component.updateContent(createAssistantMessage([{ type: "thinking", thinking: "X|1:text:1" }]));
 		component.render(120);

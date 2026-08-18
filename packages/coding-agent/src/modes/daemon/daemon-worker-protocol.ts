@@ -94,6 +94,7 @@ export interface DaemonWorkerDescriptor {
 	supervisorSocketPath: string;
 	authenticationToken: string;
 	rootActiveSessionId: string;
+	/** Stable protocol client that owns this worker. Omitted for resident sessions. */
 	ownerClientId?: string;
 	rootSessionId?: string;
 	sessionFile?: string;
@@ -102,7 +103,9 @@ export interface DaemonWorkerDescriptor {
 	lifecycle: DaemonWorkerLifecycle;
 	createCommand: DaemonCreateCommand;
 	consecutiveFailures: number;
+	/** Durable intent written before root termination so replacement supervisors never recover it. */
 	stopRequestedAt?: string;
+	/** Complete the root's archived lifecycle state after its process has stopped. */
 	archiveOnStop?: boolean;
 	lastFailureAt?: string;
 	lastError?: string;

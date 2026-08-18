@@ -16,6 +16,7 @@ class UserMessageList implements Component {
 	private maxVisible: number = 10;
 
 	constructor(messages: UserMessageItem[], initialSelectedId?: string) {
+		// Session history is chronological; default to the latest fork point.
 		this.messages = messages;
 		const initialIndex = initialSelectedId ? messages.findIndex((message) => message.id === initialSelectedId) : -1;
 		this.selectedIndex = initialIndex >= 0 ? initialIndex : Math.max(0, messages.length - 1);

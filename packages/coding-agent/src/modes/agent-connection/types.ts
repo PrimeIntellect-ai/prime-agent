@@ -297,10 +297,12 @@ export interface AgentConnectionParentMetadata {
 export interface AgentConnectionSnapshot {
 	state: AgentConnectionState;
 	messages: AgentMessage[];
+	/** In-flight assistant message, separate from finalized transcript messages. */
 	streamingMessage?: AgentMessage;
 	sessionContext?: AgentConnectionSessionContext;
 	sessionTree?: { tree: AgentConnectionSessionTreeNode[]; leafId: string | null };
 	parent?: AgentConnectionParentMetadata;
+	/** Live RLM children, including descendants, known to the host at snapshot time. */
 	children?: AgentConnectionRlmChildAgentSnapshot[];
 	lastEventSequence?: number;
 	lastEventCursor?: AgentConnectionEventCursor;
@@ -346,6 +348,7 @@ export interface AgentConnectionState {
 	scopedModels: AgentConnectionScopedModel[];
 	activeToolNames: string[];
 	contextUsage: SessionStats["contextUsage"];
+	/** One-line recent-work recap for the prompt UI. */
 	recap?: string;
 }
 
@@ -431,6 +434,7 @@ export interface AgentConnectionToolDefinition {
 	replayBuiltInToolName?: ReplayBuiltInToolName;
 }
 
+/** Only confirmed cancellation makes prompt-admission failure retry-safe. */
 export class AgentConnectionPromptAdmissionError extends Error {
 	readonly cancelled: boolean;
 
@@ -450,6 +454,7 @@ export interface AgentConnectionPromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	queueIfBusy?: boolean;
 	source?: InputSource;
+	/** Cancels only while admission waits; accepted prompts remain session-owned. */
 	signal?: AbortSignal;
 }
 
@@ -468,6 +473,7 @@ export interface AgentConnectionSideQuestionTurn {
 
 export interface AgentConnectionExecuteBashOptions {
 	excludeFromContext?: boolean;
+	/** Side-conversation bash is not recorded into the session. */
 	transient?: boolean;
 	/**
 	 * Caller-generated id echoed on the run's bash_start/bash_end events, so the
@@ -514,6 +520,7 @@ export interface AgentConnectionQueueState {
 
 export type AgentConnectionQueuedMessageLane = QueuedMessageLane;
 export type AgentConnectionQueuedMessageMutation = QueuedMessageMutation;
+/** `unsupported` means an older remote daemon lacks queued-message mutation. */
 export type AgentConnectionQueuedMessageMutationStatus = QueuedMessageMutationStatus | "unsupported";
 
 export interface AgentConnectionHeartbeat {
@@ -540,8 +547,11 @@ export interface AgentConnectionRlmChildAgentActivity {
 export interface AgentConnectionRlmChildAgentSnapshot {
 	id: string;
 	parentId?: string;
+	/** Child daemon active-session id, for direct attachment. */
 	activeSessionId?: string;
+	/** Stable daemon-visible child name for addressing and display. */
 	sessionName?: string;
+	/** Exact provider/model selector used by the child. */
 	model?: string;
 	label: string;
 	status: AgentConnectionRlmChildAgentStatus;
@@ -726,6 +736,7 @@ export interface AgentConnection {
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;
 	deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult>;
 
+/** Read-only live-session watcher; unavailable transports return undefined. */
 	watchSession(activeSessionId: string): Promise<AgentConnectionSessionWatcher | undefined>;
 
 	dispose(): Promise<void>;

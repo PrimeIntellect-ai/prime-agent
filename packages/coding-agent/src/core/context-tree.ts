@@ -9,7 +9,12 @@ import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } fro
 
 export type ContextWindowResolver = (provider: string, modelId: string) => number | undefined;
 
+/**
+ * One agent in the context overview: the main session or an RLM (sub-)agent.
+ * `ownUsage` excludes descendants; `totalUsage` includes completed descendants, matching /usage.
+ */
 export interface ContextTreeNode {
+	/** "root" for the session itself; sub-xxxx for an RLM child. */
 	id: string;
 	label: string;
 	status: "active" | RlmChildAgentStatus;

@@ -33,6 +33,7 @@ export interface CompactionDetails {
 /**
  * Extract file operations from messages and previous compaction entries.
  */
+/** Preserve file operations recorded by prior compactions and current tool calls. */
 function extractFileOperations(
 	messages: AgentMessage[],
 	entries: SessionEntry[],
@@ -309,6 +310,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 			case "session_info":
 				break;
 		}
+		// Branch summaries and custom messages are user-role turn boundaries.
 		if (entry.type === "branch_summary" || entry.type === "custom_message") {
 			cutPoints.push(i);
 		}
@@ -403,6 +405,7 @@ export function findCutPoint(
 	}
 	const cutEntry = entries[cutIndex];
 	const isUserMessage = cutEntry.type === "message" && cutEntry.message.role === "user";
+	// A cut in a non-user turn requires a prefix summary.
 	const turnStartIndex = isUserMessage ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
 
 	return {
@@ -516,6 +519,7 @@ export async function generateSummary(
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
 	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
+	// Serialize before the LLM call so it summarizes rather than continues this conversation.
 	const llmMessages = convertToLlm(currentMessages);
 	const conversationText = serializeConversation(llmMessages);
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
@@ -621,10 +625,12 @@ export function prepareCompaction(
 		}
 	}
 
+	// Avoid a compaction that would summarize no history.
 	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0 && !previousSummary) {
 		return undefined;
 	}
 	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
+	// Split turns retain their suffix, but their prefix file operations still belong in the summary.
 	if (cutPoint.isSplitTurn) {
 		for (const msg of turnPrefixMessages) {
 			extractFileOpsFromMessage(msg, fileOps);

@@ -119,6 +119,7 @@ export class BashExecutionComponent extends Container {
 			maxBytes: DEFAULT_MAX_BYTES,
 		});
 
+		// Recompute wrapping from the render width so resizes and split panes cannot use stale columns.
 		const availableLines = contextTruncation.content ? contextTruncation.content.split("\n") : [];
 
 		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);

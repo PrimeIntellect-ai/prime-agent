@@ -1770,6 +1770,8 @@ export class DaemonSupervisor {
 					await this.assertSupervisorSavedSessionNameAvailable(command.sessionPath, target.name);
 					if (!command.activeSessionId) {
 						await this.catalog.rename(command.sessionPath, command.name);
+						// Third rename write point: an offline saved-session rename
+						// changes the name the ledger carries for that child.
 						await this.rlmSpawnLedger()
 							.appendRenameByChildPath(command.sessionPath, target.name)
 							.catch((error) => {

@@ -110,6 +110,7 @@ export interface ProviderLoginOptions {
 	initialCategory?: AuthSelectorCategory;
 }
 
+/** Shared auth dialogs: host-specific refresh and billing effects remain outside the flow. */
 export class ProviderAuthFlows {
 	constructor(private readonly host: ProviderAuthFlowsHost) {}
 

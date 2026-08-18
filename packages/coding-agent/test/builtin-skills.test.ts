@@ -294,6 +294,7 @@ describe("builtin skills", () => {
 		});
 	});
 
+	// Verify every shipping path includes bundled skills; source-only success would hide a release packaging regression.
 	describe("packaging ships bundled skills", () => {
 		const packageRoot = join(__dirname, "..");
 		const repoRoot = join(packageRoot, "..", "..");
@@ -304,6 +305,7 @@ describe("builtin skills", () => {
 				scripts?: Record<string, string>;
 			};
 			expect(pkg.scripts?.["copy-assets"]).toContain("skills dist/skills");
+			// npm publish ships the source skills/ dir via the files allowlist too.
 			expect(pkg.files).toContain("skills");
 		});
 

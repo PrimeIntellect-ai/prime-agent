@@ -819,6 +819,7 @@ export class AuthStorage {
 		providerId: string,
 		options?: { includeFallback?: boolean },
 	): Promise<AuthApiKeyResult> {
+		// Runtime overrides take precedence over stored credentials and environment keys.
 		const runtimeCandidate = this.getRuntimeAuthCandidate(providerId);
 		const runtimeKey = this.runtimeOverrides.get(providerId);
 		if (runtimeKey && runtimeCandidate && !this.isAuthSourceStale(providerId, runtimeCandidate)) {
@@ -884,6 +885,7 @@ export class AuthStorage {
 				if (!provider) {
 					return {};
 				}
+				// Lock refreshes so concurrent instances cannot race on the credential file.
 				const needsRefresh = Date.now() >= cred.expires;
 
 				if (needsRefresh) {
@@ -900,6 +902,7 @@ export class AuthStorage {
 						}
 					} catch (error) {
 						this.recordError(error);
+						// A peer may have refreshed successfully; reload before treating this refresh as failed.
 						this.reload();
 						const updatedCred = this.data[providerId];
 
@@ -913,6 +916,7 @@ export class AuthStorage {
 							};
 						}
 
+						// Preserve credentials for a later /login retry while discovery skips this provider.
 						return {};
 					}
 				} else {
@@ -923,6 +927,7 @@ export class AuthStorage {
 				}
 			}
 		}
+		// Stored auth wins over environment variables for non-Prime-Inference providers.
 		if (
 			providerId !== PRIME_INFERENCE_PROVIDER_ID &&
 			envKey &&

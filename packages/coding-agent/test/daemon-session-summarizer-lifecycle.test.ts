@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { DaemonSessionSummarizer } from "../src/modes/daemon/daemon-session-summarizer.js";
 
+// The debounce the summarizer waits for after a turn settles (kept in sync with
+// SETTLE_DEBOUNCE_MS in the module).
 const SETTLE_MS = 2000;
 
 function makeState(
@@ -45,6 +47,7 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		const state = makeState({ working: false });
 
 		summarizer.notifyActivity(state);
+		// No model call until the agent has settled for the debounce window.
 		await vi.advanceTimersByTimeAsync(SETTLE_MS - 500);
 		expect(generate).not.toHaveBeenCalled();
 
@@ -63,6 +66,8 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		summarizer.notifyActivity(state);
 		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
 		expect(generate).toHaveBeenCalledOnce();
+		// The activity axis holds an unjudged idle session at "working"; the fallback
+		// settles it to needs_input so it doesn't spin forever.
 		expect(state.summaryState).toMatchObject({ taskState: "needs_input", basedOnMessageCount: 2 });
 	});
 
@@ -90,6 +95,8 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		const generate = vi.fn().mockResolvedValue({ summary: "Editing the router" });
 		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
 		const state = makeState({ working: true });
+		// A status already exists for the current message count, so an idle session
+		// would be skipped — but a working one must still refresh its recap.
 		state.summaryState = { summary: "Editing the router", taskState: undefined, basedOnMessageCount: 2 };
 
 		summarizer.notifyActivity(state);

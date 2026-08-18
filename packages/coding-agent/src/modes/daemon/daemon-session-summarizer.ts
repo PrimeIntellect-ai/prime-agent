@@ -37,6 +37,7 @@ export interface AgentStatusResult {
 	taskState?: AgentTaskState;
 }
 
+/** Resolve the cheap summary model, or undefined when it has no configured auth. */
 export function resolveSummaryModel(registry: ModelRegistry): Model<Api> | undefined {
 	const model = registry.find(SUMMARY_MODEL_PROVIDER, SUMMARY_MODEL_ID);
 	if (model && registry.hasConfiguredAuth(model)) {
@@ -76,6 +77,7 @@ function clamp(text: string, max: number): string {
 	return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
 }
 
+/** Serialize the trailing messages into a compact prompt body (tool calls by name only). */
 export function buildStatusContext(messages: readonly AgentMessage[], isWorking: boolean): string {
 	const recent = messages.slice(-SUMMARY_CONTEXT_MESSAGES);
 	const lines: string[] = [];
@@ -119,6 +121,7 @@ function cleanRecap(raw: string): string | undefined {
 	return value;
 }
 
+/** Take the content of the last `<recap>` and `<status>` tags; idle verdicts default to needs_input. */
 export function parseAgentStatusResponse(text: string, isWorking: boolean): AgentStatusResult | undefined {
 	// Normalize unicode angle-bracket lookalikes (‹ › ＜ ＞) so a tag written with them still parses.
 	const cleaned = text.replace(/[‹＜]/g, "<").replace(/[›＞]/g, ">");
@@ -144,6 +147,7 @@ export interface GenerateAgentStatusParams {
 	signal?: AbortSignal;
 }
 
+/** One cheap model call for a fresh status, or undefined if unavailable/empty/failed. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
 	const { registry, messages, isWorking, signal } = params;
 	if (messages.length === 0) {
@@ -185,6 +189,7 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 	}
 }
 
+/** True when the new status differs enough from the stored one to be worth broadcasting. */
 export function agentStatusChanged(previous: AgentStatus | undefined, next: AgentStatusResult): boolean {
 	if (!previous) {
 		return true;
@@ -247,6 +252,7 @@ export class DaemonSessionSummarizer {
 		this.rerunRequested.clear();
 	}
 
+	/** Drop any pending work for a session that is closing. */
 	forget(activeSessionId: string): void {
 		const timer = this.debounceTimers.get(activeSessionId);
 		if (timer) {
@@ -257,6 +263,7 @@ export class DaemonSessionSummarizer {
 		this.rerunRequested.delete(activeSessionId);
 	}
 
+	/** Seed in-memory status from the persisted entry when a session is added. */
 	seed(state: ActiveSessionState): void {
 		if (state.summaryState) {
 			return;
@@ -267,6 +274,7 @@ export class DaemonSessionSummarizer {
 		}
 	}
 
+	/** Called when a session finishes a turn; debounce until the agent settles. */
 	notifyActivity(state: ActiveSessionState): void {
 		const id = state.activeSessionId;
 		const existing = this.debounceTimers.get(id);

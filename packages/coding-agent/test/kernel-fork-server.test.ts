@@ -33,6 +33,8 @@ describe("fork-server gating", () => {
 
 	it("falls back to direct spawn for any PYTHON* startup-env override", async () => {
 		if (process.platform !== "linux") return;
+		// The guard treats the whole PYTHON* family as startup-affecting, so even a var
+		// not explicitly enumerated diverts to direct spawn (no var can be "missed").
 		for (const key of ["PYTHONPATH", "PYTHONUSERBASE", "PYTHONDONTWRITEBYTECODE"]) {
 			await expect(
 				forkKernel("python3", {

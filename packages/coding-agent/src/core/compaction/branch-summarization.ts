@@ -122,6 +122,7 @@ export function collectEntriesForBranchSummary(
 function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
+			// Tool-result context remains attached to its assistant tool call.
 			if (entry.message.role === "toolResult") return undefined;
 			return entry.message;
 
@@ -254,9 +255,11 @@ export async function generateBranchSummary(
 
 	const { messages, fileOps } = prepareBranchEntries(entries, tokenBudget);
 
+	// Nothing model-visible remains after filtering.
 	if (messages.length === 0) {
 		return { summary: "No content to summarize" };
 	}
+	// Serialize before the LLM call so it summarizes rather than continues this branch.
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	let instructions: string;
