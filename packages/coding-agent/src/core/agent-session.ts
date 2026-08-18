@@ -9455,7 +9455,7 @@ export class AgentSession {
 		}
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
-		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
+		const requestedThinking = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -9475,11 +9475,13 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
-		if (requestedThinkingLevel !== undefined) {
+		let requestedThinkingLevel: ThinkingLevel | undefined;
+		if (requestedThinking !== undefined) {
 			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
-			if (!supported.includes(requestedThinkingLevel)) {
+			requestedThinkingLevel = supported.find((level) => level === requestedThinking);
+			if (!requestedThinkingLevel) {
 				throw new Error(
-					`Requested thinking level "${requestedThinkingLevel}" is not supported by model "${modelSelection.model.provider}/${modelSelection.model.id}"; supported levels: ${supported.join(", ")}`,
+					`Requested thinking level "${requestedThinking}" is not supported by model "${modelSelection.model.provider}/${modelSelection.model.id}"; supported levels: ${supported.join(", ")}`,
 				);
 			}
 		}

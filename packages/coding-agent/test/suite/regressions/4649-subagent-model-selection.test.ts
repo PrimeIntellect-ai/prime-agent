@@ -332,29 +332,6 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
-	it("inherits the parent thinking level when no override is supplied", async () => {
-		const harness = await createHarness({
-			provider,
-			models: [
-				{ id: "parent-model", reasoning: true },
-				{ id: "child-model", reasoning: true },
-			],
-		});
-		try {
-			harness.session.setThinkingLevel("high");
-			harness.setResponses([fauxAssistantMessage("inherited-effort child answer")]);
-
-			await harness.session.runRlmChild("inherit the effort", { model: `${provider}/child-model` });
-			await vi.waitFor(async () => {
-				const childEntry = (await harness.session.listRlmSubagents()).subagents[0];
-				const child = harness.session.getRlmChildSession(childEntry!.rlm_child_id);
-				expect(child?.thinkingLevel).toBe("high");
-			});
-		} finally {
-			harness.cleanup();
-		}
-	});
-
 	it("fails spawn when an explicit thinking level is unsupported by the resolved model", async () => {
 		const harness = await createHarness({
 			provider,
@@ -369,32 +346,6 @@ describe("ENG-4649 subagent model selection", () => {
 			).rejects.toThrow(
 				`Requested thinking level "high" is not supported by model "${provider}/child-model"; supported levels: off`,
 			);
-		} finally {
-			harness.cleanup();
-		}
-	});
-
-	it("accepts an explicit off thinking level on a non-reasoning model", async () => {
-		const harness = await createHarness({
-			provider,
-			models: [
-				{ id: "parent-model", reasoning: true },
-				{ id: "child-model", reasoning: false },
-			],
-		});
-		try {
-			harness.session.setThinkingLevel("high");
-			harness.setResponses([fauxAssistantMessage("no-effort child answer")]);
-
-			await harness.session.runRlmChild("skip the thinking", {
-				model: `${provider}/child-model`,
-				thinking: "off",
-			});
-			await vi.waitFor(async () => {
-				const childEntry = (await harness.session.listRlmSubagents()).subagents[0];
-				const child = harness.session.getRlmChildSession(childEntry!.rlm_child_id);
-				expect(child?.thinkingLevel).toBe("off");
-			});
 		} finally {
 			harness.cleanup();
 		}

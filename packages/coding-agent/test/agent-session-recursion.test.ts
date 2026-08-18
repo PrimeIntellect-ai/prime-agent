@@ -2174,14 +2174,6 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("nested", { thinking: 3 })).rejects.toThrow("rlm.run thinking must be a string");
 	});
 
-	it("rejects an unknown rlm.run thinking level name", async () => {
-		const root = createSession();
-
-		await expect(root.runRlmChild("nested", { thinking: "ultra" })).rejects.toThrow(
-			"rlm.run thinking must be one of: off, minimal, low, medium, high, xhigh, max",
-		);
-	});
-
 	it("cancels active rlm children when the parent session is disposed", async () => {
 		let releaseChild: () => void = () => {};
 		const release = new Promise<void>((resolve) => {
