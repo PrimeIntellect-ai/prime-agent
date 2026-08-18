@@ -349,6 +349,7 @@ interface SupervisorSessionInputPause {
 	requestedActiveSessionId: string;
 	leaseKey: string;
 	pauseId: string;
+	releaseTask?: Promise<DaemonResponse>;
 }
 
 function throwIfAdmissionCancelled(admission: SupervisorPromptAdmission | undefined): void {
@@ -1657,7 +1658,8 @@ export class DaemonSupervisor {
 						entry.owner === client &&
 						entry.worker === match.worker &&
 						entry.activeSessionId === activeSessionId &&
-						entry.leaseKey === command.leaseKey,
+						entry.leaseKey === command.leaseKey &&
+						!entry.releaseTask,
 				);
 				if (existing) {
 					return success(command.id, command.type, { pauseId: existing.pauseId });
@@ -1707,14 +1709,24 @@ export class DaemonSupervisor {
 				) {
 					throw new Error(`Session input pause belongs to another session: ${command.pauseId}`);
 				}
-				const response = await this.forwardToWorker(entry.worker, {
-					...command,
-					activeSessionId: entry.activeSessionId,
-				});
-				if (response.success && this.sessionInputPauses.get(command.pauseId) === entry) {
-					this.sessionInputPauses.delete(command.pauseId);
+				const releaseTask =
+					entry.releaseTask ??
+					this.forwardToWorker(entry.worker, {
+						...command,
+						activeSessionId: entry.activeSessionId,
+					});
+				entry.releaseTask = releaseTask;
+				try {
+					const response = await releaseTask;
+					if (response.success && this.sessionInputPauses.get(command.pauseId) === entry) {
+						this.sessionInputPauses.delete(command.pauseId);
+					}
+					return response;
+				} finally {
+					if (this.sessionInputPauses.get(command.pauseId) === entry && entry.releaseTask === releaseTask) {
+						entry.releaseTask = undefined;
+					}
 				}
-				return response;
 			}
 			case "detach": {
 				const detachingSessions = this.detachingInputPauseSessions.get(client) ?? new Set<string>();

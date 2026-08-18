@@ -126,6 +126,34 @@ describe("daemon supervisor session input pause ownership", () => {
 		expect(supervisor.sessionInputPauses.has("pause-2")).toBe(true);
 	});
 
+	it("reacquires a fresh worker pause while the prior pause is releasing", async () => {
+		const { supervisor } = createHarness();
+		const client = addClient(supervisor, "socket-a", "protocol-a");
+		await supervisor.handleCommand(client, acquireCommand("acquire-1"));
+		let finishRelease!: () => void;
+		const releaseGate = new Promise<void>((resolve) => {
+			finishRelease = resolve;
+		});
+		supervisor.forwardToWorker.mockImplementationOnce(async (_worker: WorkerFixture, command: DaemonCommand) => {
+			await releaseGate;
+			return { type: "response", command: command.type, success: true } satisfies DaemonResponse;
+		});
+
+		const release = supervisor.handleCommand(client, {
+			id: "release-1",
+			type: "release_session_input_pause",
+			activeSessionId: "active-1",
+			pauseId: "pause-1",
+		});
+		const reacquired = await supervisor.handleCommand(client, acquireCommand("acquire-2"));
+		expect(reacquired).toMatchObject({ success: true, data: { pauseId: "pause-2" } });
+
+		finishRelease();
+		await release;
+		expect(supervisor.sessionInputPauses.has("pause-1")).toBe(false);
+		expect(supervisor.sessionInputPauses.has("pause-2")).toBe(true);
+	});
+
 	it("deduplicates retries and releases the client lease on detach", async () => {
 		const { supervisor } = createHarness();
 		const client = addClient(supervisor, "socket-a", "protocol-a");
