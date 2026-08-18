@@ -4,7 +4,6 @@
  */
 
 /**
- * Encode bytes as base64url string.
  */
 function base64urlEncode(bytes: Uint8Array): string {
 	let binary = "";
@@ -19,12 +18,10 @@ function base64urlEncode(bytes: Uint8Array): string {
  * Uses Web Crypto API for cross-platform compatibility.
  */
 export async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
-	// Generate random verifier
 	const verifierBytes = new Uint8Array(32);
 	crypto.getRandomValues(verifierBytes);
 	const verifier = base64urlEncode(verifierBytes);
 
-	// Compute SHA-256 challenge
 	const encoder = new TextEncoder();
 	const data = encoder.encode(verifier);
 	const hashBuffer = await crypto.subtle.digest("SHA-256", data);

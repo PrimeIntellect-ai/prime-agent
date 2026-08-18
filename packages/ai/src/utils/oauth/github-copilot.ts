@@ -1,5 +1,4 @@
 /**
- * GitHub Copilot OAuth flow
  */
 
 import { getModels } from "../../models.js";
@@ -75,18 +74,15 @@ function getBaseUrlFromToken(token: string): string | null {
 	const match = token.match(/proxy-ep=([^;]+)/);
 	if (!match) return null;
 	const proxyHost = match[1];
-	// Convert proxy.xxx to api.xxx
 	const apiHost = proxyHost.replace(/^proxy\./, "api.");
 	return `https://${apiHost}`;
 }
 
 export function getGitHubCopilotBaseUrl(token?: string, enterpriseDomain?: string): string {
-	// If we have a token, extract the base URL from proxy-ep
 	if (token) {
 		const urlFromToken = getBaseUrlFromToken(token);
 		if (urlFromToken) return urlFromToken;
 	}
-	// Fallback for enterprise or if token parsing fails
 	if (enterpriseDomain) return `https://copilot-api.${enterpriseDomain}`;
 	return "https://api.individual.githubcopilot.com";
 }
@@ -145,7 +141,6 @@ async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
 }
 
 /**
- * Sleep that can be interrupted by an AbortSignal
  */
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
@@ -236,7 +231,6 @@ async function pollForGitHubAccessToken(
 }
 
 /**
- * Refresh GitHub Copilot token
  */
 export async function refreshGitHubCopilotToken(
 	refreshToken: string,
@@ -359,7 +353,6 @@ export async function loginGitHubCopilot(options: {
 	);
 	const credentials = await refreshGitHubCopilotToken(githubAccessToken, enterpriseDomain ?? undefined);
 
-	// Enable all models after successful login
 	options.onProgress?.("Enabling models...");
 	await enableAllGitHubCopilotModels(credentials.access, enterpriseDomain ?? undefined);
 	return credentials;

@@ -34,7 +34,6 @@ const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
 const MAX_MISTRAL_ERROR_BODY_CHARS = 4000;
 
 /**
- * Provider-specific options for the Mistral API.
  */
 type MistralReasoningEffort = "none" | "high";
 
@@ -45,7 +44,6 @@ export interface MistralOptions extends StreamOptions {
 }
 
 /**
- * Stream responses from Mistral using `chat.stream`.
  */
 export const streamMistral: StreamFunction<"mistral-conversations", MistralOptions> = (
 	model: Model<"mistral-conversations">,
@@ -108,7 +106,6 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 };
 
 /**
- * Maps provider-agnostic `SimpleStreamOptions` to Mistral options.
  */
 export const streamSimpleMistral: StreamFunction<"mistral-conversations", SimpleStreamOptions> = (
 	model: Model<"mistral-conversations">,

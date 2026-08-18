@@ -1,5 +1,4 @@
 /**
- * Shared utilities for Google Generative AI and Google Vertex providers.
  */
 
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
@@ -10,8 +9,6 @@ import { transformMessages } from "./transform-messages.js";
 type GoogleApiType = "google-generative-ai" | "google-vertex";
 
 /**
- * Thinking level for Gemini 3 models.
- * Mirrors Google's ThinkingLevel enum values.
  */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
 
@@ -84,14 +81,12 @@ function isValidThoughtSignature(signature: string | undefined): boolean {
 }
 
 /**
- * Only keep signatures from the same provider/model and with valid base64.
  */
 function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: string | undefined): string | undefined {
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 
 /**
- * Models via Google APIs that require explicit tool call IDs in function calls/responses.
  */
 export function requiresToolCallId(modelId: string): boolean {
 	return modelId.startsWith("claude-") || modelId.startsWith("gpt-oss-");
@@ -112,7 +107,6 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 }
 
 /**
- * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
@@ -151,12 +145,10 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			}
 		} else if (msg.role === "assistant") {
 			const parts: Part[] = [];
-			// Check if message is from same provider and model - only then keep thinking blocks
 			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
-					// Skip empty text blocks
 					if (!block.text || block.text.trim() === "") continue;
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
 					parts.push({
@@ -164,7 +156,6 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						...(thoughtSignature && { thoughtSignature }),
 					});
 				} else if (block.type === "thinking") {
-					// Skip empty thinking blocks
 					if (!block.thinking || block.thinking.trim() === "") continue;
 					// Only keep as thinking block if same provider AND same model
 					// Otherwise convert to plain text (no tags to avoid model mimicking them)
@@ -200,7 +191,6 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				parts,
 			});
 		} else if (msg.role === "toolResult") {
-			// Extract text and image content
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map((c) => c.text).join("\n");
 			const imageContent = model.input.includes("image")
@@ -272,7 +262,6 @@ const JSON_SCHEMA_META_DECLARATIONS = new Set([
 ]);
 
 /**
- * Strip meta-declarations from a schema obj
  */
 function sanitizeForOpenApi(schema: unknown): unknown {
 	if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
@@ -314,7 +303,6 @@ export function convertTools(
 }
 
 /**
- * Map tool choice string to Gemini FunctionCallingConfigMode.
  */
 export function mapToolChoice(choice: string): FunctionCallingConfigMode {
 	switch (choice) {
@@ -330,7 +318,6 @@ export function mapToolChoice(choice: string): FunctionCallingConfigMode {
 }
 
 /**
- * Map Gemini FinishReason to our StopReason.
  */
 export function mapStopReason(reason: FinishReason): StopReason {
 	switch (reason) {
@@ -362,7 +349,6 @@ export function mapStopReason(reason: FinishReason): StopReason {
 }
 
 /**
- * Map string finish reason to our StopReason (for raw API responses).
  */
 export function mapStopReasonString(reason: string): StopReason {
 	switch (reason) {
