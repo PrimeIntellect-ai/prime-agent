@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Fixed daemon socket paths being used verbatim in identity derivations: `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree, and descriptors recorded with a raw path remain adoptable.
+- Fixed daemon socket paths being used verbatim in identity derivations: `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree.
 - Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
