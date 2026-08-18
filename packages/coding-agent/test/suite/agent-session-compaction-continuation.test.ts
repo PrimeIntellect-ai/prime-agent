@@ -201,9 +201,9 @@ describe("compaction continuation", () => {
 		const sessionRef: { current?: AgentSession } = {};
 		const harness = await createHarness({
 			tools: [createFauxIpythonTool(sessionRef)],
-			// Small window; faux usage grows per turn, so a later goal-continuation turn crosses the threshold.
-			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 4_300 }],
+			// Let a running goal continuation cross the threshold while remaining well below overflow.
+			settings: { compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 10_000 }],
 			persistSession: true,
 			extensionFactories: [
 				(pi) => {
@@ -230,14 +230,17 @@ describe("compaction continuation", () => {
 		]);
 
 		await harness.session.prompt("/goal finish the task");
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		await harness.session.waitForIdle();
-		await new Promise((resolve) => setTimeout(resolve, 300));
-
-		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toContain("threshold");
-		expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
-		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.session.goalState.status).toBe("complete");
+		await vi.waitFor(
+			() => {
+				const compactionReasons = harness.eventsOfType("compaction_start").map((event) => event.reason);
+				expect(compactionReasons).toContain("threshold");
+				expect(compactionReasons).not.toContain("overflow");
+				expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
+				expect(harness.getPendingResponseCount()).toBe(0);
+				expect(harness.session.goalState.status).toBe("complete");
+			},
+			{ timeout: 5_000 },
+		);
 	});
 
 	// With both drivers active the goal continuation takes exclusive priority, matching _getContinuationMessages.
