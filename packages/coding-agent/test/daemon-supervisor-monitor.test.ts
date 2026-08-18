@@ -2958,6 +2958,47 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("migrates a legacy raw-spelling descriptor namespace to the canonical directory", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-legacy-migrate-"));
+		try {
+			const rawSocketPath = `${root}//supervisor.sock`;
+			const now = new Date().toISOString();
+			// A namespace as an old build would have written it: keyed by the raw
+			// spelling's hash, holding a descriptor that records that spelling.
+			const legacyDir = join(root, "daemon-workers", "legacy-raw-key");
+			mkdirSync(legacyDir, { recursive: true });
+			writeFileSync(
+				join(legacyDir, "worker-1.json"),
+				`${JSON.stringify({
+					version: 1,
+					workerId: "worker-1",
+					pid: 999_999,
+					socketPath: join(root, "worker-1.sock"),
+					supervisorSocketPath: rawSocketPath,
+					authenticationToken: "token-1",
+					rootActiveSessionId: "active-1",
+					createdAt: now,
+					updatedAt: now,
+					lifecycle: "running",
+					createCommand: { type: "create", config: { cwd: root, agentDir: root } },
+					consecutiveFailures: 0,
+				})}\n`,
+			);
+
+			const supervisor = new DaemonSupervisor(rawSocketPath, {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+			}) as unknown as { descriptorDir: string };
+
+			expect(existsSync(join(supervisor.descriptorDir, "worker-1.json"))).toBe(true);
+			expect(existsSync(legacyDir)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("derives the same worker descriptor namespace for equivalent socket path spellings", () => {
 		if (process.platform === "win32") {
 			return;

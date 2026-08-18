@@ -22,12 +22,9 @@ describe("parseArgs", () => {
 	});
 
 	describe("--daemon-socket flag", () => {
-		test("normalizes the socket path", () => {
-			if (process.platform === "win32") {
-				return;
-			}
+		test("keeps the raw socket path for cwd-aware normalization in main", () => {
 			const result = parseArgs(["--daemon-socket", "/a//b.sock"]);
-			expect(result.daemonSocket).toBe("/a/b.sock");
+			expect(result.daemonSocket).toBe("/a//b.sock");
 		});
 	});
 

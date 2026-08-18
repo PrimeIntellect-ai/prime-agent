@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -506,6 +515,53 @@ function defaultWorkerDescriptorDir(agentDir: string, socketPath: string): strin
 	return join(agentDir, "daemon-workers", descriptorKey(socketPath));
 }
 
+/**
+ * Builds that hashed the raw socket spelling stored descriptors under a
+ * different key for each non-canonical spelling. Move such a directory to the
+ * canonical location once so existing workers stay adoptable after update. The
+ * old spelling is unknown here, so candidates are found by reading each
+ * namespace's descriptors and comparing their recorded supervisor socket path.
+ */
+function migrateLegacyWorkerDescriptorDir(agentDir: string, socketPath: string, canonicalDir: string): void {
+	const root = join(agentDir, "daemon-workers");
+	if (existsSync(canonicalDir) || !existsSync(root)) {
+		return;
+	}
+	const canonicalSocketPath = normalizeSocketPath(socketPath);
+	for (const name of readdirSync(root)) {
+		const legacyDir = join(root, name);
+		if (legacyDir === canonicalDir || !legacyDirBelongsToSocket(legacyDir, canonicalSocketPath)) {
+			continue;
+		}
+		try {
+			renameSync(legacyDir, canonicalDir);
+		} catch {
+			// A failed move only means this spelling keeps its old namespace.
+		}
+		return;
+	}
+}
+
+function legacyDirBelongsToSocket(legacyDir: string, socketPath: string): boolean {
+	try {
+		for (const name of readdirSync(legacyDir)) {
+			if (!name.endsWith(".json") && name !== SUPERVISOR_CONFIG_FILE_NAME) {
+				continue;
+			}
+			const parsed: unknown = JSON.parse(readFileSync(join(legacyDir, name), "utf8"));
+			const recorded =
+				(parsed as { supervisorSocketPath?: unknown }).supervisorSocketPath ??
+				(parsed as { socketPath?: unknown }).socketPath;
+			if (typeof recorded === "string" && normalizeSocketPath(recorded) === socketPath) {
+				return true;
+			}
+		}
+	} catch {
+		// Unreadable entries simply do not participate in migration.
+	}
+	return false;
+}
+
 export function idleEvictionSweepIntervalMs(idleEvictionMinutes: IdleEvictionMinutes): number {
 	if (idleEvictionMinutes === "off") return IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS;
 	return Math.max(
@@ -636,6 +692,9 @@ export class DaemonSupervisor {
 			throw new Error("Daemon supervisor config is missing agentDir");
 		}
 		this.descriptorDir = options.descriptorDir ?? defaultWorkerDescriptorDir(agentDir, socketPath);
+		if (!options.descriptorDir) {
+			migrateLegacyWorkerDescriptorDir(agentDir, socketPath, this.descriptorDir);
+		}
 		this.supervisorConfigPath = join(this.descriptorDir, SUPERVISOR_CONFIG_FILE_NAME);
 		this.defaultSessionConfig = this.loadPersistedSupervisorConfig() ?? options.defaultSessionConfig;
 		this.snapshotCacheRoot = join(this.descriptorDir, "snapshot-cache", this.generation);

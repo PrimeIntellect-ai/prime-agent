@@ -1178,10 +1178,6 @@ function processIdentityFromDaemonHello(
 	};
 }
 
-function normalizedSocketPath(socketPath: string): string {
-	return process.platform === "win32" ? socketPath.toLowerCase() : resolve(socketPath);
-}
-
 function validateReplacementDaemon(
 	socketPath: string,
 	hello: DaemonHello,
@@ -1199,7 +1195,7 @@ function validateReplacementDaemon(
 	}
 	if (
 		!hello.supervisorSocketPath ||
-		normalizedSocketPath(hello.supervisorSocketPath) !== normalizedSocketPath(socketPath)
+		normalizeSocketPath(hello.supervisorSocketPath) !== normalizeSocketPath(socketPath)
 	) {
 		throw new Error(`Replacement daemon identity does not match ${socketPath}`);
 	}

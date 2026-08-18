@@ -94,6 +94,7 @@ import {
 	defaultDaemonSocketPath,
 	InProcessAgentConnection,
 	InteractiveMode,
+	normalizeSocketPath,
 	resolveAttachModelFallbackMessage,
 	runAcpMode,
 	runAcpModeWithConnection,
@@ -1130,6 +1131,11 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(chalk.red(`Error: Cannot use cwd ${cwd}: ${message}`));
 			process.exit(1);
 		}
+	}
+	if (parsed.daemonSocket) {
+		// Normalized only after --cwd applies so a relative socket path resolves
+		// against the requested working directory.
+		parsed.daemonSocket = normalizeSocketPath(parsed.daemonSocket);
 	}
 
 	// Run migrations (pass cwd for project-local migrations)

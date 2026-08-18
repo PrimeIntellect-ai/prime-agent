@@ -18,11 +18,22 @@ const harnesses: Harness[] = [];
 const socketDirs = new Set<string>();
 
 afterEach(async () => {
-	for (const child of supervisors) {
-		if (child.exitCode === null && child.signalCode === null) {
+	// Wait for killed supervisors to fully exit before removing their
+	// directories; a dying process may still be flushing writes, which makes
+	// recursive removal race into ENOTEMPTY.
+	await Promise.all(
+		[...supervisors].map((child) => {
+			if (child.exitCode !== null || child.signalCode !== null) {
+				return undefined;
+			}
+			const exited = new Promise<void>((resolveExit) => {
+				child.once("exit", () => resolveExit());
+				setTimeout(resolveExit, 10_000).unref();
+			});
 			child.kill("SIGKILL");
-		}
-	}
+			return exited;
+		}),
+	);
 	supervisors.clear();
 	while (harnesses.length > 0) {
 		harnesses.pop()?.cleanup();
