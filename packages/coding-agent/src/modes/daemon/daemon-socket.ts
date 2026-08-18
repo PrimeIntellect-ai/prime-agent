@@ -1,8 +1,20 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
+
+/**
+ * Canonical socket-path spelling used for hashing, persistence, and identity
+ * comparisons. Collapses duplicate/trailing slashes and makes the path
+ * absolute; does not resolve symlinks (the socket may not exist yet).
+ */
+export function normalizeSocketPath(socketPath: string): string {
+	if (process.platform === "win32") {
+		return socketPath.toLowerCase();
+	}
+	return resolve(socketPath);
+}
 
 const DAEMON_SOCKET_MODE = 0o600;
 const DAEMON_SOCKET_DIR_MODE = 0o700;

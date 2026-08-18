@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed daemon socket paths being used verbatim in identity derivations: `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree, and descriptors recorded with a raw path remain adoptable.
 - Changed the agents view splash hint from "type to start" to "type to search sessions".
 - Added `app.edits.expand` (`ctrl+j`) to toggle edit diffs; diffs are now shown only by this toggle, and `ctrl+o` no longer affects them.
 - Changed edit rendering so the `╰─ <path> +N -M` summary line is always visible and `ctrl+j` toggles the diff inline beneath it, indented to the summary text.

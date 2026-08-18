@@ -15,6 +15,7 @@ import {
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
+import { normalizeSocketPath } from "./modes/daemon/daemon-socket.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 
 // =============================================================================
@@ -569,12 +570,13 @@ export function getAgentLogPath(): string {
  * daemon.sock in different dirs) don't interleave into one file.
  */
 export function getDaemonLogPath(socketPath: string): string {
-	const hash = createHash("sha256").update(socketPath).digest("hex").slice(0, 8);
-	return join(getLogsDir(), `${basename(socketPath)}.${hash}.log`);
+	const normalized = normalizeSocketPath(socketPath);
+	const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 8);
+	return join(getLogsDir(), `${basename(normalized)}.${hash}.log`);
 }
 
 export function getDaemonUpdateRestartManifestPath(socketPath: string, agentDir: string = getAgentDir()): string {
-	const normalizedSocketPath = process.platform === "win32" ? socketPath.toLowerCase() : resolve(socketPath);
+	const normalizedSocketPath = normalizeSocketPath(socketPath);
 	const socketHash = createHash("sha256").update(normalizedSocketPath).digest("hex");
 	return join(agentDir, "daemon-update-restarts", `${socketHash}.json`);
 }

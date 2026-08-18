@@ -9,8 +9,35 @@ import {
 	cleanupDaemonSocketPath,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
+	normalizeSocketPath,
 	prepareDaemonSocketPath,
 } from "../src/modes/daemon/daemon-socket.js";
+
+describe("normalizeSocketPath", () => {
+	it("collapses duplicate slashes", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		expect(normalizeSocketPath("/a//b.sock")).toBe("/a/b.sock");
+	});
+
+	it("strips trailing slashes", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		expect(normalizeSocketPath("/a/b.sock/")).toBe("/a/b.sock");
+	});
+
+	it("leaves canonical paths unchanged", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		expect(normalizeSocketPath("/a/b.sock")).toBe("/a/b.sock");
+	});
+});
 
 describe("defaultDaemonSocketPath", () => {
 	it("uses a fixed Windows named pipe path", () => {

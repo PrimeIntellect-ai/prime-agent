@@ -21,6 +21,16 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--daemon-socket flag", () => {
+		test("normalizes the socket path", () => {
+			if (process.platform === "win32") {
+				return;
+			}
+			const result = parseArgs(["--daemon-socket", "/a//b.sock"]);
+			expect(result.daemonSocket).toBe("/a/b.sock");
+		});
+	});
+
 	describe("--help flag", () => {
 		test("parses --help flag", () => {
 			const result = parseArgs(["--help"]);

@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { APP_NAME } from "../config.js";
+import { normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 
 export type Mode = "text" | "json" | "rpc" | "acp" | "daemon";
 
@@ -105,7 +106,7 @@ export function parseArgs(args: string[]): Args {
 				result.mode = mode;
 			}
 		} else if (arg === "--daemon-socket" && i + 1 < args.length) {
-			result.daemonSocket = args[++i];
+			result.daemonSocket = normalizeSocketPath(args[++i]);
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;
 		} else if (arg === "--resume" || arg === "-r") {
