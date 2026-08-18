@@ -1,16 +1,10 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 
-/** Canonical spelling for hashing and identity comparisons. Does not resolve symlinks (the socket may not exist yet). */
-export function normalizeSocketPath(socketPath: string, baseDir?: string): string {
-	if (process.platform === "win32") {
-		return socketPath.toLowerCase();
-	}
-	return baseDir ? resolve(baseDir, socketPath) : resolve(socketPath);
-}
+export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 
 const DAEMON_SOCKET_MODE = 0o600;
 const DAEMON_SOCKET_DIR_MODE = 0o700;

@@ -15,8 +15,8 @@ import {
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
-import { normalizeSocketPath } from "./modes/daemon/daemon-socket.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
+import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
 
 // =============================================================================
 // Package Detection

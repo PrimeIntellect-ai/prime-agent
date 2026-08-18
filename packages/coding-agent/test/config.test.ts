@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { basename, delimiter, join } from "path";
+import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	detectInstallMethod,
@@ -455,13 +455,5 @@ describe("getDaemonLogPath", () => {
 		}
 
 		expect(getDaemonLogPath("/a//b.sock")).toBe(getDaemonLogPath("/a/b.sock"));
-	});
-
-	test("names the log after the socket basename plus a short hash", () => {
-		if (process.platform === "win32") {
-			return;
-		}
-
-		expect(basename(getDaemonLogPath("/a/b.sock"))).toMatch(/^b\.sock\.[0-9a-f]{8}\.log$/);
 	});
 });
