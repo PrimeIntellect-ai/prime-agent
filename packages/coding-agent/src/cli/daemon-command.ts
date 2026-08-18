@@ -8,13 +8,13 @@ import { expandTildePath } from "../config.js";
 import type { AgentSessionEvent } from "../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js";
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
+import { isValidThinkingLevel } from "../core/thinking-levels.js";
 import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
 import { isLocalPath } from "../utils/paths.js";
-import { isValidThinkingLevel } from "./args.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
 import { runPs, runReap } from "./daemon-ps.js";
 

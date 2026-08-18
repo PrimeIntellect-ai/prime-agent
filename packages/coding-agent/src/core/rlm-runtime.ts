@@ -3,6 +3,7 @@ import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
+import { isValidThinkingLevel, THINKING_LEVELS } from "./thinking-levels.js";
 
 /** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
 export interface RlmRunRequest {
@@ -75,8 +76,6 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown): string
 	return name;
 }
 
-const RLM_THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
 export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -85,10 +84,10 @@ export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): Thin
 		throw new Error("rlm.run thinking must be a string");
 	}
 	const level = value.trim().toLowerCase();
-	if (!RLM_THINKING_LEVELS.includes(level as ThinkingLevel)) {
-		throw new Error(`rlm.run thinking must be one of: ${RLM_THINKING_LEVELS.join(", ")}`);
+	if (!isValidThinkingLevel(level)) {
+		throw new Error(`rlm.run thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
 	}
-	return level as ThinkingLevel;
+	return level;
 }
 
 export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {

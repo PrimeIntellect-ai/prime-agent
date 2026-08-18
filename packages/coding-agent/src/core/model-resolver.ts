@@ -6,11 +6,11 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type Api, getLogger, type KnownProvider, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
-import { isValidThinkingLevel } from "../cli/args.js";
 import { APP_NAME } from "../config.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { isPrivatePrimeInferenceModel } from "./prime-inference-models.js";
+import { isValidThinkingLevel } from "./thinking-levels.js";
 
 const log = getLogger("coding-agent.model-resolver");
 
