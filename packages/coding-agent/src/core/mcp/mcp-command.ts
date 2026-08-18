@@ -1,3 +1,4 @@
+import { getCatalogEntry } from "@earendil-works/pi-ai/mcp";
 import type { McpServerConfig, SettingsManager } from "../settings-manager.js";
 
 export type McpManagementAction = "add" | "list" | "get" | "remove";
@@ -175,6 +176,9 @@ function validateName(name: string): string {
 		throw new Error(
 			"MCP server names must be 1-64 letters, numbers, underscores, or hyphens and start with a letter or number.",
 		);
+	}
+	if (getCatalogEntry(name)) {
+		throw new Error(`MCP server name "${name}" is reserved for a built-in integration.`);
 	}
 	return name;
 }

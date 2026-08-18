@@ -97,7 +97,7 @@ describe("McpManager", () => {
 		expect(called).toBe("linear");
 	});
 
-	it("mcp.config returns the resolved URL + headers, honoring a user override of a catalog name", async () => {
+	it("mcp.config keeps catalog names reserved from generic overrides", async () => {
 		const manager = new McpManager({
 			authStorage,
 			getUserServers: () => ({
@@ -105,12 +105,7 @@ describe("McpManager", () => {
 			}),
 		});
 		const handlers = manager.hostHandlers();
-		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({
-			type: "http",
-			url: "https://proxy.test/mcp",
-			oauth: true,
-			headers: { "X-Extra": "1" },
-		});
+		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({});
 		// Catalog-only entries are reserved for their authored skills, not the generic API.
 		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({});
 	});

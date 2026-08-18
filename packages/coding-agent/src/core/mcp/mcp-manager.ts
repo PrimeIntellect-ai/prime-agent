@@ -169,7 +169,7 @@ export class McpManager {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.config requires a server");
 				const integration = this.integrations.get(server);
-				if (!integration?.userDeclared) return {};
+				if (!integration?.userDeclared || getCatalogEntry(server)) return {};
 				return { ...integration.config };
 			},
 		};

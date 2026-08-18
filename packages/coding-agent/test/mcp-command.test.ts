@@ -51,6 +51,7 @@ describe("MCP management commands", () => {
 
 	it("validates transport, URL, names, auth, and stdio environment syntax", () => {
 		for (const args of [
+			["linear", "--url", "https://example.com/mcp"],
 			["bad name", "--url", "https://example.com/mcp"],
 			["remote", "--url", "file:///tmp/server"],
 			["remote", "--url", "https://user:secret@example.com/mcp"],
