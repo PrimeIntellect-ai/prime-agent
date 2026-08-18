@@ -198,15 +198,11 @@ export class CustomEditor extends Editor {
 			// Fall through to editor handling for delete-char-forward when not empty
 		}
 
-		// Check all other app actions.
-		// A raw "\n" byte is ambiguous: it decodes as ctrl+j, but it is also what
-		// Shift+Enter sends in terminals that map it to a literal newline (and a
-		// traditional newline key itself). Let the editor's newline handling win;
-		// ctrl+j still reaches actions from kitty-protocol terminals as CSI-u.
-		const isLegacyNewlineByte = data === "\n";
+		// Check all other app actions. A raw "\n" is Shift+Enter's newline in some
+		// terminals, so it goes to the editor even though it decodes as ctrl+j.
 		for (const [action, handler] of this.actionHandlers) {
 			if (
-				!isLegacyNewlineByte &&
+				data !== "\n" &&
 				action !== "app.input.clear" &&
 				action !== "app.exit" &&
 				(action !== "app.shortcuts" || this.getText().length === 0) &&
