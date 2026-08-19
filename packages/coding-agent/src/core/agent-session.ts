@@ -1054,7 +1054,7 @@ export class AgentSession {
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
-	private readonly _unpersistedCompactionOutcomes: CustomMessage[] = [];
+	private readonly _unpersistedOutcomes: CustomMessage[] = [];
 
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _userBashRunning = false;
@@ -4066,12 +4066,12 @@ export class AgentSession {
 		for (const message of context.messages) {
 			this._applyLateIpythonSentAgentMessages(message);
 		}
-		this._mergeUnpersistedCompactionOutcomes(context.messages);
+		this._mergeUnpersistedOutcomes(context.messages);
 		return context;
 	}
 
-	private _mergeUnpersistedCompactionOutcomes(messages: AgentMessage[]): void {
-		for (const outcome of this._unpersistedCompactionOutcomes) {
+	private _mergeUnpersistedOutcomes(messages: AgentMessage[]): void {
+		for (const outcome of this._unpersistedOutcomes) {
 			let insertAt = messages.length;
 			while (insertAt > 0 && messages[insertAt - 1]!.timestamp > outcome.timestamp) {
 				insertAt -= 1;
@@ -7048,7 +7048,7 @@ export class AgentSession {
 		);
 		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
-		this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
+		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
 		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
@@ -7683,7 +7683,8 @@ export class AgentSession {
 				message.details,
 			);
 		} catch {
-			// Best-effort: the full result is already persisted as refinement history.
+			// Not in the session file, so context rebuilds would drop the outcome.
+			this._unpersistedOutcomes.push(message);
 		}
 		this.agent.state.messages.push(message);
 		this._emit({ type: "message_start", message });
@@ -7986,7 +7987,7 @@ export class AgentSession {
 				{ reason, outcome },
 			);
 			// Not in the session file, so context rebuilds would drop the disclosure.
-			this._unpersistedCompactionOutcomes.push(outcomeMessage);
+			this._unpersistedOutcomes.push(outcomeMessage);
 		}
 		this.agent.state.messages.push(outcomeMessage);
 		this._emit({ type: "message_start", message: outcomeMessage });
@@ -10685,7 +10686,7 @@ export class AgentSession {
 
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
-			this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
+			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
 			this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();

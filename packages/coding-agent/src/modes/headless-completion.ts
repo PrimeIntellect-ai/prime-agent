@@ -11,6 +11,7 @@ import {
 	type CompactionOutcomeMessage,
 	isCompactionOutcomeMessage,
 	isSessionSlashCommandResultMessage,
+	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	type SessionSlashCommandResultMessage,
 } from "../core/messages.js";
 
@@ -37,7 +38,11 @@ export function selectHeadlessTerminalResult(messages: readonly AgentMessage[]):
 		}
 		// A corrupt outcome is still part of the terminal outcome suffix. Skip it
 		// without letting it hide earlier valid outcomes or their failure status.
-		if (message.role === "custom" && message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) {
+		if (
+			message.role === "custom" &&
+			(message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
+				message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE)
+		) {
 			index--;
 			continue;
 		}

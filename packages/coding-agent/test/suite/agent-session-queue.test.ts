@@ -1093,6 +1093,37 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
+	it("keeps an unpersisted refinement outcome across context rebuilds", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			harness.setResponses([fauxAssistantMessage(refinePlanJson("no-op"))]);
+			vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementationOnce(() => {
+				throw new Error("disk full");
+			});
+
+			await harness.session.refine({ instructions: "outcome persistence failure" });
+
+			const outcome = harness.session.messages.find(isRefinementOutcomeMessage);
+			expect(outcome?.details.summary).toBe("no-op");
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom_message" && entry.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE),
+			).toBe(false);
+			// The memory-only outcome survives context rebuilds despite the failed write.
+			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
 	it("preserves a same-entry harness write made during background planning", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
