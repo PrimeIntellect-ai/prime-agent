@@ -62,13 +62,38 @@ interface SpawnParams {
 	env?: Record<string, string | undefined>;
 }
 
-type PendingSpawn = {
-	resolve: (pid: number) => void;
+export type ForkedKernelKillSignal = "TERM" | "KILL";
+export type ForkedKernelKillOutcome = "signaled" | "already-exited" | "unknown-pid";
+
+/**
+ * Handle to a forkserver-forked kernel. All signaling/liveness goes through the
+ * forkserver (the kernel's parent), never a bare process.kill from Node — a
+ * non-parent signaling a numeric pid races with pid reuse. Both methods reject
+ * with ForkServerUnavailable when the server is dead or the reply is malformed.
+ */
+export interface ForkedKernelHandle {
+	readonly pid: number;
+	kill(signal: ForkedKernelKillSignal): Promise<ForkedKernelKillOutcome>;
+	isAlive(): Promise<boolean>;
+}
+
+interface ForkServerReply {
+	id: number;
+	pid?: number;
+	error?: string;
+	outcome?: string;
+	alive?: boolean;
+}
+
+type PendingRequest = {
+	resolve: (msg: ForkServerReply) => void;
 	reject: (err: Error) => void;
 	timer: ReturnType<typeof setTimeout>;
 };
 
-class ForkServer {
+// Exported for protocol-level tests (which construct it directly, bypassing the
+// isForkServerEnabled platform gate); production entry stays forkKernel().
+export class ForkServer {
 	private readonly params: ForkServerParams;
 	// The env the template process was launched with, snapshotted at construction so
 	// it exactly matches what the template's interpreter imported with. The
@@ -86,7 +111,7 @@ class ForkServer {
 	// child's import/startup traceback lands here; surfaced in error messages.
 	private stderrTail = "";
 	private nextId = 1;
-	private readonly pending = new Map<number, PendingSpawn>();
+	private readonly pending = new Map<number, PendingRequest>();
 	// Request ids whose caller timed out; a late pid reply for one is an orphan to kill.
 	private readonly abandoned = new Set<number>();
 	private dead = false;
@@ -196,7 +221,7 @@ class ForkServer {
 			const line = this.buffer.slice(0, idx);
 			this.buffer = this.buffer.slice(idx + 1);
 			if (!line.trim()) continue;
-			let msg: { type?: string; id?: number; pid?: number; error?: string };
+			let msg: ForkServerReply & { type?: string };
 			try {
 				msg = JSON.parse(line);
 			} catch {
@@ -210,43 +235,66 @@ class ForkServer {
 			const p = this.pending.get(msg.id);
 			if (!p) {
 				// A pid for a request the caller already abandoned (timed out): the
-				// fork succeeded but nobody owns it, so kill the orphan here.
+				// fork succeeded but nobody owns it, so ask the forkserver — the
+				// orphan's parent, hence race-free — to kill it (never process.kill).
 				if (this.abandoned.delete(msg.id) && typeof msg.pid === "number") {
-					try {
-						process.kill(msg.pid, "SIGTERM");
-					} catch {
-						// Orphan already exited.
-					}
+					void this.killChild(msg.pid, "TERM").catch(() => {});
 				}
 				continue;
 			}
 			this.pending.delete(msg.id);
 			clearTimeout(p.timer);
-			if (typeof msg.pid === "number") {
-				p.resolve(msg.pid);
-			} else {
-				p.reject(new ForkServerUnavailable(this.withStderr(msg.error ?? "forkserver fork failed")));
-			}
+			p.resolve(msg);
 		}
 	}
 
-	async spawnKernel(spawn: SpawnParams): Promise<number> {
-		await this.ensureReady();
-		if (this.dead || !this.conn) throw new ForkServerUnavailable("forkserver connection unavailable");
+	private request(payload: Record<string, unknown>, opts?: { abandonOnTimeout?: boolean }): Promise<ForkServerReply> {
+		if (this.dead || !this.conn) {
+			return Promise.reject(new ForkServerUnavailable("forkserver connection unavailable"));
+		}
 		const id = this.nextId++;
-		return new Promise<number>((resolve, reject) => {
+		return new Promise<ForkServerReply>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
-				// The fork may still land after we give up; remember the id so its late
+				// A spawn may still land after we give up; remember the id so its late
 				// pid reply gets the orphan killed instead of leaked.
-				this.abandoned.add(id);
-				reject(new ForkServerUnavailable(`forkserver spawn timed out after ${SPAWN_TIMEOUT_MS}ms`));
+				if (opts?.abandonOnTimeout) this.abandoned.add(id);
+				reject(new ForkServerUnavailable(`forkserver request timed out after ${SPAWN_TIMEOUT_MS}ms`));
 			}, SPAWN_TIMEOUT_MS);
 			this.pending.set(id, { resolve, reject, timer });
-			this.conn?.write(
-				`${JSON.stringify({ id, connectionPath: spawn.connectionPath, cwd: spawn.cwd, env: spawn.env })}\n`,
-			);
+			this.conn?.write(`${JSON.stringify({ id, ...payload })}\n`);
 		});
+	}
+
+	async spawnKernel(spawn: SpawnParams): Promise<ForkedKernelHandle> {
+		await this.ensureReady();
+		const msg = await this.request(
+			{ connectionPath: spawn.connectionPath, cwd: spawn.cwd, env: spawn.env },
+			{ abandonOnTimeout: true },
+		);
+		if (typeof msg.pid !== "number") {
+			throw new ForkServerUnavailable(this.withStderr(msg.error ?? "forkserver fork failed"));
+		}
+		const pid = msg.pid;
+		return {
+			pid,
+			kill: (signal) => this.killChild(pid, signal),
+			isAlive: () => this.isChildAlive(pid),
+		};
+	}
+
+	async killChild(pid: number, signal: ForkedKernelKillSignal): Promise<ForkedKernelKillOutcome> {
+		const msg = await this.request({ kill: pid, signal });
+		const outcome = msg.outcome;
+		if (outcome === "signaled" || outcome === "already-exited" || outcome === "unknown-pid") {
+			return outcome;
+		}
+		throw new ForkServerUnavailable(`forkserver kill reply malformed: ${JSON.stringify(msg)}`);
+	}
+
+	async isChildAlive(pid: number): Promise<boolean> {
+		const msg = await this.request({ alive: pid });
+		return msg.alive === true;
 	}
 
 	private withStderr(message: string): string {
@@ -333,9 +381,9 @@ function registerForkServerCleanupOnce(): void {
  * Fork a kernel onto `spawn.connectionPath` from the shared template for this
  * interpreter, applying `spawn.cwd`/`spawn.env` in the forked child. Throws
  * ForkServerUnavailable if forking is disabled or fails — callers fall back to
- * direct spawn. Returns the forked child's pid (owned/killed by the caller).
+ * direct spawn. Returns a handle whose kill/liveness go through the forkserver.
  */
-export async function forkKernel(python: string, spawn: SpawnParams): Promise<number> {
+export async function forkKernel(python: string, spawn: SpawnParams): Promise<ForkedKernelHandle> {
 	if (!isForkServerEnabled()) throw new ForkServerUnavailable("forkserver disabled");
 	registerForkServerCleanupOnce();
 	const key = keyFor({ python });

@@ -90,6 +90,94 @@ describe("kernel parent watchdog", () => {
 		});
 	});
 
+	it("writes the inactive journal record only after a confirmed forkserver kill outcome", async () => {
+		const journalPath = join(tempDir, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		forkEnabledMock.mockReturnValue(true);
+		const killMock = vi.fn(async (): Promise<"already-exited"> => "already-exited");
+		forkKernelMock.mockResolvedValue({
+			pid: 999999,
+			isAlive: async () => false,
+			kill: killMock,
+		});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+
+		try {
+			await expect(manager.execute("x")).rejects.toThrow(/Kernel exited before resolving ports/);
+		} finally {
+			errorSpy.mockRestore();
+			await manager.dispose();
+		}
+
+		await vi.waitFor(() => {
+			expect(killMock).toHaveBeenCalledTimes(1);
+			expect(killMock).toHaveBeenCalledWith("TERM");
+			const records = readJournalRecords(journalPath);
+			expect(records).toHaveLength(2);
+			expect(records[0]).toMatchObject({ pid: 999999, active: true });
+			expect(records[1]).toMatchObject({ pid: 999999, active: false });
+		});
+	});
+
+	it("leaves the journal record active and never signals the pid when the kill is unconfirmed", async () => {
+		const journalPath = join(tempDir, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		forkEnabledMock.mockReturnValue(true);
+		const killMock = vi.fn(async (): Promise<never> => {
+			throw new ForkServerUnavailable("dead");
+		});
+		forkKernelMock.mockResolvedValue({
+			pid: 999999,
+			isAlive: async () => {
+				throw new ForkServerUnavailable("dead");
+			},
+			kill: killMock,
+		});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const killSpy = vi.spyOn(process, "kill");
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+
+		try {
+			await expect(manager.execute("x")).rejects.toThrow(/Kernel exited before resolving ports/);
+			await manager.dispose();
+			await vi.waitFor(() => expect(killMock).toHaveBeenCalled());
+			// Let the rejected kill settle: no inactive record may ever follow.
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			const records = readJournalRecords(journalPath);
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({ pid: 999999, active: true });
+			expect(killSpy.mock.calls.some((call) => call[0] === 999999)).toBe(false);
+		} finally {
+			killSpy.mockRestore();
+			errorSpy.mockRestore();
+			await manager.dispose();
+		}
+	});
+
+	it("maps SIGKILL to the forkserver KILL signal", async () => {
+		forkEnabledMock.mockReturnValue(true);
+		const isAliveMock = vi.fn(async () => true);
+		const killMock = vi.fn(async (): Promise<"signaled"> => "signaled");
+		forkKernelMock.mockResolvedValue({ pid: 999999, isAlive: isAliveMock, kill: killMock });
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+
+		try {
+			const execution = manager.execute("x");
+			execution.catch(() => {});
+			// The startup poll calls isAlive only after the handle is assigned, so
+			// kill() below is guaranteed to reach the forked branch.
+			await vi.waitFor(() => expect(isAliveMock).toHaveBeenCalled());
+			await manager.kill();
+			expect(killMock).toHaveBeenCalledWith("KILL");
+			await expect(execution).rejects.toThrow();
+		} finally {
+			errorSpy.mockRestore();
+			await manager.dispose();
+		}
+	});
+
 	it("fork request env does not carry JPY_PARENT_PID (forked children watch the forkserver)", async () => {
 		const python = writeFakePython(["#!/bin/sh", "exit 42", ""]);
 		forkEnabledMock.mockReturnValue(true);

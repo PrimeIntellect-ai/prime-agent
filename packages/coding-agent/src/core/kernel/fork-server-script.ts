@@ -9,9 +9,16 @@
 //
 // Protocol (newline-delimited JSON over the unix socket, forkserver is the client):
 //   -> { "id": <n>, "connectionPath": "<abs path>" }   spawn request from Node
+//   -> { "id": <n>, "kill": <pid>, "signal": "TERM"|"KILL" }  kill a forked child
+//   -> { "id": <n>, "alive": <pid> }                   liveness query for a child
 //   <- { "type": "ready" }                             once, after imports finish
 //   <- { "id": <n>, "pid": <pid> }                     fork succeeded
 //   <- { "id": <n>, "error": "<message>" }             fork failed
+//   <- { "id": <n>, "outcome": "signaled"|"already-exited"|"unknown-pid" }  kill reply
+//   <- { "id": <n>, "alive": true|false }              alive reply
+//
+// Kill/alive exist because the forkserver is the kernels' parent: it can signal an
+// un-reaped child without any pid-reuse race, which Node (a non-parent) cannot.
 export const FORK_SERVER_SCRIPT = String.raw`
 import gc
 import json
@@ -21,6 +28,11 @@ import socket
 import sys
 import threading
 import time
+
+# Reap table: pids of live (forked, un-reaped) children and reaped ones. Only the
+# main thread mutates these (the SIGCHLD handler runs between bytecodes there).
+_live = set()
+_reaped = set()
 
 
 def _reap_children(*_args):
@@ -32,6 +44,8 @@ def _reap_children(*_args):
             pid, _status = os.waitpid(-1, os.WNOHANG)
             if pid == 0:
                 break
+            _live.discard(pid)
+            _reaped.add(pid)
     except ChildProcessError:
         pass
 
@@ -103,12 +117,20 @@ def _serve(control_path):
     sock.connect(control_path)
     control_fd = sock.fileno()
 
+    # Block SIGCHLD before spawning any thread: the watcher inherits the blocked
+    # mask, so the kernel can never deliver process-directed SIGCHLD to it (which
+    # would run _reap_children in the main thread even while it is masked there).
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
+
     # Compare against the original ppid (not ==1) so this holds under subreapers.
     # Threads aren't inherited across fork, so children never carry this watcher.
     threading.Thread(target=_watch_parent, args=(os.getppid(),), daemon=True).start()
 
     # Reap forked kernels as they exit, independent of the request loop.
     signal.signal(signal.SIGCHLD, _reap_children)
+    # Unblock only after the handler is installed; the main thread is now the sole
+    # thread with SIGCHLD unblocked, so the kill-path mask is authoritative.
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
 
     _import_template()
     # Freeze the heap so the cyclic GC doesn't write to (and thus COW-copy) the
@@ -132,6 +154,37 @@ def _serve(control_path):
         except ValueError:
             continue
         req_id = req.get("id")
+
+        kill_pid = req.get("kill")
+        if kill_pid is not None:
+            # Block SIGCHLD across check+kill so the reap table can't change in
+            # between: while blocked, membership in _live means an un-reaped own
+            # child (zombie-pinned pid), making os.kill POSIX-race-free.
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
+            try:
+                if kill_pid in _live:
+                    sig = signal.SIGKILL if req.get("signal") == "KILL" else signal.SIGTERM
+                    try:
+                        os.kill(kill_pid, sig)
+                        outcome = "signaled"
+                    except ProcessLookupError:
+                        outcome = "already-exited"
+                elif kill_pid in _reaped:
+                    outcome = "already-exited"
+                else:
+                    outcome = "unknown-pid"
+            finally:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
+            f.write(json.dumps({"id": req_id, "outcome": outcome}).encode() + b"\n")
+            f.flush()
+            continue
+
+        alive_pid = req.get("alive")
+        if alive_pid is not None:
+            f.write(json.dumps({"id": req_id, "alive": alive_pid in _live}).encode() + b"\n")
+            f.flush()
+            continue
+
         connection_path = req.get("connectionPath")
         cwd = req.get("cwd")
         env = req.get("env")
@@ -162,6 +215,7 @@ def _serve(control_path):
             os._exit(0)
 
         # Parent: stay pristine (no loop/threads/ZMQ ever) so the next fork is clean.
+        _live.add(pid)
         f.write(json.dumps({"id": req_id, "pid": pid}).encode() + b"\n")
         f.flush()
 

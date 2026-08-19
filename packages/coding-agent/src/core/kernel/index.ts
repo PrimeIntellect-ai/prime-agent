@@ -9,7 +9,7 @@ import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
 import { recordOrphanProcessState } from "../orphan-process-journal.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
-import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
+import { type ForkedKernelHandle, ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
 	buildListNamesCode,
 	buildRestoreCode,
@@ -591,9 +591,10 @@ export class KernelManager {
 	private readonly handledHostRequestCommIds = new Set<string>();
 	private kernel?: ChildProcess;
 	// Set instead of `kernel` when the kernel was forked from the forkserver: it is
-	// not a direct child, so it has no ChildProcess handle and is killed by pid.
-	private kernelPid?: number;
-	/** Polls a forked kernel's pid for death (no "exit" event on a non-child). */
+	// not a direct child, so signaling/liveness go through the forkserver (the
+	// kernel's parent) via this handle — never a bare process.kill on its pid.
+	private forkedKernel?: ForkedKernelHandle;
+	/** Polls a forked kernel for death (no "exit" event on a non-child). */
 	private forkedLivenessTimer?: ReturnType<typeof globalThis.setInterval>;
 	private shell?: Dealer;
 	private iopub?: Subscriber;
@@ -688,7 +689,7 @@ export class KernelManager {
 		let forked = false;
 		if (isForkServerEnabled()) {
 			try {
-				const pid = await forkKernel(python, {
+				const handle = await forkKernel(python, {
 					connectionPath: connection.path,
 					cwd: this.options.cwd,
 					// Merge the current host env with per-kernel overrides, applied fresh
@@ -697,13 +698,13 @@ export class KernelManager {
 					// forkserver via parent_handle=getppid() instead.
 					env: { ...process.env, ...this.options.env },
 				});
-				this.kernelPid = pid;
-				recordOrphanProcessState(pid, true);
+				this.forkedKernel = handle;
+				recordOrphanProcessState(handle.pid, true);
 				forked = true;
 			} catch (err) {
 				if (!(err instanceof ForkServerUnavailable)) throw err;
 				this.appendKernelDiagnostic(`forkserver unavailable, spawning directly: ${err.message}`);
-				this.kernelPid = undefined;
+				this.forkedKernel = undefined;
 				// A fork request that times out or loses its pid reply may still have
 				// forked a child that binds the ports in this connection file. Mint a
 				// fresh connection for the direct spawn so a possible orphan can never
@@ -790,40 +791,45 @@ export class KernelManager {
 		this.startForkedLivenessMonitor();
 	}
 
-	// A forked kernel isn't a direct child, so no "exit" fires when it dies. Poll its
-	// pid so a mid-run death tears down like the direct-spawn exit handler: mark
-	// shutdown, drop from liveKernels, and reject any in-flight execution.
+	// A forked kernel isn't a direct child, so no "exit" fires when it dies. Poll
+	// the forkserver so a mid-run death tears down like the direct-spawn exit
+	// handler: mark shutdown, drop from liveKernels, reject in-flight execution.
 	private startForkedLivenessMonitor(): void {
-		if (this.kernelPid === undefined) return;
+		if (!this.forkedKernel) return;
 		this.forkedLivenessTimer = globalThis.setInterval(() => {
-			if (this.state !== "running") return;
-			if (!this.forkedKernelDied()) return;
-			this.appendKernelDiagnostic("forked kernel exited unexpectedly");
-			this.state = "shutdown";
-			liveKernels.delete(this);
-			this.cleanupResources();
+			void this.checkForkedKernelDeath();
 		}, FORKED_LIVENESS_POLL_MS);
 		this.forkedLivenessTimer.unref?.();
 	}
 
-	// A forked kernel is not a direct child, so it emits no "exit" event; poll its
-	// pid so a dead child fails fast instead of burning the full resolve timeout.
-	private forkedKernelDied(): boolean {
-		if (this.kernelPid === undefined) return false;
+	private async checkForkedKernelDeath(): Promise<void> {
+		if (this.state !== "running") return;
+		if (!(await this.forkedKernelDead())) return;
+		// Re-check after the await: teardown may have raced this poll.
+		if (this.state !== "running") return;
+		this.appendKernelDiagnostic("forked kernel exited unexpectedly");
+		this.state = "shutdown";
+		liveKernels.delete(this);
+		this.cleanupResources();
+	}
+
+	// Liveness comes from the forkserver's reap table (never a pid-0 probe from
+	// Node, which races with pid reuse).
+	private async forkedKernelDead(): Promise<boolean> {
+		if (!this.forkedKernel) return false;
 		try {
-			process.kill(this.kernelPid, 0);
-			return false;
-		} catch (error) {
-			// EPERM means the pid exists but isn't signalable by us — still alive.
-			// Only ESRCH (no such process) is genuine death.
-			return !(error instanceof Error && (error as NodeJS.ErrnoException).code === "EPERM");
+			return !(await this.forkedKernel.isAlive());
+		} catch {
+			// Forkserver gone: the kernel's parent_handle watchdog exits it too, so
+			// report dead and let startup/monitor tear down promptly.
+			return true;
 		}
 	}
 
 	private async waitForResolvedConnection(connectionPath: string): Promise<ConnectionInfo> {
 		const startedAt = Date.now();
 		while (Date.now() - startedAt < PORTS_RESOLVE_TIMEOUT_MS) {
-			if ((this.state as string) === "shutdown" || this.forkedKernelDied()) {
+			if ((this.state as string) === "shutdown" || (await this.forkedKernelDead())) {
 				const tail = this.kernelStderr.slice(-1024);
 				throw new Error(`Kernel exited before resolving ports. stderr:\n${tail || "(empty)"}`);
 			}
@@ -852,7 +858,7 @@ export class KernelManager {
 
 		const startedAt = Date.now();
 		while (Date.now() - startedAt < READY_TIMEOUT_MS) {
-			if ((this.state as string) === "shutdown" || this.forkedKernelDied()) {
+			if ((this.state as string) === "shutdown" || (await this.forkedKernelDead())) {
 				const tail = this.kernelStderr.slice(-1024);
 				throw new Error(`Kernel exited during startup. stderr:\n${tail || "(empty)"}`);
 			}
@@ -1378,7 +1384,6 @@ export class KernelManager {
 	}
 
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
-		const trackedPid = this.kernel?.pid ?? this.kernelPid;
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		if (this.forkedLivenessTimer) {
@@ -1393,20 +1398,34 @@ export class KernelManager {
 		this.iopub = undefined;
 		this.control = undefined;
 		this.iopubPumpPromise = undefined;
-		try {
-			if (this.kernel) {
+		if (this.kernel) {
+			const directPid = this.kernel.pid;
+			try {
 				this.kernel.kill(killSignal);
-			} else if (this.kernelPid !== undefined && !this.forkedKernelDied()) {
-				// Only signal a forked kernel confirmed still alive: a dead pid may have
-				// been recycled by the OS, and a kill would then hit an unrelated process.
-				process.kill(this.kernelPid, killSignal);
+			} catch {
+				// The kernel has already exited.
 			}
-		} catch {
-			// The kernel has already exited.
+			// ChildProcess.kill is handle-based (Node nulls the handle on exit), so
+			// signaled-or-already-exited is confirmed either way: inactive is safe.
+			if (directPid !== undefined) recordOrphanProcessState(directPid, false);
+		} else if (this.forkedKernel) {
+			const forked = this.forkedKernel;
+			// Kill via the forkserver (the kernel's parent), never process.kill:
+			// inactive is journaled only on a confirmed outcome — on uncertainty the
+			// record stays stale-active (the reaper verifies processStartId; a wrong
+			// inactive write could mask a sibling's record for a reused pid). On the
+			// 'exit' path the socket write is a same-tick enqueue but the reply never
+			// lands: stale-active again, and the later-registered disposeAllForkServers
+			// exit handler SIGTERMs the forkserver, taking kernels down via parent_handle.
+			void forked
+				.kill(killSignal === "SIGKILL" ? "KILL" : "TERM")
+				.then((outcome) => {
+					if (outcome !== "unknown-pid") recordOrphanProcessState(forked.pid, false);
+				})
+				.catch(() => this.appendKernelDiagnostic("forkserver kill unconfirmed; leaving orphan record active"));
 		}
-		if (trackedPid !== undefined) recordOrphanProcessState(trackedPid, false);
 		this.kernel = undefined;
-		this.kernelPid = undefined;
+		this.forkedKernel = undefined;
 		this.connection = undefined;
 		if (this.tempDir) {
 			try {
