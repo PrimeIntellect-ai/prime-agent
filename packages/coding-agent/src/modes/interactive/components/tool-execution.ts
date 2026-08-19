@@ -18,6 +18,8 @@ export interface ToolExecutionOptions {
 	showImages?: boolean;
 	/** Whether image metadata may parse dimensions from base64 data. */
 	includeImageDimensions?: boolean;
+	/** Muted session elapsed label (`T+<seconds>s`) shown on the status line. */
+	elapsedLabel?: string;
 }
 
 export interface ToolExecutionRendererDefinition {
@@ -102,6 +104,7 @@ export class ToolExecutionComponent extends Container {
 		details?: any;
 	};
 	private hideComponent = false;
+	private elapsedLabel: string | undefined;
 
 	constructor(
 		toolName: string,
@@ -120,6 +123,7 @@ export class ToolExecutionComponent extends Container {
 		this.builtInToolDefinition = createReplayBuiltInToolDefinition(toolName, cwd, toolDefinition);
 		this.showImages = options.showImages ?? true;
 		this.includeImageDimensions = options.includeImageDimensions ?? true;
+		this.elapsedLabel = options.elapsedLabel;
 		this.ui = ui;
 		this.cwd = cwd;
 
@@ -234,6 +238,15 @@ export class ToolExecutionComponent extends Container {
 
 	setArgsComplete(): void {
 		this.argsComplete = true;
+		this.updateDisplay();
+		this.ui.requestRender();
+	}
+
+	setElapsedLabel(elapsedLabel: string | undefined): void {
+		if (this.elapsedLabel === elapsedLabel) {
+			return;
+		}
+		this.elapsedLabel = elapsedLabel;
 		this.updateDisplay();
 		this.ui.requestRender();
 	}
@@ -402,6 +415,7 @@ export class ToolExecutionComponent extends Container {
 					argsComplete: this.argsComplete,
 					showExpandHint: this.showExpandHint,
 					showImages: this.showImages,
+					elapsedLabel: this.elapsedLabel,
 					cwd: this.cwd,
 				};
 				if (!this.ipythonCellComponent) {
@@ -532,7 +546,8 @@ export class ToolExecutionComponent extends Container {
 
 	private panelHeader(): string {
 		const label = this.toolDefinition?.label ?? this.builtInToolDefinition?.label ?? this.toolName;
-		return `${theme.fg("muted", label)}${theme.fg("dim", " · ")}${this.panelStatus()}`;
+		const elapsed = this.elapsedLabel ? `${theme.fg("dim", " · ")}${theme.fg("muted", this.elapsedLabel)}` : "";
+		return `${theme.fg("muted", label)}${theme.fg("dim", " · ")}${this.panelStatus()}${elapsed}`;
 	}
 
 	private panelStatus(): string {

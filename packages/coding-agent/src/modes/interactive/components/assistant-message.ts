@@ -17,6 +17,7 @@ import {
 	shouldCollapseErrorDetails,
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
+import { isElapsedToolMarkerBlock, parseElapsedToolMarker } from "./elapsed-tool-marker.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -27,6 +28,8 @@ const LOGIN_RECOVERY_SUFFIX = `\n\n${LOGIN_RECOVERY_MESSAGE}`;
 export interface AssistantMessageComponentOptions {
 	expanded?: boolean;
 	precededByToolActivity?: boolean;
+	/** Hide exact elapsed markers until the assistant message ends. */
+	streaming?: boolean;
 }
 
 function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
@@ -123,6 +126,7 @@ export class AssistantMessageComponent extends Container {
 	private blockMarkdowns = new Map<number, Markdown>();
 	private lastBlockTexts = new Map<number, string>();
 	private precededByToolActivity: boolean;
+	private streaming: boolean;
 
 	constructor(
 		message?: AssistantMessage,
@@ -138,6 +142,7 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.expanded = options.expanded ?? false;
 		this.precededByToolActivity = options.precededByToolActivity ?? false;
+		this.streaming = options.streaming ?? false;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -163,6 +168,13 @@ export class AssistantMessageComponent extends Container {
 	setHiddenThinkingLabel(label: string): void {
 		this.hiddenThinkingLabel = label;
 		this.dirty = true;
+	}
+
+	setStreaming(streaming: boolean): void {
+		if (this.streaming !== streaming) {
+			this.streaming = streaming;
+			this.dirty = true;
+		}
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -221,6 +233,7 @@ export class AssistantMessageComponent extends Container {
 			`hide:${this.hideThinkingBlock}`,
 			`label:${this.hiddenThinkingLabel}`,
 			`expanded:${this.expanded}`,
+			`streaming:${this.streaming}`,
 			`stop:${message.stopReason ?? ""}`,
 			`error:${message.errorMessage ?? ""}`,
 		);
@@ -263,7 +276,11 @@ export class AssistantMessageComponent extends Container {
 		this.lastBlockTexts.clear();
 
 		const hasVisibleContent = message.content.some(
-			(c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()),
+			(content, index) =>
+				(content?.type === "text" &&
+					content.text.trim() &&
+					!this.shouldHideElapsedToolMarker(message.content, index)) ||
+				(content?.type === "thinking" && content.thinking.trim()),
 		);
 
 		if (hasVisibleContent) {
@@ -274,6 +291,9 @@ export class AssistantMessageComponent extends Container {
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content?.type === "text" && content.text.trim()) {
+				if (this.shouldHideElapsedToolMarker(message.content, i)) {
+					continue;
+				}
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme);
@@ -342,6 +362,15 @@ export class AssistantMessageComponent extends Container {
 		if (hasToolCalls && (hasVisibleContent || message.stopReason === "aborted" || !this.precededByToolActivity)) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
+	}
+
+	private shouldHideElapsedToolMarker(content: AssistantMessage["content"], index: number): boolean {
+		return (
+			isElapsedToolMarkerBlock(content, index) ||
+			(this.streaming &&
+				content[index]?.type === "text" &&
+				parseElapsedToolMarker(content[index].text) !== undefined)
+		);
 	}
 
 	private createErrorComponent(message: string, prefix?: string): Component {

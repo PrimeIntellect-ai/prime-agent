@@ -37,6 +37,8 @@ export interface IPythonCellState {
 	executionStarted?: boolean;
 	argsComplete?: boolean;
 	showImages?: boolean;
+	/** Muted session elapsed label (`T+<seconds>s`) shown after the duration. */
+	elapsedLabel?: string;
 	/** Session cwd — edit paths nested under it render relative, else absolute. */
 	cwd?: string;
 }
@@ -407,6 +409,10 @@ export class IPythonCellComponent implements Component {
 		const duration = formatDuration(details.durationMs);
 		if (duration) {
 			parts.push(theme.fg("muted", duration));
+		}
+
+		if (this.state.elapsedLabel) {
+			parts.push(theme.fg("muted", this.state.elapsedLabel));
 		}
 
 		const errorName = !this.state.isPartial ? (details.error?.ename ?? details.errorEname) : undefined;

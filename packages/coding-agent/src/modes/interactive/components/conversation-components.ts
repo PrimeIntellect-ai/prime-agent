@@ -16,6 +16,7 @@ import {
 	CompactionOutcomeMessageComponent,
 	MalformedCompactionOutcomeMessageComponent,
 } from "./compaction-outcome-message.js";
+import { collectElapsedToolMarkers, ElapsedToolLabelGate } from "./elapsed-tool-marker.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./injected-prompt-message.js";
 import { IPythonCellComponent } from "./ipython-cell.js";
 import { SlashCommandMessageComponent } from "./slash-command-message.js";
@@ -70,6 +71,7 @@ export function buildConversationComponents(
 ): Component[] {
 	const components: Component[] = [];
 	const pendingTools = new Map<string, ToolExecutionComponent>();
+	const elapsedToolLabelGate = new ElapsedToolLabelGate();
 	const expanded = options.toolsExpanded ?? false;
 	const agentMessagesExpanded = options.agentMessagesExpanded ?? false;
 	const editDiffsExpanded = options.editDiffsExpanded ?? false;
@@ -90,15 +92,21 @@ export function buildConversationComponents(
 					},
 				),
 			);
+			const elapsedMarkers = collectElapsedToolMarkers(message.content);
 			for (const content of message.content) {
 				if (content.type !== "toolCall") {
 					continue;
 				}
+				const marker = elapsedMarkers.get(content.id);
 				const tool = new ToolExecutionComponent(
 					content.name,
 					content.id,
 					content.arguments,
-					{ ...options.toolOptions, includeImageDimensions: false },
+					{
+						...options.toolOptions,
+						includeImageDimensions: false,
+						elapsedLabel: marker ? elapsedToolLabelGate.admit(marker.seconds, marker.label) : undefined,
+					},
 					options.getToolDefinition(content.name),
 					options.ui,
 					options.cwd,
