@@ -104,27 +104,39 @@ def _prime_agent_snapshot_state():
     skipped = []
     oversized = []
     total = 0
+    aggregate_full = False
+    identify_oversized = ${pruneOversized ? "True" : "False"}
     for name in _b.list(ns.keys()):
         # Skip internals (dunder/underscore), IPython-injected names, and live
         # handles. A name matching a builtin (e.g. "list") is a user shadow worth
         # keeping — builtins themselves are not enumerated as user_ns keys.
         if name.startswith("_") or name in hidden or name in always_skip:
             continue
+        if aggregate_full and not identify_oversized:
+            skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
+            continue
         value = ns[name]
-        buffer = SnapshotBuffer(${maxVariableBytes})
+        remaining = ${maxBytes} - total
+        buffer_limit = ${maxVariableBytes} if identify_oversized else _b.min(${maxVariableBytes}, remaining)
+        buffer = SnapshotBuffer(buffer_limit)
         # Modules are pickled by reference and re-imported on restore.
         try:
             dill.dump(value, buffer)
             blob = buffer.getvalue()
         except SnapshotSizeLimitExceeded:
-            skipped.append({"name": name, "reason": "exceeds per-variable snapshot size cap"})
-            oversized.append(name)
+            if not identify_oversized and remaining < ${maxVariableBytes}:
+                skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
+                aggregate_full = True
+            else:
+                skipped.append({"name": name, "reason": "exceeds per-variable snapshot size cap"})
+                oversized.append(name)
             continue
         except _b.Exception as _err:
             skipped.append({"name": name, "reason": _b.type(_err).__name__ + ": " + _b.str(_err)[:200]})
             continue
         if total + _b.len(blob) > ${maxBytes}:
             skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
+            aggregate_full = True
             continue
         payload[name] = blob
         total += _b.len(blob)

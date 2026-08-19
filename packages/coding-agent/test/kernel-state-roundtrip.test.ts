@@ -174,20 +174,28 @@ large_records = [_Counted() for _ in range(100_000)]
 large_text = "x" * 16_384
 small_text_one = "a" * 4_000
 small_text_two = "b" * 4_000
-aggregate_only = "c" * 4_000`);
+aggregate_only = "c" * 4_000
+class MustNotSerialize:
+    def __reduce__(self):
+        raise RuntimeError("should not serialize after aggregate cutoff")
+after_aggregate = MustNotSerialize()`);
 			await manager.execute("large_text");
 
 			const snapshot = await manager.snapshotState();
 			expect(snapshot?.skipped.map(({ name }) => name)).toEqual(
-				expect.arrayContaining(["large_records", "large_text", "aggregate_only"]),
+				expect.arrayContaining(["large_records", "large_text", "aggregate_only", "after_aggregate"]),
 			);
+			const skipped = new Map(snapshot?.skipped.map(({ name, reason }) => [name, reason]));
+			expect(skipped.get("after_aggregate")).toContain("aggregate");
 			expect(snapshot?.saved).toEqual(expect.arrayContaining(["small_text_one", "small_text_two"]));
 			expect(await manager.listNamespaceNames()).toEqual(expect.arrayContaining(["large_records", "large_text"]));
 
 			const compacted = await manager.pruneOversizedVariables();
 			expect(compacted?.pruned).toEqual(expect.arrayContaining(["large_records", "large_text"]));
 			const remaining = await manager.listNamespaceNames();
-			expect(remaining).toEqual(expect.arrayContaining(["small_text_one", "small_text_two", "aggregate_only"]));
+			expect(remaining).toEqual(
+				expect.arrayContaining(["small_text_one", "small_text_two", "aggregate_only", "after_aggregate"]),
+			);
 			expect(remaining).not.toContain("large_records");
 			expect(remaining).not.toContain("large_text");
 			const outputCache = await manager.execute(
