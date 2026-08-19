@@ -7,6 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
+import { recordOrphanProcessState } from "../orphan-process-journal.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
@@ -687,14 +688,17 @@ export class KernelManager {
 		let forked = false;
 		if (isForkServerEnabled()) {
 			try {
-				this.kernelPid = await forkKernel(python, {
+				const pid = await forkKernel(python, {
 					connectionPath: connection.path,
 					cwd: this.options.cwd,
 					// Match the direct-spawn env exactly: merge the current host env with
 					// the per-kernel overrides, applied fresh in the child (the template's
-					// inherited env snapshot may be stale by fork time).
-					env: this.options.env ? { ...process.env, ...this.options.env } : { ...process.env },
+					// inherited env snapshot may be stale by fork time). JPY_PARENT_PID goes
+					// last so caller-supplied env can't disarm the parent-death watchdog.
+					env: { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) },
 				});
+				this.kernelPid = pid;
+				recordOrphanProcessState(pid, true);
 				forked = true;
 			} catch (err) {
 				if (!(err instanceof ForkServerUnavailable)) throw err;
@@ -718,10 +722,12 @@ export class KernelManager {
 		if (!forked) {
 			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
 				cwd: this.options.cwd,
-				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
+				// ipykernel's parent poller exits the kernel if this pid dies (covers SIGKILL of the owner).
+				env: { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) },
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			this.kernel = kernel;
+			if (kernel.pid !== undefined) recordOrphanProcessState(kernel.pid, true);
 
 			kernel.stderr?.on("data", (buf: Buffer) => {
 				const s = buf.toString();
@@ -1372,6 +1378,7 @@ export class KernelManager {
 	}
 
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
+		const trackedPid = this.kernel?.pid ?? this.kernelPid;
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		if (this.forkedLivenessTimer) {
@@ -1397,6 +1404,7 @@ export class KernelManager {
 		} catch {
 			// The kernel has already exited.
 		}
+		if (trackedPid !== undefined) recordOrphanProcessState(trackedPid, false);
 		this.kernel = undefined;
 		this.kernelPid = undefined;
 		this.connection = undefined;

@@ -19,6 +19,8 @@ import os
 import signal
 import socket
 import sys
+import threading
+import time
 
 
 def _reap_children(*_args):
@@ -32,6 +34,15 @@ def _reap_children(*_args):
                 break
     except ChildProcessError:
         pass
+
+
+def _watch_parent(original_ppid):
+    # A SIGKILLed owner can't close our socket while a forked child still holds the
+    # fd; poll ppid so the forkserver dies with its owner regardless.
+    while True:
+        if os.getppid() != original_ppid:
+            os._exit(1)
+        time.sleep(1.0)
 
 
 def _import_template():
@@ -71,7 +82,12 @@ def _run_child(connection_path, cwd, env):
     # instance (and, critically, a jupyter_client Session created in *this* pid;
     # a Session inherited from the template silently drops messages via check_pid).
     IPKernelApp.clear_instance()
-    app = IPKernelApp.instance(connection_file=connection_path)
+    # parent_handle's trait default was frozen at template import (before the
+    # per-kernel env existed), so pass it explicitly to arm the parent poller.
+    app = IPKernelApp.instance(
+        connection_file=connection_path,
+        parent_handle=int(os.environ.get("JPY_PARENT_PID") or 0),
+    )
     # initialize() binds the 5 ZMQ ports, writes the resolved ports back into
     # connection.json, and starts the heartbeat thread + ioloop — all post-fork,
     # so no thread/loop/socket is ever inherited across the fork boundary.
@@ -83,6 +99,10 @@ def _serve(control_path):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(control_path)
     control_fd = sock.fileno()
+
+    # Compare against the original ppid (not ==1) so this holds under subreapers.
+    # Threads aren't inherited across fork, so children never carry this watcher.
+    threading.Thread(target=_watch_parent, args=(os.getppid(),), daemon=True).start()
 
     # Reap forked kernels as they exit, independent of the request loop.
     signal.signal(signal.SIGCHLD, _reap_children)

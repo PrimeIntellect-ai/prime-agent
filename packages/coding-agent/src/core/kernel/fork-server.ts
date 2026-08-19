@@ -12,6 +12,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
+import { recordOrphanProcessState } from "../orphan-process-journal.js";
 import { FORK_SERVER_SCRIPT } from "./fork-server-script.js";
 
 const READY_TIMEOUT_MS = 30_000;
@@ -177,6 +178,7 @@ class ForkServer {
 					stdio: ["ignore", "ignore", "pipe"],
 				});
 				this.proc = proc;
+				if (proc.pid !== undefined) recordOrphanProcessState(proc.pid, true);
 				proc.stderr?.on("data", (buf: Buffer) => {
 					this.stderrTail = `${this.stderrTail}${buf.toString()}`.slice(-STDERR_TAIL_MAX);
 				});
@@ -289,6 +291,7 @@ class ForkServer {
 		} catch {
 			// Already exited.
 		}
+		if (this.proc?.pid !== undefined) recordOrphanProcessState(this.proc.pid, false);
 		if (this.socketDir) {
 			try {
 				rmSync(this.socketDir, { recursive: true, force: true });
