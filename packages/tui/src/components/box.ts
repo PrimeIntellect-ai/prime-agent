@@ -19,7 +19,6 @@ export class Box implements Component {
 	private paddingY: number;
 	private bgFn?: (text: string) => string;
 
-	// Cache for rendered output
 	private cache?: RenderCache;
 
 	constructor(paddingX = 1, paddingY = 1, bgFn?: (text: string) => string) {
@@ -82,7 +81,6 @@ export class Box implements Component {
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
 		const leftPad = " ".repeat(this.paddingX);
 
-		// Render all children
 		const childLines: string[] = [];
 		const selectionRegions: TableCellSelectionRegion[] = [];
 		for (const child of this.children) {
@@ -109,34 +107,27 @@ export class Box implements Component {
 			return [];
 		}
 
-		// Check if bgFn output changed by sampling
 		const bgSample = this.bgFn ? this.bgFn("test") : undefined;
 
-		// Check cache validity
 		if (this.matchCache(width, childLines, bgSample)) {
 			this.cache!.selectionRegions = selectionRegions;
 			return this.cache!.lines;
 		}
 
-		// Apply background and padding
 		const result: string[] = [];
 
-		// Top padding
 		for (let i = 0; i < this.paddingY; i++) {
 			result.push(this.applyBg("", width));
 		}
 
-		// Content
 		for (const line of childLines) {
 			result.push(this.applyBg(line, width));
 		}
 
-		// Bottom padding
 		for (let i = 0; i < this.paddingY; i++) {
 			result.push(this.applyBg("", width));
 		}
 
-		// Update cache
 		this.cache = { childLines, width, bgSample, lines: result, selectionRegions };
 
 		return result;

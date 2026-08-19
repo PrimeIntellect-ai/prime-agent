@@ -1,11 +1,3 @@
-/**
- * Benchmark: streaming-style Markdown rendering.
- *
- * Simulates an assistant message growing token by token (as during daemon
- * streaming) and measures per-update render cost. Run with:
- *
- *   npx tsx test/markdown-streaming-bench.ts
- */
 import { performance } from "node:perf_hooks";
 import { Markdown } from "../src/components/markdown.js";
 import { defaultMarkdownTheme } from "./test-themes.js";

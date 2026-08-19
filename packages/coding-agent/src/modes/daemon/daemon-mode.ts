@@ -175,6 +175,7 @@ import {
 	type DaemonSocketIdentity,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
+	normalizeSocketPath,
 	prepareDaemonSocketPath,
 	restrictDaemonSocketPath,
 } from "./daemon-socket.js";
@@ -442,19 +443,10 @@ class RuntimeOpenCancelledError extends Error {}
 class BoundSessionUnavailableError extends Error {}
 
 export async function runDaemonMode(options: DaemonModeOptions): Promise<never> {
-	const socketPath = options.socketPath ?? defaultDaemonSocketPath();
+	const socketPath = normalizeSocketPath(options.socketPath ?? defaultDaemonSocketPath());
 	const daemon = new AgentDaemon(socketPath, options);
 	await daemon.start();
 	return new Promise(() => {});
-}
-
-export function isTerminalRemoteAgentMessageError(error: unknown): error is Error {
-	return (
-		error instanceof Error &&
-		(error.message.startsWith("Unknown active session:") ||
-			error.message.startsWith("Ambiguous") ||
-			error.message === AGENT_FAMILY_REACH_ERROR)
-	);
 }
 
 export class AgentDaemon {
@@ -663,8 +655,13 @@ export class AgentDaemon {
 		this.startSupervisorMonitor();
 	}
 
+	private supervisorSocketPathFromEnv(): string | undefined {
+		const raw = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		return raw ? normalizeSocketPath(raw) : undefined;
+	}
+
 	private startSupervisorMonitor(): void {
-		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 		if (!this.options.worker || !supervisorSocketPath) {
 			return;
 		}
@@ -3346,7 +3343,7 @@ export class AgentDaemon {
 			this.clients.delete(client);
 			const wasAuthenticated = client.authenticated === true;
 			this.revokeSupervisorClaim(client);
-			const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 			if (this.options.worker && wasAuthenticated && supervisorSocketPath) {
 				this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 100);
 			}
@@ -5404,7 +5401,7 @@ export class AgentDaemon {
 	}
 
 	private async setStateSessionNameViaSupervisor(state: ActiveSessionState, name: string): Promise<void> {
-		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 		if (!this.options.worker || !supervisorSocketPath) {
 			return this.setStateSessionName(state, name);
 		}
@@ -5755,7 +5752,7 @@ export class AgentDaemon {
 		targetSelector: string,
 		message: string,
 	): Promise<AgentSessionMessageReceipt> {
-		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 		if (!supervisorSocketPath) {
 			throw new Error(`Unknown active session: ${targetSelector}`);
 		}
@@ -5874,6 +5871,7 @@ export class AgentDaemon {
 			type: "session_detached",
 			activeSessionId: state.activeSessionId,
 		});
+		// Discard an abandoned empty draft rather than retaining an empty session file.
 		// Abandoned new-chat: discard it so it doesn't linger in memory or leave an
 		// empty file. Replaces the old DeferredAgentConnection.
 		if (this.isDiscardableDraft(state)) {

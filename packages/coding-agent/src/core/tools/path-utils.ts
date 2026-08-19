@@ -66,25 +66,21 @@ export function resolveReadPath(filePath: string, cwd: string): string {
 		return resolved;
 	}
 
-	// Try macOS AM/PM variant (narrow no-break space before AM/PM)
 	const amPmVariant = tryMacOSScreenshotPath(resolved);
 	if (amPmVariant !== resolved && fileExists(amPmVariant)) {
 		return amPmVariant;
 	}
 
-	// Try NFD variant (macOS stores filenames in NFD form)
 	const nfdVariant = tryNFDVariant(resolved);
 	if (nfdVariant !== resolved && fileExists(nfdVariant)) {
 		return nfdVariant;
 	}
 
-	// Try curly quote variant (macOS uses U+2019 in screenshot names)
 	const curlyVariant = tryCurlyQuoteVariant(resolved);
 	if (curlyVariant !== resolved && fileExists(curlyVariant)) {
 		return curlyVariant;
 	}
 
-	// Try combined NFD + curly quote (for French macOS screenshots like "Capture d'écran")
 	const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
 	if (nfdCurlyVariant !== resolved && fileExists(nfdCurlyVariant)) {
 		return nfdCurlyVariant;

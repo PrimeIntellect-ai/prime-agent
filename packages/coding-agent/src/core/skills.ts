@@ -332,14 +332,12 @@ function loadSkillsFromDirInternal(
 				continue;
 			}
 
-			// Skip node_modules to avoid scanning dependencies
 			if (entry.name === "node_modules") {
 				continue;
 			}
 
 			const fullPath = join(dir, entry.name);
 
-			// For symlinks, check if they point to a directory and follow them
 			let isDirectory = entry.isDirectory();
 			let isFile = entry.isFile();
 			if (entry.isSymbolicLink()) {
@@ -348,7 +346,6 @@ function loadSkillsFromDirInternal(
 					isDirectory = stats.isDirectory();
 					isFile = stats.isFile();
 				} catch {
-					// Broken symlink, skip it
 					continue;
 				}
 			}
@@ -398,22 +395,18 @@ function loadSkillFromFile(
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
 
-		// Validate description
 		const descErrors = validateDescription(frontmatter.description);
 		for (const error of descErrors) {
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// Use name from frontmatter, or fall back to parent directory name
 		const name = frontmatter.name || parentDirName;
 
-		// Validate name
 		const nameErrors = validateName(name, parentDirName);
 		for (const error of nameErrors) {
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// Still load the skill even with warnings (unless description is completely missing)
 		if (!frontmatter.description || frontmatter.description.trim() === "") {
 			return { skill: null, diagnostics };
 		}
@@ -520,7 +513,6 @@ function resolveSkillPath(p: string, cwd: string): string {
 export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	const { cwd, agentDir, skillPaths, includeDefaults } = options;
 
-	// Resolve agentDir - if not provided, use default from config
 	const resolvedAgentDir = agentDir ?? getAgentDir();
 
 	const skillMap = new Map<string, Skill>();
@@ -533,10 +525,8 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	function addSkills(result: LoadSkillsResult) {
 		allDiagnostics.push(...result.diagnostics);
 		for (const skill of result.skills) {
-			// Resolve symlinks to detect duplicate files
 			const realPath = canonicalizePath(skill.filePath);
 
-			// Skip silently if we've already loaded this exact file (via symlink)
 			if (realPathSet.has(realPath)) {
 				continue;
 			}

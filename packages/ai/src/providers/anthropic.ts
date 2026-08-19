@@ -104,7 +104,6 @@ const claudeCodeTools = [
 
 const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
 
-// Convert tool name to CC canonical casing if it matches (case-insensitive)
 const toClaudeCodeName = (name: string) => ccToolLookup.get(name.toLowerCase()) ?? name;
 const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
 	if (tools && tools.length > 0) {
@@ -131,13 +130,11 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 					};
 			  }
 	  > {
-	// If only text blocks, return as concatenated string for simplicity
 	const hasImages = content.some((c) => c.type === "image");
 	if (!hasImages) {
 		return sanitizeSurrogates(content.map((c) => (c as TextContent).text).join("\n"));
 	}
 
-	// If we have images, convert to content block array
 	const blocks = content.map((block) => {
 		if (block.type === "text") {
 			return {
@@ -155,7 +152,6 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 		};
 	});
 
-	// If only images (no text), add placeholder text block
 	const hasText = blocks.some((b) => b.type === "text");
 	if (!hasText) {
 		blocks.unshift({
@@ -544,7 +540,6 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					output.usage.output = event.message.usage.output_tokens || 0;
 					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
 					output.usage.cacheWrite = event.message.usage.cache_creation_input_tokens || 0;
-					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					if (cacheControl && usesAnthropicCachePricing) {
@@ -700,7 +695,6 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					if (event.usage.cache_creation_input_tokens != null) {
 						output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
 					}
-					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(
@@ -888,7 +882,6 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	// Copilot: Bearer auth, selective betas.
 	if (model.provider === "github-copilot") {
 		const client = new Anthropic({
 			apiKey: null,
@@ -910,7 +903,6 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	// OAuth: Bearer auth, Claude Code identity headers
 	if (isOAuthToken(apiKey)) {
 		const client = new Anthropic({
 			apiKey: null,
@@ -933,7 +925,6 @@ function createClient(
 		return { client, isOAuthToken: true };
 	}
 
-	// API key auth
 	const client = new Anthropic({
 		apiKey,
 		baseURL: model.baseUrl,
@@ -1028,7 +1019,6 @@ function buildParams(
 							: { effort: options.effort };
 				}
 			} else {
-				// Budget-based thinking for older models
 				params.thinking = {
 					type: "enabled",
 					budget_tokens: options.thinkingBudgetTokens || 1024,
@@ -1071,7 +1061,6 @@ function convertMessages(
 ): MessageParam[] {
 	const params: MessageParam[] = [];
 
-	// Transform messages for cross-provider compatibility
 	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -1168,7 +1157,6 @@ function convertMessages(
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
 
-			// Add the current tool result
 			toolResults.push({
 				type: "tool_result",
 				tool_use_id: msg.toolCallId,
@@ -1176,7 +1164,6 @@ function convertMessages(
 				is_error: msg.isError,
 			});
 
-			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
@@ -1189,10 +1176,8 @@ function convertMessages(
 				j++;
 			}
 
-			// Skip the messages we've already processed
 			i = j - 1;
 
-			// Add a single user message with all tool results
 			params.push({
 				role: "user",
 				content: toolResults,

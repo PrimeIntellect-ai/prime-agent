@@ -3103,6 +3103,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	): Record<string, unknown> & { getUserInput: ReturnType<typeof vi.fn> } {
 		return {
 			init: vi.fn(async () => {}),
+			restorePromptStashOnOpen: vi.fn(),
 			options: { agentsViewOwnsStartupNotices: true, ...options },
 			modelRegistry: { getError: vi.fn(() => undefined) },
 			runStartupOnboarding: vi.fn(async () => true),

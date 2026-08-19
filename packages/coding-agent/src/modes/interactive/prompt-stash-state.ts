@@ -6,6 +6,7 @@ export interface PromptStash {
 	expandedText?: string;
 	pasteSnapshot?: EditorPasteSnapshot;
 	images?: readonly (readonly [number, ImageContent])[];
+	restoreOnOpen?: boolean;
 }
 
 export interface PromptStashState {
