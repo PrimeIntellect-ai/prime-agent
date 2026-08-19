@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added a pre-imported generic MCP API and shell/TUI commands to manage persistent Streamable HTTP and stdio servers in user settings.
+- **Breaking**: removed the documented catalog-name override — an `mcpServers` entry named after a built-in integration (e.g. `linear`) no longer repoints the built-in at a custom `url`/`bearerTokenEnvVar`; it now disables the built-in skill and is not served by the generic runtime. Rename the entry (e.g. `linear-proxy`) to keep using a custom endpoint via the generic API. This closes a credential-replay surface where name-keyed tokens could be sent to an override URL.
 - Fixed agents overlooking enabled generic MCP connections by advertising their names and pre-imported `mcp` API usage in the system prompt.
 - Fixed `/mcp` management feedback disappearing during resource reload and limited server details in TUI output to names and transports.
 - Fixed large IPython variables repeatedly slowing later turns by excluding them from persistent snapshots and removing them when context is compacted.

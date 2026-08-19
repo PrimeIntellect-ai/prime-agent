@@ -88,7 +88,16 @@ login flow and then use `/mcp login <name>`; use `--force` to replace a complete
 existing entry. Static secret values are not accepted: bearer and stdio secrets
 are environment-variable references. Project `.prime/agent/settings.json` MCP
 entries are ignored for execution, so a repository cannot start a local process
-or shadow a user server. Advanced runtime options may still be written directly
+or shadow a user server.
+
+Built-in integration names (`linear`, `notion`, ...) are reserved: `mcp add`
+rejects them, and a hand-edited `mcpServers` entry with such a name disables the
+built-in skill instead of reconfiguring it. Earlier releases documented a
+catalog-name override (custom `url` plus `bearerTokenEnvVar` under a built-in
+name); that override no longer works — rename the entry (for example
+`linear-proxy`) to reach a custom endpoint through the generic runtime.
+
+Advanced runtime options may still be written directly
 to the user settings file:
 
 ```jsonc
