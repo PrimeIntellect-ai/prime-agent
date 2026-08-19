@@ -1,0 +1,24 @@
+customRules:
+  - ./scripts/markdownlint/no-hard-wraps.cjs
+config:
+  MD013: false
+  MD024:
+    siblings_only: true
+  MD033:
+    allowed_elements:
+      - a
+      - br
+      - details
+      - h1
+      - h3
+      - img
+      - p
+      - picture
+      - source
+      - summary
+  MD041: false
+  MD060:
+    style: compact
+ignores:
+  - "**/node_modules/**"
+  - "packages/coding-agent/dist/**"

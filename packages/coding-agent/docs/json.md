@@ -45,11 +45,13 @@ type AgentEvent =
 ## Message Types
 
 Base messages from [`packages/ai/src/types.ts`](../../ai/src/types.ts):
+
 - `UserMessage` (line 134)
 - `AssistantMessage` (line 140)
 - `ToolResultMessage` (line 152)
 
 Extended messages from [`packages/coding-agent/src/core/messages.ts`](../src/core/messages.ts):
+
 - `BashExecutionMessage` (line 29)
 - `CustomMessage` (line 46)
 - `BranchSummaryMessage` (line 55)

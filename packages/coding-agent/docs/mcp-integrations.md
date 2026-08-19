@@ -1,20 +1,15 @@
 # MCP Integrations
 
-Connect external services (Linear, Notion, …) to Prime Agent over the
-[Model Context Protocol](https://modelcontextprotocol.io).
+Connect external services (Linear, Notion, …) to Prime Agent over the [Model Context Protocol](https://modelcontextprotocol.io).
 
-Consistent with Prime Agent's single-tool design, MCP integrations are **not**
-exposed as new agent tools. Each integration is a [Python-backed skill](skills.md)
-that the model imports and calls from the IPython kernel:
+Consistent with Prime Agent's single-tool design, MCP integrations are **not** exposed as new agent tools. Each integration is a [Python-backed skill](skills.md) that the model imports and calls from the IPython kernel:
 
 ```python
 import linear
 issues = await linear.list_issues(team="Engineering")
 ```
 
-The MCP connection runs inside the kernel via the official `mcp` Python SDK. The
-host's only jobs are interactive login (browser OAuth) and minting/refreshing
-credentials in `auth.json`.
+The MCP connection runs inside the kernel via the official `mcp` Python SDK. The host's only jobs are interactive login (browser OAuth) and minting/refreshing credentials in `auth.json`.
 
 ## Table of Contents
 
@@ -32,21 +27,15 @@ credentials in `auth.json`.
 
 Built-in integrations (Linear, Notion) ship **disabled**. Logging in enables them:
 
-- Open `/login`, switch to **MCP Connections**, pick the integration, and
-  complete OAuth in the browser. `/mcp login <name>` does the same from the CLI.
-- Once connected, the integration's skill becomes visible to the model and is
-  auto-imported into the kernel.
-- `/mcp` lists integrations and connection status; `/mcp logout <name>`
-  disconnects.
+- Open `/login`, switch to **MCP Connections**, pick the integration, and complete OAuth in the browser. `/mcp login <name>` does the same from the CLI.
+- Once connected, the integration's skill becomes visible to the model and is auto-imported into the kernel.
+- `/mcp` lists integrations and connection status; `/mcp logout <name>` disconnects.
 
-Credentials are stored once in `~/.prime/agent/auth.json` under `mcp:<name>`.
-Enablement is derived from whether valid credentials exist — there is no separate
-on/off switch.
+Credentials are stored once in `~/.prime/agent/auth.json` under `mcp:<name>`. Enablement is derived from whether valid credentials exist — there is no separate on/off switch.
 
 ## How a call works
 
-The tool set is defined by the **server**, not the skill, so discover before you
-call — don't assume tool names or arguments:
+The tool set is defined by the **server**, not the skill, so discover before you call — don't assume tool names or arguments:
 
 ```python
 import linear
@@ -63,23 +52,17 @@ result = await linear.list_issues(team="Engineering")
 ```
 
 - Every tool is an `async` method — always `await`.
-- Results are already-parsed Python: a `dict` for structured output, a string for
-  text, or a list of content blocks otherwise. No need to `json.loads` them.
-- A tool whose name isn't a valid Python identifier (e.g. Notion's `notion-search`)
-  is called via the escape hatch: `await notion.call_tool("notion-search", {...})`.
-- A call against an integration with no credentials raises `NotEnabled` (telling
-  the user to `/mcp login`); a tool that returns an error raises `McpToolError`.
+- Results are already-parsed Python: a `dict` for structured output, a string for text, or a list of content blocks otherwise. No need to `json.loads` them.
+- A tool whose name isn't a valid Python identifier (e.g. Notion's `notion-search`) is called via the escape hatch: `await notion.call_tool("notion-search", {...})`.
+- A call against an integration with no credentials raises `NotEnabled` (telling the user to `/mcp login`); a tool that returns an error raises `McpToolError`.
 
 ## Authoring your own integration
 
-An integration is a [Python skill package](skills.md#python-backed-skills) whose
-module subclasses `McpIntegration`. The built-in `linear` / `notion` packages are
-the reference implementations.
+An integration is a [Python skill package](skills.md#python-backed-skills) whose module subclasses `McpIntegration`. The built-in `linear` / `notion` packages are the reference implementations.
 
 ### 1. Declare the server
 
-Add it under `mcpServers` in `~/.prime/agent/settings.json` (or project
-`.prime/agent/settings.json`):
+Add it under `mcpServers` in `~/.prime/agent/settings.json` (or project `.prime/agent/settings.json`):
 
 ```jsonc
 // ~/.prime/agent/settings.json
@@ -94,11 +77,10 @@ Add it under `mcpServers` in `~/.prime/agent/settings.json` (or project
 }
 ```
 
-Currently only remote `"http"` servers are supported by `McpIntegration`. HTTP
-server fields:
+Currently only remote `"http"` servers are supported by `McpIntegration`. HTTP server fields:
 
 | Field | Meaning |
-|-------|---------|
+| ------- | --------- |
 | `type` | Must be `"http"` |
 | `url` | The MCP endpoint |
 | `oauth` | `true` to use the browser OAuth flow (requires the server to support dynamic client registration) |
@@ -111,10 +93,9 @@ server fields:
 
 ### 2. Ship the skill package
 
-Create a skill directory (any [skills location](skills.md#locations), e.g.
-`~/.prime/agent/skills/acme/`) with the standard Python-skill layout:
+Create a skill directory (any [skills location](skills.md#locations), e.g. `~/.prime/agent/skills/acme/`) with the standard Python-skill layout:
 
-```
+```text
 acme/
   SKILL.md
   pyproject.toml
@@ -160,21 +141,12 @@ def __getattr__(name):
     return getattr(acme, name)
 ```
 
-The base class connects with the `mcp` SDK, resolves the URL/headers from the host
-(honoring the `mcpServers` config), injects the bearer token from `auth.json`
-(refreshing when expired), and binds the server's tools as async methods. Authoring
-is a few lines — the package above is the whole integration.
+The base class connects with the `mcp` SDK, resolves the URL/headers from the host (honoring the `mcpServers` config), injects the bearer token from `auth.json` (refreshing when expired), and binds the server's tools as async methods. Authoring is a few lines — the package above is the whole integration.
 
 ### Authentication
 
-- **OAuth** (`"oauth": true`): the user runs `/login` → MCP Connections → your server (or
-  `/mcp login acme`). Works when the server supports OAuth 2.1 dynamic client
-  registration (RFC 7591); login discovers the auth server, registers a client,
-  and runs PKCE. Servers requiring a pre-registered client id are not yet
-  supported via `mcpServers`.
-- **Static bearer token** (`"bearerTokenEnvVar": "ACME_TOKEN"`): no login needed;
-  the integration is "connected" whenever that env var is set. Set the matching
-  `bearer_token_env = "ACME_TOKEN"` on the subclass.
+- **OAuth** (`"oauth": true`): the user runs `/login` → MCP Connections → your server (or `/mcp login acme`). Works when the server supports OAuth 2.1 dynamic client registration (RFC 7591); login discovers the auth server, registers a client, and runs PKCE. Servers requiring a pre-registered client id are not yet supported via `mcpServers`.
+- **Static bearer token** (`"bearerTokenEnvVar": "ACME_TOKEN"`): no login needed; the integration is "connected" whenever that env var is set. Set the matching `bearer_token_env = "ACME_TOKEN"` on the subclass.
 
 ## The `McpIntegration` API
 
@@ -183,17 +155,13 @@ Imported from `rlm` (`from rlm import McpIntegration`).
 Class attributes to set on your subclass:
 
 - `server: str` — required; the `mcpServers` key and `auth.json` credential id.
-- `url: str | None` — the remote endpoint (required unless you override
-  `_open_session` for a non-HTTP transport).
+- `url: str | None` — the remote endpoint (required unless you override `_open_session` for a non-HTTP transport).
 - `bearer_token_env: str | None` — optional env var holding a static bearer token.
 
 Methods:
 
-- `await list_tools() -> list[dict]` — the server's tools as
-  `[{name, description, inputSchema}]`. Also populates the docstrings shown by
-  `help(integration.<tool>)`.
-- `await call_tool(name, arguments={}) -> Any` — explicit call; the escape hatch
-  for non-identifier tool names.
+- `await list_tools() -> list[dict]` — the server's tools as `[{name, description, inputSchema}]`. Also populates the docstrings shown by `help(integration.<tool>)`.
+- `await call_tool(name, arguments={}) -> Any` — explicit call; the escape hatch for non-identifier tool names.
 - `integration.<tool>(**kwargs)` — auto-bound async method for any discovered tool.
 
 Exceptions (both importable from `rlm`):
@@ -205,46 +173,23 @@ Exceptions (both importable from `rlm`):
 
 This auth-gating applies to the **built-in** integrations (Linear, Notion):
 
-1. The built-in skill ships installed but **disabled** — excluded from the prompt
-   and not imported into the kernel — because no credentials exist.
+1. The built-in skill ships installed but **disabled** — excluded from the prompt and not imported into the kernel — because no credentials exist.
 2. The user logs in; credentials land in `auth.json` under `mcp:<server>`.
-3. A resource reload (automatic after `/login`/`/mcp login`, or `/reload`) detects
-   the credentials, enables the skill, and the kernel installs + imports the
-   package.
+3. A resource reload (automatic after `/login`/`/mcp login`, or `/reload`) detects the credentials, enables the skill, and the kernel installs + imports the package.
 4. Logout (or losing credentials) disables it again.
 
-If you log in mid-turn, the reload is deferred — run `/reload` after the turn to
-activate the integration.
+If you log in mid-turn, the reload is deferred — run `/reload` after the turn to activate the integration.
 
-**User-authored integrations are not auth-gated this way.** A skill you drop into
-a skills directory is loaded like any other skill — visible to the model and
-imported into the kernel immediately, regardless of `auth.json`. It simply fails
-at call time with `NotEnabled` until credentials exist. So make the skill's
-`SKILL.md` tell the model how to connect when a call raises `NotEnabled`, matching
-the auth mode you configured:
+**User-authored integrations are not auth-gated this way.** A skill you drop into a skills directory is loaded like any other skill — visible to the model and imported into the kernel immediately, regardless of `auth.json`. It simply fails at call time with `NotEnabled` until credentials exist. So make the skill's `SKILL.md` tell the model how to connect when a call raises `NotEnabled`, matching the auth mode you configured:
 
-- **OAuth** (`"oauth": true`): instruct the user to run `/mcp login <server>` (or
-  `/login` → MCP Connections). `/mcp login` only works for OAuth servers.
-- **Bearer token** (`bearerTokenEnvVar`): instruct the user to set that env var —
-  do *not* point them at `/mcp login`, which has no provider for a bearer-only
-  server and reports "Unknown MCP integration".
+- **OAuth** (`"oauth": true`): instruct the user to run `/mcp login <server>` (or `/login` → MCP Connections). `/mcp login` only works for OAuth servers.
+- **Bearer token** (`bearerTokenEnvVar`): instruct the user to set that env var — do *not* point them at `/mcp login`, which has no provider for a bearer-only server and reports "Unknown MCP integration".
 
 ## Caveats
 
-- **Discover before assuming.** Tool names and argument schemas come from the
-  server and can change; call `list_tools()` / `help()` rather than hardcoding.
-- **Custom kernel + name collisions.** The kernel import name is the `server`
-  value. On a custom `PRIME_AGENT_KERNEL_PYTHON` that already has an unrelated PyPI
-  package of the same name (e.g. `notion`), `import <name>` may resolve to that
-  package instead. Use the default managed kernel venv to avoid this.
-- **Overriding a built-in name.** Declaring an `mcpServers` entry whose key matches
-  a built-in (e.g. `linear`) with a custom `url` points the integration at your
-  URL. A previously stored official credential is *not* reused for the override, to
-  avoid sending the official token to your endpoint. Authenticate such an override
-  via `bearerTokenEnvVar` only — OAuth credentials are not honored for a
-  catalog-name override. (Use a name that isn't a built-in to get OAuth.)
-- **Multi-session daemon.** OAuth provider registration is process-global; a
-  user-declared server unique to one daemon session is re-registered on that
-  session's next reload.
+- **Discover before assuming.** Tool names and argument schemas come from the server and can change; call `list_tools()` / `help()` rather than hardcoding.
+- **Custom kernel + name collisions.** The kernel import name is the `server` value. On a custom `PRIME_AGENT_KERNEL_PYTHON` that already has an unrelated PyPI package of the same name (e.g. `notion`), `import <name>` may resolve to that package instead. Use the default managed kernel venv to avoid this.
+- **Overriding a built-in name.** Declaring an `mcpServers` entry whose key matches a built-in (e.g. `linear`) with a custom `url` points the integration at your URL. A previously stored official credential is *not* reused for the override, to avoid sending the official token to your endpoint. Authenticate such an override via `bearerTokenEnvVar` only — OAuth credentials are not honored for a catalog-name override. (Use a name that isn't a built-in to get OAuth.)
+- **Multi-session daemon.** OAuth provider registration is process-global; a user-declared server unique to one daemon session is re-registered on that session's next reload.
 
 See also: [Skills](skills.md), [Settings](settings.md).

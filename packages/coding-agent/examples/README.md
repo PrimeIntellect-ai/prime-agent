@@ -5,10 +5,13 @@ Example code for the Prime Agent SDK and extension system.
 ## Directories
 
 ### [sdk/](sdk/)
+
 Programmatic usage via `createAgentSession()`. Shows how to customize models, prompts, tools, extensions, and session management.
 
 ### [extensions/](extensions/)
+
 Example extensions demonstrating:
+
 - Lifecycle event handlers (tool interception, safety gates, context modifications)
 - Custom tools (todo lists, questions, subagents, output truncation)
 - Commands and keyboard shortcuts

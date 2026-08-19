@@ -3,7 +3,7 @@
 Prime Agent uses JSON settings files with project settings overriding global settings.
 
 | Location | Scope |
-|----------|-------|
+| ---------- | ------- |
 | `~/.prime/agent/settings.json` | Global (all projects) |
 | `.prime/agent/settings.json` | Project (current directory) |
 
@@ -14,7 +14,7 @@ Edit directly or use `/settings` for common options.
 ### Model & Thinking
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
@@ -37,7 +37,7 @@ Edit directly or use `/settings` for common options.
 ### UI & Display
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
 | `quietStartup` | boolean | `false` | Hide startup header |
 | `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
@@ -73,7 +73,7 @@ Prime Agent does not send prompts, responses, thinking, tool arguments or result
 Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `telemetry.enabled` | boolean | `true` | Send pseudonymous aggregate usage and performance events |
 
 Disable analytics with any of:
@@ -97,7 +97,7 @@ prime-agent --offline
 ### Warnings
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `warnings.anthropicExtraUsage` | boolean | `true` | Show a warning when Anthropic subscription auth may use paid extra usage |
 
 ```json
@@ -111,7 +111,7 @@ prime-agent --offline
 ### Compaction
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
@@ -129,14 +129,14 @@ prime-agent --offline
 ### Branch Summary
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `branchSummary.reserveTokens` | number | `16384` | Tokens reserved for branch summarization |
 | `branchSummary.skipPrompt` | boolean | `false` | Skip "Summarize branch?" prompt on `/tree` navigation (defaults to no summary) |
 
 ### Retry
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
 | `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
@@ -164,7 +164,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 ### Message Delivery
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
 | `transport` | string | `"sse"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
@@ -172,7 +172,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 ### Terminal & Images
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `terminal.showImages` | boolean | `true` | Show image type and dimensions in terminal |
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
@@ -181,7 +181,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 ### Shell
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows) |
 | `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
 | `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
@@ -199,7 +199,7 @@ Normally the package manager's global modules location is queried using `root -g
 ### Daemon
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
 
 `idleEvictionMinutes` is a global daemon policy and is read only from `~/.prime/agent/settings.json`. Set it to a positive number to configure the idle threshold.
@@ -207,7 +207,7 @@ Normally the package manager's global modules location is queried using `root -g
 ### Sessions
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
 
 ```json
@@ -219,7 +219,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 ### Model Cycling
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
 
 ```json
@@ -231,7 +231,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 ### Markdown
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `markdown.codeBlockIndent` | string | `"  "` | Indentation for code blocks |
 
 ### Resources
@@ -241,7 +241,7 @@ These settings define where to load extensions, skills, prompts, and themes from
 Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Paths in `.prime/agent/settings.json` resolve relative to `.prime/agent`. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
+| --------- | ------ | --------- | ------------- |
 | `packages` | array | `[]` | npm/git packages to load resources from |
 | `extensions` | string[] | `[]` | Local extension file paths or directories |
 | `skills` | string[] | `[]` | Local skill file paths or directories |

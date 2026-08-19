@@ -47,7 +47,7 @@ prime-agent
 ```
 
 | Provider | Environment Variable | `auth.json` key |
-|----------|----------------------|------------------|
+| ---------- | ---------------------- | ------------------ |
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
@@ -104,15 +104,20 @@ The file is created with `0600` permissions (user read/write only). Auth file cr
 The `key` field supports three formats:
 
 - **Shell command:** `"!command"` executes and uses stdout (cached for process lifetime)
+
   ```json
   { "type": "api_key", "key": "!security find-generic-password -ws 'anthropic'" }
   { "type": "api_key", "key": "!op read 'op://vault/item/credential'" }
   ```
+
 - **Environment variable:** Uses the value of the named variable
+
   ```json
   { "type": "api_key", "key": "MY_ANTHROPIC_KEY" }
   ```
+
 - **Literal value:** Used directly
+
   ```json
   { "type": "api_key", "key": "sk-ant-..." }
   ```
@@ -199,7 +204,7 @@ Routes to OpenAI, Anthropic, and Workers AI through Cloudflare AI Gateway. Worke
 AI Gateway authentication uses `CLOUDFLARE_API_KEY` as `cf-aig-authorization`. Upstream authentication can be one of:
 
 | Mode | Request auth | Upstream auth |
-|------|--------------|---------------|
+| ------ | -------------- | --------------- |
 | Workers AI | Cloudflare token only | Cloudflare-native |
 | Unified billing | Cloudflare token only | Cloudflare handles upstream auth and deducts credits |
 | Stored BYOK | Cloudflare token only | Cloudflare injects provider keys stored in the AI Gateway dashboard |

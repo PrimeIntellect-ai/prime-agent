@@ -62,7 +62,7 @@ sequenceDiagram
 ## Component Ownership
 
 | Component | Responsibility |
-|---|---|
+| --- | --- |
 | `src/core/kernel/index.ts` | ZeroMQ sockets, Jupyter framing, execution, comm dispatch, interrupt, and shutdown. |
 | `src/core/tools/ipython.ts` | Agent tool wrapper, lazy kernel provisioning, namespace bootstrap, and output shaping. |
 | `src/core/agent-session.ts` | RLM policy, child creation, registry, usage attribution, cancellation, and goal handlers. |
@@ -256,7 +256,7 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 ## Failure Modes
 
 | Failure | Behavior |
-|---|---|
+| --- | --- |
 | Managed runtime is missing | Kernel bootstrap rebuilds it; a custom Python without `rlm` fails clearly when recursion is called. |
 | Depth limit reached | Python raises before opening a comm; the host checks again. |
 | Unsupported options | Host rejects the request. |

@@ -2,11 +2,11 @@
 
 Prime Inference is an OpenAI-compatible API for frontier and open models, routed across providers and built for large-scale evaluations.
 
-Live docs: `inference/overview.md`, `inference/usage.md`, `inference/adapter-deployments.md`, `inference/troubleshooting.md` under https://docs.primeintellect.ai/
+Live docs: `inference/overview.md`, `inference/usage.md`, `inference/adapter-deployments.md`, `inference/troubleshooting.md` under <https://docs.primeintellect.ai/>
 
 ## Setup
 
-1. Create an API key on https://app.primeintellect.ai (account settings → API Keys) with the **Inference** permission enabled — without it, requests fail with authentication errors.
+1. Create an API key on <https://app.primeintellect.ai> (account settings → API Keys) with the **Inference** permission enabled — without it, requests fail with authentication errors.
 2. Export it:
 
 ```bash

@@ -10,13 +10,13 @@ Work out of the box.
 
 Add to your Ghostty config (`~/Library/Application Support/com.mitchellh.ghostty/config` on macOS, `~/.config/ghostty/config` on Linux):
 
-```
+```text
 keybind = alt+backspace=text:\x1b\x7f
 ```
 
 Older Claude Code versions may have added this Ghostty mapping:
 
-```
+```text
 keybind = shift+enter=text:\n
 ```
 
@@ -46,6 +46,7 @@ return config
 ## VS Code (Integrated Terminal)
 
 `keybindings.json` locations:
+
 - macOS: `~/Library/Application Support/Code/User/keybindings.json`
 - Linux: `~/.config/Code/User/keybindings.json`
 - Windows: `%APPDATA%\\Code\\User\\keybindings.json`
@@ -91,6 +92,7 @@ If you already have an `actions` array, add the objects to it. If the old fullsc
 These terminals have limited escape sequence support. Modified Enter keys like `Ctrl+Enter` and `Shift+Enter` cannot be distinguished from plain `Enter`, preventing custom keybindings such as `submit: ["ctrl+enter"]` from working.
 
 For the best experience, use a terminal that supports the Kitty keyboard protocol:
+
 - [Kitty](https://sw.kovidgoyal.net/kitty/)
 - [Ghostty](https://ghostty.org/)
 - [WezTerm](https://wezfurlong.org/wezterm/)

@@ -121,7 +121,7 @@ The `baseUrl` is required when adding custom models to the `google-generative-ai
 ## Supported APIs
 
 | API | Description |
-|-----|-------------|
+| ----- | ------------- |
 | `openai-completions` | OpenAI Chat Completions (most compatible) |
 | `openai-responses` | OpenAI Responses API |
 | `anthropic-messages` | Anthropic Messages API |
@@ -132,7 +132,7 @@ Set `api` at provider level (default for all models) or model level (override pe
 ## Provider Configuration
 
 | Field | Description |
-|-------|-------------|
+| ------- | ------------- |
 | `baseUrl` | API endpoint URL |
 | `api` | API type (see above) |
 | `apiKey` | API key (see value resolution below) |
@@ -146,15 +146,20 @@ Set `api` at provider level (default for all models) or model level (override pe
 The `apiKey` and `headers` fields support three formats:
 
 - **Shell command:** `"!command"` executes and uses stdout
+
   ```json
   "apiKey": "!security find-generic-password -ws 'anthropic'"
   "apiKey": "!op read 'op://vault/item/credential'"
   ```
+
 - **Environment variable:** Uses the value of the named variable
+
   ```json
   "apiKey": "MY_API_KEY"
   ```
+
 - **Literal value:** Used directly
+
   ```json
   "apiKey": "sk-..."
   ```
@@ -187,7 +192,7 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 ## Model Configuration
 
 | Field | Required | Default | Description |
-|-------|----------|---------|-------------|
+| ------- | ---------- | --------- | ------------- |
 | `id` | Yes | — | Model identifier (passed to the API) |
 | `name` | No | `id` | Human-readable model label. Used for matching (`--model` patterns) and shown in model details/status text. |
 | `api` | No | provider's `api` | Override provider's API for this model |
@@ -200,6 +205,7 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `compat` | No | provider `compat` | Provider compatibility overrides. Merged with provider-level `compat` when both are set. |
 
 Current behavior:
+
 - `/model` and `prime-agent model list` list entries by model `id`.
 - The configured `name` is used for model matching and detail/status text.
 
@@ -210,7 +216,7 @@ Use `thinkingLevelMap` on a model to describe model-specific thinking controls. 
 Values are tristate:
 
 | Value | Meaning |
-|-------|---------|
+| ------- | --------- |
 | omitted | Level is supported and uses the provider's default mapping |
 | string | Level is supported and this value is sent to the provider |
 | `null` | Level is unsupported and hidden/skipped/clamped away |
@@ -277,6 +283,7 @@ To merge custom models into a built-in provider, include the `models` array:
 ```
 
 Merge semantics:
+
 - Built-in models are kept.
 - Custom models are upserted by `id` within the provider.
 - If a custom model `id` matches a built-in model `id`, the custom model replaces that built-in model.
@@ -308,6 +315,7 @@ Use `modelOverrides` to customize specific built-in models without replacing the
 `modelOverrides` supports these fields per model: `name`, `reasoning`, `input`, `cost` (partial), `contextWindow`, `maxTokens`, `headers`, `compat`.
 
 Behavior notes:
+
 - `modelOverrides` are applied to built-in provider models.
 - Unknown model IDs are ignored.
 - You can combine provider-level `baseUrl`/`headers` with `modelOverrides`.
@@ -343,7 +351,7 @@ By default Prime Agent sends per-tool `eager_input_streaming: true`. If a proxy 
 ```
 
 | Field | Description |
-|-------|-------------|
+| ------- | ------------- |
 | `supportsEagerToolInputStreaming` | Whether the provider accepts per-tool `eager_input_streaming`. Default: `true`. Set to `false` to omit that field and use the legacy fine-grained tool streaming beta header on tool-enabled requests. |
 | `supportsLongCacheRetention` | Whether the provider accepts Anthropic long cache retention (`cache_control.ttl: "1h"`) when cache retention is `long`. Default: `true`. |
 
@@ -371,7 +379,7 @@ For providers with partial OpenAI compatibility, use the `compat` field.
 ```
 
 | Field | Description |
-|-------|-------------|
+| ------- | ------------- |
 | `supportsStore` | Provider supports `store` field |
 | `supportsDeveloperRole` | Use `developer` vs `system` role |
 | `supportsReasoningEffort` | Support for `reasoning_effort` parameter |

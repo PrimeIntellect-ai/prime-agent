@@ -144,6 +144,7 @@ tui.hasOverlay();
 **Anchor values**: `'center'`, `'top-left'`, `'top-right'`, `'bottom-left'`, `'bottom-right'`, `'top-center'`, `'bottom-center'`, `'left-center'`, `'right-center'`
 
 **Resolution order**:
+
 1. `minWidth` is applied as a floor after width calculation
 2. For position: absolute `row`/`col` > percentage `row`/`col` > `anchor`
 3. `margin` clamps final position to stay within terminal bounds
@@ -162,7 +163,7 @@ interface Component {
 ```
 
 | Method | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `render(width)` | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. |
 | `handleInput?(data)` | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences). |
 | `invalidate?()` | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call. |
@@ -188,6 +189,7 @@ class MyInput implements Component, Focusable {
 ```
 
 When a `Focusable` component has focus, TUI:
+
 1. Sets `focused = true` on the component
 2. Scans rendered output for `CURSOR_MARKER` (a zero-width APC escape sequence)
 3. Positions the hardware terminal cursor at that location
@@ -286,6 +288,7 @@ input.getValue();
 ```
 
 **Key Bindings:**
+
 - `Enter` - Submit
 - `Ctrl+A` / `Ctrl+E` - Line start/end
 - `Ctrl+W` or `Alt+Backspace` - Delete word backwards
@@ -320,6 +323,7 @@ editor.getPaddingX();  // Get current padding
 ```
 
 **Features:**
+
 - Multi-line editing with word wrap
 - Slash command autocomplete (type `/`)
 - File path autocomplete (press `Tab`)
@@ -328,6 +332,7 @@ editor.getPaddingX();  // Get current padding
 - Fake cursor rendering (hidden real cursor)
 
 **Key Bindings:**
+
 - `Enter` - Submit
 - `Shift+Enter`, `Ctrl+Enter`, or `Alt+Enter` - New line (terminal-dependent, Alt+Enter most reliable)
 - `Tab` - Autocomplete
@@ -383,6 +388,7 @@ md.setText("Updated markdown");
 ```
 
 **Features:**
+
 - Headings, bold, italic, code blocks, lists, links, blockquotes
 - HTML tags rendered as plain text
 - Optional syntax highlighting via `highlightCode`
@@ -421,6 +427,7 @@ doAsyncWork(loader.signal).then(done);
 ```
 
 **Properties:**
+
 - `signal: AbortSignal` - Aborted when user presses Escape
 - `aborted: boolean` - Whether the loader was aborted
 - `onAbort?: () => void` - Callback when user presses Escape
@@ -460,6 +467,7 @@ list.setFilter("opt"); // Filter items
 ```
 
 **Controls:**
+
 - Arrow keys: Navigate
 - Enter: Select
 - Escape: Cancel
@@ -500,6 +508,7 @@ settings.updateValue("theme", "light");
 ```
 
 **Controls:**
+
 - Arrow keys: Navigate
 - Enter/Space: Activate (cycle value or open submenu)
 - Escape: Cancel
@@ -561,6 +570,7 @@ editor.setAutocompleteProvider(provider);
 ```
 
 **Features:**
+
 - Type `/` to see slash commands
 - Press `Tab` for file path completion
 - Works with `~/`, `./`, `../`, and `@` prefix
@@ -587,6 +597,7 @@ if (matchesKey(data, Key.enter)) {
 ```
 
 **Key identifiers** (use `Key.*` for autocomplete, or string literals):
+
 - Basic keys: `Key.enter`, `Key.escape`, `Key.tab`, `Key.space`, `Key.backspace`, `Key.delete`, `Key.home`, `Key.end`
 - Arrow keys: `Key.up`, `Key.down`, `Key.left`, `Key.right`
 - With modifiers: `Key.ctrl("c")`, `Key.shift("tab")`, `Key.alt("left")`, `Key.ctrlShift("p")`
@@ -623,6 +634,7 @@ interface Terminal {
 ```
 
 **Built-in implementations:**
+
 - `ProcessTerminal` - Uses `process.stdin/stdout`
 - `VirtualTerminal` - For testing (uses `@xterm/headless`)
 
@@ -763,12 +775,14 @@ class CachedComponent implements Component {
 ## Example
 
 See `test/chat-simple.ts` for a complete chat interface example with:
+
 - Markdown messages with custom background colors
 - Loading spinner during responses
 - Editor with autocomplete and slash commands
 - Spacers between messages
 
 Run it:
+
 ```bash
 npx tsx test/chat-simple.ts
 ```

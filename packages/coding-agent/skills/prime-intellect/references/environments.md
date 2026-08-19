@@ -2,7 +2,7 @@
 
 verifiers is Prime Intellect's Python library for LLM environments: packages that expose `load_environment` and bundle datasets, rollout logic, and reward rubrics. Environments power evaluations (local and hosted) and RL training (Hosted Training or self-managed prime-rl).
 
-Live docs: `verifiers/overview.md`, `tutorials-environments/getting-started.md`, `hosted-training/getting-started.md`, `prime-rl/overview.md` under https://docs.primeintellect.ai/ (append `.md` for raw markdown). Source: https://github.com/PrimeIntellect-ai/verifiers and https://github.com/PrimeIntellect-ai/prime-rl
+Live docs: `verifiers/overview.md`, `tutorials-environments/getting-started.md`, `hosted-training/getting-started.md`, `prime-rl/overview.md` under <https://docs.primeintellect.ai/> (append `.md` for raw markdown). Source: <https://github.com/PrimeIntellect-ai/verifiers> and <https://github.com/PrimeIntellect-ai/prime-rl>
 
 ## Discovering Environments (Hub)
 
@@ -63,7 +63,7 @@ prime train rl.toml              # launch the run
 
 - Hosted Training launches from a CPU machine; no local GPUs needed.
 - Validate the environment with an eval before training (e.g. `-n 20 -r 3 -s`) and confirm reward diversity exists at baseline.
-- Self-managed path: `prime lab setup --prime-rl`, then follow prime-rl's own configs and launch commands. Treat prime-rl as a power-user path requiring local GPU access; see https://docs.primeintellect.ai/prime-rl/overview.md.
+- Self-managed path: `prime lab setup --prime-rl`, then follow prime-rl's own configs and launch commands. Treat prime-rl as a power-user path requiring local GPU access; see <https://docs.primeintellect.ai/prime-rl/overview.md>.
 
 ## Model Family Choice
 

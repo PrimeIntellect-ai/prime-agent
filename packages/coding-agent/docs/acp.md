@@ -17,7 +17,7 @@ Use ACP mode when something external needs to *drive* a session interactively: p
 ## Supported methods
 
 | Method | Notes |
-|---|---|
+| --- | --- |
 | `initialize` | Returns protocol version, capabilities, and agent info. |
 | `session/new` | Creates the session. One session per connection. |
 | `session/prompt` | Runs one turn and resolves with a stop reason. |
@@ -33,7 +33,7 @@ Likewise `session/prompt` refuses a concurrent turn while one is running, and th
 Session activity arrives as `session/update` notifications:
 
 | Prime Agent activity | ACP update |
-|---|---|
+| --- | --- |
 | assistant text | `agent_message_chunk` |
 | reasoning | `agent_thought_chunk` |
 | tool starts | `tool_call` (`in_progress`) |

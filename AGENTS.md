@@ -199,6 +199,7 @@ Create provider file exporting:
 1. **Update CHANGELOGs**: Ensure all changes since last release are documented in the `[Unreleased]` section of each affected package's CHANGELOG.md
 
 2. **Run release script**:
+
    ```bash
    npm run release:patch    # Fixes and additions
    npm run release:minor    # API breaking changes

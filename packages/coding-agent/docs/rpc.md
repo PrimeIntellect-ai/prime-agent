@@ -11,6 +11,7 @@ prime-agent --mode rpc [options]
 ```
 
 Common options:
+
 - `--provider <name>`: Set the LLM provider (anthropic, openai, google, etc.)
 - `--model <pattern>`: Model pattern or ID (supports `provider/id` and optional `:<thinking>`)
 - `--no-session`: Disable session persistence
@@ -29,6 +30,7 @@ All commands support an optional `id` field for request/response correlation. If
 RPC mode uses strict JSONL semantics with LF (`\n`) as the only record delimiter.
 
 This matters for clients:
+
 - Split records on `\n` only
 - Accept optional `\r\n` input by stripping a trailing `\r`
 - Do not use generic line readers that treat Unicode separators as newlines
@@ -48,6 +50,7 @@ Send a user prompt to the agent. The command response is emitted after the promp
 ```
 
 With images:
+
 ```json
 {"type": "prompt", "message": "What's in this image?", "images": [{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}]}
 ```
@@ -68,6 +71,7 @@ If the agent is streaming and no `streamingBehavior` is specified, the command r
 **Input expansion**: Skill commands (`/skill:name`) and prompt templates (`/template`) are expanded before sending/queueing.
 
 Response:
+
 ```json
 {"id": "req-1", "type": "response", "command": "prompt", "success": true}
 ```
@@ -85,6 +89,7 @@ Queue a steering message while the agent is running. It is delivered after the c
 ```
 
 With images:
+
 ```json
 {"type": "steer", "message": "Look at this instead", "images": [{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}]}
 ```
@@ -92,6 +97,7 @@ With images:
 The `images` field is optional. Each image uses `ImageContent` format (same as `prompt`).
 
 Response:
+
 ```json
 {"type": "response", "command": "steer", "success": true}
 ```
@@ -107,6 +113,7 @@ Queue a follow-up message to be processed after the agent finishes. Delivered on
 ```
 
 With images:
+
 ```json
 {"type": "follow_up", "message": "Also check this image", "images": [{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}]}
 ```
@@ -114,6 +121,7 @@ With images:
 The `images` field is optional. Each image uses `ImageContent` format (same as `prompt`).
 
 Response:
+
 ```json
 {"type": "response", "command": "follow_up", "success": true}
 ```
@@ -129,6 +137,7 @@ Abort the current agent operation.
 ```
 
 Response:
+
 ```json
 {"type": "response", "command": "abort", "success": true}
 ```
@@ -142,16 +151,19 @@ Start a fresh session. Can be cancelled by a `session_before_switch` extension e
 ```
 
 With optional parent session tracking:
+
 ```json
 {"type": "new_session", "parentSession": "/path/to/parent-session.jsonl"}
 ```
 
 Response:
+
 ```json
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false}}
 ```
 
 If an extension cancelled:
+
 ```json
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": true}}
 ```
@@ -167,6 +179,7 @@ Get current session state.
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -205,6 +218,7 @@ Get all messages in the conversation.
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -214,14 +228,14 @@ Response:
 }
 ```
 
-Messages are `AgentMessage` objects (see [Message Types](#message-types)).
+Messages are `AgentMessage` objects (see [Types](#types)).
 
 ### Daemon Coordination
 
 RPC clients can use the same daemon-owned coordination features as the interactive client. These commands are additive; existing commands and event shapes are unchanged.
 
 | Command | Fields | Successful response data |
-|---------|--------|--------------------------|
+| --------- | -------- | -------------------------- |
 | `send_message` | `targetActiveSessionId`, `message`, optional `deliveryMode` (`auto`, `steer`, `follow_up`) | Agent-message delivery receipt |
 | `agent_messages_status` | none | Messaging safety status |
 | `agent_messages_pause` | none | Updated messaging safety status |
@@ -267,6 +281,7 @@ Switch to a specific model.
 ```
 
 Response contains the full [Model](#model) object:
+
 ```json
 {
   "type": "response",
@@ -285,6 +300,7 @@ Cycle to the next available model. Returns `null` data if only one model availab
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -309,6 +325,7 @@ List all configured models.
 ```
 
 Response contains an array of full [Model](#model) objects:
+
 ```json
 {
   "type": "response",
@@ -335,6 +352,7 @@ Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`
 Available levels depend on the current model.
 
 Response:
+
 ```json
 {"type": "response", "command": "set_thinking_level", "success": true}
 ```
@@ -348,6 +366,7 @@ Cycle through available thinking levels. Returns `null` data if model doesn't su
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -368,10 +387,12 @@ Control how steering messages (from `steer`) are delivered.
 ```
 
 Modes:
+
 - `"all"`: Deliver all steering messages after the current assistant turn finishes executing its tool calls
 - `"one-at-a-time"`: Deliver one steering message per completed assistant turn (default)
 
 Response:
+
 ```json
 {"type": "response", "command": "set_steering_mode", "success": true}
 ```
@@ -385,10 +406,12 @@ Control how follow-up messages (from `follow_up`) are delivered.
 ```
 
 Modes:
+
 - `"all"`: Deliver all follow-up messages when agent finishes
 - `"one-at-a-time"`: Deliver one follow-up message per agent completion (default)
 
 Response:
+
 ```json
 {"type": "response", "command": "set_follow_up_mode", "success": true}
 ```
@@ -404,11 +427,13 @@ Manually compact conversation context to reduce token usage.
 ```
 
 With custom instructions:
+
 ```json
 {"type": "compact", "customInstructions": "Focus on code changes"}
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -432,6 +457,7 @@ Enable or disable automatic compaction when context is nearly full.
 ```
 
 Response:
+
 ```json
 {"type": "response", "command": "set_auto_compaction", "success": true}
 ```
@@ -447,6 +473,7 @@ Enable or disable automatic retry on transient errors (overloaded, rate limit, 5
 ```
 
 Response:
+
 ```json
 {"type": "response", "command": "set_auto_retry", "success": true}
 ```
@@ -460,6 +487,7 @@ Abort an in-progress retry (cancel the delay and stop retrying).
 ```
 
 Response:
+
 ```json
 {"type": "response", "command": "abort_retry", "success": true}
 ```
@@ -475,6 +503,7 @@ Execute a shell command and add output to conversation context.
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -490,6 +519,7 @@ Response:
 ```
 
 If output was truncated, includes `fullOutputPath`:
+
 ```json
 {
   "type": "response",
@@ -511,15 +541,15 @@ The `bash` command executes immediately and returns a `BashResult`. Internally, 
 
 When the next `prompt` command is sent, all messages (including `BashExecutionMessage`) are transformed before being sent to the LLM. The `BashExecutionMessage` is converted to a `UserMessage` with this format:
 
-````
+````text
 Ran `ls -la`
 ```
-total 48
-drwxr-xr-x ...
+total 48 drwxr-xr-x ...
 ```
 ````
 
 This means:
+
 1. Bash output is included in the LLM context on the **next prompt**, not immediately
 2. Multiple bash commands can be executed before a prompt; all outputs will be included
 3. No event is emitted for the `BashExecutionMessage` itself
@@ -533,6 +563,7 @@ Abort a running bash command.
 ```
 
 Response:
+
 ```json
 {"type": "response", "command": "abort_bash", "success": true}
 ```
@@ -548,6 +579,7 @@ Get token usage, cost statistics, and current context window usage.
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -591,11 +623,13 @@ Export session to an HTML file.
 ```
 
 With custom path:
+
 ```json
 {"type": "export_html", "outputPath": "/tmp/session.html"}
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -614,11 +648,13 @@ Load a different session file. Can be cancelled by a `session_before_switch` ext
 ```
 
 Response:
+
 ```json
 {"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": false}}
 ```
 
 If an extension cancelled the switch:
+
 ```json
 {"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": true}}
 ```
@@ -632,6 +668,7 @@ Create a new fork from a previous user message on the active branch. Can be canc
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -642,6 +679,7 @@ Response:
 ```
 
 If an extension cancelled the fork:
+
 ```json
 {
   "type": "response",
@@ -660,6 +698,7 @@ Duplicate the current active branch into a new session at the current position. 
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -670,6 +709,7 @@ Response:
 ```
 
 If an extension cancelled the clone:
+
 ```json
 {
   "type": "response",
@@ -688,6 +728,7 @@ Get user messages available for forking.
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -711,6 +752,7 @@ Get the text content of the last assistant message.
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -731,6 +773,7 @@ Set a display name for the current session. The name appears in session listings
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -752,6 +795,7 @@ Get available commands (extension commands, prompt templates, and skills). These
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -768,6 +812,7 @@ Response:
 ```
 
 Each command has:
+
 - `name`: Command name (invoke with `/name`)
 - `description`: Human-readable description (optional for extension commands)
 - `source`: What kind of command:
@@ -789,7 +834,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 ### Event Types
 
 | Event | Description |
-|-------|-------------|
+| ------- | ------------- |
 | `agent_start` | Agent begins processing |
 | `agent_end` | Agent completes (includes all generated messages) |
 | `turn_start` | New turn begins |
@@ -871,7 +916,7 @@ Emitted during streaming of assistant messages. Contains both the partial messag
 The `assistantMessageEvent` field contains one of these delta types:
 
 | Type | Description |
-|------|-------------|
+| ------ | ------------- |
 | `start` | Message generation started |
 | `text_start` | Text content block started |
 | `text_delta` | Text content chunk |
@@ -886,6 +931,7 @@ The `assistantMessageEvent` field contains one of these delta types:
 | `error` | Error occurred (reason: `"aborted"`, `"error"`) |
 
 Example streaming a text response:
+
 ```json
 {"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_start","contentIndex":0,"partial":{...}}}
 {"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello","partial":{...}}}
@@ -1008,6 +1054,7 @@ Emitted when automatic retry is triggered after a transient error (overloaded, r
 ```
 
 On final failure (max retries exceeded):
+
 ```json
 {
   "type": "auto_retry_end",
@@ -1042,6 +1089,7 @@ There are two categories of extension UI methods:
 If a dialog method includes a `timeout` field, the agent-side will auto-resolve with a default value when the timeout expires. The client does not need to track timeouts.
 
 Some `ExtensionUIContext` methods are not supported or degraded in RPC mode because they require direct TUI access:
+
 - `custom()` returns `undefined`
 - `setWorkingMessage()`, `setWorkingIndicator()`, `setFooter()`, `setHeader()`, `setEditorComponent()`, `setToolsExpanded()` are no-ops
 - `getEditorText()` returns `""`
@@ -1249,6 +1297,7 @@ Parse errors:
 ## Types
 
 Source files:
+
 - [`packages/ai/src/types.ts`](../../ai/src/types.ts) - `Model`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`
 - [`packages/agent/src/types.ts`](../../agent/src/types.ts) - `AgentMessage`, `AgentEvent`
 - [`src/core/messages.ts`](../src/core/messages.ts) - `BashExecutionMessage`

@@ -190,7 +190,7 @@ Calls made after the initial extension load phase are applied immediately, so no
 The `api` field determines which streaming implementation is used:
 
 | API | Use for |
-|-----|---------|
+| ----- | --------- |
 | `anthropic-messages` | Anthropic Claude API and compatibles |
 | `openai-completions` | OpenAI Chat Completions API and compatibles |
 | `openai-responses` | OpenAI Responses API |
@@ -226,8 +226,7 @@ models: [{
 }]
 ```
 
-Use `qwen-chat-template` instead for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
-Use `cacheControlFormat: "anthropic"` for OpenAI-compatible providers that expose Anthropic-style prompt caching via `cache_control` on the system prompt, last tool definition, and last user/assistant text content.
+Use `qwen-chat-template` instead for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`. Use `cacheControlFormat: "anthropic"` for OpenAI-compatible providers that expose Anthropic-style prompt caching via `cache_control` on the system prompt, last tool definition, and last user/assistant text content.
 
 > Migration note: Mistral moved from `openai-completions` to `mistral-conversations`.
 > Use `mistral-conversations` for native Mistral models.
@@ -345,6 +344,7 @@ interface OAuthCredentials {
 For providers with non-standard APIs, implement `streamSimple`. Study the existing provider implementations before writing your own:
 
 **Reference implementations:**
+
 - [anthropic.ts](../../ai/src/providers/anthropic.ts) - Anthropic Messages API
 - [mistral.ts](../../ai/src/providers/mistral.ts) - Mistral Conversations API
 - [openai-completions.ts](../../ai/src/providers/openai-completions.ts) - OpenAI Chat Completions
@@ -525,7 +525,7 @@ pi.registerProvider("my-provider", {
 Test your provider against the same test suites used by built-in providers. Copy and adapt the test files in [`packages/ai/test/`](../../ai/test/):
 
 | Test | Purpose |
-|------|---------|
+| ------ | --------- |
 | `stream.test.ts` | Basic streaming, text output |
 | `tokens.test.ts` | Token counting and usage |
 | `abort.test.ts` | AbortSignal handling |
@@ -642,5 +642,4 @@ interface ProviderModelConfig {
 }
 ```
 
-`deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
-`cacheControlFormat: "anthropic"` applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content.
+`deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`. `cacheControlFormat: "anthropic"` applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content.

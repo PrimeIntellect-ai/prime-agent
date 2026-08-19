@@ -336,6 +336,7 @@ for await (const event of s) {
 ```
 
 **Important notes about partial tool arguments:**
+
 - During `toolcall_delta` events, `arguments` contains the best-effort parse of partial JSON
 - Fields may be missing or incomplete - always check for existence before use
 - String values may be truncated mid-word
@@ -385,7 +386,7 @@ for await (const event of s) {
 All streaming events emitted during assistant message generation:
 
 | Event Type | Description | Key Properties |
-|------------|-------------|----------------|
+| ------------ | ------------- | ---------------- |
 | `start` | Stream begins | `partial`: Initial assistant message structure |
 | `text_start` | Text block starts | `contentIndex`: Position in content array |
 | `text_delta` | Text chunk received | `delta`: New text, `contentIndex`: Position |
@@ -731,6 +732,7 @@ multiModel.unregister();
 ```
 
 Notes:
+
 - Responses are consumed from a queue in request start order.
 - If the queue is empty, the faux provider returns an assistant error message with `errorMessage: "No more faux responses queued"`.
 - Use `registration.setResponses([...])` to replace the remaining queue and `registration.appendResponses([...])` to add more responses.
@@ -745,6 +747,7 @@ Notes:
 ### Providers and Models
 
 A **provider** offers models through a specific API. For example:
+
 - **Anthropic** models use the `anthropic-messages` API
 - **Google** models use the `google-generative-ai` API
 - **OpenAI** models use the `openai-responses` API
@@ -966,12 +969,14 @@ const geminiResponse = await complete(gemini, context);
 ### Provider Compatibility
 
 All providers can handle messages from other providers, including:
+
 - Text content
 - Tool calls and tool results (including images in tool results)
 - Thinking/reasoning blocks (transformed to tagged text for cross-provider compatibility)
 - Aborted messages with partial content
 
 This enables flexible workflows where you can:
+
 - Start with a fast model for initial responses
 - Switch to a more capable model for complex reasoning
 - Use specialized models for specific tasks
@@ -1045,7 +1050,7 @@ const response = await complete(model, {
 In Node.js environments, you can set environment variables to avoid passing API keys:
 
 | Provider | Environment Variable(s) |
-|----------|------------------------|
+| ---------- | ------------------------ |
 | OpenAI | `OPENAI_API_KEY` |
 | Prime Inference | `PRIME_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.openai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Supports `*.openai.azure.com` and `*.cognitiveservices.azure.com`; root endpoints auto-normalize to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
