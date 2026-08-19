@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentStatus } from "../../core/session-manager.js";
-import type { DaemonClientCapability, DaemonEventSequence, DaemonExtensionUIResponse } from "./daemon-protocol.js";
+import type {
+	DaemonClientCapability,
+	DaemonEventSequence,
+	DaemonExtensionUIResponse,
+	DaemonOutbound,
+} from "./daemon-protocol.js";
 import { formatSessionDisplayId, matchesSessionIdSuffix } from "./daemon-session-id.js";
 
 export interface DaemonSocketClient {
@@ -38,6 +43,12 @@ export interface ActiveSessionState {
 	/** Attach snapshots in flight: reserved for passivation busyness, but not yet event recipients. */
 	pendingAttaches: number;
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
+	/** Notifications emitted during the initial extension bind before a UI-capable client is available. */
+	pendingExtensionUiNotifications?: DaemonExtensionUiNotification[];
+	/** First UI-capable recipient selected for retained startup notifications. */
+	pendingExtensionUiNotificationRecipient?: DaemonSocketClient;
+	/** Prevents replacement/reload binds from opening another startup capture window. */
+	hasCompletedInitialExtensionBind?: boolean;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
 	unsubscribe?: () => void;
@@ -55,6 +66,15 @@ export interface ActiveSessionState {
 
 export interface ActiveSessionExtensionUiRequest {
 	resolve: (response: DaemonExtensionUIResponse) => void;
+}
+
+export type DaemonExtensionUiNotification = Extract<DaemonOutbound, { type: "extension_ui_request" }>;
+
+export function daemonClientSupportsExtensionUiForSession(
+	client: DaemonSocketClient,
+	activeSessionId: string,
+): boolean {
+	return client.capabilitiesByActiveSessionId?.get(activeSessionId)?.has("extension_ui") ?? client.supportsExtensionUi;
 }
 
 interface ActiveSessionIdIndex {

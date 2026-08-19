@@ -152,6 +152,7 @@ const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
 const IDLE_EVICTION_DRAIN_TIMEOUT_MS = 5_000;
 const CHILD_PASSIVATION_PER_WORKER_CAP = 2;
+const MAX_PENDING_STARTUP_NOTIFICATION_FRAMES = 100;
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
 
@@ -598,6 +599,11 @@ export class DaemonSupervisor {
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
 	private readonly mutationDrain = new MutationDrainLatch();
 	private readonly clients = new Set<DaemonSocketClient>();
+	private startupNotificationRecipients?: Map<string, DaemonSocketClient>;
+	/** Sessions whose worker subscription is synchronously releasing retained startup notifications. */
+	private startupNotificationRoutingSessions?: Set<string>;
+	private pendingStartupNotificationFrames?: Map<string, Buffer[]>;
+	private workerExtensionUiSyncs?: Map<string, Promise<void>>;
 	private readonly protocolClientIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly workers = new Map<string, ResidentWorker>();
 	private workerStopCounts?: Map<ResidentWorker, number>;
@@ -1075,9 +1081,15 @@ export class DaemonSupervisor {
 		socket.on("drain", () => {
 			client.backpressured = false;
 			if (!client.snapshotStreaming) {
-				void this.catchUpClient(client).catch((error) =>
-					this.log(`Failed to catch up client ${client.id}: ${String(error)}`),
-				);
+				void this.catchUpClient(client)
+					.then(() =>
+						Promise.all(
+							[...client.attachedActiveSessionIds].map((activeSessionId) =>
+								this.syncWorkerExtensionUi(activeSessionId, client),
+							),
+						),
+					)
+					.catch((error) => this.log(`Failed to catch up client ${client.id}: ${String(error)}`));
 			}
 		});
 	}
@@ -1464,24 +1476,28 @@ export class DaemonSupervisor {
 					const streamedResult = this.createStreamedAttachResult(attached.result, transcript);
 					try {
 						this.write(client, success(command.id, "attach", streamedResult));
-						void this.streamSnapshot(
+						const streaming = this.streamSnapshot(
 							client,
 							attached.worker,
 							streamedResult,
 							transcript,
 							"attach",
 							attached.releaseTranscript,
-						).catch((error) =>
-							this.log(
-								`Failed to stream attach snapshot for ${streamedResult.activeSessionId}: ${String(error)}`,
-							),
 						);
+						void streaming
+							.then(() => this.syncWorkerExtensionUi(streamedResult.activeSessionId, client))
+							.catch((error) =>
+								this.log(
+									`Failed to stream attach snapshot for ${streamedResult.activeSessionId}: ${String(error)}`,
+								),
+							);
 					} catch (error) {
 						attached.releaseTranscript?.();
 						throw error;
 					}
 					return undefined;
 				}
+				setImmediate(() => void this.syncWorkerExtensionUi(attached.result.activeSessionId, client));
 				return success(command.id, "attach", attached.result);
 			}
 			case "reattach": {
@@ -1517,14 +1533,17 @@ export class DaemonSupervisor {
 							releaseSnapshotReservation,
 						);
 						releaseTranscript = undefined;
-						void streaming.catch((error) =>
-							this.log(`Failed to stream reattach snapshot for ${targetActiveSessionId}: ${String(error)}`),
-						);
+						void streaming
+							.then(() => this.syncWorkerExtensionUi(targetActiveSessionId, client))
+							.catch((error) =>
+								this.log(`Failed to stream reattach snapshot for ${targetActiveSessionId}: ${String(error)}`),
+							);
 						return undefined;
 					}
 					this.write(client, success(command.id, command.type, attached.result));
 					this.detachClient(client, command.activeSessionId);
 					releaseSnapshotReservation();
+					setImmediate(() => void this.syncWorkerExtensionUi(targetActiveSessionId, client));
 					return undefined;
 				} catch (error) {
 					releaseTranscript?.();
@@ -2425,23 +2444,43 @@ export class DaemonSupervisor {
 		throw new Error(`Timed out connecting to daemon session worker: ${String(lastError)}`);
 	}
 
-	private async subscribeWorker(worker: ResidentWorker, activeSessionId: string): Promise<void> {
+	private async subscribeWorker(
+		worker: ResidentWorker,
+		activeSessionId: string,
+		preferredRecipient?: DaemonSocketClient,
+	): Promise<void> {
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
-		const supportsExtensionUi = [...this.clients].some(
-			(client) => client.attachedActiveSessionIds.has(activeSessionId) && client.supportsExtensionUi,
-		);
-		const response = await worker.client.requestWorker({
-			type: "worker_subscribe",
-			activeSessionId,
-			capabilities: supportsExtensionUi
-				? ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"]
-				: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
-			supportsExtensionUi,
-		});
-		if (!response.success) {
-			throw new Error(response.error);
+		const recipient = this.selectStartupNotificationRecipient(activeSessionId, preferredRecipient);
+		this.replayBufferedStartupNotifications(activeSessionId);
+		const pendingFrames = this.getPendingStartupNotificationFrames();
+		const routingSessions = this.getStartupNotificationRoutingSessions();
+		const hasBufferedNotifications = (pendingFrames.get(activeSessionId)?.length ?? 0) > 0;
+		const supportsExtensionUi =
+			!hasBufferedNotifications &&
+			recipient !== undefined &&
+			this.isStartupNotificationRecipientReady(recipient, activeSessionId);
+		if (supportsExtensionUi) {
+			routingSessions.add(activeSessionId);
+		}
+		try {
+			const response = await worker.client.requestWorker({
+				type: "worker_subscribe",
+				activeSessionId,
+				capabilities: supportsExtensionUi
+					? ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"]
+					: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
+				supportsExtensionUi,
+			});
+			if (!response.success) {
+				throw new Error(response.error);
+			}
+		} finally {
+			routingSessions.delete(activeSessionId);
+			if ((pendingFrames.get(activeSessionId)?.length ?? 0) === 0) {
+				this.getStartupNotificationRecipients().delete(activeSessionId);
+			}
 		}
 	}
 
@@ -3566,7 +3605,6 @@ export class DaemonSupervisor {
 					lastEventSequence: publicResult.lastEventSequence,
 				});
 			}
-			void this.syncWorkerExtensionUi(activeSessionId);
 			return { result: publicResult, worker: match.worker, transcript, releaseTranscript };
 		} catch (error) {
 			releaseTranscript?.();
@@ -3864,14 +3902,134 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private async syncWorkerExtensionUi(activeSessionId: string): Promise<void> {
+	private syncWorkerExtensionUi(activeSessionId: string, preferredRecipient?: DaemonSocketClient): Promise<void> {
+		const syncs = this.getWorkerExtensionUiSyncs();
+		const previous = syncs.get(activeSessionId) ?? Promise.resolve();
+		const sync = previous
+			.catch(() => undefined)
+			.then(() => this.syncWorkerExtensionUiNow(activeSessionId, preferredRecipient));
+		syncs.set(activeSessionId, sync);
+		return sync.finally(() => {
+			if (syncs.get(activeSessionId) === sync) {
+				syncs.delete(activeSessionId);
+			}
+		});
+	}
+
+	private getStartupNotificationRecipients(): Map<string, DaemonSocketClient> {
+		this.startupNotificationRecipients ??= new Map();
+		return this.startupNotificationRecipients;
+	}
+
+	private getStartupNotificationRoutingSessions(): Set<string> {
+		this.startupNotificationRoutingSessions ??= new Set();
+		return this.startupNotificationRoutingSessions;
+	}
+
+	private getPendingStartupNotificationFrames(): Map<string, Buffer[]> {
+		this.pendingStartupNotificationFrames ??= new Map();
+		return this.pendingStartupNotificationFrames;
+	}
+
+	private getWorkerExtensionUiSyncs(): Map<string, Promise<void>> {
+		this.workerExtensionUiSyncs ??= new Map();
+		return this.workerExtensionUiSyncs;
+	}
+
+	private clearStartupNotificationState(activeSessionId: string): void {
+		this.startupNotificationRecipients?.delete(activeSessionId);
+		this.startupNotificationRoutingSessions?.delete(activeSessionId);
+		this.pendingStartupNotificationFrames?.delete(activeSessionId);
+		this.workerExtensionUiSyncs?.delete(activeSessionId);
+	}
+
+	private async syncWorkerExtensionUiNow(
+		activeSessionId: string,
+		preferredRecipient?: DaemonSocketClient,
+	): Promise<void> {
 		const match = this.matchWorkers(activeSessionId)[0];
 		if (!match?.worker.client) {
 			return;
 		}
-		await this.subscribeWorker(match.worker, match.summary.activeSessionId ?? match.summary.id).catch(
-			() => undefined,
+		const resolvedId = match.summary.activeSessionId ?? match.summary.id;
+		await this.subscribeWorker(match.worker, resolvedId, preferredRecipient).catch(() => undefined);
+	}
+
+	private selectStartupNotificationRecipient(
+		activeSessionId: string,
+		preferredRecipient?: DaemonSocketClient,
+	): DaemonSocketClient | undefined {
+		const recipients = this.getStartupNotificationRecipients();
+		const selected = recipients.get(activeSessionId);
+		if (selected && this.isStartupNotificationRecipientEligible(selected, activeSessionId)) {
+			return selected;
+		}
+		recipients.delete(activeSessionId);
+		const recipient =
+			preferredRecipient && this.isStartupNotificationRecipientEligible(preferredRecipient, activeSessionId)
+				? preferredRecipient
+				: [...this.clients].find((client) => this.isStartupNotificationRecipientEligible(client, activeSessionId));
+		if (recipient) {
+			recipients.set(activeSessionId, recipient);
+		}
+		return recipient;
+	}
+
+	private isStartupNotificationRecipientEligible(client: DaemonSocketClient, activeSessionId: string): boolean {
+		return (
+			this.clients.has(client) &&
+			!client.socket.destroyed &&
+			client.attachedActiveSessionIds.has(activeSessionId) &&
+			client.supportsExtensionUi
 		);
+	}
+
+	private isStartupNotificationRecipientReady(client: DaemonSocketClient, activeSessionId: string): boolean {
+		return (
+			this.isStartupNotificationRecipientEligible(client, activeSessionId) &&
+			!client.snapshotActiveSessionIds?.has(activeSessionId) &&
+			client.backpressured !== true
+		);
+	}
+
+	private replayBufferedStartupNotifications(activeSessionId: string): void {
+		const pendingFrames = this.getPendingStartupNotificationFrames();
+		const pending = pendingFrames.get(activeSessionId);
+		if (!pending?.length) {
+			return;
+		}
+		const recipient = this.selectStartupNotificationRecipient(activeSessionId);
+		if (!recipient || !this.isStartupNotificationRecipientReady(recipient, activeSessionId)) {
+			return;
+		}
+		while (pending.length > 0) {
+			const accepted = this.writeSerialized(recipient, pending[0]!);
+			pending.shift();
+			if (!accepted) {
+				break;
+			}
+		}
+		if (pending.length === 0) {
+			pendingFrames.delete(activeSessionId);
+		}
+	}
+
+	private routeStartupNotification(activeSessionId: string, payload: Buffer): void {
+		const pendingFrames = this.getPendingStartupNotificationFrames();
+		const recipient = this.selectStartupNotificationRecipient(activeSessionId);
+		if (recipient && this.isStartupNotificationRecipientReady(recipient, activeSessionId)) {
+			this.writeSerialized(recipient, payload);
+			return;
+		}
+		let pending = pendingFrames.get(activeSessionId);
+		if (!pending) {
+			pending = [];
+			pendingFrames.set(activeSessionId, pending);
+		}
+		if (pending.length >= MAX_PENDING_STARTUP_NOTIFICATION_FRAMES) {
+			pending.shift();
+		}
+		pending.push(Buffer.from(payload));
 	}
 
 	private handleWorkerFrame(worker: ResidentWorker, frame: PrivateFrame<DaemonWorkerFrameHeader>): void {
@@ -4234,6 +4392,7 @@ export class DaemonSupervisor {
 		} else if (
 			sessionEventType === "message_start" ||
 			sessionEventType === "message_end" ||
+			outboundType === "extension_ui_request" ||
 			outboundType === "session_replaced" ||
 			outboundType === "session_resynced" ||
 			outboundType === "session_closed"
@@ -4247,6 +4406,14 @@ export class DaemonSupervisor {
 		}
 		const replacementSnapshotFollows =
 			decodedOutbound?.type === "session_replaced" && decodedOutbound.snapshotFollows === true;
+		if (
+			decodedOutbound?.type === "extension_ui_request" &&
+			decodedOutbound.method === "notify" &&
+			this.getStartupNotificationRoutingSessions().has(activeSessionId)
+		) {
+			this.routeStartupNotification(activeSessionId, publicPayload);
+			return;
+		}
 		this.invalidateWorkerSnapshot(
 			worker,
 			activeSessionId,
@@ -4273,6 +4440,9 @@ export class DaemonSupervisor {
 				continue;
 			}
 			this.writeSerialized(client, publicPayload);
+		}
+		if (decodedOutbound?.type === "session_closed" || decodedOutbound?.type === "session_replaced") {
+			this.clearStartupNotificationState(activeSessionId);
 		}
 		if (outboundType === "session_replaced" || outboundType === "session_closed") {
 			void this.refreshWorkerSummaries(worker)
@@ -4427,6 +4597,7 @@ export class DaemonSupervisor {
 						releaseTranscript,
 					);
 					releaseTranscript = undefined;
+					await this.syncWorkerExtensionUi(activeSessionId, client);
 					continue;
 				}
 				const meta = createDaemonEventMeta(
@@ -4456,6 +4627,7 @@ export class DaemonSupervisor {
 					}
 					return;
 				}
+				await this.syncWorkerExtensionUi(activeSessionId, client);
 			} catch (error) {
 				releaseTranscript?.();
 				this.log(`Failed to catch up client ${client.id} for ${activeSessionId}: ${String(error)}`);
@@ -4861,6 +5033,10 @@ export class DaemonSupervisor {
 		}
 		this.workers.delete(worker.descriptor.workerId);
 		if (removeDescriptor) {
+			for (const summary of worker.summaries.values()) {
+				this.clearStartupNotificationState(summary.activeSessionId ?? summary.id);
+			}
+			this.clearStartupNotificationState(worker.descriptor.rootActiveSessionId);
 			this.deleteWorkerDescriptor(worker);
 		}
 		if (!this.shuttingDown) {

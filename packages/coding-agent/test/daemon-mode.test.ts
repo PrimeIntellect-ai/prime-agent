@@ -4078,7 +4078,7 @@ describe("daemon mode helpers", () => {
 				...dialogRequest,
 				method: "notify",
 			}),
-		).toBe(true);
+		).toBe(false);
 
 		setDaemonClientSessionCapabilities(uiClient, "active", new Set(["extension_ui"]));
 		setDaemonClientSessionCapabilities(uiClient, "other", new Set());
