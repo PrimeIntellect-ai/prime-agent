@@ -566,7 +566,31 @@ function buildParams(
 	}
 
 	if (compat.thinkingFormat === "zai" && model.reasoning) {
-		(params as any).enable_thinking = !!options?.reasoningEffort;
+		// Effort-capable z.ai models reject enable_thinking: false; disabling
+		// thinking is expressed as reasoning_effort "none" instead. Proxied z.ai
+		// models (e.g. Prime Inference) are toggle-only. The compat flag is
+		// authoritative; map entries only translate levels, with identity and
+		// "none" fallbacks when a map is absent.
+		const offEntry = model.thinkingLevelMap?.off;
+		const offEffort = compat.supportsReasoningEffort ? (offEntry === undefined ? "none" : offEntry) : undefined;
+		const mappedEffort = options?.reasoningEffort ? model.thinkingLevelMap?.[options.reasoningEffort] : undefined;
+		const effort =
+			compat.supportsReasoningEffort && options?.reasoningEffort
+				? mappedEffort === undefined
+					? options.reasoningEffort
+					: mappedEffort
+				: undefined;
+		if (typeof effort === "string") {
+			(params as any).enable_thinking = true;
+			(params as any).reasoning_effort = effort;
+		} else if (options?.reasoningEnabled === false && typeof offEffort === "string") {
+			(params as any).enable_thinking = true;
+			(params as any).reasoning_effort = offEffort;
+		} else {
+			// Unspecified on effort-capable models keeps the provider default
+			// (thinking enabled); toggle-only routes keep the boolean toggle.
+			(params as any).enable_thinking = compat.supportsReasoningEffort ? true : !!options?.reasoningEffort;
+		}
 	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
 		(params as any).enable_thinking = !!options?.reasoningEffort;
 	} else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {

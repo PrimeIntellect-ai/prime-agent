@@ -17,7 +17,9 @@ import {
 	type AnthropicMessagesCompat,
 	KnownProvider,
 	Model,
+	type ModelThinkingLevel,
 	type OpenAICompletionsCompat,
+	type ThinkingLevelMap,
 } from "../src/types.js";
 import { MODELS as EXISTING_MODELS } from "../src/models.generated.js";
 
@@ -25,11 +27,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");
 
+interface ModelsDevReasoningOption {
+	type?: string;
+	values?: string[];
+}
+
 interface ModelsDevModel {
 	id: string;
 	name: string;
 	tool_call?: boolean;
 	reasoning?: boolean;
+	reasoning_options?: ModelsDevReasoningOption[];
 	limit?: {
 		context?: number;
 		output?: number;
@@ -111,6 +119,22 @@ const ZAI_THINKING_COMPAT: OpenAICompletionsCompat = {
 	supportsReasoningEffort: false,
 	thinkingFormat: "zai",
 };
+
+// On the z.ai coding endpoint, effort-capable GLM models (5.2+) reject
+// enable_thinking: false; disabling thinking is expressed as reasoning_effort
+// "none" instead (verified against the endpoint; z.ai thinking docs).
+const ZAI_EFFORT_LEVELS: readonly ModelThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+function buildZaiThinkingLevelMap(model: ModelsDevModel): ThinkingLevelMap | undefined {
+	const efforts = model.reasoning_options?.find((option) => option.type === "effort")?.values;
+	if (!efforts?.length) return undefined;
+	const supported = new Set(efforts);
+	const thinkingLevelMap: ThinkingLevelMap = { off: "none" };
+	for (const level of ZAI_EFFORT_LEVELS) {
+		thinkingLevelMap[level] = supported.has(level) ? level : null;
+	}
+	return thinkingLevelMap;
+}
 
 const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
 const PRIME_INFERENCE_COMPAT: OpenAICompletionsCompat = {
@@ -1165,6 +1189,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 				const supportsImage = m.modalities?.input?.includes("image");
+				const thinkingLevelMap = buildZaiThinkingLevelMap(m);
 
 				models.push({
 					id: modelId,
@@ -1182,9 +1207,14 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					},
 					compat: {
 						supportsDeveloperRole: false,
+						// The direct z.ai endpoint accepts reasoning_effort for
+						// effort-capable GLM models; proxies of the same models
+						// (e.g. Prime Inference) stay toggle-only.
+						...(thinkingLevelMap ? { supportsReasoningEffort: true } : {}),
 						thinkingFormat: ZAI_THINKING_COMPAT.thinkingFormat,
 						...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(modelId) ? { zaiToolStream: true } : {}),
 					},
+					...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});

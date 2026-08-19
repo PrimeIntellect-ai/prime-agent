@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -181,6 +181,49 @@ describe("ENG-4509 side questions", () => {
 
 			expect(events.at(-1)).toMatchObject({ status: "cancelled" });
 			expect(harness.session.isStreaming).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("clamps thinking off to the lowest supported level for mandatory-thinking models", async () => {
+		const harness = await createHarness({
+			models: [
+				{
+					id: "faux-mandatory-thinking",
+					reasoning: true,
+					thinkingLevelMap: {
+						off: null,
+						minimal: null,
+						low: "low",
+						medium: null,
+						high: "high",
+						xhigh: null,
+						max: "max",
+					},
+				},
+			],
+		});
+		try {
+			harness.setResponses([fauxAssistantMessage("main answer")]);
+			await harness.session.prompt("Main context message.");
+
+			let observedReasoning: string | undefined;
+			harness.setResponses([
+				(_context, options) => {
+					observedReasoning = (options as SimpleStreamOptions | undefined)?.reasoning;
+					return fauxAssistantMessage("side answer");
+				},
+			]);
+
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(harness.session.agent, "mandatory-thinking", "Side question?", (event) => {
+				events.push(event);
+			});
+			await run.done;
+
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "side answer" });
+			expect(observedReasoning).toBe("low");
 		} finally {
 			harness.cleanup();
 		}

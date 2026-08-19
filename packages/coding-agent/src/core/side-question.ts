@@ -1,5 +1,5 @@
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, clampThinkingLevel, type UserMessage } from "@earendil-works/pi-ai";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -50,6 +50,10 @@ export function startSideQuestion(
 	if (!model) {
 		throw new Error("Select a model before asking a side question");
 	}
+	// Side questions prefer thinking off; clampThinkingLevel maps that to the
+	// model's disable mechanism (e.g. reasoning_effort "none" on z.ai GLM-5.2+)
+	// or the lowest supported effort when thinking cannot be disabled.
+	const thinkingLevel = clampThinkingLevel(model, "off");
 
 	// Each turn re-clones the live main conversation, so follow-ups always see
 	// the newest main-thread context; earlier side turns are replayed after it.
@@ -83,7 +87,7 @@ export function startSideQuestion(
 			model,
 			systemPrompt: parent.state.systemPrompt,
 			messages: [...structuredClone(parent.state.messages), ...previousTurnMessages],
-			thinkingLevel: "off",
+			thinkingLevel,
 			serviceTier: parent.state.serviceTier,
 			tools: [],
 		},

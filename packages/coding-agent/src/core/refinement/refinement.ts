@@ -14,6 +14,7 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
+import { backgroundThinkingLevel } from "../background-thinking.js";
 import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
 import type { CustomEntry } from "../session-manager.js";
@@ -909,14 +910,16 @@ export async function planRefinement(
 	// final text, which makes otherwise successful daemon /refine calls fail parsing.
 	// Keep the refinement request non-reasoning regardless of the interactive session
 	// thinking level so the model uses its output budget for the JSON object.
+	// Mandatory-thinking models cannot disable reasoning; use their lowest effort.
 	void thinkingLevel;
+	const reasoning = backgroundThinkingLevel(model);
 	const response = await completeSimple(
 		model,
 		{
 			systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers, ...(reasoning ? { reasoning } : {}) },
 	);
 
 	if (response.stopReason === "error") {
@@ -975,14 +978,22 @@ ${conversationText}
 	].join("\n\n");
 	// Auto-refine review requires parseable JSON. Keep it non-reasoning so
 	// reasoning-capable models use final text budget for the JSON object.
+	// Mandatory-thinking models cannot disable reasoning; use their lowest effort.
 	void thinkingLevel;
+	const reasoning = backgroundThinkingLevel(model);
 	const response = await completeSimple(
 		model,
 		{
 			systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+		{
+			maxTokens: autoRefineReviewMaxOutputTokens(model),
+			signal,
+			apiKey,
+			headers,
+			...(reasoning ? { reasoning } : {}),
+		},
 	);
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);

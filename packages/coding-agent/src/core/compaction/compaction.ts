@@ -8,6 +8,7 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
+import { backgroundThinkingLevel } from "../background-thinking.js";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -536,10 +537,8 @@ export async function generateSummary(
 		},
 	];
 
-	const completionOptions =
-		model.reasoning && thinkingLevel && thinkingLevel !== "off"
-			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-			: { maxTokens, signal, apiKey, headers };
+	const reasoning = backgroundThinkingLevel(model, thinkingLevel);
+	const completionOptions = { maxTokens, signal, apiKey, headers, ...(reasoning ? { reasoning } : {}) };
 
 	const response = await completeSimple(
 		model,
@@ -769,12 +768,11 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
+	const reasoning = backgroundThinkingLevel(model, thinkingLevel);
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		model.reasoning && thinkingLevel && thinkingLevel !== "off"
-			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-			: { maxTokens, signal, apiKey, headers },
+		{ maxTokens, signal, apiKey, headers, ...(reasoning ? { reasoning } : {}) },
 	);
 
 	if (response.stopReason === "error") {

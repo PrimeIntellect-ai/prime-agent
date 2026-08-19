@@ -1035,7 +1035,7 @@ describe("harness refinement", () => {
 			apiKey: "api-key",
 			headers: { "x-test-header": "1" },
 		});
-		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
+		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({ reasoning: "off" });
 		expect(result.appliedEdits[0]).toMatchObject({
 			action: "create",
 			kind: "memory",
@@ -1045,6 +1045,43 @@ describe("harness refinement", () => {
 		expect(state.entries.memory.native_validation.content).toBe(
 			"Run validation through the target project environment.",
 		);
+	});
+
+	it("requests the lowest supported effort for mandatory-thinking models", async () => {
+		const state = loadHarnessState(makeTempDir());
+		completeSimpleMock.mockResolvedValueOnce(
+			assistantText(
+				JSON.stringify({
+					summary: "No edits",
+					rationale: "Nothing durable yet.",
+					expectedOutcome: "No change.",
+					edits: [],
+				}),
+			),
+		);
+
+		await refineHarness(
+			[{ role: "user", content: "Session start.", timestamp: Date.now() } satisfies AgentMessage],
+			state,
+			[],
+			{
+				...createRefineModel(true),
+				thinkingLevelMap: {
+					off: null,
+					minimal: null,
+					low: "low",
+					medium: null,
+					high: "high",
+					xhigh: null,
+					max: "max",
+				},
+			},
+			"api-key",
+			{},
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({ reasoning: "low" });
 	});
 
 	it("caps the refinement output budget by the model's own maxTokens", async () => {

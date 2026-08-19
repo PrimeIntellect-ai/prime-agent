@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed `/btw` side questions, refinement, auto-refine review, compaction summaries, and branch summaries failing with a 400 on z.ai GLM-5.2/GLM-5.3: background completions now request thinking off explicitly, which the provider layer translates to the route's disable mechanism (`reasoning_effort: "none"` on z.ai), falling back to the lowest supported effort for mandatory-thinking models.
 - Fixed large IPython variables repeatedly slowing later turns by excluding them from persistent snapshots and removing them when context is compacted.
 - Fixed daemon socket paths being used verbatim in identity derivations: on supported platforms, `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree.
 - Added a `thinking` option to `rlm.run` for spawning subagents with an explicit reasoning level; invalid levels for the resolved child model fail spawn.

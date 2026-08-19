@@ -48,6 +48,16 @@ const mockSummaryResponse: AssistantMessage = {
 	timestamp: Date.now(),
 };
 
+const MANDATORY_THINKING_MAP = {
+	off: null,
+	minimal: null,
+	low: "low",
+	medium: null,
+	high: "high",
+	xhigh: null,
+	max: "max",
+} as const;
+
 const messages: AgentMessage[] = [{ role: "user", content: "Summarize this.", timestamp: Date.now() }];
 
 describe("generateSummary reasoning options", () => {
@@ -76,7 +86,7 @@ describe("generateSummary reasoning options", () => {
 		});
 	});
 
-	it("does not set reasoning when thinking is off", async () => {
+	it("requests thinking off explicitly when the session level is off", async () => {
 		await generateSummary(
 			messages,
 			createModel(true),
@@ -92,8 +102,21 @@ describe("generateSummary reasoning options", () => {
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
 			apiKey: "test-key",
+			reasoning: "off",
 		});
-		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
+	});
+
+	it("uses the lowest supported effort for mandatory-thinking models", async () => {
+		const mandatory = { ...createModel(true), thinkingLevelMap: MANDATORY_THINKING_MAP };
+
+		await generateSummary(messages, mandatory, 2000, "test-key", undefined, undefined, undefined, undefined, "off");
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({ reasoning: "low" });
+
+		await generateSummary(messages, mandatory, 2000, "test-key");
+
+		expect(completeSimpleMock.mock.calls[1][2]).toMatchObject({ reasoning: "low" });
 	});
 
 	it("does not set reasoning for non-reasoning models", async () => {

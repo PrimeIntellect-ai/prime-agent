@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fixed z.ai GLM-5.2 and GLM-5.3 requests failing with a 400 when thinking was disabled: the coding endpoint rejects `enable_thinking: false` for effort-capable models, so thinking-off now maps to `reasoning_effort: "none"` and the supported efforts are exposed; proxied z.ai routes (Prime Inference) stay toggle-only.
+- Regenerated the provider catalog, including z.ai reasoning-effort metadata.
+
 ## [0.7.3] - 2026-08-17
 
 - Added provider-derived reasoning levels for OpenRouter and Prime Inference models, including sparse, mandatory, toggle-only, and explicit-off capabilities.
