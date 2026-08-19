@@ -313,4 +313,53 @@ describe("KernelManager abort handling", () => {
 		expect(controlSend).toHaveBeenCalled();
 		manager.disposeSync();
 	});
+
+	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
+		vi.useFakeTimers();
+		const manager = new KernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		let releaseQueue: () => void = () => {};
+		const previousExecution = new Promise<void>((resolve) => {
+			releaseQueue = resolve;
+		});
+		const executeInner = vi.fn(
+			async (_code: string, opts: { signal?: AbortSignal }) =>
+				await new Promise<{ stdout: string; stderr: string; status: "aborted"; durationMs: number }>((resolve) => {
+					opts.signal?.addEventListener(
+						"abort",
+						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
+						{ once: true },
+					);
+				}),
+		);
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+			},
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {} },
+		);
+
+		const snapshot = (
+			manager as unknown as {
+				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
+			}
+		).captureSnapshot({ executionTimeoutMs: 5000 });
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(executeInner).not.toHaveBeenCalled();
+
+		releaseQueue();
+		await waitForCalls(executeInner, 1);
+		const signal = executeInner.mock.calls[0]?.[1].signal;
+		expect(signal?.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(signal?.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(signal?.aborted).toBe(true);
+		await expect(snapshot).resolves.toBeNull();
+	});
 });

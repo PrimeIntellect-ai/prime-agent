@@ -14,6 +14,7 @@ import {
 	buildRestoreCode,
 	buildSnapshotCode,
 	DEFAULT_SNAPSHOT_MAX_BYTES,
+	DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 	parseListNamesResult,
 	parseRestoreResult,
 	parseSnapshotResult,
@@ -37,6 +38,7 @@ const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
 // Cap how long a graceful dispose waits on the final snapshot; the debounced
 // on-disk copy is the fallback if this is exceeded.
 const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
+const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
@@ -145,8 +147,10 @@ export interface KernelSnapshotConfig {
 	path: string;
 	/** Absolute path for the JSON manifest written alongside the payload. */
 	manifestPath: string;
-	/** Skip variables (and abort the payload) above this many bytes. Default 256 MiB. */
+	/** Maximum aggregate snapshot size. Default 256 MiB. */
 	maxBytes?: number;
+	/** Maximum serialized size of one variable. Default 16 MiB. */
+	maxVariableBytes?: number;
 	/** Debounce window for the auto-snapshot after a successful execution. Default 1500 ms. */
 	debounceMs?: number;
 }
@@ -879,7 +883,11 @@ export class KernelManager {
 	}
 
 	/** Queue and run a cell, serializing against all other executions. */
-	private async enqueueExecute(code: string, opts: ExecuteOptions): Promise<ExecuteResult> {
+	private async enqueueExecute(
+		code: string,
+		opts: ExecuteOptions,
+		executionTimeoutMs?: number,
+	): Promise<ExecuteResult> {
 		if (opts.signal?.aborted) {
 			return { stdout: "", stderr: "", status: "aborted", durationMs: 0 };
 		}
@@ -896,6 +904,7 @@ export class KernelManager {
 		await prev;
 
 		const started = Date.now();
+		let executionTimeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 		try {
 			await this.waitForActiveExecutionToClearForReuse(opts.signal);
 			if (opts.signal?.aborted) {
@@ -904,8 +913,17 @@ export class KernelManager {
 			if ((this.state as string) === "shutdown") {
 				throw new Error("Kernel has been shut down");
 			}
-			return await this.executeInner(code, opts, started);
+			if (executionTimeoutMs === undefined) {
+				return await this.executeInner(code, opts, started);
+			}
+
+			const controller = new AbortController();
+			executionTimeout = globalThis.setTimeout(() => controller.abort(), executionTimeoutMs);
+			executionTimeout.unref?.();
+			const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
+			return await this.executeInner(code, { ...opts, signal }, started);
 		} finally {
+			if (executionTimeout) globalThis.clearTimeout(executionTimeout);
 			resolveNext();
 		}
 	}
@@ -1471,13 +1489,36 @@ export class KernelManager {
 	 * the kernel isn't running or no snapshot target was configured. Never throws.
 	 */
 	async snapshotState(): Promise<SnapshotResult | null> {
+		return this.captureSnapshot();
+	}
+
+	/** Persist the namespace, then remove variables above the per-variable cap. */
+	async pruneOversizedVariables(): Promise<SnapshotResult | null> {
+		return this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS, pruneOversized: true });
+	}
+
+	private async captureSnapshot(
+		options: { executionTimeoutMs?: number; pruneOversized?: boolean } = {},
+	): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
-		const code = buildSnapshotCode(cfg.path, cfg.manifestPath, cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES);
+		const code = buildSnapshotCode(
+			cfg.path,
+			cfg.manifestPath,
+			cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
+			cfg.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+			options.pruneOversized,
+		);
 		try {
-			const r = await this.enqueueExecute(code, { maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true });
+			const r = await this.enqueueExecute(
+				code,
+				{ maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true },
+				options.executionTimeoutMs,
+			);
 			if (r.status !== "ok") {
-				this.appendKernelDiagnostic(`state snapshot failed: ${r.error?.evalue ?? r.stderr}`);
+				this.appendKernelDiagnostic(
+					`state snapshot ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
+				);
 				return null;
 			}
 			return parseSnapshotResult(r.stdout, cfg.path);
@@ -1535,7 +1576,7 @@ export class KernelManager {
 		if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
 		this.snapshotTimer = globalThis.setTimeout(() => {
 			this.snapshotTimer = undefined;
-			void this.snapshotState();
+			void this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS });
 		}, cfg.debounceMs ?? DEFAULT_SNAPSHOT_DEBOUNCE_MS);
 		if (this.snapshotTimer && typeof this.snapshotTimer === "object" && "unref" in this.snapshotTimer) {
 			this.snapshotTimer.unref();

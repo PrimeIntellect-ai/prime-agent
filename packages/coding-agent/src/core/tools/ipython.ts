@@ -362,6 +362,13 @@ export class IpythonKernelProvisioner {
 		return this.startedManager?.isRunning ?? false;
 	}
 
+	/** Remove live variables above the snapshot's per-variable size limit. */
+	async pruneOversizedVariables(): Promise<string[] | null> {
+		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
+		const result = await m?.pruneOversizedVariables();
+		return result ? (result.pruned ?? []) : null;
+	}
+
 	/** Live user-defined names in the kernel namespace, or null if listing failed / no kernel. */
 	async listNamespaceNames(signal?: AbortSignal): Promise<string[] | null> {
 		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
