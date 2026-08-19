@@ -104,16 +104,12 @@ def _prime_agent_snapshot_state():
     skipped = []
     oversized = []
     total = 0
-    aggregate_full = False
     identify_oversized = ${pruneOversized ? "True" : "False"}
     for name in _b.list(ns.keys()):
         # Skip internals (dunder/underscore), IPython-injected names, and live
         # handles. A name matching a builtin (e.g. "list") is a user shadow worth
         # keeping — builtins themselves are not enumerated as user_ns keys.
         if name.startswith("_") or name in hidden or name in always_skip:
-            continue
-        if aggregate_full and not identify_oversized:
-            skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
             continue
         value = ns[name]
         remaining = ${maxBytes} - total
@@ -126,7 +122,6 @@ def _prime_agent_snapshot_state():
         except SnapshotSizeLimitExceeded:
             if not identify_oversized and remaining < ${maxVariableBytes}:
                 skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
-                aggregate_full = True
             else:
                 skipped.append({"name": name, "reason": "exceeds per-variable snapshot size cap"})
                 oversized.append(name)
@@ -136,7 +131,6 @@ def _prime_agent_snapshot_state():
             continue
         if total + _b.len(blob) > ${maxBytes}:
             skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
-            aggregate_full = True
             continue
         payload[name] = blob
         total += _b.len(blob)
@@ -173,16 +167,24 @@ def _prime_agent_snapshot_state():
     except _b.Exception:
         pass
     pruned_ids = {_b.id(ns[name]) for name in pruned}
-    for name in pruned:
-        del ns[name]
-    output_cache = ns.get("Out")
-    if _b.isinstance(output_cache, _b.dict):
-        for key in _b.list(output_cache.keys()):
-            if _b.id(output_cache[key]) in pruned_ids:
-                del output_cache[key]
-    for name in hidden:
-        if name in ns and _b.id(ns[name]) in pruned_ids:
-            del ns[name]
+    while True:
+        try:
+            for name in pruned:
+                if name in ns:
+                    del ns[name]
+            output_cache = ns.get("Out")
+            if _b.isinstance(output_cache, _b.dict):
+                for key in _b.list(output_cache.keys()):
+                    if _b.id(output_cache[key]) in pruned_ids:
+                        del output_cache[key]
+            for name in hidden:
+                if name in ns and _b.id(ns[name]) in pruned_ids:
+                    del ns[name]
+            break
+        except _b.KeyboardInterrupt:
+            # Deletion is idempotent. Finish the short critical section so a
+            # snapshot timeout cannot leave only some purge candidates live.
+            continue
     _b.print(${pyStr(RESULT_MARKER)} + json.dumps({"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}))
 
 

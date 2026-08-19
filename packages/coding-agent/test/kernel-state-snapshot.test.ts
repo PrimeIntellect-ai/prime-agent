@@ -98,6 +98,7 @@ describe("buildSnapshotCode", () => {
 	it("uses dill, an atomic write, and skips internal handles", () => {
 		expect(code).toContain("import dill");
 		expect(code).toContain("os.replace");
+		expect(code).toContain("except _b.KeyboardInterrupt");
 		expect(code).toContain('"rlm"');
 		expect(code).toContain(`print(${JSON.stringify(MARKER)}`);
 	});
