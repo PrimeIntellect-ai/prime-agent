@@ -19,7 +19,7 @@ import {
 	createAgentSessionMessage,
 	isAgentSessionMessage,
 } from "../src/core/agent-messages.js";
-import { AgentSession } from "../src/core/agent-session.js";
+import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandlers, KernelManager } from "../src/core/kernel/index.js";
@@ -32,9 +32,11 @@ import {
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { createSessionMessageObligationBridge } from "../src/core/session-message-obligation-bridge.js";
 import { SettingsManager, type SettingsStorage } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+import { WORKER_MODEL_SELECTOR } from "../src/core/workflow/worker-model-capability-gate.js";
 import { type ActiveSessionState, resolveActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
@@ -252,12 +254,16 @@ describe("AgentSession rlm recursion", () => {
 			maxDepth?: number;
 			streamFn?: StreamFn;
 			agentMessageController?: AgentSessionMessageController;
+			includeAgentMessageSkill?: boolean;
 			subagentRuntimeHost?: SubagentRuntimeHost;
 			customTools?: ConstructorParameters<typeof AgentSession>[0]["customTools"];
 			rlmSessionDir?: string;
 			sessionManager?: SessionManager;
 			settingsManager?: SettingsManager;
 			extensionsResult?: LoadExtensionsResult;
+			toolExecutionDeadlineMs?: number;
+			agentMessageDeliveryDeadlineMs?: number;
+			kernelPythonLauncher?: string;
 		} = {},
 	): AgentSession {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
@@ -285,24 +291,25 @@ describe("AgentSession rlm recursion", () => {
 			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
 			resourceLoader: createTestResourceLoader({
 				extensionsResult: options.extensionsResult,
-				skills: options.agentMessageController
-					? [
-							{
-								name: "agent-message",
-								description: "test",
-								filePath: join(tempDir, "SKILL.md"),
-								baseDir: tempDir,
-								sourceInfo: createSyntheticSourceInfo(join(tempDir, "SKILL.md"), { source: "test" }),
-								disableModelInvocation: false,
-								kind: "python",
-								python: {
-									importName: "agent_message",
-									packagePath: tempDir,
-									pyprojectPath: join(tempDir, "pyproject.toml"),
+				skills:
+					options.agentMessageController || options.includeAgentMessageSkill
+						? [
+								{
+									name: "agent-message",
+									description: "test",
+									filePath: join(tempDir, "SKILL.md"),
+									baseDir: tempDir,
+									sourceInfo: createSyntheticSourceInfo(join(tempDir, "SKILL.md"), { source: "test" }),
+									disableModelInvocation: false,
+									kind: "python",
+									python: {
+										importName: "agent_message",
+										packagePath: tempDir,
+										pyprojectPath: join(tempDir, "pyproject.toml"),
+									},
 								},
-							},
-						]
-					: undefined,
+							]
+						: undefined,
 			}),
 			agentMessageController: options.agentMessageController,
 			subagentRuntimeHost: options.subagentRuntimeHost,
@@ -310,9 +317,126 @@ describe("AgentSession rlm recursion", () => {
 			rlmDepth: options.depth,
 			rlmMaxDepth: options.maxDepth,
 			rlmSessionDir: options.rlmSessionDir,
+			toolExecutionDeadlineMs: options.toolExecutionDeadlineMs,
+			agentMessageDeliveryDeadlineMs: options.agentMessageDeliveryDeadlineMs,
+			...({ kernelPythonLauncher: options.kernelPythonLauncher } as Record<string, unknown>),
 		});
 		return session;
 	}
+
+	it("propagates the host tool deadline to a spawned child runtime", async () => {
+		let observedDeadline: number | undefined;
+		const root = createSession({
+			toolExecutionDeadlineMs: 75,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					observedDeadline = options.toolExecutionDeadlineMs;
+					throw new Error("deadline_probe_complete");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+		const handle = await root.runRlmChild("deadline probe", { name: "deadline-child" });
+		await expect(root.awaitRlmChildCompletion(handle.rlm_child_id)).resolves.toMatchObject({
+			status: "error",
+			error: "deadline_probe_complete",
+		});
+		expect(observedDeadline).toBe(75);
+	});
+
+	it("propagates the exact kernel launcher to a spawned child runtime", async () => {
+		let observedLauncher: string | undefined;
+		const root = createSession({
+			kernelPythonLauncher: "/tmp/exact-kernel-launcher",
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					observedLauncher = (options as unknown as { kernelPythonLauncher?: string }).kernelPythonLauncher;
+					throw new Error("launcher_probe_complete");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+		const handle = await root.runRlmChild("launcher probe", { name: "launcher-child" });
+		await expect(root.awaitRlmChildCompletion(handle.rlm_child_id)).resolves.toMatchObject({
+			status: "error",
+			error: "launcher_probe_complete",
+		});
+		expect(observedLauncher).toBe("/tmp/exact-kernel-launcher");
+	});
+
+	it("rejects a workflow child without the scheduler capsule before spawning", async () => {
+		let spawnCalls = 0;
+		const admitWorkerModel = vi.fn();
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					spawnCalls += 1;
+					throw new Error("spawn must not be reached");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+		root.setWorkflowHost({
+			execute: vi.fn(async () => {
+				throw new Error("unexpected workflow command");
+			}),
+			status: () => ({ status: "active", workflowId: "workflow-capsule", stateDigest: "workflow-head" }) as never,
+			admitWorkerModel,
+		} as never);
+
+		await expect(
+			root.runWorkflowRlmChild("capsule-bound task", "capsule-child", WORKER_MODEL_SELECTOR, {
+				workflowId: "workflow-capsule",
+				taskId: "task-capsule",
+				attemptId: "attempt-capsule",
+				executionKey: "execution-capsule",
+				epochRef: { storeEpoch: 1, coordinatorEpoch: 1 },
+				deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		).rejects.toThrow("workflow_worker_task_capsule_required");
+		expect(admitWorkerModel).not.toHaveBeenCalled();
+		expect(spawnCalls).toBe(0);
+	});
+
+	it("rejects a raw child from a scheduler-bound worker", async () => {
+		let spawnCalls = 0;
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					spawnCalls += 1;
+					throw new Error("raw spawn must not be reached");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+		const internals = root as unknown as { _workflowTaskBinding?: unknown };
+		internals._workflowTaskBinding = { taskId: "scheduler-task", attemptId: "scheduler-attempt" };
+
+		await expect(root.runRlmChild("unbound grandchild")).rejects.toThrow(
+			"workflow workers require a scheduler-issued task attempt; direct child launch is not authorized",
+		);
+		expect(spawnCalls).toBe(0);
+	});
+
+	it("allows a raw child when the session has no workflow ownership or task binding", async () => {
+		let spawnCalls = 0;
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					spawnCalls += 1;
+					throw new Error("generic spawn reached");
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		const handle = await root.runRlmChild("generic child", { name: "generic-child" });
+		await expect(root.awaitRlmChildCompletion(handle.rlm_child_id)).resolves.toMatchObject({
+			status: "error",
+			error: "generic spawn reached",
+		});
+		expect(spawnCalls).toBe(1);
+	});
 
 	it("propagates skipped-running deletion outcomes through the host handler", async () => {
 		const subagent = {
@@ -719,6 +843,293 @@ describe("AgentSession rlm recursion", () => {
 		expect(doneUpdate?.toolUseCount).toBeUndefined();
 	});
 
+	it("persists the spawn obligation before a hosted child receives its task", async () => {
+		let childBridge: Awaited<ReturnType<typeof createSessionMessageObligationBridge>> | undefined;
+		let obligationRoot: string | undefined;
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async (options) => {
+					const childSessionManager = SessionManager.create(tempDir, options.sessionDir);
+					childSessionManager.newSession({
+						parentSession: options.parentSession.sessionFile,
+						rlmDepth: options.rlmDepth,
+					});
+					const child = createSession({
+						depth: options.rlmDepth,
+						maxDepth: options.rlmMaxDepth,
+						sessionManager: childSessionManager,
+					});
+					child.setSessionName(options.sessionName);
+					obligationRoot = join(options.sessionDir, "spawn-obligations");
+					childBridge = await createSessionMessageObligationBridge({
+						rootDir: obligationRoot,
+						targetSessionId: child.sessionId,
+						ownerId: "hosted-child-spawn-test",
+						session: child,
+					});
+					child.setAgentMessageObligationBridge(childBridge);
+					options.onSessionPublished?.(child);
+					return { session: child };
+				},
+				deleteRlmSubagentRuntime: async () => undefined,
+			},
+		});
+
+		const spawned = await root.runRlmChild("inspect governed inputs", { name: "governed-recon" });
+		await expect(root.awaitRlmChildCompletion(spawned.rlm_child_id)).resolves.toMatchObject({ status: "completed" });
+		if (obligationRoot === undefined) throw new Error("Hosted child obligation root was not created");
+		const journal = readFileSync(join(obligationRoot, "message-obligations.jsonl"), "utf8");
+		expect(journal).toContain(`"messageId":"spawn:${spawned.rlm_child_id}"`);
+		expect(journal).toContain('"kind":"context_delivered"');
+		root.dispose();
+		await childBridge?.close();
+	});
+
+	it("routes an inline child's stable parent send without a daemon controller", async () => {
+		const root = createSession({ includeAgentMessageSkill: true });
+		const obligationRoot = join(tempDir, "inline-parent-message-obligations");
+		const bridge = await createSessionMessageObligationBridge({
+			rootDir: obligationRoot,
+			targetSessionId: root.sessionId,
+			ownerId: "inline-parent-test",
+			session: root,
+		});
+		root.setAgentMessageObligationBridge(bridge);
+		const spawned = await root.runRlmChild("inspect source runtime", { name: "inline-recon" });
+		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) !== undefined);
+		const child = root.getRlmChildSession(spawned.rlm_child_id);
+		if (child === undefined) throw new Error("Inline child was not retained.");
+		const send = (child as unknown as InspectableRlmSession)._createKernelHostHandlers()["agent_message.send"];
+		if (send === undefined) throw new Error("Inline child has no stable parent-send handler.");
+
+		const receipts = await Promise.all(
+			Array.from({ length: 6 }, (_, index) =>
+				send({ message: `recon finding ${index + 1}`, receiver_role: "parent" }),
+			),
+		);
+		const receipt = receipts[0];
+
+		expect(receipt).toMatchObject({
+			source: "agent_message",
+			message: "recon finding 1",
+			deliveryStatus: "queued",
+			target: { sessionId: root.sessionId },
+		});
+		const receiptIds = receipts.map((candidate) => (candidate as { id: string }).id);
+		await waitFor(() =>
+			receiptIds.every((id) =>
+				root.messages.some((message) => isAgentSessionMessage(message) && message.details.id === id),
+			),
+		);
+		const deliveredIds = root.messages.flatMap((message) =>
+			isAgentSessionMessage(message) && receiptIds.includes(message.details.id) ? [message.details.id] : [],
+		);
+		const journal = readFileSync(join(obligationRoot, "message-obligations.jsonl"), "utf8");
+		const acceptedOrder = [...receiptIds].sort((left, right) => journal.indexOf(left) - journal.indexOf(right));
+		expect(deliveredIds).toEqual(acceptedOrder);
+		for (const id of receiptIds) {
+			expect(journal).toContain(`"messageId":"${id}"`);
+		}
+		root.setAgentMessageObligationBridge(undefined);
+		await bridge.close();
+	});
+
+	it("bounds an accepted inline parent message when the active provider turn has no boundary", async () => {
+		const streamFn: StreamFn = (_model, context, options) => {
+			if (userText(context) !== "hold parent turn") return streamAnswer(`child answer: ${userText(context)}`);
+			const stream = createAssistantMessageEventStream();
+			options?.signal?.addEventListener(
+				"abort",
+				() => {
+					const message = assistantMessage("");
+					stream.push({ type: "done", reason: "stop", message });
+				},
+				{ once: true },
+			);
+			return stream;
+		};
+		const root = createSession({
+			includeAgentMessageSkill: true,
+			streamFn,
+			agentMessageDeliveryDeadlineMs: 25,
+		});
+		const obligationRoot = join(tempDir, "inline-parent-message-deadline-obligations");
+		const bridge = await createSessionMessageObligationBridge({
+			rootDir: obligationRoot,
+			targetSessionId: root.sessionId,
+			ownerId: "inline-parent-deadline-test",
+			session: root,
+		});
+		root.setAgentMessageObligationBridge(bridge);
+		const spawned = await root.runRlmChild("inspect bounded delivery", { name: "inline-deadline-recon" });
+		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) !== undefined);
+		const child = root.getRlmChildSession(spawned.rlm_child_id);
+		if (child === undefined) throw new Error("Inline child was not retained.");
+		const send = (child as unknown as InspectableRlmSession)._createKernelHostHandlers()["agent_message.send"];
+		if (send === undefined) throw new Error("Inline child has no stable parent-send handler.");
+
+		const parentTurn = root.prompt("hold parent turn");
+		await waitFor(() => root.isStreaming);
+		const receipt = (await send({
+			message: "bounded recon finding",
+			receiver_role: "parent",
+		})) as { id: string };
+		const delivery = await Promise.race([
+			(async () => {
+				await waitFor(() => {
+					const persisted = root.sessionManager.getEntries().some((entry) => {
+						if (entry.type !== "custom_message") return false;
+						return (entry.details as { id?: string } | undefined)?.id === receipt.id;
+					});
+					if (!persisted) return false;
+					const journal = readFileSync(join(obligationRoot, "message-obligations.jsonl"), "utf8");
+					return journal.includes(`"kind":"context_delivered"`) && journal.includes(receipt.id);
+				});
+				return "delivered" as const;
+			})(),
+			sleep(250).then(() => "timeout" as const),
+		]);
+		if (delivery === "timeout") root.requestAbort();
+		await parentTurn.catch(() => undefined);
+
+		expect(delivery).toBe("delivered");
+		expect(
+			root.messages.filter((message) => isAgentSessionMessage(message) && message.details.id === receipt.id),
+		).toHaveLength(1);
+		const journal = readFileSync(join(obligationRoot, "message-obligations.jsonl"), "utf8");
+		expect(journal.match(/"kind":"context_delivered"/gu)).toHaveLength(1);
+		root.setAgentMessageObligationBridge(undefined);
+		await bridge.close();
+	});
+
+	it("drains every accepted parent message when a workflow successor waits on delivery", async () => {
+		const streamFn: StreamFn = (_model, context, options) => {
+			if (userText(context) !== "hold workflow handoff") return streamAnswer(`child answer: ${userText(context)}`);
+			const stream = createAssistantMessageEventStream();
+			options?.signal?.addEventListener(
+				"abort",
+				() => stream.push({ type: "done", reason: "stop", message: assistantMessage("") }),
+				{ once: true },
+			);
+			return stream;
+		};
+		const root = createSession({
+			includeAgentMessageSkill: true,
+			streamFn,
+			agentMessageDeliveryDeadlineMs: 10_000,
+		});
+		const obligationRoot = join(tempDir, "workflow-handoff-message-obligations");
+		const bridge = await createSessionMessageObligationBridge({
+			rootDir: obligationRoot,
+			targetSessionId: root.sessionId,
+			ownerId: "workflow-handoff-message-test",
+			session: root,
+		});
+		root.setAgentMessageObligationBridge(bridge);
+		const spawned = await root.runRlmChild("inspect workflow handoff", { name: "handoff-recon" });
+		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) !== undefined);
+		const child = root.getRlmChildSession(spawned.rlm_child_id);
+		if (child === undefined) throw new Error("Inline child was not retained.");
+		const send = (child as unknown as InspectableRlmSession)._createKernelHostHandlers()["agent_message.send"];
+		if (send === undefined) throw new Error("Inline child has no stable parent-send handler.");
+
+		const parentTurn = root.prompt("hold workflow handoff");
+		await waitFor(() => root.isStreaming);
+		const receipts = await Promise.all([
+			send({ message: "first handoff finding", receiver_role: "parent" }),
+			send({ message: "second handoff finding", receiver_role: "parent" }),
+		]);
+		const receiptIds = receipts.map((receipt) => (receipt as { id: string }).id);
+
+		await expectSettlesWithin(root.waitForPendingAgentMessageDelivery(), 100);
+		expect(
+			root.sessionManager.getEntries().filter((entry) => {
+				if (entry.type !== "custom_message") return false;
+				return receiptIds.includes((entry.details as { id?: string } | undefined)?.id ?? "");
+			}),
+		).toHaveLength(2);
+		const journal = readFileSync(join(obligationRoot, "message-obligations.jsonl"), "utf8");
+		expect(journal.match(/"kind":"context_delivered"/gu)).toHaveLength(2);
+		for (const receiptId of receiptIds) {
+			expect(journal).toContain(receiptId);
+		}
+
+		root.requestAbort();
+		await parentTurn.catch(() => undefined);
+		root.setAgentMessageObligationBridge(undefined);
+		await bridge.close();
+	});
+
+	it("persists accepted inline parent context before a delayed provider abort settles", async () => {
+		const streamFn: StreamFn = (_model, context, options) => {
+			if (userText(context) !== "hold delayed parent turn")
+				return streamAnswer(`child answer: ${userText(context)}`);
+			const stream = createAssistantMessageEventStream();
+			options?.signal?.addEventListener(
+				"abort",
+				() => {
+					setTimeout(() => {
+						const message = assistantMessage("");
+						stream.push({ type: "done", reason: "stop", message });
+					}, 150);
+				},
+				{ once: true },
+			);
+			return stream;
+		};
+		const root = createSession({
+			includeAgentMessageSkill: true,
+			streamFn,
+			agentMessageDeliveryDeadlineMs: 50,
+		});
+		const obligationRoot = join(tempDir, "inline-parent-message-persist-deadline-obligations");
+		const bridge = await createSessionMessageObligationBridge({
+			rootDir: obligationRoot,
+			targetSessionId: root.sessionId,
+			ownerId: "inline-parent-persist-deadline-test",
+			session: root,
+		});
+		root.setAgentMessageObligationBridge(bridge);
+		const spawned = await root.runRlmChild("inspect persisted delivery", { name: "inline-persist-recon" });
+		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) !== undefined);
+		const child = root.getRlmChildSession(spawned.rlm_child_id);
+		if (child === undefined) throw new Error("Inline child was not retained.");
+		const send = (child as unknown as InspectableRlmSession)._createKernelHostHandlers()["agent_message.send"];
+		if (send === undefined) throw new Error("Inline child has no stable parent-send handler.");
+
+		let parentSettled = false;
+		const parentTurn = root.prompt("hold delayed parent turn").finally(() => {
+			parentSettled = true;
+		});
+		await waitFor(() => root.isStreaming);
+		const queuedAt = Date.now();
+		const receipt = (await send({
+			message: "persist before provider abort settles",
+			receiver_role: "parent",
+		})) as { id: string };
+		await waitFor(() =>
+			root.sessionManager.getEntries().some((entry) => {
+				if (entry.type !== "custom_message") return false;
+				return (entry.details as { id?: string } | undefined)?.id === receipt.id;
+			}),
+		);
+
+		expect(parentSettled).toBe(false);
+		expect(Date.now() - queuedAt).toBeLessThan(125);
+		await parentTurn;
+		await waitFor(() =>
+			root.messages.some((message) => isAgentSessionMessage(message) && message.details.id === receipt.id),
+		);
+		expect(
+			root.sessionManager.getEntries().filter((entry) => {
+				if (entry.type !== "custom_message") return false;
+				return (entry.details as { id?: string } | undefined)?.id === receipt.id;
+			}),
+		).toHaveLength(1);
+		root.setAgentMessageObligationBridge(undefined);
+		await bridge.close();
+	});
+
 	it("marks an in-cell roled send to the parent as replied", async () => {
 		const sendAgentMessage = vi.fn(async () => ({
 			id: "agentmsg-reply",
@@ -859,8 +1270,8 @@ describe("AgentSession rlm recursion", () => {
 			promptInjectedMessage;
 		const spawned = await root.runRlmChild("completed task", { name: "completed-worker" });
 		const internals = root as unknown as InspectableRlmSession;
-		await waitFor(() => internals._activeRlmChildRuns.get(spawned.rlm_child_id)?.status === "done");
 		await waitFor(() => promptInjectedMessage.mock.calls.length === 1);
+		expect(internals._activeRlmChildRuns.get(spawned.rlm_child_id)?.status).toBe("running");
 		const send = internals._createKernelHostHandlers()["agent_message.send"];
 		if (!send) throw new Error("Missing agent_message.send host handler");
 
@@ -1846,6 +2257,202 @@ describe("AgentSession rlm recursion", () => {
 			expect(attributions).toHaveLength(2);
 			expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
 		});
+	});
+
+	it("cancels a child model operation at its immutable workflow deadline", async () => {
+		let toolExecutions = 0;
+		const tool = {
+			name: "echo",
+			description: "Echo a value",
+			label: "echo",
+			parameters: Type.Object({ value: Type.String() }),
+			execute: async (_toolCallId: string, params: { value: string }) => {
+				toolExecutions += 1;
+				return { content: [{ type: "text" as const, text: params.value }], details: {} };
+			},
+		};
+		const root = createSession({
+			customTools: [tool],
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				setTimeout(() => {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: {
+							...assistantMessage("", usage(1, 1)),
+							content: [
+								{ type: "toolCall" as const, id: "late-echo", name: "echo", arguments: { value: "late" } },
+							],
+							stopReason: "toolUse" as const,
+						},
+					});
+				}, 250);
+				return stream;
+			},
+		});
+		const startWorkflowChild = (
+			root as unknown as {
+				_startRlmChildRun(
+					prompt: string,
+					kwargs: Record<string, unknown>,
+					spawnCode: string | undefined,
+					deliverTerminalMessages: boolean,
+					thinkingLevel: undefined,
+					onMeaningfulProgress: undefined,
+					deadlineAt: string,
+				): ReturnType<AgentSession["runRlmChild"]>;
+			}
+		)._startRlmChildRun.bind(root);
+		const deadlineAt = new Date(Date.now() + 100).toISOString();
+
+		const handle = await startWorkflowChild(
+			"use a tool after the deadline",
+			{},
+			undefined,
+			false,
+			undefined,
+			undefined,
+			deadlineAt,
+		);
+		const completion = await root.awaitRlmChildCompletion(handle.rlm_child_id);
+
+		expect(completion).toMatchObject({ status: "cancelled", error: "task_deadline_expired" });
+		expect(toolExecutions).toBe(0);
+	});
+
+	it("does not publish terminal workflow snapshots from child end events before fencing", async () => {
+		let childStarted!: () => void;
+		const childStartedPromise = new Promise<void>((resolve) => {
+			childStarted = resolve;
+		});
+		let childStream: ReturnType<typeof createAssistantMessageEventStream> | undefined;
+		const root = createSession({
+			streamFn: () => {
+				childStream = createAssistantMessageEventStream();
+				childStarted();
+				return childStream;
+			},
+		});
+		const binding = {
+			schemaVersion: 1 as const,
+			kind: "workflow_task_binding" as const,
+			workflowId: "workflow-event-fence",
+			taskId: "task-event-fence",
+			attemptId: "attempt-event-fence",
+			executionKey: "execution-event-fence",
+			epochRef: { storeEpoch: 1, coordinatorEpoch: 1 },
+			deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+			capsuleDigest: "capsule-event-fence",
+		};
+		const startWorkflowChild = (
+			root as unknown as {
+				_startRlmChildRun(
+					prompt: string,
+					kwargs: Record<string, unknown>,
+					spawnCode: string | undefined,
+					deliverTerminalMessages: boolean,
+					thinkingLevel: undefined,
+					onMeaningfulProgress: undefined,
+					deadlineAt: string,
+					workflowTaskBinding: typeof binding,
+				): ReturnType<AgentSession["runRlmChild"]>;
+			}
+		)._startRlmChildRun.bind(root);
+		const handle = await startWorkflowChild(
+			"wait for terminal fencing",
+			{},
+			undefined,
+			false,
+			undefined,
+			undefined,
+			binding.deadlineAt,
+			binding,
+		);
+		await childStartedPromise;
+		const internals = root as unknown as InspectableRlmSession & {
+			_cancelRlmChildRun(run: InspectableRlmRun, reason: string): boolean;
+		};
+		const run = internals._activeRlmChildRuns.get(handle.rlm_child_id);
+		if (!run?.session) throw new Error("Workflow child was not published");
+		const child = run.session;
+		let releaseFence!: () => void;
+		const terminalFence = new Promise<void>((resolve) => {
+			releaseFence = resolve;
+		});
+		const order: string[] = [];
+		const childInternals = child as unknown as {
+			_fenceTerminalTaskKernel: () => Promise<void>;
+			_emit(event: AgentSessionEvent): void;
+		};
+		childInternals._fenceTerminalTaskKernel = vi.fn(async () => {
+			order.push("fence");
+			await terminalFence;
+		});
+		const childAbort = child.abort.bind(child);
+		child.abort = () => {
+			order.push("abort");
+			childAbort();
+			childInternals._emit({
+				type: "tool_execution_end",
+				toolCallId: "late-tool",
+				toolName: "echo",
+				result: { content: [], details: {} },
+				isError: true,
+			});
+			childInternals._emit({ type: "agent_end", messages: [] });
+			childStream?.push({ type: "done", reason: "stop", message: assistantMessage("late child answer") });
+		};
+		const publishedStatuses: string[] = [];
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update" && event.child.id === handle.rlm_child_id) {
+				publishedStatuses.push(event.child.status);
+				if (event.child.status === "cancelled") order.push("publish");
+			}
+		});
+
+		expect(internals._cancelRlmChildRun(run, "task_deadline_expired")).toBe(true);
+		await sleep(0);
+		expect(publishedStatuses).not.toContain("cancelled");
+		expect(order).toEqual(["fence", "abort"]);
+
+		releaseFence();
+		await vi.waitFor(() => expect(publishedStatuses).toContain("cancelled"));
+		expect(order).toContain("publish");
+	});
+
+	it("rejects tool admission at the workflow deadline before extension handling", async () => {
+		const root = createSession();
+		const abort = vi.fn();
+		const internal = root as unknown as {
+			_workflowTaskDeadlineMonotonicAtMs?: number;
+			_workflowTaskDeadlineAbort?: () => void;
+		};
+		internal._workflowTaskDeadlineMonotonicAtMs = performance.now() - 1;
+		internal._workflowTaskDeadlineAbort = abort;
+		const beforeToolCall = root.agent.beforeToolCall as unknown as (input: {
+			toolCall: { id: string; name: string };
+			args: Record<string, unknown>;
+		}) => Promise<unknown>;
+
+		await expect(beforeToolCall({ toolCall: { id: "late-tool", name: "echo" }, args: {} })).rejects.toThrow(
+			"workflow_task_deadline_expired",
+		);
+		expect(abort).toHaveBeenCalledOnce();
+	});
+
+	it("stops a child model continuation at the workflow deadline", () => {
+		const root = createSession();
+		const abort = vi.fn();
+		const internal = root as unknown as {
+			_workflowTaskDeadlineMonotonicAtMs?: number;
+			_workflowTaskDeadlineAbort?: () => void;
+		};
+		internal._workflowTaskDeadlineMonotonicAtMs = performance.now() - 1;
+		internal._workflowTaskDeadlineAbort = abort;
+
+		expect(root.agent.shouldStopBeforeTurn?.()).toBe(true);
+		expect(abort).toHaveBeenCalledOnce();
 	});
 
 	it("gets and persists per-chat max-depth changes without transcript messages", async () => {

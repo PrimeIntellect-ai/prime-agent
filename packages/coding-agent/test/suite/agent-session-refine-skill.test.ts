@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkflowShell } from "../../src/core/workflow/shell.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionInternals = {
@@ -132,6 +135,81 @@ describe("AgentSession refine skill host requests", () => {
 		expect(result.scheduled).toBe(false);
 		expect(result.reason).toContain("no active turn");
 		expect(harness.session.handleRefineHostRequest("refine.status").pending).toBe(false);
+	});
+
+	it("keeps workflow-owned nonauthoritative findings out of durable refinement", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			settings: {
+				autoRefine: { enabled: true, compact: true, turnInterval: 1, cooldownMs: 0 },
+				compaction: { keepRecentTokens: 1 },
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "workflow-owned compaction summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: { source: "extension" },
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		const workflowHost: WorkflowShell = {
+			execute: async () => workflowHost.status(),
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "paused",
+				phase: "recovering",
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "paused-nonauthoritative-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [{ code: "nonauthoritative_evidence" }],
+			}),
+		};
+		harness.session.setWorkflowHost(workflowHost);
+		const workflowHandlers = (harness.session as unknown as SessionInternals)._createKernelHostHandlers();
+		expect(Object.keys(workflowHandlers)).not.toContain("refine.run");
+
+		setStreaming(harness, true);
+		const result = harness.session.handleRefineHostRequest("refine.run", {
+			instructions: "promote NONAUTHORITATIVE_RECON_ONLY checkpoint",
+			global: true,
+		});
+		setStreaming(harness, false);
+
+		expect(result).toMatchObject({
+			scheduled: false,
+			reason: expect.stringContaining("authenticated learning promotion receipt"),
+		});
+		expect(harness.session.handleRefineHostRequest("refine.status").pending).toBe(false);
+		await expect(
+			harness.session.refine({ instructions: "promote NONAUTHORITATIVE_RECON_ONLY checkpoint", global: true }),
+		).rejects.toThrow("authenticated learning promotion receipt");
+
+		await harness.session.compact();
+		const harnessStatePath = join(
+			harness.session.sessionManager.getSessionArtifactDir()!,
+			"harness",
+			"harness_state.json",
+		);
+		expect(existsSync(harnessStatePath)).toBe(false);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === "prime-agent.refinement"),
+		).toBe(false);
 	});
 
 	it("validates instructions type in refine.run", async () => {

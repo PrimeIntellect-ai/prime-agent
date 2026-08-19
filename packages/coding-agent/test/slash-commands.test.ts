@@ -263,4 +263,62 @@ describe("session slash commands", () => {
 		expect(parseSessionSlashCommand("/compaction")).toBeUndefined();
 		expect(parseSessionSlashCommand("/settings")).toBeUndefined();
 	});
+
+	test("registers workflow control commands for session prompt transport", () => {
+		expect(SESSION_SLASH_COMMAND_NAMES).toContain("workflow");
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "workflow")).toMatchObject({
+			argumentHint:
+				"[<prompt>|start [--profile inline|parallel] [--max-workers <n>] <prompt>|approve [--cloud]|status|decisions|resources|respond|pause|resume|cancel]",
+			takesArgument: true,
+		});
+		expect(parseSessionSlashCommand("/workflow")).toEqual({
+			name: "workflow",
+			args: "",
+			text: "/workflow",
+		});
+		expect(parseSessionSlashCommand("/workflow start prove the shell")).toEqual({
+			name: "workflow",
+			args: "start prove the shell",
+			text: "/workflow start prove the shell",
+		});
+		expect(parseSessionSlashCommand("/workflow status")).toEqual({
+			name: "workflow",
+			args: "status",
+			text: "/workflow status",
+		});
+		expect(parseSessionSlashCommand("/workflow decisions")).toEqual({
+			name: "workflow",
+			args: "decisions",
+			text: "/workflow decisions",
+		});
+		expect(parseSessionSlashCommand("/workflow resources")).toEqual({
+			name: "workflow",
+			args: "resources",
+			text: "/workflow resources",
+		});
+		expect(parseSessionSlashCommand("/workflow respond approval-1 decline")).toEqual({
+			name: "workflow",
+			args: "respond approval-1 decline",
+			text: "/workflow respond approval-1 decline",
+		});
+		expect(parseSessionSlashCommand("/workflow pause waiting on approval")).toEqual({
+			name: "workflow",
+			args: "pause waiting on approval",
+			text: "/workflow pause waiting on approval",
+		});
+		expect(parseSessionSlashCommand("/workflow resume after review")).toEqual({
+			name: "workflow",
+			args: "resume after review",
+			text: "/workflow resume after review",
+		});
+		expect(parseSessionSlashCommand("/workflow cancel no longer needed")).toEqual({
+			name: "workflow",
+			args: "cancel no longer needed",
+			text: "/workflow cancel no longer needed",
+		});
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "resume")).toMatchObject({
+			argumentHint: "[id|path]",
+			takesArgument: true,
+		});
+	});
 });

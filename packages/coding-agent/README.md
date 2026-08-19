@@ -160,6 +160,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/workflow [prompt]` | Brainstorm a complete workflow from a prompt or the current task, then seal and approve it before execution; use `/workflow approve`, `status`, `pause`, `resume`, or `cancel` afterward |
 | `/copy` | Copy last assistant message to clipboard |
 | `/btw <question>`, `/side <question>` | Ask an inline side question without adding it to the session; replies continue the side conversation, esc returns |
 | `/export [file]` | Export session to HTML file |
@@ -168,6 +169,22 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit Prime Agent |
+
+Prime Agent uses TDD with intent, not coverage. Autonomous goal and workflow continuations judge progress against the user's intended outcome and forbidden outcomes, keep the planner moving through failed approaches, and challenge proxy metrics before consequential actions. Test counts and coverage are diagnostics, unit tests are temporary debugging probes, and mock-only evidence cannot prove progress or completion. Permanent acceptance evidence cannot call private symbols, inspect source text, or depend on production test hooks; those probes are temporary and nonauthorizing. Durability and authority require observable evidence through public host, store, process, restart, or integration boundaries.
+
+Persisted Prime workflow composition uses one authenticated runtime store. `/workflow <prompt>` and bare `/workflow` first run a conversational completeness check, asking only about material unknowns before sealing one proposal; the workflow host is not created until that proposal is complete. `/workflow approve` consumes a private one-use approval credential, while `/workflow approve --cloud` also authorizes the bounded cloud option. Start approval records the requested profile, bounded worker allowance, and cloud-compute choice. Worker launches and terminal results are immutable evidence: failure releases capacity, appears in the root session with its task and evidence binding, and never completes a stage; a launched worker that cannot be reconnected after restart becomes an explicit lost-worker failure for replanning. When authenticated config, recipe, and skill snapshots are supplied, built-in AutoResearch and MemPalace requests are installed as bounded, data-only proposals or canonical reads; omitted subsystem authority remains fail-closed. AutoResearch admits only adversarially reviewed, falsifiable, independent solution mechanisms: parameter sweeps and repeated solution families are rejected before execution. Verified AutoResearch outcomes are deduplicated into host-authenticated learning experiences and replayed from the workflow journal after restart; repeated identical evidence does not count as additional progress.
+
+The default adaptive recipe preserves one dependency-bound critical path across `recon → lens → verify → synthesize → red-team → attack → architect → judge → unify → edge-test`. A stage advances only from distinct, restorable result evidence; worker status, transcript activity, test counts, and heartbeat or lease churn are not stage progress. Task results, lease release, terminal projection, and dependency-successor admission use the host's single append-operation owner instead of competing for the filesystem guard. Before admitting a dependency successor, the host persists the complete accepted child-message batch instead of waiting for another model boundary. Transient append contention is retried against the current authenticated head. Persistent contention records a typed workflow-host blocker instead of silently pausing the goal, and advisory adaptive-review failures cannot poison unrelated result publication or scheduling operations.
+
+Workflow changes are verified from `packages/coding-agent` with the public composition, task-authority, host-accounting, and recipe suites, followed by the repository gate from the workspace root:
+
+```bash
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/workflow/default-prime-composition.test.ts
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/workflow/default-task-runtime-authority.test.ts
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/workflow-session-host-factory.test.ts
+npx tsx ../../node_modules/vitest/dist/cli.js --run test/workflow-recipes.test.ts
+cd ../.. && npm run check
+```
 
 ### Keyboard Shortcuts
 

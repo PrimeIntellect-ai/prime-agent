@@ -16,6 +16,7 @@ import {
 import {
 	type AgentFamilyCatalogEntry,
 	type AgentSessionMessageAgentSummary,
+	agentFamilyRelationship,
 	assertAgentFamilyReach,
 	assertAgentSessionNameAvailable,
 	formatAgentSessionNameUnavailable,
@@ -82,6 +83,7 @@ import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
 	classifySessionRosterStatus,
 	isSessionSummaryBusy,
+	projectSessionSummaryForClient,
 	type SessionSummary,
 	summaryForInactiveSession,
 } from "./daemon-session-list.js";
@@ -1839,11 +1841,18 @@ export class DaemonSupervisor {
 					throw new Error("Agent messaging cannot target the sending session");
 				}
 				const targetClient = this.requireAvailableWorkerClient(target.worker);
+				const fromRelationship = agentFamilyRelationship(
+					this.familyCatalogEntry(target.summary),
+					this.familyCatalogEntry(source.summary),
+				);
 				const response = await targetClient.requestWorker(
 					{
 						type: "worker_deliver_message",
 						targetActiveSessionId,
 						message: command.message,
+						...(command.messageId === undefined ? {} : { messageId: command.messageId }),
+						...(command.observationId === undefined ? {} : { observationId: command.observationId }),
+						...(fromRelationship === undefined ? {} : { fromRelationship }),
 						sender: {
 							activeSessionId: source.summary.activeSessionId ?? source.summary.id,
 							sessionId: source.summary.sessionId,
@@ -1922,6 +1931,13 @@ export class DaemonSupervisor {
 		client: DaemonSocketClient,
 		command: Extract<DaemonCommand, { type: "list" }>,
 	): Promise<DaemonResponse> {
+		if (command.capabilities !== undefined) {
+			const requested = normalizeCapabilities(command.capabilities, undefined);
+			for (const capability of requested) {
+				client.capabilities.add(capability);
+			}
+		}
+		const includeWorkflowStatus = client.capabilities.has("workflow_status_projection");
 		await Promise.all(
 			[...this.workers.values()]
 				.filter((worker) => !this.isWorkerStopping(worker))
@@ -1937,7 +1953,9 @@ export class DaemonSupervisor {
 					this.isVisibleWorker(worker) ||
 					(command.includeClientOwned === true && this.isWorkerAccessibleToClient(client, worker)),
 			)
-			.flatMap((worker) => [...worker.summaries.values()].map((summary) => this.publicSummary(worker, summary)));
+			.flatMap((worker) =>
+				[...worker.summaries.values()].map((summary) => this.publicSummary(worker, summary, includeWorkflowStatus)),
+			);
 		const busyClientOwnedSessionCount = clientOwnedWorkers
 			.flatMap((worker) => [...worker.summaries.values()])
 			.filter(isSessionSummaryBusy).length;
@@ -2972,7 +2990,10 @@ export class DaemonSupervisor {
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
-		const response = await worker.client.request({ type: "list" }, 5000);
+		const response = await worker.client.request(
+			{ type: "list", capabilities: ["workflow_status_projection"] },
+			5000,
+		);
 		const summaries = sessionSummariesFromResponse(response);
 		worker.summaries = new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary]));
 		for (const summary of summaries) {
@@ -3225,10 +3246,15 @@ export class DaemonSupervisor {
 		};
 	}
 
-	private publicSummary(worker: ResidentWorker, summary: SessionSummary): SessionSummary {
+	private publicSummary(
+		worker: ResidentWorker,
+		summary: SessionSummary,
+		includeWorkflowStatus = false,
+	): SessionSummary {
 		const activeSessionId = summary.activeSessionId ?? summary.id;
+		const projectedSummary = projectSessionSummaryForClient(summary, includeWorkflowStatus);
 		return {
-			...summary,
+			...projectedSummary,
 			attachedClients: [...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId))
 				.length,
 			workerState: this.effectiveWorkerState(worker),
@@ -3413,9 +3439,15 @@ export class DaemonSupervisor {
 						const response = await workerClient.request({
 							type: "attach",
 							activeSessionId,
-							capabilities: client.capabilities.has("chunked_snapshot")
-								? ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"]
-								: ["attach_snapshot", "event_sequence", "slim_attach"],
+						capabilities: [
+							"attach_snapshot",
+								"event_sequence",
+								"slim_attach",
+								...(client.capabilities.has("chunked_snapshot") ? ["chunked_snapshot"] : []),
+							...(client.capabilities.has("workflow_status_projection")
+								? ["workflow_status_projection"]
+								: []),
+						] as DaemonClientCapability[],
 							supportsExtensionUi: false,
 							env: command.env ?? collectDaemonClientEnv(),
 						});
@@ -3485,7 +3517,11 @@ export class DaemonSupervisor {
 		const releaseTranscript = transcript?.retain();
 		client.attachedActiveSessionIds.add(activeSessionId);
 		try {
-			const publicSummary = this.publicSummary(match.worker, result.snapshot.summary);
+			const publicSummary = this.publicSummary(
+				match.worker,
+				result.snapshot.summary,
+				client.capabilities.has("workflow_status_projection"),
+			);
 			if (publicSummary.streamingMessage?.role === "assistant") {
 				this.streamReconstructor.seed(activeSessionId, publicSummary.streamingMessage);
 			} else {

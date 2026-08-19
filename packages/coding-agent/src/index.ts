@@ -264,6 +264,23 @@ export {
 	truncateTail,
 	withFileMutationQueue,
 } from "./core/tools/index.js";
+export {
+	createPrimeWorkflowBuiltinAdapters,
+	createPrimeWorkflowComposition,
+	createPrimeWorkflowNoActiveAttemptRecovery,
+	createProductionPrimeWorkflow,
+	PRIME_WORKFLOW_INITIALIZATION_ORDER,
+	type PrimeWorkflowAuthenticatedAdapterFactory,
+	type PrimeWorkflowAuthenticatedAdapterFactoryInput,
+	type PrimeWorkflowAuthenticatedAdapters,
+	type PrimeWorkflowBuiltinAdapterInput,
+	type PrimeWorkflowBuiltinHostDependencies,
+	type PrimeWorkflowInitializationStep,
+	type PrimeWorkflowNoActiveAttemptRecovery,
+	type PrimeWorkflowSnapshots,
+	type ProductionPrimeWorkflow,
+	type ProductionPrimeWorkflowInput,
+} from "./core/workflow/prime-loop.js";
 // Main entry point
 export { type MainOptions, main } from "./main.js";
 export {

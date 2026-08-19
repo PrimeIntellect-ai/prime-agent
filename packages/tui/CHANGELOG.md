@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added fullscreen hyperlink detection and safe HTTP(S) opening for OSC 8 and bare URLs.
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07

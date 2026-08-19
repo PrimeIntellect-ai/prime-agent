@@ -79,6 +79,7 @@ export class ToolExecutionComponent extends Container {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
+	private agentMessagesExpanded = false;
 	private showExpandHint = true;
 	private showImages: boolean;
 	private includeImageDimensions: boolean;
@@ -267,6 +268,14 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	setAgentMessagesExpanded(expanded: boolean): void {
+		if (this.agentMessagesExpanded === expanded) {
+			return;
+		}
+		this.agentMessagesExpanded = expanded;
+		this.updateDisplay();
+	}
+
 	setShowExpandHint(show: boolean): void {
 		if (this.showExpandHint === show) {
 			return;
@@ -331,6 +340,7 @@ export class ToolExecutionComponent extends Container {
 					isPartial: this.isPartial,
 					isError: this.result?.isError ?? false,
 					expanded: this.expanded,
+					agentMessagesExpanded: this.agentMessagesExpanded,
 					executionStarted: this.executionStarted,
 					argsComplete: this.argsComplete,
 					showExpandHint: this.showExpandHint,

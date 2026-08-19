@@ -1,4 +1,5 @@
-import type { SessionInfo } from "../../core/session-manager.js";
+import { projectResourceExhaustedBlocker, type SessionInfo } from "../../core/session-manager.js";
+import { projectWorkerModelCapabilityBlocker } from "../../core/workflow/worker-model-capability-gate.js";
 import type { AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 import type { DaemonSavedSessionInfo } from "./daemon-protocol.js";
 
@@ -17,6 +18,12 @@ export function serializeSavedSessionInfo(session: SessionInfo): DaemonSavedSess
 		firstMessage: session.firstMessage,
 		allMessagesText: session.allMessagesText,
 		agentStatus: session.agentStatus,
+		resourceExhaustedBlocker: session.resourceExhaustedBlocker
+			? projectResourceExhaustedBlocker(session.resourceExhaustedBlocker)
+			: undefined,
+		workerModelCapabilityBlocker: session.workerModelCapabilityBlocker
+			? projectWorkerModelCapabilityBlocker(session.workerModelCapabilityBlocker)
+			: undefined,
 	};
 }
 
@@ -35,5 +42,7 @@ export function deserializeSavedSessionInfo(session: DaemonSavedSessionInfo): Ag
 		firstMessage: session.firstMessage,
 		allMessagesText: session.allMessagesText,
 		agentStatus: session.agentStatus,
+		resourceExhaustedBlocker: session.resourceExhaustedBlocker,
+		workerModelCapabilityBlocker: session.workerModelCapabilityBlocker,
 	};
 }

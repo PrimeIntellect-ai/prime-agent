@@ -13,6 +13,7 @@ import {
 } from "../src/cli/daemon-launch.js";
 import { ENV_AGENT_DIR, getDaemonLogPath, VERSION } from "../src/config.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
+import { getDaemonRuntimeIdentity } from "../src/modes/daemon/daemon-runtime-identity.js";
 
 interface FakeDaemonOptions {
 	/** Sessions returned for a `list` command. */
@@ -25,6 +26,7 @@ interface FakeDaemonOptions {
 	protocolVersion?: number;
 	appVersion?: string;
 	schemaId?: string;
+	runtime?: Record<string, unknown> | null;
 	serverCapabilities?: string[];
 	onCommand?: (command: { type: string }) => void;
 }
@@ -47,8 +49,9 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 			type: "daemon_hello",
 			socketPath,
 			protocol: { name: "prime-agent.daemon", version: options.protocolVersion ?? DAEMON_PROTOCOL_VERSION },
-			appVersion: options.appVersion,
+			appVersion: options.appVersion ?? VERSION,
 			schemaId: options.schemaId ?? DAEMON_SCHEMA_ID,
+			...(options.runtime === null ? {} : { runtime: options.runtime ?? getDaemonRuntimeIdentity() }),
 			clientId: "fake-client",
 			serverCapabilities: options.serverCapabilities ?? [],
 		});
@@ -243,6 +246,49 @@ describe("ensureInteractiveDaemonRunning", () => {
 		expect(commands).not.toContain("shutdown");
 	});
 
+	it("fails closed on a runtime mismatch before any lifecycle command", async () => {
+		const commands: string[] = [];
+		const expected = getDaemonRuntimeIdentity();
+		const daemon = await startFakeDaemon({
+			appVersion: VERSION,
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			runtime: {
+				...expected,
+				buildId: "stale-build",
+				installedBuildId: "stale-build",
+			},
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		const failure = ensureInteractiveDaemonRunning(daemon.socketPath);
+		await expect(failure).rejects.toMatchObject({ reason: "runtime_mismatch" });
+		await expect(failure).rejects.toThrow(
+			/Runtime attestation mismatch[\s\S]*Expected runtime:[\s\S]*Observed runtime:[\s\S]*installedBuildId/,
+		);
+		expect(commands).toEqual([]);
+	});
+
+	it("fails closed when an equal-version daemon omits runtime attestation", async () => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			appVersion: VERSION,
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			runtime: null,
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		const failure = ensureInteractiveDaemonRunning(daemon.socketPath);
+		await expect(failure).rejects.toMatchObject({ reason: "runtime_mismatch" });
+		await expect(failure).rejects.toThrow(
+			/Runtime attestation mismatch[\s\S]*Expected runtime:[\s\S]*Observed runtime: \{\}[\s\S]*missing attestation/,
+		);
+		expect(commands).toEqual([]);
+	});
+
 	it("does not replace a stale daemon with busy private client sessions", async () => {
 		const commands: string[] = [];
 		const daemon = await startFakeDaemon({
@@ -356,6 +402,7 @@ describe("ensureInteractiveDaemonRunning", () => {
 				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
 				appVersion: VERSION,
 				schemaId: DAEMON_SCHEMA_ID,
+				runtime: getDaemonRuntimeIdentity(),
 				clientId: "fake-client",
 				serverCapabilities: [],
 			});

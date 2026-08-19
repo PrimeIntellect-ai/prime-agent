@@ -596,6 +596,66 @@ describe("daemon supervisor resident workers", () => {
 		await waitForSocketGone(socketPath);
 	}, 30_000);
 
+	it("resolves mutual sends between busy root workers without deadlocking", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-mutual-message-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const createRoot = async (name: string) => {
+			const response = await client.request({
+				type: "create",
+				name,
+				config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+			});
+			expect(response.success).toBe(true);
+			return requireSummary(response.success ? response.data : undefined);
+		};
+		const first = await createRoot("mutual-first");
+		const second = await createRoot("mutual-second");
+		await Promise.all([
+			startBlockingBash(client, first.activeSessionId ?? first.id, join(root, "mutual-first.ready")),
+			startBlockingBash(client, second.activeSessionId ?? second.id, join(root, "mutual-second.ready")),
+		]);
+
+		const [firstToSecond, secondToFirst] = await Promise.all([
+			client.request({
+				type: "send_message",
+				fromActiveSessionId: first.activeSessionId ?? first.id,
+				targetActiveSessionId: second.activeSessionId ?? second.id,
+				message: "first to second",
+				agentOrigin: true,
+			}),
+			client.request({
+				type: "send_message",
+				fromActiveSessionId: second.activeSessionId ?? second.id,
+				targetActiveSessionId: first.activeSessionId ?? first.id,
+				message: "second to first",
+				agentOrigin: true,
+			}),
+		]);
+		expect(firstToSecond).toMatchObject({
+			success: true,
+			data: { deliveryStatus: "queued", target: { activeSessionId: second.activeSessionId ?? second.id } },
+		});
+		expect(secondToFirst).toMatchObject({
+			success: true,
+			data: { deliveryStatus: "queued", target: { activeSessionId: first.activeSessionId ?? first.id } },
+		});
+
+		const shutdown = await client.request({ type: "shutdown" }, 10_000);
+		expect(shutdown.success).toBe(true);
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 30_000);
+
 	it("cancels an archived session heartbeat without spawning a worker", { tags: ["process-stress"] }, async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");
@@ -1483,6 +1543,15 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error(scheduled.success ? "Heartbeat response was missing its job" : scheduled.error);
 		}
 		const job = (scheduled.data as { heartbeat: { id: string } }).heartbeat;
+		const beforeReplacement = await client.request({ type: "list" });
+		if (!beforeReplacement.success) throw new Error(beforeReplacement.error);
+		const beforeReplacementSummary = requireSessionList(beforeReplacement.data).find(
+			(candidate) => candidate.activeSessionId === summary.activeSessionId,
+		);
+		expect(beforeReplacementSummary).toMatchObject({
+			scheduledWake: { owner: "daemon_cron", jobId: job.id, source: "heartbeat" },
+		});
+		expect(beforeReplacementSummary?.taskState).toBeUndefined();
 
 		client.close();
 		supervisor.kill("SIGKILL");
@@ -1499,6 +1568,15 @@ describe("daemon supervisor resident workers", () => {
 		expect(store.list().find((candidate) => candidate.id === job.id)).toBeDefined();
 
 		const replacement = await connectEventually(socketPath);
+		const afterReplacement = await replacement.request({ type: "list" });
+		if (!afterReplacement.success) throw new Error(afterReplacement.error);
+		const afterReplacementSummary = requireSessionList(afterReplacement.data).find(
+			(candidate) => candidate.activeSessionId === summary.activeSessionId,
+		);
+		expect(afterReplacementSummary).toMatchObject({
+			scheduledWake: { owner: "daemon_cron", jobId: job.id, source: "heartbeat" },
+		});
+		expect(afterReplacementSummary?.taskState).toBeUndefined();
 		await replacement.request({ type: "shutdown" });
 		replacement.close();
 		await waitForSocketGone(socketPath);

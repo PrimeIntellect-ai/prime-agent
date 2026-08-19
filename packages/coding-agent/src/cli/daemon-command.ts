@@ -8,13 +8,19 @@ import { expandTildePath } from "../config.js";
 import type { AgentSessionEvent } from "../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js";
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
-import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
-import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
+import { DaemonClient } from "../modes/daemon/daemon-client.js";
+import {
+	DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY,
+	type DaemonClientCapability,
+	type DaemonOutbound,
+	type DaemonResponse,
+} from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
 import { isLocalPath } from "../utils/paths.js";
 import { isValidThinkingLevel } from "./args.js";
+import { probeDaemonVersion, StaleDaemonError } from "./daemon-launch.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
 import { runPs, runReap } from "./daemon-ps.js";
 
@@ -29,6 +35,8 @@ const DAEMON_CLIENT_COMMANDS = new Set([
 	"start",
 	"ps",
 	"list",
+	"workflow-status",
+	"workflow-watch",
 	"create",
 	"attach",
 	"detach",
@@ -145,6 +153,13 @@ async function runDaemonClientCommand(parsed: ParsedDaemonClientCommand): Promis
 		return;
 	}
 
+	if (parsed.command === "list" || parsed.command === "attach" || parsed.command.startsWith("workflow-")) {
+		const probe = await probeDaemonVersion(parsed.socketPath);
+		if (probe.status === "stale") {
+			throw new StaleDaemonError(parsed.socketPath, probe.hello, probe);
+		}
+	}
+
 	const client = new DaemonClient(parsed.socketPath);
 	await client.connect();
 
@@ -152,6 +167,12 @@ async function runDaemonClientCommand(parsed: ParsedDaemonClientCommand): Promis
 		switch (parsed.command) {
 			case "list":
 				await runList(client, parsed.positionals, parsed.json);
+				return;
+			case "workflow-status":
+				await runWorkflowStatus(client, parsed.positionals, parsed.json);
+				return;
+			case "workflow-watch":
+				await runWorkflowWatch(client, parsed.positionals, parsed.json);
 				return;
 			case "create":
 				await runCreate(client, parsed.positionals, parsed.json);
@@ -744,7 +765,12 @@ async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promis
 
 async function runList(client: DaemonClient, args: string[], json: boolean): Promise<void> {
 	const { all } = parseListArgs(args);
-	const response = await client.request({ type: "list", all });
+	const capabilities = await workflowStatusCapabilitiesForClient(client);
+	const response = await client.request({
+		type: "list",
+		all,
+		...(capabilities.length > 0 ? { capabilities } : {}),
+	});
 	const data = requireSuccess(response);
 	if (json) {
 		printJson(data);
@@ -763,6 +789,211 @@ async function runList(client: DaemonClient, args: string[], json: boolean): Pro
 	}
 
 	console.log(formatSessionListTable(sessions));
+}
+
+const DEFAULT_WORKFLOW_WATCH_INTERVAL_MS = 1000;
+const DEFAULT_WORKFLOW_WATCH_MAX_UPDATES = 100;
+const MIN_WORKFLOW_WATCH_INTERVAL_MS = 50;
+const MAX_WORKFLOW_WATCH_INTERVAL_MS = 60_000;
+const MAX_WORKFLOW_WATCH_UPDATES = 1000;
+
+async function runWorkflowStatus(client: DaemonClient, args: string[], json: boolean): Promise<void> {
+	const selector = parseWorkflowSelector(args, "status");
+	const sessions = await getWorkflowSessions(client);
+	const summary = selectWorkflowSession(sessions, selector);
+	if (json) {
+		printJson(summary);
+		return;
+	}
+	console.log(formatWorkflowStatusText(summary));
+}
+
+async function runWorkflowWatch(client: DaemonClient, args: string[], json: boolean): Promise<void> {
+	const options = parseWorkflowWatchArgs(args);
+	const interrupted = waitForWorkflowWatchInterrupt();
+	let updates = 0;
+	try {
+		while (!interrupted.isInterrupted()) {
+			const summary = selectWorkflowSession(await getWorkflowSessions(client), options.selector);
+			if (json) {
+				printJsonLine(summary);
+			} else {
+				console.log(formatWorkflowStatusText(summary));
+			}
+			updates++;
+			if (options.once || updates >= options.maxUpdates) {
+				return;
+			}
+			await Promise.race([delay(options.intervalMs), interrupted.promise]);
+		}
+	} finally {
+		interrupted.cancel();
+	}
+}
+
+interface WorkflowWatchOptions {
+	selector: string;
+	once: boolean;
+	intervalMs: number;
+	maxUpdates: number;
+}
+
+function parseWorkflowSelector(args: string[], command: string): string {
+	if (args.length !== 1 || args[0]!.startsWith("-")) {
+		throw new Error(`Usage: prime-agent workflow ${command} <agent>`);
+	}
+	return args[0]!;
+}
+
+function parseWorkflowWatchArgs(args: string[]): WorkflowWatchOptions {
+	let selector: string | undefined;
+	let once = false;
+	let intervalMs = DEFAULT_WORKFLOW_WATCH_INTERVAL_MS;
+	let maxUpdates = DEFAULT_WORKFLOW_WATCH_MAX_UPDATES;
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg === "--once") {
+			once = true;
+			continue;
+		}
+		if (arg === "--interval") {
+			intervalMs = parseBoundedWorkflowWatchNumber(
+				args[++index],
+				"--interval",
+				MIN_WORKFLOW_WATCH_INTERVAL_MS,
+				MAX_WORKFLOW_WATCH_INTERVAL_MS,
+			);
+			continue;
+		}
+		if (arg === "--max-updates") {
+			maxUpdates = parseBoundedWorkflowWatchNumber(args[++index], "--max-updates", 1, MAX_WORKFLOW_WATCH_UPDATES);
+			continue;
+		}
+		if (arg.startsWith("-")) {
+			throw new Error(`Unknown workflow watch option: ${arg}`);
+		}
+		if (selector !== undefined) {
+			throw new Error("Usage: prime-agent workflow watch <agent>");
+		}
+		selector = arg;
+	}
+	if (!selector) {
+		throw new Error("Usage: prime-agent workflow watch <agent>");
+	}
+	return { selector, once, intervalMs, maxUpdates };
+}
+
+function parseBoundedWorkflowWatchNumber(
+	value: string | undefined,
+	option: string,
+	minimum: number,
+	maximum: number,
+): number {
+	const parsed = value === undefined ? Number.NaN : Number(value);
+	if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+		throw new Error(`${option} must be an integer between ${minimum} and ${maximum}`);
+	}
+	return parsed;
+}
+
+async function getWorkflowSessions(client: DaemonClient): Promise<SessionSummary[]> {
+	const capabilities = await workflowStatusCapabilitiesForClient(client);
+	const response = await client.request({
+		type: "list",
+		all: false,
+		...(capabilities.length > 0 ? { capabilities } : {}),
+	});
+	const data = requireSuccess(response);
+	const sessions = getSessionSummaries(data);
+	if (!sessions) {
+		throw new Error("Daemon returned an invalid list response");
+	}
+	return sessions;
+}
+
+function selectWorkflowSession(sessions: readonly SessionSummary[], selector: string): SessionSummary {
+	const activeSessions = sessions.filter((session) => typeof session.activeSessionId === "string");
+	const exact = activeSessions.filter(
+		(session) =>
+			session.activeSessionId === selector || session.sessionId === selector || session.sessionName === selector,
+	);
+	const suffix = activeSessions.filter(
+		(session) =>
+			matchesSessionIdSuffix(session.activeSessionId!, selector) ||
+			matchesSessionIdSuffix(session.sessionId, selector),
+	);
+	const matches = exact.length > 0 ? exact : suffix;
+	if (matches.length === 1) {
+		return matches[0]!;
+	}
+	if (matches.length > 1) {
+		throw new Error(`Ambiguous active session "${selector}"`);
+	}
+	throw new Error(`Unknown active session: ${selector}`);
+}
+
+function formatWorkflowStatusText(summary: SessionSummary): string {
+	const workflow = summary.workflowStatus;
+	if (!workflow) {
+		return [
+			`Agent: ${summary.sessionName ?? summary.activeSessionId ?? summary.id}`,
+			`Session: ${summary.activeSessionId ?? summary.id}`,
+			"Workflow: unavailable (daemon did not negotiate workflow_status_projection)",
+		].join("\n");
+	}
+	return [
+		`Agent: ${summary.sessionName ?? summary.activeSessionId ?? summary.id}`,
+		`Session: ${summary.activeSessionId ?? summary.id}`,
+		`Workflow: ${workflow.workflowId ?? "unknown"}`,
+		`Status: ${workflow.status}`,
+		`Phase: ${workflow.phase ?? "unknown"}`,
+		`Next gate: ${workflow.nextGate ?? "none"}`,
+		`Next task: ${workflow.nextTask ?? "none"}`,
+		`Blocker: ${workflow.blocker ? `${workflow.blocker.kind}: ${workflow.blocker.reason}` : "none"}`,
+		`Journal head: ${workflow.headDigest ?? "unknown"}`,
+		`Attempts: ${workflow.attempts?.length ?? 0}`,
+		`Leases: ${workflow.leases?.length ?? 0}`,
+	].join("\n");
+}
+
+async function workflowStatusCapabilitiesForClient(client: DaemonClient): Promise<readonly DaemonClientCapability[]> {
+	const hello = await client.waitForHello();
+	if (
+		hello?.schemaRevision !== undefined &&
+		hello.schemaRevision >= (DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY.minSchemaRevision ?? 0) &&
+		client.supportsServerCapability("workflow_status_projection")
+	) {
+		return ["workflow_status_projection"];
+	}
+	return [];
+}
+
+function waitForWorkflowWatchInterrupt(): {
+	promise: Promise<void>;
+	cancel: () => void;
+	isInterrupted: () => boolean;
+} {
+	let interrupted = false;
+	let settled = false;
+	let resolveWait!: () => void;
+	const cleanup = () => {
+		process.off("SIGINT", onSignal);
+		process.off("SIGTERM", onSignal);
+	};
+	const resolveOnce = () => {
+		if (settled) return;
+		settled = true;
+		interrupted = true;
+		cleanup();
+		resolveWait();
+	};
+	const onSignal = () => resolveOnce();
+	const promise = new Promise<void>((resolve) => {
+		resolveWait = resolve;
+	});
+	process.once("SIGINT", onSignal);
+	process.once("SIGTERM", onSignal);
+	return { promise, cancel: resolveOnce, isInterrupted: () => interrupted };
 }
 
 function parseListArgs(args: string[]): { all: boolean } {
@@ -908,7 +1139,13 @@ async function runSend(client: DaemonClient, args: string[], json: boolean): Pro
 	}
 	if (isAgentMessageReceipt(data)) {
 		const target = data.target.sessionName ?? data.target.activeSessionId;
-		console.log(data.deliveryStatus === "queued" ? `Queued for ${target}` : `Sent to ${target}`);
+		console.log(
+			data.deliveryStatus === "queued"
+				? `Queued for ${target}`
+				: data.deliveryStatus === "blocked"
+					? `Blocked for ${target} (audit-only)`
+					: `Sent to ${target}`,
+		);
 		return;
 	}
 	console.log("ok");
@@ -1246,7 +1483,7 @@ function printJson(value: unknown): void {
 	console.log(JSON.stringify(value, null, 2));
 }
 
-const printJsonLine: DaemonClientMessageListener = (value) => {
+const printJsonLine = (value: unknown): void => {
 	console.log(JSON.stringify(value));
 };
 

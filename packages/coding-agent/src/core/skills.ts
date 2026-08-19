@@ -74,6 +74,7 @@ export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
 	"disable-model-invocation"?: boolean;
+	"python-import"?: string;
 	[key: string]: unknown;
 }
 
@@ -203,6 +204,7 @@ function detectPythonSkill(
 	skillDir: string,
 	name: string,
 	diagnostics: ResourceDiagnostic[],
+	explicitImportName: unknown,
 ): SkillPythonMetadata | null {
 	const pyprojectPath = join(skillDir, "pyproject.toml");
 	if (!existsSync(pyprojectPath)) {
@@ -217,7 +219,15 @@ function detectPythonSkill(
 		return null;
 	}
 
-	const importName = pythonImportNameForSkill(name);
+	if (explicitImportName !== undefined && typeof explicitImportName !== "string") {
+		diagnostics.push({
+			type: "warning",
+			message: "python-import must be a string",
+			path: pyprojectPath,
+		});
+		return null;
+	}
+	const importName = explicitImportName ?? pythonImportNameForSkill(name);
 	if (!isValidPythonImportName(importName)) {
 		diagnostics.push({
 			type: "warning",
@@ -418,7 +428,10 @@ function loadSkillFromFile(
 			return { skill: null, diagnostics };
 		}
 
-		const python = basename(filePath) === "SKILL.md" ? detectPythonSkill(skillDir, name, diagnostics) : null;
+		const python =
+			basename(filePath) === "SKILL.md"
+				? detectPythonSkill(skillDir, name, diagnostics, frontmatter["python-import"])
+				: null;
 		const baseSkill: BaseSkill = {
 			name,
 			description: frontmatter.description,

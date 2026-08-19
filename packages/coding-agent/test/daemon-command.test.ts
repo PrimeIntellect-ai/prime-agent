@@ -1,4 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { VERSION } from "../src/config.js";
+import {
+	DAEMON_PROTOCOL_VERSION,
+	DAEMON_SCHEMA_ID,
+	DAEMON_SCHEMA_REVISION,
+} from "../src/modes/daemon/daemon-protocol.js";
+import { getDaemonRuntimeIdentity } from "../src/modes/daemon/daemon-runtime-identity.js";
 
 const daemonClientMock = vi.hoisted(() => {
 	type Listener = (message: { type: string; activeSessionId?: string; event?: { type: string } }) => void;
@@ -30,6 +37,8 @@ const daemonClientMock = vi.hoisted(() => {
 		promptSucceeds: false,
 		emitStaleAgentEndOnAttach: false,
 		connectFails: false,
+		schemaRevision: 22,
+		serverCapabilities: [] as string[],
 		sessions: [] as Array<Record<string, unknown>>,
 	};
 
@@ -46,6 +55,24 @@ const daemonClientMock = vi.hoisted(() => {
 
 		async connect(): Promise<void> {
 			if (behavior.connectFails) throw new Error("mock connect failed");
+		}
+
+		async waitForHello() {
+			return {
+				type: "daemon_hello" as const,
+				socketPath: this.socketPath,
+				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				schemaId: DAEMON_SCHEMA_ID,
+				schemaRevision: behavior.schemaRevision,
+				appVersion: VERSION,
+				runtime: getDaemonRuntimeIdentity(),
+				clientId: "mock-daemon-client",
+				serverCapabilities: behavior.serverCapabilities,
+			};
+		}
+
+		supportsServerCapability(capability: string): boolean {
+			return behavior.serverCapabilities.includes(capability);
 		}
 
 		async request(command: Command): Promise<Response> {
@@ -126,6 +153,11 @@ vi.mock("node:child_process", async (importOriginal) => {
 	return { ...original, spawn: spawnMock.mockSpawn as never };
 });
 
+vi.mock("../src/cli/daemon-launch.js", () => ({
+	probeDaemonVersion: async () => ({ status: "running" }),
+	StaleDaemonError: class StaleDaemonError extends Error {},
+}));
+
 import { handleDaemonCommand } from "../src/cli/daemon-command.js";
 
 describe("daemon command", () => {
@@ -137,6 +169,8 @@ describe("daemon command", () => {
 		daemonClientMock.behavior.promptSucceeds = false;
 		daemonClientMock.behavior.emitStaleAgentEndOnAttach = false;
 		daemonClientMock.behavior.connectFails = false;
+		daemonClientMock.behavior.schemaRevision = 22;
+		daemonClientMock.behavior.serverCapabilities = [];
 		daemonClientMock.behavior.sessions = [];
 		consoleErrorMessages = [];
 		vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null | undefined) => {
@@ -209,8 +243,9 @@ describe("daemon command", () => {
 		]);
 
 		await flushPromises();
+		await flushPromises();
 
-		const client = daemonClientMock.instances[0];
+		const client = daemonClientMock.instances.at(-1);
 		expect(client?.requests.map((request) => request.type)).toEqual(["attach"]);
 
 		client?.emitMessage({ type: "session_closed", activeSessionId: "active-1" });
@@ -230,6 +265,53 @@ describe("daemon command", () => {
 		expect(client?.requests[0]).toEqual({ type: "list", all: true });
 		expect(client?.requests[1]).toMatchObject({ type: "create", name: "1" });
 		expect(client?.requests[1]?.name).not.toBe(unsafeIntegerName);
+	});
+
+	it("requests workflow projection only after the daemon advertises schema 22 and its capability", async () => {
+		daemonClientMock.behavior.schemaRevision = DAEMON_SCHEMA_REVISION;
+		daemonClientMock.behavior.serverCapabilities = ["workflow_status_projection"];
+
+		await expect(handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "list"])).resolves.toBe(true);
+
+		expect(daemonClientMock.instances[0]?.requests[0]).toEqual({
+			type: "list",
+			all: false,
+			capabilities: ["workflow_status_projection"],
+		});
+	});
+
+	it("omits workflow capability fields when talking to an older daemon", async () => {
+		daemonClientMock.behavior.schemaRevision = DAEMON_SCHEMA_REVISION - 1;
+		daemonClientMock.behavior.serverCapabilities = ["workflow_status_projection"];
+
+		await expect(
+			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "workflow-status", "worker"]),
+		).resolves.toBe(true);
+
+		expect(daemonClientMock.instances[0]?.requests[0]).toEqual({ type: "list", all: false });
+	});
+
+	it("keeps workflow watch bounded with --once", async () => {
+		daemonClientMock.behavior.schemaRevision = DAEMON_SCHEMA_REVISION;
+		daemonClientMock.behavior.serverCapabilities = ["workflow_status_projection"];
+		daemonClientMock.behavior.sessions = [makeSessionSummary("active-1", "session-1", "worker")];
+
+		await expect(
+			handleDaemonCommand([
+				"daemon",
+				"--socket",
+				"/tmp/prime-agent.sock",
+				"workflow-watch",
+				"worker",
+				"--once",
+				"--json",
+			]),
+		).resolves.toBe(true);
+
+		const client = daemonClientMock.instances[0];
+		expect(client?.requests).toEqual([{ type: "list", all: false, capabilities: ["workflow_status_projection"] }]);
+		expect(client?.messageListenerCountAtClose).toBe(0);
+		expect(client?.closeListenerCountAtClose).toBe(0);
 	});
 
 	it("keeps create session name after an unknown boolean extension flag", async () => {

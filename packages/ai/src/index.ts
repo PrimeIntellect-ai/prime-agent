@@ -40,5 +40,6 @@ export type {
 } from "./utils/oauth/types.js";
 export * from "./utils/overflow.js";
 export * from "./utils/stream-failure.js";
+export * from "./utils/stream-liveness.js";
 export * from "./utils/typebox-helpers.js";
 export * from "./utils/validation.js";

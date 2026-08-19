@@ -32,6 +32,7 @@ export interface IPythonCellState {
 	isPartial?: boolean;
 	isError?: boolean;
 	expanded?: boolean;
+	agentMessagesExpanded?: boolean;
 	showExpandHint?: boolean;
 	executionStarted?: boolean;
 	argsComplete?: boolean;
@@ -50,7 +51,9 @@ interface DiffDisplay {
 interface SentAgentMessageDisplay {
 	id: string;
 	message: string;
-	deliveryStatus: "delivered" | "queued";
+	deliveryStatus: "delivered" | "queued" | "blocked";
+	blockedReason?: string;
+	auditOnly?: true;
 	receiverRole?: "parent" | "sibling" | "child";
 	target: {
 		activeSessionId: string;
@@ -169,7 +172,11 @@ function readSentAgentMessages(value: unknown): SentAgentMessageDisplay[] | unde
 		if (
 			typeof record.id !== "string" ||
 			typeof record.message !== "string" ||
-			(record.deliveryStatus !== "delivered" && record.deliveryStatus !== "queued") ||
+			(record.deliveryStatus !== "delivered" &&
+				record.deliveryStatus !== "queued" &&
+				record.deliveryStatus !== "blocked") ||
+			(record.blockedReason !== undefined && typeof record.blockedReason !== "string") ||
+			(record.auditOnly !== undefined && record.auditOnly !== true) ||
 			typeof targetRecord.activeSessionId !== "string" ||
 			typeof targetRecord.sessionId !== "string"
 		) {
@@ -180,6 +187,8 @@ function readSentAgentMessages(value: unknown): SentAgentMessageDisplay[] | unde
 				id: record.id,
 				message: record.message,
 				deliveryStatus: record.deliveryStatus,
+				...(typeof record.blockedReason === "string" ? { blockedReason: record.blockedReason } : {}),
+				...(record.auditOnly === true ? { auditOnly: true as const } : {}),
 				...(record.receiverRole === "parent" || record.receiverRole === "sibling" || record.receiverRole === "child"
 					? { receiverRole: record.receiverRole }
 					: {}),
@@ -641,9 +650,14 @@ export class IPythonCellComponent implements Component {
 	// instead of the collapsed preview, matching received agent-message UI.
 	private renderSentAgentMessages(lines: string[], width: number, messages: readonly SentAgentMessageDisplay[]): void {
 		for (const message of messages) {
-			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
+			const label =
+				message.deliveryStatus === "delivered"
+					? "Agent message sent"
+					: message.deliveryStatus === "queued"
+						? "Agent message queued"
+						: "Agent message blocked";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
-			if (this.state.expanded) {
+			if (this.state.agentMessagesExpanded) {
 				this.addBlank(lines, width);
 				this.addPlain(
 					lines,

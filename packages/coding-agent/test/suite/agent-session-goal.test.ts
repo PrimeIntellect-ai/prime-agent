@@ -1,16 +1,26 @@
-import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AgentContext, AgentTool } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type Usage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
 import type { GoalHostResponse } from "../../src/core/goals.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
+import { createAgentSession } from "../../src/core/sdk.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
+import type { DurableApprovalSecretProof } from "../../src/core/workflow/contracts.js";
+import type { WorkflowGoalProjectionAuthorization } from "../../src/core/workflow/journal.js";
+import type { WorkflowGoalProjectionAdapter } from "../../src/core/workflow/projections.js";
+import { createPersistedSessionWorkflowHost } from "../../src/core/workflow/session-host-factory.js";
+import type { WorkflowShell } from "../../src/core/workflow/shell.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 
@@ -188,6 +198,29 @@ describe("AgentSession goals", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
+	it("keeps the autonomous planner accountable to intent instead of coverage", async () => {
+		const harness = await createGoalHarness();
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ipython", COMPLETE_GOAL_CELL), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Goal complete."),
+		]);
+
+		await harness.session.prompt("/goal deliver the user outcome without gaming its metric");
+
+		const context = getMessageText(goalContextMessages(harness)[0]).toLowerCase();
+		expect(context).toContain("intended outcome");
+		expect(context).toContain("forbidden outcomes");
+		expect(context).toContain("adversarially challenge consequential decisions");
+		expect(context).toContain("test counts and coverage are diagnostic only");
+		expect(context).toContain("unit tests are debugging probes only");
+		expect(context).toContain("mock-only evidence cannot establish progress or completion");
+		expect(context).toContain("permanent evidence that calls private symbols");
+		expect(context).toContain("inspects source text");
+		expect(context).toContain("requires production test hooks is invalid");
+		expect(context).toContain("public host, store, process, restart, or integration boundaries");
+		expect(context).toContain("observable evidence");
+	});
+
 	it("counts tokens from the goal completion turn", async () => {
 		const harness = await createGoalHarness();
 		harness.setResponses([
@@ -260,6 +293,913 @@ describe("AgentSession goals", () => {
 		const completed = harness.session.handleGoalHostRequest("goal.complete");
 		expect(completed.goal).toMatchObject({ status: "complete" });
 		expect(completed.completion_budget_report).toContain("tokens used: 0 of 50");
+	});
+
+	it("refuses direct goal completion while a durable workflow owns completion", async () => {
+		const harness = await createGoalHarness();
+		const created = harness.session.handleGoalHostRequest("goal.create", {
+			objective: "finish only after durable verification",
+		});
+		const workflowHost: WorkflowShell = {
+			execute: async () => workflowHost.status(),
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "active",
+				phase: "executing",
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "durable-workflow-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [],
+			}),
+		};
+		harness.session.setWorkflowHost(workflowHost);
+
+		expect(() => harness.session.setWorkflowHost(undefined)).toThrow("cannot be detached or replaced");
+		expect(() => harness.session.handleGoalHostRequest("goal.complete")).toThrow("durable workflow completion gate");
+		expect(harness.session.goalState).toMatchObject({
+			status: "active",
+			goalId: created.goal?.goal_id,
+		});
+	});
+
+	it("rejects an unscheduled child launch while the durable workflow owns task authority", async () => {
+		const harness = await createGoalHarness();
+		harness.session.handleGoalHostRequest("goal.create", {
+			objective: "dispatch only journal-bound workers",
+		});
+		const workflowHost: WorkflowShell = {
+			execute: async () => workflowHost.status(),
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "active",
+				phase: "executing",
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "durable-workflow-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [],
+			}),
+		};
+		harness.session.setWorkflowHost(workflowHost);
+
+		await expect(harness.session.runRlmChild("bypass the scheduler")).rejects.toThrow(
+			"workflow workers require a scheduler-issued task attempt",
+		);
+		expect(await harness.session.listRlmSubagents()).toMatchObject({ subagents: [] });
+	});
+
+	it("refuses direct goal completion whenever a workflow host is installed", async () => {
+		const harness = await createGoalHarness();
+		harness.session.handleGoalHostRequest("goal.create", { objective: "finish through the sealed gate" });
+		const workflowHost: WorkflowShell = {
+			execute: async () => workflowHost.status(),
+			status: () => ({
+				workflowId: null,
+				status: "idle",
+				phase: null,
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: null,
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [],
+			}),
+		};
+		harness.session.setWorkflowHost(workflowHost);
+
+		expect(() => harness.session.handleGoalHostRequest("goal.complete")).toThrow("durable workflow completion gate");
+		expect(harness.session.goalState.status).toBe("active");
+	});
+
+	it("carries the admitted Prime pipeline and anti-cheating rules into every planner continuation", async () => {
+		const harness = await createGoalHarness();
+		harness.session.handleGoalHostRequest("goal.create", { objective: "advance through the admitted workflow" });
+		const plannerDirective = [
+			"<prime_workflow>",
+			"pipeline: recon -> lens -> verify -> synthesize -> red-team",
+			"progress: only host-authenticated causal evidence; activity, utilization, and tokens are not progress",
+			"continue until the completion gate accepts the user-approved goal",
+			"</prime_workflow>",
+		].join("\n");
+		const workflowHost = {
+			execute: async () => workflowHost.status(),
+			ensurePrimeWorkflow: async () => workflowHost.primeWorkflow,
+			primeWorkflow: { plannerDirective },
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "active" as const,
+				phase: "planning" as const,
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "durable-workflow-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: ["intent"],
+				protectedInvariants: ["no metric cheating"],
+				protectedInvariantIds: ["no-metric-cheating"],
+				pendingWaitReasons: [],
+			}),
+		};
+		harness.session.setWorkflowHost(workflowHost as unknown as WorkflowShell);
+		harness.setResponses([fauxAssistantMessage("Following the admitted pipeline.")]);
+
+		expect(await harness.session.resumeActiveWorkflow()).toBe(true);
+		await harness.session.waitForIdle();
+
+		const context = getMessageText(goalContextMessages(harness).at(-1));
+		expect(context).toContain(plannerDirective);
+	});
+
+	it("does not let workflow-bound slash commands mutate the session goal directly", async () => {
+		const harness = await createGoalHarness();
+		const created = harness.session.handleGoalHostRequest("goal.create", {
+			objective: "workflow-owned goal state",
+		});
+		const workflowHost: WorkflowShell = {
+			execute: async () => workflowHost.status(),
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "active",
+				phase: "executing",
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "durable-workflow-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariants: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [],
+			}),
+		};
+		harness.session.setWorkflowHost(workflowHost);
+		const before = harness.session.readGoalStateForWorkflowProjection();
+
+		await harness.session.prompt("/goal pause");
+		await harness.session.prompt("/goal clear");
+		await harness.session.prompt("/goal resume");
+
+		expect(harness.session.readGoalStateForWorkflowProjection()).toEqual(before);
+		expect(created.goal?.goal_id).toBe(before.goalId);
+	});
+
+	it("rejects workflow-bound assistant usage instead of writing the session goal", async () => {
+		const harness = await createGoalHarness();
+		harness.session.handleGoalHostRequest("goal.create", { objective: "workflow-owned usage" });
+		let usageCalls = 0;
+		let continuationCalls = 0;
+		const workflowHost = {
+			execute: async () => workflowHost.status(),
+			accountAssistantUsage: async () => {
+				usageCalls += 1;
+				return harness.session.readGoalStateForWorkflowProjection();
+			},
+			accountContinuation: async () => {
+				continuationCalls += 1;
+				return harness.session.readGoalStateForWorkflowProjection();
+			},
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "active",
+				phase: "executing",
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "durable-workflow-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariants: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [],
+			}),
+		} as WorkflowShell & {
+			accountAssistantUsage: () => Promise<ReturnType<AgentSession["readGoalStateForWorkflowProjection"]>>;
+			accountContinuation: () => Promise<ReturnType<AgentSession["readGoalStateForWorkflowProjection"]>>;
+		};
+		harness.session.setWorkflowHost(workflowHost);
+		harness.setResponses([
+			assistantWithUsage("usage must stay with the host", { input: 4, output: 2, totalTokens: 6 }),
+		]);
+		await harness.session.prompt("continue");
+
+		expect(harness.session.readGoalStateForWorkflowProjection()).toMatchObject({
+			status: "active",
+			tokensUsed: 0,
+		});
+		expect(usageCalls).toBe(1);
+		expect(continuationCalls).toBeGreaterThanOrEqual(1);
+	});
+
+	it("does not convert workflow append contention into a generic planner pause", async () => {
+		const harness = await createGoalHarness();
+		harness.session.handleGoalHostRequest("goal.create", { objective: "preserve authoritative contention state" });
+		let pauseCommands = 0;
+		const workflowHost = {
+			execute: async (command: Parameters<WorkflowShell["execute"]>[0]) => {
+				if (command.kind === "pause") pauseCommands += 1;
+				return workflowHost.status();
+			},
+			accountAssistantUsage: async () => {
+				throw new Error("workflow_append_lease_guard_timeout");
+			},
+			accountContinuation: async () => harness.session.readGoalStateForWorkflowProjection(),
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "active" as const,
+				phase: "executing" as const,
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "durable-workflow-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [],
+			}),
+		} as WorkflowShell & {
+			accountAssistantUsage: () => Promise<never>;
+			accountContinuation: () => Promise<ReturnType<AgentSession["readGoalStateForWorkflowProjection"]>>;
+		};
+		harness.session.setWorkflowHost(workflowHost);
+		harness.setResponses([fauxAssistantMessage("Contention remains owned by the workflow host.")]);
+
+		await harness.session.prompt("continue");
+		await harness.session.waitForIdle();
+		await (harness.session as unknown as { _agentEventQueue: Promise<void> })._agentEventQueue;
+
+		expect(pauseCommands).toBe(0);
+		expect(workflowHost.status()).toMatchObject({ status: "active", phase: "executing" });
+	});
+
+	it("accounts workflow-owned usage and continuation through a persisted host", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "persist metering through the workflow host" },
+		});
+		harnesses.push(harness);
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		let deliveredProof: DurableApprovalSecretProof | undefined;
+		const goalProjection: WorkflowGoalProjectionAdapter = {
+			read: () => harness.session.readGoalStateForWorkflowProjection(),
+			compareAndSwap: (expected, next, authorization) =>
+				harness.session.compareAndSwapGoalState(expected, next, authorization),
+		};
+		const host = await createPersistedSessionWorkflowHost({
+			artifactRoot,
+			rootSessionId: harness.session.sessionId,
+			workflowId: harness.session.sessionId,
+			goalProjection,
+			genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+			approvalSecretDelivery: ({ proof }) => {
+				deliveredProof = proof;
+			},
+		});
+		harness.session.setWorkflowHost(host);
+		try {
+			const pending = await host.execute({
+				kind: "start",
+				request: {
+					workflowId: harness.session.sessionId,
+					objective: "persist metering through the workflow host",
+					acceptanceChecks: ["metering"],
+					protectedInvariants: ["durable-metering"],
+				},
+			});
+			expect(pending.approvalRequest).not.toBeNull();
+			if (pending.approvalRequest === null || deliveredProof === undefined)
+				throw new Error("Expected a delivered persisted approval proof.");
+			const approved = await host.execute({
+				kind: "respond",
+				approvalRequestId: pending.approvalRequest.approvalRequestId,
+				optionId: "approve",
+				proof: deliveredProof,
+			});
+			expect(approved.status).toBe("active");
+			harness.setResponses([
+				assistantWithUsage("persisted workflow metering", { input: 4, output: 2, totalTokens: 6 }),
+			]);
+			await harness.session.prompt("continue the persisted objective");
+			const meteredGoal = harness.session.readGoalStateForWorkflowProjection();
+			expect(meteredGoal).toMatchObject({
+				status: "active",
+				continuationsUsed: 1,
+			});
+			expect(meteredGoal.tokensUsed).toBeGreaterThan(0);
+		} finally {
+			await host.dispose?.();
+		}
+	});
+
+	it("rejects a shape-valid forged workflow projection authorization without changing the persisted goal", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const created = harness.session.handleGoalHostRequest("goal.create", {
+			objective: "only an authenticated journal event may update this goal",
+		});
+		const expected = harness.session.readGoalStateForWorkflowProjection();
+		const next = {
+			...expected,
+			active: false,
+			status: "paused" as const,
+			lastReason: "forged",
+		};
+		const forged = {
+			workflowId: harness.session.sessionId,
+			eventSequence: 1,
+			transitionDigest: "shape-valid-but-forged",
+			storeEpoch: 1,
+			coordinatorEpoch: 1,
+		} as unknown as WorkflowGoalProjectionAuthorization;
+
+		expect(harness.session.compareAndSwapGoalState(expected, next, forged)).toBe(false);
+		expect(harness.session.readGoalStateForWorkflowProjection()).toEqual(expected);
+		expect(created.goal?.goal_id).toBe(expected.goalId);
+	});
+
+	it("projects an authenticated workflow transition into the persisted session without rewriting its event timestamp", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "pause only after the journal commits" },
+		});
+		harnesses.push(harness);
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		let committedProjection:
+			| {
+					expected: ReturnType<AgentSession["readGoalStateForWorkflowProjection"]>;
+					next: ReturnType<AgentSession["readGoalStateForWorkflowProjection"]>;
+					authorization: WorkflowGoalProjectionAuthorization;
+			  }
+			| undefined;
+		const goalProjection: WorkflowGoalProjectionAdapter = {
+			read: () => harness.session.readGoalStateForWorkflowProjection(),
+			compareAndSwap: (expected, next, authorization) => {
+				const committed = harness.session.compareAndSwapGoalState(expected, next, authorization);
+				if (committed)
+					committedProjection = {
+						expected: structuredClone(expected),
+						next: structuredClone(next),
+						authorization,
+					};
+				return committed;
+			},
+		};
+		const host = await createPersistedSessionWorkflowHost({
+			artifactRoot,
+			rootSessionId: harness.session.sessionId,
+			workflowId: harness.session.sessionId,
+			goalProjection,
+			genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+		});
+		try {
+			const before = harness.session.readGoalStateForWorkflowProjection();
+			const status = await host.execute({
+				kind: "start",
+				request: {
+					workflowId: harness.session.sessionId,
+					objective: before.objective,
+					acceptanceChecks: ["journal-commit"],
+					protectedInvariants: ["goal-cas"],
+				},
+			});
+			const after = harness.session.readGoalStateForWorkflowProjection();
+			const replay = await host.runtimeStore.replay({
+				workflowId: harness.session.sessionId,
+				fromSequence: 0,
+				expectedStoreEpoch: 1,
+			});
+			const binding = replay.events.find((event) => event.payload.kind === "goal_binding_committed");
+			if (binding?.payload.kind !== "goal_binding_committed")
+				throw new Error("Missing committed goal binding event.");
+			expect(status.status).toBe("awaiting_user");
+			expect(after).toMatchObject({ goalId: before.goalId, objective: before.objective, status: "active" });
+			expect(after.updatedAt).toBe(binding.payload.goalDelta.updatedAt);
+			expect(after.updatedAt).not.toBe(before.updatedAt);
+			if (committedProjection === undefined) throw new Error("Missing authenticated goal projection CAS.");
+			expect(
+				harness.session.compareAndSwapGoalState(
+					committedProjection.expected,
+					committedProjection.next,
+					committedProjection.authorization,
+				),
+			).toBe(false);
+
+			const forged = {
+				workflowId: harness.session.sessionId,
+				eventSequence: binding.sequence,
+				transitionDigest: binding.eventDigest,
+				storeEpoch: 1,
+				coordinatorEpoch: 1,
+			} as unknown as WorkflowGoalProjectionAuthorization;
+			const forgedNext = { ...after, active: false, status: "paused" as const };
+			expect(harness.session.compareAndSwapGoalState(after, forgedNext, forged)).toBe(false);
+			expect(harness.session.readGoalStateForWorkflowProjection()).toEqual(after);
+		} finally {
+			await host.dispose?.();
+		}
+	});
+
+	it("reopens the persisted goal projection after the workflow host is closed", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "survive a workflow host restart" },
+		});
+		harnesses.push(harness);
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		const goalProjection: WorkflowGoalProjectionAdapter = {
+			read: () => harness.session.readGoalStateForWorkflowProjection(),
+			compareAndSwap: (expected, next, authorization) =>
+				harness.session.compareAndSwapGoalState(expected, next, authorization),
+		};
+		let host = await createPersistedSessionWorkflowHost({
+			artifactRoot,
+			rootSessionId: harness.session.sessionId,
+			workflowId: harness.session.sessionId,
+			goalProjection,
+			genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+		});
+		try {
+			const before = harness.session.readGoalStateForWorkflowProjection();
+			const started = await host.execute({
+				kind: "start",
+				request: {
+					workflowId: harness.session.sessionId,
+					objective: before.objective,
+					acceptanceChecks: ["restart"],
+					protectedInvariants: ["persisted-goal"],
+				},
+			});
+			expect(started.status).toBe("awaiting_user");
+			await host.dispose?.();
+			host = await createPersistedSessionWorkflowHost({
+				artifactRoot,
+				rootSessionId: harness.session.sessionId,
+				workflowId: harness.session.sessionId,
+				goalProjection,
+				genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+			});
+			const reopened = await host.execute({ kind: "status" });
+			expect(reopened.status).toBe("awaiting_user");
+			expect(reopened.goal).toMatchObject({
+				goalId: before.goalId,
+				objective: before.objective,
+				status: "active",
+			});
+			expect(harness.session.readGoalStateForWorkflowProjection()).toMatchObject({
+				goalId: before.goalId,
+				objective: before.objective,
+				status: "active",
+			});
+		} finally {
+			await host.dispose?.();
+		}
+	});
+
+	it("fails closed when a public persisted AgentSession reopens after goal binding before approval", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "do not resume before authenticated approval" },
+		});
+		harnesses.push(harness);
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		const goalPath = join(artifactRoot, "crash-goal.json");
+		const markerPath = join(artifactRoot, "crash-after-binding.marker");
+		writeFileSync(goalPath, JSON.stringify(harness.session.readGoalStateForWorkflowProjection()));
+		const factoryModule = pathToFileURL(join(process.cwd(), "src/core/workflow/session-host-factory.ts")).href;
+		const childSource = `
+import { createPersistedSessionWorkflowHost } from ${JSON.stringify(factoryModule)};
+import { readFileSync, writeFileSync } from "node:fs";
+const artifactRoot = process.argv[1];
+const workflowId = process.argv[2];
+const goalPath = process.argv[3];
+const markerPath = process.argv[4];
+const readGoal = () => JSON.parse(readFileSync(goalPath, "utf8"));
+const blocker = new Int32Array(new SharedArrayBuffer(4));
+const goalProjection = {
+  read: () => readGoal(),
+  compareAndSwap: () => {
+    writeFileSync(markerPath, "goal-binding-committed");
+    Atomics.wait(blocker, 0, 0);
+    return false;
+  },
+};
+const host = await createPersistedSessionWorkflowHost({
+  artifactRoot,
+  rootSessionId: workflowId,
+  workflowId,
+  goalProjection,
+  genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+});
+await host.execute({
+  kind: "start",
+  request: {
+    workflowId,
+    objective: readGoal().objective,
+    acceptanceChecks: ["approval-before-resume"],
+  },
+});
+`;
+		const child = spawn(
+			process.execPath,
+			[
+				"--import",
+				"tsx/esm",
+				"--input-type=module",
+				"-e",
+				childSource,
+				artifactRoot,
+				harness.session.sessionId,
+				goalPath,
+				markerPath,
+			],
+			{ cwd: process.cwd(), stdio: ["ignore", "ignore", "pipe"] },
+		);
+		let childStderr = "";
+		child.stderr?.on("data", (chunk: Buffer) => {
+			childStderr += chunk.toString();
+		});
+		try {
+			for (let attempt = 0; attempt < 300; attempt++) {
+				if (existsSync(markerPath)) break;
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				if (attempt === 299) throw new Error(`child did not reach goal binding: ${childStderr}`);
+			}
+			child.kill("SIGKILL");
+			const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+				child.once("error", reject);
+				child.once("close", (code, signal) => resolve({ code, signal }));
+			});
+			expect(exit.signal).toBe("SIGKILL");
+
+			harness.setResponses([fauxAssistantMessage("planner must not run")]);
+			const goalProjection: WorkflowGoalProjectionAdapter = {
+				read: () => harness.session.readGoalStateForWorkflowProjection(),
+				compareAndSwap: (expected, next, authorization) =>
+					harness.session.compareAndSwapGoalState(expected, next, authorization),
+			};
+			const services = await createAgentSessionServices({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				resourceLoaderOptions: { noExtensions: true, noPromptTemplates: true, noThemes: true },
+				telemetryDisabled: true,
+				workflowHostFactory: async (input) =>
+					createPersistedSessionWorkflowHost({
+						artifactRoot: input.artifactRoot,
+						rootSessionId: input.rootSessionId,
+						workflowId: input.workflowId,
+						goalProjection,
+					}),
+			});
+			await expect(
+				createAgentSessionFromServices({
+					services,
+					sessionManager: harness.sessionManager,
+					model: harness.getModel(),
+					tools: ["ipython"],
+					includeGoals: true,
+					telemetryDisabled: true,
+				}),
+			).rejects.toThrow(
+				"Workflow start approval is incomplete; planner resume is blocked until authenticated approval.",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(harness.faux.getPendingResponseCount()).toBe(1);
+			expect(harness.session.goalState.status).toBe("active");
+		} finally {
+			if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+		}
+	});
+
+	it("rejects a stale persisted AgentSession projection token after an authenticated child-process append", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "invalidate stale projection authority across processes" },
+		});
+		harnesses.push(harness);
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		let captured:
+			| {
+					expected: ReturnType<AgentSession["readGoalStateForWorkflowProjection"]>;
+					next: ReturnType<AgentSession["readGoalStateForWorkflowProjection"]>;
+					authorization: WorkflowGoalProjectionAuthorization;
+			  }
+			| undefined;
+		const goalProjection: WorkflowGoalProjectionAdapter = {
+			read: () => harness.session.readGoalStateForWorkflowProjection(),
+			compareAndSwap: (expected, next, authorization) => {
+				captured = { expected: structuredClone(expected), next: structuredClone(next), authorization };
+				return false;
+			},
+		};
+		const host = await createPersistedSessionWorkflowHost({
+			artifactRoot,
+			rootSessionId: harness.session.sessionId,
+			workflowId: harness.session.sessionId,
+			goalProjection,
+			genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+		});
+		try {
+			const objective = harness.session.readGoalStateForWorkflowProjection().objective;
+			if (objective === undefined) throw new Error("Expected an initial goal objective.");
+			await expect(
+				host.execute({
+					kind: "start",
+					request: { workflowId: harness.session.sessionId, objective, acceptanceChecks: ["cross-process-cas"] },
+				}),
+			).rejects.toThrow("compare-and-swap conflict");
+			if (captured === undefined) throw new Error("Expected the host to mint a projection authorization token.");
+			const capturedProjection = captured;
+			const childGoalPath = join(artifactRoot, "child-goal.json");
+			writeFileSync(childGoalPath, JSON.stringify(capturedProjection.next));
+			const parentProcessIdentity = host.runtimeStore.durableContext?.currentLeaseRef().processIdentity;
+			if (parentProcessIdentity === undefined) throw new Error("Expected the persisted host lease identity.");
+
+			const factoryModule = pathToFileURL(join(process.cwd(), "src/core/workflow/session-host-factory.ts")).href;
+			const childSource = `
+import { createPersistedSessionWorkflowHost } from ${JSON.stringify(factoryModule)};
+import { readFileSync, writeFileSync } from "node:fs";
+const artifactRoot = process.argv[1];
+const workflowId = process.argv[2];
+const goalPath = process.argv[3];
+const processIdentity = process.argv[4];
+const goalProjection = {
+  read: () => JSON.parse(readFileSync(goalPath, "utf8")),
+  compareAndSwap: (expected, next) => {
+    const current = JSON.parse(readFileSync(goalPath, "utf8"));
+    if (JSON.stringify(current) !== JSON.stringify(expected)) return false;
+    writeFileSync(goalPath, JSON.stringify(next));
+    return true;
+  },
+};
+const host = await createPersistedSessionWorkflowHost({
+  artifactRoot,
+  rootSessionId: workflowId,
+  workflowId,
+  goalProjection,
+  processIdentity,
+});
+try {
+  await host.execute({ kind: "pause", reason: "authenticated child append" });
+} finally {
+  await host.dispose();
+}
+`;
+			const child = spawn(
+				process.execPath,
+				[
+					"--import",
+					"tsx/esm",
+					"--input-type=module",
+					"-e",
+					childSource,
+					artifactRoot,
+					harness.session.sessionId,
+					childGoalPath,
+					parentProcessIdentity,
+				],
+				{ cwd: process.cwd(), stdio: ["ignore", "ignore", "pipe"] },
+			);
+			let childStderr = "";
+			child.stderr?.on("data", (chunk: Buffer) => {
+				childStderr += chunk.toString();
+			});
+			const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+				child.once("error", reject);
+				child.once("close", (code, signal) => resolve({ code, signal }));
+			});
+			if (exit.code !== 0) throw new Error(`authenticated child append failed: ${childStderr}`);
+
+			expect(
+				harness.session.compareAndSwapGoalState(
+					capturedProjection.expected,
+					capturedProjection.next,
+					capturedProjection.authorization,
+				),
+			).toBe(false);
+			expect(harness.session.readGoalStateForWorkflowProjection()).toEqual(capturedProjection.expected);
+		} finally {
+			await host?.dispose?.();
+		}
+	});
+
+	it("rejects direct completion when the public SDK reopens a durable workflow-bound goal without its host", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "keep workflow ownership after a public SDK reopen" },
+		});
+		harnesses.push(harness);
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		const goalProjection: WorkflowGoalProjectionAdapter = {
+			read: () => harness.session.readGoalStateForWorkflowProjection(),
+			compareAndSwap: (expected, next, authorization) =>
+				harness.session.compareAndSwapGoalState(expected, next, authorization),
+		};
+		const host = await createPersistedSessionWorkflowHost({
+			artifactRoot,
+			rootSessionId: harness.session.sessionId,
+			workflowId: harness.session.sessionId,
+			goalProjection,
+			genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+		});
+		let reopened: AgentSession | undefined;
+		try {
+			const before = harness.session.readGoalStateForWorkflowProjection();
+			const started = await host.execute({
+				kind: "start",
+				request: {
+					workflowId: harness.session.sessionId,
+					objective: before.objective,
+					acceptanceChecks: ["public-sdk-reopen"],
+					protectedInvariants: ["durable-workflow-ownership"],
+				},
+			});
+			expect(started.status).toBe("awaiting_user");
+			const bound = harness.session.readGoalStateForWorkflowProjection();
+			expect(bound.status).toBe("active");
+			expect(bound.updatedAt).toBeGreaterThan(before.updatedAt ?? 0);
+			await host.dispose?.();
+
+			const result = await createAgentSession({
+				sessionManager: harness.sessionManager,
+				settingsManager: harness.settingsManager,
+				authStorage: harness.authStorage,
+				model: harness.getModel(),
+				resourceLoader: createTestResourceLoader(),
+				noTools: "all",
+				includeGoals: true,
+			});
+			const reopenedSession = result.session;
+			reopened = reopenedSession;
+			expect(reopenedSession.goalState).toMatchObject({
+				status: "active",
+				goalId: bound.goalId,
+				objective: bound.objective,
+				updatedAt: bound.updatedAt,
+			});
+			expect(() => reopenedSession.handleGoalHostRequest("goal.complete")).toThrow(
+				"durable workflow completion gate",
+			);
+			expect(reopenedSession.goalState.status).toBe("active");
+			expect(reopenedSession.goalState.updatedAt).toBe(bound.updatedAt);
+			expect(harness.session.readGoalStateForWorkflowProjection()).toMatchObject({
+				status: "active",
+				updatedAt: bound.updatedAt,
+			});
+		} finally {
+			reopened?.dispose();
+			await host.dispose?.();
+		}
+	});
+
+	it("does not publish workflow_started when a paused goal would be rebound", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "the existing paused objective" },
+		});
+		harnesses.push(harness);
+		await harness.session.prompt("/goal pause");
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		const goalProjection: WorkflowGoalProjectionAdapter = {
+			read: () => harness.session.readGoalStateForWorkflowProjection(),
+			compareAndSwap: (expected, next, authorization) =>
+				harness.session.compareAndSwapGoalState(expected, next, authorization),
+		};
+		const host = await createPersistedSessionWorkflowHost({
+			artifactRoot,
+			rootSessionId: harness.session.sessionId,
+			workflowId: harness.session.sessionId,
+			goalProjection,
+			genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+		});
+		try {
+			await expect(
+				host.execute({
+					kind: "start",
+					request: {
+						workflowId: harness.session.sessionId,
+						objective: "a different objective must not rebind the paused goal",
+						acceptanceChecks: ["preflight"],
+						protectedInvariants: ["no-partial-journal"],
+					},
+				}),
+			).rejects.toThrow();
+			const replay = await host.runtimeStore.replay({
+				workflowId: harness.session.sessionId,
+				fromSequence: 0,
+				expectedStoreEpoch: 1,
+			});
+			expect(replay.events).toHaveLength(0);
+		} finally {
+			await host.dispose?.();
+		}
+	});
+
+	it("reconciles an authenticated goal projection after reopen before exposing workflow status", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "reconcile the projection after a crash" },
+		});
+		harnesses.push(harness);
+		const artifactRoot = harness.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Expected a persisted session artifact root.");
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		chmodSync(artifactRoot, 0o700);
+		let crashBeforeCas = true;
+		let casCalls = 0;
+		const goalProjection: WorkflowGoalProjectionAdapter = {
+			read: () => harness.session.readGoalStateForWorkflowProjection(),
+			compareAndSwap: (expected, next, authorization) => {
+				casCalls += 1;
+				if (crashBeforeCas) throw new Error("simulated process crash before goal projection CAS");
+				return harness.session.compareAndSwapGoalState(expected, next, authorization);
+			},
+		};
+		let host = await createPersistedSessionWorkflowHost({
+			artifactRoot,
+			rootSessionId: harness.session.sessionId,
+			workflowId: harness.session.sessionId,
+			goalProjection,
+			genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+		});
+		try {
+			const objective = harness.session.readGoalStateForWorkflowProjection().objective;
+			if (objective === undefined) throw new Error("Expected an initial goal objective.");
+			await expect(
+				host.execute({
+					kind: "start",
+					request: {
+						workflowId: harness.session.sessionId,
+						objective,
+						acceptanceChecks: ["restart-reconcile"],
+						protectedInvariants: ["authenticated-projection"],
+					},
+				}),
+			).rejects.toThrow("simulated process crash");
+			await host.dispose?.();
+			crashBeforeCas = false;
+			host = await createPersistedSessionWorkflowHost({
+				artifactRoot,
+				rootSessionId: harness.session.sessionId,
+				workflowId: harness.session.sessionId,
+				goalProjection,
+				genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+			});
+			expect(harness.session.readGoalStateForWorkflowProjection()).toMatchObject({
+				status: "active",
+				objective,
+			});
+			await expect(host.execute({ kind: "status" })).rejects.toThrow(
+				"Workflow start approval is incomplete; planner resume is blocked until authenticated approval.",
+			);
+			expect(casCalls).toBeGreaterThan(1);
+		} finally {
+			await host.dispose?.();
+		}
 	});
 
 	it("rejects malformed and unknown goal host requests", async () => {

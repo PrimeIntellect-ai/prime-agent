@@ -55,6 +55,21 @@ class ThrowingResultStream extends MockAssistantStream {
 	}
 }
 
+class SettledResultStream extends MockAssistantStream {
+	private settledResult: AssistantMessage | undefined;
+
+	override push(event: AssistantMessageEvent): void {
+		if (event.type === "done" || event.type === "error") {
+			this.settledResult = event.type === "done" ? event.message : event.error;
+		}
+		super.push(event);
+	}
+
+	getResultIfSettled(): AssistantMessage | undefined {
+		return this.settledResult;
+	}
+}
+
 function createUsage() {
 	return {
 		input: 0,
@@ -111,6 +126,51 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 }
 
 describe("agentLoop with AgentMessage", () => {
+	it("preserves a settled provider stall when caller abort races its terminal error", async () => {
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [],
+			tools: [],
+		};
+		const controller = new AbortController();
+		const stalledMessage = createAssistantMessage([{ type: "text", text: "partial" }], "error");
+		stalledMessage.errorMessage = "provider_stream_stalled (streaming/no_meaningful_content_progress)";
+		stalledMessage.diagnostics = [
+			{
+				type: "provider_stream_stalled",
+				timestamp: Date.now(),
+				details: { phase: "streaming" },
+			},
+		];
+		const streamFn = () => {
+			const response = new SettledResultStream();
+			queueMicrotask(() => {
+				response.push({ type: "error", reason: "error", error: stalledMessage });
+				controller.abort();
+			});
+			return response;
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		const result = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			config,
+			() => undefined,
+			controller.signal,
+			streamFn,
+		);
+
+		const assistant = result.find((message) => message.role === "assistant");
+		expect(assistant?.stopReason).toBe("error");
+		expect(assistant?.diagnostics).toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "provider_stream_stalled" })]),
+		);
+	});
+
 	it("should preserve a terminal response when abort fires after done", async () => {
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",

@@ -1,7 +1,18 @@
-import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
+import type { AgentEvent, AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
+import {
+	type AssistantMessage,
+	applyProviderStreamStall,
+	createAssistantMessageEventStream,
+	createProviderStreamLiveness,
+	createStreamLivenessHost,
+	fauxAssistantMessage,
+	fauxThinking,
+	fauxToolCall,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readSessionInfo, SessionManager } from "../../src/core/session-manager.js";
+import { summaryForInactiveSession } from "../../src/modes/daemon/daemon-session-list.js";
 import { createHarness, type Harness } from "./harness.js";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
@@ -77,6 +88,189 @@ describe("AgentSession retry and event characterization", () => {
 		expect(retryEvents).toEqual(["start:1", "end:true"]);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.session.isRetrying).toBe(false);
+	});
+
+	it("aborts a provider stream with no events, surfaces the stall, and retries once", async () => {
+		let callCount = 0;
+		let resolveStall: (message: AssistantMessage) => void = () => {};
+		const stallObserved = new Promise<AssistantMessage>((resolve) => {
+			resolveStall = resolve;
+		});
+		const streamFn: StreamFn = (model, _context, options) => {
+			callCount += 1;
+			const stream = createAssistantMessageEventStream();
+			if (callCount > 1) {
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: fauxAssistantMessage("recovered") });
+				});
+				return stream;
+			}
+			createProviderStreamLiveness({
+				identity: { provider: model.provider, model: model.id, transport: "test-sse" },
+				host: options?.streamLiveness,
+				signal: options?.signal,
+				onStall: (error) => {
+					const message = fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: error.message,
+					});
+					applyProviderStreamStall(message, error);
+					stream.push({ type: "done", reason: "stop", message });
+					queueMicrotask(() => resolveStall(message));
+				},
+			});
+			return stream;
+		};
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 100 } },
+			streamFn,
+			streamLiveness: createStreamLivenessHost({
+				policyResolver: () => ({
+					connectingTimeoutMs: 25,
+					headersTimeoutMs: 25,
+					streamingIdleTimeoutMs: 25,
+					finalizingTimeoutMs: 25,
+					progressExtensionMs: 10,
+					maxProgressExtensionMs: 50,
+				}),
+			}),
+		});
+		harnesses.push(harness);
+
+		const running = harness.session.prompt("wait for a stalled stream");
+		const stalledMessage = await stallObserved;
+		expect(stalledMessage.diagnostics).toContainEqual(expect.objectContaining({ type: "provider_stream_stalled" }));
+		expect(harness.session.getProviderStreamStallDiagnostic()).toMatchObject({
+			type: "provider_stream_stalled",
+			phase: "connecting",
+			reason: "no_provider_event",
+		});
+		await vi.waitFor(() =>
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "assistant" &&
+							entry.message.diagnostics?.some((diagnostic) => diagnostic.type === "provider_stream_stalled"),
+					),
+			).toBe(true),
+		);
+		const sessionFile = harness.session.sessionFile;
+		if (!sessionFile) throw new Error("Persisted liveness test session is missing its session file");
+		const reopenedManager = SessionManager.open(sessionFile, harness.sessionManager.getSessionDir());
+		const restartedHarness = await createHarness({ sessionManager: reopenedManager });
+		harnesses.push(restartedHarness);
+		expect(restartedHarness.session.getProviderStreamStallDiagnostic()).toMatchObject({
+			type: "provider_stream_stalled",
+			phase: "connecting",
+			reason: "no_provider_event",
+		});
+		const restartedInfo = await readSessionInfo(sessionFile);
+		if (!restartedInfo) throw new Error("Persisted liveness test session is missing from the saved-session catalog");
+		expect(summaryForInactiveSession(restartedInfo)).toMatchObject({
+			summary: "Provider stream stalled",
+			providerStreamStallDiagnostic: {
+				type: "provider_stream_stalled",
+				phase: "connecting",
+				reason: "no_provider_event",
+			},
+		});
+		await running;
+
+		expect(callCount).toBe(2);
+		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(1);
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "recovered" }],
+		});
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.diagnostics?.some((diagnostic) => diagnostic.type === "provider_stream_stalled"),
+				),
+		).toBe(true);
+	});
+
+	it("terminates after a second silent no-tool stream and preserves the blocker across restart", async () => {
+		let callCount = 0;
+		const streamFn: StreamFn = (model, _context, options) => {
+			callCount += 1;
+			const stream = createAssistantMessageEventStream();
+			createProviderStreamLiveness({
+				identity: { provider: model.provider, model: model.id, transport: "test-sse" },
+				host: options?.streamLiveness,
+				signal: options?.signal,
+				onStall: (error) => {
+					const message = fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: error.message,
+					});
+					applyProviderStreamStall(message, error);
+					stream.push({ type: "done", reason: "stop", message });
+				},
+			});
+			return stream;
+		};
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
+			streamFn,
+			streamLiveness: createStreamLivenessHost({
+				policyResolver: () => ({
+					connectingTimeoutMs: 25,
+					headersTimeoutMs: 25,
+					streamingIdleTimeoutMs: 25,
+					finalizingTimeoutMs: 25,
+					progressExtensionMs: 10,
+					maxProgressExtensionMs: 50,
+				}),
+			}),
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("produce the required report");
+		await new Promise((resolve) => setTimeout(resolve, 75));
+
+		expect(callCount).toBe(2);
+		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(1);
+		expect(harness.eventsOfType("auto_retry_end")).toEqual([expect.objectContaining({ success: false, attempt: 1 })]);
+		expect(harness.eventsOfType("tool_execution_start")).toHaveLength(0);
+		expect(harness.session.isStreaming).toBe(false);
+		expect(harness.session.isRetrying).toBe(false);
+		expect(harness.session.getProviderStreamStallDiagnostic()).toMatchObject({
+			type: "provider_stream_stalled",
+			phase: "connecting",
+			reason: "no_provider_event",
+		});
+		const stalledAssistantMessages = harness.sessionManager
+			.getEntries()
+			.filter(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					entry.message.diagnostics?.some((diagnostic) => diagnostic.type === "provider_stream_stalled"),
+			);
+		expect(stalledAssistantMessages).toHaveLength(2);
+
+		const sessionFile = harness.session.sessionFile;
+		if (!sessionFile) throw new Error("Persisted terminal liveness test session is missing its session file");
+		const restartedInfo = await readSessionInfo(sessionFile);
+		if (!restartedInfo) throw new Error("Persisted terminal liveness test session is missing from the catalog");
+		expect(summaryForInactiveSession(restartedInfo)).toMatchObject({
+			summary: "Provider stream stalled",
+			providerStreamStallDiagnostic: {
+				type: "provider_stream_stalled",
+				phase: "connecting",
+				reason: "no_provider_event",
+			},
+		});
 	});
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {

@@ -65,6 +65,17 @@ describe("InteractiveMode startup hints", () => {
 		expect(unpadded.render(120)[0]).not.toBe("");
 	});
 
+	it("uses the session-search hint when no custom splash hint is supplied", () => {
+		const header = new BrandSplashHeader(
+			"0.0.0",
+			() => "test-model",
+			() => "/tmp/project",
+		);
+		const output = stripAnsi(header.render(120).join("\n"));
+
+		expect(output).toContain("type to search sessions");
+	});
+
 	it("randomly selects from five concise filepath prompts", () => {
 		expect(START_HINTS).toHaveLength(5);
 		expect(new Set(START_HINTS).size).toBe(5);

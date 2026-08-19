@@ -439,7 +439,9 @@ export class ModelRegistry {
 	private authorizedPrivatePrimeInferenceModelIds = new Set<string>();
 	private authorizedPrivatePrimeInferenceTeamId: string | undefined;
 	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
-	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
+	private openAICodexModelsCache:
+		| { authFingerprint: string; authRevision: string; modelIds: Set<string>; refreshedAt: number }
+		| undefined;
 	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
 	private loadError: string | undefined = undefined;
 
@@ -983,8 +985,13 @@ export class ModelRegistry {
 			return availableModels.filter((model) => model.provider !== "openai-codex");
 		}
 		const authFingerprint = createHash("sha256").update(auth.apiKey).digest("hex");
+		const authSourceToken = this.getCurrentProviderAuthSourceToken("openai-codex");
+		const authRevision = authSourceToken
+			? `${authSourceToken.source}:${authSourceToken.identityFingerprint}:${authSourceToken.valueFingerprint}`
+			: `api-key:${authFingerprint}`;
 		const cached = this.openAICodexModelsCache;
-		if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
+		const sameAuth = cached?.authFingerprint === authFingerprint && cached.authRevision === authRevision;
+		if (sameAuth && Date.now() - cached.refreshedAt < 300_000) {
 			if (cached.modelIds.size === 0) {
 				return availableModels;
 			}
@@ -1009,7 +1016,7 @@ export class ModelRegistry {
 				throw new Error(`OpenAI Codex model discovery failed with HTTP ${response.status}`);
 			}
 			const modelIds = readOpenAICodexModelIds(await response.json());
-			this.openAICodexModelsCache = { authFingerprint, modelIds, refreshedAt: Date.now() };
+			this.openAICodexModelsCache = { authFingerprint, authRevision, modelIds, refreshedAt: Date.now() };
 			// An empty catalog means discovery told us nothing, not that the account has
 			// no models. Some accounts get `{"models": []}` with HTTP 200 for every
 			// client and originator. Filtering on that removes every Codex model, and
@@ -1022,7 +1029,10 @@ export class ModelRegistry {
 			}
 			return availableModels.filter((model) => model.provider !== "openai-codex" || modelIds.has(model.id));
 		} catch {
-			if (cached?.authFingerprint === authFingerprint && Date.now() - cached.refreshedAt < 300_000) {
+			// Discovery is advisory. Keep the last-known-good catalog for this exact
+			// authenticated source after its refresh TTL, but never carry it across an
+			// auth source/value revision change.
+			if (sameAuth) {
 				return availableModels.filter(
 					(model) => model.provider !== "openai-codex" || cached.modelIds.has(model.id),
 				);

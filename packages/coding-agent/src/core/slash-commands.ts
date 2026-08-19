@@ -10,7 +10,7 @@ export interface SlashCommandInfo {
 	sourceInfo: SourceInfo;
 }
 
-export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
+export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous", "workflow"] as const;
 
 export type SessionSlashCommandName = (typeof SESSION_SLASH_COMMAND_NAMES)[number];
 
@@ -172,6 +172,13 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		takesArgument: true,
 	},
 	{
+		name: "workflow",
+		description: "Brainstorm, approve, and control a durable workflow",
+		argumentHint:
+			"[<prompt>|start [--profile inline|parallel] [--max-workers <n>] <prompt>|approve [--cloud]|status|decisions|resources|respond|pause|resume|cancel]",
+		takesArgument: true,
+	},
+	{
 		name: "rlm-max-depth",
 		description:
 			"Set/view the per-chat persistent RLM max depth immediately; never interrupts or queues the running turn",
@@ -186,6 +193,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		takesArgument: true,
 	},
 	{ name: "heartbeats", description: "View and manage all user and agent heartbeats" },
+	{
+		name: "resume",
+		description: "Open the agents view, or resume a session by id or path",
+		argumentHint: "[id|path]",
+		takesArgument: true,
+	},
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
 	{
 		name: "fullscreen",

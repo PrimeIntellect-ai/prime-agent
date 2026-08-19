@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
+import { type HostRequestHandlers, installHostRequestCapabilityResolver } from "../src/core/kernel/index.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
@@ -14,6 +15,18 @@ function bundledRlmHeartbeatSkill(): PythonSkillRuntimeInfo {
 		packagePath,
 		pyprojectPath: join(packagePath, "pyproject.toml"),
 	};
+}
+
+function authorizedHostHandlers(handlers: HostRequestHandlers): HostRequestHandlers {
+	let nonce = 0;
+	return installHostRequestCapabilityResolver(handlers, (requestType) => ({
+		workflowId: "workflow-1",
+		decisionId: "decision-1",
+		decisionRevision: 1,
+		capabilities: [requestType],
+		expiresAt: Date.now() + 60_000,
+		nonce: `nonce-${++nonce}`,
+	}));
 }
 
 describe("RLM heartbeat skill over the kernel host bridge", () => {
@@ -35,7 +48,7 @@ describe("RLM heartbeat skill over the kernel host bridge", () => {
 		const requests: Array<{ type: string; payload: Record<string, unknown> }> = [];
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [bundledRlmHeartbeatSkill()],
-			hostHandlers: {
+			hostHandlers: authorizedHostHandlers({
 				"rlm_heartbeat.create": async (payload) => {
 					requests.push({ type: "rlm_heartbeat.create", payload });
 					return {
@@ -85,7 +98,7 @@ describe("RLM heartbeat skill over the kernel host bridge", () => {
 						},
 					};
 				},
-			},
+			}),
 		});
 
 		const manager = await provisioner.ensure();

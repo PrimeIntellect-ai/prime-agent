@@ -7,6 +7,8 @@ import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
+	type DaemonWorkflowStatusProjection,
+	projectSessionSummaryForClient,
 	resolveAttachModelFallbackMessage,
 	type SessionSummary,
 	summaryForActiveSession,
@@ -65,6 +67,126 @@ describe("buildSessionList", () => {
 		expect(second.created).toBe(first.created);
 	});
 
+	it("projects workflow phase, next work, blocker, head, and approval action details", () => {
+		const workflowStatus: DaemonWorkflowStatusProjection = {
+			workflowId: "workflow-1",
+			status: "awaiting_user",
+			phase: "adjudicating",
+			nextGate: "approval_gate",
+			nextTask: "review-evidence",
+			blocker: {
+				kind: "awaiting_external",
+				reason: "Approval is required before dispatch",
+				blockerId: "approval-blocker-1",
+				owner: "external",
+			},
+			headDigest: "head-immutable-1",
+			approvalRequest: {
+				approvalRequestId: "approval-1",
+				question: "Choose a dispatch mode",
+				expiresAt: "2026-05-01T01:00:00.000Z",
+				expectedResponseSequence: 4,
+				headDigest: "head-immutable-1",
+				stateDigest: "state-1",
+				options: [{ optionId: "approve", label: "Approve", effectDigest: "effect-1" }],
+			},
+			attempts: [
+				{
+					taskId: "review-evidence",
+					attemptId: "attempt-1",
+					status: "running",
+					leaseExpiresAt: "2026-05-01T01:10:00.000Z",
+				},
+			],
+			leases: [
+				{
+					kind: "resource",
+					leaseId: "lease-1",
+					taskId: "review-evidence",
+					attemptId: "attempt-1",
+					status: "active",
+					expiresAt: "2026-05-01T01:10:00.000Z",
+				},
+			],
+		};
+
+		const unsafeWorkflowStatus = {
+			...workflowStatus,
+			tokenHash: "must-not-cross-the-daemon-boundary",
+			approvalRequest: { ...workflowStatus.approvalRequest!, tokenHash: "must-not-cross-the-daemon-boundary" },
+			attempts: workflowStatus.attempts?.map((attempt) => ({
+				...attempt,
+				workerIdentity: "must-not-cross-the-daemon-boundary",
+			})),
+			leases: workflowStatus.leases?.map((lease) => ({
+				...lease,
+				holderIdentity: "must-not-cross-the-daemon-boundary",
+			})),
+		} as unknown as DaemonWorkflowStatusProjection;
+		const summary = summaryForActiveSession(
+			makeState({ activeSessionId: "workflow-active", workflowStatusProjection: unsafeWorkflowStatus }),
+		);
+
+		expect(summary.workflowStatus).toEqual(workflowStatus);
+		expect(summary.workflowStatus?.approvalRequest?.approvalRequestId).toBe("approval-1");
+		expect(summary.workflowStatus?.headDigest).toBe("head-immutable-1");
+		expect(summary.workflowStatus).not.toHaveProperty("tokenHash");
+		expect(summary.workflowStatus?.approvalRequest).not.toHaveProperty("tokenHash");
+		expect(summary.workflowStatus).toMatchObject({
+			attempts: [
+				{
+					taskId: "review-evidence",
+					attemptId: "attempt-1",
+					status: "running",
+					leaseExpiresAt: "2026-05-01T01:10:00.000Z",
+				},
+			],
+			leases: [
+				{
+					kind: "resource",
+					leaseId: "lease-1",
+					taskId: "review-evidence",
+					attemptId: "attempt-1",
+					status: "active",
+					expiresAt: "2026-05-01T01:10:00.000Z",
+				},
+			],
+		});
+		const projectedWorkflow = summary.workflowStatus as unknown as {
+			attempts?: readonly Record<string, unknown>[];
+			leases?: readonly Record<string, unknown>[];
+		};
+		expect(projectedWorkflow.attempts?.[0]).not.toHaveProperty("workerIdentity");
+		expect(projectedWorkflow.leases?.[0]).not.toHaveProperty("holderIdentity");
+	});
+
+	it("removes workflow metadata for clients without the negotiated capability", () => {
+		const summary = summaryForActiveSession(
+			makeState({
+				activeSessionId: "workflow-filtered",
+				workflowStatusProjection: {
+					workflowId: "workflow-1",
+					status: "active",
+					phase: "executing",
+					nextGate: null,
+					nextTask: "task-1",
+					blocker: null,
+					headDigest: "head-1",
+					approvalRequest: null,
+				},
+			}),
+		);
+
+		expect(projectSessionSummaryForClient(summary, true)).toHaveProperty("workflowStatus");
+		expect(projectSessionSummaryForClient(summary, false)).not.toHaveProperty("workflowStatus");
+	});
+
+	it("omits workflow metadata when an older session host has no projection provider", () => {
+		const summary = summaryForActiveSession(makeState({ activeSessionId: "legacy-active" }));
+
+		expect(summary).not.toHaveProperty("workflowStatus");
+	});
+
 	it("takes last activity from custom messages and tool results", () => {
 		const oldMessage = {
 			role: "user",
@@ -113,21 +235,74 @@ describe("buildSessionList", () => {
 
 	it("keeps a session working while background subagents run", () => {
 		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
-		const entries = buildSessionList(
-			[
-				makeState({
-					activeSessionId: "parent",
-					sessionFile: "/tmp/parent.jsonl",
-					isStreaming: false,
-					hasRunningRlmChildren: true,
-					messages: oneMessage,
-					summaryState: { basedOnMessageCount: 1 } as ActiveSessionState["summaryState"],
-				}),
-			],
-			[],
+		const options: StateOptions = {
+			activeSessionId: "parent",
+			sessionFile: "/tmp/parent.jsonl",
+			isStreaming: false,
+			hasRunningRlmChildren: true,
+			messages: oneMessage,
+			summaryState: {
+				summary: "Waiting for a decision",
+				taskState: "needs_input",
+				basedOnMessageCount: 1,
+			},
+		};
+		const state = makeState(options);
+
+		const [working] = buildSessionList([state], []);
+		expect(working).toMatchObject({ activity: "working", hasRunningRlmChildren: true });
+		expect(working?.taskState).toBeUndefined();
+
+		options.hasRunningRlmChildren = false;
+		const [idle] = buildSessionList([state], []);
+		expect(idle).toMatchObject({ activity: "idle", taskState: "needs_input" });
+	});
+
+	it("requires a bounded invocation lease before reporting a tool as running", () => {
+		const stale = summaryForActiveSession(
+			makeState({
+				activeSessionId: "stale-tool-owner",
+				isStreaming: true,
+				pendingToolCalls: ["tool-stale"],
+				toolExecutionStallDiagnostic: {
+					type: "tool_execution_stalled",
+					toolCallId: "tool-stale",
+					toolName: "review",
+					startedAt: "2026-05-01T00:00:00.000Z",
+					lastProgressAt: "2026-05-01T00:00:00.000Z",
+					deadlineAt: "2026-05-01T00:10:00.000Z",
+					progressEventCount: 0,
+					phase: "stalled",
+					detectedAt: "2026-05-01T00:10:00.000Z",
+					reason: "deadline_exceeded",
+				},
+			}),
 		);
-		expect(entries[0]?.activity).toBe("working");
-		expect(entries[0]?.hasRunningRlmChildren).toBe(true);
+
+		expect(stale).toMatchObject({
+			isRunningTools: false,
+			summary: "Tool execution stalled",
+			toolExecutionLiveness: [],
+			diagnostics: [expect.objectContaining({ message: "tool_execution_stalled: review/deadline_exceeded" })],
+		});
+
+		const leased = summaryForActiveSession(
+			makeState({
+				activeSessionId: "leased-tool-owner",
+				toolExecutionLiveness: [
+					{
+						toolCallId: "tool-live",
+						toolName: "review",
+						startedAt: "2026-05-01T00:00:00.000Z",
+						lastProgressAt: "2026-05-01T00:00:01.000Z",
+						deadlineAt: "2026-05-01T00:10:00.000Z",
+						progressEventCount: 1,
+						phase: "running",
+					},
+				],
+			}),
+		);
+		expect(leased).toMatchObject({ isRunningTools: true, toolExecutionLiveness: [expect.any(Object)] });
 	});
 
 	it("marks sessions with active standard or RLM heartbeats", () => {
@@ -231,6 +406,118 @@ describe("buildSessionList", () => {
 		expect(summary.unfinishedActionCount).toBe(3);
 	});
 
+	it("surfaces a selectable agent-message queue without wake ownership as an invariant violation", () => {
+		const messages = [{ role: "user", content: "queued coordinator work" }] as unknown as AgentMessage[];
+		const summary = summaryForActiveSession(
+			makeState({
+				activeSessionId: "orphaned-agent-message",
+				unfinishedActionCount: 1,
+				sessionInputWakeInvariantViolation: "queued_without_wake",
+				messages,
+				summaryState: {
+					summary: "Waiting for user input",
+					taskState: "needs_input",
+					basedOnMessageCount: 1,
+				},
+			}),
+		);
+
+		expect(summary.summary).toBe("Invariant violation: queued_without_wake");
+		expect(summary.taskState).toBeUndefined();
+		expect(summary.diagnostics).toContainEqual({
+			type: "error",
+			message: "queued_without_wake: selectable agent message has no scheduler wake or drain owner",
+		});
+	});
+
+	it("projects compaction phase and deadline without treating child-attributed file writes as coordinator progress", () => {
+		const coordinatorTimestamp = Date.parse("2026-05-03T00:00:00.000Z");
+		const summary = summaryForActiveSession(
+			makeState({
+				activeSessionId: "bounded-compaction",
+				isCompacting: true,
+				messages: [{ role: "user", content: "compact", timestamp: coordinatorTimestamp }] as AgentMessage[],
+				compactionLiveness: {
+					phase: "summarizing",
+					startedAt: coordinatorTimestamp + 1_000,
+					deadlineAt: coordinatorTimestamp + 121_000,
+					elapsedMs: 30_000,
+				},
+			}),
+			makeSessionInfo({
+				id: "bounded-compaction",
+				path: "/tmp/bounded-compaction.jsonl",
+				modified: new Date("2026-05-03T00:05:00.000Z"),
+			}),
+		);
+
+		expect(summary).toMatchObject({
+			activity: "working",
+			isCompacting: true,
+			lastActivityAt: new Date(coordinatorTimestamp).toISOString(),
+			compactionLiveness: {
+				phase: "summarizing",
+				startedAt: coordinatorTimestamp + 1_000,
+				deadlineAt: coordinatorTimestamp + 121_000,
+				elapsedMs: 30_000,
+			},
+		});
+	});
+
+	it("projects provider stream progress and a host-known stall ahead of summary text", () => {
+		const startedAt = Date.parse("2026-05-03T00:00:00.000Z");
+		const summary = summaryForActiveSession(
+			makeState({
+				activeSessionId: "stalled-stream",
+				isStreaming: true,
+				providerStreamLiveness: {
+					phase: "streaming",
+					startedAt,
+					deadlineAt: startedAt + 60_000,
+					elapsedMs: 45_000,
+					lastProviderEventAt: startedAt + 15_000,
+					lastMeaningfulContentDeltaAt: startedAt + 10_000,
+					receivedBytes: 128,
+					blocks: 2,
+					abortability: "abortable",
+				},
+				providerStreamStallDiagnostic: {
+					type: "provider_stream_stalled",
+					phase: "streaming",
+					reason: "no_meaningful_content_progress",
+					at: 45_000,
+					elapsedMs: 45_000,
+					idleMs: 35_000,
+					receivedBytes: 128,
+					blocks: 2,
+					provider: "h2-provider",
+					model: "h2-model",
+					transport: "h2-sse",
+					requestId: undefined,
+					attemptId: undefined,
+				},
+				summaryState: {
+					summary: "Waiting for input",
+					taskState: "needs_input",
+					basedOnMessageCount: 0,
+				},
+			}),
+		);
+
+		expect(summary).toMatchObject({
+			providerStreamLiveness: {
+				phase: "streaming",
+				deadlineAt: startedAt + 60_000,
+				lastMeaningfulContentDeltaAt: startedAt + 10_000,
+			},
+			summary: "Provider stream stalled",
+		});
+		expect(summary.taskState).toBeUndefined();
+		expect(summary.diagnostics).toContainEqual(
+			expect.objectContaining({ type: "error", message: expect.stringContaining("provider_stream_stalled") }),
+		);
+	});
+
 	it("marks a finished subagent idle instead of holding it at working", () => {
 		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
 		const entries = buildSessionList(
@@ -282,6 +569,45 @@ describe("buildSessionList", () => {
 			activity: "idle",
 			hasActiveHeartbeat: true,
 		});
+	});
+
+	it("projects a durable scheduled wake instead of a user-input verdict", () => {
+		const messages = [{ role: "user", content: "continue autonomously" }] as unknown as AgentMessage[];
+		const [entry] = buildSessionList(
+			[
+				makeState({
+					activeSessionId: "scheduled-root",
+					sessionId: "scheduled-session",
+					sessionFile: "/tmp/scheduled-root.jsonl",
+					messages,
+					summaryState: {
+						summary: "Waiting for user input",
+						taskState: "needs_input",
+						basedOnMessageCount: 1,
+					},
+				}),
+			],
+			[],
+			[
+				makeCronJob({
+					id: "refinement-wake",
+					activeSessionId: "scheduled-root",
+					source: "heartbeat",
+					nextRunAt: "2026-05-01T00:05:00.000Z",
+				}),
+			],
+		);
+
+		expect(entry).toMatchObject({
+			activity: "idle",
+			scheduledWake: {
+				owner: "daemon_cron",
+				jobId: "refinement-wake",
+				source: "heartbeat",
+				nextRunAt: "2026-05-01T00:05:00.000Z",
+			},
+		});
+		expect(entry?.taskState).toBeUndefined();
 	});
 
 	it("merges active records with saved sessions and marks inactive sessions", () => {
@@ -686,6 +1012,7 @@ interface StateOptions {
 	sessionFile?: string;
 	sessionId?: string;
 	isStreaming?: boolean;
+	isCompacting?: boolean;
 	pendingToolCalls?: string[];
 	clients?: number;
 	messages?: AgentMessage[];
@@ -695,8 +1022,62 @@ interface StateOptions {
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
 	unfinishedActionCount?: number;
+	sessionInputWakeInvariantViolation?: "queued_without_wake";
 	contextTokens?: number;
 	streamingMessage?: AgentMessage;
+	compactionLiveness?: {
+		phase: "summarizing";
+		startedAt: number;
+		deadlineAt: number;
+		elapsedMs: number;
+	};
+	providerStreamLiveness?: {
+		phase: "streaming";
+		startedAt: number;
+		deadlineAt: number;
+		elapsedMs: number;
+		lastProviderEventAt: number;
+		lastMeaningfulContentDeltaAt: number;
+		receivedBytes: number;
+		blocks: number;
+		abortability: "abortable";
+	};
+	providerStreamStallDiagnostic?: {
+		type: "provider_stream_stalled";
+		phase: "streaming";
+		reason: "no_meaningful_content_progress";
+		at: number;
+		elapsedMs: number;
+		idleMs: number;
+		receivedBytes: number;
+		blocks: number;
+		provider: string;
+		model: string;
+		transport: string;
+		requestId: undefined;
+		attemptId: undefined;
+	};
+	toolExecutionLiveness?: Array<{
+		toolCallId: string;
+		toolName: string;
+		startedAt: string;
+		lastProgressAt: string;
+		deadlineAt: string;
+		progressEventCount: number;
+		phase: "running";
+	}>;
+	toolExecutionStallDiagnostic?: {
+		type: "tool_execution_stalled";
+		toolCallId: string;
+		toolName: string;
+		startedAt: string;
+		lastProgressAt: string;
+		deadlineAt: string;
+		progressEventCount: number;
+		phase: "stalled";
+		detectedAt: string;
+		reason: "deadline_exceeded";
+	};
 	rlmDepth?: number;
 	metadata?: {
 		kind: "top-level" | "subagent";
@@ -709,6 +1090,7 @@ interface StateOptions {
 		prompt?: string;
 		sessionDir?: string;
 	};
+	workflowStatusProjection?: DaemonWorkflowStatusProjection;
 }
 
 function makeState(options: StateOptions): ActiveSessionState {
@@ -729,7 +1111,12 @@ function makeState(options: StateOptions): ActiveSessionState {
 				model: options.model,
 				thinkingLevel: "off",
 				isStreaming: options.isStreaming ?? false,
-				isCompacting: false,
+				isCompacting: options.isCompacting ?? false,
+				getCompactionLiveness: () => options.compactionLiveness,
+				getProviderStreamLiveness: () => options.providerStreamLiveness,
+				getProviderStreamStallDiagnostic: () => options.providerStreamStallDiagnostic,
+				getToolExecutionLiveness: () => options.toolExecutionLiveness ?? [],
+				getToolExecutionStallDiagnostic: () => options.toolExecutionStallDiagnostic,
 				sessionFile: options.sessionFile,
 				sessionId: options.sessionId ?? `session-${options.activeSessionId}`,
 				rlmDepth: options.rlmDepth ?? 0,
@@ -743,8 +1130,10 @@ function makeState(options: StateOptions): ActiveSessionState {
 				messages: options.messages ?? ([] as AgentMessage[]),
 				getRlmChildRunStatus: (childId: string) => options.childRunStatuses?.[childId],
 				hasRunningRlmChildren: () => options.hasRunningRlmChildren ?? false,
+				getWorkflowStatusProjection: () => options.workflowStatusProjection,
 				hasAcceptedPromptInFlight: options.hasAcceptedPromptInFlight ?? false,
 				unfinishedActionCount: options.unfinishedActionCount ?? (options.hasAcceptedPromptInFlight ? 1 : 0),
+				sessionInputWakeInvariantViolation: options.sessionInputWakeInvariantViolation,
 				isSessionActive: options.isStreaming === true || options.hasAcceptedPromptInFlight === true,
 				getCurrentRecap: () => undefined,
 				_contextTokensForCurrentMessages: () => options.contextTokens,

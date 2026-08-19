@@ -114,6 +114,7 @@ export interface AgentOptions {
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
 	maxRetryDelayMs?: number;
+	streamLiveness?: SimpleStreamOptions["streamLiveness"];
 	toolExecution?: ToolExecutionMode;
 }
 
@@ -214,6 +215,7 @@ export class Agent {
 	public transport: Transport;
 	/** Optional cap for provider-requested retry delays. */
 	public maxRetryDelayMs?: number;
+	public streamLiveness?: SimpleStreamOptions["streamLiveness"];
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
 
@@ -236,6 +238,7 @@ export class Agent {
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
+		this.streamLiveness = options.streamLiveness;
 		this.toolExecution = options.toolExecution ?? "parallel";
 	}
 
@@ -472,7 +475,7 @@ export class Agent {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			model: this._state.model,
-			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
@@ -480,6 +483,7 @@ export class Agent {
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
+			streamLiveness: this.streamLiveness,
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,

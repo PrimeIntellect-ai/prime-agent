@@ -80,6 +80,27 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		summary: "Show background service status",
 	},
 	{
+		path: ["workflow"],
+		usage: "workflow <status|watch>",
+		summary: "Inspect a workflow hosted by an agent",
+	},
+	{
+		path: ["workflow", "status"],
+		usage: "workflow status <agent> [--json]",
+		summary: "Show workflow status for an agent",
+	},
+	{
+		path: ["workflow", "watch"],
+		usage: "workflow watch <agent> [--once] [--interval <ms>] [--max-updates <n>] [--json]",
+		summary: "Watch workflow status until interrupted",
+		options: [
+			"--once                Print one snapshot and exit",
+			"--interval <ms>       Polling interval (50-60000 ms)",
+			"--max-updates <n>     Stop after a bounded number of snapshots",
+			"--json                Print newline-delimited JSON snapshots",
+		],
+	},
+	{
 		path: ["doctor"],
 		usage: "doctor [--fix] [--json]",
 		summary: "Inspect and safely clean up background services",

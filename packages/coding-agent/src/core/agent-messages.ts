@@ -16,10 +16,39 @@ export const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS = 1000;
 
 /** Legacy daemon wire input accepted and ignored for compatibility. */
 export type AgentSessionMessageDeliveryMode = "auto" | "steer" | "follow_up";
-export type AgentSessionMessageDeliveryStatus = "delivered" | "queued";
+export type AgentSessionMessageDeliveryStatus = "delivered" | "queued" | "blocked";
 export type AgentSessionMessageRuntimeKind = "top-level" | "subagent";
 export type AgentFamilyStatus = "running" | "idle" | "inactive";
 export type AgentFamilyRelationship = "parent" | "sibling" | "child";
+
+export const AGENT_MESSAGE_BLOCKED_CODE = "AGENT_MESSAGE_BLOCKED" as const;
+
+/** Typed, audit-only result for a message rejected by a terminal workflow task. */
+export class AgentSessionMessageBlockedError extends Error {
+	readonly code = AGENT_MESSAGE_BLOCKED_CODE;
+	readonly status = "blocked" as const;
+	readonly auditOnly = true as const;
+	readonly reason: string;
+	obligationSettled = false;
+
+	constructor(reason: string) {
+		super(reason);
+		this.name = "AgentSessionMessageBlockedError";
+		this.reason = reason;
+	}
+}
+
+export function isAgentSessionMessageBlockedError(error: unknown): error is AgentSessionMessageBlockedError {
+	if (error instanceof AgentSessionMessageBlockedError) return true;
+	if (error === null || typeof error !== "object") return false;
+	const candidate = error as Record<string, unknown>;
+	return (
+		candidate.code === AGENT_MESSAGE_BLOCKED_CODE &&
+		candidate.status === "blocked" &&
+		candidate.auditOnly === true &&
+		typeof candidate.reason === "string"
+	);
+}
 
 export const AGENT_FAMILY_REACH_ERROR = "Agent reach is limited to parent, siblings, and children";
 
@@ -111,6 +140,8 @@ export interface AgentSessionNameAvailabilityInput extends AgentSessionNameScope
 
 export interface AgentSessionMessagePayload {
 	id: string;
+	/** Stable observation identity shared across retries of the same remote send. */
+	observationId?: string;
 	source: typeof AGENT_MESSAGE_SOURCE;
 	message: string;
 	from?: AgentSessionMessageSender;
@@ -121,6 +152,8 @@ export interface AgentSessionMessagePayload {
 
 export interface AgentSessionMessageDetails {
 	id: string;
+	/** Stable observation identity shared across retries of the same remote send. */
+	observationId?: string;
 	message: string;
 	from?: AgentSessionMessageSender;
 	fromRelationship?: AgentFamilyRelationship;
@@ -135,6 +168,8 @@ export interface AgentSessionMessage extends CustomMessage<AgentSessionMessageDe
 
 export interface AgentSessionMessageReceipt {
 	id: string;
+	/** Stable observation identity used when a remote send is retried. */
+	observationId?: string;
 	source: typeof AGENT_MESSAGE_SOURCE;
 	target: AgentSessionMessageEndpoint;
 	from?: AgentSessionMessageSender;
@@ -145,6 +180,10 @@ export interface AgentSessionMessageReceipt {
 	deliveredAt?: string;
 	/** Present when deliveryStatus is "queued": the message waits behind the target's current work. */
 	queuedAt?: string;
+	/** Present when deliveryStatus is "blocked": the message was retained for audit without execution. */
+	blockedAt?: string;
+	blockedReason?: string;
+	auditOnly?: true;
 	deliveryMode?: "steer";
 }
 
@@ -331,6 +370,10 @@ export function createAgentSessionMessageId(): string {
 	return `agentmsg_${randomUUID()}`;
 }
 
+export function createAgentSessionMessageObservationId(): string {
+	return `agentobs_${randomUUID()}`;
+}
+
 export function normalizeAgentSessionMessage(message: string, maxChars = DEFAULT_AGENT_MESSAGE_MAX_CHARS): string {
 	const trimmed = message.trim();
 	if (!trimmed) {
@@ -415,6 +458,7 @@ export function createAgentSessionMessage(
 		display: true,
 		details: {
 			id: payload.id,
+			...(payload.observationId === undefined ? {} : { observationId: payload.observationId }),
 			message: payload.message,
 			from: payload.from,
 			fromRelationship: payload.fromRelationship,
@@ -440,16 +484,24 @@ export function isAgentSessionMessage(message: AgentMessage): message is AgentSe
 export function createAgentSessionMessageReceipt(
 	payload: AgentSessionMessagePayload,
 	status: AgentSessionMessageDeliveryStatus,
-	at = new Date().toISOString(),
+	atOrBlockedReason = status === "blocked" ? "workflow_task_terminal" : new Date().toISOString(),
+	blockedReason?: string,
 ): AgentSessionMessageReceipt {
+	const at = status === "blocked" ? new Date().toISOString() : atOrBlockedReason;
+	const reason = status === "blocked" ? (blockedReason ?? atOrBlockedReason) : undefined;
 	return {
 		id: payload.id,
+		...(payload.observationId === undefined ? {} : { observationId: payload.observationId }),
 		source: payload.source,
 		target: payload.target,
 		from: payload.from,
 		message: payload.message,
 		deliveryStatus: status,
-		...(status === "delivered" ? { deliveredAt: at } : { queuedAt: at }),
+		...(status === "delivered"
+			? { deliveredAt: at }
+			: status === "queued"
+				? { queuedAt: at }
+				: { blockedAt: at, blockedReason: reason, auditOnly: true as const }),
 		deliveryMode: "steer",
 	};
 }

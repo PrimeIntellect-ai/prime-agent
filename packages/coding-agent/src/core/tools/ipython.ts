@@ -1,5 +1,6 @@
 // TODO: reconsider whether the persistent kernel is needed once RLM-1 weights land.
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
@@ -12,14 +13,50 @@ import {
 	type HostRequestHandlers,
 	type KernelAttachment,
 	KernelBusyAfterInterruptError,
+	KernelContainerCleanupError,
 	type KernelDiffDisplay,
 	KernelManager,
 	type KernelSentAgentMessage,
+	type KernelSnapshotConfig,
 } from "../kernel/index.js";
+import {
+	createKernelOutputScratch,
+	kernelOutputPathIsProtected,
+	removeKernelOutputScratch,
+	type KernelContainerIsolationOptions,
+	type KernelContainerIsolationResolver,
+} from "../kernel/isolation.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { parseIpythonBashCell } from "./ipython-cell-code.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+
+const MAX_IPYTHON_TOOL_OUTPUT_CHARS = 1_000_000;
+const IPYTHON_OUTPUT_TRUNCATION_MARKER = "\n[... output truncated ...]";
+
+function truncateIpythonOutput(value: string, maxChars = MAX_IPYTHON_TOOL_OUTPUT_CHARS): string {
+	if (value.length <= maxChars) return value;
+	if (maxChars <= IPYTHON_OUTPUT_TRUNCATION_MARKER.length) return IPYTHON_OUTPUT_TRUNCATION_MARKER.slice(0, maxChars);
+	return `${value.slice(0, maxChars - IPYTHON_OUTPUT_TRUNCATION_MARKER.length)}${IPYTHON_OUTPUT_TRUNCATION_MARKER}`;
+}
+
+function appendIpythonOutput(current: string, next: string): string {
+	if (!next) return current;
+	return truncateIpythonOutput(`${current}${current ? "\n" : ""}${next}`);
+}
+
+function isKernelContainerCleanupFailure(error: unknown): boolean {
+	return error instanceof KernelContainerCleanupError || (
+		error instanceof Error &&
+		typeof (error as { readonly code?: unknown }).code === "string" &&
+		(error as { readonly code: string }).code.startsWith("KERNEL_CONTAINER_")
+	);
+}
+
+function truncateIpythonTraceback(traceback: readonly string[]): string[] {
+	const bounded = truncateIpythonOutput(traceback.join("\n"));
+	return bounded ? bounded.split("\n") : [];
+}
 
 const RLM_BOOTSTRAP_BASE_CODE = `
 import asyncio
@@ -67,11 +104,15 @@ except Exception as _prime_agent_rlm_error:
     rlm = _PrimeAgentMissingRlm()
 `.trim();
 
-export function buildRlmBootstrapCode(pythonSkills: readonly PythonSkillRuntimeInfo[] = []): string {
+export function buildRlmBootstrapCode(
+	pythonSkills: readonly PythonSkillRuntimeInfo[] = [],
+	requiredPythonSkillImports: readonly string[] = [],
+): string {
 	const importNames = [...new Set(pythonSkills.map((skill) => skill.importName))];
 	if (importNames.length === 0) {
 		return RLM_BOOTSTRAP_BASE_CODE;
 	}
+	const sourcePaths = [...new Set(pythonSkills.map((skill) => join(skill.packagePath, "src")))];
 
 	return `
 ${RLM_BOOTSTRAP_BASE_CODE}
@@ -80,6 +121,10 @@ import importlib as _prime_agent_importlib
 import inspect as _prime_agent_inspect
 import sys as _prime_agent_sys
 import types as _prime_agent_types
+
+for _prime_agent_skill_source in ${JSON.stringify(sourcePaths)}:
+    if _prime_agent_skill_source not in _prime_agent_sys.path:
+        _prime_agent_sys.path.insert(0, _prime_agent_skill_source)
 
 class _PrimeAgentCallableSkillModule(_prime_agent_types.ModuleType):
     async def __call__(self, *args, **kwargs):
@@ -136,6 +181,20 @@ for _prime_agent_skill_name in ${JSON.stringify(importNames)}:
         globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill(
             _prime_agent_skill_name,
             str(_prime_agent_skill_error),
+        )
+
+for _prime_agent_required_skill_name in ${JSON.stringify([...new Set(requiredPythonSkillImports)])}:
+    if (
+        _prime_agent_required_skill_name in _PRIME_AGENT_SKILL_IMPORT_ERRORS
+        or _prime_agent_required_skill_name not in globals()
+    ):
+        _prime_agent_required_skill_error = _PRIME_AGENT_SKILL_IMPORT_ERRORS.get(
+            _prime_agent_required_skill_name,
+            "skill was not included in the admitted runtime",
+        )
+        raise RuntimeError(
+            f"required Python skill {_prime_agent_required_skill_name} is unavailable: "
+            f"{_prime_agent_required_skill_error}"
         )
 `.trim();
 }
@@ -270,6 +329,10 @@ export interface IpythonToolDetails {
 export interface IpythonToolOptions {
 	/** Python override. Must have `ipykernel` installed. */
 	python?: string;
+	/** Optional physical Docker boundary for worker/coordinator kernels. */
+	isolation?: KernelContainerIsolationOptions | KernelContainerIsolationResolver;
+	/** Host-owned agent directory used for the default bootstrapped Python runtime. */
+	agentDir?: string;
 	env?: Record<string, string>;
 	/** Command prefix prepended to every %%bash cell. */
 	commandPrefix?: string;
@@ -279,8 +342,12 @@ export interface IpythonToolOptions {
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
 	pythonSkills?: readonly PythonSkillRuntimeInfo[];
+	/** Python skill imports that must be functional before the kernel is admitted. */
+	requiredPythonSkillImports?: readonly string[];
 	/** Per-session artifact dir where the kernel namespace snapshot is stored. Omit to disable snapshots. */
 	snapshotDir?: string;
+	/** Durable-state policy applied to the session snapshot. */
+	snapshot?: Omit<KernelSnapshotConfig, "path" | "manifestPath">;
 	/** Resolves before this kernel starts — e.g. the previous provisioner's dispose, so a
 	 * /reload's old-kernel snapshot flush can't race the new kernel's restore. */
 	readyGate?: Promise<unknown>;
@@ -328,10 +395,13 @@ function applyShellSettingsToBashMagicCell(
  */
 export class IpythonKernelProvisioner {
 	private managerPromise?: Promise<KernelManager>;
+	private startingManager?: KernelManager;
 	private startedManager?: KernelManager;
+	private runtimeFence?: Promise<void>;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
+	private isolationOutputScratch?: string;
 	private readonly disposeController = new AbortController();
 
 	constructor(
@@ -358,6 +428,12 @@ export class IpythonKernelProvisioner {
 		void this.ensure().catch(() => {});
 	}
 
+	private removeIsolationOutputScratch(): void {
+		const scratch = this.isolationOutputScratch;
+		this.isolationOutputScratch = undefined;
+		if (scratch !== undefined) removeKernelOutputScratch(scratch);
+	}
+
 	/** Whether a kernel has finished starting and is currently running. */
 	get hasRunningKernel(): boolean {
 		return this.startedManager?.isRunning ?? false;
@@ -381,29 +457,79 @@ export class IpythonKernelProvisioner {
 		if (this.options?.kernelManagerRef) {
 			this.options.kernelManagerRef.current = undefined;
 		}
-		if (!pending) return;
-		try {
-			const m = await pending;
-			await m.dispose();
-		} catch {
-			// a failed startup already cleaned up after itself
+		let cleanupError: unknown;
+		if (pending) {
+			try {
+				const manager = await pending;
+				await manager.dispose();
+			} catch (error) {
+				if (!this.disposeController.signal.aborted || isKernelContainerCleanupFailure(error)) cleanupError = error;
+			}
 		}
+		try {
+			this.removeIsolationOutputScratch();
+		} catch (error) {
+			cleanupError ??= error;
+		}
+		if (cleanupError !== undefined) throw cleanupError;
 	}
 
 	async kill(): Promise<void> {
+		let fenceError: unknown;
+		if (this.runtimeFence) {
+			try {
+				await this.runtimeFence;
+			} catch (error) {
+				fenceError = error;
+			}
+			try {
+				this.removeIsolationOutputScratch();
+			} catch (error) {
+				fenceError ??= error;
+			}
+			if (fenceError !== undefined) throw fenceError;
+			return;
+		}
 		const pending = this.managerPromise;
+		const startingManager = this.startingManager;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
 		if (this.options?.kernelManagerRef) {
 			this.options.kernelManagerRef.current = undefined;
 		}
-		if (!pending) return;
+		const fence = (async () => {
+			let cleanupError: unknown;
+			try {
+				await startingManager?.kill();
+			} catch (error) {
+				cleanupError = error;
+			}
+			if (!pending) {
+				if (cleanupError !== undefined) throw cleanupError;
+				return;
+			}
+			try {
+				const manager = await pending;
+				if (manager !== startingManager) await manager.kill();
+			} catch (error) {
+				if (isKernelContainerCleanupFailure(error)) cleanupError ??= error;
+			}
+			if (cleanupError !== undefined) throw cleanupError;
+		})();
+		this.runtimeFence = fence;
 		try {
-			const m = await pending;
-			await m.kill();
-		} catch {
-			// a failed startup already cleaned up after itself
+			await fence;
+		} catch (error) {
+			fenceError = error;
+		} finally {
+			if (this.runtimeFence === fence) this.runtimeFence = undefined;
 		}
+		try {
+			this.removeIsolationOutputScratch();
+		} catch (error) {
+			fenceError ??= error;
+		}
+		if (fenceError !== undefined) throw fenceError;
 	}
 
 	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelManager> {
@@ -424,7 +550,9 @@ export class IpythonKernelProvisioner {
 			}
 		}
 		if (!this.managerPromise) {
-			const startup = this.startKernel(signal);
+			const startup = this.runtimeFence
+				? this.runtimeFence.then(() => this.startKernel(signal))
+				: this.startKernel(signal);
 			this.managerPromise = startup;
 			startup.then(
 				(m) => {
@@ -463,6 +591,7 @@ export class IpythonKernelProvisioner {
 	private async startKernel(signal?: AbortSignal): Promise<KernelManager> {
 		const startupAbort = createLinkedAbortSignal([this.disposeController.signal, signal]);
 		const startupSignal = startupAbort.signal;
+		let startingManager: KernelManager | undefined;
 		// Wait for a previous provisioner (e.g. on /reload) to finish disposing — and
 		// flushing its final snapshot — before we read that snapshot back, so the two
 		// kernels can't race over the same on-disk file. Guarded so the common
@@ -474,19 +603,40 @@ export class IpythonKernelProvisioner {
 					startupSignal,
 				);
 			}
-			const snapshotDir = this.options?.snapshotDir;
+			const configuredIsolation = this.options?.isolation;
+			const isolation = typeof configuredIsolation === "function" ? configuredIsolation() : configuredIsolation;
+			let snapshotDir = this.options?.snapshotDir;
+			let isolationOutputPaths: readonly string[] | undefined;
+			if (isolation) {
+				const outputScratch = createKernelOutputScratch(isolation);
+				this.isolationOutputScratch = outputScratch;
+				if (snapshotDir === undefined || kernelOutputPathIsProtected(snapshotDir, isolation.protectedPaths)) {
+					snapshotDir = outputScratch;
+					isolationOutputPaths = [outputScratch];
+				}
+			}
 			const m = new KernelManager({
 				python: this.options?.python,
+				agentDir: this.options?.agentDir,
 				cwd: this.cwd,
 				env: this.options?.env,
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
 				pythonSkills: this.options?.pythonSkills,
+				isolation,
+				isolationOutputPaths,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
 				snapshot: snapshotDir
-					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
+					? {
+							...this.options?.snapshot,
+							path: snapshotPathIn(snapshotDir),
+							manifestPath: manifestPathIn(snapshotDir),
+							artifactRoot: isolation ? snapshotDir : this.options?.snapshot?.artifactRoot,
+						}
 					: undefined,
 			});
+			startingManager = m;
+			this.startingManager = m;
 			let pendingRestore: RestoreResult | undefined;
 			try {
 				// Emitted synchronously (before the permit await) so a listener attaching
@@ -512,21 +662,35 @@ export class IpythonKernelProvisioner {
 					this.emitStartupProgress("Restoring IPython state...");
 					const restore = await raceWithAbort(m.restoreState(), startupSignal);
 					if (snapshotExisted) {
-						pendingRestore = restore ?? { restored: [], failed: [], path: snapshotPathIn(snapshotDir) };
+						if (!restore) throw new Error("Snapshot restore did not return a result for a configured checkpoint");
+						pendingRestore = restore;
 					}
 				}
 				this.emitStartupProgress("Preparing IPython runtime...");
-				const bootstrap = await m.execute(buildRlmBootstrapCode(this.options?.pythonSkills), {
-					signal: startupSignal,
-				});
+				const bootstrap = await m.execute(
+					buildRlmBootstrapCode(this.options?.pythonSkills, this.options?.requiredPythonSkillImports),
+					{
+						signal: startupSignal,
+					},
+				);
 				if (bootstrap.status !== "ok") {
 					const details = [bootstrap.stderr, bootstrap.error?.traceback.join("\n")].filter(Boolean).join("\n");
 					throw new Error(`Failed to initialize rlm runtime in the IPython kernel:\n${details}`);
 				}
 			} catch (error) {
 				// Never leak the kernel's ZMQ sockets / temp dir if startup fails after spawn.
-				void m.dispose();
-				throw error;
+				let cleanupError: unknown;
+				try {
+					await m.kill();
+				} catch (killError) {
+					cleanupError = killError;
+				}
+				try {
+					this.removeIsolationOutputScratch();
+				} catch (scratchError) {
+					cleanupError ??= scratchError;
+				}
+				throw cleanupError ?? error;
 			}
 			// Only tell the model what was revived once the kernel is actually usable —
 			// a notice claiming restored state must never outlive a failed bootstrap.
@@ -539,6 +703,7 @@ export class IpythonKernelProvisioner {
 			}
 			return m;
 		} finally {
+			if (this.startingManager === startingManager) this.startingManager = undefined;
 			startupAbort.cleanup();
 		}
 	}
@@ -626,7 +791,7 @@ export function createIpythonToolDefinition(
 		name: "ipython",
 		label: "ipython",
 		description:
-			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls, and durable state is verified when a session is resumed; declared transient values are omitted and required state failures stop the resume. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
 		promptSnippet: "ipython - persistent agent notebook for Python scratchpad code and %%bash orchestration",
 		// The kernel is single-threaded — pi must not run two ipython calls in parallel within a batch.
 		executionMode: "sequential",
@@ -664,14 +829,23 @@ export function createIpythonToolDefinition(
 					ctx,
 				);
 
-				let text = r.stdout;
-				if (r.stderr) text += (text ? "\n" : "") + r.stderr;
-				if (r.result) text += (text ? "\n" : "") + r.result;
-				if (r.status === "error" && r.error) {
-					text += (text ? "\n" : "") + r.error.traceback.join("\n");
-				}
+				const stdout = truncateIpythonOutput(r.stdout);
+				const stderr = truncateIpythonOutput(r.stderr);
+				const result = r.result === undefined ? undefined : truncateIpythonOutput(r.result);
+				const error = r.error
+					? {
+							...r.error,
+							evalue: truncateIpythonOutput(r.error.evalue),
+							traceback: truncateIpythonTraceback(r.error.traceback),
+						}
+					: undefined;
+				let text = "";
+				text = appendIpythonOutput(text, stdout);
+				text = appendIpythonOutput(text, stderr);
+				text = appendIpythonOutput(text, result ?? "");
+				if (r.status === "error" && error) text = appendIpythonOutput(text, error.traceback.join("\n"));
 				if (kernelRestarted) {
-					text = text ? `${KERNEL_RESTART_NOTICE}\n\n${text}` : KERNEL_RESTART_NOTICE;
+					text = truncateIpythonOutput(text ? `${KERNEL_RESTART_NOTICE}\n\n${text}` : KERNEL_RESTART_NOTICE);
 				}
 
 				const imageBlocks = imageBlocksFromAttachments(r.attachments);
@@ -682,15 +856,15 @@ export function createIpythonToolDefinition(
 					details: {
 						durationMs: r.durationMs,
 						status: r.status,
-						errorEname: r.error?.ename,
-						stdout: r.stdout,
-						stderr: r.stderr,
-						result: r.result,
+						errorEname: error?.ename,
+						stdout,
+						stderr,
+						result,
 						diffs: r.diffs,
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,
 						kernelRestarted,
-						error: r.error,
+						error,
 					},
 					isError: r.status === "error" || r.status === "aborted",
 				};

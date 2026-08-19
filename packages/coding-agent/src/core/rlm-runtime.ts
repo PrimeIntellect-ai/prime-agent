@@ -217,6 +217,9 @@ export interface CreateRlmSubagentRuntimeOptions {
 	customTools: ToolDefinition[];
 	includeGoals: boolean;
 	includeCompactSkill: boolean;
+	toolExecutionDeadlineMs?: number;
+	/** Exact executable inherited from the parent for launching the isolated kernel. */
+	kernelPythonLauncher?: string;
 	rlmDepth: number;
 	rlmMaxDepth: number;
 	rlmParentNodeId: string;

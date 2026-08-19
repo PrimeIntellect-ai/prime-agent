@@ -37,6 +37,61 @@ describe("KernelManager abort handling", () => {
 		expect(startCount).toBe(1);
 	});
 
+	it("fences the kernel when the IOPub channel fails", async () => {
+		const close = vi.fn();
+		const iopub = {
+			close,
+			[Symbol.asyncIterator](): AsyncIterator<Buffer[]> {
+				return {
+					next: async () => {
+						throw new Error("simulated iopub failure");
+					},
+				};
+			},
+		};
+		const manager = new KernelManager({ cwd: process.cwd() });
+		Object.assign(manager as unknown as { state: "running"; iopub: typeof iopub }, {
+			state: "running",
+			iopub,
+		});
+
+		await (manager as unknown as { runIopubPump: () => Promise<void> }).runIopubPump();
+
+		expect((manager as unknown as { state: string }).state).toBe("shutdown");
+		expect(close).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects typed cleanup failures and retains the container identity", async () => {
+		const containerId = "0123456789ab";
+		const manager = new KernelManager({
+			cwd: process.cwd(),
+			isolation: {
+				type: "docker",
+				image: "kernel-test-image",
+				ownerIdentity: "cleanup-test-owner",
+				protectedPaths: [process.cwd()],
+				sessionId: "cleanup-test-session",
+				sessionPath: process.cwd(),
+				workflowId: "cleanup-test-workflow",
+				taskId: "cleanup-test-task",
+				attemptId: "cleanup-test-attempt",
+				executionKey: "cleanup-test-execution",
+				dockerBinary: "/usr/bin/false",
+			},
+		});
+		Object.assign(manager as unknown as { state: "running"; containerId: string }, {
+			state: "running",
+			containerId,
+		});
+
+		await expect(manager.kill()).rejects.toMatchObject({
+			name: "KernelContainerCleanupError",
+			code: "KERNEL_CONTAINER_CLEANUP_FAILED",
+			containerId,
+		});
+		expect((manager as unknown as { containerId?: string }).containerId).toBe(containerId);
+	});
+
 	it("does not cancel shared startup when one waiting caller aborts", async () => {
 		const manager = new KernelManager({ cwd: process.cwd() });
 		let releaseStart: () => void = () => {};

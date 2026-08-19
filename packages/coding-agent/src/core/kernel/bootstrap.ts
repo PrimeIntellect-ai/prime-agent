@@ -63,6 +63,8 @@ export type KernelPythonSkill = PythonSkillRuntimeInfo;
 export type KernelBootstrapProgressHandler = (message: string) => void;
 
 export interface EnsureKernelPythonOptions {
+	/** Host-owned agent directory used for the default kernel runtime. */
+	agentDir?: string;
 	pythonSkills?: readonly KernelPythonSkill[];
 	onProgress?: KernelBootstrapProgressHandler;
 }
@@ -326,19 +328,24 @@ function formatPythonSkillInstallArgs(skill: BootstrapPythonSkill): string[] {
 	return ["--editable", skill.packagePath];
 }
 
-function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): string {
+function ensureKernelPythonKey(
+	pythonSkills: readonly BootstrapPythonSkill[],
+	options: EnsureKernelPythonOptions,
+): string {
 	return [
 		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
 		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
+		options.agentDir ? path.resolve(options.agentDir) : "",
 		process.env.HOME ?? "",
 		process.env.XDG_DATA_HOME ?? "",
 		JSON.stringify(pythonSkills),
 	].join("\0");
 }
 
-export function getKernelVenvDir(): string {
+export function getKernelVenvDir(agentDir?: string): string {
 	const override = process.env.PRIME_AGENT_KERNEL_VENV;
 	if (override) return path.resolve(expandHome(override));
+	if (agentDir) return path.join(path.resolve(agentDir), "kernel-venv");
 	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
 }
 
@@ -349,13 +356,13 @@ function getXdgKernelVenvDir(): string {
 	return path.join(dataHome, "prime", "agent", "kernel-venv");
 }
 
-async function resolveWritableKernelVenvDir(): Promise<string> {
-	const primary = getKernelVenvDir();
+async function resolveWritableKernelVenvDir(options: EnsureKernelPythonOptions): Promise<string> {
+	const primary = getKernelVenvDir(options.agentDir);
 	try {
 		await mkdir(path.dirname(primary), { recursive: true });
 		return primary;
 	} catch (primaryError) {
-		if (process.env.PRIME_AGENT_KERNEL_VENV) {
+		if (process.env.PRIME_AGENT_KERNEL_VENV || options.agentDir) {
 			throw new Error(`couldn't create kernel venv parent directory for ${primary}: ${errorMessage(primaryError)}`);
 		}
 
@@ -374,7 +381,7 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
-			env: process.env,
+			env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
 			stdio: options.stdio ?? "ignore",
 		});
 		child.on("error", reject);
@@ -885,7 +892,7 @@ async function ensureKernelPythonUncached(
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
-	const venv = await resolveWritableKernelVenvDir();
+	const venv = await resolveWritableKernelVenvDir(options);
 	const python = path.join(venv, "bin", "python");
 	const runtimeIdentity = await resolveRuntimeIdentity();
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
@@ -918,7 +925,7 @@ async function ensureKernelPythonUncached(
 
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
 	const pythonSkills = normalizePythonSkills(options.pythonSkills);
-	const key = ensureKernelPythonKey(pythonSkills);
+	const key = ensureKernelPythonKey(pythonSkills, options);
 	if (inFlightEnsureKernelPython?.key === key) return inFlightEnsureKernelPython.promise;
 
 	const promise = ensureKernelPythonUncached(options, pythonSkills).finally(() => {

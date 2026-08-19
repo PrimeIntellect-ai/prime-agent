@@ -14,6 +14,9 @@ import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
+	DAEMON_SESSION_SUMMARY_COMPATIBILITY,
+	DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
+	DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY,
 	type DaemonCommand,
 	type DaemonOutbound,
 	getDaemonCommandCompatibilities,
@@ -136,6 +139,112 @@ describe("daemon protocol helpers", () => {
 		// ignore unknown values, so no capability gate is needed; the revision
 		// lets version probes distinguish daemons with the old semantics.
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
+	});
+
+	it("capability-gates the optional durable worker-model blocker projection in both directions", () => {
+		const compatibility = {
+			minProtocol: 7,
+			minSchemaRevision: 19,
+			capability: "worker_model_capability_blocker",
+		};
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_list_item).toEqual(compatibility);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_attached).toEqual(compatibility);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_replaced).toEqual(compatibility);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_resynced).toEqual(compatibility);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_snapshot_begin).toEqual(compatibility);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("resource_exhausted_blocker");
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("worker_model_capability_blocker");
+	});
+
+	it("keeps optional session-liveness metadata backward-compatible in both directions", () => {
+		// Revision 20 lets a new client identify the richer optional session shape.
+		// Old clients ignore the extra JSON fields, while new clients treat their
+		// absence from an older daemon as unknown rather than as healthy progress.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(20);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_list_item).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 19,
+			capability: "worker_model_capability_blocker",
+		});
+	});
+
+	it("keeps optional scheduled-wake metadata backward-compatible in both directions", () => {
+		// Old clients ignore the optional summary field. New clients treat an
+		// absent field from older daemons as unknown, never as proof of no wake.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(21);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_list_item).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 19,
+			capability: "worker_model_capability_blocker",
+		});
+	});
+
+	it("capability-gates the optional workflow status projection while preserving legacy attachment", () => {
+		expect(DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 22,
+			capability: "workflow_status_projection",
+		});
+		expect(DAEMON_SESSION_SUMMARY_COMPATIBILITY.workflowStatus).toEqual(
+			DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY,
+		);
+		expect(DAEMON_SUPPORTED_CLIENT_CAPABILITIES).toContain("workflow_status_projection");
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("workflow_status_projection");
+
+		// A legacy summary has no optional workflow field and remains a valid
+		// attachment result for a new client; absence means "unknown".
+		const legacySummary = {
+			id: "legacy",
+			lifecycle: "live" as const,
+			activity: "idle" as const,
+			isSessionActive: false,
+			sessionId: "legacy",
+			cwd: "/tmp",
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			messageCount: 0,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+		};
+		const legacyClientAttach: DaemonCommand = {
+			type: "attach",
+			activeSessionId: "legacy",
+			capabilities: ["attach_snapshot", "event_sequence"],
+		};
+		expect(legacyClientAttach.capabilities).not.toContain("workflow_status_projection");
+		expect(legacySummary).not.toHaveProperty("workflowStatus");
+	});
+
+	it("carries workflow capability negotiation on list without changing its legacy command compatibility", () => {
+		const modernList: DaemonCommand = {
+			type: "list",
+			capabilities: ["workflow_status_projection"],
+		};
+		const legacyList: DaemonCommand = { type: "list" };
+
+		expect(modernList.capabilities).toEqual(["workflow_status_projection"]);
+		expect(getDaemonCommandCompatibilities(modernList)).toEqual([{ minProtocol: 7 }]);
+		expect(getDaemonCommandCompatibilities(legacyList)).toEqual([{ minProtocol: 7 }]);
+	});
+
+	it("keeps old agent-message clients compatible while gating stable identities", () => {
+		const oldClientSend: DaemonCommand = {
+			type: "send_message",
+			targetActiveSessionId: "target-active",
+			message: "legacy payload",
+		};
+		const newClientSend: DaemonCommand = {
+			...oldClientSend,
+			messageId: "agentmsg-1",
+			observationId: "agentobs-1",
+		};
+
+		expect(getDaemonCommandCompatibilities(oldClientSend)).toEqual([{ minProtocol: 7 }]);
+		expect(getDaemonCommandCompatibilities(newClientSend)).toEqual([
+			{ minProtocol: 7, minSchemaRevision: 17, capability: "session-message-obligations" },
+			{ minProtocol: 7 },
+		]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("session-message-obligations");
 	});
 
 	it("keeps refine failure events backward-compatible on the existing session event channel", () => {

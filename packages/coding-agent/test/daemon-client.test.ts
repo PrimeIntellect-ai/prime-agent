@@ -278,6 +278,48 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
+	it("rejects stable agent-message identities against an old daemon", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["session_input_admission"], DAEMON_SCHEMA_REVISION - 1);
+
+		await expect(
+			client.request({
+				type: "send_message",
+				targetActiveSessionId: "target-active",
+				message: "hello",
+				messageId: "agentmsg-1",
+				observationId: "agentobs-1",
+			}),
+		).rejects.toThrow("does not support session-message-obligations");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it("sends old-client agent messages to a new daemon without identity fields", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["session-message-obligations"], DAEMON_SCHEMA_REVISION);
+
+		const request = client.request({
+			type: "send_message",
+			targetActiveSessionId: "target-active",
+			message: "legacy client",
+		});
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		const envelope = JSON.parse(socket.writes[0]!.trim()) as { command?: Record<string, unknown> };
+		expect(envelope.command).not.toHaveProperty("messageId");
+		expect(envelope.command).not.toHaveProperty("observationId");
+		client.close();
+		await expect(request).rejects.toThrow("closed before the operation completed");
+	});
+
 	it("field-gates prompt admissionId before writing raw commands", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();

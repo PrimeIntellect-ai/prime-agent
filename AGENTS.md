@@ -10,6 +10,9 @@
 ## Code Quality
 
 - Read files in full before making wide-ranging changes, before editing files you have not already fully inspected, and when the user asks you to investigate or audit something. Do not rely only on search snippets for broad changes.
+- Planning, recon, review, and design agents are read-only by default. They define constraints, interfaces, risks, acceptance checks, and task boundaries; implementation agents write the product code and tests.
+- Skip standalone design artifacts for small changes. When a design document is necessary, keep it concise and avoid implementation code or code blocks; include only protocol or data-shape examples whose meaning would otherwise be ambiguous.
+- A planning or design agent may write code only when the user explicitly assigns implementation authority and an exact write set.
 - Don't be too verbose with comments in the code. Only write comments when there is serious ambiguity
 - No `any` types unless absolutely necessary
 - Check node_modules for external API type definitions instead of guessing
@@ -25,6 +28,12 @@
 - After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
 - Note: `npm run check` does not run tests.
 - NEVER run: `npm run dev`, `npm run build`, `npm test`
+- TDD with intent, not coverage: start from the user-visible outcome and forbidden outcomes, not the proposed implementation or private API. Prefer black-box tests at the public host boundary.
+- Do not add unit tests for workflow changes except as temporary or supplemental debugging probes. Durable regressions and acceptance evidence must be intent tests that exercise observable behavior through public host, store, process, restart, or integration boundaries. Existing or debugging unit tests never count as acceptance evidence.
+- Do not use test counts or coverage percentages as progress, quality, or completion metrics. A test counts only when it can falsify a user outcome, protected invariant, or forbidden behavior; coverage is diagnostic only.
+- Record the failing RED result before implementing the fix. Convert every successful adversarial probe into a permanent regression test before changing production code.
+- Durability, authority, concurrency, and recovery claims require real store/process/restart evidence. Mock-only tests may diagnose behavior but cannot prove completion.
+- Add metamorphic and anti-cheating checks where metrics or gates could be gamed: mutate caller data, reorder inputs, vary locale, replay stale state, race duplicate operations, and prove bypassing the enforcement makes the test fail.
 - Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
 - Run tests from the package root, not the repo root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.

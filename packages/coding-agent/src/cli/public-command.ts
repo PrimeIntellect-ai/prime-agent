@@ -103,6 +103,8 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runNestedAgentCommand("schedule", "cron", args.slice(1));
 		case "status":
 			return runStatus(args.slice(1));
+		case "workflow":
+			return runWorkflow(args.slice(1));
 		case "doctor":
 			return runDoctor(args.slice(1));
 		case "shutdown":
@@ -245,6 +247,27 @@ async function runStatus(args: string[]): Promise<PublicCommandResult> {
 	if (!options) return HANDLED;
 	await runPs(options.has("--json"));
 	return HANDLED;
+}
+
+async function runWorkflow(args: string[]): Promise<PublicCommandResult> {
+	const subcommand = args[0];
+	const children = getChildCommandSpecs(["workflow"]).map((spec) => spec.path.at(-1)!);
+	if (!subcommand || !children.includes(subcommand)) {
+		const suggestion = subcommand ? findCommandSuggestion(subcommand, children) : undefined;
+		return fail(
+			subcommand ? `Unknown workflow command: ${subcommand}` : "Missing workflow command.",
+			suggestion
+				? `Did you mean "${APP_NAME} workflow ${suggestion}"?`
+				: `Run "${APP_NAME} help workflow" for usage.`,
+		);
+	}
+	if (subcommand === "status") {
+		if (args.length < 2) {
+			return fail(`Usage: ${APP_NAME} ${getCommandSpec(["workflow", "status"])!.usage}`);
+		}
+		return runInternalAgentCommand("workflow-status", args.slice(1));
+	}
+	return runInternalAgentCommand("workflow-watch", args.slice(1));
 }
 
 async function runDoctor(args: string[]): Promise<PublicCommandResult> {

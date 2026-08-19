@@ -42,6 +42,18 @@ describe("AssistantMessageComponent", () => {
 		expect(lines[lines.length - 1].startsWith(OSC133_ZONE_END + OSC133_ZONE_FINAL)).toBe(true);
 	});
 
+	test("ignores null content blocks from malformed provider responses", () => {
+		initTheme("dark");
+
+		const malformedContent = [null, { type: "text", text: "hello" }] as unknown as AssistantMessage["content"];
+		const component = new AssistantMessageComponent(createAssistantMessage(malformedContent));
+		expect(stripAnsi(component.render(40).join("\n"))).toContain("hello");
+
+		const updatedContent = [null, { type: "text", text: "hello again" }] as unknown as AssistantMessage["content"];
+		component.updateContent(createAssistantMessage(updatedContent));
+		expect(stripAnsi(component.render(40).join("\n"))).toContain("hello again");
+	});
+
 	test("does not add OSC 133 zone markers when assistant message contains tool calls", () => {
 		initTheme("dark");
 

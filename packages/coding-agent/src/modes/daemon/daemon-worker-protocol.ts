@@ -1,5 +1,6 @@
 import { closeSync, readFileSync } from "node:fs";
 import type {
+	AgentFamilyRelationship,
 	AgentSessionMessageAgentSummary,
 	AgentSessionMessageDeliveryMode,
 	AgentSessionMessageSender,
@@ -70,6 +71,9 @@ export type DaemonWorkerCommand =
 			type: "worker_deliver_message";
 			targetActiveSessionId: string;
 			message: string;
+			messageId?: string;
+			observationId?: string;
+			fromRelationship?: AgentFamilyRelationship;
 			sender: AgentSessionMessageSender;
 			deliveryMode?: AgentSessionMessageDeliveryMode;
 	  }

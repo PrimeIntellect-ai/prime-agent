@@ -136,7 +136,7 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
-	it("does not reuse an expired ChatGPT model catalog after a refresh failure", async () => {
+	it("keeps a same-auth last-known-good ChatGPT catalog usable after a refresh failure", async () => {
 		const codexProvider = "openai-codex";
 		const harness = await createHarness({ provider: codexProvider, models: [{ id: "parent-model" }] });
 		const fetchModels = vi
@@ -158,7 +158,96 @@ describe("ENG-4649 subagent model selection", () => {
 			});
 
 			now += 300_001;
+			await expect(harness.session.findRlmModels("parent", 8)).resolves.toMatchObject({
+				models: [{ selector: `${codexProvider}/parent-model` }],
+			});
+			expect(fetchModels).toHaveBeenCalledTimes(2);
+		} finally {
+			dateNow.mockRestore();
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
+	it("does not reuse a stale ChatGPT catalog after the auth source revision changes", async () => {
+		const codexProvider = "openai-codex";
+		const harness = await createHarness({ provider: codexProvider, models: [{ id: "parent-model" }] });
+		const token = openAICodexToken("account-1");
+		const fetchModels = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ models: [{ slug: "parent-model" }] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			)
+			.mockRejectedValueOnce(new Error("offline"));
+		vi.stubGlobal("fetch", fetchModels);
+		let now = Date.now();
+		const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, token);
+			await expect(harness.session.findRlmModels("parent", 8)).resolves.toMatchObject({
+				models: [{ selector: `${codexProvider}/parent-model` }],
+			});
+
+			harness.authStorage.removeRuntimeApiKey(codexProvider);
+			harness.authStorage.set(codexProvider, { type: "api_key", key: token });
+			now += 300_001;
 			await expect(harness.session.findRlmModels("parent", 8)).resolves.toEqual({ models: [] });
+			expect(fetchModels).toHaveBeenCalledTimes(2);
+		} finally {
+			dateNow.mockRestore();
+			vi.unstubAllGlobals();
+			harness.cleanup();
+		}
+	});
+
+	it("does not spawn a substitute when a later coherent Luna catalog admits the exact worker", async () => {
+		const codexProvider = "openai-codex";
+		const lunaModel = "gpt-5.6-luna";
+		const solModel = "gpt-5.6-sol";
+		const harness = await createHarness({
+			provider: codexProvider,
+			models: [{ id: "parent-model" }, { id: lunaModel }, { id: solModel }],
+		});
+		const fetchModels = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ models: [{ slug: "parent-model" }, { slug: solModel }] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({ models: [{ slug: "parent-model" }, { slug: lunaModel }, { slug: solModel }] }),
+					{
+						status: 200,
+						headers: { "content-type": "application/json" },
+					},
+				),
+			);
+		vi.stubGlobal("fetch", fetchModels);
+		let now = Date.now();
+		const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
+			await expect(harness.session.findRlmModels(lunaModel, 8)).resolves.toEqual({ models: [] });
+
+			now += 300_001;
+			await expect(harness.session.findRlmModels(lunaModel, 8)).resolves.toMatchObject({
+				models: [{ selector: `${codexProvider}/${lunaModel}` }],
+			});
+			harness.setResponses([fauxAssistantMessage("exact Luna child answer")]);
+			const child = await harness.session.runRlmChild("run the exact Luna worker", {
+				model: `${codexProvider}/${lunaModel}`,
+			});
+			expect(child.model).toBe(`${codexProvider}/${lunaModel}`);
+			expect(child.model).not.toBe(`${codexProvider}/${solModel}`);
+			await vi.waitFor(async () => {
+				expect((await harness.session.listRlmSubagents()).subagents[0]?.status).toBe("completed");
+			});
 			expect(fetchModels).toHaveBeenCalledTimes(2);
 		} finally {
 			dateNow.mockRestore();
@@ -434,7 +523,7 @@ describe("ENG-4649 subagent model selection", () => {
 			models: [{ id: "parent-model" }],
 		});
 		const fetchModels = vi.fn(
-			async () =>
+			async (_url: string, _init?: RequestInit) =>
 				new Response(JSON.stringify({ models: [{ slug: "parent-model" }] }), {
 					status: 200,
 					headers: { "content-type": "application/json" },
@@ -444,7 +533,7 @@ describe("ENG-4649 subagent model selection", () => {
 		try {
 			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
 			await harness.session.findRlmModels("", 20);
-			const [requestedUrl] = fetchModels.mock.calls[0] as [string];
+			const [requestedUrl] = fetchModels.mock.calls[0];
 			const clientVersion = new URL(requestedUrl).searchParams.get("client_version");
 			expect(clientVersion).not.toContain("+");
 		} finally {

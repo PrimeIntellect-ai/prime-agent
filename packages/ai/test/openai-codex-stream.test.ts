@@ -756,6 +756,314 @@ describe("openai-codex streaming", () => {
 		const streamResult = streamOpenAICodexResponses(model, context, { apiKey: token });
 		await streamResult.result();
 	});
+
+	it("preserves structured usage exhaustion metadata from an SSE error without retrying", async () => {
+		const token = mockToken();
+		const resetInSeconds = 419704;
+		const sse = `data: ${JSON.stringify({
+			type: "error",
+			error: {
+				type: "usage_limit_reached",
+				message: "The usage limit has been reached",
+				plan_type: "pro",
+				resets_at: 1787402590,
+				resets_in_seconds: resetInSeconds,
+			},
+			status_code: 429,
+			headers: {
+				"x-codex-active-limit": "premium",
+				"X-CODEX-CREDITS-HAS-CREDITS": "False",
+				Authorization: "Bearer secret",
+				"X-Private": "do-not-persist",
+			},
+		})}\r\n\r\n`;
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode(sse));
+				controller.close();
+			},
+		});
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(body, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		global.fetch = fetchMock as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const result = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: "You are a helpful assistant.",
+				messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+			},
+			{ apiKey: token, transport: "sse" },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "provider_stream_failure",
+				details: expect.objectContaining({
+					kind: "resource_exhausted",
+					providerErrorType: "usage_limit_reached",
+					status: 429,
+					limitClass: "premium",
+					resetAt: 1787402590,
+					resetInSeconds,
+					creditsUnavailable: true,
+				}),
+			}),
+		);
+		const diagnosticText = JSON.stringify(result.diagnostics);
+		expect(diagnosticText).not.toContain("Bearer secret");
+		expect(diagnosticText).not.toContain("do-not-persist");
+	});
+
+	it("preserves structured usage exhaustion metadata from an HTTP 429 without retrying", async () => {
+		const token = mockToken();
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						response: {
+							error: {
+								type: "usage_limit_reached",
+								message: "The usage limit has been reached",
+								resets_at: 2_000_000_000,
+								resets_in_seconds: 419704,
+								plan_type: "pro",
+							},
+							status_code: 429,
+							headers: {
+								"x-codex-active-limit": "premium",
+								"X-CODEX-CREDITS-HAS-CREDITS": "False",
+								Authorization: "Bearer nested-secret",
+								"X-Private": "nested-private",
+							},
+						},
+						status_code: 429,
+					}),
+					{
+						status: 429,
+						headers: {
+							"content-type": "application/json",
+						},
+					},
+				),
+		);
+		global.fetch = fetchMock as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const result = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: "You are a helpful assistant.",
+				messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+			},
+			{ apiKey: token, transport: "sse" },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "provider_stream_failure",
+				details: expect.objectContaining({
+					kind: "resource_exhausted",
+					providerErrorType: "usage_limit_reached",
+					status: 429,
+					limitClass: "premium",
+					resetAt: 2_000_000_000,
+					resetInSeconds: 419704,
+					creditsUnavailable: true,
+				}),
+			}),
+		);
+		const diagnosticText = JSON.stringify(result.diagnostics);
+		expect(diagnosticText).not.toContain("nested-secret");
+		expect(diagnosticText).not.toContain("nested-private");
+	});
+
+	it("redacts credentials from an unknown HTTP provider error while retaining safe status and code", async () => {
+		const token = mockToken();
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: {
+							type: "mystery_provider_error",
+							message:
+								"Authorization: Bearer top-secret-token; bearer second-secret; api-key=sk-live-unsafe; x-api-key: another-secret",
+						},
+						status_code: 418,
+					}),
+					{ status: 418, headers: { "content-type": "application/json" } },
+				),
+		);
+		global.fetch = fetchMock as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const result = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: "You are a helpful assistant.",
+				messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+			},
+			{ apiKey: token, transport: "sse" },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("mystery_provider_error");
+		for (const secret of ["top-secret-token", "second-secret", "sk-live-unsafe", "another-secret"]) {
+			expect(result.errorMessage).not.toContain(secret);
+		}
+		const diagnosticText = JSON.stringify(result.diagnostics);
+		for (const secret of ["top-secret-token", "second-secret", "sk-live-unsafe", "another-secret"]) {
+			expect(diagnosticText).not.toContain(secret);
+		}
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "provider_stream_failure",
+				error: expect.objectContaining({
+					message: expect.not.stringContaining("top-secret-token"),
+					stack: expect.not.stringContaining("top-secret-token"),
+				}),
+				details: expect.objectContaining({
+					kind: "unknown",
+					providerErrorType: "mystery_provider_error",
+					status: 418,
+				}),
+			}),
+		);
+	});
+
+	it("carries status metadata from a structured response.failed SSE event", async () => {
+		const token = mockToken();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(
+					new TextEncoder().encode(
+						`data: ${JSON.stringify({
+							type: "response.failed",
+							status_code: 429,
+							response: {
+								status: "failed",
+								error: { type: "usage_limit_reached", message: "The usage limit has been reached" },
+							},
+						})}\n\n`,
+					),
+				);
+				controller.close();
+			},
+		});
+		const fetchMock = vi.fn(async () => new Response(body, { status: 200 }));
+		global.fetch = fetchMock as typeof fetch;
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const result = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: "You are a helpful assistant.",
+				messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+			},
+			{ apiKey: token, transport: "sse" },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.diagnostics?.[0]).toMatchObject({
+			type: "provider_stream_failure",
+			details: expect.objectContaining({ kind: "resource_exhausted", status: 429 }),
+		});
+	});
+
+	it("keeps retrying an ordinary transient HTTP 429", async () => {
+		const token = mockToken();
+		const sse = buildSSEPayload({ status: "completed" });
+		let calls = 0;
+		const fetchMock = vi.fn(async () => {
+			calls++;
+			if (calls === 1) {
+				return new Response(JSON.stringify({ error: { code: "rate_limit_exceeded", message: "Try again" } }), {
+					status: 429,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+		global.fetch = fetchMock as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const result = await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: "You are a helpful assistant.",
+				messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+			},
+			{ apiKey: token, transport: "sse" },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
 	it("forwards auto transport from streamSimple options and uses cached websocket context", async () => {
 		const token = mockToken();
 		const sentBodies: unknown[] = [];

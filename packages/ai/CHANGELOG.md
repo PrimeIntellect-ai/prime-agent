@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed explicit reasoning-off requests disabling provider thinking without changing omitted-option defaults.
+
 ## [0.7.2] - 2026-08-11
 
 ## [0.7.1] - 2026-08-07

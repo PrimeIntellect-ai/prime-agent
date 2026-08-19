@@ -60,8 +60,14 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-export const DAEMON_SCHEMA_REVISION = 16;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-16-1bcb9e7f1a49";
+// Revision 17 adds optional stable message and observation ids to send_message.
+// Revision 18 publishes the durable resource-exhaustion blocker projection.
+// Revision 19 publishes the durable worker-model capability blocker projection.
+// Revision 20 adds optional compaction, provider-stream, and tool-execution liveness metadata to session summaries.
+// Revision 21 adds the optional durable scheduled-wake projection to session summaries.
+// Revision 22 adds the optional capability-gated workflow status projection to session summaries.
+export const DAEMON_SCHEMA_REVISION = 22;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-22-c336daa23701";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -79,7 +85,8 @@ export type DaemonClientCapability =
 	| "extension_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
-	| "client_owned_sessions";
+	| "client_owned_sessions"
+	| "workflow_status_projection";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
 	status: DaemonPromptAdmissionCancellationStatus;
@@ -100,7 +107,11 @@ export type DaemonServerCapability =
 	| "transient_bash"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
-	| "queue_message_mutation";
+	| "queue_message_mutation"
+	| "session-message-obligations"
+	| "resource_exhausted_blocker"
+	| "worker_model_capability_blocker"
+	| "workflow_status_projection";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -126,6 +137,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"slim_attach",
 	"chunked_snapshot",
 	"client_owned_sessions",
+	"workflow_status_projection",
 ];
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -139,6 +151,9 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_admission",
 	"prompt_admission_cancellation",
 	"queue_message_mutation",
+	"session-message-obligations",
+	"resource_exhausted_blocker",
+	"worker_model_capability_blocker",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -354,6 +369,8 @@ export type DaemonCommand =
 			cwd?: string;
 			sessionDir?: string;
 			includeClientOwned?: boolean;
+			/** Optional fields the caller can consume in session summaries. */
+			capabilities?: readonly DaemonClientCapability[];
 	  }
 	| DaemonSavedSessionListCommand
 	| ({
@@ -470,6 +487,10 @@ export type DaemonCommand =
 			targetActiveSessionId: string;
 			message: string;
 			fromActiveSessionId?: string;
+			/** Stable identity reused when a remote response is retried. */
+			messageId?: string;
+			/** Stable observation identity for this send attempt across retries. */
+			observationId?: string;
 			/** Internal worker-origin marker; public clients remain unrestricted. */
 			agentOrigin?: boolean;
 			deliveryMode?: AgentSessionMessageDeliveryMode;
@@ -649,6 +670,11 @@ const DELETE_RLM_SUBAGENT_COMMAND = {
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
 const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const SESSION_MESSAGE_OBLIGATIONS_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "session-message-obligations",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -762,6 +788,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 		return [PROMPT_ADMISSION_CANCELLATION_COMMAND, compatibility];
 	}
+	if (command.type === "send_message" && (command.messageId !== undefined || command.observationId !== undefined)) {
+		return [SESSION_MESSAGE_OBLIGATIONS_COMMAND, compatibility];
+	}
 	return [compatibility];
 }
 
@@ -830,6 +859,8 @@ export interface DaemonSavedSessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
+	resourceExhaustedBlocker?: AgentConnectionAgentStatus["resourceExhaustedBlocker"];
+	workerModelCapabilityBlocker?: AgentConnectionAgentStatus["workerModelCapabilityBlocker"];
 }
 
 export type DaemonDeleteSavedSessionResult = DeleteSessionFileResult;
@@ -947,20 +978,37 @@ export type DaemonOutbound =
 			meta?: DaemonEventMeta;
 	  };
 
+const WORKER_MODEL_CAPABILITY_BLOCKER_OUTBOUND = {
+	minProtocol: 7,
+	minSchemaRevision: 19,
+	capability: "worker_model_capability_blocker",
+} as const;
+
+export const DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY = {
+	minProtocol: 7,
+	minSchemaRevision: 22,
+	capability: "workflow_status_projection",
+} as const;
+
+/** Field-level compatibility for optional metadata shared by list and attach summaries. */
+export const DAEMON_SESSION_SUMMARY_COMPATIBILITY = {
+	workflowStatus: DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY,
+} as const;
+
 export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	response: LEGACY_DAEMON_COMMAND,
 	session_list_progress: LEGACY_DAEMON_COMMAND,
-	session_list_item: LEGACY_DAEMON_COMMAND,
+	session_list_item: WORKER_MODEL_CAPABILITY_BLOCKER_OUTBOUND,
 	daemon_hello: LEGACY_DAEMON_COMMAND,
 	daemon_closing: LEGACY_DAEMON_COMMAND,
 	heartbeats_changed: { minProtocol: 7, capability: "heartbeat_catalog" },
 	session_event: LEGACY_DAEMON_COMMAND,
 	side_question_event: LEGACY_DAEMON_COMMAND,
 	session_status: LEGACY_DAEMON_COMMAND,
-	session_replaced: LEGACY_DAEMON_COMMAND,
-	session_resynced: LEGACY_DAEMON_COMMAND,
-	session_attached: LEGACY_DAEMON_COMMAND,
-	session_snapshot_begin: LEGACY_DAEMON_COMMAND,
+	session_replaced: WORKER_MODEL_CAPABILITY_BLOCKER_OUTBOUND,
+	session_resynced: WORKER_MODEL_CAPABILITY_BLOCKER_OUTBOUND,
+	session_attached: WORKER_MODEL_CAPABILITY_BLOCKER_OUTBOUND,
+	session_snapshot_begin: WORKER_MODEL_CAPABILITY_BLOCKER_OUTBOUND,
 	session_snapshot_chunk: LEGACY_DAEMON_COMMAND,
 	session_snapshot_end: LEGACY_DAEMON_COMMAND,
 	session_snapshot_failed: LEGACY_DAEMON_COMMAND,

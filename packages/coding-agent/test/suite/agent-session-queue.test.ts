@@ -11,6 +11,7 @@ import {
 	createAgentSessionMessage,
 	createAgentSessionMessagePrompt,
 } from "../../src/core/agent-messages.js";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.js";
 import { type AgentCronJob, shouldDeferHeartbeatCronJob } from "../../src/core/cron-jobs.js";
 import { createSessionSlashCommandMessage } from "../../src/core/messages.js";
 import {
@@ -25,6 +26,7 @@ import {
 	saveHarnessState,
 } from "../../src/core/refinement/index.js";
 import { parseSessionSlashCommand } from "../../src/core/slash-commands.js";
+import type { WorkflowShellStatus } from "../../src/core/workflow/shell.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
 import { createDeferred, createWaitingHarness, gatedHook, withStreaming } from "./scheduling.js";
 
@@ -3340,5 +3342,339 @@ describe("AgentSession scheduler scenarios", () => {
 				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
 			}
 		}
+	});
+
+	it("routes workflow commands through the attached persisted-session host without a model turn", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const status: WorkflowShellStatus = {
+			workflowId: harness.sessionManager.getSessionId(),
+			status: "awaiting_user",
+			phase: "adjudicating",
+			goal: {
+				active: false,
+				status: "paused",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				continuationsUsed: 0,
+			},
+			goalContract: null,
+			approvalRequest: null,
+			stateDigest: "state-digest",
+			decisionRefs: [],
+			resourceEnvelopeDigest: null,
+			scorecardDigest: null,
+			pendingWaitReasons: [],
+			acceptanceCheckIds: [],
+			protectedInvariantIds: [],
+		};
+		const execute = vi.fn(async () => status);
+		const dispose = vi.fn(async () => {});
+		harness.session.setWorkflowHost({
+			execute,
+			status: () => status,
+			dispose,
+		});
+		harness.setResponses([fauxAssistantMessage("model must not run")]);
+
+		await harness.session.promptAndWait("/workflow status");
+
+		expect(execute).toHaveBeenCalledWith({ kind: "status" });
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(getAssistantTexts(harness)).toEqual([]);
+		expect(harness.session.messages.at(-1)).toMatchObject({ role: "custom" });
+		expect(getMessageText(harness.session.messages.at(-1))).toContain("Workflow");
+		await harness.session.disposeAsync();
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("parses workflow start profile and worker options into the structured host request", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const status: WorkflowShellStatus = {
+			workflowId: harness.sessionManager.getSessionId(),
+			status: "awaiting_user",
+			phase: "adjudicating",
+			goal: {
+				active: false,
+				status: "paused",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				continuationsUsed: 0,
+			},
+			goalContract: null,
+			approvalRequest: null,
+			stateDigest: "state-digest",
+			decisionRefs: [],
+			resourceEnvelopeDigest: null,
+			scorecardDigest: null,
+			pendingWaitReasons: [],
+			acceptanceCheckIds: [],
+			protectedInvariantIds: [],
+		};
+		const execute = vi.fn(async () => status);
+		harness.session.setWorkflowHost({ execute, status: () => status });
+
+		await harness.session.promptAndWait(
+			"/workflow start --profile parallel --max-workers 3 establish the exact durable objective",
+		);
+
+		expect(execute).toHaveBeenCalledWith({
+			kind: "start",
+			request: {
+				workflowId: harness.sessionManager.getSessionId(),
+				requestedProfile: "parallel",
+				maxWorkers: 3,
+				objective: "establish the exact durable objective",
+			},
+		});
+	});
+
+	it("starts a planner turn when a durable workflow command activates its goal", async () => {
+		const harness = await createHarness({ persistSession: true, settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		harness.session.handleGoalHostRequest("goal.create", { objective: "continue the durable workflow" });
+		const activeStatus: WorkflowShellStatus = {
+			workflowId: harness.sessionManager.getSessionId(),
+			status: "active",
+			phase: "planning",
+			goal: harness.session.readGoalStateForWorkflowProjection(),
+			goalContract: null,
+			approvalRequest: null,
+			stateDigest: "active-state-digest",
+			decisionRefs: [],
+			resourceEnvelopeDigest: "resources",
+			scorecardDigest: "scorecard",
+			pendingWaitReasons: [],
+			acceptanceCheckIds: ["objective"],
+			protectedInvariantIds: ["workflow-state"],
+		};
+		const execute = vi.fn(async () => activeStatus);
+		harness.session.setWorkflowHost({ execute, status: () => activeStatus });
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "intentional planner stop" }),
+		]);
+
+		await harness.session.promptAndWait("/workflow resume");
+		await harness.session.waitForIdle();
+
+		expect(execute).toHaveBeenCalledWith({ kind: "resume" });
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.session.goalState).toMatchObject({
+			status: "error",
+			lastError: "intentional planner stop",
+		});
+	});
+
+	it("does not treat textual workflow respond options as trusted approval proofs", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const status: WorkflowShellStatus = {
+			workflowId: harness.sessionManager.getSessionId(),
+			status: "awaiting_user",
+			phase: "adjudicating",
+			goal: {
+				active: false,
+				status: "paused",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				continuationsUsed: 0,
+			},
+			goalContract: null,
+			approvalRequest: null,
+			stateDigest: "state-digest",
+			decisionRefs: [],
+			resourceEnvelopeDigest: null,
+			scorecardDigest: null,
+			pendingWaitReasons: [],
+			acceptanceCheckIds: [],
+			protectedInvariantIds: [],
+		};
+		const execute = vi.fn(async () => status);
+		harness.session.setWorkflowHost({ execute, status: () => status });
+
+		await expect(harness.session.promptAndWait("/workflow respond approval-1 decline")).rejects.toThrow(
+			/structured|trusted approval proof/i,
+		);
+		expect(execute).not.toHaveBeenCalled();
+		expect(getAssistantTexts(harness)).toEqual([]);
+	});
+
+	it("keeps the workflow projection snapshot stable while the displayed goal clock advances", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		await harness.session.promptAndWait("/goal projection timing objective");
+		const persisted = harness.session.readGoalStateForWorkflowProjection();
+		const now = Date.now();
+		const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now + 5_000);
+		try {
+			expect(harness.session.goalState.timeUsedSeconds).toBeGreaterThan(persisted.timeUsedSeconds);
+			expect(harness.session.readGoalStateForWorkflowProjection()).toEqual(persisted);
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	it("constructs the default persisted workflow host and recovers status across session recreation", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const services = await createAgentSessionServices({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			authStorage: harness.authStorage,
+			settingsManager: harness.settingsManager,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		let first: Awaited<ReturnType<typeof createAgentSessionFromServices>> | undefined;
+		let second: Awaited<ReturnType<typeof createAgentSessionFromServices>> | undefined;
+		try {
+			first = await createAgentSessionFromServices({
+				services,
+				sessionManager: harness.sessionManager,
+				model: harness.getModel(),
+			});
+			await first.session.promptAndWait("/workflow start persist this objective");
+			const startResult = getMessageText(first.session.messages.at(-1));
+			expect(startResult).toContain('objective="persist this objective"');
+			expect(startResult).toContain("acceptance=objective");
+			expect(startResult).toContain("invariants=workflow-state");
+			expect(startResult).toContain("decisions=goal_contract:");
+			expect(startResult).toContain('next="/workflow resume"');
+			await first.session.disposeAsync();
+
+			second = await createAgentSessionFromServices({
+				services,
+				sessionManager: harness.sessionManager,
+				model: harness.getModel(),
+			});
+			await second.session.promptAndWait("/workflow status");
+			const statusResult = getMessageText(second.session.messages.at(-1));
+			expect(statusResult).toContain("awaiting_user");
+			expect(statusResult).toContain('objective="persist this objective"');
+			expect(statusResult).toContain("acceptance=objective");
+			expect(statusResult).toContain("invariants=workflow-state");
+		} finally {
+			await second?.session.disposeAsync();
+			await first?.session.disposeAsync();
+		}
+	});
+
+	it("runs the real durable start-approve-planner loop and pauses on terminal planner failure", async () => {
+		const harness = await createHarness({ persistSession: true, settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		const services = await createAgentSessionServices({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			authStorage: harness.authStorage,
+			settingsManager: harness.settingsManager,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		const created = await createAgentSessionFromServices({
+			services,
+			sessionManager: harness.sessionManager,
+			model: harness.getModel(),
+		});
+		try {
+			await created.session.promptAndWait("/workflow start exercise the durable loop");
+			expect(getMessageText(created.session.messages.at(-1))).toContain("awaiting_user");
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "intentional planner failure" }),
+			]);
+
+			await created.session.promptAndWait("/workflow resume approve exact proposal");
+			await created.session.waitForIdle();
+			await created.session.promptAndWait("/workflow status");
+
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(getMessageText(created.session.messages.at(-1))).toContain("paused");
+			expect(created.session.goalState).toMatchObject({
+				status: "paused",
+				lastReason: expect.stringContaining("intentional planner failure"),
+			});
+		} finally {
+			await created.session.disposeAsync();
+		}
+	});
+
+	it("automatically resumes an active durable workflow after session recreation", async () => {
+		const harness = await createHarness({ persistSession: true, settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		harness.session.handleGoalHostRequest("goal.create", { objective: "resume after restart" });
+		const goal = harness.session.readGoalStateForWorkflowProjection();
+		await harness.session.disposeAsync();
+		const status: WorkflowShellStatus = {
+			workflowId: harness.sessionManager.getSessionId(),
+			status: "active",
+			phase: "planning",
+			goal,
+			goalContract: null,
+			approvalRequest: null,
+			stateDigest: "restart-state-digest",
+			decisionRefs: [],
+			resourceEnvelopeDigest: "resources",
+			scorecardDigest: "scorecard",
+			pendingWaitReasons: [],
+			acceptanceCheckIds: ["objective"],
+			protectedInvariantIds: ["workflow-state"],
+		};
+		let recoveryFinished = false;
+		let pauseReason: string | undefined;
+		const services = await createAgentSessionServices({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			authStorage: harness.authStorage,
+			settingsManager: harness.settingsManager,
+			workflowHostFactory: async () => ({
+				recoverBeforeResume: async () => {
+					recoveryFinished = true;
+				},
+				execute: async (command) => {
+					if (command.kind === "pause") pauseReason = command.reason;
+					return status;
+				},
+				blockOnExternal: async () => {
+					throw new Error("Unexpected external blocker in restart fixture.");
+				},
+				resumeBlocked: async () => {
+					throw new Error("Unexpected blocker resume in restart fixture.");
+				},
+				runOutcome: async (): Promise<never> => {
+					throw new Error("Unexpected phase outcome in restart fixture.");
+				},
+				status: () => {
+					if (!recoveryFinished) throw new Error("workflow planner resumed before durable recovery");
+					return status;
+				},
+			}),
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "intentional restart stop" }),
+		]);
+		const recreated = await createAgentSessionFromServices({
+			services,
+			sessionManager: harness.sessionManager,
+			model: harness.getModel(),
+		});
+		try {
+			await recreated.session.waitForIdle();
+			expect(recoveryFinished).toBe(true);
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(pauseReason).toBe("Planner failed: intentional restart stop");
+		} finally {
+			await recreated.session.disposeAsync();
+		}
+	});
+
+	it("fails workflow commands closed when the session has no artifact root", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("model must not run")]);
+
+		await expect(harness.session.promptAndWait("/workflow status")).rejects.toThrow(
+			"Workflow commands require a persisted session artifact root.",
+		);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(getAssistantTexts(harness)).toEqual([]);
 	});
 });

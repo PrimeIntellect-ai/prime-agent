@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -85,9 +85,28 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		});
 		try {
 			const restore = await manager.restoreState();
-			expect(restore).toEqual({ restored: [], failed: [], path: join(freshDir, "missing.dill") });
+			expect(restore).toEqual({ restored: [], failed: [], missing: true, path: join(freshDir, "missing.dill") });
 		} finally {
 			await manager.dispose();
+			rmSync(freshDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("fails visibly when a required snapshot is missing instead of starting fresh", async () => {
+		const freshDir = mkdtempSync(join(tmpdir(), "prime-agent-state-required-missing-"));
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: freshDir,
+			snapshot: {
+				path: join(freshDir, "missing.dill"),
+				manifestPath: join(freshDir, "missing.json"),
+				requiredNames: ["required_value"],
+			},
+		});
+		try {
+			await expect(manager.restoreState()).rejects.toThrow(/required|missing|fresh/i);
+		} finally {
+			await manager.kill();
 			rmSync(freshDir, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -118,7 +137,7 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		}
 	}, 60_000);
 
-	it("treats a corrupt (non-dict) snapshot as no restore without throwing", async () => {
+	it("fails closed on a corrupt (non-dict) snapshot instead of silently starting fresh", async () => {
 		const badDir = mkdtempSync(join(tmpdir(), "prime-agent-state-corrupt-"));
 		const badPath = join(badDir, "corrupt.dill");
 		const manager = new KernelManager({
@@ -127,16 +146,147 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 			snapshot: { path: badPath, manifestPath: join(badDir, "corrupt.json") },
 		});
 		try {
-			// A valid dill file that deserializes to a list, not the expected name->bytes dict.
+			await manager.execute("value = 1");
+			await manager.snapshotState();
+			// Replace a committed payload with a valid dill list, not the expected name->bytes dict.
 			await manager.execute(`import dill\nopen(${JSON.stringify(badPath)}, "wb").write(dill.dumps([1, 2, 3]))`);
-			const restore = await manager.restoreState();
-			expect(restore).toBeNull();
-			// The kernel must still be usable after a failed restore.
-			const echo = await manager.execute("print('alive')");
-			expect(echo.stdout.trim()).toBe("alive");
+			await expect(manager.restoreState()).rejects.toThrow(/failed closed|corrupt|unverifiable/i);
 		} finally {
 			await manager.dispose();
 			rmSync(badDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("omits declared transient state and externalizes an approved large value through verified CAS", async () => {
+		const casDir = mkdtempSync(join(tmpdir(), "prime-agent-state-cas-"));
+		const path = join(casDir, "state.dill");
+		const cfg = {
+			path,
+			manifestPath: join(casDir, "state.json"),
+			maxBytes: 512,
+			transientNames: ["frame", "tool_output", "logs", "cache"],
+			reproducibleNames: ["dataset"],
+		};
+		const writer = new KernelManager({ python: python as string, cwd: casDir, snapshot: cfg });
+		try {
+			await writer.execute(
+				"frame = list(range(200))\ntool_output = 'raw output'\nlogs = 'tail'\ncache = {'x': 1}\ngoal = 'host-owned goal'\nworkflow = {'host': 'workflow'}\nworkflow_ledger = {'host': 'ledger'}\nledger = {'host': 'ledger'}\nlease = {'host': 'lease'}\nleases = [{'host': 'lease'}]\nworker = {'host': 'worker'}\nmessage_obligations = [{'host': 'message'}]\ndataset = 'd' * 8192",
+			);
+			const snapshot = await writer.snapshotState();
+			expect(snapshot?.saved).not.toContain("frame");
+			expect(snapshot?.saved).not.toContain("tool_output");
+			expect(snapshot?.saved).not.toContain("logs");
+			expect(snapshot?.saved).not.toContain("cache");
+			expect(snapshot?.saved).not.toContain("goal");
+			expect(snapshot?.saved).not.toContain("workflow");
+			expect(snapshot?.saved).not.toContain("workflow_ledger");
+			expect(snapshot?.saved).not.toContain("ledger");
+			expect(snapshot?.saved).not.toContain("lease");
+			expect(snapshot?.saved).not.toContain("leases");
+			expect(snapshot?.saved).not.toContain("worker");
+			expect(snapshot?.saved).not.toContain("message_obligations");
+			expect(snapshot?.retainedValues).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						valueId: "dataset",
+						classification: "artifact_ref",
+						representation: "durable",
+					}),
+				]),
+			);
+			expect(snapshot?.serializationDurationMs).toBeGreaterThanOrEqual(0);
+			expect(snapshot?.growthBytesPerTurn).toBeNull();
+			expect(readFileSync(cfg.manifestPath, "utf8")).not.toContain("raw output");
+			await writer.execute("checkpoint_marker = 'durable'");
+			const nextSnapshot = await writer.snapshotState();
+			expect(nextSnapshot?.checkpointTurn).toBeGreaterThan(snapshot?.checkpointTurn ?? 0);
+			expect(nextSnapshot?.growthBytesPerTurn).not.toBeNull();
+		} finally {
+			await writer.kill();
+		}
+
+		const reader = new KernelManager({ python: python as string, cwd: casDir, snapshot: cfg });
+		try {
+			const restore = await reader.restoreState();
+			expect(restore?.restored).toContain("dataset");
+			expect(restore?.restoreDurationMs).toBeGreaterThanOrEqual(0);
+			const echo = await reader.execute(
+				"print(len(dataset), [name in globals() for name in ('frame', 'goal', 'workflow', 'workflow_ledger', 'ledger', 'lease', 'leases', 'worker', 'message_obligations')])",
+			);
+			expect(echo.stdout.trim()).toBe("8192 [False, False, False, False, False, False, False, False, False]");
+		} finally {
+			await reader.kill();
+			rmSync(casDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("fails visibly when required state is unpicklable", async () => {
+		const requiredDir = mkdtempSync(join(tmpdir(), "prime-agent-state-required-"));
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: requiredDir,
+			snapshot: {
+				path: join(requiredDir, "required.dill"),
+				manifestPath: join(requiredDir, "required.json"),
+				requiredNames: ["generator"],
+			},
+		});
+		try {
+			await manager.execute("generator = (n for n in range(3))");
+			await expect(manager.snapshotState()).rejects.toThrow(/required|unpicklable|durable/i);
+			await expect(manager.dispose()).rejects.toThrow(/required|unpicklable|durable/i);
+		} finally {
+			await manager.kill();
+			rmSync(requiredDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("fails visibly when required state exceeds the inline durable budget", async () => {
+		const requiredDir = mkdtempSync(join(tmpdir(), "prime-agent-state-budget-"));
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: requiredDir,
+			snapshot: {
+				path: join(requiredDir, "required.dill"),
+				manifestPath: join(requiredDir, "required.json"),
+				maxBytes: 512,
+				requiredNames: ["too_big"],
+			},
+		});
+		try {
+			await manager.execute("too_big = 'x' * 8192");
+			await expect(manager.snapshotState()).rejects.toThrow(/required|budget|durable/i);
+		} finally {
+			await manager.kill();
+			rmSync(requiredDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("fails visibly when the current required-state registry is absent from a committed checkpoint", async () => {
+		const requiredDir = mkdtempSync(join(tmpdir(), "prime-agent-state-required-missing-"));
+		const path = join(requiredDir, "state.dill");
+		const manifestPath = join(requiredDir, "state.json");
+		const writer = new KernelManager({
+			python: python as string,
+			cwd: requiredDir,
+			snapshot: { path, manifestPath },
+		});
+		try {
+			await writer.execute("ordinary = 1");
+			await writer.snapshotState();
+		} finally {
+			await writer.kill();
+		}
+		const reader = new KernelManager({
+			python: python as string,
+			cwd: requiredDir,
+			snapshot: { path, manifestPath, requiredNames: ["must_exist"] },
+		});
+		try {
+			await expect(reader.restoreState()).rejects.toThrow(/required|registry|missing/i);
+		} finally {
+			await reader.kill();
+			rmSync(requiredDir, { recursive: true, force: true });
 		}
 	}, 60_000);
 

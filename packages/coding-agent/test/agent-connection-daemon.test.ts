@@ -30,6 +30,7 @@ import {
 	type DaemonOutbound,
 	type DaemonResponse,
 } from "../src/modes/daemon/daemon-protocol.js";
+import type { DaemonWorkflowStatusProjection } from "../src/modes/daemon/daemon-session-list.js";
 
 class FakeDaemonClient {
 	readonly requests: DaemonCommand[] = [];
@@ -601,6 +602,7 @@ interface CreateAttachResultOptions {
 	sessionTree?: DaemonAttachResult["snapshot"]["sessionTree"];
 	parent?: DaemonAttachResult["snapshot"]["parent"];
 	replay?: DaemonAttachResult["replay"];
+	workflowStatus?: DaemonWorkflowStatusProjection;
 }
 
 function createAttachResult(
@@ -627,6 +629,7 @@ function createAttachResult(
 		messageCount: messages.length,
 		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		...(options.streamingMessage ? { streamingMessage: options.streamingMessage } : {}),
+		...(options.workflowStatus ? { workflowStatus: options.workflowStatus } : {}),
 	};
 	// Slim shape: the daemon omits top-level state/messages for clients with the
 	// "slim_attach" capability, which DaemonAgentConnection always advertises.
@@ -670,7 +673,8 @@ function createAttachResult(
 					capability === "event_sequence" ||
 					capability === "extension_ui" ||
 					capability === "slim_attach" ||
-					capability === "chunked_snapshot",
+					capability === "chunked_snapshot" ||
+					capability === "workflow_status_projection",
 			),
 		},
 	};
@@ -708,6 +712,56 @@ describe("DaemonAgentConnection", () => {
 			type: "attach",
 			activeSessionId: "active-1",
 			telemetryDisabled: true,
+		});
+	});
+
+	it("advertises workflow status support only to a daemon that negotiated it", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("workflow_status_projection");
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+
+		await connection.attach();
+
+		expect(fakeClient.requests[0]).toMatchObject({
+			type: "attach",
+			capabilities: expect.arrayContaining(["workflow_status_projection"]),
+		});
+
+		const oldDaemonClient = new FakeDaemonClient();
+		const oldDaemonConnection = new DaemonAgentConnection(asDaemonClient(oldDaemonClient), "active-1");
+		await oldDaemonConnection.attach();
+
+		expect(oldDaemonClient.requests[0]).toMatchObject({
+			type: "attach",
+			capabilities: expect.not.arrayContaining(["workflow_status_projection"]),
+		});
+	});
+
+	it("retains the workflow summary received during attach", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("workflow_status_projection");
+		fakeClient.attachResultFactory = (command) =>
+			createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 1, {
+				workflowStatus: {
+					workflowId: "workflow-1",
+					status: "active",
+					phase: "executing",
+					nextGate: "execution_gate",
+					nextTask: "task-1",
+					blocker: null,
+					headDigest: "head-1",
+					approvalRequest: null,
+				},
+			});
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+
+		await connection.attach();
+
+		expect(connection.getSessionSummary()?.workflowStatus).toMatchObject({
+			phase: "executing",
+			nextGate: "execution_gate",
+			nextTask: "task-1",
+			headDigest: "head-1",
 		});
 	});
 

@@ -38,6 +38,7 @@ import {
 	type AgentFamilyCatalogEntry,
 	type AgentFamilyRelationship,
 	type AgentFamilyRosterResult,
+	type AgentSessionMessage,
 	type AgentSessionMessageAgentSummary,
 	type AgentSessionMessageController,
 	type AgentSessionMessageDeliveryStatus,
@@ -55,12 +56,14 @@ import {
 	buildAgentFamilyRoster,
 	createAgentSessionMessage,
 	createAgentSessionMessageId,
+	createAgentSessionMessageObservationId,
 	createAgentSessionMessageReceipt,
 	DEFAULT_AGENT_MESSAGE_MAX_CHARS,
 	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY,
 	DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
 	formatAgentSessionNameUnavailable,
+	isAgentSessionMessageBlockedError,
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
 	sessionNameReservationKey,
@@ -114,6 +117,10 @@ import {
 	type SessionInfo,
 	SessionManager,
 } from "../../core/session-manager.js";
+import {
+	createSessionMessageObligationBridge,
+	type SessionMessageObligationBridge,
+} from "../../core/session-message-obligation-bridge.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
@@ -175,6 +182,7 @@ import {
 	classifySessionRosterStatus,
 	inactiveLifecycleForSession,
 	isActiveSessionBusy,
+	projectSessionSummaryForClient,
 	type SessionSummary,
 	summaryForActiveSession,
 } from "./daemon-session-list.js";
@@ -495,6 +503,7 @@ export class AgentDaemon {
 	// Refcount of prompts in preflight (accepted but not yet streaming); >0 makes
 	// concurrent agent messages queue instead of racing agent.prompt.
 	private readonly agentMessagePreparingTargets = new Map<string, number>();
+	private readonly agentMessageObligationBridges = new Map<string, SessionMessageObligationBridge>();
 	// Sessions inserted into `sessions` but still awaiting extension binding;
 	// visible to host controllers during bind, excluded from targeting.
 	private readonly bindingSessions = new Set<string>();
@@ -1244,6 +1253,7 @@ export class AgentDaemon {
 					throw new RuntimeOpenCancelledError();
 				}
 			}
+			await this.ensureAgentMessageObligationBridge(state);
 			onStateBound?.(state);
 		} catch (error) {
 			state.unsubscribe?.();
@@ -1301,6 +1311,31 @@ export class AgentDaemon {
 		if (this.cronStore.registerSessionArtifact(session.sessionId, artifactDir)) {
 			this.cronStore.recoverSessionArtifact(session.sessionId);
 			this.cronScheduler.wake();
+		}
+	}
+
+	private async ensureAgentMessageObligationBridge(state: ActiveSessionState): Promise<void> {
+		const artifactDir = state.runtime.session.sessionManager.getSessionArtifactDir();
+		if (artifactDir === undefined) return;
+		const bridge = await createSessionMessageObligationBridge({
+			rootDir: join(artifactDir, "session-message-obligations"),
+			targetSessionId: state.runtime.session.sessionId,
+			ownerId: `daemon:${process.pid}:${state.activeSessionId}`,
+		});
+		const setBridge = (
+			state.runtime.session as unknown as {
+				setAgentMessageObligationBridge?: (value: SessionMessageObligationBridge | undefined) => void;
+			}
+		).setAgentMessageObligationBridge;
+		setBridge?.call(state.runtime.session, bridge);
+		this.agentMessageObligationBridges.set(state.activeSessionId, bridge);
+		try {
+			await bridge.bindSession(state.runtime.session);
+		} catch (error) {
+			this.agentMessageObligationBridges.delete(state.activeSessionId);
+			setBridge?.call(state.runtime.session, undefined);
+			await bridge.close().catch(() => undefined);
+			throw error;
 		}
 	}
 
@@ -2329,6 +2364,8 @@ export class AgentDaemon {
 					customTools: options.customTools,
 					includeGoals: options.includeGoals,
 					includeCompactSkill: options.includeCompactSkill,
+					toolExecutionDeadlineMs: options.toolExecutionDeadlineMs,
+					kernelPythonLauncher: options.kernelPythonLauncher,
 					agentMessageController: this.createAgentMessageController(() => stateRef),
 					agentObserveController: this.createAgentObserveController(() => stateRef),
 					rlmHeartbeatController: {
@@ -3344,7 +3381,7 @@ export class AgentDaemon {
 					);
 					state.clients.add(client);
 					client.attachedActiveSessionIds.add(state.activeSessionId);
-					this.write(client, success(command.id, "attach", summaryForActiveSession(state)));
+					this.write(client, success(command.id, "attach", this.projectSummaryForClient(client, state)));
 					return;
 				}
 				case "worker_unsubscribe": {
@@ -3377,6 +3414,9 @@ export class AgentDaemon {
 					const receipt = await this.sendAgentSessionMessage({
 						targetSelector: command.targetActiveSessionId,
 						message: command.message,
+						messageId: command.messageId,
+						observationId: command.observationId,
+						fromRelationship: command.fromRelationship,
 						sender: command.sender,
 						senderKey: command.sender.activeSessionId ?? `client:${command.sender.clientId}`,
 						origin: "agent",
@@ -3460,11 +3500,17 @@ export class AgentDaemon {
 			case "ack_result":
 				return undefined;
 			case "list": {
+				if (command.capabilities !== undefined) {
+					addDaemonClientCapabilities(client, normalizeClientCapabilities(command.capabilities, undefined));
+				}
+				const includeWorkflowStatus = daemonClientSupportsWorkflowStatus(client);
 				const activeSessions = Array.from(this.sessions.values());
 				const scheduledJobs = this.cronStore.list();
 				if (!command.all) {
 					return success(command.id, "list", {
-						sessions: await this.buildSessionListWithPassiveRlmSubagents(activeSessions, [], scheduledJobs),
+						sessions: (await this.buildSessionListWithPassiveRlmSubagents(activeSessions, [], scheduledJobs)).map(
+							(summary) => projectSessionSummaryForClient(summary, includeWorkflowStatus),
+						),
 					});
 				}
 				const defaultConfig = this.options.defaultSessionConfig;
@@ -3472,11 +3518,9 @@ export class AgentDaemon {
 				if (command.cwd) {
 					const savedSessions = await SessionManager.list(resolve(command.cwd), listSessionDir);
 					return success(command.id, "list", {
-						sessions: await this.buildSessionListWithPassiveRlmSubagents(
-							activeSessions,
-							savedSessions,
-							scheduledJobs,
-						),
+						sessions: (
+							await this.buildSessionListWithPassiveRlmSubagents(activeSessions, savedSessions, scheduledJobs)
+						).map((summary) => projectSessionSummaryForClient(summary, includeWorkflowStatus)),
 					});
 				}
 				const savedSessions =
@@ -3484,11 +3528,9 @@ export class AgentDaemon {
 						? await SessionManager.listAll(undefined, listSessionDir)
 						: await SessionManager.listAll();
 				return success(command.id, "list", {
-					sessions: await this.buildSessionListWithPassiveRlmSubagents(
-						activeSessions,
-						savedSessions,
-						scheduledJobs,
-					),
+					sessions: (
+						await this.buildSessionListWithPassiveRlmSubagents(activeSessions, savedSessions, scheduledJobs)
+					).map((summary) => projectSessionSummaryForClient(summary, includeWorkflowStatus)),
 				});
 			}
 
@@ -3539,7 +3581,7 @@ export class AgentDaemon {
 
 			case "create": {
 				const state = await this.createRuntime(command);
-				return success(command.id, "create", summaryForActiveSession(state));
+				return success(command.id, "create", this.projectSummaryForClient(client, state));
 			}
 
 			case "attach": {
@@ -3674,7 +3716,7 @@ export class AgentDaemon {
 					throw new Error("Session name cannot be empty");
 				}
 				await this.setStateSessionName(state, name);
-				return success(command.id, "rename", summaryForActiveSession(state));
+				return success(command.id, "rename", this.projectSummaryForClient(client, state));
 			}
 
 			case "rename_saved_session": {
@@ -3940,6 +3982,8 @@ export class AgentDaemon {
 				const receipt = await this.sendAgentSessionMessage({
 					targetSelector: command.targetActiveSessionId,
 					message: command.message,
+					messageId: command.messageId,
+					observationId: command.observationId,
 					fromState,
 					clientId: client.id,
 					senderKey: this.createCliAgentMessageSenderKey(),
@@ -4116,7 +4160,7 @@ export class AgentDaemon {
 
 			case "get_state": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_state", summaryForActiveSession(state));
+				return success(command.id, "get_state", this.projectSummaryForClient(client, state));
 			}
 
 			case "get_connection_state": {
@@ -4563,6 +4607,13 @@ export class AgentDaemon {
 		command: Extract<DaemonCommand, { type: "attach" }>,
 	): Promise<DaemonAttachResult> {
 		const snapshot = await this.createSessionSnapshot(state);
+		const projectedSnapshot = {
+			...snapshot,
+			summary: projectSessionSummaryForClient(
+				snapshot.summary,
+				daemonClientSupportsWorkflowStatus(client, state.activeSessionId),
+			),
+		};
 		const replay =
 			command.resumeCursor?.activeSessionId && command.resumeCursor.activeSessionId !== state.activeSessionId
 				? {
@@ -4586,8 +4637,8 @@ export class AgentDaemon {
 		return {
 			protocol: DAEMON_PROTOCOL_INFO,
 			activeSessionId: state.activeSessionId,
-			...(slim ? {} : { state: snapshot.summary, messages: snapshot.messages }),
-			snapshot,
+			...(slim ? {} : { state: projectedSnapshot.summary, messages: projectedSnapshot.messages }),
+			snapshot: projectedSnapshot,
 			replay,
 			lastEventSequence: state.lastEventSequence,
 			lastEventCursor: {
@@ -4599,6 +4650,13 @@ export class AgentDaemon {
 				capabilities: [...capabilities],
 			},
 		};
+	}
+
+	private projectSummaryForClient(client: DaemonSocketClient, state: ActiveSessionState): SessionSummary {
+		return projectSessionSummaryForClient(
+			summaryForActiveSession(state),
+			daemonClientSupportsWorkflowStatus(client, state.activeSessionId),
+		);
 	}
 
 	private async createSessionSnapshot(state: ActiveSessionState): Promise<DaemonSessionSnapshot> {
@@ -5347,6 +5405,9 @@ export class AgentDaemon {
 	private async sendAgentSessionMessage(options: {
 		targetSelector: string;
 		message: string;
+		messageId?: string;
+		observationId?: string;
+		fromRelationship?: AgentFamilyRelationship;
 		fromState?: ActiveSessionState;
 		sender?: AgentSessionMessageSender;
 		clientId?: string;
@@ -5358,6 +5419,8 @@ export class AgentDaemon {
 		}
 		const targetSelector = assertDirectAgentMessageTarget(options.targetSelector);
 		const message = normalizeAgentSessionMessage(options.message, DEFAULT_AGENT_MESSAGE_MAX_CHARS);
+		const messageId = options.messageId ?? createAgentSessionMessageId();
+		const observationId = options.observationId ?? createAgentSessionMessageObservationId();
 		let targetState: ActiveSessionState;
 		try {
 			targetState = this.getBoundSessionState(targetSelector);
@@ -5393,7 +5456,13 @@ export class AgentDaemon {
 						} else if (this.options.worker && options.fromState) {
 							// The supervisor can resolve and wake a saved worker even when it is no longer
 							// present in this worker's resident peer snapshot.
-							return this.sendRemoteAgentSessionMessage(options.fromState, targetSelector, message);
+							return this.sendRemoteAgentSessionMessage(
+								options.fromState,
+								targetSelector,
+								message,
+								messageId,
+								observationId,
+							);
 						} else {
 							throw error;
 						}
@@ -5417,17 +5486,18 @@ export class AgentDaemon {
 			throw new Error(`Agent messaging rate limit exceeded; retry after ${rateLimit.retryAfterMs}ms`);
 		}
 		const payload: AgentSessionMessagePayload = {
-			id: createAgentSessionMessageId(),
+			id: messageId,
+			observationId,
 			source: AGENT_MESSAGE_SOURCE,
 			message,
 			from:
 				options.sender ??
 				this.createAgentSessionMessageSender(options.fromState, options.clientId ?? options.origin),
-			fromRelationship: this.agentMessageRelationship(options.fromState, targetState),
+			fromRelationship: options.fromRelationship ?? this.agentMessageRelationship(options.fromState, targetState),
 			target: this.createAgentSessionMessageEndpoint(targetState),
 		};
 		try {
-			const { status } = await this.withAgentMessageTargetLock(targetState.activeSessionId, async () => {
+			const result = await this.withAgentMessageTargetLock(targetState.activeSessionId, async () => {
 				if (this.agentMessagesPaused) {
 					throw new Error("Agent messaging is paused");
 				}
@@ -5442,7 +5512,9 @@ export class AgentDaemon {
 				}
 				return this.acceptAgentSessionMessage(targetState, payload, releaseQueueSlot);
 			});
-			return createAgentSessionMessageReceipt(payload, status);
+			return result.status === "blocked"
+				? createAgentSessionMessageReceipt(payload, result.status, result.blockedReason)
+				: createAgentSessionMessageReceipt(payload, result.status);
 		} catch (error) {
 			this.agentMessageRateLimiter.refund(rateLimitKey);
 			throw error;
@@ -5456,6 +5528,8 @@ export class AgentDaemon {
 		fromState: ActiveSessionState,
 		targetSelector: string,
 		message: string,
+		messageId = createAgentSessionMessageId(),
+		observationId = createAgentSessionMessageObservationId(),
 	): Promise<AgentSessionMessageReceipt> {
 		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 		if (!supervisorSocketPath) {
@@ -5469,11 +5543,16 @@ export class AgentDaemon {
 			try {
 				await client.connect(1000);
 				await client.waitForHello(1000);
+				if (!client.supportsServerCapability("session-message-obligations")) {
+					throw new Error("Remote daemon does not support session-message-obligations");
+				}
 				const response = await client.request(
 					{
 						type: "send_message",
 						targetActiveSessionId: targetSelector,
 						message,
+						messageId,
+						observationId,
 						fromActiveSessionId: fromState.activeSessionId,
 						agentOrigin: true,
 					},
@@ -5488,6 +5567,9 @@ export class AgentDaemon {
 				}
 				return response.data as AgentSessionMessageReceipt;
 			} catch (error) {
+				if (error instanceof Error && error.message.includes("session-message-obligations")) {
+					throw error;
+				}
 				lastError = error;
 				if (receivedResponse) {
 					throw error;
@@ -5504,7 +5586,7 @@ export class AgentDaemon {
 		targetState: ActiveSessionState,
 		payload: AgentSessionMessagePayload,
 		releaseReservation: () => void,
-	): Promise<{ status: AgentSessionMessageDeliveryStatus }> {
+	): Promise<{ status: AgentSessionMessageDeliveryStatus; blockedReason?: string }> {
 		const session = targetState.runtime.session;
 		const reserved = this.agentMessagePendingReservations.get(targetState.activeSessionId) ?? 0;
 		const otherReservations = Math.max(0, reserved - 1);
@@ -5512,6 +5594,10 @@ export class AgentDaemon {
 			session.unfinishedActionCount + otherReservations,
 			DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 		);
+		const obligationBridge = this.agentMessageObligationBridges.get(targetState.activeSessionId);
+		if (obligationBridge === undefined) {
+			throw new Error("CONTRACT_CHANGE: durable session-message obligations require a persisted session artifact");
+		}
 		const shouldQueue =
 			this.agentMessageAcceptingTargets.has(targetState.activeSessionId) ||
 			this.agentMessagePreparingTargets.has(targetState.activeSessionId) ||
@@ -5523,17 +5609,47 @@ export class AgentDaemon {
 		const streamingBehavior = "steer";
 		const message = createAgentSessionMessage(payload);
 		const prompt = message.content;
+		const accepted = await obligationBridge.accept({ payload, lane: "steering" });
+		if (accepted.replayed && accepted.obligations.every((obligation) => obligation.outcome === "processed")) {
+			releaseReservation();
+			return { status: "delivered" };
+		}
+		if (accepted.replayed && session.hasAgentMessageAction(payload.id)) {
+			releaseReservation();
+			return { status: "queued" };
+		}
+		try {
+			if (
+				accepted.replayed &&
+				session.hasPersistedAgentMessage(payload.id) &&
+				!session.hasAgentMessageAction(payload.id)
+			) {
+				await session.queueAgentMessagePrompt(prompt, streamingBehavior, message);
+				releaseReservation();
+				return { status: "queued" };
+			}
+			return await this.dispatchAcceptedAgentSessionMessage(targetState, message, shouldQueue, releaseReservation);
+		} catch (error) {
+			if (!isAgentSessionMessageBlockedError(error)) throw error;
+			releaseReservation();
+			return { status: "blocked", blockedReason: error.reason };
+		}
+	}
 
+	private async dispatchAcceptedAgentSessionMessage(
+		targetState: ActiveSessionState,
+		message: AgentSessionMessage,
+		shouldQueue: boolean,
+		releaseReservation: () => void,
+	): Promise<{ status: AgentSessionMessageDeliveryStatus; blockedReason?: string }> {
+		const session = targetState.runtime.session;
+		const prompt = message.content;
+		const streamingBehavior = "steer";
 		if (shouldQueue) {
 			const didQueue = await session.queueAgentMessagePrompt(prompt, streamingBehavior, message);
-			if (!didQueue) {
-				throw new Error("Agent message was not queued");
-			}
-			// The queued message now counts in unfinishedActionCount.
+			if (!didQueue) throw new Error("Agent message was not queued");
 			releaseReservation();
-			// Do not await delivery: a queued message delivers only when the target's
-			// turn progresses, and the sender is blocked inside its own turn — awaiting
-			// here deadlocks mutual sends between busy sessions.
+			// Queued delivery is deliberately fire-and-forget so mutual sends cannot deadlock.
 			return { status: "queued" };
 		}
 
@@ -5551,16 +5667,11 @@ export class AgentDaemon {
 				},
 			};
 			if (typeof session.acceptAgentMessagePrompt === "function") {
-				await session.acceptAgentMessagePrompt(prompt, {
-					...promptOptions,
-					customMessage: message,
-				});
+				await session.acceptAgentMessagePrompt(prompt, { ...promptOptions, customMessage: message });
 			} else {
 				await session.prompt(prompt, promptOptions);
 			}
-			if (preflightFailed) {
-				throw new Error("Agent message was not accepted");
-			}
+			if (preflightFailed) throw new Error("Agent message was not accepted");
 			releaseReservation();
 			return { status: preflightQueued ? "queued" : "delivered" };
 		} finally {
@@ -6077,6 +6188,15 @@ export class AgentDaemon {
 		}
 		this.recordWorkerRecoveryState(state, `closed:${reason}`, false);
 		state.unsubscribe?.();
+		const obligationBridge = this.agentMessageObligationBridges.get(state.activeSessionId);
+		this.agentMessageObligationBridges.delete(state.activeSessionId);
+		const clearBridge = (
+			state.runtime.session as unknown as {
+				setAgentMessageObligationBridge?: (value: SessionMessageObligationBridge | undefined) => void;
+			}
+		).setAgentMessageObligationBridge;
+		clearBridge?.call(state.runtime.session, undefined);
+		await obligationBridge?.close().catch(() => undefined);
 		let disposeError: unknown;
 		try {
 			await state.runtime.dispose();
@@ -6764,6 +6884,19 @@ function normalizeClientCapabilities(
 		normalized.add("extension_ui");
 	}
 	return normalized;
+}
+
+function addDaemonClientCapabilities(
+	client: DaemonSocketClient,
+	capabilities: ReadonlySet<DaemonClientCapability>,
+): void {
+	for (const capability of capabilities) {
+		client.capabilities.add(capability);
+	}
+}
+
+function daemonClientSupportsWorkflowStatus(client: DaemonSocketClient, activeSessionId?: string): boolean {
+	return daemonClientCapabilitiesForSession(client, activeSessionId ?? "").has("workflow_status_projection");
 }
 
 type SequencedDaemonOutbound = Extract<

@@ -7,6 +7,8 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private done = false;
 	private finalResultPromise: Promise<R>;
 	private resolveFinalResult!: (result: R) => void;
+	private finalResult: R | undefined;
+	private hasFinalResult = false;
 
 	constructor(
 		private isComplete: (event: T) => boolean,
@@ -22,7 +24,9 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 
 		if (this.isComplete(event)) {
 			this.done = true;
-			this.resolveFinalResult(this.extractResult(event));
+			this.finalResult = this.extractResult(event);
+			this.hasFinalResult = true;
+			this.resolveFinalResult(this.finalResult);
 		}
 
 		// Deliver to waiting consumer or queue it
@@ -37,6 +41,8 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	end(result?: R): void {
 		this.done = true;
 		if (result !== undefined) {
+			this.finalResult = result;
+			this.hasFinalResult = true;
 			this.resolveFinalResult(result);
 		}
 		// Notify all waiting consumers that we're done
@@ -62,6 +68,11 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 
 	result(): Promise<R> {
 		return this.finalResultPromise;
+	}
+
+	/** Return the terminal result without awaiting a provider that may still be running. */
+	resultIfSettled(): R | undefined {
+		return this.hasFinalResult ? this.finalResult : undefined;
 	}
 }
 

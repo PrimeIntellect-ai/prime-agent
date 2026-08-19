@@ -32,6 +32,7 @@ import { shortHash } from "../utils/hash.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
+import type { StreamLivenessObservation } from "../utils/stream-liveness.js";
 import { transformMessages } from "./transform-messages.js";
 
 // =============================================================================
@@ -74,6 +75,7 @@ export interface OpenAIResponsesStreamOptions {
 		usage: Usage,
 		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	) => void;
+	onLivenessObservation?: (observation: StreamLivenessObservation) => void;
 }
 
 export interface ConvertResponsesMessagesOptions {
@@ -292,8 +294,10 @@ export async function processResponsesStream<TApi extends Api>(
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
+	const observe = options?.onLivenessObservation;
 
 	for await (const event of openaiStream) {
+		observe?.({ type: "provider_event", eventId: event.type });
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
@@ -302,11 +306,13 @@ export async function processResponsesStream<TApi extends Api>(
 				currentItem = item;
 				currentBlock = { type: "thinking", thinking: "" };
 				output.content.push(currentBlock);
+				observe?.({ type: "block" });
 				stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
 			} else if (item.type === "message") {
 				currentItem = item;
 				currentBlock = { type: "text", text: "" };
 				output.content.push(currentBlock);
+				observe?.({ type: "block" });
 				stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
 			} else if (item.type === "function_call") {
 				currentItem = item;
@@ -318,6 +324,7 @@ export async function processResponsesStream<TApi extends Api>(
 					partialJson: item.arguments || "",
 				};
 				output.content.push(currentBlock);
+				observe?.({ type: "block" });
 				stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
 			}
 		} else if (event.type === "response.reasoning_summary_part.added") {
@@ -332,6 +339,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart) {
 					currentBlock.thinking += event.delta;
 					lastPart.text += event.delta;
+					observe?.({ type: "thinking_delta", delta: event.delta });
 					stream.push({
 						type: "thinking_delta",
 						contentIndex: blockIndex(),
@@ -347,6 +355,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart) {
 					currentBlock.thinking += "\n\n";
 					lastPart.text += "\n\n";
+					observe?.({ type: "thinking_delta", delta: "\n\n" });
 					stream.push({
 						type: "thinking_delta",
 						contentIndex: blockIndex(),
@@ -358,6 +367,7 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "response.reasoning_text.delta") {
 			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
 				currentBlock.thinking += event.delta;
+				observe?.({ type: "thinking_delta", delta: event.delta });
 				stream.push({
 					type: "thinking_delta",
 					contentIndex: blockIndex(),
@@ -382,6 +392,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart?.type === "output_text") {
 					currentBlock.text += event.delta;
 					lastPart.text += event.delta;
+					observe?.({ type: "text_delta", delta: event.delta });
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
@@ -399,6 +410,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (lastPart?.type === "refusal") {
 					currentBlock.text += event.delta;
 					lastPart.refusal += event.delta;
+					observe?.({ type: "text_delta", delta: event.delta });
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
@@ -411,6 +423,12 @@ export async function processResponsesStream<TApi extends Api>(
 			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
 				currentBlock.partialJson += event.delta;
 				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+				observe?.({
+					type: "tool_call",
+					id: currentBlock.id,
+					name: currentBlock.name,
+					args: currentBlock.partialJson,
+				});
 				stream.push({
 					type: "toolcall_delta",
 					contentIndex: blockIndex(),
@@ -423,6 +441,12 @@ export async function processResponsesStream<TApi extends Api>(
 				const previousPartialJson = currentBlock.partialJson;
 				currentBlock.partialJson = event.arguments;
 				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+				observe?.({
+					type: "tool_call",
+					id: currentBlock.id,
+					name: currentBlock.name,
+					args: currentBlock.partialJson,
+				});
 
 				if (event.arguments.startsWith(previousPartialJson)) {
 					const delta = event.arguments.slice(previousPartialJson.length);
@@ -487,6 +511,7 @@ export async function processResponsesStream<TApi extends Api>(
 				stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 			}
 		} else if (event.type === "response.completed") {
+			observe?.({ type: "finalizing" });
 			const response = event.response;
 			if (response?.id) {
 				output.responseId = response.id;

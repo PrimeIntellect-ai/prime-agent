@@ -1,20 +1,42 @@
 // TODO: reconsider persistent kernel vs stateless `python -c` once RLM-1 weights land.
 import { type ChildProcess, spawn } from "node:child_process";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
+import {
+	recordWorkflowCheckpointBudgetTelemetry,
+	type WorkflowCheckpointBudgetTelemetryHost,
+	type WorkflowCheckpointBudgetTelemetryObservationInput,
+} from "../workflow/checkpoint-budget-telemetry.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
+import {
+	canonicalizeKernelWritablePath,
+	createKernelContainer,
+	KernelContainerCleanupError,
+	KernelContainerCreationError,
+	type KernelContainerIsolationOptions,
+	removeKernelContainer,
+	reserveKernelPorts,
+	writeContainerConnectionFile,
+} from "./isolation.js";
+
+export type { KernelContainerIsolationOptions } from "./isolation.js";
+export { KernelContainerCleanupError, KernelContainerCreationError } from "./isolation.js";
+
 import {
 	buildListNamesCode,
 	buildRestoreCode,
 	buildSnapshotCode,
 	DEFAULT_SNAPSHOT_MAX_BYTES,
+	type KernelSnapshotRetainedValue,
+	type KernelSnapshotRetentionClass,
+	parseKernelStateError,
 	parseListNamesResult,
 	parseRestoreResult,
 	parseSnapshotResult,
@@ -29,6 +51,7 @@ const READY_TIMEOUT_MS = 5000;
 // Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
+const MAX_EXECUTE_OUTPUT_CHARS = 1_000_000;
 const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 // How often to poll a forked kernel's pid for unexpected death.
@@ -39,9 +62,11 @@ const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
 // on-disk copy is the fallback if this is exceeded.
 const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
+const KERNEL_TERMINATE_GRACE_MS = 2000;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
+const MAX_KERNEL_STDERR_CHARS = 65_536;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
 	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
 
@@ -52,17 +77,175 @@ export class KernelBusyAfterInterruptError extends Error {
 	}
 }
 
+/** Raised when a checkpoint cannot be committed or a persisted state cannot be verified. */
+export class KernelSnapshotError extends Error {
+	public constructor(message: string) {
+		super(message);
+		this.name = "KernelSnapshotError";
+	}
+}
+
 /** Comm target the kernel-side `rlm.host_request` shim opens for typed host requests. */
 export const HOST_COMM_TARGET = "host.request";
 
+/** Current host-request gateway contract. The Python bridge may omit this for legacy calls. */
+export const HOST_REQUEST_GATEWAY_VERSION = 1 as const;
+
+export type HostRequestAccess = "read" | "mutate";
+
+/** Host-owned authority installed out-of-band from the Python request payload. */
+export interface HostRequestCapabilityContext {
+	readonly workflowId?: string;
+	readonly decisionId?: string;
+	readonly decisionRevision?: number;
+	readonly capabilities: readonly string[];
+	readonly expiresAt?: number;
+	readonly nonce?: string;
+}
+
+/** A bounded field in one closed host-request descriptor. */
+export interface HostRequestFieldDescriptor {
+	readonly kind: "string" | "boolean" | "integer" | "number" | "record" | "array";
+	readonly required?: boolean;
+	readonly maxChars?: number;
+	readonly min?: number;
+	readonly max?: number;
+	readonly minItems?: number;
+	readonly maxItems?: number;
+	readonly maxKeys?: number;
+	readonly items?: HostRequestFieldDescriptor;
+	readonly properties?: Readonly<Record<string, HostRequestFieldDescriptor>>;
+}
+
+/** Closed request metadata owned by the TypeScript host. */
+export interface HostRequestDescriptor {
+	readonly type: string;
+	readonly version: typeof HOST_REQUEST_GATEWAY_VERSION;
+	readonly access: HostRequestAccess;
+	readonly requiredCapability?: string;
+	readonly fields: Readonly<Record<string, HostRequestFieldDescriptor>>;
+	readonly maxPayloadBytes: number;
+	readonly maxNodes: number;
+	readonly availability: "available" | "injectable";
+}
+
+/** Nested result envelope returned by the host gateway before legacy wire flattening. */
+export interface HostRequestGatewaySuccess {
+	readonly status: "ok";
+	readonly result: Record<string, unknown>;
+}
+
+const HOST_REQUEST_CAPABILITY_CONTEXT = new WeakMap<object, HostRequestCapabilityContext>();
+
+/** A bounded value accepted by a descriptor's JSON-shaped payload schema. */
+interface HostRequestValueLimits {
+	readonly maxBytes: number;
+	readonly maxNodes: number;
+	readonly maxDepth: number;
+}
+
+interface HostRequestDispatchOptions {
+	/** Host-derived source attribution; never read from caller data. */
+	readonly cellSourceCode?: string;
+}
+
+export interface HostRequestGatewayOptions {
+	handlers?: HostRequestHandlers;
+	capabilityContext?: HostRequestCapabilityContext;
+	capabilityResolver?: HostRequestCapabilityResolver;
+	now?: () => number;
+}
+
 /**
  * Handles one typed request from Python code running in the kernel.
- * The returned record is sent back verbatim as the comm reply payload.
+ * The optional context is host-owned and never comes from the Python payload.
  */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export type HostRequestHandler = (
+	payload: Record<string, unknown>,
+	context?: HostRequestContext,
+) => Promise<Record<string, unknown>>;
+
+/** Per-request authority supplied only by the host gateway. */
+export interface HostRequestContext {
+	readonly requestId: string;
+	readonly version: typeof HOST_REQUEST_GATEWAY_VERSION;
+	readonly signal: AbortSignal;
+	readonly capability: HostRequestCapabilityContext;
+	readonly cellSourceCode?: string;
+	isCurrent(): boolean;
+}
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
+
+/** Resolve current host authority for one canonical request type. */
+export type HostRequestCapabilityResolver = (requestType: string) => HostRequestCapabilityContext;
+
+const HOST_REQUEST_CAPABILITY_RESOLVER = new WeakMap<object, HostRequestCapabilityResolver>();
+
+function cloneHostRequestCapabilityContext(
+	context: HostRequestCapabilityContext | undefined,
+): HostRequestCapabilityContext {
+	const capabilities = context?.capabilities ?? [];
+	if (!Array.isArray(capabilities) || !capabilities.every((value) => typeof value === "string" && value.length > 0)) {
+		throw new Error("host request capabilities must be a list of non-empty strings");
+	}
+	if (
+		context?.workflowId !== undefined &&
+		(typeof context.workflowId !== "string" || context.workflowId.length === 0)
+	) {
+		throw new Error("host request workflowId must be a non-empty string when provided");
+	}
+	if (
+		context?.decisionId !== undefined &&
+		(typeof context.decisionId !== "string" || context.decisionId.length === 0)
+	) {
+		throw new Error("host request decisionId must be a non-empty string when provided");
+	}
+	if (
+		context?.decisionRevision !== undefined &&
+		(!Number.isSafeInteger(context.decisionRevision) || context.decisionRevision < 1)
+	) {
+		throw new Error("host request decisionRevision must be a positive integer when provided");
+	}
+	if (context?.expiresAt !== undefined && (!Number.isFinite(context.expiresAt) || context.expiresAt <= 0)) {
+		throw new Error("host request expiresAt must be a positive timestamp when provided");
+	}
+	if (context?.nonce !== undefined && (typeof context.nonce !== "string" || context.nonce.length === 0)) {
+		throw new Error("host request nonce must be a non-empty string when provided");
+	}
+	return Object.freeze({
+		...(context?.workflowId === undefined ? {} : { workflowId: context.workflowId }),
+		...(context?.decisionId === undefined ? {} : { decisionId: context.decisionId }),
+		...(context?.decisionRevision === undefined ? {} : { decisionRevision: context.decisionRevision }),
+		capabilities: Object.freeze([...capabilities]),
+		...(context?.expiresAt === undefined ? {} : { expiresAt: context.expiresAt }),
+		...(context?.nonce === undefined ? {} : { nonce: context.nonce }),
+	});
+}
+
+/**
+ * Install host authority on a copied handler table. Caller payloads cannot carry
+ * this context, and later mutation of the caller's table cannot substitute a handler.
+ */
+export function installHostRequestCapabilityContext(
+	handlers: HostRequestHandlers,
+	context: HostRequestCapabilityContext = { capabilities: [] },
+): HostRequestHandlers {
+	const installed = { ...handlers };
+	HOST_REQUEST_CAPABILITY_CONTEXT.set(installed, cloneHostRequestCapabilityContext(context));
+	return installed;
+}
+
+/** Install a current-state authority resolver on a copied handler table. */
+export function installHostRequestCapabilityResolver(
+	handlers: HostRequestHandlers,
+	resolver: HostRequestCapabilityResolver,
+): HostRequestHandlers {
+	const installed = { ...handlers };
+	HOST_REQUEST_CAPABILITY_RESOLVER.set(installed, resolver);
+	return installed;
+}
 
 /** Where and how to persist the kernel's user namespace so it survives resume. */
 export interface KernelSnapshotConfig {
@@ -70,15 +253,33 @@ export interface KernelSnapshotConfig {
 	path: string;
 	/** Absolute path for the JSON manifest written alongside the payload. */
 	manifestPath: string;
-	/** Skip variables (and abort the payload) above this many bytes. Default 256 MiB. */
+	/** Inline durable-state ceiling. Declared required values above it fail closed. Default 256 MiB. */
 	maxBytes?: number;
 	/** Debounce window for the auto-snapshot after a successful execution. Default 1500 ms. */
 	debounceMs?: number;
+	/** Names omitted before serialization as transient tool/output state. */
+	transientNames?: readonly string[];
+	/** Host-owned names that must remain in the host workflow/session stores. */
+	hostOnlyNames?: readonly string[];
+	/** Per-name classification for declared transient values. */
+	transientClassifications?: Readonly<Record<string, KernelSnapshotRetentionClass>>;
+	/** Names whose large values may be externalized to local content-addressed artifacts. */
+	reproducibleNames?: readonly string[];
+	/** Names that must be durable or cause the checkpoint/restore to fail closed. */
+	requiredNames?: readonly string[];
+	/** Optional local CAS directory for externalized values. */
+	artifactRoot?: string;
+	/** Maximum retained metadata records in one checkpoint. */
+	maxRetainedValues?: number;
+	/** Host-owned checkpoint telemetry authority; receipts and journal commits never come from the kernel. */
+	checkpointTelemetry?: WorkflowCheckpointBudgetTelemetryHost;
 }
 
 export interface KernelManagerOptions {
 	/** Python interpreter that has `ipykernel` available. Defaults to the auto-bootstrapped kernel. */
 	python?: string;
+	/** Host-owned agent directory used for the default bootstrapped Python runtime. */
+	agentDir?: string;
 	cwd?: string;
 	env?: Record<string, string>;
 	sessionId?: string;
@@ -86,6 +287,10 @@ export interface KernelManagerOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
+	/** Optional physical Docker boundary for untrusted worker/coordinator kernels. */
+	isolation?: KernelContainerIsolationOptions;
+	/** Additional host-owned writable capability roots for an isolated kernel. */
+	isolationOutputPaths?: readonly string[];
 	/** Default: "prime-agent". */
 	username?: string;
 }
@@ -144,7 +349,9 @@ export interface KernelAttachment {
 export interface KernelSentAgentMessage {
 	id: string;
 	message: string;
-	deliveryStatus: "delivered" | "queued";
+	deliveryStatus: "delivered" | "queued" | "blocked";
+	blockedReason?: string;
+	auditOnly?: true;
 	receiverRole?: "parent" | "sibling" | "child";
 	target: {
 		activeSessionId: string;
@@ -205,12 +412,14 @@ function parseSentAgentMessage(payload: unknown): KernelSentAgentMessage | undef
 	if (!isRecord(payload) || !isRecord(payload.target)) {
 		return undefined;
 	}
-	const { id, message, deliveryStatus, receiverRole, target } = payload;
+	const { id, message, deliveryStatus, blockedReason, auditOnly, receiverRole, target } = payload;
 	const { activeSessionId, sessionId, sessionName } = target;
 	if (
 		typeof id !== "string" ||
 		typeof message !== "string" ||
-		(deliveryStatus !== "delivered" && deliveryStatus !== "queued") ||
+		(deliveryStatus !== "delivered" && deliveryStatus !== "queued" && deliveryStatus !== "blocked") ||
+		(blockedReason !== undefined && typeof blockedReason !== "string") ||
+		(auditOnly !== undefined && auditOnly !== true) ||
 		typeof activeSessionId !== "string" ||
 		typeof sessionId !== "string"
 	) {
@@ -220,6 +429,8 @@ function parseSentAgentMessage(payload: unknown): KernelSentAgentMessage | undef
 		id,
 		message,
 		deliveryStatus,
+		...(typeof blockedReason === "string" ? { blockedReason } : {}),
+		...(auditOnly === true ? { auditOnly: true as const } : {}),
 		...(receiverRole === "parent" || receiverRole === "sibling" || receiverRole === "child" ? { receiverRole } : {}),
 		target: {
 			activeSessionId,
@@ -311,6 +522,7 @@ interface ActiveExecution {
 	stderr: string;
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
+	streamedOutputChars: { stdout: number; stderr: number };
 	result?: string;
 	diffs: KernelDiffDisplay[];
 	attachments: KernelAttachment[];
@@ -334,6 +546,755 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+const OUTPUT_TRUNCATION_MARKER = "\n[... output truncated ...]";
+
+function truncateKernelText(value: string, maxChars: number): string {
+	if (value.length <= maxChars) return value;
+	if (maxChars <= OUTPUT_TRUNCATION_MARKER.length) return OUTPUT_TRUNCATION_MARKER.slice(0, maxChars);
+	return `${value.slice(0, maxChars - OUTPUT_TRUNCATION_MARKER.length)}${OUTPUT_TRUNCATION_MARKER}`;
+}
+
+function truncateKernelTraceback(traceback: readonly string[], maxChars: number): string[] {
+	if (maxChars <= 0) return [];
+	let bounded = "";
+	let truncated = false;
+	for (const line of traceback) {
+		if (bounded.length >= maxChars) {
+			truncated = true;
+			break;
+		}
+		const prefix = bounded.length === 0 ? "" : "\n";
+		const remaining = maxChars - bounded.length - prefix.length;
+		if (remaining <= 0) {
+			truncated = true;
+			break;
+		}
+		if (line.length > remaining) {
+			bounded += `${prefix}${line.slice(0, remaining)}`;
+			truncated = true;
+			break;
+		}
+		bounded += `${prefix}${line}`;
+	}
+	if (truncated) bounded = truncateKernelText(`${bounded}${"\n"}`, maxChars);
+	return bounded.length === 0 ? [] : bounded.split("\n");
+}
+
+function normalizeMaxOutputChars(value: number | undefined): number {
+	if (value === undefined) return DEFAULT_MAX_OUTPUT_CHARS;
+	if (value === Number.POSITIVE_INFINITY) return MAX_EXECUTE_OUTPUT_CHARS;
+	if (!Number.isFinite(value)) return DEFAULT_MAX_OUTPUT_CHARS;
+	return Math.min(MAX_EXECUTE_OUTPUT_CHARS, Math.max(0, Math.floor(value)));
+}
+
+/** Validate host-supplied snapshot bounds before any kernel is spawned. */
+function validateKernelSnapshotConfig(config: KernelSnapshotConfig): void {
+	if (!Number.isSafeInteger(config.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES) || (config.maxBytes ?? 1) < 1) {
+		throw new KernelSnapshotError("snapshot maxBytes must be a positive safe integer");
+	}
+	if (
+		!Number.isSafeInteger(config.maxRetainedValues ?? 256) ||
+		(config.maxRetainedValues ?? 1) < 1 ||
+		(config.maxRetainedValues ?? 256) > 256
+	) {
+		throw new KernelSnapshotError("snapshot maxRetainedValues must be between 1 and 256");
+	}
+	for (const [label, names] of [
+		["transientNames", config.transientNames],
+		["hostOnlyNames", config.hostOnlyNames],
+		["reproducibleNames", config.reproducibleNames],
+		["requiredNames", config.requiredNames],
+	] as const) {
+		if (names && (!Array.isArray(names) || !names.every((name) => typeof name === "string" && name.length > 0))) {
+			throw new KernelSnapshotError(`snapshot ${label} must contain non-empty names`);
+		}
+	}
+}
+
+function checkpointTelemetryReason(
+	value: KernelSnapshotRetainedValue,
+): WorkflowCheckpointBudgetTelemetryObservationInput["retainedValues"][number]["reasonCode"] {
+	if (value.representation === "durable") return null;
+	switch (value.reason) {
+		case "declared transient":
+		case "host-owned":
+			return "transient";
+		case "value missing":
+			return "missing";
+		case "value failed to restore":
+			return "restore_failed";
+		default:
+			return "not_serializable";
+	}
+}
+
+function buildCheckpointTelemetryInput(
+	snapshot: SnapshotResult,
+	restoreTiming: {
+		readonly restoreStartedAtMonotonicMs: number;
+		readonly restoreEndedAtMonotonicMs: number;
+	} | null,
+): WorkflowCheckpointBudgetTelemetryObservationInput {
+	if (
+		snapshot.checkpointTurn === undefined ||
+		snapshot.serializeStartedAtMonotonicMs === undefined ||
+		snapshot.serializeEndedAtMonotonicMs === undefined ||
+		snapshot.retainedValues === undefined
+	) {
+		throw new KernelSnapshotError("state snapshot did not return complete checkpoint telemetry metadata");
+	}
+	return {
+		schemaVersion: 1,
+		checkpointTurn: snapshot.checkpointTurn,
+		serializeStartedAtMonotonicMs: snapshot.serializeStartedAtMonotonicMs,
+		serializeEndedAtMonotonicMs: snapshot.serializeEndedAtMonotonicMs,
+		restoreStartedAtMonotonicMs: restoreTiming?.restoreStartedAtMonotonicMs ?? null,
+		restoreEndedAtMonotonicMs: restoreTiming?.restoreEndedAtMonotonicMs ?? null,
+		bytesWritten: snapshot.bytes,
+		retainedValues: snapshot.retainedValues.map((value) => ({
+			valueId: value.valueId,
+			type: value.type,
+			bytes: value.bytes,
+			classification: value.classification,
+			representation: value.representation,
+			digest: value.digest,
+			artifactRef: value.artifactRef,
+			reasonCode: checkpointTelemetryReason(value),
+		})),
+	};
+}
+
+const DEFAULT_HOST_REQUEST_MAX_BYTES = 64 * 1024;
+const DEFAULT_HOST_REQUEST_MAX_NODES = 1024;
+const DEFAULT_HOST_REQUEST_MAX_DEPTH = 8;
+const MAX_HOST_REQUEST_OBJECT_KEYS = 128;
+
+function stringField(options: Omit<HostRequestFieldDescriptor, "kind"> = {}): HostRequestFieldDescriptor {
+	return Object.freeze({ kind: "string", ...options });
+}
+
+function boolField(options: Omit<HostRequestFieldDescriptor, "kind"> = {}): HostRequestFieldDescriptor {
+	return Object.freeze({ kind: "boolean", ...options });
+}
+
+function integerField(options: Omit<HostRequestFieldDescriptor, "kind"> = {}): HostRequestFieldDescriptor {
+	return Object.freeze({ kind: "integer", ...options });
+}
+
+function recordField(options: Omit<HostRequestFieldDescriptor, "kind"> = {}): HostRequestFieldDescriptor {
+	return Object.freeze({ kind: "record", ...options });
+}
+
+function arrayField(options: Omit<HostRequestFieldDescriptor, "kind"> = {}): HostRequestFieldDescriptor {
+	return Object.freeze({ kind: "array", ...options });
+}
+
+function artifactReferenceField(): HostRequestFieldDescriptor {
+	return recordField({
+		maxKeys: 5,
+		properties: Object.freeze({
+			artifact_id: stringField({ required: true, maxChars: 512 }),
+			relative_path: stringField({ required: true, maxChars: 512 }),
+			digest: stringField({ required: true, maxChars: 64 }),
+			size_bytes: integerField({ required: true, min: 0, max: 8_388_608 }),
+			source_event_sequence: integerField({ required: true, min: 0, max: Number.MAX_SAFE_INTEGER }),
+		}),
+	});
+}
+
+const ARTIFACT_REFERENCE_FIELD = artifactReferenceField();
+
+function descriptor(
+	type: string,
+	access: HostRequestAccess,
+	fields: Readonly<Record<string, HostRequestFieldDescriptor>> = {},
+	options: Pick<HostRequestDescriptor, "requiredCapability" | "availability"> = { availability: "available" },
+): HostRequestDescriptor {
+	return Object.freeze({
+		type,
+		version: HOST_REQUEST_GATEWAY_VERSION,
+		access,
+		fields: Object.freeze({ ...fields }),
+		maxPayloadBytes: DEFAULT_HOST_REQUEST_MAX_BYTES,
+		maxNodes: DEFAULT_HOST_REQUEST_MAX_NODES,
+		...options,
+	});
+}
+
+function mempalaceProposalFields(): Readonly<Record<string, HostRequestFieldDescriptor>> {
+	const procedure = recordField({
+		maxKeys: 4,
+		properties: Object.freeze({
+			inputs: recordField({ required: true, maxKeys: 256 }),
+			steps: arrayField({
+				required: true,
+				minItems: 1,
+				maxItems: 256,
+				items: stringField({ required: true, maxChars: 4_000 }),
+			}),
+			successChecks: arrayField({
+				required: true,
+				minItems: 1,
+				maxItems: 256,
+				items: stringField({ required: true, maxChars: 4_000 }),
+			}),
+			failureChecks: arrayField({
+				required: true,
+				minItems: 1,
+				maxItems: 256,
+				items: stringField({ required: true, maxChars: 4_000 }),
+			}),
+		}),
+	});
+	return Object.freeze({
+		knowledge_kind: stringField({ required: true, maxChars: 32 }),
+		source_evidence_refs: arrayField({
+			required: true,
+			minItems: 1,
+			maxItems: 32,
+			items: ARTIFACT_REFERENCE_FIELD,
+		}),
+		title: stringField({ maxChars: 256 }),
+		statement: stringField({ maxChars: 4_000 }),
+		procedure,
+	});
+}
+
+const HOST_REQUEST_DESCRIPTOR_LIST: readonly HostRequestDescriptor[] = Object.freeze([
+	descriptor(
+		"rlm.run",
+		"mutate",
+		{
+			prompt: stringField({ required: true, maxChars: 32_000 }),
+			kwargs: recordField({ maxKeys: 32 }),
+		},
+		{ requiredCapability: "rlm.run", availability: "available" },
+	),
+	descriptor("rlm.find_models", "read", {
+		query: stringField({ required: true, maxChars: 256 }),
+		limit: integerField({ min: 1, max: 20 }),
+	}),
+	descriptor("rlm.list_subagents", "read"),
+	descriptor(
+		"rlm.delete_subagent",
+		"mutate",
+		{
+			target: stringField({ required: true, maxChars: 256 }),
+		},
+		{ requiredCapability: "rlm.delete_subagent", availability: "available" },
+	),
+	descriptor("model.info", "read"),
+	descriptor("goal.get", "read"),
+	descriptor(
+		"goal.create",
+		"mutate",
+		{
+			objective: stringField({ required: true, maxChars: 4_000 }),
+			token_budget: integerField({ min: 1, max: Number.MAX_SAFE_INTEGER }),
+		},
+		{ requiredCapability: "goal.create", availability: "available" },
+	),
+	descriptor("goal.complete", "mutate", {}, { requiredCapability: "goal.complete", availability: "available" }),
+	descriptor("compact.status", "read"),
+	descriptor(
+		"compact.run",
+		"mutate",
+		{
+			instructions: stringField({ maxChars: 16_000 }),
+		},
+		{ requiredCapability: "compact.run", availability: "available" },
+	),
+	descriptor("refine.status", "read"),
+	descriptor(
+		"refine.run",
+		"mutate",
+		{
+			instructions: stringField({ maxChars: 16_000 }),
+			global: boolField(),
+		},
+		{ requiredCapability: "refine.run", availability: "available" },
+	),
+	descriptor("rlm_heartbeat.list", "read", {
+		include_inactive: boolField(),
+		includeInactive: boolField(),
+	}),
+	descriptor(
+		"rlm_heartbeat.create",
+		"mutate",
+		{
+			instruction: stringField({ required: true, maxChars: 16_000 }),
+			interval: stringField({ maxChars: 128 }),
+			label: stringField({ maxChars: 256 }),
+			delivery_mode: stringField({ maxChars: 32 }),
+			deliveryMode: stringField({ maxChars: 32 }),
+		},
+		{ requiredCapability: "rlm_heartbeat.create", availability: "available" },
+	),
+	descriptor(
+		"rlm_heartbeat.update",
+		"mutate",
+		{
+			id: stringField({ required: true, maxChars: 256 }),
+			instruction: stringField({ maxChars: 16_000 }),
+			interval: stringField({ maxChars: 128 }),
+			label: stringField({ maxChars: 256 }),
+			status: stringField({ maxChars: 32 }),
+			delivery_mode: stringField({ maxChars: 32 }),
+			deliveryMode: stringField({ maxChars: 32 }),
+		},
+		{ requiredCapability: "rlm_heartbeat.update", availability: "available" },
+	),
+	descriptor(
+		"rlm_heartbeat.delete",
+		"mutate",
+		{
+			id: stringField({ required: true, maxChars: 256 }),
+		},
+		{ requiredCapability: "rlm_heartbeat.delete", availability: "available" },
+	),
+	descriptor("agent_message.list_agents", "read"),
+	descriptor(
+		"agent_message.send",
+		"mutate",
+		{
+			target: stringField({ maxChars: 256 }),
+			message: stringField({ required: true, maxChars: 32_000 }),
+			receiver_role: stringField({ maxChars: 32 }),
+			receiver_name: stringField({ maxChars: 256 }),
+			mode: stringField({ maxChars: 32 }),
+		},
+		{ requiredCapability: "agent_message.send", availability: "available" },
+	),
+	descriptor("agent_observe.list", "read"),
+	descriptor("agent_observe.get", "read", {
+		target: stringField({ required: true, maxChars: 256 }),
+	}),
+	descriptor("agent_observe.recent", "read", {
+		target: stringField({ required: true, maxChars: 256 }),
+		limit: integerField({ min: 1, max: 50 }),
+		max_chars: integerField({ min: 80, max: 2_000 }),
+		maxChars: integerField({ min: 80, max: 2_000 }),
+	}),
+	descriptor(
+		"mcp.refresh",
+		"mutate",
+		{
+			server: stringField({ required: true, maxChars: 256 }),
+		},
+		{ requiredCapability: "mcp.refresh", availability: "available" },
+	),
+	descriptor("mcp.config", "read", {
+		server: stringField({ required: true, maxChars: 256 }),
+	}),
+	descriptor(
+		"mcp.begin_login",
+		"mutate",
+		{
+			server: stringField({ required: true, maxChars: 256 }),
+		},
+		{ requiredCapability: "mcp.begin_login", availability: "available" },
+	),
+	descriptor(
+		"autoresearch.run",
+		"mutate",
+		{
+			recipe_digest: stringField({ required: true, maxChars: 64 }),
+			evidence_refs: arrayField({ required: true, maxItems: 32, items: ARTIFACT_REFERENCE_FIELD }),
+		},
+		{ requiredCapability: "autoresearch.run", availability: "injectable" },
+	),
+	descriptor(
+		"mempalace.recall",
+		"read",
+		{
+			query: stringField({ required: true, maxChars: 250 }),
+			knowledge_kind: stringField({ maxChars: 32 }),
+			limit: integerField({ required: true, min: 1, max: 5 }),
+		},
+		{ availability: "injectable" },
+	),
+	descriptor("mempalace.propose", "mutate", mempalaceProposalFields(), {
+		requiredCapability: "mempalace.propose",
+		availability: "injectable",
+	}),
+	descriptor(
+		"workflow.v1.autoresearch.run",
+		"mutate",
+		{
+			recipe_digest: stringField({ required: true, maxChars: 64 }),
+			evidence_refs: arrayField({ required: true, maxItems: 32, items: ARTIFACT_REFERENCE_FIELD }),
+		},
+		{ requiredCapability: "autoresearch.run", availability: "injectable" },
+	),
+	descriptor(
+		"workflow.v1.mempalace.recall",
+		"read",
+		{
+			query: stringField({ required: true, maxChars: 250 }),
+			knowledge_kind: stringField({ maxChars: 32 }),
+			limit: integerField({ required: true, min: 1, max: 5 }),
+		},
+		{ availability: "injectable" },
+	),
+	descriptor("workflow.v1.mempalace.propose", "mutate", mempalaceProposalFields(), {
+		requiredCapability: "mempalace.propose",
+		availability: "injectable",
+	}),
+	descriptor(
+		"workflow.v1.pipeline.record",
+		"mutate",
+		{
+			stage_id: stringField({ required: true, maxChars: 256 }),
+			evidence_refs: arrayField({ required: true, maxItems: 32, items: ARTIFACT_REFERENCE_FIELD }),
+		},
+		{ requiredCapability: "pipeline.record", availability: "injectable" },
+	),
+	descriptor("workflow.v1.execution_evidence.read", "read", {}, { availability: "injectable" }),
+	descriptor(
+		"workflow.v1.learning.review",
+		"mutate",
+		{ experience_id: stringField({ required: true, maxChars: 512 }) },
+		{ requiredCapability: "learning.review", availability: "injectable" },
+	),
+	descriptor(
+		"workflow.v1.learning.rollback",
+		"mutate",
+		{ candidate_id: stringField({ required: true, maxChars: 512 }) },
+		{ requiredCapability: "learning.rollback", availability: "injectable" },
+	),
+	descriptor(
+		"workflow.v1.completion.request",
+		"mutate",
+		{},
+		{
+			requiredCapability: "completion.request",
+			availability: "injectable",
+		},
+	),
+]);
+
+const HOST_REQUEST_DESCRIPTORS = new Map(HOST_REQUEST_DESCRIPTOR_LIST.map((entry) => [entry.type, entry]));
+
+const HOST_REQUEST_TYPE_ALIASES: Readonly<Record<string, string>> = {
+	"autoresearch.run": "workflow.v1.autoresearch.run",
+	"mempalace.recall": "workflow.v1.mempalace.recall",
+	"mempalace.propose": "workflow.v1.mempalace.propose",
+	"pipeline.record": "workflow.v1.pipeline.record",
+	"execution_evidence.read": "workflow.v1.execution_evidence.read",
+	"learning.review": "workflow.v1.learning.review",
+	"learning.rollback": "workflow.v1.learning.rollback",
+	"completion.request": "workflow.v1.completion.request",
+};
+
+/** Return the closed host-owned descriptor set for diagnostics and contract tests. */
+export function getHostRequestDescriptors(): readonly HostRequestDescriptor[] {
+	return HOST_REQUEST_DESCRIPTOR_LIST;
+}
+
+function assertBoundedHostRequestValue(value: unknown, limits: HostRequestValueLimits): void {
+	let bytes = 0;
+	let nodes = 0;
+	const ancestors = new Set<object>();
+	const visit = (entry: unknown, depth: number): void => {
+		if (depth > limits.maxDepth) throw new Error("host request payload is too deeply nested");
+		nodes += 1;
+		if (nodes > limits.maxNodes) throw new Error("host request payload has too many values");
+		if (typeof entry === "string") {
+			bytes += Buffer.byteLength(entry);
+		} else if (typeof entry === "number") {
+			if (!Number.isFinite(entry)) throw new Error("host request payload numbers must be finite");
+			bytes += 16;
+		} else if (typeof entry === "boolean" || entry === null) {
+			bytes += 8;
+		} else if (Array.isArray(entry)) {
+			if (ancestors.has(entry)) throw new Error("host request payload must not contain cycles");
+			ancestors.add(entry);
+			for (const child of entry) visit(child, depth + 1);
+			ancestors.delete(entry);
+		} else if (isRecord(entry)) {
+			const prototype = Object.getPrototypeOf(entry);
+			if (prototype !== Object.prototype && prototype !== null) {
+				throw new Error("host request payload must contain plain JSON objects");
+			}
+			if (ancestors.has(entry)) throw new Error("host request payload must not contain cycles");
+			const entries = Object.entries(entry);
+			if (entries.length > MAX_HOST_REQUEST_OBJECT_KEYS)
+				throw new Error("host request payload has too many object keys");
+			ancestors.add(entry);
+			for (const [key, child] of entries) {
+				bytes += Buffer.byteLength(key);
+				visit(child, depth + 1);
+			}
+			ancestors.delete(entry);
+		} else {
+			throw new Error("host request payload must contain JSON-compatible values");
+		}
+		if (bytes > limits.maxBytes) throw new Error("host request payload is too large");
+	};
+	visit(value, 0);
+}
+
+function assertHostRequestField(value: unknown, name: string, field: HostRequestFieldDescriptor): void {
+	if (field.kind === "string") {
+		if (typeof value !== "string") throw new Error(`host request field ${name} must be a string`);
+		if (field.maxChars !== undefined && value.length > field.maxChars) {
+			throw new Error(`host request field ${name} exceeds ${field.maxChars} characters`);
+		}
+		return;
+	}
+	if (field.kind === "boolean") {
+		if (typeof value !== "boolean") throw new Error(`host request field ${name} must be a boolean`);
+		return;
+	}
+	if (field.kind === "integer") {
+		if (!Number.isSafeInteger(value)) throw new Error(`host request field ${name} must be a safe integer`);
+		if (field.min !== undefined && (value as number) < field.min)
+			throw new Error(`host request field ${name} is below its minimum`);
+		if (field.max !== undefined && (value as number) > field.max)
+			throw new Error(`host request field ${name} exceeds its maximum`);
+		return;
+	}
+	if (field.kind === "number") {
+		if (typeof value !== "number" || !Number.isFinite(value))
+			throw new Error(`host request field ${name} must be finite`);
+		if (field.min !== undefined && value < field.min)
+			throw new Error(`host request field ${name} is below its minimum`);
+		if (field.max !== undefined && value > field.max)
+			throw new Error(`host request field ${name} exceeds its maximum`);
+		return;
+	}
+	if (field.kind === "record") {
+		if (!isRecord(value)) throw new Error(`host request field ${name} must be an object`);
+		if (field.maxKeys !== undefined && Object.keys(value).length > field.maxKeys) {
+			throw new Error(`host request field ${name} has too many object keys`);
+		}
+		if (field.properties !== undefined) {
+			const allowed = new Set(Object.keys(field.properties));
+			for (const key of Object.keys(value)) {
+				if (!allowed.has(key)) throw new Error(`host request field ${name} has unknown property ${key}`);
+			}
+			for (const [propertyName, property] of Object.entries(field.properties)) {
+				const propertyValue = value[propertyName];
+				if (propertyValue === undefined) {
+					if (property.required) throw new Error(`host request field ${name} requires property ${propertyName}`);
+					continue;
+				}
+				assertHostRequestField(propertyValue, `${name}.${propertyName}`, property);
+			}
+		}
+		return;
+	}
+	if (!Array.isArray(value)) throw new Error(`host request field ${name} must be an array`);
+	if (field.minItems !== undefined && value.length < field.minItems) {
+		throw new Error(`host request field ${name} has too few items`);
+	}
+	if (field.maxItems !== undefined && value.length > field.maxItems) {
+		throw new Error(`host request field ${name} has too many references`);
+	}
+	if (field.items !== undefined) {
+		for (const [index, item] of value.entries()) {
+			assertHostRequestField(item, `${name}[${index}]`, field.items);
+		}
+	}
+}
+
+function validateHostRequestPayload(
+	data: Record<string, unknown>,
+	descriptorEntry: HostRequestDescriptor,
+): Record<string, unknown> {
+	assertBoundedHostRequestValue(data, {
+		maxBytes: descriptorEntry.maxPayloadBytes,
+		maxNodes: descriptorEntry.maxNodes,
+		maxDepth: DEFAULT_HOST_REQUEST_MAX_DEPTH,
+	});
+	const version = data.version;
+	if (version !== undefined && version !== descriptorEntry.version) {
+		throw new Error(`host request ${descriptorEntry.type} has unsupported version ${String(version)}`);
+	}
+	if (Object.hasOwn(data, "capability")) {
+		throw new Error("host request capability must be installed by the host, not supplied by the caller");
+	}
+	const allowed = new Set(["type", "version", ...Object.keys(descriptorEntry.fields)]);
+	for (const key of Object.keys(data)) {
+		if (!allowed.has(key)) throw new Error(`host request ${descriptorEntry.type} has unknown field ${key}`);
+	}
+	for (const [name, field] of Object.entries(descriptorEntry.fields)) {
+		const value = data[name];
+		if (value === undefined) {
+			if (field.required) throw new Error(`host request ${descriptorEntry.type} requires field ${name}`);
+			continue;
+		}
+		assertHostRequestField(value, name, field);
+	}
+	const payload: Record<string, unknown> = { type: descriptorEntry.type };
+	for (const name of Object.keys(descriptorEntry.fields)) {
+		if (data[name] !== undefined) payload[name] = data[name];
+	}
+	return payload;
+}
+
+function mintHostRequestContext(
+	capability: HostRequestCapabilityContext,
+	cellSourceCode: string | undefined,
+	controller: AbortController,
+	now: () => number,
+	renewAuthority?: () => number | undefined,
+): HostRequestContext {
+	let current = true;
+	let authorityExpiresAt = capability.expiresAt;
+	let renewalTimer: ReturnType<typeof setTimeout> | undefined;
+	const scheduleRenewal = (): void => {
+		if (!current || renewAuthority === undefined || authorityExpiresAt === undefined) return;
+		const remainingMilliseconds = authorityExpiresAt - now();
+		const delayMilliseconds = Math.max(1, Math.floor(remainingMilliseconds / 2));
+		renewalTimer = setTimeout(() => {
+			renewalTimer = undefined;
+			const renewedExpiresAt = renewAuthority();
+			if (renewedExpiresAt === undefined || renewedExpiresAt <= now()) {
+				current = false;
+				return;
+			}
+			authorityExpiresAt = renewedExpiresAt;
+			scheduleRenewal();
+		}, delayMilliseconds);
+		renewalTimer.unref?.();
+	};
+	const context: HostRequestContext = Object.freeze({
+		requestId: uuid(),
+		version: HOST_REQUEST_GATEWAY_VERSION,
+		signal: controller.signal,
+		capability,
+		...(cellSourceCode === undefined ? {} : { cellSourceCode }),
+		isCurrent: () => {
+			if (!current || controller.signal.aborted) return false;
+			if (authorityExpiresAt === undefined || authorityExpiresAt > now()) return true;
+			const renewedExpiresAt = renewAuthority?.();
+			if (renewedExpiresAt === undefined || renewedExpiresAt <= now()) return false;
+			authorityExpiresAt = renewedExpiresAt;
+			return true;
+		},
+	});
+	controller.signal.addEventListener(
+		"abort",
+		() => {
+			current = false;
+			if (renewalTimer !== undefined) clearTimeout(renewalTimer);
+		},
+		{ once: true },
+	);
+	scheduleRenewal();
+	return context;
+}
+
+/** One host-owned, bounded, closed request gateway. */
+export class HostRequestGateway {
+	private readonly handlers: ReadonlyMap<string, HostRequestHandler>;
+	private readonly capability: HostRequestCapabilityContext;
+	private readonly capabilityResolver?: HostRequestCapabilityResolver;
+	private readonly now: () => number;
+	private readonly usedCapabilityNonces = new Set<string>();
+	private readonly activeControllers = new Set<AbortController>();
+
+	constructor(options: HostRequestGatewayOptions = {}) {
+		const source = options.handlers ?? {};
+		const entries = Object.entries(source).filter(
+			(entry): entry is [string, HostRequestHandler] => typeof entry[1] === "function",
+		);
+		this.handlers = new Map(entries);
+		this.capability = cloneHostRequestCapabilityContext(
+			options.capabilityContext ?? HOST_REQUEST_CAPABILITY_CONTEXT.get(source),
+		);
+		this.capabilityResolver = options.capabilityResolver ?? HOST_REQUEST_CAPABILITY_RESOLVER.get(source);
+		this.now = options.now ?? (() => Date.now());
+	}
+
+	/** Dispatch one caller payload and return a nested host-owned result envelope. */
+	async dispatch(data: unknown, options: HostRequestDispatchOptions = {}): Promise<HostRequestGatewaySuccess> {
+		if (!isRecord(data)) throw new Error("host request payload must be an object");
+		if (typeof data.type !== "string" || data.type.length === 0) {
+			throw new Error("host request payload must have a string type");
+		}
+		const incomingType = data.type;
+		const handlerType =
+			this.handlers.has(incomingType) || !HOST_REQUEST_TYPE_ALIASES[incomingType]
+				? incomingType
+				: HOST_REQUEST_TYPE_ALIASES[incomingType];
+		const descriptorEntry = HOST_REQUEST_DESCRIPTORS.get(handlerType);
+		if (!descriptorEntry) throw new Error(`host request type "${incomingType}" is not available in this session`);
+		const payload = validateHostRequestPayload(data, descriptorEntry);
+		const capability = cloneHostRequestCapabilityContext(this.capabilityResolver?.(handlerType) ?? this.capability);
+		const handler = this.handlers.get(handlerType);
+		if (!handler) {
+			if (descriptorEntry.availability === "injectable") {
+				throw new Error(`host request type "${incomingType}" is unavailable until its host module is injected`);
+			}
+			throw new Error(`host request type "${incomingType}" is not available in this session`);
+		}
+
+		if (descriptorEntry.access === "mutate") {
+			const required = descriptorEntry.requiredCapability;
+			if (!required || !capability.capabilities.includes(required)) {
+				throw new Error(`host request ${incomingType} requires host capability ${required ?? "unknown"}`);
+			}
+			if (
+				!capability.workflowId ||
+				!capability.decisionId ||
+				!Number.isSafeInteger(capability.decisionRevision) ||
+				capability.expiresAt === undefined ||
+				capability.expiresAt <= this.now()
+			) {
+				throw new Error(`host request ${incomingType} capability is expired or not bound to a current decision`);
+			}
+			const nonce = capability.nonce;
+			if (!nonce) throw new Error(`host request ${incomingType} capability has no replay nonce`);
+			const nonceKey = `${capability.workflowId}:${capability.decisionId}:${capability.decisionRevision}:${handlerType}:${nonce}`;
+			if (this.usedCapabilityNonces.has(nonceKey))
+				throw new Error(`host request ${incomingType} capability was already used`);
+			this.usedCapabilityNonces.add(nonceKey);
+		}
+
+		const controller = new AbortController();
+		this.activeControllers.add(controller);
+		const renewAuthority =
+			this.capabilityResolver === undefined
+				? undefined
+				: (): number | undefined => {
+						const renewed = cloneHostRequestCapabilityContext(this.capabilityResolver?.(handlerType));
+						if (
+							renewed.workflowId !== capability.workflowId ||
+							renewed.decisionId !== capability.decisionId ||
+							renewed.decisionRevision !== capability.decisionRevision ||
+							capability.capabilities.some((name) => !renewed.capabilities.includes(name))
+						)
+							return undefined;
+						return renewed.expiresAt;
+					};
+		const context = mintHostRequestContext(capability, options.cellSourceCode, controller, this.now, renewAuthority);
+		try {
+			const result = await handler(
+				options.cellSourceCode === undefined ? payload : { ...payload, cellSourceCode: options.cellSourceCode },
+				context,
+			);
+			if (!context.isCurrent()) throw new Error(`host request ${incomingType} authority was revoked`);
+			if (!isRecord(result)) throw new Error(`host request ${incomingType} returned a non-object result`);
+			return { status: "ok", result: { ...result } };
+		} finally {
+			controller.abort();
+			this.activeControllers.delete(controller);
+		}
+	}
+
+	/** Revoke active handler contexts when the owning kernel is torn down. */
+	revoke(): void {
+		for (const controller of this.activeControllers) controller.abort();
+		this.activeControllers.clear();
+	}
+}
+
+export function createHostRequestGateway(options: HostRequestGatewayOptions = {}): HostRequestGateway {
+	return new HostRequestGateway(options);
 }
 
 function createDeferred<T>(): Deferred<T> {
@@ -385,10 +1346,18 @@ function encode(msg: JupyterMessage, key: string): Buffer[] {
 	return [DELIM, sign(parts, key), ...parts];
 }
 
-function decode(frames: Buffer[]): JupyterMessage | null {
+function decode(frames: Buffer[], key: string): JupyterMessage | null {
 	let i = 0;
 	while (i < frames.length && !frames[i].equals(DELIM)) i++;
 	if (i + 5 >= frames.length) return null;
+	const signedParts = frames.slice(i + 2, i + 6);
+	const expectedSignature = sign(signedParts, key);
+	const receivedSignature = frames[i + 1];
+	if (
+		receivedSignature.byteLength !== expectedSignature.byteLength ||
+		!timingSafeEqual(receivedSignature, expectedSignature)
+	)
+		return null;
 	try {
 		return {
 			header: JSON.parse(frames[i + 2].toString()),
@@ -467,6 +1436,63 @@ function makeConnection(): { info: ConnectionInfo; path: string; tempDir: string
 	return { info, path, tempDir };
 }
 
+async function makeContainerConnection(): Promise<{
+	info: ConnectionInfo;
+	path: string;
+	tempDir: string;
+	ports: readonly number[];
+}> {
+	const base = makeConnection();
+	const ports = await reserveKernelPorts();
+	const [shellPort, iopubPort, stdinPort, controlPort, hbPort] = ports;
+	const info: ConnectionInfo = {
+		...base.info,
+		shell_port: shellPort!,
+		iopub_port: iopubPort!,
+		stdin_port: stdinPort!,
+		control_port: controlPort!,
+		hb_port: hbPort!,
+	};
+	writeFileSync(base.path, JSON.stringify(info, null, 2), { mode: 0o600 });
+	writeContainerConnectionFile(base.tempDir, { ...info });
+	return { ...base, info, ports };
+}
+
+function kernelContainerOutputPaths(snapshot: KernelSnapshotConfig | undefined): readonly string[] {
+	if (!snapshot) return [];
+	if (!snapshot.artifactRoot) {
+		throw new Error("kernel isolation snapshots require an explicit artifact capability root");
+	}
+	const capabilityRoot = resolve(snapshot.artifactRoot);
+	for (const output of [dirname(resolve(snapshot.path)), dirname(resolve(snapshot.manifestPath))]) {
+		const remainder = relative(capabilityRoot, output);
+		if (remainder === ".." || remainder.startsWith(`..${resolve("/")}`) || resolve(output) === resolve("/")) {
+			throw new Error("kernel snapshot paths must be contained by the explicit artifact capability root");
+		}
+	}
+	return [capabilityRoot];
+}
+
+function canonicalizeKernelSnapshot(snapshot: KernelSnapshotConfig | undefined): KernelSnapshotConfig | undefined {
+	if (!snapshot) return undefined;
+	return {
+		...snapshot,
+		path: canonicalizeKernelWritablePath(snapshot.path),
+		manifestPath: canonicalizeKernelWritablePath(snapshot.manifestPath),
+		artifactRoot: snapshot.artifactRoot ? canonicalizeKernelWritablePath(snapshot.artifactRoot) : undefined,
+	};
+}
+
+function kernelContainerEnvironment(
+	environment: Record<string, string> | undefined,
+	pythonSkills: readonly KernelPythonSkill[] | undefined,
+): Readonly<Record<string, string>> {
+	const result = { ...(environment ?? {}) };
+	const skillSources = [...new Set((pythonSkills ?? []).map((skill) => join(skill.packagePath, "src")))];
+	if (skillSources.length > 0) result.PYTHONPATH = skillSources.join(delimiter);
+	return result;
+}
+
 // ---- process-wide cleanup -----------------------------------------------
 
 const liveKernels = new Set<KernelManager>();
@@ -486,7 +1512,12 @@ function installSignalHandlersOnce(): void {
 
 	const asyncShutdown = async (): Promise<void> => {
 		// These paths can await, so flush the namespace snapshot before tearing down.
-		await Promise.allSettled([...liveKernels].map((k) => k.shutdown({ snapshot: true })));
+		const outcomes = await Promise.allSettled([...liveKernels].map((k) => k.shutdown({ snapshot: true })));
+		for (const outcome of outcomes) {
+			if (outcome.status === "rejected") {
+				console.error(`[kernel] final checkpoint flush failed: ${errorMessage(outcome.reason)}`);
+			}
+		}
 	};
 
 	// `beforeExit` and signal handlers can await async cleanup. `exit`
@@ -511,10 +1542,20 @@ function installSignalHandlersOnce(): void {
 export class KernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
+		| "python"
+		| "agentDir"
+		| "cwd"
+		| "env"
+		| "sessionId"
+		| "hostHandlers"
+		| "pythonSkills"
+		| "snapshot"
+		| "isolation"
+		| "isolationOutputPaths"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
+	private containerId?: string;
 	private readonly commTargets = new Map<string, string>();
 	private readonly handledHostRequestCommIds = new Set<string>();
 	private kernel?: ChildProcess;
@@ -527,6 +1568,7 @@ export class KernelManager {
 	private iopub?: Subscriber;
 	private control?: Dealer;
 	private iopubPumpPromise?: Promise<void>;
+	private iopubReady?: Deferred<void>;
 	private connection?: ConnectionInfo;
 	private tempDir?: string;
 	private kernelStderr = "";
@@ -540,23 +1582,40 @@ export class KernelManager {
 	// attribute their spawning program.
 	private lastCellCode?: string;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	private readonly hostRequestGateway: HostRequestGateway;
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Memoized so concurrent callers all await the same in-flight startup. */
 	private startPromise?: Promise<void>;
 	/** Pending debounced auto-snapshot, if one has been scheduled. */
 	private snapshotTimer?: ReturnType<typeof globalThis.setTimeout>;
+	/** Monotonic checkpoint turn assigned by the host for state snapshots. */
+	private checkpointTurn = 0;
+	/** Last committed durable bytes, used for growth-per-turn telemetry. */
+	private previousDurableBytes: number | null = null;
+	/** Restore timing is attached to the first checkpoint after a verified restore. */
+	private pendingRestoreTiming: {
+		readonly restoreStartedAtMonotonicMs: number;
+		readonly restoreEndedAtMonotonicMs: number;
+	} | null = null;
 
 	constructor(options: KernelManagerOptions) {
+		if (options.snapshot) validateKernelSnapshotConfig(options.snapshot);
 		this.options = {
 			python: options.python,
+			agentDir: options.agentDir,
 			cwd: options.cwd,
 			env: options.env,
 			sessionId: options.sessionId,
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
-			snapshot: options.snapshot,
+			snapshot: options.isolation ? canonicalizeKernelSnapshot(options.snapshot) : options.snapshot,
+			isolation: options.isolation,
+			isolationOutputPaths: options.isolationOutputPaths,
 			username: options.username ?? "prime-agent",
 		};
+		this.hostRequestGateway = createHostRequestGateway({
+			handlers: this.options.hostHandlers,
+		});
 	}
 
 	get ownerSessionId(): string | undefined {
@@ -564,7 +1623,39 @@ export class KernelManager {
 	}
 
 	private appendKernelDiagnostic(message: string): void {
-		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
+		this.appendKernelStderr(`[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`);
+	}
+
+	private appendKernelStderr(chunk: string): void {
+		this.kernelStderr = `${this.kernelStderr}${chunk}`;
+		if (this.kernelStderr.length > MAX_KERNEL_STDERR_CHARS) {
+			this.kernelStderr = this.kernelStderr.slice(-MAX_KERNEL_STDERR_CHARS);
+		}
+	}
+
+	private attachKernelProcess(kernel: ChildProcess): void {
+		this.kernel = kernel;
+		kernel.stderr?.on("data", (buf: Buffer) => {
+			this.appendKernelStderr(buf.toString());
+		});
+		kernel.on("error", (err) => {
+			if (this.kernel !== kernel) return;
+			this.appendKernelDiagnostic(`spawn error: ${err.message}`);
+			this.state = "shutdown";
+			liveKernels.delete(this);
+			const cleanupError = this.cleanupResources();
+			if (cleanupError) this.appendKernelDiagnostic(cleanupError.message);
+		});
+		kernel.on("exit", (code, signal) => {
+			if (this.kernel !== kernel) return;
+			if (this.state !== "shutdown") {
+				this.appendKernelDiagnostic(`unexpected exit code=${code} signal=${signal}`);
+			}
+			this.state = "shutdown";
+			liveKernels.delete(this);
+			const cleanupError = this.cleanupResources();
+			if (cleanupError) this.appendKernelDiagnostic(cleanupError.message);
+		});
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
@@ -588,15 +1679,18 @@ export class KernelManager {
 		// handlers can dispose a kernel that is still booting.
 		liveKernels.add(this);
 
-		let python: string;
+		let python = this.options.python ?? "python";
 		try {
-			python =
-				this.options.python ??
-				(await ensureKernelPython({
-					pythonSkills: this.options.pythonSkills,
-					onProgress: startOptions.onBootstrapProgress,
-				}));
-			this.options.python = python;
+			if (!this.options.isolation) {
+				python =
+					this.options.python ??
+					(await ensureKernelPython({
+						agentDir: this.options.agentDir,
+						pythonSkills: this.options.pythonSkills,
+						onProgress: startOptions.onBootstrapProgress,
+					}));
+				this.options.python = python;
+			}
 		} catch (error) {
 			liveKernels.delete(this);
 			if ((this.state as string) !== "shutdown") this.state = "idle";
@@ -607,14 +1701,49 @@ export class KernelManager {
 			throw new Error("Kernel was disposed during startup");
 		}
 
-		let connection = makeConnection();
+		let connection = this.options.isolation ? await makeContainerConnection() : makeConnection();
 		this.tempDir = connection.tempDir;
 
-		// Fast path: fork a pre-imported kernel from the forkserver. Any failure
-		// (disabled, unavailable, fork error) degrades to the direct-spawn path so
-		// correctness never depends on fork.
 		let forked = false;
-		if (isForkServerEnabled()) {
+		if (this.options.isolation) {
+			try {
+				const containerPorts = (connection as { ports?: readonly number[] }).ports;
+				if (!containerPorts) throw new Error("container kernel connection ports were not reserved");
+				const containerId = await createKernelContainer({
+					isolation: this.options.isolation,
+					workspace: this.options.cwd ?? process.cwd(),
+					tempDir: connection.tempDir,
+					ports: containerPorts,
+					outputPaths: [
+						...new Set([
+							...kernelContainerOutputPaths(this.options.snapshot),
+							...(this.options.isolationOutputPaths ?? []),
+						]),
+					],
+					environment: kernelContainerEnvironment(this.options.env, this.options.pythonSkills),
+				});
+				this.containerId = containerId;
+				const kernel = spawn(this.options.isolation.dockerBinary ?? "docker", ["start", "--attach", containerId], {
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				this.attachKernelProcess(kernel);
+			} catch (error) {
+				if (
+					(error instanceof KernelContainerCreationError || error instanceof KernelContainerCleanupError) &&
+					error.containerId !== undefined
+				) {
+					this.containerId = error.containerId;
+				}
+				this.state = "shutdown";
+				liveKernels.delete(this);
+				const cleanupError = this.cleanupResources();
+				if (cleanupError) throw cleanupError;
+				throw error;
+			}
+		} else if (isForkServerEnabled()) {
+			// Fast path: fork a pre-imported kernel from the forkserver. Any failure
+			// (disabled, unavailable, fork error) degrades to the direct-spawn path so
+			// correctness never depends on fork.
 			try {
 				this.kernelPid = await forkKernel(python, {
 					connectionPath: connection.path,
@@ -643,36 +1772,13 @@ export class KernelManager {
 			}
 		}
 
-		if (!forked) {
+		if (!this.options.isolation && !forked) {
 			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
 				cwd: this.options.cwd,
 				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
-			this.kernel = kernel;
-
-			kernel.stderr?.on("data", (buf: Buffer) => {
-				const s = buf.toString();
-				this.kernelStderr += s;
-			});
-
-			kernel.on("error", (err) => {
-				if (this.kernel !== kernel) return;
-				this.appendKernelDiagnostic(`spawn error: ${err.message}`);
-				this.state = "shutdown";
-				liveKernels.delete(this);
-				this.cleanupResources();
-			});
-
-			kernel.on("exit", (code, signal) => {
-				if (this.kernel !== kernel) return;
-				if (this.state !== "shutdown") {
-					this.appendKernelDiagnostic(`unexpected exit code=${code} signal=${signal}`);
-				}
-				this.state = "shutdown";
-				liveKernels.delete(this);
-				this.cleanupResources();
-			});
+			this.attachKernelProcess(kernel);
 		}
 
 		const connectionPath = connection.path;
@@ -694,6 +1800,7 @@ export class KernelManager {
 		this.iopub.connect(`${conn.transport}://${conn.ip}:${conn.iopub_port}`);
 		this.control.connect(`${conn.transport}://${conn.ip}:${conn.control_port}`);
 		this.iopub.subscribe("");
+		this.iopubReady = createDeferred<void>();
 
 		// ZMQ PUB/SUB slow-joiner: give the subscription a brief chance to reach the kernel before first execute.
 		await sleep(IOPUB_SUBSCRIBE_DELAY_MS);
@@ -723,7 +1830,8 @@ export class KernelManager {
 			this.appendKernelDiagnostic("forked kernel exited unexpectedly");
 			this.state = "shutdown";
 			liveKernels.delete(this);
-			this.cleanupResources();
+			const cleanupError = this.cleanupResources();
+			if (cleanupError) this.appendKernelDiagnostic(cleanupError.message);
 		}, FORKED_LIVENESS_POLL_MS);
 		this.forkedLivenessTimer.unref?.();
 	}
@@ -765,14 +1873,19 @@ export class KernelManager {
 	}
 
 	private async probeReady(): Promise<void> {
-		const conn = this.connection!;
-		const shell = this.shell!;
+		const conn = this.connection;
+		const shell = this.shell;
+		if ((this.state as string) === "shutdown" || !conn || !shell) {
+			const tail = this.kernelStderr.slice(-1024);
+			throw new Error(`Kernel exited during startup. stderr:\n${tail || "(empty)"}`);
+		}
 
 		const msg = buildMessage("kernel_info_request", {}, this.session, this.options.username);
 		const requestMsgId = msg.header.msg_id;
 		await shell.send(encode(msg, conn.key));
 
 		const startedAt = Date.now();
+		let shellReady = false;
 		while (Date.now() - startedAt < READY_TIMEOUT_MS) {
 			if ((this.state as string) === "shutdown" || this.forkedKernelDied()) {
 				const tail = this.kernelStderr.slice(-1024);
@@ -786,17 +1899,28 @@ export class KernelManager {
 			]);
 			if (winner.kind === "timeout") break;
 
-			const incoming = decode(winner.frames);
+			const incoming = decode(winner.frames, conn.key);
 			if (
 				incoming?.header.msg_type === "kernel_info_reply" &&
 				(incoming.parent_header as { msg_id?: string }).msg_id === requestMsgId
 			) {
-				return;
+				shellReady = true;
+				break;
+			}
+		}
+		if (shellReady && this.iopubReady) {
+			const remaining = READY_TIMEOUT_MS - (Date.now() - startedAt);
+			if (remaining > 0) {
+				const iopub = await Promise.race([
+					this.iopubReady.promise.then(() => "ready" as const),
+					sleep(remaining).then(() => "timeout" as const),
+				]);
+				if (iopub === "ready") return;
 			}
 		}
 		const tail = this.kernelStderr.slice(-1024);
 		throw new Error(
-			`Kernel did not respond to kernel_info_request within ${READY_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,
+			`Kernel did not complete shell and IOPub readiness within ${READY_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,
 		);
 	}
 
@@ -845,7 +1969,7 @@ export class KernelManager {
 	private async executeInner(code: string, opts: ExecuteOptions, started: number): Promise<ExecuteResult> {
 		const conn = this.connection!;
 		const shell = this.shell!;
-		const maxChars = opts.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+		const maxChars = normalizeMaxOutputChars(opts.maxOutputChars);
 
 		const msg = buildMessage(
 			"execute_request",
@@ -880,6 +2004,7 @@ export class KernelManager {
 			stderr: "",
 			stdoutTruncated: false,
 			stderrTruncated: false,
+			streamedOutputChars: { stdout: 0, stderr: 0 },
 			diffs: [],
 			attachments: [],
 			sentAgentMessages: [],
@@ -955,8 +2080,11 @@ export class KernelManager {
 
 		try {
 			for await (const frames of iopub) {
-				const incoming = decode(frames);
+				const key = this.connection?.key;
+				if (key === undefined) continue;
+				const incoming = decode(frames, key);
 				if (!incoming) continue;
+				this.iopubReady?.resolve();
 				const t = incoming.header.msg_type;
 				if (t === "comm_open" || t === "comm_msg" || t === "comm_close") {
 					this.handleCommMessage(incoming);
@@ -967,7 +2095,10 @@ export class KernelManager {
 		} catch (error) {
 			if ((this.state as string) !== "shutdown") {
 				this.appendKernelDiagnostic(`iopub pump failed: ${errorMessage(error)}`);
-				this.rejectActiveExecution(new Error(`Kernel IOPub channel failed: ${errorMessage(error)}`));
+				this.state = "shutdown";
+				liveKernels.delete(this);
+				const cleanupError = this.cleanupResources();
+				if (cleanupError) this.appendKernelDiagnostic(cleanupError.message);
 			}
 		} finally {
 			if (this.iopub === iopub) {
@@ -1013,17 +2144,25 @@ export class KernelManager {
 					}
 				}
 			}
-			execution.opts.onStream?.(c.text, c.name);
+			const streamed = execution.streamedOutputChars[c.name];
+			if (streamed < execution.maxChars) {
+				const chunk = c.text.slice(0, execution.maxChars - streamed);
+				execution.streamedOutputChars[c.name] += chunk.length;
+				execution.opts.onStream?.(chunk, c.name);
+			}
 		} else if (t === "execute_result") {
 			const c = incoming.content as { data: Record<string, string> };
-			if (c.data["text/plain"]) execution.result = c.data["text/plain"];
+			if (c.data["text/plain"]) execution.result = truncateKernelText(c.data["text/plain"], execution.maxChars);
 		} else if (t === "display_data" || t === "update_display_data") {
 			const c = incoming.content as { data?: Record<string, unknown> };
 			const diff = parseDiffDisplay(c.data?.[DIFF_DISPLAY_MIME]);
 			if (diff) execution.diffs.push(diff);
 			const attachment = parseAttachmentDisplay(c.data?.[ATTACHMENT_DISPLAY_MIME]);
 			if (attachment === "oversized") {
-				execution.stderr += `${execution.stderr ? "\n" : ""}attachment dropped: exceeds ${MAX_ATTACHMENT_DATA_CHARS} base64 chars`;
+				const message = `${execution.stderr ? "\n" : ""}attachment dropped: exceeds ${MAX_ATTACHMENT_DATA_CHARS} base64 chars`;
+				const nextStderr = truncateKernelText(`${execution.stderr}${message}`, execution.maxChars);
+				execution.stderrTruncated ||= nextStderr.length < execution.stderr.length + message.length;
+				execution.stderr = nextStderr;
 				execution.status = "error";
 			} else if (attachment) {
 				execution.attachments.push(attachment);
@@ -1032,7 +2171,11 @@ export class KernelManager {
 			if (sentAgentMessage) execution.sentAgentMessages.push(sentAgentMessage);
 		} else if (t === "error") {
 			const c = incoming.content as { ename: string; evalue: string; traceback: string[] };
-			execution.error = c;
+			execution.error = {
+				...c,
+				evalue: truncateKernelText(c.evalue, execution.maxChars),
+				traceback: truncateKernelTraceback(c.traceback, execution.maxChars),
+			};
 			execution.status = "error";
 		} else if (t === "status") {
 			const c = incoming.content as { execution_state: string };
@@ -1064,11 +2207,9 @@ export class KernelManager {
 			let stderr = execution.stderr;
 			let result = execution.result;
 			let status = execution.status;
-			if (execution.stdoutTruncated) stdout += `\n[... output truncated at ${execution.maxChars} chars ...]`;
-			if (execution.stderrTruncated) stderr += `\n[... output truncated at ${execution.maxChars} chars ...]`;
-			if (result !== undefined && result.length > execution.maxChars) {
-				result = `${result.slice(0, execution.maxChars)}\n[... output truncated at ${execution.maxChars} chars ...]`;
-			}
+			if (execution.stdoutTruncated) stdout = truncateKernelText(stdout, execution.maxChars);
+			if (execution.stderrTruncated) stderr = truncateKernelText(stderr, execution.maxChars);
+			if (result !== undefined) result = truncateKernelText(result, execution.maxChars);
 
 			if (execution.opts.signal?.aborted) status = "aborted";
 
@@ -1226,9 +2367,11 @@ export class KernelManager {
 
 		const task = (async () => {
 			try {
-				const result = await this.handleHostRequest(data);
+				const response = await this.handleHostRequest(data);
 				try {
-					await this.sendCommMessage(commId, { status: "ok", ...result });
+					// Keep the legacy Python response flat while making the nested gateway
+					// result the only source of handler data. Host status is written last.
+					await this.sendCommMessage(commId, { ...response.result, status: response.status });
 				} catch (replyError) {
 					this.appendKernelDiagnostic(
 						`failed to send host request ok reply for comm ${commId}: ${errorMessage(replyError)}`,
@@ -1251,23 +2394,11 @@ export class KernelManager {
 		});
 	}
 
-	private async handleHostRequest(data: unknown): Promise<Record<string, unknown>> {
-		if (!isRecord(data)) {
-			throw new Error("host request payload must be an object");
-		}
-		if (typeof data.type !== "string" || data.type.length === 0) {
-			throw new Error("host request payload must have a string type");
-		}
-
-		const handler = this.options.hostHandlers?.[data.type];
-		if (!handler) {
-			throw new Error(`host request type "${data.type}" is not available in this session`);
-		}
-		// Tag the request with the cell that triggered it. A blocking call is still
-		// the in-flight execution; detached spawns (asyncio.create_task) fire after
-		// the scheduling cell goes idle, so fall back to that last cell's source.
+	private async handleHostRequest(data: unknown): Promise<HostRequestGatewaySuccess> {
+		// Tag the request with the cell that triggered it without letting Python
+		// provide or overwrite this host-owned attribution field.
 		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-		return handler({ ...data, cellSourceCode });
+		return this.hostRequestGateway.dispatch(data, { cellSourceCode });
 	}
 
 	private async sendCommMessage(commId: string, data: Record<string, unknown>): Promise<void> {
@@ -1285,7 +2416,8 @@ export class KernelManager {
 		await this.control.send(encode(msg, this.connection.key));
 	}
 
-	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
+	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): KernelContainerCleanupError | undefined {
+		this.hostRequestGateway.revoke();
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		if (this.forkedLivenessTimer) {
@@ -1300,6 +2432,7 @@ export class KernelManager {
 		this.iopub = undefined;
 		this.control = undefined;
 		this.iopubPumpPromise = undefined;
+		this.iopubReady = undefined;
 		try {
 			if (this.kernel) {
 				this.kernel.kill(killSignal);
@@ -1310,6 +2443,19 @@ export class KernelManager {
 			}
 		} catch {
 			// Kernel already exited.
+		}
+		let containerCleanupError: KernelContainerCleanupError | undefined;
+		if (this.containerId) {
+			const containerId = this.containerId;
+			try {
+				removeKernelContainer(this.options.isolation?.dockerBinary ?? "docker", containerId);
+				this.containerId = undefined;
+			} catch (error) {
+				containerCleanupError =
+					error instanceof KernelContainerCleanupError
+						? error
+						: new KernelContainerCleanupError(containerId, errorMessage(error));
+			}
 		}
 		this.kernel = undefined;
 		this.kernelPid = undefined;
@@ -1323,6 +2469,7 @@ export class KernelManager {
 		}
 		this.tempDir = undefined;
 		this.startPromise = undefined;
+		return containerCleanupError;
 	}
 
 	private async waitForHostRequestsToSettle(tasks: Promise<void>[], timeoutMs: number): Promise<void> {
@@ -1348,13 +2495,19 @@ export class KernelManager {
 	async shutdown(opts: { snapshot?: boolean } = {}): Promise<void> {
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
-			this.cleanupResources();
+			const cleanupError = this.cleanupResources();
+			if (cleanupError) throw cleanupError;
 			return;
 		}
-		// Best-effort final flush (bounded) before teardown — used by signal handlers
-		// so a SIGINT/SIGTERM exit doesn't lose work the debounced snapshot hasn't saved.
+		let flushError: unknown;
+		// Bounded final flush before teardown — used by signal handlers so a
+		// SIGINT/SIGTERM exit does not silently lose an uncommitted checkpoint.
 		if (opts.snapshot) {
-			await this.flushSnapshotForDispose();
+			try {
+				await this.flushSnapshotForDispose();
+			} catch (error) {
+				flushError = error;
+			}
 		}
 		this.state = "shutdown";
 		liveKernels.delete(this);
@@ -1371,7 +2524,9 @@ export class KernelManager {
 			);
 		}
 
-		this.cleanupResources();
+		const cleanupError = this.cleanupResources();
+		if (cleanupError) throw cleanupError;
+		if (flushError !== undefined) throw flushError;
 	}
 
 	async restart(): Promise<void> {
@@ -1393,52 +2548,126 @@ export class KernelManager {
 	}
 
 	async kill(): Promise<void> {
+		const kernel = this.kernel;
+		const kernelPid = this.kernelPid;
+		const exited =
+			kernel && kernel.exitCode === null && kernel.signalCode === null
+				? new Promise<void>((resolve) => {
+						kernel.once("exit", () => resolve());
+						kernel.once("error", () => resolve());
+					})
+				: Promise.resolve();
 		this.state = "shutdown";
 		liveKernels.delete(this);
-		this.cleanupResources("SIGKILL");
+		const cleanupError = this.cleanupResources("SIGTERM");
+		await Promise.race([exited, sleep(KERNEL_TERMINATE_GRACE_MS)]);
+		try {
+			if (kernel && kernel.exitCode === null && kernel.signalCode === null) kernel.kill("SIGKILL");
+			else if (kernelPid !== undefined && !this.forkedKernelDied()) process.kill(kernelPid, "SIGKILL");
+		} catch {
+			// The exact kernel exited during the graceful termination window.
+		}
+		if (cleanupError) throw cleanupError;
 	}
 
 	/**
-	 * Serialize the user namespace to disk (best-effort, per-variable). No-op when
-	 * the kernel isn't running or no snapshot target was configured. Never throws.
+	 * Serialize the user namespace to a verified durable checkpoint.
+	 *
+	 * Args:
+	 * None.
+	 * Return: Host-safe checkpoint metadata, or null when snapshots are disabled.
+	 * Throws: KernelSnapshotError when a required value, payload, or manifest is not durable.
 	 */
 	async snapshotState(): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
-		const code = buildSnapshotCode(cfg.path, cfg.manifestPath, cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES);
-		try {
-			const r = await this.enqueueExecute(code, { maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true });
-			if (r.status !== "ok") {
-				this.appendKernelDiagnostic(`state snapshot failed: ${r.error?.evalue ?? r.stderr}`);
-				return null;
-			}
-			return parseSnapshotResult(r.stdout, cfg.path);
-		} catch (error) {
-			this.appendKernelDiagnostic(`state snapshot error: ${errorMessage(error)}`);
-			return null;
+		const nextTurn = this.checkpointTurn + 1;
+		const code = buildSnapshotCode(cfg.path, cfg.manifestPath, cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES, {
+			transientNames: cfg.transientNames,
+			hostOnlyNames: cfg.hostOnlyNames,
+			transientClassifications: cfg.transientClassifications,
+			reproducibleNames: cfg.reproducibleNames,
+			requiredNames: cfg.requiredNames,
+			artifactRoot: cfg.artifactRoot,
+			checkpointTurn: nextTurn,
+			previousCheckpointTurn: this.checkpointTurn > 0 ? this.checkpointTurn : null,
+			previousDurableBytes: this.previousDurableBytes,
+			maxRetainedValues: cfg.maxRetainedValues,
+		});
+		const r = await this.enqueueExecute(code, { maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true });
+		if (r.status !== "ok") {
+			throw new KernelSnapshotError(`state snapshot failed: ${r.error?.evalue ?? r.stderr}`);
 		}
+		const parsed = parseSnapshotResult(r.stdout, cfg.path);
+		if (!parsed) {
+			throw new KernelSnapshotError(
+				`state snapshot failed closed: ${parseKernelStateError(r.stdout) ?? "the kernel did not commit a verifiable payload and manifest"}`,
+			);
+		}
+		this.checkpointTurn = parsed.checkpointTurn ?? nextTurn;
+		this.previousDurableBytes = parsed.durableBytes ?? this.previousDurableBytes;
+		if (cfg.checkpointTelemetry) {
+			try {
+				await recordWorkflowCheckpointBudgetTelemetry(
+					buildCheckpointTelemetryInput(parsed, this.pendingRestoreTiming),
+					cfg.checkpointTelemetry,
+				);
+			} catch (error) {
+				throw new KernelSnapshotError(`checkpoint telemetry failed: ${errorMessage(error)}`);
+			}
+			this.pendingRestoreTiming = null;
+		}
+		return parsed;
 	}
 
 	/**
 	 * Revive a previously snapshotted namespace into the kernel. Call right after
 	 * start() and before the runtime bootstrap, which then refreshes live handles
-	 * (rlm, skills) over anything restored. Never throws.
+	 * (rlm, skills) over anything restored.
+	 *
+	 * Args:
+	 * None.
+	 * Return: Host-safe restore metadata, or null when snapshots are disabled.
+	 * Throws: KernelSnapshotError when an existing checkpoint is missing, corrupt, or unverifiable.
 	 */
 	async restoreState(): Promise<RestoreResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg) return null;
-		const code = buildRestoreCode(cfg.path);
-		try {
-			const r = await this.enqueueExecute(code, { maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true });
-			if (r.status !== "ok") {
-				this.appendKernelDiagnostic(`state restore failed: ${r.error?.evalue ?? r.stderr}`);
-				return null;
-			}
-			return parseRestoreResult(r.stdout, cfg.path);
-		} catch (error) {
-			this.appendKernelDiagnostic(`state restore error: ${errorMessage(error)}`);
-			return null;
+		const code = buildRestoreCode(
+			cfg.path,
+			cfg.manifestPath,
+			cfg.artifactRoot,
+			cfg.requiredNames,
+			cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
+			cfg.maxRetainedValues,
+		);
+		const r = await this.enqueueExecute(code, { maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true });
+		if (r.status !== "ok") {
+			throw new KernelSnapshotError(`state restore failed: ${r.error?.evalue ?? r.stderr}`);
 		}
+		const parsed = parseRestoreResult(r.stdout, cfg.path);
+		if (!parsed) {
+			throw new KernelSnapshotError(
+				"state restore failed closed: the existing checkpoint is missing, corrupt, or unverifiable",
+			);
+		}
+		if (parsed.missing) {
+			if (cfg.requiredNames && cfg.requiredNames.length > 0) {
+				throw new KernelSnapshotError("state restore failed closed: required snapshot state is missing");
+			}
+			this.pendingRestoreTiming = null;
+			return parsed;
+		}
+		this.checkpointTurn = parsed.checkpointTurn ?? this.checkpointTurn;
+		this.previousDurableBytes = parsed.durableBytes ?? this.previousDurableBytes;
+		this.pendingRestoreTiming =
+			parsed.restoreStartedAtMonotonicMs !== undefined && parsed.restoreEndedAtMonotonicMs !== undefined
+				? {
+						restoreStartedAtMonotonicMs: parsed.restoreStartedAtMonotonicMs,
+						restoreEndedAtMonotonicMs: parsed.restoreEndedAtMonotonicMs,
+					}
+				: null;
+		return parsed;
 	}
 
 	/** Live user-defined top-level names, or null if the kernel isn't running. Never throws. */
@@ -1467,7 +2696,9 @@ export class KernelManager {
 		if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
 		this.snapshotTimer = globalThis.setTimeout(() => {
 			this.snapshotTimer = undefined;
-			void this.snapshotState();
+			void this.snapshotState().catch((error: unknown) => {
+				this.appendKernelDiagnostic(`state snapshot error: ${errorMessage(error)}`);
+			});
 		}, cfg.debounceMs ?? DEFAULT_SNAPSHOT_DEBOUNCE_MS);
 		if (this.snapshotTimer && typeof this.snapshotTimer === "object" && "unref" in this.snapshotTimer) {
 			this.snapshotTimer.unref();
@@ -1481,18 +2712,29 @@ export class KernelManager {
 		}
 	}
 
-	/** Best-effort final snapshot before a graceful dispose, bounded by a timeout. */
+	/** Final snapshot before a graceful dispose, bounded by a timeout and fail-closed. */
 	private async flushSnapshotForDispose(): Promise<void> {
 		if (!this.options.snapshot || !this.isRunning) return;
+		this.clearSnapshotTimer();
 		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 		const guard = new Promise<void>((resolve) => {
 			timeout = globalThis.setTimeout(resolve, SNAPSHOT_DISPOSE_TIMEOUT_MS);
 			if (timeout && typeof timeout === "object" && "unref" in timeout) timeout.unref();
 		});
+		const snapshot = this.snapshotState();
 		try {
-			await Promise.race([this.snapshotState().then(() => undefined), guard]);
+			const result = await Promise.race([
+				snapshot.then(() => "committed" as const),
+				guard.then(() => "timed_out" as const),
+			]);
+			if (result === "timed_out") {
+				throw new KernelSnapshotError(
+					`final state snapshot did not commit within ${SNAPSHOT_DISPOSE_TIMEOUT_MS}ms`,
+				);
+			}
 		} finally {
 			if (timeout) clearTimeout(timeout);
+			if (snapshot) void snapshot.catch(() => undefined);
 		}
 	}
 
@@ -1500,18 +2742,26 @@ export class KernelManager {
 	dispose(): Promise<void> {
 		return (async () => {
 			// Final namespace flush while the kernel is still live (session end / reload).
-			await this.flushSnapshotForDispose();
+			let flushError: unknown;
+			try {
+				await this.flushSnapshotForDispose();
+			} catch (error) {
+				flushError = error;
+			}
 			this.state = "shutdown";
 			liveKernels.delete(this);
 			const inFlightHostRequests = [...this.inFlightHostRequests];
 			// TODO: plumb AbortSignal through AgentSession.prompt so disposal can cancel long-running child loops.
+			let cleanupError: KernelContainerCleanupError | undefined;
 			try {
 				if (inFlightHostRequests.length > 0) {
 					await this.waitForHostRequestsToSettle(inFlightHostRequests, HOST_REQUEST_DISPOSE_TIMEOUT_MS);
 				}
 			} finally {
-				this.cleanupResources();
+				cleanupError = this.cleanupResources();
 			}
+			if (cleanupError) throw cleanupError;
+			if (flushError !== undefined) throw flushError;
 		})();
 	}
 
@@ -1520,7 +2770,8 @@ export class KernelManager {
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		// TODO: replace this best-effort hard-exit path if Node exposes an awaitable process-exit cleanup hook.
-		this.cleanupResources();
+		const cleanupError = this.cleanupResources();
+		if (cleanupError) this.appendKernelDiagnostic(cleanupError.message);
 	}
 
 	get isRunning(): boolean {

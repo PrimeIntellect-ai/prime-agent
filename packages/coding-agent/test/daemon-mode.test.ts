@@ -4,7 +4,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	AGENT_FAMILY_REACH_ERROR,
 	type AgentSessionMessageController,
@@ -21,6 +21,10 @@ import {
 } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
+import {
+	createSessionMessageObligationBridge,
+	type SessionMessageObligationBridge,
+} from "../src/core/session-message-obligation-bridge.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
 	AgentDaemon,
@@ -44,6 +48,16 @@ import {
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
+
+const fakeMessageObligationBridges = new Set<{ bridge: SessionMessageObligationBridge; rootDir: string }>();
+
+afterEach(async () => {
+	for (const fixture of fakeMessageObligationBridges) {
+		await fixture.bridge.close();
+		rmSync(fixture.rootDir, { recursive: true, force: true });
+	}
+	fakeMessageObligationBridges.clear();
+});
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -230,6 +244,7 @@ describe("daemon mode helpers", () => {
 				sessionName: "Source",
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -248,10 +263,7 @@ describe("daemon mode helpers", () => {
 			fromState,
 			origin: "agent",
 		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce();
+		await vi.waitFor(() => expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce());
 		resolvePrompt();
 		await expect(send).resolves.toMatchObject({
 			deliveryStatus: "delivered",
@@ -612,6 +624,7 @@ describe("daemon mode helpers", () => {
 				acceptAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, subagentState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			createAgentMessageController(
@@ -1385,7 +1398,13 @@ describe("daemon mode helpers", () => {
 				origin: "agent",
 			}),
 		).resolves.toEqual(receipt);
-		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, remoteSelector, "continue remotely");
+		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(
+			source,
+			remoteSelector,
+			"continue remotely",
+			expect.stringMatching(/^agentmsg_/),
+			expect.stringMatching(/^agentobs_/),
+		);
 	});
 
 	it("routes nonresident agent-message targets through the supervisor wake path", async () => {
@@ -1431,7 +1450,13 @@ describe("daemon mode helpers", () => {
 				origin: "agent",
 			}),
 		).rejects.toThrow("Unknown active session: deleted-child");
-		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "deleted-child", "continue");
+		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(
+			source,
+			"deleted-child",
+			"continue",
+			expect.stringMatching(/^agentmsg_/),
+			expect.stringMatching(/^agentobs_/),
+		);
 	});
 
 	it("rejects invalid nonresident agent messages before remote fallback", async () => {
@@ -1489,8 +1514,9 @@ describe("daemon mode helpers", () => {
 					socketPath,
 					protocol: DAEMON_PROTOCOL_INFO,
 					schemaId: DAEMON_SCHEMA_ID,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
 					clientId: "supervisor",
-					serverCapabilities: [],
+					serverCapabilities: ["session-message-obligations"],
 				})}\n`,
 			);
 			let buffer = "";
@@ -1632,6 +1658,95 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("retries a remote agent message with the same stable identities after response loss", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pa-message-response-loss-"));
+		const socketPath = join(tempDir, "s");
+		let requestCount = 0;
+		const identities: Array<{ messageId?: string; observationId?: string }> = [];
+		const server = createServer((socket) => {
+			socket.on("error", () => undefined);
+			socket.write(
+				`${JSON.stringify({
+					type: "daemon_hello",
+					socketPath,
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
+					serverCapabilities: ["session-message-obligations"],
+				})}\n`,
+			);
+			let buffered = "";
+			socket.on("data", (chunk: Buffer) => {
+				buffered += chunk.toString("utf8");
+				const newline = buffered.indexOf("\n");
+				if (newline < 0) return;
+				const wire = JSON.parse(buffered.slice(0, newline)) as {
+					id?: string;
+					command?: { messageId?: string; observationId?: string; message?: string };
+				};
+				const command = wire.command;
+				identities.push({ messageId: command?.messageId, observationId: command?.observationId });
+				requestCount++;
+				if (requestCount === 1) {
+					socket.destroy();
+					return;
+				}
+				if (socket.destroyed) return;
+				socket.write(
+					`${JSON.stringify({
+						type: "response",
+						id: wire.id,
+						command: "send_message",
+						success: true,
+						data: {
+							id: command?.messageId,
+							observationId: command?.observationId,
+							source: "agent_message",
+							message: command?.message,
+							target: { activeSessionId: "remote-active", sessionId: "remote-session" },
+							deliveryStatus: "queued",
+							queuedAt: new Date().toISOString(),
+						},
+					})}\n`,
+				);
+			});
+		});
+		const previousSupervisorSocket = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		try {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(socketPath, resolve);
+			});
+			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
+			const daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: vi.fn(),
+				worker: { authenticationToken: "worker-token" },
+			});
+			const source = makeState("source");
+			const internals = daemon as unknown as {
+				sendRemoteAgentSessionMessage(
+					fromState: ActiveSessionState,
+					targetSelector: string,
+					message: string,
+				): Promise<{
+					id: string;
+					observationId?: string;
+				}>;
+			};
+
+			const receipt = await internals.sendRemoteAgentSessionMessage(source, "remote-target", "retry me");
+			expect(receipt.id).toBe(identities[0]?.messageId);
+			expect(receipt.observationId).toBe(identities[0]?.observationId);
+			expect(requestCount).toBe(2);
+			expect(identities[1]).toEqual(identities[0]);
+		} finally {
+			if (previousSupervisorSocket === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("does not retry permanent ambiguity errors from the supervisor", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-ambiguous-"));
 		const socketPath = join(tempDir, "s");
@@ -1643,7 +1758,7 @@ describe("daemon mode helpers", () => {
 					socketPath,
 					protocol: DAEMON_PROTOCOL_INFO,
 					schemaRevision: DAEMON_SCHEMA_REVISION,
-					serverCapabilities: [],
+					serverCapabilities: ["session-message-obligations"],
 				})}\n`,
 			);
 			let buffered = "";
@@ -1720,6 +1835,7 @@ describe("daemon mode helpers", () => {
 			...fromState.runtime,
 			session: { sessionId: "session-source", sessionName: "Source" },
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -1769,6 +1885,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
@@ -1820,6 +1937,7 @@ describe("daemon mode helpers", () => {
 				},
 			} as never;
 		}
+		await Promise.all([targetA, targetB].map((state) => installFakeSessionMessageObligationBridge(daemon, state)));
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
@@ -2046,6 +2164,7 @@ describe("daemon mode helpers", () => {
 				}),
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -2112,6 +2231,7 @@ describe("daemon mode helpers", () => {
 				prompt: vi.fn(async () => {}),
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
@@ -2131,7 +2251,7 @@ describe("daemon mode helpers", () => {
 			fromState,
 			origin: "agent",
 		});
-		await Promise.resolve();
+		await vi.waitFor(() => expect(queueAgentMessagePrompt).toHaveBeenCalledOnce());
 
 		const clear = internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
 			id: "command-1",
@@ -2180,6 +2300,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -2202,20 +2323,17 @@ describe("daemon mode helpers", () => {
 		});
 
 		const errors: unknown[] = [];
-		for (const [i, fromState] of senders.entries()) {
-			void internals
-				.sendAgentSessionMessage({
-					targetSelector: targetState.activeSessionId,
-					message: `message ${i}`,
-					fromState,
-					origin: "agent",
-				})
-				.catch((error) => {
-					errors.push(error);
-				});
-		}
-		for (let attempt = 0; attempt < 200 && queueAgentMessagePrompt.mock.calls.length < 12; attempt++) {
-			await Promise.resolve();
+		const sends = senders.map((fromState, i) =>
+			internals.sendAgentSessionMessage({
+				targetSelector: targetState.activeSessionId,
+				message: `message ${i}`,
+				fromState,
+				origin: "agent",
+			}),
+		);
+		await vi.waitFor(() => expect(queueAgentMessagePrompt).toHaveBeenCalledTimes(12));
+		for (const result of await Promise.allSettled(sends)) {
+			if (result.status === "rejected") errors.push(result.reason);
 		}
 
 		// With reservations held past queue time, 12 concurrent senders would
@@ -2253,6 +2371,7 @@ describe("daemon mode helpers", () => {
 				waitForAgentMessagePromptDelivery,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -2306,6 +2425,10 @@ describe("daemon mode helpers", () => {
 		};
 		const stateA = makeBusyState("alpha");
 		const stateB = makeBusyState("beta");
+		await Promise.all([
+			installFakeSessionMessageObligationBridge(daemon, stateA),
+			installFakeSessionMessageObligationBridge(daemon, stateB),
+		]);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -2364,6 +2487,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt: vi.fn(async () => true),
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -2723,6 +2847,7 @@ describe("daemon mode helpers", () => {
 		const familyHelper = makeAgentFamilyState("family-helper", "helper", observer.state);
 		const otherRoot = makeAgentFamilyState("other-root", "other-root");
 		const unrelatedHelper = makeAgentFamilyState("unrelated-helper", "helper", otherRoot.state);
+		await installFakeSessionMessageObligationBridge(daemon, familyHelper.state);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			createAgentMessageController(
@@ -2847,6 +2972,7 @@ describe("daemon mode helpers", () => {
 				followUp,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -2871,17 +2997,11 @@ describe("daemon mode helpers", () => {
 			fromState,
 			origin: "agent",
 		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(1);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
 
 		promptResolves[0]?.();
 		await expect(first).resolves.toMatchObject({ message: "first" });
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(2);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
 		expect(followUp).not.toHaveBeenCalled();
 		promptResolves[1]?.();
 		await expect(second).resolves.toMatchObject({ message: "second" });
@@ -2917,6 +3037,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -2973,6 +3094,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3028,6 +3150,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3082,6 +3205,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3141,6 +3265,7 @@ describe("daemon mode helpers", () => {
 				waitForAgentMessagePromptDelivery,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3202,6 +3327,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3226,18 +3352,11 @@ describe("daemon mode helpers", () => {
 			fromState,
 			origin: "agent",
 		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(1);
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
 		(targetState.runtime.session as { isStreaming: boolean }).isStreaming = true;
 		promptResolves[0]?.();
 		await expect(first).resolves.toMatchObject({ message: "first" });
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(1);
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
+		await vi.waitFor(() => expect(queueAgentMessagePrompt).toHaveBeenCalledOnce());
 		expect(queueAgentMessagePrompt.mock.calls[0]?.[1]).toBe("steer");
 		expect(followUp).not.toHaveBeenCalled();
 		await expect(second).resolves.toMatchObject({ message: "second" });
@@ -3268,6 +3387,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3321,6 +3441,7 @@ describe("daemon mode helpers", () => {
 				acceptAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3374,6 +3495,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown> | undefined;
@@ -3442,6 +3564,7 @@ describe("daemon mode helpers", () => {
 				acceptAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown> | undefined;
@@ -3458,9 +3581,7 @@ describe("daemon mode helpers", () => {
 			message: "agent message",
 			origin: "agent",
 		});
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce();
+		await vi.waitFor(() => expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce());
 
 		const promptClient = makeClient("client-1", targetState.activeSessionId);
 		(promptClient.socket as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn();
@@ -3476,11 +3597,7 @@ describe("daemon mode helpers", () => {
 
 		resolveAccept();
 		await send;
-		for (let attempt = 0; attempt < 10 && prompt.mock.calls.length === 0; attempt++) {
-			await Promise.resolve();
-		}
-
-		expect(prompt).toHaveBeenCalledOnce();
+		await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
 	});
 
 	it("releases cron preparing state after prompt admission", async () => {
@@ -3516,6 +3633,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			runCronJob(job: AgentCronJob): Promise<"skipped" | undefined>;
@@ -3577,6 +3695,7 @@ describe("daemon mode helpers", () => {
 				queueAgentMessagePrompt,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown> | undefined;
@@ -3656,6 +3775,7 @@ describe("daemon mode helpers", () => {
 				followUp,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			sendAgentSessionMessage(options: {
@@ -3680,8 +3800,7 @@ describe("daemon mode helpers", () => {
 			fromState,
 			origin: "agent",
 		});
-		await Promise.resolve();
-		await Promise.resolve();
+		await vi.waitFor(() => expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce());
 		(targetState.runtime.session as { unfinishedActionCount: number }).unfinishedActionCount = 20;
 
 		resolveFirstPrompt();
@@ -3709,6 +3828,7 @@ describe("daemon mode helpers", () => {
 				prompt: vi.fn(async () => {}),
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
@@ -3765,6 +3885,7 @@ describe("daemon mode helpers", () => {
 				clearQueuedUserMessagesMatching,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
@@ -3781,8 +3902,7 @@ describe("daemon mode helpers", () => {
 			message: "first",
 			origin: "agent",
 		});
-		await Promise.resolve();
-		await Promise.resolve();
+		await vi.waitFor(() => expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce());
 
 		const clear = internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
 			id: "command-1",
@@ -3826,6 +3946,7 @@ describe("daemon mode helpers", () => {
 				clearQueuedUserMessagesMatching,
 			},
 		} as never;
+		await installFakeSessionMessageObligationBridge(daemon, targetState);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
@@ -9910,6 +10031,29 @@ function makeAgentFamilyState(
 		},
 	} as never;
 	return { state, acceptAgentMessagePrompt };
+}
+
+async function installFakeSessionMessageObligationBridge(
+	daemon: AgentDaemon,
+	state: ActiveSessionState,
+): Promise<void> {
+	const session = state.runtime.session as unknown as {
+		sessionId?: string;
+		setAgentMessageObligationBridge?: (bridge: SessionMessageObligationBridge | undefined) => void;
+	};
+	if (typeof session.sessionId !== "string") throw new Error("Fake message target is missing a session id");
+	const rootDir = mkdtempSync(join(tmpdir(), "daemon-mode-message-obligations-"));
+	const bridge = await createSessionMessageObligationBridge({
+		rootDir,
+		targetSessionId: session.sessionId,
+		ownerId: `test:daemon-mode:${state.activeSessionId}`,
+	});
+	const internals = daemon as unknown as {
+		agentMessageObligationBridges: Map<string, SessionMessageObligationBridge>;
+	};
+	internals.agentMessageObligationBridges.set(state.activeSessionId, bridge);
+	session.setAgentMessageObligationBridge?.(bridge);
+	fakeMessageObligationBridges.add({ bridge, rootDir });
 }
 
 function makeState(activeSessionId: string, parentActiveSessionId?: string): ActiveSessionState {

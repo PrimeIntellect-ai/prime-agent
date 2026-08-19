@@ -103,6 +103,21 @@ describe("public command routing", () => {
 		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--all", "--json"]]);
 	});
 
+	it("routes workflow status and watch without changing the background-service status command", async () => {
+		await expect(handlePublicCommand(["workflow", "status", "worker", "--json"])).resolves.toMatchObject({
+			handled: true,
+		});
+		await expect(handlePublicCommand(["workflow", "watch", "worker", "--once", "--json"])).resolves.toMatchObject({
+			handled: true,
+		});
+
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "workflow-status", "worker", "--json"],
+			["daemon", "workflow-watch", "worker", "--once", "--json"],
+		]);
+		expect(mocks.psCalls).toEqual([]);
+	});
+
 	it("forwards a custom daemon socket when stopping an agent", async () => {
 		await expect(
 			handlePublicCommand(["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"]),

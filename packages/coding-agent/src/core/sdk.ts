@@ -398,6 +398,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		workflowSetupGate: options.workflowSetupGate,
+		hostRequestCapabilityContext: options.hostRequestCapabilityContext,
+		compactionDeadlineMs: options.compactionDeadlineMs,
+		streamLiveness: options.streamLiveness,
+		toolExecutionDeadlineMs: options.toolExecutionDeadlineMs,
+		agentMessageDeliveryDeadlineMs: options.agentMessageDeliveryDeadlineMs,
+		kernelPythonLauncher: options.kernelPythonLauncher,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

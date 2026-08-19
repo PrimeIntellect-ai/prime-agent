@@ -21,6 +21,12 @@ import {
 	recordStreamFailure,
 	streamFailureFromStopReason,
 } from "../utils/stream-failure.js";
+import {
+	applyProviderStreamStall,
+	createProviderStreamLiveness,
+	observeProviderAsyncIterable,
+	type ProviderStreamLiveness,
+} from "../utils/stream-liveness.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
@@ -92,6 +98,14 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let liveness: ProviderStreamLiveness | undefined;
+		let terminalEventPushed = false;
+		const cleanStreamingScratch = (): void => {
+			for (const block of output.content) {
+				delete (block as { index?: number }).index;
+				delete (block as { partialJson?: string }).partialJson;
+			}
+		};
 
 		try {
 			// Create OpenAI client
@@ -104,22 +118,39 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
+			liveness = createProviderStreamLiveness({
+				identity: { provider: model.provider, model: model.id, transport: "sse" },
+				host: options?.streamLiveness,
+				signal: options?.signal,
+				onStall: (error) => {
+					cleanStreamingScratch();
+					applyProviderStreamStall(output, error);
+					if (!terminalEventPushed) {
+						terminalEventPushed = true;
+						stream.push({ type: "error", reason: "error", error: output });
+						stream.end();
+					}
+				},
+			});
 			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
+				...(liveness ? { signal: liveness.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
 			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
+			liveness.observe({ type: "headers", receivedBytes: 0 });
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			const requestId = response.headers.get("x-request-id") ?? undefined;
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model, {
+			await processResponsesStream(observeProviderAsyncIterable(openaiStream, liveness), output, stream, model, {
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				onLivenessObservation: liveness.observe,
 			});
 
-			if (options?.signal?.aborted) {
+			liveness.markFinal();
+			if (liveness.callerAborted()) {
 				throw new Error("Request was aborted");
 			}
 
@@ -127,19 +158,30 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				throw streamFailureFromStopReason(output.stopReasonRaw, { requestId });
 			}
 
+			terminalEventPushed = true;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+			cleanStreamingScratch();
+			const stalled = liveness?.stalledError();
+			if (stalled) {
+				applyProviderStreamStall(output, stalled);
+			} else {
+				output.stopReason = liveness?.callerAborted() || options?.signal?.aborted ? "aborted" : "error";
+				output.errorMessage = formatStreamFailureMessage(error);
+				recordStreamFailure(model, output, error);
 			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatStreamFailureMessage(error);
-			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			if (!terminalEventPushed) {
+				terminalEventPushed = true;
+				stream.push({
+					type: "error",
+					reason: output.stopReason === "aborted" ? "aborted" : "error",
+					error: output,
+				});
+				stream.end();
+			}
+		} finally {
+			liveness?.close();
 		}
 	})();
 

@@ -1,6 +1,7 @@
+import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { Model, ServiceTier, StreamLivenessHost } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
@@ -11,6 +12,7 @@ import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
+import type { HostRequestCapabilityContext } from "./kernel/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
@@ -19,6 +21,32 @@ import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
+import { persistWorkflowCliApprovalDelivery } from "./workflow/cli-approval.js";
+import { type DurableApprovalSecretProof, digestObject, type WorkflowApprovalRequest } from "./workflow/contracts.js";
+import type { DefaultPrimeTaskRuntimeAuthorityFactory } from "./workflow/default-prime.js";
+import type { DefaultPrimeWorkerFailureNotice, DefaultPrimeWorkerLauncher } from "./workflow/default-task-runtime.js";
+import type { DefaultTaskRuntimeProgressWakeObligation } from "./workflow/default-task-runtime-authority.js";
+import type { WorkflowExecutionEvidenceSource } from "./workflow/execution-evidence.js";
+import {
+	createGcloudWorkflowGoalAuthoritySourceResolver,
+	createSessionWorkflowGoalAuthoritySourceResolver,
+} from "./workflow/goal-authority-source.js";
+import type { WorkerModelCapabilityAvailabilityResolver } from "./workflow/persisted-worker-model-admission.js";
+import type { WorkflowPhaseHost } from "./workflow/phase-host.js";
+import type { PrimeWorkflowAuthenticatedAdapterFactory, PrimeWorkflowSnapshots } from "./workflow/prime-loop.js";
+import {
+	createPersistedSessionWorkflowHost,
+	resolvePersistedSessionWorkflowAuthority,
+	type WorkflowGoalAuthoritySourceResolver,
+} from "./workflow/session-host-factory.js";
+import type { WorkflowResourceLoaderPort } from "./workflow/skill-snapshots.js";
+import type { WorkflowPrimeStageEvidenceAdapter } from "./workflow/task-runtime-authority.js";
+import {
+	WORKER_MODEL_ID,
+	WORKER_MODEL_PROVIDER,
+	WORKER_MODEL_SELECTOR,
+	type WorkerModelCapabilityLaunchAuthorizer,
+} from "./workflow/worker-model-capability-gate.js";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -45,6 +73,31 @@ export interface CreateAgentSessionServicesOptions {
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
 	modelRegistry?: ModelRegistry;
+	/** Optional durable workflow host factory. It must reject incomplete durable adapter tuples. */
+	workflowHostFactory?: AgentSessionWorkflowHostFactory;
+	/** Runtime contract version forwarded to the authenticated workflow host. */
+	runtimeVersion?: string;
+	/** Authenticated immutable snapshots for the production Prime composition. */
+	primeWorkflowSnapshots?: PrimeWorkflowSnapshots;
+	/** Host-owned adapters bound to the opened workflow store and lease. */
+	primeWorkflowAdaptersFactory?: PrimeWorkflowAuthenticatedAdapterFactory;
+	/** Generic task-runtime authority factory bound to the opened store and epoch. */
+	taskRuntimeAuthorityFactory?: DefaultPrimeTaskRuntimeAuthorityFactory;
+	goalAuthoritySourceResolver?: WorkflowGoalAuthoritySourceResolver;
+	/** Prime stage/evidence adapter bound to the opened store and authenticated status. */
+	taskRuntimePrimeAdapter?: WorkflowPrimeStageEvidenceAdapter;
+	primeWorkflowWorkerLauncher?: DefaultPrimeWorkerLauncher;
+	primeWorkflowWorkerModel?: string;
+	/** Host-sealed worker admission; absent means workflow child launch fails closed. */
+	workerModelCapabilityAdmission?: WorkerModelCapabilityLaunchAuthorizer;
+	/** Optional redacted model availability override used by the persisted admission gate. */
+	workerModelCapabilityAvailability?: WorkerModelCapabilityAvailabilityResolver;
+	primeWorkflowWorkerFailureDelivery?: (notice: DefaultPrimeWorkerFailureNotice) => Promise<void> | void;
+	approvalSecretDelivery?: (input: {
+		readonly request: WorkflowApprovalRequest;
+		readonly proof: DurableApprovalSecretProof;
+		readonly proofs: Readonly<Record<string, DurableApprovalSecretProof>>;
+	}) => Promise<void> | void;
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
 	/**
@@ -90,6 +143,20 @@ export interface AgentSessionCreationOptions {
 	telemetryDisabled?: true;
 	/** Initial goal to seed at session creation (rlmDepth 0 only, idempotent). */
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Host-minted capability context installed before any kernel can start. */
+	hostRequestCapabilityContext?: HostRequestCapabilityContext;
+	/** Host-owned construction gate resolved only after workflow setup is installed. */
+	workflowSetupGate?: Promise<void>;
+	/** Host-owned total deadline for one compaction attempt. */
+	compactionDeadlineMs?: number;
+	/** Host-owned provider stream liveness policy and clock. */
+	streamLiveness?: StreamLivenessHost;
+	/** Host-owned absolute deadline for one tool invocation. */
+	toolExecutionDeadlineMs?: number;
+	/** Host-owned deadline for accepted agent messages to reach recipient context. */
+	agentMessageDeliveryDeadlineMs?: number;
+	/** Exact executable used to launch admitted session kernels. */
+	kernelPythonLauncher?: string;
 }
 
 /**
@@ -119,6 +186,262 @@ export interface AgentSessionServices {
 	resourceLoader: ResourceLoader;
 	mcpManager: McpManager;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+	/** Durable workflow construction is injected so the service layer never invents a store. */
+	workflowHostFactory?: AgentSessionWorkflowHostFactory;
+	runtimeVersion?: string;
+	/** Authenticated immutable snapshots for the production Prime composition. */
+	primeWorkflowSnapshots?: PrimeWorkflowSnapshots;
+	/** Host-owned adapters bound to the opened workflow store and lease. */
+	primeWorkflowAdaptersFactory?: PrimeWorkflowAuthenticatedAdapterFactory;
+	taskRuntimeAuthorityFactory?: DefaultPrimeTaskRuntimeAuthorityFactory;
+	goalAuthoritySourceResolver?: WorkflowGoalAuthoritySourceResolver;
+	taskRuntimePrimeAdapter?: WorkflowPrimeStageEvidenceAdapter;
+	primeWorkflowWorkerLauncher?: DefaultPrimeWorkerLauncher;
+	primeWorkflowWorkerModel?: string;
+	workerModelCapabilityAdmission?: WorkerModelCapabilityLaunchAuthorizer;
+	workerModelCapabilityAvailability?: WorkerModelCapabilityAvailabilityResolver;
+	primeWorkflowWorkerFailureDelivery?: (notice: DefaultPrimeWorkerFailureNotice) => Promise<void> | void;
+	approvalSecretDelivery?: (input: {
+		readonly request: WorkflowApprovalRequest;
+		readonly proof: DurableApprovalSecretProof;
+		readonly proofs: Readonly<Record<string, DurableApprovalSecretProof>>;
+	}) => Promise<void> | void;
+}
+
+export interface AgentSessionWorkflowHostFactoryInput {
+	sessionManager: SessionManager;
+	artifactRoot: string;
+	workflowId: string;
+	rootSessionId: string;
+	runtimeVersion?: string;
+	primeWorkflowSnapshots?: PrimeWorkflowSnapshots;
+	primeWorkflowAdaptersFactory?: PrimeWorkflowAuthenticatedAdapterFactory;
+	taskRuntimeAuthorityFactory?: DefaultPrimeTaskRuntimeAuthorityFactory;
+	goalAuthoritySourceResolver?: WorkflowGoalAuthoritySourceResolver;
+	taskRuntimePrimeAdapter?: WorkflowPrimeStageEvidenceAdapter;
+	primeWorkflowWorkerLauncher?: DefaultPrimeWorkerLauncher;
+	primeWorkflowWorkerFailureDelivery?: (notice: DefaultPrimeWorkerFailureNotice) => Promise<void> | void;
+	progressWakeDelivery?: (
+		obligation: DefaultTaskRuntimeProgressWakeObligation,
+	) => Promise<"scheduled" | "already_scheduled">;
+	workerModelCapabilityAdmission?: WorkerModelCapabilityLaunchAuthorizer;
+	workerModelCapabilityAvailability?: WorkerModelCapabilityAvailabilityResolver;
+	primeWorkflowResourceLoader?: WorkflowResourceLoaderPort;
+	approvalSecretDelivery?: (input: {
+		readonly request: WorkflowApprovalRequest;
+		readonly proof: DurableApprovalSecretProof;
+		readonly proofs: Readonly<Record<string, DurableApprovalSecretProof>>;
+	}) => Promise<void> | void;
+	executionEvidenceSourceDelivery?: (source: WorkflowExecutionEvidenceSource) => void;
+	beforeTaskLaunch?: (taskId: string) => Promise<void>;
+}
+
+interface WorkflowSetupGate {
+	readonly promise: Promise<void>;
+	resolve(): void;
+	reject(error: unknown): void;
+}
+
+function createWorkflowSetupGate(): WorkflowSetupGate {
+	let resolvePromise: () => void = () => {};
+	let rejectPromise: (error: unknown) => void = () => {};
+	const promise = new Promise<void>((resolve, reject) => {
+		resolvePromise = resolve;
+		rejectPromise = reject;
+	});
+	return {
+		promise,
+		resolve: resolvePromise,
+		reject: rejectPromise,
+	};
+}
+
+export interface AgentSessionRecoverableWorkflowHost extends WorkflowPhaseHost {
+	recoverBeforeResume(): Promise<void>;
+}
+
+export type AgentSessionWorkflowHostFactory = (
+	input: AgentSessionWorkflowHostFactoryInput,
+) => Promise<AgentSessionRecoverableWorkflowHost>;
+
+type PrimeWorkflowWorkerSession = Pick<
+	CreateAgentSessionResult["session"],
+	"runWorkflowRlmChild" | "awaitRlmChildCompletion" | "cancelRlmChildRun"
+>;
+
+/** Create the host-owned workflow child launcher with bounded heartbeat admission. */
+export function createDefaultPrimeWorkflowWorkerLauncher(input: {
+	readonly session: PrimeWorkflowWorkerSession;
+	readonly workerModel?: string;
+}): DefaultPrimeWorkerLauncher {
+	return async (request) => {
+		let heartbeatInFlight: Promise<void> | null = null;
+		let pendingHeartbeat: { readonly observedAt: string; readonly progressDigest: string } | null = null;
+		let heartbeatFailure: Error | undefined;
+		const flushHeartbeat = (): void => {
+			if (heartbeatInFlight !== null || pendingHeartbeat === null) return;
+			const heartbeat = pendingHeartbeat;
+			pendingHeartbeat = null;
+			heartbeatInFlight = request
+				.reportHeartbeat(heartbeat)
+				.catch((error: unknown) => {
+					heartbeatFailure = error instanceof Error ? error : new Error(String(error));
+				})
+				.finally(() => {
+					heartbeatInFlight = null;
+					flushHeartbeat();
+				});
+		};
+		const reportMeaningfulProgress = (progressDigest: string): void => {
+			pendingHeartbeat = { observedAt: new Date().toISOString(), progressDigest };
+			flushHeartbeat();
+		};
+		const capsuleDigest = request.taskCapsule?.capsuleDigest;
+		if (capsuleDigest === undefined || capsuleDigest.length === 0)
+			throw new Error("workflow_worker_task_capsule_required");
+		const workerModel = input.workerModel ?? WORKER_MODEL_SELECTOR;
+		if (workerModel !== WORKER_MODEL_SELECTOR) throw new Error("worker_model_policy_selector_denied");
+		const handle = await input.session.runWorkflowRlmChild(
+			request.prompt,
+			request.sessionName,
+			workerModel,
+			{
+				workflowId: request.workflowId,
+				taskId: request.taskId,
+				attemptId: request.attemptId,
+				executionKey: request.executionKey,
+				epochRef: request.epochRef,
+				deadlineAt: request.deadlineAt,
+				capsuleDigest,
+			},
+			reportMeaningfulProgress,
+		);
+		return {
+			workerId: handle.rlm_child_id,
+			executionIdentity: `rlm:${handle.rlm_child_id}:${request.executionKey}`,
+			processStartId: `host:${process.pid}:${Math.floor(Date.now() - process.uptime() * 1_000)}`,
+			processGroupId: `same-process-rlm:${process.pid}`,
+			launchedAt: new Date().toISOString(),
+			terminate: async (reason: string): Promise<boolean> => {
+				const cancelled = input.session.cancelRlmChildRun(handle.rlm_child_id, reason);
+				await input.session.awaitRlmChildCompletion(handle.rlm_child_id);
+				return cancelled;
+			},
+			completion: (async () => {
+				const completion = await input.session.awaitRlmChildCompletion(handle.rlm_child_id);
+				const result =
+					heartbeatFailure === undefined
+						? completion
+						: {
+								status: "error" as const,
+								output: completion.output,
+								error: heartbeatFailure.message,
+								retryable: true,
+							};
+				return {
+					...result,
+					kind: "worker" as const,
+					binding: {
+						workflowId: request.workflowId,
+						taskId: request.taskId,
+						attemptId: request.attemptId,
+						executionKey: request.executionKey,
+					},
+				};
+			})(),
+		};
+	};
+}
+
+function createDefaultWorkerModelCapabilityAvailability(
+	modelRegistry: ModelRegistry,
+): WorkerModelCapabilityAvailabilityResolver {
+	return async (_input) => {
+		const catalogModel = modelRegistry.find(WORKER_MODEL_PROVIDER, WORKER_MODEL_ID);
+		let executableModel: ReturnType<ModelRegistry["find"]>;
+		try {
+			executableModel = (await modelRegistry.getExecutableModels()).find(
+				(model) => model.provider === WORKER_MODEL_PROVIDER && model.id === WORKER_MODEL_ID,
+			);
+		} catch {
+			return {
+				authenticated: false,
+				authRevision: "auth-unavailable",
+				capabilityRevision:
+					catalogModel === undefined
+						? "model-unavailable"
+						: digestObject({
+								provider: catalogModel.provider,
+								id: catalogModel.id,
+								api: catalogModel.api,
+								contextWindow: catalogModel.contextWindow,
+								maxTokens: catalogModel.maxTokens,
+							}),
+				safeReason: "worker_model_readiness_probe_failed",
+				desiredWorkers: 1,
+				activeWorkers: 0,
+				idleCapacity: 0,
+				idleReason: "worker_model_capability_unavailable",
+				retryAt: null,
+			};
+		}
+
+		const auth =
+			executableModel === undefined
+				? undefined
+				: await modelRegistry.getApiKeyAndHeaders(executableModel).catch(() => undefined);
+		const authToken = modelRegistry.getCurrentProviderAuthSourceToken(WORKER_MODEL_PROVIDER);
+		const authStatus = modelRegistry.getProviderAuthStatus(WORKER_MODEL_PROVIDER);
+		const authenticated =
+			executableModel !== undefined &&
+			auth?.ok === true &&
+			authToken !== undefined &&
+			authStatus.source === authToken.source &&
+			authStatus.label !== "expired";
+		return {
+			authenticated,
+			authRevision:
+				authToken === undefined
+					? "auth-unavailable"
+					: digestObject({
+							provider: authToken.provider,
+							source: authToken.source,
+							identityFingerprint: authToken.identityFingerprint,
+							valueFingerprint: authToken.valueFingerprint,
+						}),
+			capabilityRevision:
+				executableModel === undefined
+					? catalogModel === undefined
+						? "model-unavailable"
+						: digestObject({
+								provider: catalogModel.provider,
+								id: catalogModel.id,
+								api: catalogModel.api,
+								contextWindow: catalogModel.contextWindow,
+								maxTokens: catalogModel.maxTokens,
+							})
+					: digestObject({
+							provider: executableModel.provider,
+							id: executableModel.id,
+							api: executableModel.api,
+							contextWindow: executableModel.contextWindow,
+							maxTokens: executableModel.maxTokens,
+						}),
+			safeReason:
+				catalogModel === undefined
+					? "worker_model_not_in_catalog"
+					: executableModel === undefined
+						? "worker_model_not_executable"
+						: authenticated
+							? "available"
+							: "worker_model_authentication_unavailable",
+			desiredWorkers: 1,
+			activeWorkers: 0,
+			idleCapacity: authenticated ? 1 : 0,
+			idleReason: authenticated ? null : "worker_model_capability_unavailable",
+			retryAt: null,
+		};
+	};
 }
 
 function applyExtensionFlagValues(
@@ -182,6 +505,8 @@ export async function createAgentSessionServices(
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const workerModelCapabilityAvailability =
+		options.workerModelCapabilityAvailability ?? createDefaultWorkerModelCapabilityAvailability(modelRegistry);
 
 	// MCP integrations: registers OAuth providers and gates the built-in
 	// integration skills by whether the user is logged in (enable-by-login).
@@ -251,6 +576,20 @@ export async function createAgentSessionServices(
 		resourceLoader,
 		mcpManager,
 		diagnostics,
+		workflowHostFactory: options.workflowHostFactory,
+		runtimeVersion: options.runtimeVersion,
+		primeWorkflowSnapshots: options.primeWorkflowSnapshots,
+		primeWorkflowAdaptersFactory: options.primeWorkflowAdaptersFactory,
+		taskRuntimeAuthorityFactory: options.taskRuntimeAuthorityFactory,
+		goalAuthoritySourceResolver:
+			options.goalAuthoritySourceResolver ?? createGcloudWorkflowGoalAuthoritySourceResolver(),
+		taskRuntimePrimeAdapter: options.taskRuntimePrimeAdapter,
+		primeWorkflowWorkerLauncher: options.primeWorkflowWorkerLauncher,
+		primeWorkflowWorkerModel: options.primeWorkflowWorkerModel ?? WORKER_MODEL_SELECTOR,
+		workerModelCapabilityAdmission: options.workerModelCapabilityAdmission,
+		workerModelCapabilityAvailability,
+		primeWorkflowWorkerFailureDelivery: options.primeWorkflowWorkerFailureDelivery,
+		approvalSecretDelivery: options.approvalSecretDelivery,
 	};
 }
 
@@ -268,6 +607,28 @@ export async function createAgentSessionFromServices(
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
 	});
+	const artifactRoot = options.sessionManager.getSessionArtifactDir();
+	const workflowSetupGate = createWorkflowSetupGate();
+	let persistedAuthority: Awaited<ReturnType<typeof resolvePersistedSessionWorkflowAuthority>> | null = null;
+	if (artifactRoot === undefined) {
+		workflowSetupGate.resolve();
+	} else {
+		await mkdir(artifactRoot, { recursive: true, mode: 0o700 });
+		await chmod(artifactRoot, 0o700);
+		if (
+			options.services.workflowHostFactory !== undefined &&
+			(options.services.primeWorkflowSnapshots !== undefined ||
+				options.services.primeWorkflowAdaptersFactory !== undefined)
+		)
+			throw new Error("prime_workflow_requires_persisted_session_host_factory");
+		if (options.services.workflowHostFactory === undefined) {
+			persistedAuthority = await resolvePersistedSessionWorkflowAuthority({
+				artifactRoot,
+				workflowId: options.sessionManager.getSessionId(),
+				rootSessionId: options.sessionManager.getSessionId(),
+			});
+		}
+	}
 	const result = await createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
@@ -302,7 +663,126 @@ export async function createAgentSessionFromServices(
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		workflowSetupGate: workflowSetupGate.promise,
+		hostRequestCapabilityContext: options.hostRequestCapabilityContext,
+		compactionDeadlineMs: options.compactionDeadlineMs,
+		streamLiveness: options.streamLiveness,
+		toolExecutionDeadlineMs: options.toolExecutionDeadlineMs,
+		agentMessageDeliveryDeadlineMs: options.agentMessageDeliveryDeadlineMs,
+		kernelPythonLauncher: options.kernelPythonLauncher,
 	});
+	const primeWorkflowWorkerLauncher =
+		options.services.primeWorkflowWorkerLauncher ??
+		createDefaultPrimeWorkflowWorkerLauncher({
+			session: result.session,
+			workerModel: options.services.primeWorkflowWorkerModel,
+		});
+	const primeWorkflowWorkerFailureDelivery =
+		options.services.primeWorkflowWorkerFailureDelivery ??
+		((notice: DefaultPrimeWorkerFailureNotice): void => result.session.recordWorkflowWorkerFailure(notice));
+	if (artifactRoot !== undefined) {
+		try {
+			const goalAuthoritySourceResolver = createSessionWorkflowGoalAuthoritySourceResolver({
+				artifactRoot,
+				fallback: options.services.goalAuthoritySourceResolver ?? createGcloudWorkflowGoalAuthoritySourceResolver(),
+			});
+			const approvalSecretDelivery: NonNullable<
+				AgentSessionWorkflowHostFactoryInput["approvalSecretDelivery"]
+			> = async (delivery) => {
+				await persistWorkflowCliApprovalDelivery({
+					artifactRoot,
+					request: delivery.request,
+					proofs: delivery.proofs,
+				});
+				await options.services.approvalSecretDelivery?.(delivery);
+			};
+			let executionEvidenceSource: WorkflowExecutionEvidenceSource | undefined;
+			const executionEvidenceSourceDelivery = (source: WorkflowExecutionEvidenceSource): void => {
+				if (executionEvidenceSource !== undefined)
+					throw new Error("workflow_execution_evidence_source_already_delivered");
+				executionEvidenceSource = source;
+			};
+			const sessionId = options.sessionManager.getSessionId();
+			const progressWakeDelivery = async (
+				_obligation: DefaultTaskRuntimeProgressWakeObligation,
+			): Promise<"scheduled" | "already_scheduled"> =>
+				(await result.session.wakeActiveWorkflow()) ? "scheduled" : "already_scheduled";
+			const beforeTaskLaunch = (_taskId: string): Promise<void> =>
+				result.session.waitForPendingAgentMessageDelivery();
+			const createWorkflowHost = async () => {
+				let workflowHost: AgentSessionRecoverableWorkflowHost | undefined;
+				try {
+					workflowHost = options.services.workflowHostFactory
+						? await options.services.workflowHostFactory({
+								sessionManager: options.sessionManager,
+								artifactRoot,
+								workflowId: sessionId,
+								rootSessionId: sessionId,
+								runtimeVersion: options.services.runtimeVersion,
+								primeWorkflowSnapshots: options.services.primeWorkflowSnapshots,
+								primeWorkflowAdaptersFactory: options.services.primeWorkflowAdaptersFactory,
+								taskRuntimeAuthorityFactory: options.services.taskRuntimeAuthorityFactory,
+								goalAuthoritySourceResolver,
+								taskRuntimePrimeAdapter: options.services.taskRuntimePrimeAdapter,
+								primeWorkflowWorkerLauncher,
+								primeWorkflowWorkerFailureDelivery,
+								progressWakeDelivery,
+								workerModelCapabilityAdmission: options.services.workerModelCapabilityAdmission,
+								workerModelCapabilityAvailability: options.services.workerModelCapabilityAvailability,
+								primeWorkflowResourceLoader: options.services.resourceLoader,
+								approvalSecretDelivery,
+								executionEvidenceSourceDelivery,
+								beforeTaskLaunch,
+							})
+						: await createPersistedSessionWorkflowHost({
+								artifactRoot,
+								workflowId: sessionId,
+								rootSessionId: sessionId,
+								genesisEpoch: persistedAuthority?.genesisEpoch ?? { storeEpoch: 1, coordinatorEpoch: 1 },
+								writerIdentity: persistedAuthority?.writerIdentity,
+								runtimeVersion: options.services.runtimeVersion,
+								primeWorkflowSnapshots: options.services.primeWorkflowSnapshots,
+								primeWorkflowAdaptersFactory: options.services.primeWorkflowAdaptersFactory,
+								taskRuntimeAuthorityFactory: options.services.taskRuntimeAuthorityFactory,
+								goalAuthoritySourceResolver,
+								taskRuntimePrimeAdapter: options.services.taskRuntimePrimeAdapter,
+								primeWorkflowWorkerLauncher,
+								primeWorkflowWorkerFailureDelivery,
+								progressWakeDelivery,
+								workerModelCapabilityAdmission: options.services.workerModelCapabilityAdmission,
+								workerModelCapabilityAvailability: options.services.workerModelCapabilityAvailability,
+								primeWorkflowResourceLoader: options.services.resourceLoader,
+								approvalSecretDelivery,
+								executionEvidenceSourceDelivery,
+								beforeTaskLaunch,
+								goalProjection: {
+									read: () => result.session.readGoalStateForWorkflowProjection(),
+									compareAndSwap: (expected, next, binding) =>
+										result.session.compareAndSwapGoalState(expected, next, binding),
+								},
+							});
+					if (options.services.workflowHostFactory !== undefined) await workflowHost.recoverBeforeResume();
+					else if (workflowHost.status().status === "active") await workflowHost.recoverBeforeResume();
+					result.session.setWorkflowHost(workflowHost, executionEvidenceSource);
+				} catch (error) {
+					executionEvidenceSource = undefined;
+					await workflowHost?.dispose?.().catch(() => undefined);
+					throw error;
+				}
+			};
+			if (options.services.workflowHostFactory !== undefined || persistedAuthority !== null) {
+				await createWorkflowHost();
+				await result.session.resumeActiveWorkflow();
+			} else {
+				result.session.setWorkflowHostLoader(createWorkflowHost);
+			}
+			workflowSetupGate.resolve();
+		} catch (error) {
+			workflowSetupGate.reject(error);
+			await result.session.disposeAsync();
+			throw error;
+		}
+	}
 	if (result.session.rlmDepth === 0 && !options.telemetryDisabled) {
 		installAgentTelemetry(result.session, {
 			agentDir: options.services.agentDir,
