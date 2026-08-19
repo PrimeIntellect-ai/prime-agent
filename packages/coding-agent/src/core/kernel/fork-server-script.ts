@@ -17,11 +17,9 @@
 //   <- { "id": <n>, "outcome": "signaled"|"already-exited"|"unknown-pid" }  kill reply
 //   <- { "id": <n>, "alive": true|false }              alive reply
 //
-// Kill/alive are keyed by the fork request id, never a raw pid: request ids are
-// unique and never reused, so an id can only ever name the one child incarnation
-// it forked — a reaped pid recycled by a later fork can't alias to an old handle.
-// The forkserver is the kernels' parent, so it can signal an un-reaped child
-// without any OS-level pid-reuse race either, which Node (a non-parent) cannot.
+// Kill/alive are keyed by the never-reused fork request id, so a handle can only
+// name the one child incarnation it forked (a recycled pid can't alias), and the
+// forkserver signals only its own un-reaped children — POSIX-race-free.
 export const FORK_SERVER_SCRIPT = String.raw`
 import gc
 import json
@@ -32,14 +30,11 @@ import sys
 import threading
 import time
 
-# Registry: fork request id -> [pid, alive]. Ids are unique and never reused, so
-# an entry names exactly one child incarnation. _pid_to_id is the reverse index
-# for the reaper and only holds un-reaped, un-evicted children. Only the main
-# thread mutates these (the SIGCHLD handler runs between bytecodes there).
+# fork id -> [pid, alive]; _pid_to_id holds un-reaped, un-evicted children only.
+# Only the main thread mutates these (the SIGCHLD handler runs between its bytecodes).
 _children = {}
 _pid_to_id = {}
-# FIFO bound on registry history so it can't grow unbounded over the forkserver's
-# lifetime; kill/alive for an evicted id fail closed ("unknown-pid"/false).
+# FIFO history bound; kill/alive for an evicted id fail closed.
 _history_bound = 4096
 
 
@@ -105,11 +100,8 @@ def _run_child(connection_path, cwd, env):
     # instance (and, critically, a jupyter_client Session created in *this* pid;
     # a Session inherited from the template silently drops messages via check_pid).
     IPKernelApp.clear_instance()
-    # Watch the forkserver (our real parent), not the Node worker: ipykernel's
-    # poller distrusts a handle that differs from getppid() and would fall back
-    # to watching for pid-1 reparenting, which subreapers (systemd --user) break.
-    # The forkserver's own watchdog ties its lifetime to the worker, so watching
-    # it transitively covers a hard-killed worker on every platform.
+    # Watch our real parent (the forkserver): ipykernel distrusts a handle that
+    # differs from getppid(), and its pid-1 fallback breaks under subreapers.
     app = IPKernelApp.instance(
         connection_file=connection_path,
         parent_handle=os.getppid(),
@@ -126,9 +118,8 @@ def _serve(control_path):
     sock.connect(control_path)
     control_fd = sock.fileno()
 
-    # Block SIGCHLD before spawning any thread: the watcher inherits the blocked
-    # mask, so the kernel can never deliver process-directed SIGCHLD to it (which
-    # would run _reap_children in the main thread even while it is masked there).
+    # Block SIGCHLD before spawning the watcher so it inherits the blocked mask;
+    # otherwise the kernel could deliver SIGCHLD there while the main thread is masked.
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
 
     # Compare against the original ppid (not ==1) so this holds under subreapers.
@@ -137,8 +128,7 @@ def _serve(control_path):
 
     # Reap forked kernels as they exit, independent of the request loop.
     signal.signal(signal.SIGCHLD, _reap_children)
-    # Unblock only after the handler is installed; the main thread is now the sole
-    # thread with SIGCHLD unblocked, so the kill-path mask is authoritative.
+    # Unblock after handler install; the main thread's mask is now authoritative.
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
 
     _import_template()
@@ -166,15 +156,13 @@ def _serve(control_path):
 
         kill_id = req.get("kill")
         if kill_id is not None:
-            # Block SIGCHLD across check+kill so the registry can't change in
-            # between: while blocked, an alive entry means an un-reaped own child
-            # (zombie-pinned pid), making os.kill POSIX-race-free.
+            # Blocked across check+kill: an alive entry then means an un-reaped
+            # own child (zombie-pinned pid), so os.kill is race-free.
             signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
             try:
                 entry = _children.get(kill_id)
                 if entry is None:
-                    # Unknown or evicted id: fail closed, never signal anything.
-                    outcome = "unknown-pid"
+                        outcome = "unknown-pid"
                 elif not entry[1]:
                     outcome = "already-exited"
                 else:
@@ -201,9 +189,8 @@ def _serve(control_path):
         cwd = req.get("cwd")
         env = req.get("env")
 
-        # Block SIGCHLD across fork+bookkeeping: a fast-exiting child could
-        # otherwise be reaped before its registry entry exists, recording a
-        # stale (possibly reused) pid as alive.
+        # Blocked across fork+bookkeeping: a fast-exiting child could otherwise
+        # be reaped before its registry entry exists, recording a stale pid as alive.
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
         try:
             pid = os.fork()
@@ -214,8 +201,7 @@ def _serve(control_path):
             continue
 
         if pid == 0:
-            # Child: it inherits the forking thread's mask with SIGCHLD blocked;
-            # unblock first so the kernel's own child handling can see SIGCHLD.
+            # The child inherits the blocked mask; the kernel needs SIGCHLD.
             signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
             # Shed every inherited fd tied to the control channel, then run.
             try:
@@ -237,8 +223,7 @@ def _serve(control_path):
         # Parent: stay pristine (no loop/threads/ZMQ ever) so the next fork is clean.
         _children[req_id] = [pid, True]
         _pid_to_id[pid] = req_id
-        # FIFO eviction (dicts preserve insertion order); an evicted-while-alive
-        # child just loses its reverse-index entry, so its later reap is a no-op.
+        # FIFO eviction; an evicted-while-alive child's later reap is a no-op.
         while len(_children) > _history_bound:
             evicted_id = next(iter(_children))
             evicted_pid, evicted_alive = _children.pop(evicted_id)

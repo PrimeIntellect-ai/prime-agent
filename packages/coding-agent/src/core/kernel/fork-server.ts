@@ -68,11 +68,9 @@ export type ForkedKernelKillSignal = "TERM" | "KILL";
 export type ForkedKernelKillOutcome = "signaled" | "already-exited" | "unknown-pid";
 
 /**
- * Handle to a forkserver-forked kernel. All signaling/liveness goes through the
- * forkserver (the kernel's parent), keyed by the fork request id (never a raw
- * pid, which can alias across children via reuse) — process.kill from Node is
- * never used. Both methods reject with ForkServerUnavailable when the server is
- * dead or the reply is malformed. `pid` exists for journal writes only.
+ * Handle to a forkserver-forked kernel: signaling/liveness go through the
+ * forkserver by fork request id, never process.kill (see the protocol header
+ * in fork-server-script.ts). `pid` exists for journal writes only.
  */
 export interface ForkedKernelHandle {
 	readonly pid: number;
@@ -239,9 +237,8 @@ export class ForkServer {
 			if (typeof msg.id !== "number") continue;
 			const p = this.pending.get(msg.id);
 			if (!p) {
-				// A pid for a request the caller already abandoned (timed out): the
-				// fork succeeded but nobody owns it, so ask the forkserver — the
-				// orphan's parent — to kill it by its fork request id (never process.kill).
+				// A fork the caller already abandoned (timed out): nobody owns it,
+				// so have the forkserver kill it.
 				if (this.abandoned.delete(msg.id) && typeof msg.pid === "number") {
 					void this.killChild(msg.id, "TERM").catch(() => {});
 				}
@@ -281,8 +278,6 @@ export class ForkServer {
 			throw new ForkServerUnavailable(this.withStderr(msg.error ?? "forkserver fork failed"));
 		}
 		const pid = msg.pid;
-		// The reply echoes the fork request id — the stable, never-reused key this
-		// handle kills/polls by, so it can only ever act on this child incarnation.
 		const forkId = msg.id;
 		return {
 			pid,

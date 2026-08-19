@@ -590,9 +590,8 @@ export class KernelManager {
 	private readonly commTargets = new Map<string, string>();
 	private readonly handledHostRequestCommIds = new Set<string>();
 	private kernel?: ChildProcess;
-	// Set instead of `kernel` when the kernel was forked from the forkserver: it is
-	// not a direct child, so signaling/liveness go through the forkserver (the
-	// kernel's parent) via this handle — never a bare process.kill on its pid.
+	// Set instead of `kernel` for forkserver-forked kernels (not our child):
+	// signaling/liveness go through the forkserver, never process.kill.
 	private forkedKernel?: ForkedKernelHandle;
 	/** Polls a forked kernel for death (no "exit" event on a non-child). */
 	private forkedLivenessTimer?: ReturnType<typeof globalThis.setInterval>;
@@ -692,10 +691,8 @@ export class KernelManager {
 				const handle = await forkKernel(python, {
 					connectionPath: connection.path,
 					cwd: this.options.cwd,
-					// Merge the current host env with per-kernel overrides, applied fresh
-					// in the child (the template's inherited snapshot may be stale by fork
-					// time). No JPY_PARENT_PID here: the forked child watches the
-					// forkserver via parent_handle=getppid() instead.
+					// Applied fresh in the child (the template's env snapshot may be stale).
+					// No JPY_PARENT_PID: forked children watch the forkserver by getppid().
 					env: { ...process.env, ...this.options.env },
 				});
 				this.forkedKernel = handle;
@@ -791,9 +788,8 @@ export class KernelManager {
 		this.startForkedLivenessMonitor();
 	}
 
-	// A forked kernel isn't a direct child, so no "exit" fires when it dies. Poll
-	// the forkserver so a mid-run death tears down like the direct-spawn exit
-	// handler: mark shutdown, drop from liveKernels, reject in-flight execution.
+	// No "exit" event fires for a non-child; poll the forkserver so a mid-run
+	// death tears down like the direct-spawn exit handler.
 	private startForkedLivenessMonitor(): void {
 		if (!this.forkedKernel) return;
 		this.forkedLivenessTimer = globalThis.setInterval(() => {
@@ -813,15 +809,13 @@ export class KernelManager {
 		this.cleanupResources();
 	}
 
-	// Liveness comes from the forkserver's reap table (never a pid-0 probe from
-	// Node, which races with pid reuse).
+	// Liveness from the forkserver's reap table; a pid-0 probe would race reuse.
 	private async forkedKernelDead(): Promise<boolean> {
 		if (!this.forkedKernel) return false;
 		try {
 			return !(await this.forkedKernel.isAlive());
 		} catch {
-			// Forkserver gone: the kernel's parent_handle watchdog exits it too, so
-			// report dead and let startup/monitor tear down promptly.
+			// Forkserver gone: its kernels' parent_handle watchdogs exit them too.
 			return true;
 		}
 	}
@@ -1410,16 +1404,11 @@ export class KernelManager {
 			if (directPid !== undefined) recordOrphanProcessState(directPid, false);
 		} else if (this.forkedKernel) {
 			const forked = this.forkedKernel;
-			// Kill via the forkserver (the kernel's parent), never process.kill. The
-			// journal is raw-pid keyed, so inactive is written only on "signaled":
-			// at the SIGCHLD-blocked dispatch the fork id still mapped to our
-			// un-reaped child, so the pid provably belonged to our incarnation.
-			// "already-exited"/"unknown-pid"/errors leave the record stale-active
-			// (the reaper verifies processStartId, so a stale record self-neutralizes;
-			// a wrong inactive write could mask a sibling's record for a reused pid).
-			// On the 'exit' path the reply never lands: stale-active again, and the
-			// later-registered disposeAllForkServers exit handler SIGTERMs the
-			// forkserver, taking kernels down via parent_handle.
+			// The journal is raw-pid keyed, so inactive is written only on "signaled"
+			// — the one outcome proving the pid still named our un-reaped child. Any
+			// other outcome leaves the record stale-active: the reaper's startId check
+			// neutralizes it, while a wrong inactive write could mask a sibling's
+			// record for a reused pid.
 			void forked
 				.kill(killSignal === "SIGKILL" ? "KILL" : "TERM")
 				.then((outcome) => {
