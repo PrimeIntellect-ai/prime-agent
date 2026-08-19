@@ -87,6 +87,18 @@ interface RequestBody {
 	[key: string]: unknown;
 }
 
+/**
+ * A request failure the retry loop must not retry. It is raised inside the same
+ * try block that catches transport errors, so it needs to be distinguishable
+ * there or the catch would retry the very statuses isRetryableError rejected.
+ */
+class NonRetryableCodexRequestError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "NonRetryableCodexRequestError";
+	}
+}
+
 function isRetryableError(status: number, errorText: string): boolean {
 	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
 		return true;
@@ -247,8 +259,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						statusText: response.statusText,
 					});
 					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
+					throw new NonRetryableCodexRequestError(info.friendlyMessage || info.message);
 				} catch (error) {
+					if (error instanceof NonRetryableCodexRequestError) {
+						throw error;
+					}
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
@@ -501,41 +516,77 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 	return CODEX_RESPONSE_STATUSES.has(status as CodexResponseStatus) ? (status as CodexResponseStatus) : undefined;
 }
 
+function parseSseEventChunk(chunk: string): Record<string, unknown> | undefined {
+	const dataLines = chunk
+		.split("\n")
+		.filter((l) => l.startsWith("data:"))
+		.map((l) => l.slice(5).trim());
+	if (dataLines.length === 0) return undefined;
+
+	const data = dataLines.join("\n").trim();
+	if (!data || data === "[DONE]") return undefined;
+
+	try {
+		return JSON.parse(data) as Record<string, unknown>;
+	} catch (cause) {
+		throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
+			cause,
+			payload: data,
+		});
+	}
+}
+
 async function* parseSSE(response: Response): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
+	// A chunk that ends on the CR of a CRLF pair is held back so the pair is not
+	// normalized into two separate newlines, which would look like an event boundary
+	// in the middle of an event.
+	let pendingCarriageReturn = false;
+
+	const appendToBuffer = (text: string): void => {
+		let next = pendingCarriageReturn ? `\r${text}` : text;
+		pendingCarriageReturn = false;
+		if (next.endsWith("\r")) {
+			next = next.slice(0, -1);
+			pendingCarriageReturn = true;
+		}
+		// SSE separates events with a blank line. On the wire that is CRLF for a
+		// spec-compliant server and for anything behind a proxy that rewrites line
+		// endings, so framing must not assume LF.
+		buffer += next.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	};
 
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
+			if (done) {
+				appendToBuffer(decoder.decode());
+				if (pendingCarriageReturn) {
+					buffer += "\n";
+					pendingCarriageReturn = false;
+				}
+				// Emit whatever is left. A body that does not end with a blank line
+				// would otherwise drop its final event, and for Codex that is
+				// response.completed, which carries usage, cost, and the toolUse stop
+				// reason - losing it reports a successful, empty, free turn.
+				const tail = buffer;
+				buffer = "";
+				const event = parseSseEventChunk(tail);
+				if (event) yield event;
+				break;
+			}
+			appendToBuffer(decoder.decode(value, { stream: true }));
 
 			let idx = buffer.indexOf("\n\n");
 			while (idx !== -1) {
 				const chunk = buffer.slice(0, idx);
 				buffer = buffer.slice(idx + 2);
-
-				const dataLines = chunk
-					.split("\n")
-					.filter((l) => l.startsWith("data:"))
-					.map((l) => l.slice(5).trim());
-				if (dataLines.length > 0) {
-					const data = dataLines.join("\n").trim();
-					if (data && data !== "[DONE]") {
-						try {
-							yield JSON.parse(data) as Record<string, unknown>;
-						} catch (cause) {
-							throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
-								cause,
-								payload: data,
-							});
-						}
-					}
-				}
+				const event = parseSseEventChunk(chunk);
+				if (event) yield event;
 				idx = buffer.indexOf("\n\n");
 			}
 		}
