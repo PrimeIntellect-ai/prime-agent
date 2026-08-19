@@ -13,8 +13,10 @@ function readOrientationFromTiff(bytes: Uint8Array, tiffStart: number): number {
 		return (bytes[pos] << 8) | bytes[pos + 1];
 	};
 
+	// TIFF offsets are unsigned. `<< 24` is a signed shift, so the result needs
+	// `>>> 0` or a high bit turns the offset negative.
 	const read32 = (pos: number): number => {
-		if (le) return bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24);
+		if (le) return (bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24)) >>> 0;
 		return ((bytes[pos] << 24) | (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3]) >>> 0;
 	};
 
@@ -66,8 +68,11 @@ function findWebpTiffOffset(bytes: Uint8Array): number {
 	let offset = 12;
 	while (offset + 8 <= bytes.length) {
 		const chunkId = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+		// RIFF chunk sizes are unsigned. `<< 24` is a signed shift, so a size with the
+		// high bit set would decode negative and walk `offset` backwards or leave it
+		// unchanged, which is an unbreakable loop on the main thread.
 		const chunkSize =
-			bytes[offset + 4] | (bytes[offset + 5] << 8) | (bytes[offset + 6] << 16) | (bytes[offset + 7] << 24);
+			(bytes[offset + 4] | (bytes[offset + 5] << 8) | (bytes[offset + 6] << 16) | (bytes[offset + 7] << 24)) >>> 0;
 		const dataStart = offset + 8;
 
 		if (chunkId === "EXIF") {
@@ -78,7 +83,11 @@ function findWebpTiffOffset(bytes: Uint8Array): number {
 		}
 
 		// RIFF chunks are padded to even size
-		offset = dataStart + chunkSize + (chunkSize % 2);
+		const nextOffset = dataStart + chunkSize + (chunkSize % 2);
+		// A declared size that does not advance the scan means the chunk table is
+		// malformed; stop rather than re-reading the same header forever.
+		if (nextOffset <= offset) return -1;
+		offset = nextOffset;
 	}
 
 	return -1;
