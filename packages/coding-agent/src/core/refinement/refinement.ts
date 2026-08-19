@@ -860,6 +860,14 @@ export interface RefinementPlan {
  * here can take many seconds, during which the kernel or another session may write
  * the shared `harness_state.json`.
  */
+/** Mint a refinement id in the canonical `refine_<timestamp>` format. */
+export function generateRefinementId(): string {
+	return `refine_${new Date()
+		.toISOString()
+		.replace(/[^0-9]/g, "")
+		.slice(0, 17)}`;
+}
+
 export async function planRefinement(
 	messages: AgentMessage[],
 	state: HarnessState,
@@ -871,10 +879,7 @@ export async function planRefinement(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 ): Promise<RefinementPlan> {
-	const id = `refine_${new Date()
-		.toISOString()
-		.replace(/[^0-9]/g, "")
-		.slice(0, 17)}`;
+	const id = generateRefinementId();
 	if (options.rollbackId) {
 		const target = history.find((item) => item.id === options.rollbackId);
 		if (!target) {
