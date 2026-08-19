@@ -14,10 +14,6 @@ export interface EditorPasteSnapshot {
  * compatibility with the core application.
  */
 export interface EditorComponent extends Component {
-	// =========================================================================
-	// Core text access (required)
-	// =========================================================================
-
 	/** Get the current text content */
 	getText(): string;
 
@@ -27,19 +23,11 @@ export interface EditorComponent extends Component {
 	/** Handle raw terminal input (key presses, paste sequences, etc.) */
 	handleInput(data: string): void;
 
-	// =========================================================================
-	// Callbacks (required)
-	// =========================================================================
-
 	/** Called when user submits (e.g., Enter key) */
 	onSubmit?: (text: string) => void;
 
 	/** Called when text changes */
 	onChange?: (text: string) => void;
-
-	// =========================================================================
-	// History support (optional)
-	// =========================================================================
 
 	/** Add text to history for up/down navigation */
 	addToHistory?(text: string): void;
@@ -49,10 +37,6 @@ export interface EditorComponent extends Component {
 
 	/** Clear prompt history (e.g. when switching to a different session). */
 	clearHistory?(): void;
-
-	// =========================================================================
-	// Advanced text manipulation (optional)
-	// =========================================================================
 
 	/** Insert text at current cursor position */
 	insertTextAtCursor?(text: string): void;
@@ -67,16 +51,8 @@ export interface EditorComponent extends Component {
 
 	restorePasteSnapshot?(snapshot: EditorPasteSnapshot): void;
 
-	// =========================================================================
-	// Autocomplete support (optional)
-	// =========================================================================
-
 	/** Set the autocomplete provider */
 	setAutocompleteProvider?(provider: AutocompleteProvider): void;
-
-	// =========================================================================
-	// Appearance (optional)
-	// =========================================================================
 
 	/** Border color function */
 	borderColor?: (str: string) => string;

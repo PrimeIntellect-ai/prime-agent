@@ -113,7 +113,6 @@ except RuntimeError as error:
 			'RuntimeError: host request type "goal.get" is not available in this session',
 		);
 
-		// A "type" key smuggled into the payload must not reroute the request.
 		const reroute = await manager.execute(`
 import rlm as _rlm
 try:

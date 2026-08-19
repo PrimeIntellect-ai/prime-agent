@@ -56,8 +56,6 @@ describe.sequential("MCP OAuth provider", () => {
 				authUrl = info.url;
 			},
 			onPrompt: async () => "",
-			// Headless: supply the redirect URL via the manual-input path, which
-			// races (and wins against) the local callback server.
 			onManualCodeInput: async () => {
 				const state = new URL(authUrl).searchParams.get("state") ?? "";
 				return `${REDIRECT}?code=the-code&state=${state}`;
@@ -67,7 +65,6 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(creds.access).toBe("access-1");
 		expect(creds.refresh).toBe("refresh-1");
 		expect(creds.expires).toBeGreaterThan(Date.now());
-		// auth URL carries PKCE challenge + registered client id
 		const authParams = new URL(authUrl).searchParams;
 		expect(authParams.get("client_id")).toBe("client-xyz");
 		expect(authParams.get("code_challenge")).toBeTruthy();
@@ -76,8 +73,6 @@ describe.sequential("MCP OAuth provider", () => {
 
 	it("falls back to the next port when the base callback port is in use", async () => {
 		const http = await import("node:http");
-		// Occupy the base callback port. If something already holds it (e.g. a stray
-		// local daemon), that satisfies the precondition too — bind best-effort.
 		const blocker = http.createServer();
 		const blockerBound = await new Promise<boolean>((resolve) => {
 			blocker.once("error", () => resolve(false));
@@ -107,7 +102,6 @@ describe.sequential("MCP OAuth provider", () => {
 				},
 			});
 			expect(creds.access).toBe("a");
-			// Did NOT use the blocked base port.
 			const redirect = new URL(authUrl).searchParams.get("redirect_uri") ?? "";
 			expect(redirect).not.toContain(":53700/");
 			expect(redirect).toContain(":5370");

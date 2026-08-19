@@ -12,7 +12,7 @@ import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
-import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
+import { defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { isLocalPath } from "../utils/paths.js";
 import { isValidThinkingLevel } from "./args.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
@@ -107,7 +107,7 @@ function parseDaemonClientCommand(args: string[]): ParsedDaemonClientCommand {
 			if (!value) {
 				throw new Error(`${arg} requires a value`);
 			}
-			socketPath = value;
+			socketPath = normalizeSocketPath(value);
 			index++;
 			continue;
 		}

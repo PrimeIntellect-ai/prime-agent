@@ -1,11 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
 
-/** Find a python that can launch an ipykernel and has dill, or null to skip. */
 function resolveKernelPython(): string | null {
 	const candidates = [
 		process.env.PRIME_AGENT_KERNEL_PYTHON,
@@ -98,8 +97,6 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		const cfg = { path, manifestPath: join(dir, "shadow.json") };
 		const writer = new KernelManager({ python: python as string, cwd: dir, snapshot: cfg });
 		try {
-			// Shadow builtins the snapshot helper itself relies on (list/print) plus a
-			// plain builtin-named var (id); the helper must still run and capture them.
 			await writer.execute("list = [10, 20]\nprint = 'shadowed'\nid = 99");
 			const snap = await writer.snapshotState();
 			expect(snap).not.toBeNull();
@@ -127,11 +124,9 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 			snapshot: { path: badPath, manifestPath: join(badDir, "corrupt.json") },
 		});
 		try {
-			// A valid dill file that deserializes to a list, not the expected name->bytes dict.
 			await manager.execute(`import dill\nopen(${JSON.stringify(badPath)}, "wb").write(dill.dumps([1, 2, 3]))`);
 			const restore = await manager.restoreState();
 			expect(restore).toBeNull();
-			// The kernel must still be usable after a failed restore.
 			const echo = await manager.execute("print('alive')");
 			expect(echo.stdout.trim()).toBe("alive");
 		} finally {
@@ -144,17 +139,93 @@ describeIfKernel("kernel state snapshot round-trip (real kernel)", { tags: ["ker
 		const listDir = mkdtempSync(join(tmpdir(), "prime-agent-state-list-"));
 		const manager = new KernelManager({ python: python as string, cwd: listDir });
 		try {
-			// A fresh, unstarted kernel reports no names.
 			expect(await manager.listNamespaceNames()).toBeNull();
 			await manager.execute("alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()");
 			const names = await manager.listNamespaceNames();
 			expect(names).toEqual(expect.arrayContaining(["alpha", "helper"]));
-			// Underscore-prefixed names and the live rlm handle must be filtered out.
 			expect(names).not.toContain("_hidden");
 			expect(names).not.toContain("rlm");
 		} finally {
 			await manager.dispose();
 			rmSync(listDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("caps each variable without reducing the aggregate snapshot budget", async () => {
+		const boundedDir = mkdtempSync(join(tmpdir(), "prime-agent-state-bounded-"));
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: boundedDir,
+			snapshot: {
+				path: join(boundedDir, "bounded.dill"),
+				manifestPath: join(boundedDir, "bounded.json"),
+				maxBytes: 10 * 1024,
+				maxVariableBytes: 8 * 1024,
+			},
+		});
+		try {
+			await manager.execute(`pickle_count = 0
+class _Counted:
+    def __reduce__(self):
+        global pickle_count
+        pickle_count += 1
+        return (dict, ())
+large_records = [_Counted() for _ in range(100_000)]
+large_text = "x" * 16_384
+small_text_one = "a" * 4_000
+small_text_two = "b" * 4_000
+aggregate_only = "c" * 4_000
+late_small = "d" * 1_000`);
+			await manager.execute("large_text");
+
+			const snapshot = await manager.snapshotState();
+			expect(snapshot?.skipped.map(({ name }) => name)).toEqual(
+				expect.arrayContaining(["large_records", "large_text", "aggregate_only"]),
+			);
+			expect(snapshot?.saved).toEqual(expect.arrayContaining(["small_text_one", "small_text_two", "late_small"]));
+			expect(await manager.listNamespaceNames()).toEqual(expect.arrayContaining(["large_records", "large_text"]));
+
+			const compacted = await manager.pruneOversizedVariables();
+			expect(compacted?.pruned).toEqual(expect.arrayContaining(["large_records", "large_text"]));
+			const remaining = await manager.listNamespaceNames();
+			expect(remaining).toEqual(
+				expect.arrayContaining(["small_text_one", "small_text_two", "aggregate_only", "late_small"]),
+			);
+			expect(remaining).not.toContain("large_records");
+			expect(remaining).not.toContain("large_text");
+			const outputCache = await manager.execute(
+				"print(any(isinstance(value, str) and len(value) == 16_384 for value in Out.values()))",
+			);
+			expect(outputCache.stdout.trim()).toBe("False");
+			const count = await manager.execute("print(pickle_count)");
+			expect(Number(count.stdout.trim())).toBeLessThan(100_000);
+		} finally {
+			await manager.dispose();
+			rmSync(boundedDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("keeps oversized variables when the compaction snapshot cannot be written", async () => {
+		const failedDir = mkdtempSync(join(tmpdir(), "prime-agent-state-prune-failure-"));
+		const blocker = join(failedDir, "not-a-directory");
+		writeFileSync(blocker, "block snapshot parent");
+		const manager = new KernelManager({
+			python: python as string,
+			cwd: failedDir,
+			snapshot: {
+				path: join(blocker, "state.dill"),
+				manifestPath: join(blocker, "state.json"),
+				maxBytes: 64 * 1024,
+				maxVariableBytes: 8 * 1024,
+			},
+		});
+		try {
+			await manager.execute('large_text = "x" * 16_384');
+			expect(await manager.pruneOversizedVariables()).toBeNull();
+			expect(await manager.listNamespaceNames()).toContain("large_text");
+		} finally {
+			await manager.dispose();
+			rmSync(failedDir, { recursive: true, force: true });
 		}
 	}, 60_000);
 

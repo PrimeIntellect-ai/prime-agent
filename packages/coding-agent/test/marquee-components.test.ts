@@ -91,7 +91,6 @@ describe("marquee TUI components", () => {
 		const component = new IPythonCellComponent(state);
 
 		const collapsed = await renderInVirtualTerminal(component);
-		// Collapsed: marker + the bash command + duration + error name, on one line.
 		expect(collapsed).toContain("bash");
 		expect(collapsed).toContain("echo hi");
 		expect(collapsed).not.toContain("%%bash");
@@ -228,7 +227,6 @@ describe("marquee TUI components", () => {
 		const component = new IPythonCellComponent(state);
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
-		// Collapsed python shows a one-line preview, the input line count, and the expand hint.
 		expect(collapsed).toContain("line_0 = 0");
 		expect(collapsed).not.toContain("line_7 = 7");
 		expect(collapsed).toContain("↑ 8");
@@ -253,7 +251,6 @@ describe("marquee TUI components", () => {
 		});
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
-		// A single status line carries both counts and exactly one expand hint.
 		expect(collapsed).toContain("↑ 8 ↓ 8 lines");
 		expect(collapsed.match(/to expand/g)?.length).toBe(1);
 	});
@@ -270,7 +267,6 @@ describe("marquee TUI components", () => {
 			details: { status: "ok", durationMs: 15 },
 			executionStarted: true,
 			argsComplete: true,
-			// Expanded so the long code/output lines wrap and reflow with width.
 			expanded: true,
 		};
 		const component = new IPythonCellComponent(state);
@@ -422,8 +418,6 @@ describe("marquee TUI components", () => {
 			isError: false,
 		});
 
-		// Collapsed: routed through the cell renderer (a status line), not the
-		// generic JSON arg dump.
 		const collapsedLines = component.render(100);
 		const collapsed = stripAnsi(collapsedLines.join("\n"));
 		expect(collapsed).toContain("python");
@@ -432,8 +426,6 @@ describe("marquee TUI components", () => {
 		expect(collapsed).not.toContain("ipython");
 		expect(collapsed).not.toContain('"code"');
 
-		// Expanded keeps the same status content while updating the toggle hint,
-		// then attaches the code and output below it, backgroundless like the top line.
 		component.setExpanded(true);
 		const expandedLines = component.render(100);
 		const expanded = stripAnsi(expandedLines.join("\n"));
