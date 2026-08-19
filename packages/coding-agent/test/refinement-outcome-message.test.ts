@@ -52,7 +52,7 @@ function result(): RefinementResult {
 }
 
 function rendered(component: RefinementOutcomeMessageComponent): string {
-	return stripAnsi(component.render(100).join("\n"));
+	return stripAnsi(component.render(120).join("\n"));
 }
 
 describe("RefinementOutcomeMessageComponent", () => {
@@ -61,21 +61,21 @@ describe("RefinementOutcomeMessageComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	test("shows edit identity collapsed and exact payload through the code-edit toggle", () => {
+	test("collapses to a labeled one-liner and expands through the shared tool toggle", () => {
 		const message = createRefinementOutcomeMessage(result());
 		const component = new RefinementOutcomeMessageComponent(message);
 
 		const collapsed = rendered(component);
-		expect(collapsed).toContain(
-			"✓ Refinement complete: Added local guidance to make conversational responses rhyme.",
-		);
-		expect(collapsed).toContain("Created local prompt `rhyme-response-guidance`");
-		expect(collapsed).toContain("Ctrl+J to expand");
-		expect(collapsed).not.toContain("Make conversational responses rhyme.");
+		expect(collapsed).toContain("[refinement]");
+		expect(collapsed).toContain("Added local guidance to make conversational responses rhyme.");
+		expect(collapsed).toContain("1 edit applied");
+		expect(collapsed).toContain("Ctrl+O to expand");
+		expect(collapsed).not.toContain("Created local prompt");
+		expect(collapsed).not.toContain('Make conversational responses rhyme."');
 
-		component.setEditDiffsExpanded(true);
+		component.setExpanded(true);
 		const expanded = rendered(component);
-		expect(expanded).toContain("Ctrl+J to collapse");
+		expect(expanded).toContain("Created local prompt `rhyme-response-guidance`");
 		expect(expanded).toContain('"content": "Make conversational responses rhyme."');
 		expect(expanded).toContain('"path": "prompts/rhyme-response-guidance.md"');
 	});
@@ -93,7 +93,7 @@ describe("RefinementOutcomeMessageComponent", () => {
 			],
 		});
 		const component = new RefinementOutcomeMessageComponent(message);
-		component.setEditDiffsExpanded(true);
+		component.setExpanded(true);
 		const output = rendered(component);
 
 		expect(output).toContain("Updated local prompt `tone-guidance`");
@@ -103,18 +103,18 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(output).toContain('"content": "Use prose."');
 	});
 
-	test("replays the durable outcome with the saved edit expansion state", () => {
+	test("replays the durable outcome with the saved tool expansion state", () => {
 		const message = createRefinementOutcomeMessage(result());
 		const [component] = buildConversationComponents([message], {
 			ui: {} as TUI,
 			cwd: "/tmp",
 			toolOptions: {},
 			getToolDefinition: () => undefined,
-			editDiffsExpanded: true,
+			toolsExpanded: true,
 		});
 
 		expect(component).toBeInstanceOf(RefinementOutcomeMessageComponent);
-		expect(stripAnsi(component!.render(100).join("\n"))).toContain(
+		expect(stripAnsi(component!.render(120).join("\n"))).toContain(
 			'"content": "Make conversational responses rhyme."',
 		);
 	});

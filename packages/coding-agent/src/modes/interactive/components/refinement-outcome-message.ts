@@ -1,4 +1,4 @@
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, Spacer, Text } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
 import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
@@ -52,64 +52,68 @@ function editLabel(edit: AppliedRefinementEdit, fallbackScope: "local" | "global
 	return `${theme.fg("success", verb)} ${scope} ${edit.kind} \`${edit.id}\``;
 }
 
-export class RefinementOutcomeMessageComponent extends Container {
-	private readonly content = new Container();
-	private editDiffsExpanded = false;
+function editCount(edits: AppliedRefinementEdit[]): string {
+	const applied = edits.filter((edit) => edit.applied).length;
+	return edits.length === applied
+		? `${applied} edit${applied === 1 ? "" : "s"} applied`
+		: `${applied}/${edits.length} edits applied`;
+}
+
+/**
+ * Renders a durable refinement outcome with collapsed/expanded state.
+ * Mirrors the compaction-summary and skill-invocation components: a
+ * custom-message box with a bold [refinement] label, collapsed to a single
+ * line and expanded via the shared tool-output expansion toggle.
+ */
+export class RefinementOutcomeMessageComponent extends Box {
+	private expanded = false;
 
 	constructor(private readonly message: RefinementOutcomeMessage) {
-		super();
-		this.addChild(new Spacer(1));
-		this.addChild(this.content);
-		this.rebuild();
+		super(1, 1, (t) => theme.bg("customMessageBg", t));
+		this.updateDisplay();
 	}
 
-	setExpanded(_expanded: boolean): void {}
-
-	setEditDiffsExpanded(expanded: boolean): void {
-		if (this.editDiffsExpanded === expanded) return;
-		this.editDiffsExpanded = expanded;
-		this.rebuild();
+	setExpanded(expanded: boolean): void {
+		if (this.expanded === expanded) return;
+		this.expanded = expanded;
+		this.updateDisplay();
 	}
 
 	override invalidate(): void {
 		super.invalidate();
-		this.rebuild();
+		this.updateDisplay();
 	}
 
-	private rebuild(): void {
-		this.content.clear();
-		this.content.addChild(
-			new Text(theme.fg("success", `✓ Refinement complete: ${this.message.details.summary}`), 0, 0),
-		);
+	private updateDisplay(): void {
+		this.clear();
 
-		const edits = this.message.details.edits;
-		const applied = edits.filter((edit) => edit.applied).length;
-		const count =
-			edits.length === applied
-				? `${applied} edit${applied === 1 ? "" : "s"} applied`
-				: `${applied}/${edits.length} edits applied`;
-		const hint = edits.length === 0 ? "" : ` · ${expandCollapseHint("app.edits.expand", this.editDiffsExpanded)}`;
-		this.content.addChild(new Text(`Refined continual harness state: ${count}${hint}`, 0, 0));
+		const { summary, edits, scope } = this.message.details;
+		const label = theme.fg("customMessageLabel", `\x1b[1m[refinement]\x1b[22m`);
+		if (!this.expanded) {
+			const line =
+				`${label} ` +
+				theme.fg("customMessageText", `${summary} · ${editCount(edits)}`) +
+				` ${expandCollapseHint("app.tools.expand", false)}`;
+			this.addChild(new Text(line, 0, 0));
+			return;
+		}
 
+		this.addChild(new Text(label, 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("customMessageText", `${summary} · ${editCount(edits)}`), 0, 0));
 		for (const edit of edits) {
-			this.content.addChild(
-				new Text(`${theme.fg("dim", "    ╰─ ")}${editLabel(edit, this.message.details.scope)}`, 0, 0),
-			);
-			if (this.editDiffsExpanded) {
-				const diff = editDiff(edit);
-				if (diff) this.content.addChild(new Text(renderDiff(diff), 4, 0));
-			}
+			this.addChild(new Text(`${theme.fg("dim", "  ╰─ ")}${editLabel(edit, scope)}`, 0, 0));
+			const diff = editDiff(edit);
+			if (diff) this.addChild(new Text(renderDiff(diff), 4, 0));
 		}
 	}
 }
 
-export class MalformedRefinementOutcomeMessageComponent extends Container {
+export class MalformedRefinementOutcomeMessageComponent extends Box {
 	constructor() {
-		super();
-		this.addChild(new Spacer(1));
+		super(1, 1, (t) => theme.bg("customMessageBg", t));
 		this.addChild(new Text(theme.fg("error", "[Malformed refinement outcome message]"), 0, 0));
 	}
 
 	setExpanded(_expanded: boolean): void {}
-	setEditDiffsExpanded(_expanded: boolean): void {}
 }

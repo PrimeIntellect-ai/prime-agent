@@ -153,7 +153,7 @@ export function buildConversationComponents(
 			const component = isRefinementOutcomeMessage(message)
 				? new RefinementOutcomeMessageComponent(message)
 				: new MalformedRefinementOutcomeMessageComponent();
-			component.setEditDiffsExpanded(editDiffsExpanded);
+			component.setExpanded(expanded);
 			components.push(component);
 		} else if (isAgentSessionMessage(message) && message.display) {
 			const component = new AgentMessageComponent(message, options.markdownTheme, {
