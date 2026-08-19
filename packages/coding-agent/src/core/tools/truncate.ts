@@ -185,12 +185,17 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 
 		if (outputBytesCount + lineBytes > maxBytes) {
 			truncatedBy = "bytes";
-			// Edge case: if we haven't added ANY lines yet and this line exceeds maxBytes,
-			// take the end of the line (partial)
-			if (outputLinesArr.length === 0) {
-				const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes);
+			// Edge case: if no line with content has been collected yet and this line
+			// exceeds the remaining budget, keep the end of it (partial). Content that
+			// ends with a newline splits into a trailing empty element, so testing
+			// `outputLinesArr.length === 0` here would skip this fallback and return
+			// nothing at all for output whose last line is longer than maxBytes.
+			if (!outputLinesArr.some((collected) => collected.length > 0)) {
+				const separatorBytes = outputLinesArr.length > 0 ? 1 : 0;
+				const budget = Math.max(0, maxBytes - outputBytesCount - separatorBytes);
+				const truncatedLine = truncateStringToBytesFromEnd(line, budget);
 				outputLinesArr.unshift(truncatedLine);
-				outputBytesCount = Buffer.byteLength(truncatedLine, "utf-8");
+				outputBytesCount += Buffer.byteLength(truncatedLine, "utf-8") + separatorBytes;
 				lastLinePartial = true;
 			}
 			break;
