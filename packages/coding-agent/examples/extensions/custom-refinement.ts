@@ -35,8 +35,12 @@ export default function (pi: ExtensionAPI) {
 
 		ctx.ui.notify(`Custom refinement (${trigger}, ${scope}) with ${model.id}...`, "info");
 
+		// Global entries are read-only during a local refinement; label scopes so
+		// the model never proposes edits against another scope's ids.
 		const existingIds = Object.entries(planningState.entries)
-			.flatMap(([kind, entries]) => Object.keys(entries).map((id) => `${kind}:${id}`))
+			.flatMap(([kind, entries]) =>
+				Object.entries(entries).map(([id, entry]) => `${entry.scope ?? scope}:${kind}:${id}`),
+			)
 			.join(", ");
 		const recentRefinements = history
 			.slice(-5)
@@ -52,7 +56,8 @@ export default function (pi: ExtensionAPI) {
 						text: `You maintain a persistent "continual harness" of prompt notes, memories, skills, and subagent specs for a coding agent.
 From the conversation, propose a SMALL set of create/update/delete edits that capture durable, reusable lessons.
 
-Existing entry ids: ${existingIds || "(none)"}
+Existing entries as scope:kind:id (use the bare id in edits): ${existingIds || "(none)"}
+This refinement targets the ${scope} scope. Entries from any other scope are read-only: never propose update or delete edits for them.
 Recent refinements:
 ${recentRefinements || "(none)"}
 ${instructions ? `Focus: ${instructions}` : ""}

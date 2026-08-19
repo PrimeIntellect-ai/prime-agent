@@ -478,7 +478,7 @@ export type SerializedBackgroundPlanResult =
 			abort: AbortController;
 			branchVersion: number;
 	  }
-	| { status: "skip" }
+	| { status: "skip"; explicit?: boolean }
 	| { status: "invalidated"; branchVersion: number }
 	| {
 			status: "failure";
@@ -2146,8 +2146,11 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "skip") {
-				// Reviewer declined during background planning.
+				// Reviewer declined or an extension skipped during background planning.
 				// Reset exactly once. Never retry the interval review; only fall through for a separate pending refine.run.
+				if (bgResult.explicit) {
+					this._emitRefineFailed(new RefineSkippedError("Refinement skipped by extension"));
+				}
 				this._lastAutoRefineReviewAt = Date.now();
 				this._assistantTurnsSinceAutoRefine = 0;
 				if (!this._pendingRequestedRefine) {
@@ -2276,9 +2279,7 @@ export class AgentSession {
 				this._assistantTurnsSinceAutoRefine = 0;
 				return;
 			}
-			await this._runSerializedRefine({
-				instructions: autoRefineInstructions(reason, review),
-			});
+			await this._runSerializedRefine({ instructions: autoRefineInstructions(reason, review) }, "auto");
 			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
 				return;
 			}
@@ -2287,7 +2288,12 @@ export class AgentSession {
 		} catch (error) {
 			if (branchVersion === this._autoRefineBranchVersion) {
 				this._lastAutoRefineReviewAt = Date.now();
-				this._emitRefineFailed(error);
+				// An extension skip is an intentional non-round, not a failure.
+				if (error instanceof RefineSkippedError) {
+					this._assistantTurnsSinceAutoRefine = 0;
+				} else {
+					this._emitRefineFailed(error);
+				}
 			}
 		} finally {
 			if (this._autoRefineReviewAbort === reviewAbort) {
@@ -2465,7 +2471,7 @@ export class AgentSession {
 				return { status: "invalidated", branchVersion };
 			}
 			if (error instanceof RefineSkippedError) {
-				return { status: "skip" };
+				return { status: "skip", explicit: skipReview };
 			}
 			return {
 				status: "failure",
@@ -2487,11 +2493,14 @@ export class AgentSession {
 	 * so the agent is between turns and _applyRefine's disconnect/reconnect
 	 * is safe.
 	 */
-	private async _runSerializedRefine(options: {
-		instructions?: string;
-		rollbackId?: string;
-		global?: boolean;
-	}): Promise<void> {
+	private async _runSerializedRefine(
+		options: {
+			instructions?: string;
+			rollbackId?: string;
+			global?: boolean;
+		},
+		trigger: "manual" | "auto" = "manual",
+	): Promise<void> {
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -2515,7 +2524,7 @@ export class AgentSession {
 		const refineAbort = new AbortController();
 		this._refineAbortController = refineAbort;
 
-		const planRun = this._planRefine(options, refineAbort.signal, "manual");
+		const planRun = this._planRefine(options, refineAbort.signal, trigger);
 		const planSettled = planRun.then(
 			() => undefined,
 			() => undefined,

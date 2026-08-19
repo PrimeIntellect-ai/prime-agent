@@ -134,4 +134,58 @@ describe("AgentSession session_before_refine extension hook", () => {
 		);
 		expect(handlerCalls).toBe(1);
 	});
+
+	it("marks serialized auto-refine as trigger auto and treats extension skip as a non-failure", async () => {
+		const events: SessionBeforeRefineEvent[] = [];
+		const harness = await createHarness({
+			persistSession: true,
+			serializedRefine: true,
+			autoRefineReviewer: async () => ({
+				shouldRefine: true,
+				rationale: "durable lesson",
+				instructions: "capture the lesson",
+			}),
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_refine", async (event) => {
+						events.push(event);
+						return { skip: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([]);
+		await harness.session.prompt("hello").catch(() => {});
+
+		const internals = harness.session as unknown as {
+			_runSerializedAutoRefineReview(reason: "compact" | "turn_interval", branchVersion: number): Promise<void>;
+			_autoRefineBranchVersion: number;
+		};
+		await internals._runSerializedAutoRefineReview("turn_interval", internals._autoRefineBranchVersion);
+
+		expect(events).toHaveLength(1);
+		expect(events[0]?.preparation.trigger).toBe("auto");
+		expect(harness.eventsOfType("refine_failed")).toHaveLength(0);
+	});
+
+	it("surfaces an extension skip of an explicit serialized refine.run as refine_failed", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			serializedRefine: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_refine", async () => ({ skip: true }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([]);
+		await harness.session.prompt("hello").catch(() => {});
+
+		const internals = harness.session as unknown as {
+			_runSerializedRefine(options: { instructions?: string }): Promise<void>;
+		};
+		await expect(internals._runSerializedRefine({ instructions: "x" })).rejects.toThrow(RefineSkippedError);
+	});
 });
