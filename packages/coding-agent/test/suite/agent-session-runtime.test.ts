@@ -412,7 +412,7 @@ describe("AgentSessionRuntime characterization", () => {
 			rlmParentNodeId: "parent-agent-child",
 		});
 
-		expect(childRuntime.session.systemPrompt).toContain("spawned by parent-worker");
+		expect(childRuntime.session.systemPrompt).toContain('Your parent agent identifier is "parent-worker"');
 		await runtime.deleteRlmSubagentRuntime("parent-agent-child", childRuntime.session);
 	});
 

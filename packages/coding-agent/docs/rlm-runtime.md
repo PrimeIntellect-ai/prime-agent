@@ -210,10 +210,11 @@ The interactive transcript presents Act as a foreground model chain. Depth-label
 Supported `rlm.run` options are:
 
 - `name`: a unique readable child session name;
-- `model`: an exact `provider/model` selector from `rlm.find_models()`; and
+- `model`: an exact `provider/model` selector from `rlm.find_models()`;
+- `thinking`: a thinking level supported by the selected child model; and
 - `service_tier`: one of `auto`, `default`, `flex`, `scale`, `priority`, or `None`, subject to the `rlmAllowedServiceTiers` settings allowlist.
 
-Unknown options, invalid service-tier values, and service tiers excluded by `rlmAllowedServiceTiers` fail instead of being ignored. When `rlmAllowedServiceTiers` is unset, it contains exactly the configured `defaultServiceTier` (which defaults to `default`). Omitting `service_tier` inherits the parent's tier. An explicit `priority` tier uses the existing fast-mode clamp for the selected child model. Model search is bounded to active, non-expired credentials. If an exact selection is unavailable or fails auth preflight, spawn fails instead of silently falling back to another model. A child otherwise inherits the parent model.
+Unknown options, unsupported thinking levels, invalid service-tier values, and service tiers excluded by `rlmAllowedServiceTiers` fail instead of being ignored. Omitting `thinking` uses the selected candidate's configured level; an explicit value overrides that level for the admitted child. When `rlmAllowedServiceTiers` is unset, it contains exactly the configured `defaultServiceTier` (which defaults to `default`). Omitting `service_tier` inherits the parent's tier. An explicit `priority` tier uses the existing fast-mode clamp for the selected child model. Model search is bounded to active, non-expired credentials. If an exact selection is unavailable or fails auth preflight, spawn fails instead of silently falling back to another model. A child otherwise inherits the parent model.
 
 ## Child Execution
 

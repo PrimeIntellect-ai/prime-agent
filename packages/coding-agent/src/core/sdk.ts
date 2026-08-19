@@ -10,7 +10,7 @@ import type { AgentAutonomousConfig } from "./autonomous.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
-import { addElapsedMessageTimes, convertToLlm } from "./messages.js";
+import { addElapsedSystemPrompt, convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { findInitialModel } from "./model-resolver.js";
 import type { ResourceLoader } from "./resource-loader.js";
@@ -287,7 +287,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			}
 		}
-		return addElapsedMessageTimes(converted, conversationStartedAt ?? Number.NaN);
+		return converted;
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
@@ -302,12 +302,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
+			const providerContext = {
+				...context,
+				systemPrompt: addElapsedSystemPrompt(context.systemPrompt, conversationStartedAt ?? Number.NaN),
+			};
 			const auth = await modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) {
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			return streamSimple(model, context, {
+			return streamSimple(model, providerContext, {
 				...options,
 				apiKey: auth.apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,

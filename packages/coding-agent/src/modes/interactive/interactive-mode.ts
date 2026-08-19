@@ -60,6 +60,7 @@ import {
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
 	VERSION,
 } from "../../config.js";
+import { type ActProjectionEvent, actEventDepth } from "../../core/act-events.js";
 import { AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL, isAgentSessionMessage } from "../../core/agent-messages.js";
 import {
 	type AgentTracePreviewResult,
@@ -193,6 +194,7 @@ import { DaxnutsComponent } from "./components/daxnuts.js";
 import { DynamicBorder } from "./components/dynamic-border.js";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.js";
 import { type FileChangeSummary, formatTotalChangeSummary, mergeTurnFileChanges } from "./components/edit-summary.js";
+import { collectElapsedToolMarkers, ElapsedToolLabelGate } from "./components/elapsed-tool-marker.js";
 import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
@@ -273,7 +275,7 @@ interface Expandable {
 	setExpanded(expanded: boolean): void;
 }
 
-const MAX_LATE_ACT_TERMINALS = 32;
+const MAX_LATE_ACT_EVENTS = 128;
 
 interface PendingToolCallRenderInput {
 	id: string;
@@ -931,6 +933,9 @@ export class InteractiveMode {
 
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	// Spaces displayed elapsed tool labels; reset whenever the transcript is
+	// rebuilt from the session messages so replay stays deterministic.
+	private readonly elapsedToolLabelGate = new ElapsedToolLabelGate();
 	private sideQuestionComponent: SideQuestionComponent | undefined;
 	private sideQuestionEvent: AgentConnectionSideQuestionEvent | undefined;
 	private sideQuestionTurns: AgentConnectionSideQuestionEvent[] = [];
@@ -960,11 +965,9 @@ export class InteractiveMode {
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private ipythonToolComponents = new Map<string, ToolExecutionComponent>();
 	private lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
-	private activeActTray: { actId: string; model: string; thinkingLevel?: string } | undefined;
-	private lateActTerminals = new Map<
-		string,
-		Extract<AgentConnectionSessionEvent, { type: "act_event" }> & { event: "terminal" }
-	>();
+	private activeActTrays = new Map<number, { actId: string; depth: number; model: string; thinkingLevel?: string }>();
+	private lateActEvents = new Map<string, ActProjectionEvent[]>();
+	private lateActEventOrder: Array<{ outerToolCallId: string; event: ActProjectionEvent }> = [];
 	private pendingToolCreations = new Set<string>();
 	private startedToolCalls = new Set<string>();
 	private pendingToolGeneration = 0;
@@ -2870,8 +2873,9 @@ export class InteractiveMode {
 		this.renderRecap();
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
-		this.lateActTerminals?.clear();
-		this.activeActTray = undefined;
+		this.lateActEvents?.clear();
+		this.lateActEventOrder?.splice(0);
+		this.activeActTrays?.clear();
 		this.resetSubagentSummary();
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
@@ -2966,12 +2970,32 @@ export class InteractiveMode {
 		);
 	}
 
-	private getLateActTerminals(): Map<
-		string,
-		Extract<AgentConnectionSessionEvent, { type: "act_event" }> & { event: "terminal" }
-	> {
-		if (!this.lateActTerminals) this.lateActTerminals = new Map();
-		return this.lateActTerminals;
+	private getLateActEvents(): Map<string, ActProjectionEvent[]> {
+		if (!this.lateActEvents) this.lateActEvents = new Map();
+		return this.lateActEvents;
+	}
+
+	private getLateActEventOrder(): Array<{ outerToolCallId: string; event: ActProjectionEvent }> {
+		if (!this.lateActEventOrder) this.lateActEventOrder = [];
+		return this.lateActEventOrder;
+	}
+
+	private retainLateActEvent(event: ActProjectionEvent): void {
+		const events = this.getLateActEvents();
+		const retained = events.get(event.outerToolCallId) ?? [];
+		retained.push(event);
+		events.set(event.outerToolCallId, retained);
+		const order = this.getLateActEventOrder();
+		order.push({ outerToolCallId: event.outerToolCallId, event });
+		while (order.length > MAX_LATE_ACT_EVENTS) {
+			const oldest = order.shift();
+			if (!oldest) break;
+			const oldestEvents = events.get(oldest.outerToolCallId);
+			if (!oldestEvents) continue;
+			const index = oldestEvents.indexOf(oldest.event);
+			if (index !== -1) oldestEvents.splice(index, 1);
+			if (oldestEvents.length === 0) events.delete(oldest.outerToolCallId);
+		}
 	}
 
 	private registerIpythonToolComponent(toolName: string, toolCallId: string, component: ToolExecutionComponent): void {
@@ -2982,12 +3006,13 @@ export class InteractiveMode {
 		for (const lateMessage of this.lateIpythonSentAgentMessages.get(toolCallId) ?? []) {
 			component.appendSentAgentMessage(lateMessage);
 		}
-		const terminals = this.getLateActTerminals();
-		for (const [key, event] of terminals) {
-			if (event.outerToolCallId !== toolCallId) continue;
+		const events = this.getLateActEvents();
+		for (const event of events.get(toolCallId) ?? []) {
 			component.appendActEvent(event);
-			terminals.delete(key);
 		}
+		events.delete(toolCallId);
+		const order = this.getLateActEventOrder();
+		order.splice(0, order.length, ...order.filter((entry) => entry.outerToolCallId !== toolCallId));
 	}
 
 	private async getOrCreatePendingToolComponent(
@@ -3038,10 +3063,25 @@ export class InteractiveMode {
 			this.chatContainer.addChild(component);
 			this.pendingTools.set(latestToolCall.id, component);
 			this.registerIpythonToolComponent(latestToolCall.name, latestToolCall.id, component);
+			this.applyElapsedToolLabel(component, latestToolCall.id);
 			return component;
 		} finally {
 			this.pendingToolCreations.delete(toolCall.id);
 		}
+	}
+
+	/**
+	 * applyElapsedToolLabel moves an exact `[T+<seconds>s]` marker that precedes
+	 * this tool call onto its status line, gated by the label interval.
+	 */
+	private applyElapsedToolLabel(component: ToolExecutionComponent, toolCallId: string): void {
+		const marker = this.streamingMessage
+			? collectElapsedToolMarkers(this.streamingMessage.content).get(toolCallId)
+			: undefined;
+		if (!marker) {
+			return;
+		}
+		component.setElapsedLabel(this.elapsedToolLabelGate.admit(marker.seconds, marker.label));
 	}
 
 	private createToolExecutionDefinition(
@@ -5481,7 +5521,9 @@ export class InteractiveMode {
 								: `Operation aborted${elapsedSuffix}`;
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage);
+					const component = this.ensureAssistantStreamingComponent(event.message);
+					component.setStreaming(false);
+					component.updateContent(this.streamingMessage);
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -5508,27 +5550,24 @@ export class InteractiveMode {
 				break;
 
 			case "act_event": {
+				const depth = actEventDepth(event);
 				if (event.event === "start") {
-					this.activeActTray = {
+					this.activeActTrays.set(depth, {
 						actId: event.actId,
+						depth,
 						model: event.model.name?.trim() || event.model.id,
 						thinkingLevel: event.thinkingLevel,
-					};
+					});
 					this.subagentSummaryLine.invalidate();
-				} else if (event.event === "terminal" && this.activeActTray?.actId === event.actId) {
-					this.activeActTray = undefined;
+				} else if (event.event === "terminal" && this.activeActTrays.get(depth)?.actId === event.actId) {
+					this.activeActTrays.delete(depth);
 					this.subagentSummaryLine.invalidate();
 				}
 				const component = this.ipythonToolComponents.get(event.outerToolCallId);
 				if (component) {
 					component.appendActEvent(event);
-				} else if (event.event === "terminal") {
-					const terminals = this.getLateActTerminals();
-					terminals.set(`${event.outerToolCallId}:${event.actId}`, event);
-					if (terminals.size > MAX_LATE_ACT_TERMINALS) {
-						const oldest = terminals.keys().next().value;
-						if (oldest !== undefined) terminals.delete(oldest);
-					}
+				} else {
+					this.retainLateActEvent(event);
 				}
 				this.ui.requestRender();
 				break;
@@ -5728,6 +5767,7 @@ export class InteractiveMode {
 			this.hiddenThinkingLabel,
 			{
 				expanded: this.toolOutputExpanded,
+				streaming: true,
 				precededByToolActivity:
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
@@ -6017,12 +6057,13 @@ export class InteractiveMode {
 	}
 
 	private getActTrayLabel(): string | undefined {
-		const active = this.activeActTray;
+		const active = [...(this.activeActTrays?.values() ?? [])].sort((left, right) => right.depth - left.depth)[0];
 		if (!active) return undefined;
 		const parts = [active.model];
 		if (active.thinkingLevel && active.thinkingLevel !== "off") parts.push(active.thinkingLevel);
 		const pulse = theme.fg("bashMode", workingIconFrame(getWorkingPulseFrame()));
-		return `${theme.fg("dim", "│")}  ${pulse} ${theme.fg("accent", `act: ${parts.join(" • ")}`)}`;
+		const label = active.depth > 1 ? `act ${active.depth}` : "act";
+		return `${theme.fg("dim", "│")}  ${pulse} ${theme.fg("accent", `${label}: ${parts.join(" • ")}`)}`;
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -6436,11 +6477,15 @@ export class InteractiveMode {
 		} = {},
 	): Promise<void> {
 		this.resetPendingToolState();
+		// The rebuild recomputes every elapsed label from the transcript, so the
+		// interval gate starts clean for deterministic replay.
+		this.elapsedToolLabelGate.reset();
 		const transcriptMessages = this.orderMessagesForTranscript(sessionContext.messages);
 		const messagesToRender = options.limitTranscript ? initialRenderMessages(transcriptMessages) : transcriptMessages;
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
-		this.lateActTerminals?.clear();
+		this.lateActEvents?.clear();
+		this.lateActEventOrder?.splice(0);
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		const toolNames: string[] = [];
 		for (const message of messagesToRender) {
@@ -6491,8 +6536,10 @@ export class InteractiveMode {
 			if (message.role === "assistant") {
 				this.addMessageToChat(message);
 				// Render tool call components
+				const elapsedMarkers = collectElapsedToolMarkers(message.content);
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
+						const marker = elapsedMarkers.get(content.id);
 						const component = new ToolExecutionComponent(
 							content.name,
 							content.id,
@@ -6500,6 +6547,9 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								includeImageDimensions: false,
+								elapsedLabel: marker
+									? this.elapsedToolLabelGate.admit(marker.seconds, marker.label)
+									: undefined,
 							},
 							this.getCachedToolDefinition(content.name),
 							this.ui,
@@ -6669,7 +6719,8 @@ export class InteractiveMode {
 	}
 
 	private handleCtrlC(): void {
-		if (this.editor.getText().length > 0) {
+		const hasQueuedMessages = this.connectionQueue.steering.length + this.connectionQueue.followUp.length > 0;
+		if (this.editor.getText().length > 0 && (!this.hasInterruptibleWork() || !hasQueuedMessages)) {
 			this.clearInputBar();
 			return;
 		}

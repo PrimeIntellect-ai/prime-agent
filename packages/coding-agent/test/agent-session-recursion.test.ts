@@ -2864,6 +2864,14 @@ describe("AgentSession rlm recursion", () => {
 		);
 	});
 
+	it("applies an explicit thinking level to a native child", async () => {
+		const root = createSession();
+		const spawned = await root.runRlmChild("high thinking child", { thinking: "high" });
+
+		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) !== undefined);
+		expect(root.getRlmChildSession(spawned.rlm_child_id)?.thinkingLevel).toBe("high");
+	});
+
 	it("rejects a non-string rlm.run thinking kwarg", async () => {
 		const root = createSession();
 

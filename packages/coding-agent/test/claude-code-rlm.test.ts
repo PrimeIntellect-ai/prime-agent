@@ -114,6 +114,7 @@ describe("Claude Code RLM admission", () => {
 			const handle = await harness.session.runRlmChild("inspect the runtime", {
 				name: "claude-worker",
 				model: "@claude",
+				thinking: "low",
 			});
 			expect(handle).toMatchObject({
 				name: "claude-worker",
@@ -122,6 +123,7 @@ describe("Claude Code RLM admission", () => {
 			expect(query.start).toHaveBeenCalledOnce();
 			expect(query.request()).toMatchObject({
 				allowedTools: expect.arrayContaining(["Read", "Edit", ...CLAUDE_CODE_FAMILY_TOOL_NAMES]),
+				effort: "low",
 				disallowedTools: ["Agent", "Task", "SendMessage"],
 				mcpServers: { prime: { type: "sdk", name: "prime" } },
 			});

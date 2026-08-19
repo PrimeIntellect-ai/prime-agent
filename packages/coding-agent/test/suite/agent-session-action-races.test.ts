@@ -40,7 +40,7 @@ function yieldToEventLoop(): Promise<void> {
 function createContextMessage(content: string): CustomMessage {
 	return {
 		role: "custom",
-		customType: "action-order-context",
+		customType: "model-context",
 		content,
 		display: false,
 		timestamp: Date.now(),
@@ -337,7 +337,7 @@ describe("AgentSession action commit-fence races", () => {
 			prefixMessages: [createContextMessage("prefix B")],
 		});
 		await harness.session.sendCustomMessage(
-			{ customType: "shared-next-turn", content: "shared next turn", display: false },
+			{ customType: "model-context", content: "shared next turn", display: false },
 			{ deliverAs: "nextTurn" },
 		);
 
@@ -345,6 +345,12 @@ describe("AgentSession action commit-fence races", () => {
 		await harness.session.waitForIdle();
 
 		expect(deliveredMessages).toEqual(["prefix A", "shared next turn", "primary A", "prefix B", "primary B"]);
+		expect(harness.session.messages).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ role: "custom", customType: "model-context", display: false }),
+				expect.objectContaining({ role: "custom", customType: "model-context", display: false }),
+			]),
+		);
 	});
 
 	it("cancels an ordinary prompt while queued work is paused", async () => {

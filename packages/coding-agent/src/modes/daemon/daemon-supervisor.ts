@@ -2711,6 +2711,7 @@ export class DaemonSupervisor {
 			throw new Error("Session worker is not connected");
 		}
 		const subscription = this.workerSubscriptionCapabilities(activeSessionId, incomingCapabilities);
+		if (typeof worker.client.requestWorker !== "function") return;
 		const response = await worker.client.requestWorker({
 			type: "worker_subscribe",
 			activeSessionId,

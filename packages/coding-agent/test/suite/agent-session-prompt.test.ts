@@ -552,7 +552,8 @@ stale extension instructions`,
 							message: {
 								customType: "refine-race-proof",
 								content: "extension message preserved",
-								display: false,
+								display: true,
+								details: { source: "extension" },
 							},
 							systemPrompt: `${event.systemPrompt}
 
@@ -603,6 +604,14 @@ stale extension instructions`,
 		expect(providerSystemPrompt).toContain("refined $& base");
 		expect(providerSystemPrompt).toContain("stale extension instructions");
 		expect(providerMessages).toContain("extension message preserved");
+		expect(harness.session.messages).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: "refine-race-proof",
+				display: true,
+				details: { source: "extension" },
+			}),
+		);
 	});
 
 	it("preserves an independent extension prompt when refine completes during its hook", async () => {
@@ -686,7 +695,7 @@ stale extension instructions`,
 							message: {
 								customType: "refine-race-proof",
 								content: "injected extension message preserved",
-								display: false,
+								display: true,
 							},
 							systemPrompt: `${event.systemPrompt}
 
