@@ -691,11 +691,11 @@ export class KernelManager {
 				const pid = await forkKernel(python, {
 					connectionPath: connection.path,
 					cwd: this.options.cwd,
-					// Match the direct-spawn env exactly: merge the current host env with
-					// the per-kernel overrides, applied fresh in the child (the template's
-					// inherited env snapshot may be stale by fork time). JPY_PARENT_PID goes
-					// last so caller-supplied env can't disarm the parent-death watchdog.
-					env: { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) },
+					// Merge the current host env with per-kernel overrides, applied fresh
+					// in the child (the template's inherited snapshot may be stale by fork
+					// time). No JPY_PARENT_PID here: the forked child watches the
+					// forkserver via parent_handle=getppid() instead.
+					env: { ...process.env, ...this.options.env },
 				});
 				this.kernelPid = pid;
 				recordOrphanProcessState(pid, true);

@@ -82,11 +82,14 @@ def _run_child(connection_path, cwd, env):
     # instance (and, critically, a jupyter_client Session created in *this* pid;
     # a Session inherited from the template silently drops messages via check_pid).
     IPKernelApp.clear_instance()
-    # parent_handle's trait default was frozen at template import (before the
-    # per-kernel env existed), so pass it explicitly to arm the parent poller.
+    # Watch the forkserver (our real parent), not the Node worker: ipykernel's
+    # poller distrusts a handle that differs from getppid() and would fall back
+    # to watching for pid-1 reparenting, which subreapers (systemd --user) break.
+    # The forkserver's own watchdog ties its lifetime to the worker, so watching
+    # it transitively covers a hard-killed worker on every platform.
     app = IPKernelApp.instance(
         connection_file=connection_path,
-        parent_handle=int(os.environ.get("JPY_PARENT_PID") or 0),
+        parent_handle=os.getppid(),
     )
     # initialize() binds the 5 ZMQ ports, writes the resolved ports back into
     # connection.json, and starts the heartbeat thread + ioloop — all post-fork,

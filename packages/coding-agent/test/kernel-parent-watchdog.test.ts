@@ -90,7 +90,7 @@ describe("kernel parent watchdog", () => {
 		});
 	});
 
-	it("fork request env carries JPY_PARENT_PID", async () => {
+	it("fork request env does not carry JPY_PARENT_PID (forked children watch the forkserver)", async () => {
 		const python = writeFakePython(["#!/bin/sh", "exit 42", ""]);
 		forkEnabledMock.mockReturnValue(true);
 		forkKernelMock.mockRejectedValue(new ForkServerUnavailable("test"));
@@ -106,7 +106,7 @@ describe("kernel parent watchdog", () => {
 
 		expect(forkKernelMock).toHaveBeenCalledTimes(1);
 		const spawnParams = forkKernelMock.mock.calls[0]?.[1] as { env?: Record<string, string | undefined> };
-		expect(spawnParams.env?.JPY_PARENT_PID).toBe(String(process.pid));
+		expect(spawnParams.env?.JPY_PARENT_PID).toBeUndefined();
 	});
 });
 
