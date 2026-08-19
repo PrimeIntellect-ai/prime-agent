@@ -142,11 +142,12 @@ export interface RpcSlashCommand {
 
 export interface RpcSessionState {
 	rpcProtocolVersion: 1;
-	rpcSchemaRevision: 2;
+	rpcSchemaRevision: 3;
 	cwd: string;
 	serviceTier: ServiceTier;
 	rlmMaxDepth: number;
 	actEnabled: boolean;
+	retryEnabled: boolean;
 	foregroundMode: "rpc_only" | "ordinary";
 	model?: Model<any>;
 	thinkingLevel: ThinkingLevel;

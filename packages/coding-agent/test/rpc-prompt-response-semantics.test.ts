@@ -251,9 +251,10 @@ describe("RPC prompt response semantics", () => {
 							success: true,
 							data: expect.objectContaining({
 								rpcProtocolVersion: 1,
-								rpcSchemaRevision: 2,
+								rpcSchemaRevision: 3,
 								rlmMaxDepth: 0,
 								actEnabled: false,
+								retryEnabled: false,
 								foregroundMode: "rpc_only",
 							}),
 						}),

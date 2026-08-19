@@ -7,12 +7,13 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 
 ## Supported harness boundary
 
-Prime Agent exposes protocol version `1` and schema revision `2`. Every
+Prime Agent exposes protocol version `1` and schema revision `3`. Every
 `get_state` response includes these versions together with `cwd`, `serviceTier`,
-effective `rlmMaxDepth`, `actEnabled`, and `foregroundMode`. Schema revision 2
-makes `abort` an active-operation/event fence: its response follows the
-aborted operation's terminal events and drained event queue while preserving
-queued work.
+effective `rlmMaxDepth`, `actEnabled`, `retryEnabled`, and `foregroundMode`.
+In `rpc-only` harness mode, `retryEnabled` is always `false`, regardless of
+persisted retry settings. Schema revision 3 makes `abort` an
+active-operation/event fence: its response follows the aborted operation's
+terminal events and drained event queue while preserving queued work.
 
 Launch `--mode rpc --harness-mode rpc-only` for an externally supervised
 foreground session. This mode accepts model work only from literal `prompt`
@@ -139,7 +140,7 @@ See [set_follow_up_mode](#set_follow_up_mode) for controlling how follow-up mess
 
 #### abort
 
-Abort the current agent operation. In schema revision 2, the success response
+Abort the current agent operation. In schema revision 3, the success response
 is emitted only after that operation is idle and its pending events are
 emitted. Queued work remains suspended; `abort` does not wait for the whole
 queue to become idle.
@@ -197,6 +198,7 @@ Response:
     "thinkingLevel": "medium",
     "isStreaming": false,
     "isCompacting": false,
+    "retryEnabled": true,
     "steeringMode": "all",
     "followUpMode": "one-at-a-time",
     "sessionFile": "/path/to/session.jsonl",

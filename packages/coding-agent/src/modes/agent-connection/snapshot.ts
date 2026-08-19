@@ -33,6 +33,7 @@ export function createAgentConnectionState(
 		serviceTier: session.serviceTier,
 		rlmMaxDepth: session.rlmMaxDepth,
 		actEnabled: session.actEnabled,
+		retryEnabled: session.autoRetryEnabled,
 		availableThinkingLevels: session.getAvailableThinkingLevels(),
 		isStreaming: session.isStreaming,
 		isCompacting: session.isCompacting,

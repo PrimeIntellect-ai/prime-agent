@@ -355,6 +355,7 @@ export interface AgentConnectionState {
 	serviceTier: ServiceTier;
 	rlmMaxDepth?: number;
 	actEnabled?: boolean;
+	retryEnabled?: boolean;
 	availableThinkingLevels: ThinkingLevel[];
 	isStreaming: boolean;
 	isCompacting: boolean;

@@ -32,7 +32,7 @@ export type {
 } from "./rpc-types.js";
 
 export const PRIME_AGENT_RPC_PROTOCOL_VERSION = 1;
-export const PRIME_AGENT_RPC_SCHEMA_REVISION = 2;
+export const PRIME_AGENT_RPC_SCHEMA_REVISION = 3;
 
 interface RpcModeConnectionOptions {
 	harnessMode?: "rpc-only";
@@ -271,6 +271,7 @@ async function runRpcModeWithConnectionInternal(
 					serviceTier: state.serviceTier,
 					rlmMaxDepth: state.rlmMaxDepth ?? 0,
 					actEnabled: state.actEnabled ?? false,
+					retryEnabled: state.retryEnabled!,
 					foregroundMode: options.harnessMode === "rpc-only" ? "rpc_only" : "ordinary",
 					model: state.model,
 					thinkingLevel: state.thinkingLevel,
