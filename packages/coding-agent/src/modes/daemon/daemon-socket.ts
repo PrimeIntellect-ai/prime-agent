@@ -15,11 +15,25 @@ const DAEMON_SOCKET_LOCK_UPDATE_MS = 1000;
 
 export class DaemonSocketPathLease {
 	private released = false;
+	private compromised: Error | undefined;
 
 	constructor(
 		readonly socketPath: string,
 		private readonly releaseLock: () => Promise<void>,
 	) {}
+
+	/**
+	 * Record that another process stole this lease after judging it stale. Callers
+	 * observe it through assertSocketLease, which fails where the lease is actually
+	 * relied on rather than from inside a filesystem callback.
+	 */
+	markCompromised(error: Error): void {
+		this.compromised ??= error;
+	}
+
+	get compromisedError(): Error | undefined {
+		return this.compromised;
+	}
 
 	async release(): Promise<void> {
 		if (this.released) {
@@ -47,6 +61,7 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 	if (process.platform === "win32") {
 		return undefined;
 	}
+	let lease: DaemonSocketPathLease | undefined;
 	const releaseLock = await lockfile.lock(socketPath, {
 		realpath: false,
 		stale: DAEMON_SOCKET_LOCK_STALE_MS,
@@ -57,8 +72,14 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 			minTimeout: DAEMON_SOCKET_RELEASE_POLL_MS,
 			maxTimeout: DAEMON_SOCKET_RELEASE_POLL_MS,
 		},
+		// proper-lockfile defaults onCompromised to `throw err`, and it calls it from
+		// inside the mtime-refresh filesystem callback. This lease is held for the
+		// supervisor's whole lifetime, so a stall past `stale` that lets another
+		// process steal it would take the supervisor down with an uncaught exception.
+		onCompromised: (error) => lease?.markCompromised(error),
 	});
-	return new DaemonSocketPathLease(socketPath, releaseLock);
+	lease = new DaemonSocketPathLease(socketPath, releaseLock);
+	return lease;
 }
 
 export async function prepareDaemonSocketPath(socketPath: string, lease?: DaemonSocketPathLease): Promise<void> {
@@ -69,6 +90,10 @@ export async function prepareDaemonSocketPath(socketPath: string, lease?: Daemon
 	}
 	if (lease) {
 		assertSocketLease(socketPath, lease);
+		const compromised = lease.compromisedError;
+		if (compromised) {
+			throw new Error(`Daemon socket lease for ${socketPath} was compromised: ${compromised.message}`);
+		}
 		await prepareUnixDaemonSocketPath(socketPath);
 		return;
 	}
@@ -159,6 +184,11 @@ export function cleanupDaemonSocketPath(
 	}
 	if (lease) {
 		assertSocketLease(socketPath, lease);
+		if (lease.compromisedError) {
+			// Another process took the lease over, so the socket at this path may be
+			// its own. Leave it alone rather than unlinking a live successor's socket.
+			return;
+		}
 		try {
 			cleanupUnixDaemonSocketPath(socketPath, expectedIdentity);
 		} catch {
@@ -173,6 +203,7 @@ export function cleanupDaemonSocketPath(
 			stale: DAEMON_SOCKET_LOCK_STALE_MS,
 			update: DAEMON_SOCKET_LOCK_UPDATE_MS,
 			retries: 0,
+			onCompromised: () => {},
 		});
 	} catch {
 		return;

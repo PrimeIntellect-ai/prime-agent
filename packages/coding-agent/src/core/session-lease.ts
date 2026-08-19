@@ -193,6 +193,8 @@ function withLeaseGuard<T>(directory: string, action: () => T): T {
 				realpath: false,
 				lockfilePath: `${directory}.guard`,
 				stale: 5000,
+				// Never rethrow: proper-lockfile invokes this from a filesystem callback.
+				onCompromised: () => {},
 			});
 			break;
 		} catch (error) {

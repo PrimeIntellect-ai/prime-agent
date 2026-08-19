@@ -335,6 +335,8 @@ async function withCoordinatorRegistryGuard<T>(registryDir: string, action: () =
 			minTimeout: COORDINATOR_REGISTRY_LOCK_RETRY_MS,
 			maxTimeout: COORDINATOR_REGISTRY_LOCK_RETRY_MS,
 		},
+		// Never rethrow: proper-lockfile invokes this from a filesystem callback.
+		onCompromised: () => {},
 	});
 	try {
 		return await action();

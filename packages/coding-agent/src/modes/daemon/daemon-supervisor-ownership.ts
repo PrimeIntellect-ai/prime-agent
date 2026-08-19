@@ -367,6 +367,10 @@ async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action:
 			minTimeout: REGISTRY_LOCK_RETRY_MS,
 			maxTimeout: REGISTRY_LOCK_RETRY_MS,
 		},
+		// Never rethrow: proper-lockfile invokes this from a filesystem callback, so a
+		// throw here is an uncaught exception rather than a failure the guard can
+		// report. The guarded action still runs and the release below is a no-op.
+		onCompromised: () => {},
 	});
 	try {
 		return await action();
