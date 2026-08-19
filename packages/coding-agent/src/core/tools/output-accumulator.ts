@@ -51,6 +51,7 @@ export class OutputAccumulator {
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
+	private tempFileFailed = false;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -203,13 +204,24 @@ export class OutputAccumulator {
 	}
 
 	private ensureTempFile(): void {
-		if (this.tempFilePath) {
+		if (this.tempFilePath || this.tempFileFailed) {
 			return;
 		}
-		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
-		this.tempFileStream = createWriteStream(this.tempFilePath);
+		const path = defaultTempFilePath(this.tempFilePrefix);
+		const stream = createWriteStream(path);
+		// createWriteStream reports open failures (unwritable or full TMPDIR, EMFILE)
+		// asynchronously via "error". Without a listener that is an unhandled error
+		// event, which terminates the process. Losing the full-output file is
+		// recoverable - the truncated tail is held separately - so degrade instead.
+		stream.on("error", () => {
+			this.tempFileFailed = true;
+			this.tempFilePath = undefined;
+			this.tempFileStream = undefined;
+		});
+		this.tempFilePath = path;
+		this.tempFileStream = stream;
 		for (const chunk of this.rawChunks) {
-			this.tempFileStream.write(chunk);
+			stream.write(chunk);
 		}
 		this.rawChunks = [];
 	}

@@ -51,15 +51,27 @@ export async function executeBashWithOperations(
 	let tempFileStream: WriteStream | undefined;
 	let totalBytes = 0;
 
+	let tempFileFailed = false;
 	const ensureTempFile = () => {
-		if (tempFilePath) {
+		if (tempFilePath || tempFileFailed) {
 			return;
 		}
 		const id = randomBytes(8).toString("hex");
-		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		tempFileStream = createWriteStream(tempFilePath);
+		const path = join(tmpdir(), `pi-bash-${id}.log`);
+		const stream = createWriteStream(path);
+		// createWriteStream reports open failures (unwritable or full TMPDIR, EMFILE)
+		// asynchronously via "error". Without a listener that is an unhandled error
+		// event, which terminates the process. The full-output file is best effort,
+		// so drop it and keep returning the truncated output instead.
+		stream.on("error", () => {
+			tempFileFailed = true;
+			tempFilePath = undefined;
+			tempFileStream = undefined;
+		});
+		tempFilePath = path;
+		tempFileStream = stream;
 		for (const chunk of outputChunks) {
-			tempFileStream.write(chunk);
+			stream.write(chunk);
 		}
 	};
 
