@@ -1528,6 +1528,84 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("keeps settled error deletion in quiescence through cleanup retry", async () => {
+		const child = createSession({ rlmSessionDir: join(tempDir, "settled-error-child") });
+		vi.spyOn(child, "promptAndWait").mockRejectedValue(new Error("child prompt failed"));
+		const firstCleanup = deferred<void>();
+		const retryCleanup = deferred<void>();
+		let cleanupAttempts = 0;
+		const deleteRlmSubagentRuntime = vi.fn(async (_id: string, session?: AgentSession) => {
+			const cleanup = ++cleanupAttempts === 1 ? firstCleanup.promise : retryCleanup.promise;
+			await cleanup;
+			await session?.disposeAsync();
+		});
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				releaseRlmSubagentRuntime: async () => {},
+				deleteRlmSubagentRuntime,
+			},
+		});
+
+		const spawned = await root.runRlmChild("fail after startup", { name: "settled-error-worker" });
+		const internals = root as unknown as InspectableRlmSession;
+		await vi.waitFor(() => expect(internals._activeRlmChildRuns.get(spawned.rlm_child_id)?.settled).toBe(true));
+		const run = internals._activeRlmChildRuns.get(spawned.rlm_child_id);
+		if (!run) throw new Error("Missing settled error run");
+		expect(run.status).toBe("error");
+		expect(run.session).toBe(child);
+		expect(internals._rlmChildSessions.has(spawned.rlm_child_id)).toBe(false);
+		expect(internals._unsettledRlmChildRuns.has(run)).toBe(false);
+
+		await expect(root.deleteRlmSubagent("settled-error-worker")).resolves.toMatchObject({
+			subagent: { rlm_child_id: spawned.rlm_child_id },
+		});
+		await expect(root.deleteRlmSubagent(spawned.rlm_child_id)).resolves.toMatchObject({
+			subagent: { rlm_child_id: spawned.rlm_child_id },
+		});
+		expect(deleteRlmSubagentRuntime).toHaveBeenCalledOnce();
+		expect(run.settled).toBe(false);
+		expect(internals._unsettledRlmChildRuns.has(run)).toBe(true);
+		let quiesced = false;
+		const quiescence = root.waitForRlmQuiescence().then(() => {
+			quiesced = true;
+		});
+		await sleep(20);
+		expect(quiesced).toBe(false);
+
+		firstCleanup.reject(new Error("first cleanup failed"));
+		await waitFor(() => internals._rlmChildCleanupFailures.has(spawned.rlm_child_id));
+		await sleep(20);
+		expect(quiesced).toBe(false);
+		expect(internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(true);
+		expect(internals._unsettledRlmChildRuns.has(run)).toBe(true);
+		await expect(root.runRlmChild("replacement before retry", { name: "settled-error-worker" })).rejects.toThrow(
+			"an agent of that name already exists at depth 1 under this parent",
+		);
+
+		await expect(root.deleteRlmSubagent("settled-error-worker")).resolves.toMatchObject({
+			subagent: { rlm_child_id: spawned.rlm_child_id },
+		});
+		await expect(root.deleteRlmSubagent(spawned.rlm_child_id)).resolves.toMatchObject({
+			subagent: { rlm_child_id: spawned.rlm_child_id },
+		});
+		expect(deleteRlmSubagentRuntime).toHaveBeenCalledTimes(2);
+		await sleep(20);
+		expect(quiesced).toBe(false);
+
+		retryCleanup.resolve();
+		await quiescence;
+		expect(internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		expect(internals._unsettledRlmChildRuns.has(run)).toBe(false);
+		expect(internals._deletingRlmChildren.has(spawned.rlm_child_id)).toBe(false);
+		expect(deleteRlmSubagentRuntime).toHaveBeenCalledTimes(2);
+		await expect(
+			root.runRlmChild("replacement after cleanup", { name: "settled-error-worker" }),
+		).resolves.toMatchObject({
+			name: "settled-error-worker",
+		});
+	});
+
 	it("notifies the runtime host when the initial child task completes", async () => {
 		const child = createSession({ rlmSessionDir: join(tempDir, "host-completion-child") });
 		const completeRlmSubagentRuntime = vi.fn(() => true);

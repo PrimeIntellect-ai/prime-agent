@@ -9446,6 +9446,12 @@ export class AgentSession {
 				this._removeRlmSubagentTracking(childId, run);
 				return { subagent };
 			}
+			if (liveSession && run.settled) {
+				run.deletionRunFinished = true;
+				run.settlement = createAgentMessageDeferred();
+				run.settled = false;
+				this._unsettledRlmChildRuns.add(run);
+			}
 			if (liveSession) this._continueFinishedRlmRunDeletion(run, subagent, liveSession);
 
 			// Return once deletion is accepted. The run stays hidden but unsettled until
