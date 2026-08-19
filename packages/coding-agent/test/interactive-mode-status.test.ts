@@ -5098,3 +5098,27 @@ describe("InteractiveMode.showLoadedResources", () => {
 		expect(output).not.toContain("[Skill conflicts]");
 	});
 });
+
+test("shows a refine loader from the /refine command message until refine_complete", () => {
+	initTheme("dark");
+	const statusContainer = new Container();
+	const fakeThis = {
+		ui: { requestRender: vi.fn() } as unknown as TUI,
+		statusContainer,
+		refineLoader: undefined,
+		stopWorkingLoader: vi.fn(),
+		syncWorkingLoader: vi.fn(),
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		startRefineLoader(this: InteractiveMode): void;
+		stopRefineLoader(this: InteractiveMode): void;
+	};
+
+	prototype.startRefineLoader.call(fakeThis);
+	expect(statusContainer.children.length).toBe(1);
+
+	prototype.stopRefineLoader.call(fakeThis);
+	expect(statusContainer.children.length).toBe(0);
+	expect((fakeThis as unknown as { syncWorkingLoader: () => void }).syncWorkingLoader).toHaveBeenCalled();
+});

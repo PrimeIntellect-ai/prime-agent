@@ -1005,6 +1005,7 @@ export class InteractiveMode {
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	private autoCompactionLoader: Loader | undefined = undefined;
+	private refineLoader: Loader | undefined = undefined;
 
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
@@ -3381,6 +3382,28 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/** Live status for a user-issued /refine, mirroring the compaction loader. */
+	private startRefineLoader(): void {
+		this.stopWorkingLoader();
+		this.statusContainer.clear();
+		this.refineLoader = new Loader(
+			this.ui,
+			(spinner) => theme.fg("muted", spinner),
+			(text) => theme.fg("muted", text),
+			"Refining continual harness state...",
+		);
+		this.statusContainer.addChild(this.refineLoader);
+		this.ui.requestRender();
+	}
+
+	private stopRefineLoader(): void {
+		if (!this.refineLoader) return;
+		this.refineLoader.stop();
+		this.refineLoader = undefined;
+		this.statusContainer.clear();
+		this.syncWorkingLoader();
+	}
+
 	private syncWorkingLoader(): void {
 		// A compaction that started before this client attached (or while another
 		// view was open) has no start-event edge; restore its loader from state.
@@ -5411,6 +5434,9 @@ export class InteractiveMode {
 
 			case "message_start":
 				if (event.message.role === "custom") {
+					if (isSessionSlashCommandMessage(event.message) && event.message.details.command.name === "refine") {
+						this.startRefineLoader();
+					}
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
@@ -5657,10 +5683,12 @@ export class InteractiveMode {
 				break;
 
 			case "refine_failed":
+				this.stopRefineLoader();
 				this.showError(`Refinement failed: ${event.error}`);
 				break;
 
 			case "refine_complete":
+				this.stopRefineLoader();
 				break;
 		}
 	}
