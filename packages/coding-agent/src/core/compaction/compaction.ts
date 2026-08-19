@@ -384,12 +384,12 @@ export function findCutPoint(
 		const messageTokens = estimateTokens(entry.message);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					break;
-				}
-			}
+			// Tool results are never valid cut points, so when a single turn's trailing
+			// results already exceed the budget there is no cut point at or after i.
+			// Fall back to the newest cut point - keeping just the last turn - rather
+			// than to the oldest, which keeps the whole window and makes compaction a
+			// no-op that reports "session is too short to compact".
+			cutIndex = cutPoints.find((candidate) => candidate >= i) ?? cutPoints[cutPoints.length - 1];
 			break;
 		}
 	}

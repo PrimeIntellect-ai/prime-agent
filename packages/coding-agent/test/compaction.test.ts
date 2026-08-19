@@ -67,6 +67,33 @@ function createAssistantMessage(text: string, usage?: Usage): AssistantMessage {
 	};
 }
 
+function createAssistantWithToolCall(text: string, toolCallId: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [
+			{ type: "text", text },
+			{ type: "toolCall", id: toolCallId, name: "bash", arguments: {} },
+		],
+		usage: createMockUsage(100, 50),
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+	};
+}
+
+function createToolResultMessage(toolCallId: string, bytes: number): AgentMessage {
+	return {
+		role: "toolResult",
+		toolCallId,
+		toolName: "bash",
+		content: [{ type: "text", text: "z".repeat(bytes) }],
+		isError: false,
+		timestamp: Date.now(),
+	} as AgentMessage;
+}
+
 let entryCounter = 0;
 let lastId: string | null = null;
 
@@ -304,6 +331,28 @@ describe("findCutPoint", () => {
 		expect(entries[result.firstKeptEntryIndex].type).toBe("message");
 		const role = (entries[result.firstKeptEntryIndex] as SessionMessageEntry).message.role;
 		expect(role === "user" || role === "assistant").toBe(true);
+	});
+
+	it("keeps the newest turn when trailing tool results alone exceed the budget", () => {
+		// Tool results are never valid cut points, so a turn whose results exceed
+		// keepRecentTokens leaves no cut point at or after the scan position. The
+		// fallback must be the newest cut point, not the oldest: falling back to the
+		// oldest keeps the whole window, so compaction frees nothing and reports
+		// "session is too short to compact" while the context sits at 95%.
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createAssistantMessage("A1")),
+			createMessageEntry(createUserMessage("Turn 2")),
+			createMessageEntry(createAssistantWithToolCall("running two commands", "tc1")),
+			createMessageEntry(createToolResultMessage("tc1", 60 * 1024)),
+			createMessageEntry(createToolResultMessage("tc1", 60 * 1024)),
+		];
+
+		const result = findCutPoint(entries, 0, entries.length, DEFAULT_COMPACTION_SETTINGS.keepRecentTokens);
+
+		expect(result.firstKeptEntryIndex).toBe(3);
+		expect(result.isSplitTurn).toBe(true);
+		expect(result.turnStartIndex).toBe(2);
 	});
 
 	it("should return startIndex if no valid cut points in range", () => {
