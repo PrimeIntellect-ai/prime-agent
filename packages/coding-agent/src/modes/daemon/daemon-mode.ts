@@ -4403,7 +4403,7 @@ export class AgentDaemon {
 
 			case "abort": {
 				const state = this.getSessionState(command.activeSessionId);
-				state.runtime.session.requestAbort();
+				await state.runtime.session.abort();
 				return success(command.id, "abort");
 			}
 

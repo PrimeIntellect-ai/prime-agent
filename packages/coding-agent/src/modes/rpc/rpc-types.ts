@@ -142,7 +142,7 @@ export interface RpcSlashCommand {
 
 export interface RpcSessionState {
 	rpcProtocolVersion: 1;
-	rpcSchemaRevision: 1;
+	rpcSchemaRevision: 2;
 	cwd: string;
 	serviceTier: ServiceTier;
 	rlmMaxDepth: number;

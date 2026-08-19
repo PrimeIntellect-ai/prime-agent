@@ -32,7 +32,7 @@ export type {
 } from "./rpc-types.js";
 
 export const PRIME_AGENT_RPC_PROTOCOL_VERSION = 1;
-export const PRIME_AGENT_RPC_SCHEMA_REVISION = 1;
+export const PRIME_AGENT_RPC_SCHEMA_REVISION = 2;
 
 interface RpcModeConnectionOptions {
 	harnessMode?: "rpc-only";
@@ -85,6 +85,7 @@ async function runRpcModeWithConnectionInternal(
 	let shuttingDown = false;
 	let detachInput = () => {};
 	let inputEnded = false;
+	let preserveSuspendedQueueAtEof = false;
 	let promptResponsePending = false;
 	let promptCommandTail = Promise.resolve();
 	const bufferedConnectionOutputs: object[] = [];
@@ -239,15 +240,19 @@ async function runRpcModeWithConnectionInternal(
 					streamingBehavior: command.streamingBehavior,
 					source: "rpc",
 				});
+				preserveSuspendedQueueAtEof = false;
 				return success(id, command.type);
 			case "steer":
 				await connection.steer(command.message, command.images);
+				preserveSuspendedQueueAtEof = false;
 				return success(id, command.type);
 			case "follow_up":
 				await connection.followUp(command.message, command.images);
+				preserveSuspendedQueueAtEof = false;
 				return success(id, command.type);
 			case "abort":
 				await connection.abort();
+				preserveSuspendedQueueAtEof = true;
 				return success(id, command.type);
 			case "new_session":
 				return success(
@@ -558,7 +563,7 @@ async function runRpcModeWithConnectionInternal(
 		queueMicrotask(() => {
 			void cancelPendingExtensionUi()
 				.then(() => Promise.allSettled([...pendingInputHandlers]))
-				.then(() => connection.waitForIdle())
+				.then(() => (preserveSuspendedQueueAtEof ? undefined : connection.waitForIdle()))
 				.then(
 					() => shutdown(),
 					() => shutdown(1),

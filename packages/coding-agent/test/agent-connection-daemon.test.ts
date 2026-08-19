@@ -419,6 +419,8 @@ class FakeDaemonClient {
 					};
 				}
 				return { type: "response", command: command.type, success: true };
+			case "abort":
+				return { type: "response", command: command.type, success: true };
 			case "abort_bash":
 				if (this.abortBashUnknownCommand) {
 					return {
@@ -2408,6 +2410,15 @@ describe("DaemonAgentConnection", () => {
 		await expect(connection.getState()).resolves.toMatchObject({
 			sessionId: "session-new",
 		});
+	});
+
+	it("uses the long-running request timeout for abort", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.abort();
+
+		expect(fakeClient.requests).toEqual([expect.objectContaining({ type: "abort", activeSessionId: "active-1" })]);
+		expect(fakeClient.requestTimeouts).toEqual([24 * 60 * 60 * 1000]);
 	});
 
 	it("sends queue commands through the daemon protocol", async () => {

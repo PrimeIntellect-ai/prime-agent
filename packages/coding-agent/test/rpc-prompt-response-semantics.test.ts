@@ -251,7 +251,7 @@ describe("RPC prompt response semantics", () => {
 							success: true,
 							data: expect.objectContaining({
 								rpcProtocolVersion: 1,
-								rpcSchemaRevision: 1,
+								rpcSchemaRevision: 2,
 								rlmMaxDepth: 0,
 								actEnabled: false,
 								foregroundMode: "rpc_only",
@@ -342,6 +342,127 @@ describe("RPC prompt response semantics", () => {
 				expect(parseOutputLines(rpcIo.outputLines).some((record) => record.type === "agent_start")).toBe(true);
 			});
 			expect(session.isStreaming).toBe(true);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("fences the aborted operation while preserving queued follow-up input", async () => {
+		const { lineHandler, session, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 250 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "abort-prompt", type: "prompt", message: "Hello" }));
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines).some((record) => record.type === "agent_start")).toBe(true);
+			});
+			lineHandler(
+				JSON.stringify({
+					id: "abort-follow-up",
+					type: "prompt",
+					message: "Remain queued",
+					streamingBehavior: "followUp",
+				}),
+			);
+			await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "abort-follow-up")).toHaveLength(1));
+
+			lineHandler(JSON.stringify({ id: "abort", type: "abort" }));
+			await vi.waitFor(() => {
+				expect(
+					parseOutputLines(rpcIo.outputLines).some(
+						(record) => record.id === "abort" && record.type === "response" && record.command === "abort",
+					),
+				).toBe(true);
+			});
+
+			const records = parseOutputLines(rpcIo.outputLines);
+			const abortResponseIndex = records.findIndex(
+				(record) => record.id === "abort" && record.type === "response" && record.command === "abort",
+			);
+			const terminalEventIndex = records.findIndex((record) => record.type === "agent_end");
+			expect(terminalEventIndex).toBeGreaterThanOrEqual(0);
+			expect(terminalEventIndex).toBeLessThan(abortResponseIndex);
+			expect(records.filter((record) => record.type === "agent_start")).toHaveLength(1);
+			expect(session.getFollowUpMessages()).toEqual(["Remain queued"]);
+			lineHandler(JSON.stringify({ id: "abort-state", type: "get_state" }));
+			await vi.waitFor(() => {
+				const state = parseOutputLines(rpcIo.outputLines).find(
+					(record) => record.id === "abort-state" && record.type === "response" && record.command === "get_state",
+				);
+				expect(state).toMatchObject({ data: { isStreaming: false } });
+			});
+			expect(session.isStreaming).toBe(false);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("drains a new turn before EOF after an abort", async () => {
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
+			exitCodes.push(typeof code === "number" ? code : 0);
+			return undefined as never;
+		});
+		const { lineHandler, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 50,
+			harnessMode: "rpc-only",
+		});
+
+		try {
+			lineHandler(JSON.stringify({ id: "first", type: "prompt", message: "First" }));
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "agent_start")).toHaveLength(
+					1,
+				);
+			});
+			lineHandler(JSON.stringify({ id: "abort", type: "abort" }));
+			await vi.waitFor(() => {
+				expect(
+					parseOutputLines(rpcIo.outputLines).some(
+						(record) => record.id === "abort" && record.type === "response" && record.command === "abort",
+					),
+				).toBe(true);
+			});
+			lineHandler(JSON.stringify({ id: "second", type: "prompt", message: "Second" }));
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "second")).toHaveLength(1);
+				expect(parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "agent_start")).toHaveLength(
+					2,
+				);
+			});
+
+			const endListeners = process.stdin.listeners("end");
+			const endListener = endListeners[endListeners.length - 1];
+			if (!endListener) throw new Error("RPC mode did not register an EOF listener");
+			endListener();
+
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+			const records = parseOutputLines(rpcIo.outputLines);
+			const secondStart = records.reduce(
+				(index, record, current) => (record.type === "agent_start" ? current : index),
+				-1,
+			);
+			const finalEnd = records.reduce(
+				(index, record, current) => (record.type === "agent_end" ? current : index),
+				-1,
+			);
+			expect(finalEnd).toBeGreaterThan(secondStart);
+		} finally {
+			exit.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("acknowledges an abort with no active operation", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "idle-abort", type: "abort" }));
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines)).toEqual(
+					expect.arrayContaining([expect.objectContaining({ id: "idle-abort", command: "abort", success: true })]),
+				);
+			});
 		} finally {
 			await cleanup();
 		}
