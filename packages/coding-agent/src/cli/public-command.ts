@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
+import { AuthStorage } from "../core/auth-storage.js";
 import { runMcpManagementCommand } from "../core/mcp/mcp-command.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
@@ -271,7 +272,7 @@ async function runShutdown(args: string[]): Promise<PublicCommandResult> {
 
 async function runMcp(args: string[]): Promise<PublicCommandResult> {
 	const settingsManager = SettingsManager.create(process.cwd());
-	const result = await runMcpManagementCommand(args, settingsManager);
+	const result = await runMcpManagementCommand(args, settingsManager, AuthStorage.create());
 	console.log(result.message);
 	return HANDLED;
 }

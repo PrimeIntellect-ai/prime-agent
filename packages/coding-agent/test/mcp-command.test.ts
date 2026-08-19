@@ -89,6 +89,39 @@ describe("MCP management commands", () => {
 		expect(manager.getProjectSettings().mcpServers).toBeUndefined();
 	});
 
+	it("drops stored mcp:<name> credentials on remove and on --force replace", async () => {
+		const manager = SettingsManager.inMemory({});
+		const dropped: string[] = [];
+		const creds = new Set(["mcp:remote"]);
+		const authStorage = {
+			has: (provider: string) => creds.has(provider),
+			logout: (provider: string) => {
+				creds.delete(provider);
+				dropped.push(provider);
+			},
+		};
+		await runMcpManagementCommand(
+			["add", "remote", "--url", "https://one.example/mcp", "--oauth"],
+			manager,
+			authStorage,
+		);
+		// A brand-new add never touches credentials.
+		expect(dropped).toEqual([]);
+		// Replacing the entry may change the endpoint; the old token must not replay.
+		await runMcpManagementCommand(
+			["add", "remote", "--url", "https://two.example/mcp", "--oauth", "--force"],
+			manager,
+			authStorage,
+		);
+		expect(dropped).toEqual(["mcp:remote"]);
+		creds.add("mcp:remote");
+		await runMcpManagementCommand(["remove", "remote"], manager, authStorage);
+		expect(dropped).toEqual(["mcp:remote", "mcp:remote"]);
+		// Without an auth store the same flows still succeed.
+		await runMcpManagementCommand(["add", "remote", "--url", "https://three.example/mcp"], manager);
+		await runMcpManagementCommand(["remove", "remote"], manager);
+	});
+
 	it("atomically persists only user settings while preserving concurrent fields", async () => {
 		const agentDir = join(testDir, "agent");
 		const projectDir = join(testDir, "project");

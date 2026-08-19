@@ -8565,7 +8565,7 @@ export class InteractiveMode {
 		}
 
 		try {
-			const result = await runMcpManagementCommand(argv, this.settingsManager);
+			const result = await runMcpManagementCommand(argv, this.settingsManager, this.modelRegistry.authStorage);
 			if (result.changed && result.serverChange) {
 				const { name, transport, verb } = result.serverChange;
 				const successMessage =

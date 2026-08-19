@@ -17,9 +17,15 @@ export interface McpManagementResult {
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+export interface McpCredentialStore {
+	has(provider: string): boolean;
+	logout(provider: string): void;
+}
+
 export async function runMcpManagementCommand(
 	args: readonly string[],
 	settingsManager: SettingsManager,
+	authStorage?: McpCredentialStore,
 ): Promise<McpManagementResult> {
 	const action = args[0];
 	if (action === "list") {
@@ -41,6 +47,7 @@ export async function runMcpManagementCommand(
 			throw new Error(`MCP server "${name}" was not found.`);
 		}
 		await flushGlobalSettings(settingsManager);
+		dropServerCredentials(name, authStorage);
 		return {
 			action,
 			message: `Removed MCP server "${name}".`,
@@ -53,6 +60,9 @@ export async function runMcpManagementCommand(
 		const replaced = settingsManager.getGlobalMcpServers()?.[name] !== undefined;
 		settingsManager.setGlobalMcpServer(name, config, force);
 		await flushGlobalSettings(settingsManager);
+		// A replaced entry may point at a different endpoint; a token issued for
+		// the old URL must never replay to the new one.
+		if (replaced) dropServerCredentials(name, authStorage);
 		return {
 			action,
 			message: `${replaced ? "Replaced" : "Added"} MCP server "${name}".`,
@@ -191,6 +201,11 @@ async function flushGlobalSettings(settingsManager: SettingsManager): Promise<vo
 	await settingsManager.flush();
 	const error = settingsManager.drainErrors("global")[0];
 	if (error) throw error.error;
+}
+
+function dropServerCredentials(name: string, authStorage: McpCredentialStore | undefined): void {
+	const provider = `mcp:${name}`;
+	if (authStorage?.has(provider)) authStorage.logout(provider);
 }
 
 function requireCount(args: readonly string[], count: number, usage: string): void {
