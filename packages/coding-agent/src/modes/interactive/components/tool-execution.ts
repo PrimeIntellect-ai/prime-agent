@@ -11,7 +11,6 @@ import type { AgentConnectionToolDefinition } from "../../agent-connection/index
 import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
 import { ACT_COMPONENT_MAX_ACTS_PER_TOOL, ActExecutionComponent } from "./act-execution.js";
-import { FileChangeSummaryComponent, getToolFileChanges } from "./edit-summary.js";
 import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
 import { ToolPanel } from "./tool-panel.js";
 
