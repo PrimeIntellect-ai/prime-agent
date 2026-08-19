@@ -773,10 +773,9 @@ export class KernelManager {
 		} catch (e) {
 			if (this.startStale(generation)) throw e; // never tear down a newer start's kernel
 			const canRetryStartup = (this.state as string) !== "shutdown";
-			await this.shutdown();
-			// Our own teardown bumps the generation exactly once; any further bump means a newer owner took over.
-			if (this.startStale(generation + 1)) throw e;
-			if (canRetryStartup) this.state = "idle";
+			// Only the call that performed the cleanup may resurrect to idle; a
+			// concurrent kill()/teardown owns the state otherwise.
+			if ((await this.shutdown()) && canRetryStartup) this.state = "idle";
 			throw e;
 		}
 
@@ -799,10 +798,9 @@ export class KernelManager {
 		} catch (e) {
 			if (this.startStale(generation)) throw e; // never tear down a newer start's kernel
 			const canRetryStartup = (this.state as string) !== "shutdown";
-			await this.shutdown();
-			// Our own teardown bumps the generation exactly once; any further bump means a newer owner took over.
-			if (this.startStale(generation + 1)) throw e;
-			if (canRetryStartup) this.state = "idle";
+			// Only the call that performed the cleanup may resurrect to idle; a
+			// concurrent kill()/teardown owns the state otherwise.
+			if ((await this.shutdown()) && canRetryStartup) this.state = "idle";
 			throw e;
 		}
 
@@ -1492,11 +1490,12 @@ export class KernelManager {
 		}
 	}
 
-	async shutdown(opts: { snapshot?: boolean } = {}): Promise<void> {
+	/** Resolves true when this call performed the cleanup (false: a concurrent teardown won). */
+	async shutdown(opts: { snapshot?: boolean } = {}): Promise<boolean> {
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			this.cleanupResources();
-			return;
+			return true;
 		}
 		// Captured before any await: teardowns and newer starts bump the counter.
 		const generation = this.startGeneration;
@@ -1504,7 +1503,7 @@ export class KernelManager {
 		// so a SIGINT/SIGTERM exit doesn't lose work the debounced snapshot hasn't saved.
 		if (opts.snapshot) {
 			await this.flushSnapshotForDispose();
-			if (this.startGeneration !== generation) return; // superseded mid-flush: the newer owner already cleaned this kernel
+			if (this.startStale(generation)) return false; // superseded mid-flush: the newer owner already cleaned this kernel
 		}
 		this.state = "shutdown";
 		liveKernels.delete(this);
@@ -1521,8 +1520,9 @@ export class KernelManager {
 			);
 		}
 
-		if (this.startGeneration !== generation) return; // superseded during the awaits: the newer owner already cleaned this kernel
+		if (this.startStale(generation)) return false; // superseded during the awaits: the newer owner already cleaned this kernel
 		this.cleanupResources();
+		return true;
 	}
 
 	async restart(): Promise<void> {
@@ -1677,7 +1677,7 @@ export class KernelManager {
 			const generation = this.startGeneration;
 			// Final namespace flush while the kernel is still live (session end / reload).
 			await this.flushSnapshotForDispose();
-			if (this.startGeneration !== generation) return; // superseded mid-flush: the newer owner already cleaned this kernel
+			if (this.startStale(generation)) return; // superseded mid-flush: the newer owner already cleaned this kernel
 			this.state = "shutdown";
 			liveKernels.delete(this);
 			const inFlightHostRequests = [...this.inFlightHostRequests];
@@ -1687,7 +1687,7 @@ export class KernelManager {
 					await this.waitForHostRequestsToSettle(inFlightHostRequests, HOST_REQUEST_DISPOSE_TIMEOUT_MS);
 				}
 			} finally {
-				if (this.startGeneration === generation) this.cleanupResources(); // else: superseded, the newer owner already cleaned
+				if (!this.startStale(generation)) this.cleanupResources(); // else: superseded, the newer owner already cleaned
 			}
 		})();
 	}

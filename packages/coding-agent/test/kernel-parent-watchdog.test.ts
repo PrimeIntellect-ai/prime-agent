@@ -296,6 +296,30 @@ describe("kernel parent watchdog", () => {
 		}
 	});
 
+	it("a shutdown superseded by a concurrent kill reports not-owner so recovery cannot resurrect to idle", async () => {
+		const manager = new KernelManager({ python: "/nonexistent-python", cwd: tmpdir() });
+		const internals = manager as unknown as {
+			state: string;
+			connection: unknown;
+			control: unknown;
+			shutdown(): Promise<boolean>;
+			kill(): Promise<void>;
+		};
+		internals.state = "starting";
+		internals.connection = { key: "" };
+		let releaseSend: () => void = () => {};
+		internals.control = {
+			send: () => new Promise<void>((resolve) => (releaseSend = resolve)),
+			close: () => {},
+		};
+		const shutdownResult = internals.shutdown();
+		await new Promise((resolve) => setTimeout(resolve, 10)); // park in the control send
+		await internals.kill(); // concurrent teardown wins ownership
+		releaseSend();
+		expect(await shutdownResult).toBe(false); // recovery must not set idle
+		expect(internals.state).toBe("shutdown");
+	});
+
 	it("a stale shutdown parked in its control-send await never cleans up a successor kernel", async () => {
 		const journalPath = join(tempDir, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
