@@ -1057,8 +1057,7 @@ describe("AgentSession queue characterization", () => {
 			});
 			await new Promise<void>((resolve) => setTimeout(resolve, 0));
 			expect(refineSettled).toBe(false);
-			// The turn barrier (_refineInFlight) is up, but status must stay off
-			// until the apply phase actually starts.
+			// The turn barrier is up, but status stays off until the apply phase starts.
 			expect(harness.session.isRefining).toBe(false);
 
 			promptGate.resolve();

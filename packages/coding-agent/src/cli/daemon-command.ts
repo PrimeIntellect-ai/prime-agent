@@ -1460,11 +1460,6 @@ class DaemonAttachTerminal {
 			case "compaction_end":
 				this.writeLine(chalk.dim(`Compaction ${event.aborted ? "aborted" : "finished"}: ${event.reason}`));
 				return;
-			case "refinement_start":
-				this.writeLine(chalk.dim("Refinement started."));
-				return;
-			case "refinement_end":
-				return;
 			case "auto_retry_start":
 				this.writeLine(chalk.dim(`Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`));
 				return;
@@ -1480,9 +1475,10 @@ class DaemonAttachTerminal {
 			case "refine_failed":
 				this.writeLine(chalk.red(`Refinement failed: ${event.error}`));
 				return;
+			// The persisted refinement outcome message prints via message_end.
 			case "refine_complete":
-				this.writeLine(chalk.dim(`Refinement complete: ${event.result.summary}`));
-				return;
+			case "refinement_start":
+			case "refinement_end":
 			case "turn_start":
 			case "turn_end":
 			case "message_start":

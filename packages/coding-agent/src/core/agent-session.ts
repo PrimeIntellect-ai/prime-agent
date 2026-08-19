@@ -4037,15 +4037,12 @@ export class AgentSession {
 		);
 	}
 
-	/** Whether continual harness refinement is currently applying changes. */
 	get isRefining(): boolean {
 		return this._refinementApplyActive;
 	}
 
-	/**
-	 * Runs _applyRefine and emits refinement_start/refinement_end around the
-	 * apply phase only, so status stays off while a refine waits for idle.
-	 */
+	// Status brackets only the apply phase; _refineInFlight is set earlier as a
+	// turn barrier while public refine() still waits for idle.
 	private async _applyRefineWithStatus(
 		plan: RefinementPlan,
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
@@ -7687,8 +7684,7 @@ export class AgentSession {
 				message.details,
 			);
 		} catch {
-			// The full result is already stored as refinement history. Keep the
-			// expandable outcome visible for this process even if transcript persistence fails.
+			// Best-effort: the full result is already persisted as refinement history.
 		}
 		this.agent.state.messages.push(message);
 		this._emit({ type: "message_start", message });

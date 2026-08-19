@@ -138,6 +138,20 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
 	});
 
+	it("keeps refinement status additions backward-compatible at revision 17", () => {
+		// Old daemons never emit these events and omit isRefining; new clients
+		// treat the absent field as false. Old clients no-op on the unknown
+		// event types, so no capability gate is needed.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(17);
+		const newDaemonEvent: DaemonOutbound = {
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: { type: "refinement_start" },
+		};
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 7 });
+		expect(newDaemonEvent).toMatchObject({ event: { type: "refinement_start" } });
+	});
+
 	it("keeps refine failure events backward-compatible on the existing session event channel", () => {
 		const event: DaemonOutbound = {
 			type: "session_event",

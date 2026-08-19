@@ -52,7 +52,6 @@ function editLabel(edit: AppliedRefinementEdit, fallbackScope: "local" | "global
 	return `${theme.fg("success", verb)} ${scope} ${edit.kind} \`${edit.id}\``;
 }
 
-/** Durable refinement result with exact harness edits behind the code-edit expansion toggle. */
 export class RefinementOutcomeMessageComponent extends Container {
 	private readonly content = new Container();
 	private editDiffsExpanded = false;
