@@ -126,6 +126,7 @@ interface InspectableRlmRun {
 }
 
 interface InspectableRlmSession {
+	_disposing: boolean;
 	_activeRlmChildRuns: Map<string, InspectableRlmRun>;
 	_unsettledRlmChildRuns: Set<InspectableRlmRun>;
 	_deletingRlmChildren: Map<
@@ -1412,7 +1413,7 @@ describe("AgentSession rlm recursion", () => {
 		).toHaveLength(0);
 	});
 
-	it("keeps detached deletion silent when child startup later settles", async () => {
+	it("notifies after detached startup deletion cleanup settles", async () => {
 		let releaseRuntimeCreation: () => void = () => {};
 		const runtimeCreationGate = new Promise<void>((resolve) => {
 			releaseRuntimeCreation = resolve;
@@ -1439,7 +1440,11 @@ describe("AgentSession rlm recursion", () => {
 			root.messages.filter(
 				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
 			),
-		).toHaveLength(0);
+		).toEqual([
+			expect.objectContaining({
+				details: expect.objectContaining({ kind: "cancelled", reason: "Deleted by parent orchestrator" }),
+			}),
+		]);
 	});
 
 	it("fully deletes a settled startup failure and frees its session name", async () => {
@@ -2704,6 +2709,387 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.getRlmChildSession(spawned.rlm_child_id)).toBeUndefined();
 	});
 
+	it("aborts an active child tool and settles only after shared runtime cleanup", async () => {
+		let toolStarted = false;
+		let toolAborted = false;
+		const tool = {
+			name: "blocking_tool",
+			description: "Block until cancellation",
+			label: "blocking tool",
+			parameters: Type.Object({}),
+			execute: async (_toolCallId: string, _params: Record<string, never>, signal: AbortSignal) => {
+				toolStarted = true;
+				await new Promise<never>((_resolve, reject) => {
+					const rejectAborted = () => {
+						toolAborted = true;
+						reject(new Error("tool aborted"));
+					};
+					if (signal.aborted) rejectAborted();
+					else signal.addEventListener("abort", rejectAborted, { once: true });
+				});
+				throw new Error("unreachable");
+			},
+		};
+		const hostedChild = createSession({
+			customTools: [tool],
+			streamFn: (_model, context) => {
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => {
+					const hasToolResult = context.messages.some((message) => message.role === "toolResult");
+					stream.push({
+						type: "done",
+						reason: hasToolResult ? "stop" : "toolUse",
+						message: hasToolResult
+							? assistantMessage("unexpected completion")
+							: {
+									...assistantMessage(""),
+									content: [{ type: "toolCall" as const, id: "blocking-1", name: tool.name, arguments: {} }],
+									stopReason: "toolUse" as const,
+								},
+					});
+				});
+				return stream;
+			},
+		});
+		let releaseCleanup: () => void = () => {};
+		const cleanupGate = new Promise<void>((resolve) => {
+			releaseCleanup = resolve;
+		});
+		let cleanupStarted = false;
+		const deleteRuntime = vi.fn(async () => {
+			cleanupStarted = true;
+			await cleanupGate;
+			await hostedChild.disposeAsync();
+		});
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: deleteRuntime,
+			},
+		});
+
+		const spawned = await root.runRlmChild("use the blocking tool", { name: "tool-worker" });
+		await waitFor(() => toolStarted);
+		const internals = root as unknown as InspectableRlmSession;
+		const run = internals._activeRlmChildRuns.get(spawned.rlm_child_id);
+		if (!run) throw new Error("Missing active tool run");
+
+		const firstDeletion = root.deleteRlmSubagent("tool-worker");
+		const repeatedDeletion = root.deleteRlmSubagent(spawned.rlm_child_id);
+		await expect(firstDeletion).resolves.toMatchObject({ subagent: { rlm_child_id: spawned.rlm_child_id } });
+		await expect(repeatedDeletion).resolves.toMatchObject({ subagent: { rlm_child_id: spawned.rlm_child_id } });
+		await waitFor(() => toolAborted && cleanupStarted);
+		expect(deleteRuntime).toHaveBeenCalledOnce();
+		expect(run.status).toBe("cancelled");
+		expect(run.settled).toBe(false);
+		expect(internals._activeRlmChildRuns.get(spawned.rlm_child_id)).toBe(run);
+
+		let quiesced = false;
+		const quiescence = root.waitForRlmQuiescence().then(() => {
+			quiesced = true;
+		});
+		await sleep(20);
+		expect(quiesced).toBe(false);
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+
+		releaseCleanup();
+		await quiescence;
+		expect(run.settled).toBe(true);
+		expect(internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		expect(deleteRuntime).toHaveBeenCalledOnce();
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toEqual([
+			expect.objectContaining({
+				details: expect.objectContaining({ kind: "cancelled", reason: "Deleted by parent orchestrator" }),
+			}),
+		]);
+	});
+
+	it("admits a child-controller deletion notice only after runtime cleanup", async () => {
+		let releaseChild: () => void = () => {};
+		const childGate = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		let cleanupSucceeded = false;
+		const sendAgentMessage = vi.fn(async () => {
+			expect(cleanupSucceeded).toBe(true);
+			return {
+				id: "agentmsg-deletion-complete",
+				source: "agent_message" as const,
+				target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+				message: "deleted",
+				deliveryStatus: "delivered" as const,
+			};
+		});
+		const hostedChild = createSession({
+			agentMessageController: {
+				listAgents: () => ({
+					current: { activeSessionId: "child-active", sessionId: "child-session" },
+					agents: [],
+				}),
+				sendAgentMessage,
+			},
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void childGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("child stopped") });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(hostedChild, "abort").mockResolvedValue();
+		let releaseCleanup: () => void = () => {};
+		const cleanupGate = new Promise<void>((resolve) => {
+			releaseCleanup = resolve;
+		});
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: () => cleanupGate,
+			},
+		});
+
+		const spawned = await root.runRlmChild("controller ordering", { name: "controller-worker" });
+		await waitFor(() => childStarted);
+		await root.deleteRlmSubagent(spawned.rlm_child_id);
+		releaseChild();
+		await sleep(20);
+		expect(sendAgentMessage).not.toHaveBeenCalled();
+
+		cleanupSucceeded = true;
+		releaseCleanup();
+		await root.waitForRlmQuiescence();
+		expect(sendAgentMessage).toHaveBeenCalledOnce();
+		expect(sendAgentMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ message: expect.stringContaining("was cancelled: Deleted by parent orchestrator") }),
+		);
+	});
+
+	it("exposes fast cleanup failure and admits retry before an abort-insensitive child unwinds", async () => {
+		let releaseChild: () => void = () => {};
+		const childGate = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const hostedChild = createSession({
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void childGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("child stopped") });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(hostedChild, "abort").mockResolvedValue();
+		let rejectFirstCleanup: (error: Error) => void = () => {};
+		const firstCleanup = new Promise<void>((_resolve, reject) => {
+			rejectFirstCleanup = reject;
+		});
+		let releaseRetryCleanup: () => void = () => {};
+		const retryCleanup = new Promise<void>((resolve) => {
+			releaseRetryCleanup = resolve;
+		});
+		let cleanupAttempts = 0;
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: () => (++cleanupAttempts === 1 ? firstCleanup : retryCleanup),
+			},
+		});
+
+		const spawned = await root.runRlmChild("abort-insensitive cleanup retry", { name: "early-retry-worker" });
+		await waitFor(() => childStarted);
+		await root.deleteRlmSubagent(spawned.rlm_child_id);
+		rejectFirstCleanup(new Error("first cleanup failed quickly"));
+		const internals = root as unknown as InspectableRlmSession;
+		await waitFor(() => internals._rlmChildCleanupFailures.size === 1);
+		await waitFor(() =>
+			root.messages.some((message) => message.role === "custom" && message.customType === "rlm_child_failure"),
+		);
+
+		await expect(root.deleteRlmSubagent("early-retry-worker")).resolves.toMatchObject({
+			subagent: { rlm_child_id: spawned.rlm_child_id },
+		});
+		expect(cleanupAttempts).toBe(2);
+		releaseRetryCleanup();
+		await sleep(20);
+		expect(internals._activeRlmChildRuns.get(spawned.rlm_child_id)?.settled).toBe(false);
+
+		releaseChild();
+		await root.waitForRlmQuiescence();
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(1);
+	});
+
+	it("settles a pre-existing deletion cleanup failure during parent disposal", async () => {
+		let releaseChild: () => void = () => {};
+		const childGate = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const hostedChild = createSession({
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void childGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("child stopped") });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(hostedChild, "abort").mockResolvedValue();
+		const disposeHostedChild = vi.spyOn(hostedChild, "disposeAsync");
+		const deleteRuntime = vi.fn(() => Promise.reject(new Error("cleanup failed before dispose")));
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: deleteRuntime,
+			},
+		});
+
+		const spawned = await root.runRlmChild("pre-failed cleanup disposal", { name: "pre-failed-worker" });
+		await waitFor(() => childStarted);
+		await root.deleteRlmSubagent(spawned.rlm_child_id);
+		const internals = root as unknown as InspectableRlmSession;
+		const run = internals._activeRlmChildRuns.get(spawned.rlm_child_id);
+		if (!run) throw new Error("Missing deleting run");
+		await waitFor(() => internals._rlmChildCleanupFailures.size === 1);
+
+		await root.disposeAsync();
+		expect(run.settled).toBe(true);
+		expect(deleteRuntime).toHaveBeenCalledOnce();
+		expect(disposeHostedChild).toHaveBeenCalled();
+		expect(internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		expect(internals._unsettledRlmChildRuns.has(run)).toBe(false);
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+		releaseChild();
+	});
+
+	it("settles disposal after cleanup succeeds without waiting for abort-insensitive task unwind", async () => {
+		let releaseChild: () => void = () => {};
+		const childGate = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const hostedChild = createSession({
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void childGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("child stopped") });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(hostedChild, "abort").mockResolvedValue();
+		let releaseCleanup: () => void = () => {};
+		const cleanup = new Promise<void>((resolve) => {
+			releaseCleanup = resolve;
+		});
+		const deleteRuntime = vi.fn(() => cleanup);
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: deleteRuntime,
+			},
+		});
+
+		const spawned = await root.runRlmChild("successful cleanup disposal", { name: "dispose-success-worker" });
+		await waitFor(() => childStarted);
+		await root.deleteRlmSubagent(spawned.rlm_child_id);
+		const internals = root as unknown as InspectableRlmSession;
+		const run = internals._activeRlmChildRuns.get(spawned.rlm_child_id);
+		if (!run) throw new Error("Missing deleting run");
+
+		const disposal = root.disposeAsync();
+		await waitFor(() => internals._disposing);
+		releaseCleanup();
+		await disposal;
+		expect(run.settled).toBe(true);
+		expect(deleteRuntime).toHaveBeenCalledOnce();
+		expect(internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		expect(internals._unsettledRlmChildRuns.has(run)).toBe(false);
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+		releaseChild();
+	});
+
+	it("settles and suppresses notices when deletion cleanup fails during parent disposal", async () => {
+		let releaseChild: () => void = () => {};
+		const childGate = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const hostedChild = createSession({
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void childGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("child stopped") });
+				});
+				return stream;
+			},
+		});
+		vi.spyOn(hostedChild, "abort").mockResolvedValue();
+		const disposeHostedChild = vi.spyOn(hostedChild, "disposeAsync");
+		let rejectCleanup: (error: Error) => void = () => {};
+		const cleanup = new Promise<void>((_resolve, reject) => {
+			rejectCleanup = reject;
+		});
+		const deleteRuntime = vi.fn(() => cleanup);
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: deleteRuntime,
+			},
+		});
+
+		const spawned = await root.runRlmChild("dispose during failed cleanup", { name: "dispose-worker" });
+		await waitFor(() => childStarted);
+		await root.deleteRlmSubagent(spawned.rlm_child_id);
+		const internals = root as unknown as InspectableRlmSession;
+		const run = internals._activeRlmChildRuns.get(spawned.rlm_child_id);
+		if (!run) throw new Error("Missing deleting run");
+
+		const disposal = root.disposeAsync();
+		await waitFor(() => internals._disposing);
+		rejectCleanup(new Error("cleanup failed during dispose"));
+		releaseChild();
+		await disposal;
+		await waitFor(() => run.settled);
+		expect(deleteRuntime).toHaveBeenCalledOnce();
+		expect(disposeHostedChild).toHaveBeenCalled();
+		expect(internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		expect(internals._unsettledRlmChildRuns.has(run)).toBe(false);
+		expect(
+			root.messages.filter(
+				(message) =>
+					message.role === "custom" &&
+					(message.customType === "rlm_child_failure" || message.customType === "rlm_child_terminal_notice"),
+			),
+		).toHaveLength(0);
+	});
+
 	it("keeps deleted live runs in the RLM quiescence barrier until settlement", async () => {
 		let releaseChild: () => void = () => {};
 		const release = new Promise<void>((resolve) => {
@@ -2741,25 +3127,44 @@ describe("AgentSession rlm recursion", () => {
 			quiesced = true;
 		});
 		await root.deleteRlmSubagent(spawned.rlm_child_id);
-		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		const run = (root as unknown as InspectableRlmSession)._activeRlmChildRuns.get(spawned.rlm_child_id);
+		expect(run?.status).toBe("cancelled");
+		expect(run?.settled).toBe(false);
 		await sleep(20);
 		expect(quiesced).toBe(false);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(true);
 
 		releaseChild();
 		await quiescence;
 		expect(quiesced).toBe(true);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
 	});
 
-	it("does not let completion retention resurrect a child being deleted", async () => {
+	it("does not add a cancellation notice when deletion races a started completion notice", async () => {
+		let releaseCompletionNotice: () => void = () => {};
+		const completionNoticeGate = new Promise<void>((resolve) => {
+			releaseCompletionNotice = resolve;
+		});
 		const root = createSession();
+		const promptInjectedMessage = vi.fn(async (..._args: unknown[]) => completionNoticeGate);
+		(root as unknown as { _promptInjectedMessage: typeof promptInjectedMessage })._promptInjectedMessage =
+			promptInjectedMessage;
 		const spawned = await root.runRlmChild("fast child", { name: "fast-worker" });
-		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) !== undefined);
+		const internals = root as unknown as InspectableRlmSession;
+		await waitFor(() => internals._activeRlmChildRuns.get(spawned.rlm_child_id)?.status === "done");
+		await waitFor(() => promptInjectedMessage.mock.calls.length === 1);
+
 		await expect(root.deleteRlmSubagent("fast-worker")).resolves.toMatchObject({
 			subagent: { rlm_child_id: spawned.rlm_child_id },
 		});
+		releaseCompletionNotice();
+		await root.waitForRlmQuiescence();
 		expect(await root.listRlmSubagents()).toEqual({ subagents: [] });
-		await Promise.resolve();
 		expect(root.getRlmChildSession(spawned.rlm_child_id)).toBeUndefined();
+		expect(promptInjectedMessage).toHaveBeenCalledOnce();
+		expect(promptInjectedMessage.mock.calls[0]?.[1]).toMatchObject({
+			details: expect.objectContaining({ kind: "completed_without_reply" }),
+		});
 	});
 
 	it("reconciles failed-delete tracking when the detached retry succeeds", async () => {
@@ -2769,6 +3174,7 @@ describe("AgentSession rlm recursion", () => {
 		});
 		let childStarted = false;
 		let deleteAttempts = 0;
+		let failNextDeletePreflight = false;
 		const hostedChild = createSession({
 			rlmSessionDir: join(tempDir, "detached-retry-child"),
 			streamFn: (_model, context) => {
@@ -2785,23 +3191,75 @@ describe("AgentSession rlm recursion", () => {
 			},
 		});
 		const root = createSession({
+			agentMessageController: {
+				listAgents: async () => {
+					if (failNextDeletePreflight) {
+						failNextDeletePreflight = false;
+						throw new Error("delete preflight failed");
+					}
+					return {
+						current: { activeSessionId: "parent-active", sessionId: "parent-session" },
+						agents: [],
+					};
+				},
+				sendAgentMessage: async () => {
+					throw new Error("unexpected direct send");
+				},
+			},
 			subagentRuntimeHost: {
 				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
-				deleteRlmSubagentRuntime: async (_id, session) => {
-					if (++deleteAttempts === 1) throw new Error("first close failed");
-					await session?.disposeAsync();
+				deleteRlmSubagentRuntime: (_id, session) => {
+					if (++deleteAttempts === 1) throw new Error("first close failed synchronously");
+					return session?.disposeAsync() ?? Promise.resolve();
 				},
 			},
 		});
 
 		await root.runRlmChild("slow retry shard", { name: "retry-worker" });
 		await waitFor(() => childStarted);
-		await expect(root.deleteRlmSubagent("retry-worker")).rejects.toThrow("first close failed");
+		await expect(root.deleteRlmSubagent("retry-worker")).resolves.toMatchObject({
+			subagent: { session_name: "retry-worker" },
+		});
 		const internals = root as unknown as InspectableRlmSession;
-		expect(internals._rlmChildCleanupFailures.size).toBe(1);
+		let quiesced = false;
+		const quiescence = root.waitForRlmQuiescence().then(() => {
+			quiesced = true;
+		});
 		releaseChild();
+		await waitFor(() => internals._rlmChildCleanupFailures.size === 1);
+		await waitFor(() =>
+			root.messages.some((message) => message.role === "custom" && message.customType === "rlm_child_failure"),
+		);
+		await sleep(20);
+		expect(quiesced).toBe(false);
+		expect([...internals._activeRlmChildRuns.values()][0]?.settled).toBe(false);
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+		expect(
+			root.messages.find((message) => message.role === "custom" && message.customType === "rlm_child_failure"),
+		).toMatchObject({
+			content: expect.stringContaining("retry rlm.delete_subagent"),
+		});
 
-		await waitFor(() => deleteAttempts === 2);
+		failNextDeletePreflight = true;
+		await expect(root.deleteRlmSubagent("retry-worker")).rejects.toThrow("delete preflight failed");
+		expect(deleteAttempts).toBe(1);
+		expect([...internals._activeRlmChildRuns.values()][0]?.settled).toBe(false);
+
+		await expect(root.deleteRlmSubagent("retry-worker")).resolves.toMatchObject({
+			subagent: { session_name: "retry-worker" },
+		});
+		expect(deleteAttempts).toBe(2);
+		await quiescence;
+		expect(quiesced).toBe(true);
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(1);
 		await waitFor(() => internals._rlmChildCleanupFailures.size === 0);
 		expect(internals._rlmChildSessions.size).toBe(0);
 		expect(internals._rlmChildUnsubscribes.size).toBe(0);
@@ -2885,6 +3343,7 @@ describe("AgentSession rlm recursion", () => {
 
 		releaseFailureInjection();
 		await waitFor(() => !internals._activeRlmChildRuns.has(failed?.rlm_child_id ?? ""));
+		expect(promptInjectedMessage).toHaveBeenCalledOnce();
 		await expect(root.runRlmChild("replacement", { name: "failed-worker" })).resolves.toMatchObject({
 			name: "failed-worker",
 		});
@@ -3006,12 +3465,13 @@ describe("AgentSession rlm recursion", () => {
 		expect(disposeHostedChild).not.toHaveBeenCalled();
 
 		await root.deleteRlmSubagent("starting-worker");
+		await root.waitForRlmQuiescence();
 		expect(deleteRuntime).toHaveBeenCalledTimes(2);
 		expect(disposeHostedChild).toHaveBeenCalledOnce();
 		expect(internals._rlmChildCleanupFailures.size).toBe(0);
 	});
 
-	it("deletes a running direct child by name and waits for runtime cleanup", async () => {
+	it("accepts repeated deletion of a running direct child without waiting for task unwind", async () => {
 		let releaseChild: () => void = () => {};
 		const release = new Promise<void>((resolve) => {
 			releaseChild = resolve;

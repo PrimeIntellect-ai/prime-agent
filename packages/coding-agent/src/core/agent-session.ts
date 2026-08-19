@@ -871,8 +871,19 @@ interface RlmChildRun {
 	suppressTerminalNotice?: boolean;
 	/** Excluded from future strong barriers after an authoritative cancellation cut. */
 	abandonedForQuiescence?: boolean;
-	/** Selector snapshot for a delete admitted while runtime startup was still pending. */
+	/** Selector snapshot for an admitted explicit delete. */
 	detachedDeletion?: RlmSubagentRegistryEntry;
+	/** Shared physical runtime cleanup owned by the explicit-delete path. */
+	deletionCleanup?: Promise<void>;
+	deletionCleanupObserver?: Promise<boolean>;
+	/** Resolves when a deletion may release its selector reservation. */
+	deletionReservation: AgentMessageDeferred;
+	deletionCleanupFailed?: boolean;
+	deletionRunFinished?: boolean;
+	deletionNotice?: Promise<void>;
+	deletionNeedsCompletionNotice?: boolean;
+	completeDeletion?: () => Promise<void>;
+	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
 	unsubscribe?: () => void;
 }
@@ -3865,9 +3876,22 @@ export class AgentSession {
 	private async _disposeAsyncOnce(): Promise<void> {
 		// Flush kernels/traces for both still-running and retained children; the sync
 		// dispose() below only tears them down synchronously.
-		for (const run of this._activeRlmChildRuns.values()) {
-			if (run.session) {
-				await run.session.disposeAsync().catch(() => undefined);
+		for (const run of [...this._activeRlmChildRuns.values()]) {
+			const childSession = run.session;
+			if (!childSession) continue;
+			if (run.detachedDeletion) {
+				run.suppressTerminalNotice = true;
+				if (run.deletionCleanupObserver) {
+					await run.deletionCleanupObserver.catch(() => false);
+				} else if (run.deletionCleanup) {
+					await run.deletionCleanup.catch(() => childSession.disposeAsync().catch(() => undefined));
+				} else {
+					// Cleanup already failed and was exposed for retry before disposal.
+					await childSession.disposeAsync().catch(() => undefined);
+				}
+				if (!run.settled) await this._finishRlmRunDeletion(run);
+			} else {
+				await childSession.disposeAsync().catch(() => undefined);
 			}
 		}
 		for (const unsubscribe of this._rlmChildUnsubscribes.values()) {
@@ -9255,8 +9279,19 @@ export class AgentSession {
 		try {
 			return await deletion;
 		} finally {
-			if (this._deletingRlmChildren.get(subagent.rlm_child_id)?.promise === deletion) {
-				this._deletingRlmChildren.delete(subagent.rlm_child_id);
+			const clearReservation = () => {
+				if (this._deletingRlmChildren.get(subagent.rlm_child_id)?.promise === deletion) {
+					this._deletingRlmChildren.delete(subagent.rlm_child_id);
+				}
+			};
+			const run = this._activeRlmChildRuns.get(subagent.rlm_child_id);
+			if (run?.detachedDeletion) {
+				// Keep every selector reserved until the run settles, or until a failed
+				// cleanup is exposed for an explicit retry. Repeated deletes before that
+				// boundary return the same accepted result.
+				void run.deletionReservation.promise.then(clearReservation, clearReservation);
+			} else {
+				clearReservation();
 			}
 		}
 	}
@@ -9266,6 +9301,85 @@ export class AgentSession {
 			return this._subagentRuntimeHost.deleteRlmSubagentRuntime(childId, session);
 		}
 		return session?.disposeAsync() ?? Promise.resolve();
+	}
+
+	private _ensureRlmRunDeletionCleanup(run: RlmChildRun, session: AgentSession): Promise<void> {
+		if (run.deletionCleanup) return run.deletionCleanup;
+		const cleanup = Promise.resolve().then(() => this._deleteRlmSubagentSession(run.id, session));
+		run.deletionCleanup = cleanup;
+		// Deletion admission is intentionally nonblocking. The detached run owner
+		// joins this exact promise before settlement and records any failure.
+		void cleanup.catch(() => undefined);
+		return cleanup;
+	}
+
+	private async _recordRlmRunDeletionCleanupFailure(
+		run: RlmChildRun,
+		subagent: RlmSubagentRegistryEntry,
+		session: AgentSession,
+		error: unknown,
+	): Promise<void> {
+		if (this._disposed || this._disposing) {
+			run.suppressTerminalNotice = true;
+			await session.disposeAsync().catch(() => undefined);
+			if (!run.settled) await this._finishRlmRunDeletion(run);
+			return;
+		}
+		run.deletionCleanup = undefined;
+		run.deletionCleanupObserver = undefined;
+		run.deletionCleanupFailed = true;
+		run.session = session;
+		this._rlmChildCleanupFailures.set(run.id, subagent);
+		// Make retry admission available before waking the parent model with the
+		// retry-required notice.
+		run.deletionReservation.resolve();
+		await Promise.resolve();
+		await run.reportDeletionCleanupFailure?.(error);
+	}
+
+	private async _finishRlmRunDeletion(run: RlmChildRun): Promise<void> {
+		await run.completeDeletion?.();
+		if (this._activeRlmChildRuns.get(run.id) === run) {
+			this._removeRlmSubagentTracking(run.id, run);
+		}
+		run.settled = true;
+		run.settlement.resolve();
+		run.deletionReservation.resolve();
+		this._unsettledRlmChildRuns.delete(run);
+	}
+
+	private _observeRlmRunDeletionCleanup(
+		run: RlmChildRun,
+		subagent: RlmSubagentRegistryEntry,
+		session: AgentSession,
+		cleanup: Promise<void>,
+	): Promise<boolean> {
+		if (run.deletionCleanupObserver) return run.deletionCleanupObserver;
+		const observer = cleanup.then(
+			() => true,
+			async (error) => {
+				await this._recordRlmRunDeletionCleanupFailure(run, subagent, session, error);
+				return false;
+			},
+		);
+		run.deletionCleanupObserver = observer;
+		void observer.catch(() => undefined);
+		return observer;
+	}
+
+	private _continueFinishedRlmRunDeletion(
+		run: RlmChildRun,
+		subagent: RlmSubagentRegistryEntry,
+		session: AgentSession,
+	): void {
+		const cleanup = this._ensureRlmRunDeletionCleanup(run, session);
+		const observer = this._observeRlmRunDeletionCleanup(run, subagent, session, cleanup);
+		if (!run.deletionRunFinished) return;
+		void observer
+			.then(async (cleanupSucceeded) => {
+				if (cleanupSucceeded) await this._finishRlmRunDeletion(run);
+			})
+			.catch(() => undefined);
 	}
 
 	private _removeRlmSubagentTracking(childId: string, run?: RlmChildRun): void {
@@ -9305,7 +9419,20 @@ export class AgentSession {
 		const childId = subagent.rlm_child_id;
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run) {
-			if (!this._cancelRlmChildRun(run, "Deleted by parent orchestrator")) {
+			if (run.deletionCleanupFailed) {
+				// Reset retry coordination only after selector preflight reaches the
+				// resolved child. A failed preflight must leave the prior retry boundary
+				// intact so a later call can acquire it.
+				run.deletionCleanupFailed = false;
+				run.deletionReservation = createAgentMessageDeferred();
+			}
+			// The detached task remains the sole lifecycle owner. Mark deletion before
+			// cancellation so its catch/finally path cannot race a normal release or
+			// terminal notice against the physical delete.
+			run.detachedDeletion = subagent;
+			if (this._cancelRlmChildRun(run, "Deleted by parent orchestrator")) {
+				run.deletionNeedsCompletionNotice = true;
+			} else {
 				this._emitRlmSubagentRemoval(subagent);
 			}
 			const liveSession = run.session;
@@ -9314,33 +9441,10 @@ export class AgentSession {
 				this._removeRlmSubagentTracking(childId, run);
 				return { subagent };
 			}
-			if (liveSession) {
-				try {
-					await this._deleteRlmSubagentSession(childId, liveSession);
-				} catch (error) {
-					if (this._disposed || this._disposing) {
-						this._removeRlmSubagentTracking(childId, run);
-						void liveSession.disposeAsync().catch(() => undefined);
-						throw error;
-					}
-					this._rlmChildSessions.set(childId, liveSession);
-					this._rlmChildCleanupFailures.set(childId, subagent);
-					if (run.unsubscribe) this._rlmChildUnsubscribes.set(childId, run.unsubscribe);
-					this._activeRlmChildRuns.delete(childId);
-					run.abort = noopRlmChildAbort;
-					run.unsubscribe = undefined;
-					run.session = undefined;
-					throw error;
-				}
-				this._deletedRlmChildIds.add(childId);
-				this._removeRlmSubagentTracking(childId, run);
-				return { subagent };
-			}
+			if (liveSession) this._continueFinishedRlmRunDeletion(run, subagent, liveSession);
 
-			// Startup can be blocked in a host before it has a session to close. Admit
-			// deletion immediately, but retain the cancelled run as a hidden tombstone
-			// until startup settles so selectors cannot be reused underneath it.
-			run.detachedDeletion = subagent;
+			// Return once deletion is accepted. The run stays hidden but unsettled until
+			// abort-insensitive model/tool work unwinds and the shared cleanup finishes.
 			this._deletedRlmChildIds.add(childId);
 			return { subagent };
 		}
@@ -9720,6 +9824,7 @@ export class AgentSession {
 			abort: noopRlmChildAbort,
 			publication: createAgentMessageDeferred(),
 			settlement: createAgentMessageDeferred(),
+			deletionReservation: createAgentMessageDeferred(),
 		};
 		const throwIfCancelled = () => {
 			if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
@@ -9758,6 +9863,9 @@ export class AgentSession {
 			run.session = child;
 			run.abort = () => void child.abort();
 			run.publication.resolve();
+			// Cancellation may have been admitted while runtime construction was
+			// blocked and run.abort was still a no-op.
+			if (run.status === "cancelled") run.abort();
 		};
 		const subagentOptions: CreateRlmSubagentRuntimeOptions = {
 			...this._createRlmSubagentRuntimeOptions({
@@ -9791,6 +9899,35 @@ export class AgentSession {
 				returnAfterAccepted: true,
 				suppressAutonomousContinuation: true,
 			}).catch(() => undefined);
+		};
+
+		run.completeDeletion = () => {
+			if (!run.deletionNeedsCompletionNotice || run.suppressTerminalNotice || this._disposed || this._disposing) {
+				return Promise.resolve();
+			}
+			if (run.deletionNotice) return run.deletionNotice;
+			const notice = deliverTerminalMessageToParent(
+				createRlmChildTerminalNoticeMessage({
+					kind: "cancelled",
+					childId: run.id,
+					sessionName,
+					reason: run.error ?? "Deleted by parent orchestrator",
+				}),
+			);
+			run.deletionNotice = notice;
+			return notice;
+		};
+
+		run.reportDeletionCleanupFailure = (error) => {
+			if (run.suppressTerminalNotice || this._disposed || this._disposing) return Promise.resolve();
+			const cleanupError = error instanceof Error ? error.message : String(error);
+			return deliverTerminalMessageToParent(
+				createRlmChildFailureMessage({
+					childId: run.id,
+					sessionName,
+					error: `Deletion cleanup failed; retry rlm.delete_subagent("${run.id}") before completion: ${cleanupError}`,
+				}),
+			);
 		};
 
 		// Runtime startup and the task run are deliberately detached. The public
@@ -9917,7 +10054,7 @@ export class AgentSession {
 						}),
 					);
 				}
-				if (!this.registerRlmChildSession(run.id, child)) {
+				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
 						await this._subagentRuntimeHost
 							.releaseRlmSubagentRuntime(childRuntime, subagentOptions, "error")
@@ -9986,34 +10123,42 @@ export class AgentSession {
 					}
 				}
 			} finally {
-				if (run.detachedDeletion && childRuntime) {
-					try {
-						await this._deleteRlmSubagentSession(run.id, childRuntime.session);
-					} catch {
-						if (!this._disposed && !this._disposing) {
-							this._rlmChildSessions.set(run.id, childRuntime.session);
-							this._rlmChildCleanupFailures.set(run.id, run.detachedDeletion);
+				if (run.detachedDeletion) {
+					run.deletionRunFinished = true;
+					if (!run.settled) {
+						let cleanupSucceeded = !run.deletionCleanupFailed;
+						if (childRuntime && cleanupSucceeded) {
+							const cleanup =
+								run.deletionCleanup ?? this._ensureRlmRunDeletionCleanup(run, childRuntime.session);
+							cleanupSucceeded = await this._observeRlmRunDeletionCleanup(
+								run,
+								run.detachedDeletion,
+								childRuntime.session,
+								cleanup,
+							);
+						}
+						if (cleanupSucceeded) await this._finishRlmRunDeletion(run);
+					}
+				} else {
+					if (this._activeRlmChildRuns.get(run.id) === run) {
+						if (this._rlmChildSessions.has(run.id)) {
+							this._activeRlmChildRuns.delete(run.id);
+							if (run.unsubscribe) this._rlmChildUnsubscribes.set(run.id, run.unsubscribe);
+							run.abort = noopRlmChildAbort;
+							run.unsubscribe = undefined;
+							run.session = undefined;
+						} else if (run.status !== "error") {
+							this._removeRlmSubagentTracking(run.id, run);
+						} else {
+							run.unsubscribe?.();
+							run.abort = noopRlmChildAbort;
+							run.unsubscribe = undefined;
 						}
 					}
+					run.settled = true;
+					run.settlement.resolve();
+					this._unsettledRlmChildRuns.delete(run);
 				}
-				if (this._activeRlmChildRuns.get(run.id) === run) {
-					if (this._rlmChildSessions.has(run.id)) {
-						this._activeRlmChildRuns.delete(run.id);
-						if (run.unsubscribe) this._rlmChildUnsubscribes.set(run.id, run.unsubscribe);
-						run.abort = noopRlmChildAbort;
-						run.unsubscribe = undefined;
-						run.session = undefined;
-					} else if (run.status !== "error" || run.detachedDeletion) {
-						this._removeRlmSubagentTracking(run.id, run);
-					} else {
-						run.unsubscribe?.();
-						run.abort = noopRlmChildAbort;
-						run.unsubscribe = undefined;
-					}
-				}
-				run.settled = true;
-				run.settlement.resolve();
-				this._unsettledRlmChildRuns.delete(run);
 			}
 		})().catch(() => undefined);
 
