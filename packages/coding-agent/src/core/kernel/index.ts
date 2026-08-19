@@ -1492,7 +1492,14 @@ export class KernelManager {
 		return this.captureSnapshot();
 	}
 
-	private async captureSnapshot(executionTimeoutMs?: number): Promise<SnapshotResult | null> {
+	/** Persist the namespace, then remove variables above the per-variable cap. */
+	async pruneOversizedVariables(): Promise<SnapshotResult | null> {
+		return this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS, pruneOversized: true });
+	}
+
+	private async captureSnapshot(
+		options: { executionTimeoutMs?: number; pruneOversized?: boolean } = {},
+	): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
 		const code = buildSnapshotCode(
@@ -1500,12 +1507,13 @@ export class KernelManager {
 			cfg.manifestPath,
 			cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
 			cfg.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+			options.pruneOversized,
 		);
 		try {
 			const r = await this.enqueueExecute(
 				code,
 				{ maxOutputChars: SNAPSHOT_MAX_OUTPUT_CHARS, internal: true },
-				executionTimeoutMs,
+				options.executionTimeoutMs,
 			);
 			if (r.status !== "ok") {
 				this.appendKernelDiagnostic(
@@ -1568,7 +1576,7 @@ export class KernelManager {
 		if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
 		this.snapshotTimer = globalThis.setTimeout(() => {
 			this.snapshotTimer = undefined;
-			void this.captureSnapshot(SNAPSHOT_EXECUTION_TIMEOUT_MS);
+			void this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS });
 		}, cfg.debounceMs ?? DEFAULT_SNAPSHOT_DEBOUNCE_MS);
 		if (this.snapshotTimer && typeof this.snapshotTimer === "object" && "unref" in this.snapshotTimer) {
 			this.snapshotTimer.unref();

@@ -345,8 +345,10 @@ describe("KernelManager abort handling", () => {
 		);
 
 		const snapshot = (
-			manager as unknown as { captureSnapshot: (executionTimeoutMs?: number) => Promise<unknown> }
-		).captureSnapshot(5000);
+			manager as unknown as {
+				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
+			}
+		).captureSnapshot({ executionTimeoutMs: 5000 });
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(executeInner).not.toHaveBeenCalled();
 

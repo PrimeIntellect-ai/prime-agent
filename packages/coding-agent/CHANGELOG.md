@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Fixed large IPython variables repeatedly slowing later turns while the persistent kernel snapshot was saved.
+- Fixed large IPython variables repeatedly slowing later turns by excluding them from persistent snapshots and removing them when context is compacted.
 - Fixed daemon socket paths being used verbatim in identity derivations: on supported platforms, `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree.
 - Added a `thinking` option to `rlm.run` for spawning subagents with an explicit reasoning level; invalid levels for the resolved child model fail spawn.
 - Changed opening the agents view (full or scoped) with a draft prompt to auto-stash the draft instead of refusing; the draft is restored into the editor when the session is reopened.

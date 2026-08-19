@@ -26,12 +26,14 @@ describe("parseSnapshotResult", () => {
 		const stdout = `${MARKER}${JSON.stringify({
 			saved: ["x", "y"],
 			skipped: [{ name: "sock", reason: "TypeError: cannot pickle" }],
+			pruned: ["large_text"],
 			bytes: 1234,
 		})}\n`;
 		const result = parseSnapshotResult(stdout, "/tmp/s.dill");
 		expect(result).toEqual({
 			saved: ["x", "y"],
 			skipped: [{ name: "sock", reason: "TypeError: cannot pickle" }],
+			pruned: ["large_text"],
 			bytes: 1234,
 			path: "/tmp/s.dill",
 		});

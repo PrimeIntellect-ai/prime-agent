@@ -6781,9 +6781,10 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
-	private async _notifyKernelStateAfterCompaction(): Promise<void> {
+	private async _syncKernelStateAfterCompaction(): Promise<void> {
 		const provisioner = this._ipythonKernelProvisioner;
 		if (!provisioner?.hasRunningKernel) return;
+		const pruned = await provisioner.pruneOversizedVariables().catch(() => null);
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
 		if (typeof timer === "object" && "unref" in timer) timer.unref();
@@ -6800,9 +6801,13 @@ export class AgentSession {
 				: names.length > 0
 					? ` These names are still defined: ${names.join(", ")}.`
 					: " You have not defined any names yet.";
+		const prunedDetail =
+			pruned && pruned.length > 0
+				? ` Variables above the per-variable snapshot limit were removed: ${pruned.join(", ")}.`
+				: "";
 		const content = [
 			"<ipython_state>",
-			`Your IPython kernel persisted through compaction; all variables, imports, and helpers you defined remain available.${detail}`,
+			`Your IPython kernel persisted through compaction; its remaining variables, imports, and helpers are still available.${prunedDetail}${detail}`,
 			"</ipython_state>",
 		].join("\n");
 		const message = {
@@ -7025,7 +7030,7 @@ export class AgentSession {
 				fromExtension,
 			});
 		}
-		await this._notifyKernelStateAfterCompaction();
+		await this._syncKernelStateAfterCompaction();
 		await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
 
 		return { summary, firstKeptEntryId, tokensBefore, details };
