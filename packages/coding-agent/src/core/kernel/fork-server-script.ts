@@ -5,20 +5,23 @@
 //
 // Embedded as a string rather than shipped as a package asset so it can never be
 // missing from a release layout (see the built-in-skills packaging gap). Run via
-// `python -c <this> <control-socket-path>`.
+// `python -c <this> <control-socket-path> [<history-bound>]`.
 //
 // Protocol (newline-delimited JSON over the unix socket, forkserver is the client):
 //   -> { "id": <n>, "connectionPath": "<abs path>" }   spawn request from Node
-//   -> { "id": <n>, "kill": <pid>, "signal": "TERM"|"KILL" }  kill a forked child
-//   -> { "id": <n>, "alive": <pid> }                   liveness query for a child
+//   -> { "id": <n>, "kill": <fork-id>, "signal": "TERM"|"KILL" }  kill a forked child
+//   -> { "id": <n>, "alive": <fork-id> }               liveness query for a child
 //   <- { "type": "ready" }                             once, after imports finish
 //   <- { "id": <n>, "pid": <pid> }                     fork succeeded
 //   <- { "id": <n>, "error": "<message>" }             fork failed
 //   <- { "id": <n>, "outcome": "signaled"|"already-exited"|"unknown-pid" }  kill reply
 //   <- { "id": <n>, "alive": true|false }              alive reply
 //
-// Kill/alive exist because the forkserver is the kernels' parent: it can signal an
-// un-reaped child without any pid-reuse race, which Node (a non-parent) cannot.
+// Kill/alive are keyed by the fork request id, never a raw pid: request ids are
+// unique and never reused, so an id can only ever name the one child incarnation
+// it forked — a reaped pid recycled by a later fork can't alias to an old handle.
+// The forkserver is the kernels' parent, so it can signal an un-reaped child
+// without any OS-level pid-reuse race either, which Node (a non-parent) cannot.
 export const FORK_SERVER_SCRIPT = String.raw`
 import gc
 import json
@@ -29,10 +32,15 @@ import sys
 import threading
 import time
 
-# Reap table: pids of live (forked, un-reaped) children and reaped ones. Only the
-# main thread mutates these (the SIGCHLD handler runs between bytecodes there).
-_live = set()
-_reaped = set()
+# Registry: fork request id -> [pid, alive]. Ids are unique and never reused, so
+# an entry names exactly one child incarnation. _pid_to_id is the reverse index
+# for the reaper and only holds un-reaped, un-evicted children. Only the main
+# thread mutates these (the SIGCHLD handler runs between bytecodes there).
+_children = {}
+_pid_to_id = {}
+# FIFO bound on registry history so it can't grow unbounded over the forkserver's
+# lifetime; kill/alive for an evicted id fail closed ("unknown-pid"/false).
+_history_bound = 4096
 
 
 def _reap_children(*_args):
@@ -44,8 +52,9 @@ def _reap_children(*_args):
             pid, _status = os.waitpid(-1, os.WNOHANG)
             if pid == 0:
                 break
-            _live.discard(pid)
-            _reaped.add(pid)
+            child_id = _pid_to_id.pop(pid, None)
+            if child_id is not None:
+                _children[child_id][1] = False
     except ChildProcessError:
         pass
 
@@ -155,33 +164,36 @@ def _serve(control_path):
             continue
         req_id = req.get("id")
 
-        kill_pid = req.get("kill")
-        if kill_pid is not None:
-            # Block SIGCHLD across check+kill so the reap table can't change in
-            # between: while blocked, membership in _live means an un-reaped own
-            # child (zombie-pinned pid), making os.kill POSIX-race-free.
+        kill_id = req.get("kill")
+        if kill_id is not None:
+            # Block SIGCHLD across check+kill so the registry can't change in
+            # between: while blocked, an alive entry means an un-reaped own child
+            # (zombie-pinned pid), making os.kill POSIX-race-free.
             signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
             try:
-                if kill_pid in _live:
+                entry = _children.get(kill_id)
+                if entry is None:
+                    # Unknown or evicted id: fail closed, never signal anything.
+                    outcome = "unknown-pid"
+                elif not entry[1]:
+                    outcome = "already-exited"
+                else:
                     sig = signal.SIGKILL if req.get("signal") == "KILL" else signal.SIGTERM
                     try:
-                        os.kill(kill_pid, sig)
+                        os.kill(entry[0], sig)
                         outcome = "signaled"
                     except ProcessLookupError:
                         outcome = "already-exited"
-                elif kill_pid in _reaped:
-                    outcome = "already-exited"
-                else:
-                    outcome = "unknown-pid"
             finally:
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
             f.write(json.dumps({"id": req_id, "outcome": outcome}).encode() + b"\n")
             f.flush()
             continue
 
-        alive_pid = req.get("alive")
-        if alive_pid is not None:
-            f.write(json.dumps({"id": req_id, "alive": alive_pid in _live}).encode() + b"\n")
+        alive_id = req.get("alive")
+        if alive_id is not None:
+            entry = _children.get(alive_id)
+            f.write(json.dumps({"id": req_id, "alive": bool(entry and entry[1])}).encode() + b"\n")
             f.flush()
             continue
 
@@ -189,15 +201,23 @@ def _serve(control_path):
         cwd = req.get("cwd")
         env = req.get("env")
 
+        # Block SIGCHLD across fork+bookkeeping: a fast-exiting child could
+        # otherwise be reaped before its registry entry exists, recording a
+        # stale (possibly reused) pid as alive.
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
         try:
             pid = os.fork()
         except OSError as exc:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
             f.write(json.dumps({"id": req_id, "error": str(exc)}).encode() + b"\n")
             f.flush()
             continue
 
         if pid == 0:
-            # Child: shed every inherited fd tied to the control channel, then run.
+            # Child: it inherits the forking thread's mask with SIGCHLD blocked;
+            # unblock first so the kernel's own child handling can see SIGCHLD.
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
+            # Shed every inherited fd tied to the control channel, then run.
             try:
                 sock.close()
                 f.close()
@@ -215,11 +235,22 @@ def _serve(control_path):
             os._exit(0)
 
         # Parent: stay pristine (no loop/threads/ZMQ ever) so the next fork is clean.
-        _live.add(pid)
+        _children[req_id] = [pid, True]
+        _pid_to_id[pid] = req_id
+        # FIFO eviction (dicts preserve insertion order); an evicted-while-alive
+        # child just loses its reverse-index entry, so its later reap is a no-op.
+        while len(_children) > _history_bound:
+            evicted_id = next(iter(_children))
+            evicted_pid, evicted_alive = _children.pop(evicted_id)
+            if evicted_alive:
+                _pid_to_id.pop(evicted_pid, None)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
         f.write(json.dumps({"id": req_id, "pid": pid}).encode() + b"\n")
         f.flush()
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 2:
+        _history_bound = int(sys.argv[2])
     _serve(sys.argv[1])
 `;

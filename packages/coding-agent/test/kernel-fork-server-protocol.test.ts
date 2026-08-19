@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { type ForkedKernelHandle, ForkServer, ForkServerUnavailable } from "../s
 // alive without a real kernel — fork itself is safe here even on macOS because
 // the child never touches the frameworks that make fork-without-exec unsafe.
 const STUB_KERNELAPP = [
+	"import os",
 	"import time",
 	"",
 	"",
@@ -26,6 +27,10 @@ const STUB_KERNELAPP = [
 	"        pass",
 	"",
 	"    def start(self):",
+	"        # Env knob: lets tests fork a child that exits immediately (the",
+	"        # per-kernel env is applied in the child before start()).",
+	"        if os.environ.get('STUB_KERNEL_EXIT'):",
+	"            return",
 	"        while True:",
 	"            time.sleep(1)",
 	"",
@@ -81,8 +86,11 @@ describeIf("forkserver kill/liveness protocol (stub python)", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	async function spawnStubKernel(): Promise<ForkedKernelHandle> {
-		const handle = await server!.spawnKernel({ connectionPath: join(tempDir, "conn.json") });
+	async function spawnStubKernel(
+		target: ForkServer = server!,
+		env?: Record<string, string | undefined>,
+	): Promise<ForkedKernelHandle> {
+		const handle = await target.spawnKernel({ connectionPath: join(tempDir, "conn.json"), env });
 		leakedPids.push(handle.pid);
 		return handle;
 	}
@@ -100,33 +108,25 @@ describeIf("forkserver kill/liveness protocol (stub python)", () => {
 		});
 	}, 15_000);
 
-	it("reports already-exited after reap and never signals an unknown pid", async () => {
+	it("reports already-exited after reap and fails closed on an unknown fork id", async () => {
 		const handle = await spawnStubKernel();
 		expect(await handle.kill("TERM")).toBe("signaled");
 		await vi.waitFor(async () => {
-			expect(await server!.killChild(handle.pid, "TERM")).toBe("already-exited");
+			expect(await handle.kill("TERM")).toBe("already-exited");
 		});
-		// A child of the TEST, never of the forkserver: the direct pid-reuse-safety
-		// assertion — a pid the forkserver doesn't own is never signaled.
-		let decoy: ChildProcess | undefined;
-		try {
-			decoy = spawn("sleep", ["60"]);
-			expect(await server!.killChild(decoy.pid!, "TERM")).toBe("unknown-pid");
-			expect(decoy.exitCode).toBe(null);
-			expect(decoy.killed).toBe(false);
-		} finally {
-			decoy?.kill("SIGKILL");
-		}
+		// A fork id the forkserver never issued: nothing may be signaled.
+		expect(await server!.killChild(999_999, "TERM")).toBe("unknown-pid");
+		expect(await server!.isChildAlive(999_999)).toBe(false);
 	}, 15_000);
 
 	it("liveness reflects the reap table on external child death", async () => {
 		const handle = await spawnStubKernel();
-		expect(await server!.isChildAlive(handle.pid)).toBe(true);
+		expect(await handle.isAlive()).toBe(true);
 		// External death (not via the protocol): proves the SIGCHLD reaper drives
-		// the table independently of the kill path.
+		// the registry independently of the kill path.
 		process.kill(handle.pid, "SIGTERM");
 		await vi.waitFor(async () => {
-			expect(await server!.isChildAlive(handle.pid)).toBe(false);
+			expect(await handle.isAlive()).toBe(false);
 		});
 	}, 15_000);
 
@@ -143,6 +143,79 @@ describeIf("forkserver kill/liveness protocol (stub python)", () => {
 			await vi.waitFor(async () => {
 				expect(await handle.kill("TERM")).toBe("already-exited");
 			});
+		}
+	}, 15_000);
+
+	it("a fast-exiting child never lands alive; its handle stays already-exited across new forks", async () => {
+		// STUB_KERNEL_EXIT makes the forked child return from start() immediately,
+		// so it can be reaped as early as the OS allows relative to the parent-side
+		// registry insertion — the SIGCHLD-blocked fork bookkeeping must still
+		// record it under its own id and mark exactly that entry not-alive.
+		const fast = await spawnStubKernel(server!, { STUB_KERNEL_EXIT: "1" });
+		await vi.waitFor(async () => {
+			expect(await fast.isAlive()).toBe(false);
+		});
+		expect(await fast.kill("TERM")).toBe("already-exited");
+		// Id-keying invariant: a later fork gets a fresh id (even if the OS reuses
+		// the pid, which we can't force), and the old handle's answers don't change.
+		const next = await spawnStubKernel();
+		expect(await next.isAlive()).toBe(true);
+		expect(await fast.isAlive()).toBe(false);
+		expect(await fast.kill("TERM")).toBe("already-exited");
+		expect(await next.kill("TERM")).toBe("signaled");
+	}, 15_000);
+
+	it("evicted registry entries fail closed (unknown-pid/false), recent ones stay answerable", async () => {
+		// A tiny history bound (argv[2] to the script) makes FIFO eviction reachable.
+		const bounded = new ForkServer({ python: "python3", historyBound: 2 });
+		try {
+			const oldest = await spawnStubKernel(bounded, { STUB_KERNEL_EXIT: "1" });
+			await vi.waitFor(async () => {
+				expect(await oldest.kill("TERM")).toBe("already-exited");
+			});
+			const middle = await spawnStubKernel(bounded, { STUB_KERNEL_EXIT: "1" });
+			const newest = await spawnStubKernel(bounded, { STUB_KERNEL_EXIT: "1" });
+			// Three entries against a bound of 2: the oldest id has been evicted.
+			expect(await oldest.kill("TERM")).toBe("unknown-pid");
+			expect(await oldest.isAlive()).toBe(false);
+			for (const handle of [middle, newest]) {
+				await vi.waitFor(async () => {
+					expect(await handle.kill("TERM")).toBe("already-exited");
+				});
+				expect(await handle.isAlive()).toBe(false);
+			}
+		} finally {
+			bounded.dispose();
+		}
+	}, 15_000);
+
+	it("evicting a still-alive entry then killing it externally leaves the forkserver healthy", async () => {
+		// Eviction while the child is ALIVE: its later external death hits the
+		// SIGCHLD reaper with a pid no longer in the registry (no-op pop), which
+		// must not crash the forkserver or corrupt the surviving entries.
+		const bounded = new ForkServer({ python: "python3", historyBound: 2 });
+		try {
+			const oldest = await spawnStubKernel(bounded);
+			expect(await oldest.isAlive()).toBe(true);
+			const middle = await spawnStubKernel(bounded);
+			const newest = await spawnStubKernel(bounded);
+			// Three entries against a bound of 2: the alive oldest id is evicted.
+			expect(await oldest.kill("TERM")).toBe("unknown-pid");
+			expect(await oldest.isAlive()).toBe(false);
+			// External death by raw os pid (test harness only, never a src path).
+			process.kill(oldest.pid, "SIGKILL");
+			await vi.waitFor(() => {
+				expect(() => process.kill(oldest.pid, 0)).toThrow();
+			});
+			// The reaper's no-op pop must leave the server answering correctly.
+			expect(await oldest.kill("TERM")).toBe("unknown-pid");
+			expect(await oldest.isAlive()).toBe(false);
+			expect(await middle.isAlive()).toBe(true);
+			expect(await newest.isAlive()).toBe(true);
+			expect(await middle.kill("TERM")).toBe("signaled");
+			expect(await newest.kill("TERM")).toBe("signaled");
+		} finally {
+			bounded.dispose();
 		}
 	}, 15_000);
 

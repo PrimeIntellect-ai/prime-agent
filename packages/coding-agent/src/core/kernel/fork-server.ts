@@ -52,6 +52,8 @@ export function isForkServerEnabled(): boolean {
 // forked child, so every kernel for a given python shares ONE template.
 interface ForkServerParams {
 	python: string;
+	// Registry-history bound override (argv[2] to the script); tests only.
+	historyBound?: number;
 }
 
 interface SpawnParams {
@@ -67,9 +69,10 @@ export type ForkedKernelKillOutcome = "signaled" | "already-exited" | "unknown-p
 
 /**
  * Handle to a forkserver-forked kernel. All signaling/liveness goes through the
- * forkserver (the kernel's parent), never a bare process.kill from Node — a
- * non-parent signaling a numeric pid races with pid reuse. Both methods reject
- * with ForkServerUnavailable when the server is dead or the reply is malformed.
+ * forkserver (the kernel's parent), keyed by the fork request id (never a raw
+ * pid, which can alias across children via reuse) — process.kill from Node is
+ * never used. Both methods reject with ForkServerUnavailable when the server is
+ * dead or the reply is malformed. `pid` exists for journal writes only.
  */
 export interface ForkedKernelHandle {
 	readonly pid: number;
@@ -198,7 +201,9 @@ export class ForkServer {
 			server.listen(socketPath, () => {
 				// The template only imports; its own cwd/env are irrelevant since each
 				// forked child applies the per-kernel cwd/env itself. Inherit the daemon's.
-				const proc = spawn(this.params.python, ["-c", FORK_SERVER_SCRIPT, socketPath], {
+				const args = ["-c", FORK_SERVER_SCRIPT, socketPath];
+				if (this.params.historyBound !== undefined) args.push(String(this.params.historyBound));
+				const proc = spawn(this.params.python, args, {
 					env: this.launchEnv,
 					stdio: ["ignore", "ignore", "pipe"],
 				});
@@ -236,9 +241,9 @@ export class ForkServer {
 			if (!p) {
 				// A pid for a request the caller already abandoned (timed out): the
 				// fork succeeded but nobody owns it, so ask the forkserver — the
-				// orphan's parent, hence race-free — to kill it (never process.kill).
+				// orphan's parent — to kill it by its fork request id (never process.kill).
 				if (this.abandoned.delete(msg.id) && typeof msg.pid === "number") {
-					void this.killChild(msg.pid, "TERM").catch(() => {});
+					void this.killChild(msg.id, "TERM").catch(() => {});
 				}
 				continue;
 			}
@@ -276,15 +281,18 @@ export class ForkServer {
 			throw new ForkServerUnavailable(this.withStderr(msg.error ?? "forkserver fork failed"));
 		}
 		const pid = msg.pid;
+		// The reply echoes the fork request id — the stable, never-reused key this
+		// handle kills/polls by, so it can only ever act on this child incarnation.
+		const forkId = msg.id;
 		return {
 			pid,
-			kill: (signal) => this.killChild(pid, signal),
-			isAlive: () => this.isChildAlive(pid),
+			kill: (signal) => this.killChild(forkId, signal),
+			isAlive: () => this.isChildAlive(forkId),
 		};
 	}
 
-	async killChild(pid: number, signal: ForkedKernelKillSignal): Promise<ForkedKernelKillOutcome> {
-		const msg = await this.request({ kill: pid, signal });
+	async killChild(forkId: number, signal: ForkedKernelKillSignal): Promise<ForkedKernelKillOutcome> {
+		const msg = await this.request({ kill: forkId, signal });
 		const outcome = msg.outcome;
 		if (outcome === "signaled" || outcome === "already-exited" || outcome === "unknown-pid") {
 			return outcome;
@@ -292,8 +300,8 @@ export class ForkServer {
 		throw new ForkServerUnavailable(`forkserver kill reply malformed: ${JSON.stringify(msg)}`);
 	}
 
-	async isChildAlive(pid: number): Promise<boolean> {
-		const msg = await this.request({ alive: pid });
+	async isChildAlive(forkId: number): Promise<boolean> {
+		const msg = await this.request({ alive: forkId });
 		return msg.alive === true;
 	}
 

@@ -1410,17 +1410,20 @@ export class KernelManager {
 			if (directPid !== undefined) recordOrphanProcessState(directPid, false);
 		} else if (this.forkedKernel) {
 			const forked = this.forkedKernel;
-			// Kill via the forkserver (the kernel's parent), never process.kill:
-			// inactive is journaled only on a confirmed outcome — on uncertainty the
-			// record stays stale-active (the reaper verifies processStartId; a wrong
-			// inactive write could mask a sibling's record for a reused pid). On the
-			// 'exit' path the socket write is a same-tick enqueue but the reply never
-			// lands: stale-active again, and the later-registered disposeAllForkServers
-			// exit handler SIGTERMs the forkserver, taking kernels down via parent_handle.
+			// Kill via the forkserver (the kernel's parent), never process.kill. The
+			// journal is raw-pid keyed, so inactive is written only on "signaled":
+			// at the SIGCHLD-blocked dispatch the fork id still mapped to our
+			// un-reaped child, so the pid provably belonged to our incarnation.
+			// "already-exited"/"unknown-pid"/errors leave the record stale-active
+			// (the reaper verifies processStartId, so a stale record self-neutralizes;
+			// a wrong inactive write could mask a sibling's record for a reused pid).
+			// On the 'exit' path the reply never lands: stale-active again, and the
+			// later-registered disposeAllForkServers exit handler SIGTERMs the
+			// forkserver, taking kernels down via parent_handle.
 			void forked
 				.kill(killSignal === "SIGKILL" ? "KILL" : "TERM")
 				.then((outcome) => {
-					if (outcome !== "unknown-pid") recordOrphanProcessState(forked.pid, false);
+					if (outcome === "signaled") recordOrphanProcessState(forked.pid, false);
 				})
 				.catch(() => this.appendKernelDiagnostic("forkserver kill unconfirmed; leaving orphan record active"));
 		}

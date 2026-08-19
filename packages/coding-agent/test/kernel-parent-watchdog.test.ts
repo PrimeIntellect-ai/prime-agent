@@ -90,11 +90,11 @@ describe("kernel parent watchdog", () => {
 		});
 	});
 
-	it("writes the inactive journal record only after a confirmed forkserver kill outcome", async () => {
+	it("writes the inactive journal record only on a signaled forkserver kill outcome", async () => {
 		const journalPath = join(tempDir, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
 		forkEnabledMock.mockReturnValue(true);
-		const killMock = vi.fn(async (): Promise<"already-exited"> => "already-exited");
+		const killMock = vi.fn(async (): Promise<"signaled"> => "signaled");
 		forkKernelMock.mockResolvedValue({
 			pid: 999999,
 			isAlive: async () => false,
@@ -118,6 +118,34 @@ describe("kernel parent watchdog", () => {
 			expect(records[0]).toMatchObject({ pid: 999999, active: true });
 			expect(records[1]).toMatchObject({ pid: 999999, active: false });
 		});
+	});
+
+	it("leaves the journal record active on an already-exited kill outcome (pid may be reused)", async () => {
+		const journalPath = join(tempDir, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		forkEnabledMock.mockReturnValue(true);
+		const killMock = vi.fn(async (): Promise<"already-exited"> => "already-exited");
+		forkKernelMock.mockResolvedValue({
+			pid: 999999,
+			isAlive: async () => false,
+			kill: killMock,
+		});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+
+		try {
+			await expect(manager.execute("x")).rejects.toThrow(/Kernel exited before resolving ports/);
+		} finally {
+			errorSpy.mockRestore();
+			await manager.dispose();
+		}
+
+		await vi.waitFor(() => expect(killMock).toHaveBeenCalledTimes(1));
+		// Let the resolved kill settle: no inactive record may ever follow.
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		const records = readJournalRecords(journalPath);
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({ pid: 999999, active: true });
 	});
 
 	it("leaves the journal record active and never signals the pid when the kill is unconfirmed", async () => {
