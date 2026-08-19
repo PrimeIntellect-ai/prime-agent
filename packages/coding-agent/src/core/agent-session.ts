@@ -172,6 +172,8 @@ import {
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
+	RLM_CHILD_FAILURE_CUSTOM_TYPE,
+	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
@@ -1036,6 +1038,7 @@ export class AgentSession {
 	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private readonly _sessionInputAdmissionPauses = new Set<symbol>();
+	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
 	private _sessionActionCommitOwner: symbol | undefined;
 	private _pendingSessionActionFenceWaiters = 0;
@@ -4440,6 +4443,135 @@ export class AgentSession {
 		});
 	}
 
+	private _isRlmTerminalNotice(message: CustomMessage): boolean {
+		return (
+			message.customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE ||
+			message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE
+		);
+	}
+
+	private _assertRlmTerminalNotice(message: CustomMessage): void {
+		if (!this._isRlmTerminalNotice(message)) {
+			throw new Error("Deferred terminal admission only accepts RLM child terminal notices.");
+		}
+	}
+
+	private _isRlmTerminalNoticeAction(action: QueuedSessionAction): boolean {
+		if (action.payload.kind !== "turn") return false;
+		const message = primaryDeliveryRecord(action).message;
+		return message.role === "custom" && this._isRlmTerminalNotice(message);
+	}
+
+	private _hasDeferredRlmTerminalNotices(): boolean {
+		return this._pendingNextTurnMessages.some((message) => this._isRlmTerminalNotice(message));
+	}
+
+	private _enqueueRlmTerminalNoticeAction(message: CustomMessage): void {
+		this._assertRlmTerminalNotice(message);
+		const action = this._createPreparedTurnAction("followUp", message.content as string, undefined, {
+			message,
+			suppressAutonomousContinuation: true,
+			resumeIfIdle: false,
+			source: "internal",
+			executionPolicy: this._turnExecutionPolicy("injected"),
+			queueVisible: false,
+		});
+		this._durableRlmTerminalNoticeActionIds.add(action.id);
+		try {
+			const result = this._admitSessionInput(action, { wake: false });
+			if (!result.accepted) throw new Error("RLM child terminal notice was not admitted.");
+		} catch (error) {
+			this._durableRlmTerminalNoticeActionIds.delete(action.id);
+			throw error;
+		}
+	}
+
+	private _flushDeferredRlmTerminalNotices(): void {
+		if (
+			this._sessionInputAdmissionPauses.size > 0 ||
+			this._sessionInputPumpSuspended ||
+			this._queuedWorkPauses.size > 0 ||
+			this._disposed ||
+			this._disposing
+		) {
+			return;
+		}
+		while (true) {
+			const index = this._pendingNextTurnMessages.findIndex((message) => this._isRlmTerminalNotice(message));
+			if (index < 0) break;
+			const message = this._pendingNextTurnMessages[index];
+			try {
+				this._enqueueRlmTerminalNoticeAction(message);
+			} catch {
+				return;
+			}
+			this._pendingNextTurnMessages.splice(index, 1);
+		}
+		this._scheduleSessionInputPump();
+	}
+
+	private async _acquireRlmTerminalNoticeRetentionFence(): Promise<{ owner: symbol; release(): void } | undefined> {
+		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+		while (!this._disposed && !this._disposing && !disposeSignal.aborted) {
+			if (this._queuedWorkPauses.size > 0) {
+				let wake = () => {};
+				const pauseReleased = new Promise<void>((resolve) => {
+					wake = resolve;
+					this._sessionInputCheckpointWaiters.add(resolve);
+				});
+				try {
+					await waitForPromiseOrAbort(pauseReleased, disposeSignal, "Terminal notice retention cancelled");
+				} catch {
+					return undefined;
+				} finally {
+					this._sessionInputCheckpointWaiters.delete(wake);
+				}
+				continue;
+			}
+			let fence: { owner: symbol; release(): void };
+			try {
+				fence = await this._acquireSessionActionCommitFence(disposeSignal);
+			} catch {
+				return undefined;
+			}
+			if (this._queuedWorkPauses.size === 0 && !this._disposed && !this._disposing) return fence;
+			fence.release();
+		}
+		return undefined;
+	}
+
+	private async _deferRlmTerminalNotice(message: CustomMessage): Promise<void> {
+		this._assertRlmTerminalNotice(message);
+		const fence = await this._acquireRlmTerminalNoticeRetentionFence();
+		if (!fence) return;
+		try {
+			if (this._disposed || this._disposing) return;
+			this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+			this._flushDeferredRlmTerminalNotices();
+		} finally {
+			fence.release();
+		}
+	}
+
+	private _demoteRlmTerminalNoticeActions(): void {
+		const actions = this._actionStore
+			.clearableActions()
+			.filter((action) => this._durableRlmTerminalNoticeActionIds.has(action.id));
+		if (actions.length === 0) return;
+		for (const action of actions) {
+			if (!this._isRlmTerminalNoticeAction(action)) continue;
+			const message = primaryDeliveryRecord(action).message;
+			if (message.role === "custom") this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+		}
+		const ids = new Set(actions.map((action) => action.id));
+		this._cancelSessionActions(
+			(action) => ids.has(action.id),
+			new Error("RLM child terminal notice deferred across session input suspension."),
+			actions,
+		);
+		for (const id of ids) this._durableRlmTerminalNoticeActionIds.delete(id);
+	}
+
 	private async _promptInjectedMessage(
 		text: string,
 		message: CustomMessage,
@@ -4913,7 +5045,16 @@ export class AgentSession {
 				...(recovered.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
 			};
 		});
-		for (const action of actions) this._admitSessionInput(action, { restore: true });
+		for (const action of actions) {
+			const durableTerminalNotice = this._isRlmTerminalNoticeAction(action);
+			if (durableTerminalNotice) this._durableRlmTerminalNoticeActionIds.add(action.id);
+			try {
+				this._admitSessionInput(action, { restore: true });
+			} catch (error) {
+				if (durableTerminalNotice) this._durableRlmTerminalNoticeActionIds.delete(action.id);
+				throw error;
+			}
+		}
 		return actions.length;
 	}
 
@@ -5495,6 +5636,7 @@ export class AgentSession {
 								action.lifecycle.state === "failed" ||
 								action.lifecycle.state === "cancelled")
 						) {
+							this._durableRlmTerminalNoticeActionIds.delete(action.id);
 							this._actionStore.releaseTerminal(action);
 						}
 					}
@@ -6337,6 +6479,7 @@ export class AgentSession {
 				this._sessionInputAdmissionPauses.delete(token);
 				this._sessionInputPumpEpoch++;
 				this._notifySessionInputCheckpointChange();
+				this._flushDeferredRlmTerminalNotices();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6354,6 +6497,7 @@ export class AgentSession {
 				released = true;
 				this._queuedWorkPauses.delete(token);
 				this._notifySessionInputCheckpointChange();
+				this._flushDeferredRlmTerminalNotices();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6446,6 +6590,7 @@ export class AgentSession {
 		this._sessionInputSuspendedForUpdateRestart = false;
 		this._sessionInputPumpEpoch++;
 		this._notifySessionInputCheckpointChange();
+		this._flushDeferredRlmTerminalNotices();
 	}
 
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
@@ -6525,6 +6670,7 @@ export class AgentSession {
 
 	restorePendingNextTurnMessages(messages: readonly CustomMessage[]): void {
 		this._pendingNextTurnMessages.push(...messages.map((message) => cloneCustomMessage(message)));
+		this._flushDeferredRlmTerminalNotices();
 	}
 
 	removeQueuedFollowUp(queueKey: string): boolean {
@@ -6553,8 +6699,12 @@ export class AgentSession {
 		this._sessionInputPumpEpoch++;
 		this._sessionInputPumpSuspended = true;
 		this._sessionInputSuspendedForUpdateRestart = false;
+		this._demoteRlmTerminalNoticeActions();
 		this._cancelSessionActions(
-			(action) => action.payload.kind === "turn" && !action.payload.queueVisible,
+			(action) =>
+				action.payload.kind === "turn" &&
+				!action.payload.queueVisible &&
+				!this._durableRlmTerminalNoticeActionIds.has(action.id),
 			new Error("Prompt aborted before delivery."),
 		);
 		this._cancelPostCompactionContinue();
@@ -9598,6 +9748,7 @@ export class AgentSession {
 	}
 
 	private _hasUnsettledRlmQuiescenceWork(): boolean {
+		if (this._hasDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
 			(child) => child.isSessionActive || child._hasUnsettledRlmQuiescenceWork(),
@@ -9609,31 +9760,49 @@ export class AgentSession {
 	 * message and for the resulting parent turns to drain. Re-snapshotting after
 	 * each drain includes descendants spawned while earlier results were consumed.
 	 */
-	async waitForRlmQuiescence(): Promise<void> {
+	async waitForRlmQuiescence(externalSignal?: AbortSignal): Promise<void> {
 		const cancellation = new AbortController();
+		const cancelFromParent = () => cancellation.abort();
+		if (externalSignal?.aborted) cancellation.abort();
+		else externalSignal?.addEventListener("abort", cancelFromParent, { once: true });
 		this._rlmQuiescenceWaitAborts.add(cancellation);
+		let rejectCancelled = (_error: Error) => {};
 		const cancelled = new Promise<never>((_resolve, reject) => {
-			cancellation.signal.addEventListener("abort", () => reject(new Error("RLM quiescence wait cancelled")), {
-				once: true,
-			});
+			rejectCancelled = reject;
 		});
+		const onCancelled = () => rejectCancelled(new Error("RLM quiescence wait cancelled"));
+		cancellation.signal.addEventListener("abort", onCancelled, { once: true });
+		if (cancellation.signal.aborted) onCancelled();
 		const wait = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, cancelled]);
 		try {
 			while (true) {
 				await wait(this.waitForHeadlessIdle());
+				// Strong RLM quiescence also owns session-level work (bash, refine,
+				// branch mutation, and manual compaction) that interactive waitForIdle
+				// intentionally ignores. Yield a macrotask while such work is active so
+				// recursive parent/child barriers cannot form a microtask busy-loop.
+				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices()) {
+					await wait(new Promise<void>((resolve) => setTimeout(resolve, 0)));
+					continue;
+				}
 				const unsettledRuns = [...this._unsettledRlmChildRuns].filter((run) => !run.settled);
 				const childSessions = this._rlmChildSessionSnapshot();
 				if (unsettledRuns.length === 0 && !this._hasUnsettledRlmQuiescenceWork()) return;
 				await wait(
 					Promise.all([
 						...unsettledRuns.map((run) => run.settlement.promise),
-						...childSessions.map((child) => child.waitForRlmQuiescence()),
+						...childSessions.map((child) => child.waitForRlmQuiescence(cancellation.signal)),
 					]),
 				);
-				await wait(this.waitForHeadlessIdle());
-				if (!this._hasUnsettledRlmQuiescenceWork()) return;
+				// Always loop through the self-active/deferred checks again. Work may
+				// start at the child-settlement boundary.
 			}
 		} finally {
+			// A local descendant error must cancel sibling recursive waits owned by
+			// this barrier before their propagation listeners are removed.
+			cancellation.abort();
+			externalSignal?.removeEventListener("abort", cancelFromParent);
+			cancellation.signal.removeEventListener("abort", onCancelled);
 			this._rlmQuiescenceWaitAborts.delete(cancellation);
 		}
 	}
@@ -9892,24 +10061,9 @@ export class AgentSession {
 		};
 
 		const deliverTerminalMessageToParent = async (message: CustomMessage): Promise<void> => {
-			const childController = childSession?._agentMessageController;
-			if (childController) {
-				try {
-					await childController.sendAgentMessage({
-						target: this.sessionId,
-						message: message.content as string,
-					});
-					return;
-				} catch {
-					// An unattributed notice beats silence, so fall through to the injected path.
-				}
-			}
-			await this._promptInjectedMessage(message.content as string, message, {
-				streamingBehavior: "followUp",
-				queueIfBusy: true,
-				returnAfterAccepted: true,
-				suppressAutonomousContinuation: true,
-			}).catch(() => undefined);
+			// Synthesized lifecycle notices always use the parent's private durable
+			// path. Explicit child replies continue through agent_message separately.
+			await this._deferRlmTerminalNotice(message);
 		};
 
 		run.completeDeletion = () => {
