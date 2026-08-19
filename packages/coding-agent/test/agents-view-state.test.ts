@@ -98,11 +98,6 @@ describe("agents view state", () => {
 		).toBe("inactive");
 	});
 
-	test("labels active refinement work", () => {
-		const [row] = buildAgentsViewRows([makeSummary({ isRefining: true, activity: "working" })]);
-		expect(row?.statusLabel).toBe("refining");
-	});
-
 	test("places all non-busy resident sessions in Idle", () => {
 		// Working is heuristic and ignores taskState.
 		expect(

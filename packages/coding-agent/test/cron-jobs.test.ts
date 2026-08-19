@@ -1409,15 +1409,6 @@ describe("shouldDeferHeartbeatCronJob", () => {
 		expect(
 			shouldDeferHeartbeatCronJob(job, {
 				isStreaming: false,
-				isRefining: true,
-				isBashRunning: false,
-				hasPendingSessionWork: false,
-				unfinishedActionCount: 0,
-			}),
-		).toBe(true);
-		expect(
-			shouldDeferHeartbeatCronJob(job, {
-				isStreaming: false,
 				isBashRunning: true,
 				hasPendingSessionWork: false,
 				unfinishedActionCount: 0,

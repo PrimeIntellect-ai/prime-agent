@@ -1004,7 +1004,7 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
-	it("surfaces refinement apply state while preserving a concurrent prompt result", async () => {
+	it("records a durable refinement outcome while preserving a concurrent prompt result", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
@@ -1015,12 +1015,6 @@ describe("AgentSession queue characterization", () => {
 			const promptGate = createDeferred();
 			const promptStartedPromise = createDeferred();
 			let promptSignal: AbortSignal | undefined;
-			const refinementStates: Array<["refinement_start" | "refinement_end", boolean]> = [];
-			harness.session.subscribe((event) => {
-				if (event.type === "refinement_start" || event.type === "refinement_end") {
-					refinementStates.push([event.type, harness.session.isRefining]);
-				}
-			});
 			harness.setResponses([
 				async () => {
 					planStartedPromise.resolve();
@@ -1037,7 +1031,6 @@ describe("AgentSession queue characterization", () => {
 
 			const refinePromise = harness.session.refine({ instructions: "background refine" });
 			await planStartedPromise.promise;
-			expect(harness.session.isRefining).toBe(false);
 
 			const promptPromise = harness.session.prompt("hello during refine");
 			await promptStartedPromise.promise;
@@ -1057,17 +1050,11 @@ describe("AgentSession queue characterization", () => {
 			});
 			await new Promise<void>((resolve) => setTimeout(resolve, 0));
 			expect(refineSettled).toBe(false);
-			// The turn barrier is up, but status stays off until the apply phase starts.
-			expect(harness.session.isRefining).toBe(false);
 
 			promptGate.resolve();
 			await refinePromise;
 			await promptPromise;
 
-			expect(refinementStates).toEqual([
-				["refinement_start", true],
-				["refinement_end", false],
-			]);
 			const outcome = harness.session.messages.find(isRefinementOutcomeMessage);
 			expect(outcome?.details.summary).toBe("no-op");
 			expect(

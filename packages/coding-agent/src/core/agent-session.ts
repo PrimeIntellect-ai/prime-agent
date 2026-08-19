@@ -309,8 +309,6 @@ export type AgentSessionEvent =
 			reason: CompactionReason;
 			customInstructions?: string;
 	  }
-	| { type: "refinement_start" }
-	| { type: "refinement_end" }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "service_tier_changed"; serviceTier: ServiceTier }
@@ -1165,7 +1163,6 @@ export class AgentSession {
 	private readonly _autoRefineReviewer?: AutoRefineReviewer;
 	private readonly _serializedRefine: boolean;
 	private _refineInFlight?: Promise<void>;
-	private _refinementApplyActive = false;
 	private _refinePlanInFlight?: Promise<void>;
 	private _serializedPlanInFlight?: Promise<SerializedBackgroundPlanResult | undefined>;
 	private _serializedPlanClaim?: Promise<void>;
@@ -2344,7 +2341,7 @@ export class AgentSession {
 		});
 		this._refineInFlight = applySettled;
 		try {
-			await this._applyRefineWithStatus(bgResult.plan, bgResult.options, bgResult.abort);
+			await this._applyRefine(bgResult.plan, bgResult.options, bgResult.abort);
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {
@@ -2546,7 +2543,7 @@ export class AgentSession {
 		});
 		this._refineInFlight = applySettled;
 		try {
-			await this._applyRefineWithStatus(plan, options, refineAbort);
+			await this._applyRefine(plan, options, refineAbort);
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {
@@ -4035,26 +4032,6 @@ export class AgentSession {
 			this._compactionAbortController !== undefined ||
 			this._branchSummaryAbortController !== undefined
 		);
-	}
-
-	get isRefining(): boolean {
-		return this._refinementApplyActive;
-	}
-
-	// Status brackets only the apply phase; _refineInFlight goes up earlier as a turn barrier while public refine() still waits for idle.
-	private async _applyRefineWithStatus(
-		plan: RefinementPlan,
-		options: { instructions?: string; rollbackId?: string; global?: boolean },
-		refineAbort: AbortController,
-	): Promise<RefinementResult> {
-		this._refinementApplyActive = true;
-		this._emit({ type: "refinement_start" });
-		try {
-			return await this._applyRefine(plan, options, refineAbort);
-		} finally {
-			this._refinementApplyActive = false;
-			this._emit({ type: "refinement_end" });
-		}
 	}
 
 	get messages(): AgentMessage[] {
@@ -7582,7 +7559,7 @@ export class AgentSession {
 			if (this._disposed || refineAbort.signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
-			return await this._applyRefineWithStatus(plan, options, refineAbort);
+			return await this._applyRefine(plan, options, refineAbort);
 		} finally {
 			resolveApplySettled();
 			if (this._refineInFlight === applySettled) {

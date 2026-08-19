@@ -434,35 +434,13 @@ export function isCompactionOutcomeMessage(message: unknown): message is Compact
 	);
 }
 
-function isRefinementKind(value: unknown): value is AppliedRefinementEdit["kind"] {
-	return value === "prompt" || value === "memory" || value === "skill" || value === "subagent";
-}
-
-function isHarnessEntry(value: unknown): boolean {
+function isAppliedRefinementEdit(value: unknown): value is AppliedRefinementEdit {
 	return (
 		isRecord(value) &&
-		typeof value.id === "string" &&
-		isRefinementKind(value.kind) &&
-		typeof value.title === "string" &&
-		typeof value.content === "string" &&
-		typeof value.path === "string" &&
-		(value.scope === undefined || value.scope === "local" || value.scope === "global") &&
-		isRecord(value.reference) &&
-		isRecord(value.arguments) &&
-		isRecord(value.metadata)
-	);
-}
-
-function isAppliedRefinementEdit(value: unknown): value is AppliedRefinementEdit {
-	if (!isRecord(value)) return false;
-	return (
 		(value.action === "create" || value.action === "update" || value.action === "delete") &&
-		isRefinementKind(value.kind) &&
+		typeof value.kind === "string" &&
 		typeof value.id === "string" &&
-		typeof value.applied === "boolean" &&
-		(value.error === undefined || typeof value.error === "string") &&
-		(value.before === undefined || isHarnessEntry(value.before)) &&
-		(value.after === undefined || isHarnessEntry(value.after))
+		typeof value.applied === "boolean"
 	);
 }
 
@@ -470,10 +448,8 @@ export function isRefinementOutcomeMessage(message: unknown): message is Refinem
 	if (!isRecord(message) || !hasValidCustomMessageEnvelope(message, REFINEMENT_OUTCOME_CUSTOM_TYPE)) return false;
 	if (!isRecord(message.details)) return false;
 	return (
-		typeof message.details.refinementId === "string" &&
 		typeof message.details.summary === "string" &&
 		(message.details.scope === "local" || message.details.scope === "global") &&
-		(message.details.rollbackOf === undefined || typeof message.details.rollbackOf === "string") &&
 		Array.isArray(message.details.edits) &&
 		message.details.edits.every(isAppliedRefinementEdit)
 	);

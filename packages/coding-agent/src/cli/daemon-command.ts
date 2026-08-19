@@ -1475,10 +1475,8 @@ class DaemonAttachTerminal {
 			case "refine_failed":
 				this.writeLine(chalk.red(`Refinement failed: ${event.error}`));
 				return;
-			// The persisted refinement outcome message prints via message_end.
 			case "refine_complete":
-			case "refinement_start":
-			case "refinement_end":
+				return;
 			case "turn_start":
 			case "turn_end":
 			case "message_start":
@@ -1643,7 +1641,6 @@ function isSessionSummary(value: unknown): value is SessionSummary {
 		typeof candidate.isSessionActive === "boolean" &&
 		typeof candidate.isStreaming === "boolean" &&
 		typeof candidate.isCompacting === "boolean" &&
-		(candidate.isRefining === undefined || typeof candidate.isRefining === "boolean") &&
 		typeof candidate.attachedClients === "number" &&
 		typeof candidate.messageCount === "number" &&
 		(candidate.unfinishedActionCount === undefined || typeof candidate.unfinishedActionCount === "number") &&

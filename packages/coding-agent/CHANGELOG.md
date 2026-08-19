@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added a visible refinement indicator and a durable refinement outcome message with expandable exact harness edits.
+- Added a durable `[refinement]` transcript message after each refinement showing the applied harness edits, expandable to exact before/after diffs via the shared tool-output toggle.
 - Fixed large IPython variables repeatedly slowing later turns by excluding them from persistent snapshots and removing them when context is compacted.
 - Fixed daemon socket paths being used verbatim in identity derivations: on supported platforms, `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree.
 - Added a `thinking` option to `rlm.run` for spawning subagents with an explicit reasoning level; invalid levels for the resolved child model fail spawn.

@@ -356,8 +356,6 @@ const RECOVERY_CHECKPOINT_EVENTS: ReadonlySet<string> = new Set([
 	"tool_execution_end",
 	"compaction_start",
 	"compaction_end",
-	"refinement_start",
-	"refinement_end",
 	"auto_retry_start",
 	"auto_retry_end",
 	"bash_start",
@@ -3235,19 +3233,17 @@ export class AgentDaemon {
 		const session = state.runtime.session;
 		const messages = session.messages;
 		const latest = messages.at(-1);
-		const status = session.isRefining
-			? "refining"
-			: session.isStreaming
-				? session.state.pendingToolCalls.size > 0
-					? "tool"
-					: "model"
-				: session.isCompacting
-					? "compacting"
-					: session.isSessionActive || session.hasRunningRlmChildren()
-						? "busy"
-						: state.clients.size > 0
-							? "user"
-							: "idle";
+		const status = session.isStreaming
+			? session.state.pendingToolCalls.size > 0
+				? "tool"
+				: "model"
+			: session.isCompacting
+				? "compacting"
+				: session.isSessionActive || session.hasRunningRlmChildren()
+					? "busy"
+					: state.clients.size > 0
+						? "user"
+						: "idle";
 		return {
 			activeSessionId: state.activeSessionId,
 			sessionId: summary.sessionId,
