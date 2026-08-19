@@ -613,6 +613,8 @@ export class KernelManager {
 	private lastCellCode?: string;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
+	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
+	private startGeneration = 0;
 	/** Memoized so concurrent callers all await the same in-flight startup. */
 	private startPromise?: Promise<void>;
 	/** Pending debounced auto-snapshot, if one has been scheduled. */
@@ -644,16 +646,19 @@ export class KernelManager {
 			throw createKernelStartupAbortError();
 		}
 		if (!this.startPromise) {
-			this.startPromise = this.doStart({ onBootstrapProgress: options.onBootstrapProgress }).catch((error) => {
-				this.startPromise = undefined;
+			const startPromise = this.doStart({ onBootstrapProgress: options.onBootstrapProgress }).catch((error) => {
+				// Only clear our own memoization: a stale start must not evict a newer one.
+				if (this.startPromise === startPromise) this.startPromise = undefined;
 				throw error;
 			});
+			this.startPromise = startPromise;
 		}
 		return raceStartupWithAbort(this.startPromise, options.signal);
 	}
 
 	private async doStart(startOptions: KernelStartOptions): Promise<void> {
 		if (this.state !== "idle") return;
+		const generation = ++this.startGeneration;
 		this.state = "starting";
 		installSignalHandlersOnce();
 		// Tracked from the moment startup begins so session cleanup and signal
@@ -668,8 +673,10 @@ export class KernelManager {
 					pythonSkills: this.options.pythonSkills,
 					onProgress: startOptions.onBootstrapProgress,
 				}));
+			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			this.options.python = python;
 		} catch (error) {
+			if (this.startStale(generation)) throw error; // never touch a newer start's state
 			liveKernels.delete(this);
 			if ((this.state as string) !== "shutdown") this.state = "idle";
 			throw error;
@@ -695,10 +702,16 @@ export class KernelManager {
 					// No JPY_PARENT_PID: forked children watch the forkserver by getppid().
 					env: { ...process.env, ...this.options.env },
 				});
+				if (this.startStale(generation)) {
+					// Nobody owns this kernel; the protocol kill is id-keyed and safe.
+					void handle.kill("TERM").catch(() => {});
+					throw new Error("Kernel start superseded");
+				}
 				this.forkedKernel = handle;
 				recordOrphanProcessState(handle.pid, true);
 				forked = true;
 			} catch (err) {
+				if (this.startStale(generation)) throw err; // never touch a newer start's state
 				if (!(err instanceof ForkServerUnavailable)) throw err;
 				this.appendKernelDiagnostic(`forkserver unavailable, spawning directly: ${err.message}`);
 				this.forkedKernel = undefined;
@@ -755,10 +768,14 @@ export class KernelManager {
 		let conn: ConnectionInfo;
 		try {
 			conn = await this.waitForResolvedConnection(connectionPath);
+			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			this.connection = conn;
 		} catch (e) {
+			if (this.startStale(generation)) throw e; // never tear down a newer start's kernel
 			const canRetryStartup = (this.state as string) !== "shutdown";
 			await this.shutdown();
+			// Our own teardown bumps the generation exactly once; any further bump means a newer owner took over.
+			if (this.startStale(generation + 1)) throw e;
 			if (canRetryStartup) this.state = "idle";
 			throw e;
 		}
@@ -773,19 +790,29 @@ export class KernelManager {
 
 		// ZMQ PUB/SUB slow-joiner: give the subscription a brief chance to reach the kernel before first execute.
 		await sleep(IOPUB_SUBSCRIBE_DELAY_MS);
+		if (this.startStale(generation)) throw new Error("Kernel start superseded");
 		this.startIopubPump();
 
 		try {
 			await this.probeReady();
+			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 		} catch (e) {
+			if (this.startStale(generation)) throw e; // never tear down a newer start's kernel
 			const canRetryStartup = (this.state as string) !== "shutdown";
 			await this.shutdown();
+			// Our own teardown bumps the generation exactly once; any further bump means a newer owner took over.
+			if (this.startStale(generation + 1)) throw e;
 			if (canRetryStartup) this.state = "idle";
 			throw e;
 		}
 
 		this.state = "running";
 		this.startForkedLivenessMonitor();
+	}
+
+	/** True when a teardown (or newer start) superseded the start that captured `generation`. */
+	private startStale(generation: number): boolean {
+		return generation !== this.startGeneration;
 	}
 
 	// No "exit" event fires for a non-child; poll the forkserver so a mid-run
@@ -800,9 +827,10 @@ export class KernelManager {
 
 	private async checkForkedKernelDeath(): Promise<void> {
 		if (this.state !== "running") return;
-		if (!(await this.forkedKernelDead())) return;
-		// Re-check after the await: teardown may have raced this poll.
-		if (this.state !== "running") return;
+		const probed = this.forkedKernel;
+		if (!(await this.forkedKernelDead(probed))) return;
+		// Re-check after the await: teardown or a restart may have raced this poll.
+		if (this.state !== "running" || this.forkedKernel !== probed) return;
 		this.appendKernelDiagnostic("forked kernel exited unexpectedly");
 		this.state = "shutdown";
 		liveKernels.delete(this);
@@ -810,10 +838,15 @@ export class KernelManager {
 	}
 
 	// Liveness from the forkserver's reap table; a pid-0 probe would race reuse.
-	private async forkedKernelDead(): Promise<boolean> {
-		if (!this.forkedKernel) return false;
+	// `timeoutMs` bounds the probe (timeout counts as alive so the caller's own
+	// deadline decides); without it the protocol request timeout applies.
+	private async forkedKernelDead(probed: ForkedKernelHandle | undefined, timeoutMs?: number): Promise<boolean> {
+		if (!probed) return false;
 		try {
-			return !(await this.forkedKernel.isAlive());
+			const alive = probed.isAlive();
+			if (timeoutMs === undefined) return !(await alive);
+			alive.catch(() => {}); // absorb a rejection that lands after the race is lost
+			return !(await Promise.race([alive, sleep(timeoutMs, true, { ref: false })]));
 		} catch {
 			// Forkserver gone: its kernels' parent_handle watchdogs exit them too.
 			return true;
@@ -823,7 +856,11 @@ export class KernelManager {
 	private async waitForResolvedConnection(connectionPath: string): Promise<ConnectionInfo> {
 		const startedAt = Date.now();
 		while (Date.now() - startedAt < PORTS_RESOLVE_TIMEOUT_MS) {
-			if ((this.state as string) === "shutdown" || (await this.forkedKernelDead())) {
+			const remainingBudget = PORTS_RESOLVE_TIMEOUT_MS - (Date.now() - startedAt);
+			if (
+				(this.state as string) === "shutdown" ||
+				(await this.forkedKernelDead(this.forkedKernel, remainingBudget))
+			) {
 				const tail = this.kernelStderr.slice(-1024);
 				throw new Error(`Kernel exited before resolving ports. stderr:\n${tail || "(empty)"}`);
 			}
@@ -852,7 +889,11 @@ export class KernelManager {
 
 		const startedAt = Date.now();
 		while (Date.now() - startedAt < READY_TIMEOUT_MS) {
-			if ((this.state as string) === "shutdown" || (await this.forkedKernelDead())) {
+			const remainingBudget = READY_TIMEOUT_MS - (Date.now() - startedAt);
+			if (
+				(this.state as string) === "shutdown" ||
+				(await this.forkedKernelDead(this.forkedKernel, remainingBudget))
+			) {
 				const tail = this.kernelStderr.slice(-1024);
 				throw new Error(`Kernel exited during startup. stderr:\n${tail || "(empty)"}`);
 			}
@@ -1378,6 +1419,7 @@ export class KernelManager {
 	}
 
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
+		this.startGeneration++; // any teardown invalidates in-flight starts
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		if (this.forkedLivenessTimer) {
@@ -1456,10 +1498,13 @@ export class KernelManager {
 			this.cleanupResources();
 			return;
 		}
+		// Captured before any await: teardowns and newer starts bump the counter.
+		const generation = this.startGeneration;
 		// Best-effort final flush (bounded) before teardown — used by signal handlers
 		// so a SIGINT/SIGTERM exit doesn't lose work the debounced snapshot hasn't saved.
 		if (opts.snapshot) {
 			await this.flushSnapshotForDispose();
+			if (this.startGeneration !== generation) return; // superseded mid-flush: the newer owner already cleaned this kernel
 		}
 		this.state = "shutdown";
 		liveKernels.delete(this);
@@ -1476,6 +1521,7 @@ export class KernelManager {
 			);
 		}
 
+		if (this.startGeneration !== generation) return; // superseded during the awaits: the newer owner already cleaned this kernel
 		this.cleanupResources();
 	}
 
@@ -1627,8 +1673,11 @@ export class KernelManager {
 	/** Graceful cleanup. Waits briefly for in-flight host request handlers before closing sockets. */
 	dispose(): Promise<void> {
 		return (async () => {
+			// Captured before any await: teardowns and newer starts bump the counter.
+			const generation = this.startGeneration;
 			// Final namespace flush while the kernel is still live (session end / reload).
 			await this.flushSnapshotForDispose();
+			if (this.startGeneration !== generation) return; // superseded mid-flush: the newer owner already cleaned this kernel
 			this.state = "shutdown";
 			liveKernels.delete(this);
 			const inFlightHostRequests = [...this.inFlightHostRequests];
@@ -1638,7 +1687,7 @@ export class KernelManager {
 					await this.waitForHostRequestsToSettle(inFlightHostRequests, HOST_REQUEST_DISPOSE_TIMEOUT_MS);
 				}
 			} finally {
-				this.cleanupResources();
+				if (this.startGeneration === generation) this.cleanupResources(); // else: superseded, the newer owner already cleaned
 			}
 		})();
 	}

@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ForkedKernelHandle, ForkServer, ForkServerUnavailable } from "../src/core/kernel/fork-server.js";
+import { ORPHAN_PROCESS_JOURNAL_ENV } from "../src/core/orphan-process-journal.js";
 
 // Drives the REAL Python forkserver script through the REAL ForkServer class.
 // Stub Python modules stand in for IPython/ipykernel so the forked child stays
@@ -225,6 +226,73 @@ describeIf("forkserver kill/liveness protocol (stub python)", () => {
 		await expect(handle.kill("TERM")).rejects.toBeInstanceOf(ForkServerUnavailable);
 		await expect(handle.isAlive()).rejects.toBeInstanceOf(ForkServerUnavailable);
 	}, 15_000);
+
+	describe("forkserver orphan journal", () => {
+		let journalPath = "";
+		const savedJournal = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
+
+		interface JournalRecord {
+			pid: number;
+			active: boolean;
+		}
+
+		function readJournal(): JournalRecord[] {
+			if (!existsSync(journalPath)) return [];
+			return readFileSync(journalPath, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as JournalRecord);
+		}
+
+		beforeEach(() => {
+			journalPath = join(tempDir, "orphans.jsonl");
+			process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		});
+
+		afterEach(() => {
+			if (savedJournal === undefined) delete process.env[ORPHAN_PROCESS_JOURNAL_ENV];
+			else process.env[ORPHAN_PROCESS_JOURNAL_ENV] = savedJournal;
+		});
+
+		it("disposing a live forkserver delivers the kill and writes inactive", async () => {
+			await spawnStubKernel();
+			const records = readJournal();
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({ active: true });
+			server!.dispose();
+			const after = readJournal();
+			expect(after).toHaveLength(2);
+			expect(after[1]).toMatchObject({ pid: records[0]!.pid, active: false });
+		}, 15_000);
+
+		it("a forkserver exit observed by the handle writes inactive", async () => {
+			await spawnStubKernel();
+			const forkserverPid = readJournal()[0]!.pid;
+			process.kill(forkserverPid, "SIGKILL");
+			// The exit event drives markDead → dispose with the exit already observed.
+			await vi.waitFor(() => {
+				const records = readJournal();
+				expect(records).toHaveLength(2);
+				expect(records[1]).toMatchObject({ pid: forkserverPid, active: false });
+			});
+		}, 15_000);
+
+		it("a never-started forkserver writes no journal records on dispose", () => {
+			const idle = new ForkServer({ python: "python3" });
+			idle.dispose();
+			expect(readJournal()).toHaveLength(0);
+		});
+
+		it("an unconfirmed kill with no observed exit leaves no inactive record", () => {
+			const unconfirmed = new ForkServer({ python: "python3" });
+			const internals = unconfirmed as unknown as {
+				proc?: { pid?: number; exitCode: number | null; signalCode: string | null; kill(): boolean };
+			};
+			internals.proc = { pid: 424242, exitCode: null, signalCode: null, kill: () => false };
+			unconfirmed.dispose();
+			expect(readJournal().some((r) => r.pid === 424242)).toBe(false);
+		});
+	});
 });
 
 function resolveKernelPython(): string | null {

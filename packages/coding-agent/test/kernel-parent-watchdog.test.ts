@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ForkServerUnavailable } from "../src/core/kernel/fork-server.js";
+import { type ForkedKernelHandle, ForkServerUnavailable } from "../src/core/kernel/fork-server.js";
 import { KernelManager } from "../src/core/kernel/index.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../src/core/orphan-process-journal.js";
 
@@ -205,6 +205,178 @@ describe("kernel parent watchdog", () => {
 			await manager.dispose();
 		}
 	});
+
+	it("a stale liveness probe resumed after restart never tears down the new kernel", async () => {
+		const journalPath = join(tempDir, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		let resolveProbe: (alive: boolean) => void = () => {};
+		const killA = vi.fn(async (): Promise<"signaled"> => "signaled");
+		const killB = vi.fn(async (): Promise<"signaled"> => "signaled");
+		const handleA: ForkedKernelHandle = {
+			pid: 111111,
+			isAlive: () =>
+				new Promise<boolean>((resolve) => {
+					resolveProbe = resolve;
+				}),
+			kill: killA,
+		};
+		const handleB: ForkedKernelHandle = { pid: 222222, isAlive: async () => true, kill: killB };
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+		const internals = manager as unknown as {
+			state: string;
+			forkedKernel?: ForkedKernelHandle;
+			checkForkedKernelDeath(): Promise<void>;
+		};
+
+		try {
+			internals.state = "running";
+			internals.forkedKernel = handleA;
+			const probe = internals.checkForkedKernelDeath();
+			// A restart completes while the probe is in flight: the manager is
+			// "running" again, but on a different kernel.
+			internals.forkedKernel = handleB;
+			resolveProbe(false);
+			await probe;
+
+			expect(internals.state).toBe("running");
+			expect(killB).not.toHaveBeenCalled();
+			const records = existsSync(journalPath) ? readJournalRecords(journalPath) : [];
+			expect(records.some((r) => r.pid === handleB.pid && !r.active)).toBe(false);
+		} finally {
+			internals.forkedKernel = undefined;
+			internals.state = "idle";
+			await manager.dispose();
+		}
+	});
+
+	it("a stale doStart resumed after a concurrent teardown never touches the new kernel", async () => {
+		const journalPath = join(tempDir, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		forkEnabledMock.mockReturnValue(true);
+		let resolveFork: (handle: ForkedKernelHandle) => void = () => {};
+		const killA = vi.fn(async (): Promise<"signaled"> => "signaled");
+		const killB = vi.fn(async (): Promise<"signaled"> => "signaled");
+		const handleA: ForkedKernelHandle = { pid: 111111, isAlive: async () => true, kill: killA };
+		const handleB: ForkedKernelHandle = { pid: 222222, isAlive: async () => true, kill: killB };
+		forkKernelMock.mockReturnValue(
+			new Promise<ForkedKernelHandle>((resolve) => {
+				resolveFork = resolve;
+			}),
+		);
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+		const internals = manager as unknown as { state: string; forkedKernel?: ForkedKernelHandle };
+
+		try {
+			// Start A blocks inside `await forkKernel(...)`.
+			const staleStart = manager.start();
+			staleStart.catch(() => {});
+			await vi.waitFor(() => expect(forkKernelMock).toHaveBeenCalledTimes(1));
+
+			// A concurrent restart tears the starting kernel down (bumping the start
+			// generation) and brings up a new running kernel B.
+			await manager.kill();
+			internals.state = "running";
+			internals.forkedKernel = handleB;
+
+			// The stale doStart resumes with handle A: it must fail without touching B.
+			resolveFork(handleA);
+			await expect(staleStart).rejects.toThrow(/Kernel start superseded/);
+
+			expect(internals.state).toBe("running");
+			expect(internals.forkedKernel).toBe(handleB);
+			expect(killB).not.toHaveBeenCalled();
+			// A is reclaimed via its own handle, never journaled.
+			await vi.waitFor(() => expect(killA).toHaveBeenCalledWith("TERM"));
+			const records = existsSync(journalPath) ? readJournalRecords(journalPath) : [];
+			expect(records.some((r) => r.pid === handleA.pid)).toBe(false);
+		} finally {
+			internals.forkedKernel = undefined;
+			internals.state = "idle";
+			await manager.dispose();
+		}
+	});
+
+	it("a stale shutdown parked in its control-send await never cleans up a successor kernel", async () => {
+		const journalPath = join(tempDir, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		let releaseSend: () => void = () => {};
+		const parkedSend = new Promise<void>((resolve) => {
+			releaseSend = resolve;
+		});
+		const killA = vi.fn(async (): Promise<"signaled"> => "signaled");
+		const killB = vi.fn(async (): Promise<"signaled"> => "signaled");
+		const handleA: ForkedKernelHandle = { pid: 111111, isAlive: async () => true, kill: killA };
+		const handleB: ForkedKernelHandle = { pid: 222222, isAlive: async () => true, kill: killB };
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+		const internals = manager as unknown as {
+			state: string;
+			forkedKernel?: ForkedKernelHandle;
+			control?: { send(frames: Buffer[]): Promise<void>; close(): void };
+			connection?: { ip: string; transport: string; control_port: number; key: string };
+			startPromise?: Promise<void>;
+		};
+
+		try {
+			// Kernel A is running with a control channel whose send parks forever
+			// until released — shutdown() will suspend inside its await window
+			// after having synchronously set state = "shutdown".
+			internals.state = "running";
+			internals.forkedKernel = handleA;
+			internals.control = { send: () => parkedSend, close: () => {} };
+			internals.connection = { ip: "127.0.0.1", transport: "tcp", control_port: 1, key: "test-key" };
+			const staleShutdown = manager.shutdown();
+
+			// While A's shutdown is parked, a concurrent teardown reclaims A (this is
+			// the cleanup restart() reaches via shutdown's already-shutdown fast path)
+			// and a new start brings up kernel B.
+			await manager.kill();
+			internals.state = "running";
+			internals.forkedKernel = handleB;
+			const startPromiseB = Promise.resolve();
+			internals.startPromise = startPromiseB;
+
+			// A's stale shutdown resumes: it must not clean up B or clear B's start.
+			releaseSend();
+			await staleShutdown;
+
+			expect(internals.state).toBe("running");
+			expect(internals.forkedKernel).toBe(handleB);
+			expect(killB).not.toHaveBeenCalled();
+			expect(internals.startPromise).toBe(startPromiseB);
+			// A was reclaimed by kill(); B must never gain an inactive journal record.
+			await vi.waitFor(() => expect(killA).toHaveBeenCalledWith("KILL"));
+			const records = existsSync(journalPath) ? readJournalRecords(journalPath) : [];
+			expect(records.some((r) => r.pid === handleB.pid && !r.active)).toBe(false);
+		} finally {
+			internals.forkedKernel = undefined;
+			internals.startPromise = undefined;
+			internals.state = "idle";
+			await manager.dispose();
+		}
+	});
+
+	it("a hung forkserver liveness probe cannot stretch startup past the ports-resolve budget", async () => {
+		forkEnabledMock.mockReturnValue(true);
+		const killMock = vi.fn(async (): Promise<"signaled"> => "signaled");
+		forkKernelMock.mockResolvedValue({
+			pid: 999999,
+			isAlive: () => new Promise<boolean>(() => {}),
+			kill: killMock,
+		});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+		const started = Date.now();
+
+		try {
+			await expect(manager.execute("x")).rejects.toThrow(/did not resolve connection ports/);
+		} finally {
+			errorSpy.mockRestore();
+			await manager.dispose();
+		}
+
+		// PORTS_RESOLVE_TIMEOUT_MS (5s) plus generous slack for CI.
+		expect(Date.now() - started).toBeLessThan(9000);
+	}, 15_000);
 
 	it("fork request env does not carry JPY_PARENT_PID (forked children watch the forkserver)", async () => {
 		const python = writeFakePython(["#!/bin/sh", "exit 42", ""]);

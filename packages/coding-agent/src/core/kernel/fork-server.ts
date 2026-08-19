@@ -337,12 +337,19 @@ export class ForkServer {
 		} catch {
 			// Already closed.
 		}
-		try {
-			this.proc?.kill("SIGTERM");
-		} catch {
-			// Already exited.
+		const proc = this.proc;
+		if (proc) {
+			// Inactive only when the pid is soundly ours at write time (handle saw the
+			// exit, or handle-based kill delivered); otherwise leave the record active.
+			const observedExit = proc.exitCode !== null || proc.signalCode !== null;
+			let delivered = false;
+			try {
+				delivered = proc.kill("SIGTERM");
+			} catch {
+				// Already exited.
+			}
+			if (proc.pid !== undefined && (observedExit || delivered)) recordOrphanProcessState(proc.pid, false);
 		}
-		if (this.proc?.pid !== undefined) recordOrphanProcessState(this.proc.pid, false);
 		if (this.socketDir) {
 			try {
 				rmSync(this.socketDir, { recursive: true, force: true });
