@@ -200,17 +200,21 @@ describe("ModelSelectorComponent", () => {
 		expect(output).toContain("(2/12)");
 	});
 
-	it("orders search matches by recency among equally-good fuzzy matches", async () => {
+	it("keeps exact matches ahead of weaker signed-in matches and prefers sign-in for equivalent matches", async () => {
 		const harness = await createHarness({
-			models: [
-				{ id: "glm-5", name: "GLM 5", reasoning: true },
-				{ id: "glm-5.1", name: "GLM 5.1", reasoning: true },
-				{ id: "glm-5.2", name: "GLM 5.2", reasoning: true },
-			],
+			models: [{ id: "base", name: "Base", reasoning: true }],
 		});
 		harnesses.push(harness);
 
-		const provider = harness.getModel("glm-5")!.provider;
+		const base = harness.getModel("base")!;
+		const signedInExact = { ...base, provider: "prime-inference", id: "z-ai/glm-5.2", name: "GLM 5.2" };
+		const signedOutExact = { ...base, provider: "opencode", id: "glm-5.2", name: "GLM 5.2" };
+		const signedInFuzzy = {
+			...base,
+			provider: "prime-inference",
+			id: "glorious-language-model-5.2",
+			name: "Glorious Language Model 5.2",
+		};
 		const selector = new ModelSelectorComponent(
 			createFakeTui(),
 			undefined,
@@ -218,19 +222,95 @@ describe("ModelSelectorComponent", () => {
 			[],
 			() => {},
 			() => {},
-			"glm",
-			{ recentModels: [`${provider}/glm-5.2`, `${provider}/glm-5.1`] },
+			"glm5.2",
+			{
+				availableModels: [signedInFuzzy, signedOutExact, signedInExact],
+				configuredProviders: new Set(["prime-inference"]),
+			},
 		);
 
 		await waitForAsyncRender();
 
 		const lines = stripAnsi(selector.render(120).join("\n")).split("\n");
-		const row52 = lines.findIndex((line) => /glm-5\.2/.test(line));
-		const row51 = lines.findIndex((line) => /glm-5\.1/.test(line));
-		const row5 = lines.findIndex((line) => /glm-5(?![.\d])/.test(line));
-		expect(row52).toBeGreaterThanOrEqual(0);
-		expect(row52).toBeLessThan(row51);
-		expect(row51).toBeLessThan(row5);
+		const signedInExactRow = lines.findIndex((line) => line.includes("z-ai/glm-5.2"));
+		const signedOutExactRow = lines.findIndex((line) => line.includes("opencode"));
+		const signedInFuzzyRow = lines.findIndex((line) => line.includes("glorious-language-model-5.2"));
+		expect(signedInExactRow).toBeGreaterThanOrEqual(0);
+		expect(signedInExactRow).toBeLessThan(signedOutExactRow);
+		expect(signedOutExactRow).toBeLessThan(signedInFuzzyRow);
+	});
+
+	it("orders provider-qualified exact, prefix, and fuzzy matches by quality", async () => {
+		const harness = await createHarness({
+			models: [{ id: "base", name: "Base", reasoning: true }],
+		});
+		harnesses.push(harness);
+
+		const base = harness.getModel("base")!;
+		const exact = { ...base, provider: "openai", id: "gpt-5", name: "GPT-5" };
+		const prefix = { ...base, provider: "prime-inference", id: "openai-gpt-5-preview", name: "GPT-5 Preview" };
+		const fuzzy = { ...base, provider: "prime-inference", id: "other-openai-gpt-5", name: "Other GPT-5" };
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			undefined,
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			"openai/gpt5",
+			{
+				availableModels: [fuzzy, prefix, exact],
+				configuredProviders: new Set(["prime-inference"]),
+			},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(120).join("\n")).split("\n");
+		const exactRow = lines.findIndex(
+			(line) => line.includes("gpt-5") && !line.includes("preview") && !line.includes("other-"),
+		);
+		const prefixRow = lines.findIndex((line) => line.includes("openai-gpt-5-preview"));
+		const fuzzyRow = lines.findIndex((line) => line.includes("other-openai-gpt-5"));
+		expect(exactRow).toBeGreaterThanOrEqual(0);
+		expect(exactRow).toBeLessThan(prefixRow);
+		expect(prefixRow).toBeLessThan(fuzzyRow);
+	});
+
+	it("uses current model, recency, and alphabetical order for equivalent matches", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "glm-5", name: "GLM 5", reasoning: true },
+				{ id: "glm-5.1", name: "GLM 5.1", reasoning: true },
+				{ id: "glm-5.2", name: "GLM 5.2", reasoning: true },
+				{ id: "glm-6", name: "GLM 6", reasoning: true },
+			],
+		});
+		harnesses.push(harness);
+
+		const provider = harness.getModel("glm-5")!.provider;
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			harness.getModel("glm-5.1"),
+			harness.session.modelRegistry,
+			[],
+			() => {},
+			() => {},
+			"glm",
+			{ recentModels: [`${provider}/glm-5.2`] },
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(120).join("\n")).split("\n");
+		const currentRow = lines.findIndex((line) => /glm-5\.1/.test(line));
+		const recentRow = lines.findIndex((line) => /glm-5\.2/.test(line));
+		const alphabeticalRow = lines.findIndex((line) => /glm-5(?![.\d])/.test(line));
+		const lastRow = lines.findIndex((line) => /glm-6/.test(line));
+		expect(currentRow).toBeGreaterThanOrEqual(0);
+		expect(currentRow).toBeLessThan(recentRow);
+		expect(recentRow).toBeLessThan(alphabeticalRow);
+		expect(alphabeticalRow).toBeLessThan(lastRow);
 	});
 
 	it("treats a whitespace-only query as no search and keeps the current model first", async () => {

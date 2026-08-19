@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed model searches ranking stronger matches ahead of weaker signed-in matches while preferring signed-in providers for equivalent results ([#539](https://github.com/PrimeIntellect-ai/prime-agent/pull/539) by [@eliebak](https://github.com/eliebak)).
 - Fixed large IPython variables repeatedly slowing later turns by excluding them from persistent snapshots and removing them when context is compacted.
 - Fixed daemon socket paths being used verbatim in identity derivations: on supported platforms, `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree.
 - Added a `thinking` option to `rlm.run` for spawning subagents with an explicit reasoning level; invalid levels for the resolved child model fail spawn.
