@@ -4041,8 +4041,7 @@ export class AgentSession {
 		return this._refinementApplyActive;
 	}
 
-	// Status brackets only the apply phase; _refineInFlight is set earlier as a
-	// turn barrier while public refine() still waits for idle.
+	// Status brackets only the apply phase; _refineInFlight goes up earlier as a turn barrier while public refine() still waits for idle.
 	private async _applyRefineWithStatus(
 		plan: RefinementPlan,
 		options: { instructions?: string; rollbackId?: string; global?: boolean },

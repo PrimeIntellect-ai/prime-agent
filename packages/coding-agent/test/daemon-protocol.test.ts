@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { acpUpdatesForSessionEvent } from "../src/modes/acp/acp-events.js";
+import { buildAgentsViewRows } from "../src/modes/agents-view/agents-view-state.js";
 import {
 	createDaemonCommandEnvelope,
 	createDaemonEventEnvelope,
@@ -21,6 +23,7 @@ import {
 	isDaemonMutatingCommand,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
+import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 
 describe("daemon protocol helpers", () => {
 	it("keeps the advertised schema identity synchronized with wire type shapes", () => {
@@ -139,17 +142,29 @@ describe("daemon protocol helpers", () => {
 	});
 
 	it("keeps refinement status additions backward-compatible at revision 17", () => {
-		// Old daemons never emit these events and omit isRefining; new clients
-		// treat the absent field as false. Old clients no-op on the unknown
-		// event types, so no capability gate is needed.
+		// Optional isRefining fields plus new events on the ungated session-event channel; no capability gate.
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(17);
-		const newDaemonEvent: DaemonOutbound = {
-			type: "session_event",
-			activeSessionId: "active-1",
-			event: { type: "refinement_start" },
-		};
 		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 7 });
-		expect(newDaemonEvent).toMatchObject({ event: { type: "refinement_start" } });
+		// A session-event handler written before revision 17 ignores the new lifecycle events.
+		expect(acpUpdatesForSessionEvent({ type: "refinement_start" })).toEqual([]);
+		expect(acpUpdatesForSessionEvent({ type: "refinement_end" })).toEqual([]);
+		// An old-daemon summary omits isRefining; a new client must not read it as refining.
+		const oldDaemonSummary: SessionSummary = {
+			id: "active-1",
+			activeSessionId: "active-1",
+			lifecycle: "live",
+			activity: "working",
+			isSessionActive: true,
+			sessionId: "session-1",
+			cwd: "/tmp/project",
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			messageCount: 1,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+		};
+		const [row] = buildAgentsViewRows([oldDaemonSummary]);
+		expect(row?.statusLabel).not.toBe("refining");
 	});
 
 	it("keeps refine failure events backward-compatible on the existing session event channel", () => {
