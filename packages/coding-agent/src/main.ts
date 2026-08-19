@@ -679,6 +679,9 @@ function runtimeConfigFromArgs(
 		// instead of its own appMode="daemon".
 		serializedRefine: appMode !== "interactive" && appMode !== "daemon",
 		initialGoal: parsed.goal ? { objective: parsed.goal, tokenBudget: parsed.goalTokenBudget } : undefined,
+		rlmMaxDepthCeiling: parsed.harnessMode === "rpc-only" ? 0 : parsed.rlmMaxDepthCeiling,
+		disableRlmAct: parsed.harnessMode === "rpc-only" || parsed.disableRlmAct ? true : undefined,
+		harnessMode: parsed.harnessMode,
 	};
 }
 
@@ -1089,6 +1092,17 @@ export async function main(args: string[], options?: MainOptions) {
 	time("parseArgs");
 	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
 
+	if (parsed.harnessMode === "rpc-only" && appMode !== "rpc") {
+		console.error(chalk.red("Error: --harness-mode rpc-only requires --mode rpc"));
+		process.exit(1);
+	}
+	if (
+		parsed.harnessMode === "rpc-only" &&
+		(parsed.daemonSocket !== undefined || publicCommand.attachAgent !== undefined)
+	) {
+		console.error(chalk.red("Error: rpc-only harness mode does not support daemon or attach options"));
+		process.exit(1);
+	}
 	if (shouldRejectNonInteractiveAttach(publicCommand.attachAgent, appMode)) {
 		console.error(chalk.red("Error: attach requires an interactive terminal"));
 		process.exit(1);
@@ -1162,14 +1176,16 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	// Programmatic factories are process-local functions and cannot be serialized to a daemon worker.
 	const hasProcessLocalExtensionFactories = (options?.extensionFactories?.length ?? 0) > 0;
-	const useDaemonClient = shouldUseDaemonClientRuntime({
-		appMode,
-		startupBenchmark,
-		noSession: parsed.noSession,
-		listModels: parsed.listModels,
-		ownedSessionWorker: isOwnedSessionWorkerProcess(),
-		hasProcessLocalExtensionFactories,
-	});
+	const useDaemonClient =
+		parsed.harnessMode !== "rpc-only" &&
+		shouldUseDaemonClientRuntime({
+			appMode,
+			startupBenchmark,
+			noSession: parsed.noSession,
+			listModels: parsed.listModels,
+			ownedSessionWorker: isOwnedSessionWorkerProcess(),
+			hasProcessLocalExtensionFactories,
+		});
 	const useDaemonInteractive = useDaemonClient && appMode === "interactive";
 
 	// Decide the final runtime cwd before creating cwd-bound runtime services.
@@ -1308,9 +1324,18 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager,
 			sessionStartEvent,
 			...resolvedSessionOptions,
+			rlmHeartbeatController:
+				config.harnessMode === "rpc-only" ? undefined : resolvedSessionOptions.rlmHeartbeatController,
+			agentMessageController:
+				config.harnessMode === "rpc-only" ? undefined : resolvedSessionOptions.agentMessageController,
+			includeGoals: config.harnessMode === "rpc-only" ? false : resolvedSessionOptions.includeGoals,
+			autonomous: config.harnessMode === "rpc-only" ? { enabled: false } : resolvedSessionOptions.autonomous,
 			// Main agents boot their kernel in the background at session creation;
 			// subagent sessions (rlmDepth > 0) keep the lazy first-call start.
 			prewarmIpythonKernel: true,
+			rlmMaxDepthCeiling: config.rlmMaxDepthCeiling,
+			actEnabled: !config.disableRlmAct,
+			harnessMode: config.harnessMode,
 			// Read serializedRefine from the merged runtime config (passed
 			// from the JSON/print client through AgentSessionRuntimeConfig)
 			// so it survives the daemon worker's appMode="daemon" context.
@@ -1579,7 +1604,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 		printTimings();
 		if (appMode === "rpc") {
-			return await runRpcModeWithConnection(connection);
+			return await runRpcModeWithConnection(connection, { harnessMode: parsed.harnessMode });
 		}
 		if (appMode === "acp") {
 			return await runAcpModeWithConnection(connection);

@@ -9,6 +9,8 @@ type SessionInternals = {
 	_serializedExplicitRefineOptions?: { instructions?: string; global?: boolean };
 	_refineAbortController?: AbortController;
 	_createKernelHostHandlers: () => Record<string, unknown>;
+	_maybeStartSerializedBackgroundPlan: () => void;
+	_serializedRefine: boolean;
 	refine: (options: { instructions?: string; global?: boolean }) => Promise<unknown>;
 };
 
@@ -259,6 +261,26 @@ describe("AgentSession refine skill host requests", () => {
 		const handlerKeys = Object.keys(internals._createKernelHostHandlers());
 		expect(handlerKeys).not.toContain("refine.run");
 		expect(handlerKeys).not.toContain("refine.status");
+	});
+
+	it("omits the IPython refine route in rpc-only mode without starting model work", async () => {
+		const harness = await createHarness({ persistSession: true, harnessMode: "rpc-only", serializedRefine: true });
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionInternals;
+		const startPlan = vi.spyOn(internals, "_maybeStartSerializedBackgroundPlan");
+
+		const handlers = internals._createKernelHostHandlers();
+		setStreaming(harness, true);
+		await expect(async () => {
+			const handler = handlers["refine.run"] as ((payload: Record<string, unknown>) => Promise<unknown>) | undefined;
+			if (!handler) throw new Error('host request type "refine.run" is not available in this session');
+			await handler({ instructions: "capture a lesson" });
+		}).rejects.toThrow('host request type "refine.run" is not available in this session');
+		setStreaming(harness, false);
+
+		expect(internals._serializedRefine).toBe(false);
+		expect(startPlan).not.toHaveBeenCalled();
+		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
 	it("does not register refine handlers without a persisted session", async () => {

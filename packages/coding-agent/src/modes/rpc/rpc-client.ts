@@ -6,7 +6,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
@@ -268,6 +268,10 @@ export class RpcClient {
 	/**
 	 * Set thinking level.
 	 */
+	async setServiceTier(serviceTier: ServiceTier): Promise<void> {
+		await this.send({ type: "set_service_tier", serviceTier });
+	}
+
 	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
 		await this.send({ type: "set_thinking_level", level });
 	}

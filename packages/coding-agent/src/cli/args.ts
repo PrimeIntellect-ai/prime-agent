@@ -6,6 +6,8 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { APP_NAME } from "../config.js";
 import { THINKING_LEVELS } from "../core/thinking-levels.js";
 
+export type HarnessMode = "rpc-only";
+
 export type Mode = "text" | "json" | "rpc" | "acp" | "daemon";
 
 export interface Args {
@@ -50,6 +52,9 @@ export interface Args {
 	autonomousTimeoutMs?: number;
 	goal?: string;
 	goalTokenBudget?: number;
+	rlmMaxDepthCeiling?: number;
+	disableRlmAct?: boolean;
+	harnessMode?: HarnessMode;
 	listModels?: string | true;
 	offline?: boolean;
 	verbose?: boolean;
@@ -259,6 +264,18 @@ export function parseArgs(args: string[]): Args {
 			if (hasRequiredOptionValue(args, i, arg, result)) {
 				result.autonomousTimeoutMs = parsePositiveInt(args[++i], "--autonomous-timeout-ms", result);
 			}
+		} else if (arg === "--rlm-max-depth-ceiling") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				result.rlmMaxDepthCeiling = parseNonNegativeInt(args[++i], arg, result);
+			}
+		} else if (arg === "--disable-rlm-act") {
+			result.disableRlmAct = true;
+		} else if (arg === "--harness-mode") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				const value = args[++i];
+				if (value === "rpc-only") result.harnessMode = value;
+				else result.diagnostics.push({ type: "error", message: `${arg} must be rpc-only` });
+			}
 		} else if (arg === "--goal") {
 			if (hasRequiredOptionValue(args, i, arg, result)) {
 				const value = args[++i];
@@ -340,6 +357,15 @@ function parsePositiveInt(value: string, flag: string, result: Args): number | u
 	const parsed = Number(value);
 	if (!Number.isInteger(parsed) || parsed <= 0) {
 		result.diagnostics.push({ type: "error", message: `${flag} must be a positive integer` });
+		return undefined;
+	}
+	return parsed;
+}
+
+function parseNonNegativeInt(value: string, flag: string, result: Args): number | undefined {
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed < 0) {
+		result.diagnostics.push({ type: "error", message: `${flag} must be a non-negative integer` });
 		return undefined;
 	}
 	return parsed;

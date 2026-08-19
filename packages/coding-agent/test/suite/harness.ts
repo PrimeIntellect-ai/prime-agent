@@ -90,6 +90,7 @@ export interface HarnessOptions {
 	autonomous?: AgentAutonomousConfig;
 	autoRefineReviewer?: AutoRefineReviewer;
 	serializedRefine?: boolean;
+	harnessMode?: "rpc-only";
 	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
@@ -221,6 +222,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		autonomous: options.autonomous,
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,
+		harnessMode: options.harnessMode,
 		initialGoal: options.initialGoal,
 	});
 

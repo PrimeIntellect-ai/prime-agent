@@ -31,7 +31,11 @@ export type {
 	RpcSessionState,
 } from "./rpc-types.js";
 
+export const PRIME_AGENT_RPC_PROTOCOL_VERSION = 1;
+export const PRIME_AGENT_RPC_SCHEMA_REVISION = 1;
+
 interface RpcModeConnectionOptions {
+	harnessMode?: "rpc-only";
 	bindHeadlessExtensions?: (options: {
 		uiContext: ReturnType<typeof createRpcExtensionUiBridge>["uiContext"];
 		shutdownHandler: () => void;
@@ -41,12 +45,16 @@ interface RpcModeConnectionOptions {
 export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
 	const connection = new InProcessAgentConnection(runtimeHost);
 	return runRpcModeWithConnectionInternal(connection, {
+		harnessMode: runtimeHost.session.foregroundMode === "rpc_only" ? "rpc-only" : undefined,
 		bindHeadlessExtensions: (options) => connection.bindHeadlessExtensions(options),
 	});
 }
 
-export async function runRpcModeWithConnection(connection: AgentConnection): Promise<never> {
-	return runRpcModeWithConnectionInternal(connection);
+export async function runRpcModeWithConnection(
+	connection: AgentConnection,
+	options: RpcModeConnectionOptions = {},
+): Promise<never> {
+	return runRpcModeWithConnectionInternal(connection, options);
 }
 
 async function runRpcModeWithConnectionInternal(
@@ -206,7 +214,7 @@ async function runRpcModeWithConnectionInternal(
 		signalCleanupHandlers.push(() => process.off(signal, handler));
 	}
 
-	if (options.bindHeadlessExtensions) {
+	if (options.bindHeadlessExtensions && options.harnessMode !== "rpc-only") {
 		await options.bindHeadlessExtensions({
 			uiContext: extensionUi.uiContext,
 			shutdownHandler: () => {
@@ -217,9 +225,16 @@ async function runRpcModeWithConnectionInternal(
 
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		if (
+			options.harnessMode === "rpc-only" &&
+			!["prompt", "abort", "get_state", "compact", "set_service_tier"].includes(command.type)
+		) {
+			return error(id, command.type, `Command ${command.type} is disabled in rpc-only harness mode`);
+		}
 		switch (command.type) {
 			case "prompt":
 				await connection.prompt(command.message, {
+					internalPrompt: options.harnessMode === "rpc-only",
 					images: command.images,
 					streamingBehavior: command.streamingBehavior,
 					source: "rpc",
@@ -245,6 +260,13 @@ async function runRpcModeWithConnectionInternal(
 			case "get_state": {
 				const state = await connection.getState();
 				const rpcState: RpcSessionState = {
+					rpcProtocolVersion: PRIME_AGENT_RPC_PROTOCOL_VERSION,
+					rpcSchemaRevision: PRIME_AGENT_RPC_SCHEMA_REVISION,
+					cwd: state.cwd,
+					serviceTier: state.serviceTier,
+					rlmMaxDepth: state.rlmMaxDepth ?? 0,
+					actEnabled: state.actEnabled ?? false,
+					foregroundMode: options.harnessMode === "rpc-only" ? "rpc_only" : "ordinary",
 					model: state.model,
 					thinkingLevel: state.thinkingLevel,
 					isStreaming: state.isStreaming,
@@ -261,6 +283,9 @@ async function runRpcModeWithConnectionInternal(
 				};
 				return success(id, command.type, rpcState);
 			}
+			case "set_service_tier":
+				await connection.setServiceTier(command.serviceTier);
+				return success(id, command.type);
 			case "set_model":
 				return success(id, command.type, await connection.setModel(command.provider, command.modelId));
 			case "cycle_model":

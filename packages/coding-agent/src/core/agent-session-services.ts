@@ -59,6 +59,9 @@ export interface AgentSessionCreationOptions {
 	agentObserveController?: AgentObserveController;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
+	rlmMaxDepthCeiling?: number;
+	actEnabled?: boolean;
+	harnessMode?: "rpc-only";
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
@@ -250,6 +253,9 @@ export async function createAgentSessionFromServices(
 		agentObserveController: options.agentObserveController,
 		rlmDepth: options.rlmDepth,
 		rlmMaxDepth: options.rlmMaxDepth,
+		rlmMaxDepthCeiling: options.rlmMaxDepthCeiling,
+		actEnabled: options.actEnabled,
+		harnessMode: options.harnessMode,
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,

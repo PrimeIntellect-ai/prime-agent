@@ -353,6 +353,8 @@ export interface AgentConnectionState {
 	model?: AgentConnectionModel;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;
+	rlmMaxDepth?: number;
+	actEnabled?: boolean;
 	availableThinkingLevels: ThinkingLevel[];
 	isStreaming: boolean;
 	isCompacting: boolean;

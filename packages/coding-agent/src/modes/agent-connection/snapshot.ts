@@ -31,6 +31,8 @@ export function createAgentConnectionState(
 		model: toConnectionModel(session.model),
 		thinkingLevel: session.thinkingLevel,
 		serviceTier: session.serviceTier,
+		rlmMaxDepth: session.rlmMaxDepth,
+		actEnabled: session.actEnabled,
 		availableThinkingLevels: session.getAvailableThinkingLevels(),
 		isStreaming: session.isStreaming,
 		isCompacting: session.isCompacting,

@@ -4,6 +4,20 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 
 **Note for Node.js/TypeScript users**: If you're building a Node.js application, consider using `AgentSession` directly from `@earendil-works/pi-coding-agent` instead of spawning a subprocess. See [`src/core/agent-session.ts`](../src/core/agent-session.ts) for the API. For a subprocess-based TypeScript client, see [`src/modes/rpc/rpc-client.ts`](../src/modes/rpc/rpc-client.ts).
 
+
+## Supported harness boundary
+
+Prime Agent exposes protocol version `1` and schema revision `1`. Every
+`get_state` response includes these versions together with `cwd`, `serviceTier`,
+effective `rlmMaxDepth`, `actEnabled`, and `foregroundMode`.
+
+Launch `--mode rpc --harness-mode rpc-only` for an externally supervised
+foreground session. This mode accepts model work only from literal `prompt`
+frames. It permits `get_state`, `set_service_tier`, `prompt`, `abort`, and
+`compact`; other RPC commands are rejected. Launch ceilings
+`--rlm-max-depth-ceiling <n>` and `--disable-rlm-act` override persisted and
+configured session behavior, including resumed sessions.
+
 ## Starting RPC Mode
 
 ```bash

@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
+import { mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -93,7 +94,12 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): {
+function createRuntimeHost(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	harnessMode?: "rpc-only";
+}): {
 	runtimeHost: AgentSessionRuntime;
 	session: AgentSession;
 	cleanup: () => Promise<void>;
@@ -140,6 +146,9 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 		cwd: tempDir,
 		modelRegistry,
 		resourceLoader: createTestResourceLoader(),
+		harnessMode: options.harnessMode,
+		rlmMaxDepthCeiling: options.harnessMode === "rpc-only" ? 0 : undefined,
+		actEnabled: options.harnessMode !== "rpc-only",
 	});
 
 	const runtimeHost = {
@@ -170,7 +179,12 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 	};
 }
 
-async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
+async function startRpcMode(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	harnessMode?: "rpc-only";
+}): Promise<{
 	lineHandler: (line: string) => void;
 	session: AgentSession;
 	cleanup: () => Promise<void>;
@@ -186,11 +200,89 @@ async function startRpcMode(options: { withAuth: boolean; responseDelayMs: numbe
 }
 
 describe("RPC prompt response semantics", () => {
+	it("merges launch ceilings monotonically", () => {
+		expect(
+			mergeAgentSessionRuntimeConfig(
+				{ rlmMaxDepthCeiling: 0, disableRlmAct: true, harnessMode: "rpc-only" },
+				{ rlmMaxDepthCeiling: 9, disableRlmAct: false },
+			),
+		).toMatchObject({ rlmMaxDepthCeiling: 0, disableRlmAct: true, harnessMode: "rpc-only" });
+	});
+
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
 	});
 
+	it("enforces the rpc-only harness boundary", async () => {
+		const { lineHandler, session, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+			harnessMode: "rpc-only",
+		});
+
+		try {
+			await expect(session.promptHeartbeat({} as never)).rejects.toThrow("disabled in rpc-only");
+			await expect(session.acceptAgentMessagePrompt("persisted peer input")).rejects.toThrow("disabled in rpc-only");
+			await expect(session.queueAgentMessagePrompt("persisted queued input", "followUp")).rejects.toThrow(
+				"disabled in rpc-only",
+			);
+			lineHandler(JSON.stringify({ id: "state", type: "get_state" }));
+			lineHandler(JSON.stringify({ id: "tier", type: "set_service_tier", serviceTier: "default" }));
+			for (const [id, type] of [
+				["steer", "steer"],
+				["goal", "follow_up"],
+				["schedule", "add_schedule"],
+				["heartbeat", "set_heartbeat"],
+				["peer", "send_message"],
+				["external", "get_commands"],
+				["refine", "refine"],
+			] as const) {
+				lineHandler(JSON.stringify({ id, type, message: "bypass", schedule: "every 1m", prompt: "bypass" }));
+			}
+			lineHandler(JSON.stringify({ id: "literal", type: "prompt", message: "/goal bypass" }));
+
+			await vi.waitFor(() => {
+				const records = parseOutputLines(rpcIo.outputLines);
+				expect(records).toEqual(
+					expect.arrayContaining([
+						expect.objectContaining({
+							id: "state",
+							success: true,
+							data: expect.objectContaining({
+								rpcProtocolVersion: 1,
+								rpcSchemaRevision: 1,
+								rlmMaxDepth: 0,
+								actEnabled: false,
+								foregroundMode: "rpc_only",
+							}),
+						}),
+						expect.objectContaining({ id: "tier", success: true }),
+						expect.objectContaining({ id: "literal", success: true }),
+					]),
+				);
+				for (const id of ["steer", "goal", "schedule", "heartbeat", "peer", "external", "refine"]) {
+					expect(records).toEqual(
+						expect.arrayContaining([
+							expect.objectContaining({ id, success: false, error: expect.stringContaining("disabled") }),
+						]),
+					);
+				}
+			});
+			await vi.waitFor(() =>
+				expect(
+					session.messages.some(
+						(message) =>
+							message.role === "user" &&
+							Array.isArray(message.content) &&
+							message.content.some((part) => part.type === "text" && part.text === "/goal bypass"),
+					),
+				).toBe(true),
+			);
+		} finally {
+			await cleanup();
+		}
+	});
 	it("emits one failure response when prompt preflight rejects", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({
 			withAuth: false,

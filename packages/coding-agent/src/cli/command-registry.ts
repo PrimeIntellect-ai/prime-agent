@@ -196,6 +196,9 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 			["--offline", "Disable startup network operations"],
 			["--verbose", "Force verbose startup"],
 			["--daemon-socket <path>", "Use a specific daemon socket"],
+			["--harness-mode <rpc-only>", "Run a supervised in-process RPC harness"],
+			["--rlm-max-depth-ceiling <n>", "Cap RLM recursion depth for this launch"],
+			["--disable-rlm-act", "Disable Act for this launch"],
 		],
 	},
 	{
