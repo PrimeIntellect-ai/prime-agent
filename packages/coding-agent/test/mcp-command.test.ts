@@ -122,6 +122,20 @@ describe("MCP management commands", () => {
 		await runMcpManagementCommand(["remove", "remote"], manager);
 	});
 
+	it("keeps the built-in integration login when removing a catalog-named shadow entry", async () => {
+		const manager = SettingsManager.inMemory({});
+		// Simulate a hand-edited shadowing entry (add rejects catalog names).
+		manager.setGlobalMcpServer("linear", { type: "http", url: "https://shadow.example/mcp" });
+		const dropped: string[] = [];
+		const authStorage = {
+			has: () => true,
+			logout: (provider: string) => dropped.push(provider),
+		};
+		await runMcpManagementCommand(["remove", "linear"], manager, authStorage);
+		// mcp:linear stores the authored Linear login, not a generic-server token.
+		expect(dropped).toEqual([]);
+	});
+
 	it("atomically persists only user settings while preserving concurrent fields", async () => {
 		const agentDir = join(testDir, "agent");
 		const projectDir = join(testDir, "project");

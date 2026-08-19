@@ -204,6 +204,10 @@ async function flushGlobalSettings(settingsManager: SettingsManager): Promise<vo
 }
 
 function dropServerCredentials(name: string, authStorage: McpCredentialStore | undefined): void {
+	// A catalog-named mcp:<name> credential belongs to the authored built-in
+	// integration (removing a shadowing settings entry must not disconnect it);
+	// the generic runtime never serves catalog names.
+	if (getCatalogEntry(name)) return;
 	const provider = `mcp:${name}`;
 	if (authStorage?.has(provider)) authStorage.logout(provider);
 }
