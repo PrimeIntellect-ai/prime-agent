@@ -5,6 +5,8 @@ from primequant.strategy.base import (
     SignalResult,
     Strategy,
 )
+from primequant.strategy.ema import EMAStrategy
+from primequant.strategy.supertrend import SupertrendStrategy
 
 __all__ = [
     "Strategy",
@@ -12,4 +14,6 @@ __all__ = [
     "PositionSizer",
     "FixedLotSizer",
     "MomentumStrategy",
+    "EMAStrategy",
+    "SupertrendStrategy",
 ]
