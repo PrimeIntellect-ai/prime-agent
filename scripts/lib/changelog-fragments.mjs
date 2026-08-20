@@ -9,9 +9,10 @@ export function normalizeFragment(text) {
 }
 
 /**
- * Replace the [Unreleased] section of a changelog with a release section that
- * merges any existing [Unreleased] entries (first) with fragment contents
- * (oldest first). fragments = [{ name, content }] already sorted.
+ * Insert a [version] - date section built from fragment contents (oldest
+ * first; fragments = [{ name, content }] already sorted). If a stray
+ * [Unreleased] section exists (an old-style PR merged after the fragment
+ * cutover), its entries are absorbed first instead of being stranded.
  * Returns { content, changed }.
  */
 export function buildReleaseSection(changelogContent, fragments, version, date) {

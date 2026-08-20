@@ -42,7 +42,7 @@ Development setup and commands are documented in the [development guide](package
 
 ## Changelog entries
 
-Do not edit the `[Unreleased]` section of `packages/*/CHANGELOG.md` directly. Instead, add one fragment
+Do not edit `packages/*/CHANGELOG.md` directly. Instead, add one fragment
 file per PR per touched package: `packages/<pkg>/.changes/<slug>.md`, where `<slug>` is a kebab-case name
 derived from your branch or ticket (e.g. `eng-1234-fix-resize.md`). The file contains exactly the bullet
 line(s) that describe the change, e.g. `- Fixed the frobnicator dropping input on resize.`. The release

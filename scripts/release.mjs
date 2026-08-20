@@ -10,12 +10,10 @@
  * Steps:
  * 1. Check for uncommitted changes
  * 2. Bump version via npm run version:xxx or set an explicit version
- * 3. Update CHANGELOG.md files: merge [Unreleased] entries and .changes/*.md
- *    fragments into a [version] - date section, git rm the consumed fragments
+ * 3. Update CHANGELOG.md files: aggregate .changes/*.md fragments into a
+ *    [version] - date section, git rm the consumed fragments
  * 4. Commit and tag
  * 5. Publish to npm
- * 6. Add new [Unreleased] section to changelogs
- * 7. Commit
  */
 
 import { execSync } from "child_process";
@@ -143,7 +141,7 @@ function updateChangelogsForRelease(version) {
 		const result = buildReleaseSection(content, fragments, version, date);
 
 		if (!result.changed) {
-			console.log(`  Skipping ${changelog}: no [Unreleased] section and no fragments`);
+			console.log(`  Skipping ${changelog}: no fragments`);
 			continue;
 		}
 
@@ -164,23 +162,6 @@ function updateChangelogsForRelease(version) {
 		} else {
 			run(`git rm -q -- ${consumedFragments.map(shellQuote).join(" ")}`);
 		}
-	}
-}
-
-function addUnreleasedSection() {
-	const changelogs = getChangelogs();
-	const unreleasedSection = "## [Unreleased]\n\n";
-
-	for (const changelog of changelogs) {
-		const content = readFileSync(changelog, "utf-8");
-
-		// Insert after "# Changelog\n\n"
-		const updated = content.replace(
-			/^(# Changelog\n\n)/,
-			`$1${unreleasedSection}`
-		);
-		writeFileSync(changelog, updated);
-		console.log(`  Added [Unreleased] to ${changelog}`);
 	}
 }
 
@@ -228,15 +209,6 @@ console.log();
 
 console.log("Publishing to npm...");
 run("npm run publish");
-console.log();
-
-console.log("Adding [Unreleased] sections for next cycle...");
-addUnreleasedSection();
-console.log();
-
-console.log("Committing changelog updates...");
-stageChangedFiles();
-run(`git commit -m "Add [Unreleased] section for next cycle"`);
 console.log();
 
 console.log("Pushing to remote...");

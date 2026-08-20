@@ -50,11 +50,7 @@ jobs:
                   fragmentRe.test(f.filename) &&
                   !f.filename.endsWith("/README.md"),
               );
-              // Transition escape hatch: an edit (not a deletion) of the package CHANGELOG.
-              const touchesChangelog = files.some(
-                (f) => f.status === "modified" && f.filename === `packages/${pkg}/CHANGELOG.md`,
-              );
-              if (!hasFragment && !touchesChangelog) {
+              if (!hasFragment) {
                 failing.push(pkg);
               }
             }

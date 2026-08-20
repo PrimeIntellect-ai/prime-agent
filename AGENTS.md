@@ -191,7 +191,7 @@ Create provider file exporting:
 
 ### Steps
 
-1. **Check fragments**: Ensure all changes since last release have fragment files in `packages/<pkg>/.changes/` (plus any remaining `[Unreleased]` entries from before the fragment workflow)
+1. **Check fragments**: Ensure all changes since last release have fragment files in `packages/<pkg>/.changes/`
 
 2. **Run release script**:
    ```bash
@@ -199,7 +199,7 @@ Create provider file exporting:
    npm run release:minor    # API breaking changes
    ```
 
-The script handles: version bump, folding `.changes/` fragments (and any leftover `[Unreleased]` entries) into the release section, commit, tag, publish, and re-adding new `[Unreleased]` sections during the transition.
+The script handles: version bump, folding `.changes/` fragments into the release section, commit, tag, and publish.
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 
