@@ -1,0 +1,1 @@
+- Fixed path-scoped protected-resource discovery and resource-bound refresh for MCP OAuth servers.
