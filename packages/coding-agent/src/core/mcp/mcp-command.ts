@@ -20,6 +20,7 @@ const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export interface McpCredentialStore {
 	has(provider: string): boolean;
 	logout(provider: string): void;
+	drainErrors(): Error[];
 }
 
 export async function runMcpManagementCommand(
@@ -58,10 +59,15 @@ export async function runMcpManagementCommand(
 	if (action === "add") {
 		const { name, config, force } = parseMcpAddArgs(args.slice(1));
 		const replaced = settingsManager.getGlobalMcpServers()?.[name] !== undefined;
+		if (replaced && !force) {
+			throw new Error(`MCP server "${name}" already exists. Use --force to replace it.`);
+		}
+		// Any add may repoint a name an authored skill resolves by (e.g. slack); a
+		// stored token must never replay there. Dropped before the new URL is
+		// persisted so a failed drop aborts the add instead of arming the pair.
+		dropServerCredentials(name, authStorage);
 		settingsManager.setGlobalMcpServer(name, config, force);
 		await flushGlobalSettings(settingsManager);
-		// Any add may repoint a name an authored skill resolves by (e.g. slack); a stored token must never replay there.
-		dropServerCredentials(name, authStorage);
 		return {
 			action,
 			message: `${replaced ? "Replaced" : "Added"} MCP server "${name}".`,
@@ -208,7 +214,13 @@ function dropServerCredentials(name: string, authStorage: McpCredentialStore | u
 	// the generic runtime never serves catalog names.
 	if (getCatalogEntry(name)) return;
 	const provider = `mcp:${name}`;
-	if (authStorage?.has(provider)) authStorage.logout(provider);
+	if (!authStorage?.has(provider)) return;
+	authStorage.drainErrors();
+	authStorage.logout(provider);
+	// The store records persistence failures instead of throwing; fail closed so
+	// the old token cannot survive on disk behind a reported success.
+	const error = authStorage.drainErrors()[0];
+	if (error) throw new Error(`Could not remove stored credentials for "${name}": ${error.message}`);
 }
 
 function requireCount(args: readonly string[], count: number, usage: string): void {

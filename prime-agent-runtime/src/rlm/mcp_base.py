@@ -190,25 +190,20 @@ class McpIntegration:
     # -- connection ---------------------------------------------------------
 
     async def _resolve_config(self) -> tuple[str | None, dict[str, str]]:
-        """Host-resolved (url, extra_headers), honoring a user's mcpServers override.
-        Falls back to the class ``url`` and no extra headers on host error."""
-        try:
-            cfg = await host_request("mcp.config", {"server": self.server})
-        except RuntimeError:
-            cfg = {}
-        url = cfg.get("url") if isinstance(cfg, dict) else None
-        headers = cfg.get("headers") if isinstance(cfg, dict) else None
-        if not (isinstance(url, str) and url):
-            url = self.url
-        extra = headers if isinstance(headers, dict) else {}
-        return url, {str(k): str(v) for k, v in extra.items()}
+        """The integration's own (url, extra_headers).
+
+        Never consults user ``mcpServers`` entries: a same-named entry must not
+        repoint an authored integration, whose credentials (auth.json or a
+        bearer-token env var) would follow to the configured URL. Custom
+        endpoints go through the generic runtime under their own name.
+        """
+        return self.url, {}
 
     async def _open_session(self, stack: AsyncExitStack):
         """Open an initialized MCP ClientSession bound to ``stack``.
 
         Override for non-HTTP transports (e.g. stdio). The default connects over
-        streamable HTTP with a Bearer token from auth.json. The URL comes from the
-        host (mcpServers override) when available, else ``self.url``.
+        streamable HTTP to the class ``url`` with a Bearer token from auth.json.
         """
         import inspect  # noqa: PLC0415
 

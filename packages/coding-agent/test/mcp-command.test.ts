@@ -99,6 +99,7 @@ describe("MCP management commands", () => {
 				creds.delete(provider);
 				dropped.push(provider);
 			},
+			drainErrors: () => [],
 		};
 		await runMcpManagementCommand(
 			["add", "remote", "--url", "https://one.example/mcp", "--oauth"],
@@ -121,6 +122,19 @@ describe("MCP management commands", () => {
 		await runMcpManagementCommand(["remove", "remote"], manager);
 	});
 
+	it("aborts an add when the credential drop fails, leaving settings untouched", async () => {
+		const manager = SettingsManager.inMemory({});
+		const authStorage = {
+			has: () => true,
+			logout: () => {},
+			drainErrors: () => [new Error("auth.json write failed")],
+		};
+		await expect(
+			runMcpManagementCommand(["add", "remote", "--url", "https://two.example/mcp"], manager, authStorage),
+		).rejects.toThrow('Could not remove stored credentials for "remote"');
+		expect(manager.getGlobalMcpServers()?.remote).toBeUndefined();
+	});
+
 	it("keeps the built-in integration login when removing a catalog-named shadow entry", async () => {
 		const manager = SettingsManager.inMemory({});
 		// Simulate a hand-edited shadowing entry (add rejects catalog names).
@@ -129,6 +143,7 @@ describe("MCP management commands", () => {
 		const authStorage = {
 			has: () => true,
 			logout: (provider: string) => dropped.push(provider),
+			drainErrors: () => [],
 		};
 		await runMcpManagementCommand(["remove", "linear"], manager, authStorage);
 		// mcp:linear stores the authored Linear login, not a generic-server token.
