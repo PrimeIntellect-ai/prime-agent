@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-19
+
 ## [0.7.3] - 2026-08-17
 
 - Added provider-derived reasoning levels for OpenRouter and Prime Inference models, including sparse, mandatory, toggle-only, and explicit-off capabilities.
