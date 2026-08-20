@@ -1,3 +1,8 @@
+- Fixed an OAuth login that finishes after its server was retargeted arming the old-endpoint token against the new URL: credentials are endpoint-bound at issuance, and the host and kernel only use a token bound to the configured endpoint. **Breaking**: generic MCP OAuth credentials stored before this release lack the binding and require one `/mcp login <server>`.
+- Fixed `mcp add` keeping a stored `mcp:<name>` credential when the entry was new: any add now drops the name's credential, so tokens for authored non-catalog skills (e.g. slack) cannot replay to a user-configured URL.
+- Fixed kernel MCP shutdown budgets exceeding the host's kill deadline; graceful close now finishes inside it, and a kernel that exits without a `shutdown_reply` no longer stalls shutdown for the full deadline.
+- Fixed a shutdown race that could leave an MCP server process running after its generation was dropped from the registry.
+- Fixed the kernel MCP regression test and the Python runtime tests not running in CI.
 - Fixed first IPython calls after an upgrade failing with a raw "Operation was not possible or timed out": kernel startup now tolerates cold venv boots (30s budget; crashes still fail fast via the exit handler), and zmq socket-teardown rejections surface as actionable retriable kernel errors.
 - Fixed headless completion reporting a clean finish when a post-compaction continuation failed to start: ACP and print-mode idle waiters now see the failure, while interactive idle behavior is unchanged.
 - Added a pre-imported generic MCP API and shell/TUI commands to manage persistent Streamable HTTP and stdio servers in user settings.
