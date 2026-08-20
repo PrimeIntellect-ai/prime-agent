@@ -23,7 +23,11 @@ jobs:
               core.info("Label no-changelog is set; skipping changelog check.");
               return;
             }
-            // listFiles caps at 3000 files; PRs here are far smaller.
+            // listFiles caps at 3000 files; beyond that the check cannot see every change.
+            if (pr.changed_files > 3000) {
+              core.setFailed("PR changes more than 3000 files; split it or apply the no-changelog label.");
+              return;
+            }
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner: context.repo.owner,
               repo: context.repo.repo,
