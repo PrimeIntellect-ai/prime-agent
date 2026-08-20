@@ -38,6 +38,8 @@ export interface McpOAuthConfig {
 interface McpCredentials extends OAuthCredentials {
 	tokenEndpoint?: string;
 	clientId?: string;
+	/** MCP endpoint the token was issued for; consumers refuse to send it elsewhere. */
+	endpoint?: string;
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
@@ -226,6 +228,7 @@ function toCredentials(
 	token: { access_token: string; refresh_token?: string; expires_in?: number },
 	tokenEndpoint: string,
 	clientId: string,
+	endpoint: string | undefined,
 	previousRefresh?: string,
 ): McpCredentials {
 	return {
@@ -237,6 +240,7 @@ function toCredentials(
 			: Date.now() + 3600 * 1000 - TOKEN_EXPIRY_BUFFER_MS,
 		tokenEndpoint,
 		clientId,
+		endpoint,
 	};
 }
 
@@ -341,7 +345,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				client_id: clientId,
 				code_verifier: verifier,
 			});
-			return toCredentials(token, meta.token_endpoint, clientId);
+			return toCredentials(token, meta.token_endpoint, clientId, config.url);
 		} finally {
 			cb.server.close();
 		}
@@ -359,7 +363,8 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			refresh_token: creds.refresh,
 			...(clientId ? { client_id: clientId } : {}),
 		});
-		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.refresh);
+		// Never infer a binding: refreshing an unbound credential must not rebind it to the current URL.
+		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.endpoint, creds.refresh);
 	}
 
 	return {

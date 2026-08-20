@@ -239,6 +239,38 @@ describe("compaction continuation", () => {
 		expect(harness.session.getLastAssistantText()).toBe("final answer after successful compaction");
 	});
 
+	it("rejects headless idle waiters when a continuation cannot start", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
+
+		sessionInternals._schedulePostCompactionContinue();
+		const idle = harness.session.waitForHeadlessIdle();
+		const rejectedIdle = expect(idle).rejects.toThrow("continuation failed");
+		await vi.advanceTimersByTimeAsync(100);
+
+		await rejectedIdle;
+	});
+
+	it("does not expose a failed continuation to later headless idle waiters", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
+
+		sessionInternals._schedulePostCompactionContinue();
+		await vi.advanceTimersByTimeAsync(100);
+
+		await expect(harness.session.waitForHeadlessIdle()).resolves.toBeUndefined();
+	});
+
 	// BUG B (end-to-end): unlike the tests above, the threshold compaction here SUCCEEDS.
 	it("e2e: an active goal keeps continuing after a successful threshold compaction", async () => {
 		const sessionRef: { current?: AgentSession } = {};

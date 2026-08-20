@@ -268,6 +268,26 @@ class McpRegistryTest(unittest.TestCase):
         self.assertEqual(env, {"PATH": "/bin", "TOKEN": "value"})
         self.assertNotIn("UNRELATED", env)
 
+    def test_endpoint_bound_credential_never_attaches_to_another_url(self):
+        cred = {"access": "old-token", "endpoint": "https://old.example/mcp"}
+        config = {"oauth": True, "url": "https://new.example/mcp"}
+        with mock.patch.object(mcp, "_read_auth", return_value=cred):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mcp._headers("remote", config))
+            # Exact match only: even a trailing-slash difference is a changed entry.
+            config["url"] = "https://old.example/mcp/"
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mcp._headers("remote", config))
+            config["url"] = "https://old.example/mcp"
+            headers = asyncio.run(mcp._headers("remote", config))
+        self.assertEqual(headers["Authorization"], "Bearer old-token")
+
+    def test_unbound_credential_requires_relogin(self):
+        config = {"oauth": True, "url": "https://srv.example/mcp"}
+        with mock.patch.object(mcp, "_read_auth", return_value={"access": "unbound-token"}):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mcp._headers("remote", config))
+
     def test_diagnostics_do_not_contain_headers_or_env_secrets(self):
         async def host_request(*_args):
             raise RuntimeError("bridge failed")

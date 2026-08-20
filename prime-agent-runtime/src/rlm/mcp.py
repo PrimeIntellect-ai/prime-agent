@@ -21,7 +21,8 @@ __all__ = ["McpStartupError", "call_tool", "close", "list_tools", "reload"]
 
 _DEFAULT_STARTUP_TIMEOUT = 20.0
 _DEFAULT_CALL_TIMEOUT = 60.0
-_SHUTDOWN_TIMEOUT = 5.0
+# Must stay strictly below the host's KERNEL_SHUTDOWN_TIMEOUT_MS (5s) kill deadline.
+_SHUTDOWN_TIMEOUT = 2.5
 _T = TypeVar("_T")
 _STDERR_BYTE_LIMIT = 8 * 1024
 _STDERR_LINE_LIMIT = 40
@@ -208,15 +209,32 @@ class _Generation:
         raise ValueError(f"MCP server '{self.server}' has unsupported transport {kind!r}")
 
     async def _open_http(self):
-        from mcp.client.streamable_http import streamable_http_client
-        from mcp.shared._httpx_utils import create_mcp_http_client
+        import inspect
+
+        from .mcp_base import _resolve_streamable_http
 
         url = self.config.get("url")
         if not isinstance(url, str) or not url:
             raise ValueError(f"MCP server '{self.server}' requires a URL")
         headers = await _headers(self.server, self.config)
-        client = await self.stack.enter_async_context(create_mcp_http_client(headers=headers))
-        streams = await self.stack.enter_async_context(streamable_http_client(url, http_client=client))
+        transport = _resolve_streamable_http()
+        # SDK signatures vary: some take headers=, others only http_client=.
+        if "headers" in inspect.signature(transport).parameters:
+            streams = await self.stack.enter_async_context(transport(url, headers=headers))
+        else:
+            # This SDK shape requires its companion httpx2 client (the transport calls client.sse()).
+            import httpx2
+
+            # SDK-factory timeouts (30s ops / 300s SSE reads); reads must also outlast the session-enforced call timeout.
+            # No redirects: a redirecting endpoint must not receive configured secret headers.
+            client = await self.stack.enter_async_context(
+                httpx2.AsyncClient(
+                    headers=headers,
+                    timeout=httpx2.Timeout(30.0, read=max(300.0, self.call_timeout + 30.0)),
+                    follow_redirects=False,
+                )
+            )
+            streams = await self.stack.enter_async_context(transport(url, http_client=client))
         return streams[0], streams[1]
 
     async def _open_stdio(self):
@@ -353,7 +371,6 @@ class _Registry:
         self._generations[server] = generation
         try:
             await generation.open()
-            self._accepting_work()
         except BaseException:
             if self._generations.get(server) is generation:
                 self._generations.pop(server, None)
@@ -381,7 +398,10 @@ class _Registry:
     async def reload(self, server: str | None = None) -> None:
         async def operation() -> None:
             names = [server] if server is not None else list(set(self._locks) | set(self._generations))
-            await asyncio.gather(*(self._close_name(name) for name in names))
+            results = await asyncio.gather(*(self._close_name(name) for name in names), return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
         await self._tracked(operation)
 
@@ -415,7 +435,7 @@ class _Registry:
             if operations:
                 await asyncio.gather(*operations, return_exceptions=True)
             names = set(self._locks) | set(self._generations)
-            await asyncio.gather(*(self._close_name(name) for name in names))
+            await asyncio.gather(*(self._close_name(name) for name in names), return_exceptions=True)
         self._state = "shut_down"
 
 
@@ -492,19 +512,33 @@ async def _config(server: str) -> dict[str, Any]:
     return config
 
 
+def _bound_auth(provider: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored credential, only when bound to this exact endpoint: a token
+    that is unbound or bound elsewhere (login finished after a retarget) must
+    never be attached — re-login is required. Exact match: both strings come
+    from the same settings entry, so any difference means the entry changed."""
+    cred = _read_auth(provider)
+    if cred is None:
+        return None
+    endpoint = cred.get("endpoint")
+    if not isinstance(endpoint, str) or endpoint != str(config.get("url", "")):
+        return None
+    return cred
+
+
 async def _auth_identity(server: str, config: dict[str, Any]) -> str:
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
     if config.get("oauth") is True and not token:
         provider = f"mcp:{server}"
-        cred = _read_auth(provider)
+        cred = _bound_auth(provider, config)
         expires = (cred or {}).get("expires")
         if isinstance(expires, (int, float)) and expires <= time.time() * 1000 + 30_000:
             try:
                 await host_request("mcp.refresh", {"server": server})
             except Exception as exc:
                 raise RuntimeError(f"Could not refresh MCP credentials for '{server}'") from exc
-            cred = _read_auth(provider)
+            cred = _bound_auth(provider, config)
         token = _resolve_config_value(str((cred or {}).get("access") or (cred or {}).get("key") or ""))
     if not token:
         if config.get("oauth") is True or env_name:
@@ -521,7 +555,7 @@ async def _headers(server: str, config: dict[str, Any]) -> dict[str, str]:
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
     if config.get("oauth") is True and not token:
-        cred = _read_auth(f"mcp:{server}")
+        cred = _bound_auth(f"mcp:{server}", config)
         token = _resolve_config_value(str((cred or {}).get("access") or (cred or {}).get("key") or ""))
     if token:
         headers["Authorization"] = f"Bearer {token}"

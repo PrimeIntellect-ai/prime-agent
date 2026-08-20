@@ -1009,7 +1009,7 @@ describe("InteractiveMode MCP command", () => {
 		const ui = { requestRender: vi.fn() };
 		const showStatus = (InteractiveMode.prototype as unknown as { showStatus(message: string): void }).showStatus;
 		return {
-			modelRegistry: { authStorage: { get: vi.fn(() => undefined), has: vi.fn(() => false), logout: vi.fn() } },
+			modelRegistry: { authStorage: { get: vi.fn(() => undefined), removeVerified: vi.fn() } },
 			settingsManager: manager,
 			chatContainer,
 			ui,

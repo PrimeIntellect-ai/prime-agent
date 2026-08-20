@@ -1,0 +1,1 @@
+- Added changelog fragments (`packages/<pkg>/.changes/*.md`) with a CI check and release-time aggregation, eliminating `[Unreleased]` merge conflicts.
