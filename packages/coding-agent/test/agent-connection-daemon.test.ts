@@ -193,6 +193,8 @@ class FakeDaemonClient {
 						},
 					},
 				};
+			case "replace_acp_mcp_servers":
+				return { type: "response", command: command.type, success: true };
 			case "get_model_catalog":
 				return {
 					type: "response",
@@ -2570,6 +2572,35 @@ describe("DaemonAgentConnection", () => {
 			type: "get_resource_snapshot",
 			activeSessionId: "active-1",
 		});
+	});
+
+	it("capability-gates ACP MCP server replacement", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "session-1");
+		expect(connection.supportsAcpMcpServers()).toBe(false);
+		await expect(
+			connection.replaceAcpMcpServers(
+				[
+					{
+						name: "task",
+						type: "http",
+						url: "https://task.example/mcp",
+						headers: { Authorization: "Bearer task" },
+					},
+				],
+				"owner-a",
+			),
+		).rejects.toBeInstanceOf(DaemonCapabilityUnavailableError);
+
+		fakeClient.serverCapabilities.add("acp_mcp_servers");
+		expect(connection.supportsAcpMcpServers()).toBe(true);
+		await connection.releaseAcpMcpServers("owner-a", ["task"]);
+		expect(fakeClient.requests.at(-1)).toMatchObject({
+			type: "replace_acp_mcp_servers",
+			ownerId: "owner-a",
+			servers: [],
+		});
+		await connection.dispose();
 	});
 
 	it("loads the full model catalog through the daemon protocol", async () => {

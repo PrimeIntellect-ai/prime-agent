@@ -150,7 +150,7 @@ describe("createAgentSessionFromServices", () => {
 			expect(initialPrompt).toContain(
 				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in IPython, not as top-level native tool namespaces or installed Python skills.",
 			);
-			expect(initialPrompt).toContain("Enabled user-configured generic MCP servers: `filesystem`, `zebra`.");
+			expect(initialPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');
 			expect(initialPrompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
 			for (const hidden of [
@@ -166,14 +166,46 @@ describe("createAgentSessionFromServices", () => {
 			]) {
 				expect(initialPrompt).not.toContain(hidden);
 			}
-			expect(initialPrompt).not.toContain("Enabled user-configured generic MCP servers: `linear`");
+			expect(initialPrompt).not.toContain("Enabled generic MCP servers: `linear`");
+
+			const rebuildRuntime = vi.spyOn(
+				session as unknown as { _rebuildRuntimeForAcpMcpServers(): void },
+				"_rebuildRuntimeForAcpMcpServers",
+			);
+			session.replaceAcpMcpServers(
+				[
+					{
+						name: "task",
+						type: "http",
+						url: "https://task-secret.example/mcp",
+						headers: { Authorization: "Bearer task-secret" },
+					},
+				],
+				"owner-a",
+			);
+			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `task`, `zebra`.");
+			expect(session.systemPrompt).not.toContain("task-secret");
+			rebuildRuntime.mockClear();
+			const waitForIdle = vi.spyOn(session.agent, "waitForIdle");
+			await session.releaseAcpMcpServers("unknown-owner", ["task"]);
+			expect(waitForIdle).not.toHaveBeenCalled();
+			const originalProvisioner = Reflect.get(session, "_ipythonKernelProvisioner");
+			const execute = vi.fn(async (_code: string) => ({ status: "ok" }));
+			Reflect.set(session, "_ipythonKernelProvisioner", { manager: { isRunning: true, execute } });
+			await session.releaseAcpMcpServers("owner-a", ["task"]);
+			Reflect.set(session, "_ipythonKernelProvisioner", originalProvisioner);
+			expect(rebuildRuntime).not.toHaveBeenCalled();
+			expect(execute).toHaveBeenCalledOnce();
+			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");
+			expect(execute.mock.calls[0]?.[0]).toContain('["task"]');
+			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 
 			settingsManager.setGlobalMcpServer("added", { type: "stdio", command: "new-secret" });
 			settingsManager.removeGlobalMcpServer("filesystem");
 			await settingsManager.flush();
 			await session.reload();
 
-			expect(session.systemPrompt).toContain("Enabled user-configured generic MCP servers: `added`, `zebra`.");
+			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `added`, `zebra`.");
 			expect(session.systemPrompt).toContain('await mcp.list_tools("added")');
 			expect(session.systemPrompt).not.toContain('await mcp.list_tools("filesystem")');
 			expect(session.systemPrompt).not.toContain("new-secret");

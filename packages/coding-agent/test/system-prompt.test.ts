@@ -218,7 +218,7 @@ describe("buildSystemPrompt", () => {
 				genericMcpServers: ["zebra", "filesystem"],
 			});
 
-			expect(prompt).toContain("Enabled user-configured generic MCP servers: `filesystem`, `zebra`.");
+			expect(prompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 			expect(prompt).toContain('await mcp.list_tools("filesystem")');
 			expect(prompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
 			expect(prompt).toContain("not as top-level native tool namespaces or installed Python skills");
