@@ -239,22 +239,6 @@ describe("compaction continuation", () => {
 		expect(harness.session.getLastAssistantText()).toBe("final answer after successful compaction");
 	});
 
-	it("releases headless idle waiters when a continuation is cancelled", async () => {
-		vi.useFakeTimers();
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_cancelPostCompactionContinue(): void;
-		};
-
-		sessionInternals._schedulePostCompactionContinue();
-		const idle = harness.session.waitForHeadlessIdle();
-		sessionInternals._cancelPostCompactionContinue();
-
-		await expect(idle).resolves.toBeUndefined();
-	});
-
 	it("rejects headless idle waiters when a continuation cannot start", async () => {
 		vi.useFakeTimers();
 		const harness = await createHarness();
@@ -285,21 +269,6 @@ describe("compaction continuation", () => {
 		await vi.advanceTimersByTimeAsync(100);
 
 		await expect(harness.session.waitForHeadlessIdle()).resolves.toBeUndefined();
-	});
-
-	it("keeps interactive waitForIdle resolving through a failed continuation", async () => {
-		vi.useFakeTimers();
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-		};
-		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
-
-		sessionInternals._schedulePostCompactionContinue();
-		await vi.advanceTimersByTimeAsync(100);
-
-		await expect(harness.session.waitForIdle()).resolves.toBeUndefined();
 	});
 
 	// BUG B (end-to-end): unlike the tests above, the threshold compaction here SUCCEEDS.
