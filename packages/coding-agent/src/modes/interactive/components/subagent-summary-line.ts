@@ -83,10 +83,15 @@ export class SubagentSummaryLine implements Component, Focusable {
 	render(width: number): string[] {
 		const lines = this.renderInfoLine(width);
 		if (this.counts.total === 0) return lines;
-		const safeWidth = Math.max(24, width);
+		if (width < 2) return lines;
+		const safeWidth = width;
 		const inner = safeWidth - 2;
 		const label = theme.fg("accent", "[1magents[22m");
-		const top = `${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 9))}╮`)}`;
+		const top = truncateToWidth(
+			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 9))}╮`)}`,
+			safeWidth,
+			"…",
+		);
 		const counts =
 			theme.fg("success", `● ${this.counts.running} running`) +
 			"   " +

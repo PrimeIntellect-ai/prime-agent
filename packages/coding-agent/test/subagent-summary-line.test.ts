@@ -39,6 +39,17 @@ describe("SubagentSummaryLine", () => {
 		expect(rendered[1]).toContain("● 1 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
+	it("never emits lines wider than the allocated width", () => {
+		const line = new SubagentSummaryLine();
+		line.setSubagentCounts({ total: 3, running: 1, idle: 1, inactive: 1 });
+		line.setOpenable(true);
+		for (const width of [120, 40, 24, 12, 6, 3, 2, 1]) {
+			for (const rendered of line.render(width).map(stripAnsi)) {
+				expect(rendered.length).toBeLessThanOrEqual(width);
+			}
+		}
+	});
+
 	it("counts only direct children using running, idle, and inactive status projections", () => {
 		const children = [
 			child("running", "running"),
