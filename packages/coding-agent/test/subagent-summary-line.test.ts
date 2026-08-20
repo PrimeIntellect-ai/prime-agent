@@ -39,6 +39,19 @@ describe("SubagentSummaryLine", () => {
 		expect(rendered[1]).toContain("● 1 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
+	it("keeps the selection background across truncation resets when focused", () => {
+		const line = new SubagentSummaryLine();
+		line.setSubagentCounts({ total: 3, running: 1, idle: 1, inactive: 1 });
+		line.setOpenable(true);
+		line.focused = true;
+		// Narrow enough that the colored counts truncate and inject a full reset.
+		const content = line.render(20)[1];
+		expect(content).toContain("\x1b[0m");
+		for (const segment of content.split("\x1b[0m").slice(1, -1)) {
+			expect(segment.startsWith("\x1b[4") || segment.startsWith("\x1b[10")).toBe(true);
+		}
+	});
+
 	it("never emits lines wider than the allocated width", () => {
 		const line = new SubagentSummaryLine();
 		line.setSubagentCounts({ total: 3, running: 1, idle: 1, inactive: 1 });

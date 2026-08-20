@@ -102,7 +102,14 @@ export class SubagentSummaryLine implements Component, Focusable {
 		const gap = Math.max(1, inner - 2 - visibleWidth(counts) - visibleWidth(openHint));
 		const body = truncateToWidth(` ${counts}${" ".repeat(gap)}${theme.fg("dim", openHint)} `, inner, "…");
 		const pad = " ".repeat(Math.max(0, inner - visibleWidth(body)));
-		const content = this.focused ? theme.bg("selectedBg", `${body}${pad}`) : `${body}${pad}`;
+		// Truncation may inject full ANSI resets; wrap each segment so the
+		// selection background survives past them (custom-editor precedent).
+		const content = this.focused
+			? `${body}${pad}`
+					.split("\x1b[0m")
+					.map((segment) => theme.bg("selectedBg", segment))
+					.join("\x1b[0m")
+			: `${body}${pad}`;
 		lines.push(
 			top,
 			`${theme.fg("border", "│")}${content}${theme.fg("border", "│")}`,
