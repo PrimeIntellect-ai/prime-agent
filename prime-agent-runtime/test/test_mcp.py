@@ -113,10 +113,13 @@ class McpRegistryTest(unittest.TestCase):
         generation = self.generation(
             {"type": "http", "enabledTools": ["yes", "denied"], "disabledTools": ["denied"]}, tools
         )
-        with mock.patch.object(mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)):
-            self.assertEqual([tool["name"] for tool in run(mcp.list_tools("svc"))], ["yes"])
-            with self.assertRaises(PermissionError):
-                run(mcp.call_tool("svc", "denied"))
+        async def scenario():
+            with mock.patch.object(mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)):
+                self.assertEqual([tool["name"] for tool in await mcp.list_tools("svc")], ["yes"])
+                with self.assertRaises(PermissionError):
+                    await mcp.call_tool("svc", "denied")
+
+        run(scenario())
 
     def test_reuses_generation_and_closes_before_replacement(self):
         configs = [{"type": "http", "url": "a"}, {"type": "http", "url": "a"}, {"type": "http", "url": "b"}]
@@ -129,10 +132,14 @@ class McpRegistryTest(unittest.TestCase):
             opened.append(generation)
             generation.session = FakeSession([])
 
-        with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
-            first = run(mcp._registry.get("svc"))
-            self.assertIs(run(mcp._registry.get("svc")), first)
-            second = run(mcp._registry.get("svc"))
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                first = await mcp._registry.get("svc")
+                self.assertIs(await mcp._registry.get("svc"), first)
+                second = await mcp._registry.get("svc")
+            return first, second
+
+        first, second = run(scenario())
         self.assertTrue(first.closed)
         self.assertIs(second, opened[-1])
 
@@ -177,10 +184,13 @@ class McpRegistryTest(unittest.TestCase):
                 raise RuntimeError("failed")
             generation.session = FakeSession([])
 
-        with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
-            with self.assertRaises(RuntimeError):
-                run(mcp._registry.get("bad"))
-            self.assertEqual(run(mcp._registry.get("good")).server, "good")
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                with self.assertRaises(RuntimeError):
+                    await mcp._registry.get("bad")
+                self.assertEqual((await mcp._registry.get("good")).server, "good")
+
+        run(scenario())
 
     def test_call_timeout_cancels_request(self):
         cancelled = False
@@ -284,22 +294,31 @@ class McpRegistryTest(unittest.TestCase):
         generation._stderr.tail.assert_not_called()
 
     def test_cancelled_close_can_be_retried(self):
-        generation = self.generation({"type": "http"}, [])
+        generation = mcp._Generation("svc", {"type": "http"})
+        release = asyncio.Event()
+
+        async def lifecycle(ready):
+            ready.set_result(None)
+            await generation._close_requested.wait()
+            await release.wait()
+            await generation.stack.aclose()
+            generation.closed = True
 
         async def scenario():
-            await generation._call_lock.acquire()
+            ready = asyncio.get_running_loop().create_future()
+            generation._lifecycle = asyncio.create_task(lifecycle(ready))
+            await ready
             closing = asyncio.create_task(generation.close())
             await asyncio.sleep(0)
             closing.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await closing
             self.assertFalse(generation.closed)
-            generation._call_lock.release()
+            release.set()
             await generation.close()
 
         run(scenario())
         self.assertTrue(generation.closed)
-        self.assertEqual(generation.stack.closed, 1)
 
     def test_close_is_idempotent(self):
         generation = self.generation({"type": "http"}, [])
@@ -441,6 +460,55 @@ class McpRegistryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             mcp._seconds(True, 1)
 
+    def test_shutdown_closes_servers_concurrently_with_one_deadline(self):
+        started = 0
+        all_started = asyncio.Event()
+
+        class SlowGeneration:
+            closed = False
+
+            async def close(self):
+                nonlocal started
+                started += 1
+                if started == 2:
+                    all_started.set()
+                await all_started.wait()
+                await asyncio.sleep(10)
+
+        async def scenario():
+            registry = mcp._Registry()
+            registry._generations = {"one": SlowGeneration(), "two": SlowGeneration()}
+            with mock.patch.object(mcp, "_SHUTDOWN_TIMEOUT", 0.02):
+                with self.assertRaises(TimeoutError):
+                    await registry.shutdown()
+            self.assertEqual(started, 2)
+            with self.assertRaises(RuntimeError):
+                await registry.get("new")
+
+        run(scenario())
+
+    def test_reload_remains_reusable_but_shutdown_is_terminal(self):
+        async def config(_server):
+            return {"type": "http", "url": "a"}
+
+        async def open_generation(generation):
+            generation.session = FakeSession([])
+
+        async def scenario():
+            registry = mcp._Registry()
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                first = await registry.get("svc")
+                await registry.reload("svc")
+                second = await registry.get("svc")
+                self.assertIsNot(first, second)
+                await registry.shutdown()
+                with self.assertRaises(RuntimeError):
+                    await registry.reload("svc")
+
+        run(scenario())
+
     def test_shutdown_hook_supports_synchronous_kernel_handler(self):
         class Kernel:
             def __init__(self):
@@ -451,11 +519,15 @@ class McpRegistryTest(unittest.TestCase):
 
         kernel = Kernel()
         shell = SimpleNamespace(kernel=kernel)
-        with mock.patch.object(mcp, "get_ipython", create=True, return_value=shell):
-            mcp.install_shutdown_hook()
-        with mock.patch.object(mcp, "close", mock.AsyncMock()) as close:
-            self.assertEqual(run(kernel.do_shutdown(False)), {"status": "ok", "restart": False})
-        close.assert_awaited_once()
+
+        async def scenario():
+            with mock.patch.object(mcp, "get_ipython", create=True, return_value=shell):
+                mcp.install_shutdown_hook()
+            with mock.patch.object(mcp, "close", mock.AsyncMock()) as close:
+                self.assertEqual(await kernel.do_shutdown(False), {"status": "ok", "restart": False})
+            close.assert_awaited_once()
+
+        run(scenario())
 
     def test_close_waits_for_inflight_startup(self):
         started = asyncio.Event()
@@ -473,11 +545,12 @@ class McpRegistryTest(unittest.TestCase):
             with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
                 opening = asyncio.create_task(mcp._registry.get("svc"))
                 await started.wait()
-                closing = asyncio.create_task(mcp._registry.close())
+                closing = asyncio.create_task(mcp._registry.shutdown())
                 await asyncio.sleep(0)
                 self.assertFalse(closing.done())
                 release.set()
-                await opening
+                with self.assertRaises(asyncio.CancelledError):
+                    await opening
                 await closing
                 self.assertEqual(mcp._registry._generations, {})
 

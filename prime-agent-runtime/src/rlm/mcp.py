@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import hashlib
 import io
 import os
@@ -11,7 +10,8 @@ import re
 import threading
 import time
 from contextlib import AsyncExitStack
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 from . import host_request
 from .mcp_base import _parse_result, _read_auth, _resolve_config_value
@@ -20,6 +20,9 @@ __all__ = ["McpStartupError", "call_tool", "close", "list_tools", "reload"]
 
 _DEFAULT_STARTUP_TIMEOUT = 20.0
 _DEFAULT_CALL_TIMEOUT = 60.0
+_SHUTDOWN_TIMEOUT = 5.0
+_CROSS_LOOP_TIMEOUT = 65.0
+_T = TypeVar("_T")
 _STDERR_BYTE_LIMIT = 8 * 1024
 _STDERR_LINE_LIMIT = 40
 _SAFE_ENV = ("HOME", "PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot", "WINDIR")
@@ -104,6 +107,8 @@ class _Generation:
         self._stderr_secrets: tuple[str, ...] = ()
         self._stderr_disclosable = True
         self._diagnostic_private_values: tuple[str, ...] = ()
+        self._close_requested = asyncio.Event()
+        self._lifecycle: asyncio.Task[None] | None = None
 
     @property
     def startup_timeout(self) -> float:
@@ -114,38 +119,64 @@ class _Generation:
         return _seconds(self.config.get("callTimeoutMs"), _DEFAULT_CALL_TIMEOUT)
 
     async def open(self) -> None:
+        if self._lifecycle is not None:
+            raise RuntimeError("MCP generation has already started")
+        ready = asyncio.get_running_loop().create_future()
+        self._lifecycle = asyncio.create_task(self._run_lifecycle(ready))
+        try:
+            await asyncio.shield(ready)
+        except BaseException:
+            if not ready.done():
+                self._lifecycle.cancel()
+            try:
+                await asyncio.shield(self._lifecycle)
+            except BaseException:
+                pass
+            raise
+
+    async def _run_lifecycle(self, ready: asyncio.Future[None]) -> None:
         startup_failure: Exception | None = None
         try:
-            async with asyncio.timeout(self.startup_timeout):
-                read, write = await self._open_transport()
-                from mcp import ClientSession
+            try:
+                async with asyncio.timeout(self.startup_timeout):
+                    read, write = await self._open_transport()
+                    from mcp import ClientSession
 
-                self.session = await self.stack.enter_async_context(
-                    ClientSession(read, write, read_timeout_seconds=self.call_timeout)
-                )
+                    self.session = await self.stack.enter_async_context(
+                        ClientSession(read, write, read_timeout_seconds=self.call_timeout)
+                    )
+                    try:
+                        await self.session.initialize()
+                        await self.discover()
+                    except Exception as exc:
+                        if self._stderr is None or _is_exception_group(exc):
+                            raise
+                        startup_failure = exc
+                    if startup_failure is None and self._stderr is not None:
+                        self._stderr.stop_capture()
+            except BaseException as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+                return
+
+            if startup_failure is not None:
+                if not ready.done():
+                    ready.set_exception(self._startup_error(startup_failure))
+                return
+
+            ready.set_result(None)
+            await self._close_requested.wait()
+        finally:
+            try:
                 try:
-                    await self.session.initialize()
-                    await self.discover()
-                except Exception as exc:
-                    # Do not turn cancellation or exception groups into an ordinary
-                    # RuntimeError. Groups can carry cleanup failures that callers
-                    # must retain structurally.
-                    if self._stderr is None or _is_exception_group(exc):
-                        raise
-                    startup_failure = exc
-                if startup_failure is None and self._stderr is not None:
-                    # Keep draining the pipe for the life of a successful server,
-                    # but never retain or expose post-startup stderr.
-                    self._stderr.stop_capture()
-        except BaseException:
-            await self.close()
-            raise
-        if startup_failure is not None:
-            # Teardown is deliberately outside the startup deadline: otherwise a
-            # late handshake failure can become a bare TimeoutError and lose its
-            # actionable (already bounded and redacted) diagnostic.
-            await self.close()
-            raise self._startup_error(startup_failure) from startup_failure
+                    async with asyncio.timeout(_SHUTDOWN_TIMEOUT):
+                        await self.stack.aclose()
+                except TimeoutError:
+                    pass
+            finally:
+                if self._stderr is not None:
+                    self._stderr.close()
+                self.closed = True
 
     def _startup_error(self, exc: Exception) -> McpStartupError:
         assert self._stderr is not None
@@ -243,107 +274,199 @@ class _Generation:
         return _parse_result(result)
 
     async def close(self) -> None:
-        if self.closed:
-            return
-        async with self._call_lock:
-            try:
-                try:
-                    async with asyncio.timeout(5):
-                        await self.stack.aclose()
-                except TimeoutError:
-                    pass
-            finally:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            if not self.closed:
+                await self.stack.aclose()
                 if self._stderr is not None:
                     self._stderr.close()
-            self.closed = True
+                self.closed = True
+            return
+        if self.closed:
+            return
+        self._close_requested.set()
+        await asyncio.shield(lifecycle)
 
 
 class _Registry:
     def __init__(self):
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._generations: dict[str, _Generation] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._closing = False
+        self._operations: set[asyncio.Task[Any]] = set()
+        self._state = "open"
+        self._shutdown_task: asyncio.Task[None] | None = None
+
+    def bind_owner(self) -> asyncio.AbstractEventLoop:
+        loop = asyncio.get_running_loop()
+        if self._owner_loop is None:
+            self._owner_loop = loop
+        return self._owner_loop
+
+    def _assert_owner(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._owner_loop is None:
+            self._owner_loop = loop
+        elif loop is not self._owner_loop:
+            raise RuntimeError("MCP registry state must only be accessed on its owner loop")
+
+    def _accepting_work(self) -> None:
+        self._assert_owner()
+        if self._state != "open":
+            raise RuntimeError(f"MCP registry is {self._state.replace('_', ' ')}")
+
+    async def _tracked(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        self._accepting_work()
+        task = asyncio.current_task()
+        assert task is not None
+        self._operations.add(task)
+        try:
+            return await operation()
+        finally:
+            self._operations.discard(task)
 
     async def get(self, server: str) -> _Generation:
+        return await self._tracked(lambda: self._get(server))
+
+    async def _get(self, server: str) -> _Generation:
+        self._accepting_work()
         _validate_name(server, "server")
         lock = self._locks.setdefault(server, asyncio.Lock())
         async with lock:
             return await self._get_locked(server)
 
     async def _get_locked(self, server: str) -> _Generation:
-        if self._closing:
-            raise RuntimeError("MCP registry is closing")
+        self._accepting_work()
         config = await _config(server)
+        self._accepting_work()
         current = self._generations.get(server)
         if current and current.config == config and not current.closed:
             return current
         if current:
             await current.close()
-            self._generations.pop(server, None)
+            if self._generations.get(server) is current:
+                self._generations.pop(server, None)
+        self._accepting_work()
         generation = _Generation(server, config)
-        await generation.open()
         self._generations[server] = generation
+        try:
+            await generation.open()
+            self._accepting_work()
+        except BaseException:
+            if self._generations.get(server) is generation:
+                self._generations.pop(server, None)
+            raise
         return generation
 
     async def tools(self, server: str) -> list[dict[str, Any]]:
-        _validate_name(server, "server")
-        lock = self._locks.setdefault(server, asyncio.Lock())
-        async with lock:
-            generation = await self._get_locked(server)
+        async def operation() -> list[dict[str, Any]]:
+            generation = await self._get(server)
             return [dict(tool) for name, tool in generation.tools.items() if generation.allows(name)]
 
+        return await self._tracked(operation)
+
     async def call(self, server: str, tool: str, arguments: dict[str, Any]) -> Any:
-        _validate_name(server, "server")
-        lock = self._locks.setdefault(server, asyncio.Lock())
-        async with lock:
-            generation = await self._get_locked(server)
-            return await generation.call(tool, arguments)
+        async def operation() -> Any:
+            self._accepting_work()
+            _validate_name(server, "server")
+            lock = self._locks.setdefault(server, asyncio.Lock())
+            async with lock:
+                generation = await self._get_locked(server)
+                return await generation.call(tool, arguments)
+
+        return await self._tracked(operation)
 
     async def reload(self, server: str | None = None) -> None:
-        names = [server] if server is not None else list(set(self._locks) | set(self._generations))
-        for name in names:
-            lock = self._locks.setdefault(name, asyncio.Lock())
-            async with lock:
-                generation = self._generations.pop(name, None)
-                if generation:
-                    await generation.close()
+        async def operation() -> None:
+            names = [server] if server is not None else list(set(self._locks) | set(self._generations))
+            await asyncio.gather(*(self._close_name(name) for name in names))
 
-    async def close(self) -> None:
-        self._closing = True
-        try:
+        await self._tracked(operation)
+
+    async def _close_name(self, name: str) -> None:
+        self._assert_owner()
+        lock = self._locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            generation = self._generations.get(name)
+            if generation:
+                await generation.close()
+                if generation.closed and self._generations.get(name) is generation:
+                    self._generations.pop(name, None)
+
+    async def shutdown(self) -> None:
+        self._assert_owner()
+        if self._state == "shut_down":
+            return
+        task = self._shutdown_task
+        if task is None or task.done():
+            self._state = "shutting_down"
+            task = asyncio.create_task(self._shutdown_once())
+            self._shutdown_task = task
+        await asyncio.shield(task)
+
+    async def _shutdown_once(self) -> None:
+        self._assert_owner()
+        async with asyncio.timeout(_SHUTDOWN_TIMEOUT):
+            operations = list(self._operations)
+            for operation in operations:
+                operation.cancel()
+            if operations:
+                await asyncio.gather(*operations, return_exceptions=True)
             names = set(self._locks) | set(self._generations)
-            for name in names:
-                lock = self._locks.setdefault(name, asyncio.Lock())
-                async with lock:
-                    generation = self._generations.pop(name, None)
-                    if generation:
-                        await generation.close()
-        finally:
-            self._closing = False
+            await asyncio.gather(*(self._close_name(name) for name in names))
+        self._state = "shut_down"
 
 
 _registry = _Registry()
 
 
+async def _dispatch(
+    operation: Callable[[], Awaitable[_T]], *, timeout: float = _CROSS_LOOP_TIMEOUT
+) -> _T:
+    current = asyncio.get_running_loop()
+    owner = _registry.bind_owner()
+    if current is owner:
+        return await operation()
+    if owner.is_closed() or not owner.is_running():
+        raise RuntimeError("MCP owner loop is unavailable")
+
+    coroutine = operation()
+    try:
+        submitted = asyncio.run_coroutine_threadsafe(coroutine, owner)
+    except BaseException:
+        coroutine.close()
+        raise RuntimeError("Could not schedule work on the MCP owner loop") from None
+    wrapped = asyncio.wrap_future(submitted)
+    try:
+        done, _ = await asyncio.wait({wrapped}, timeout=timeout)
+        if not done:
+            submitted.cancel()
+            raise RuntimeError("Timed out waiting for the MCP owner loop")
+        return await wrapped
+    finally:
+        if not wrapped.done():
+            wrapped.cancel()
+
+
 async def list_tools(server: str) -> list[dict[str, Any]]:
-    return await _registry.tools(server)
+    return await _dispatch(lambda: _registry.tools(server))
 
 
 async def call_tool(server: str, tool: str, arguments: dict[str, Any] | None = None) -> Any:
     _validate_name(tool, "tool")
     if arguments is not None and not isinstance(arguments, dict):
         raise TypeError("arguments must be a dict or None")
-    return await _registry.call(server, tool, arguments or {})
+    return await _dispatch(lambda: _registry.call(server, tool, arguments or {}))
 
 
 async def reload(server: str | None = None) -> None:
     if server is not None:
         _validate_name(server, "server")
-    await _registry.reload(server)
+    await _dispatch(lambda: _registry.reload(server), timeout=_SHUTDOWN_TIMEOUT + 1)
 
 
 async def close() -> None:
-    await _registry.close()
+    await _dispatch(_registry.shutdown, timeout=_SHUTDOWN_TIMEOUT + 1)
 
 
 def _validate_name(value: str, label: str) -> None:
@@ -499,6 +622,7 @@ def install_shutdown_hook() -> None:
         return
     if getattr(kernel, "_prime_agent_mcp_shutdown", False):
         return
+    _registry.bind_owner()
     original = kernel.do_shutdown
 
     async def do_shutdown(restart: bool):
@@ -510,13 +634,3 @@ def install_shutdown_hook() -> None:
 
     kernel.do_shutdown = do_shutdown
     kernel._prime_agent_mcp_shutdown = True
-
-
-def _close_at_exit() -> None:
-    try:
-        asyncio.run(close())
-    except Exception:
-        pass
-
-
-atexit.register(_close_at_exit)
