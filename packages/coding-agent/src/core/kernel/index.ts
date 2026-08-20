@@ -30,6 +30,7 @@ const READY_TIMEOUT_MS = 5000;
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
+const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 // How often to poll a forked kernel's pid for unexpected death.
 const FORKED_LIVENESS_POLL_MS = 1000;
@@ -598,6 +599,8 @@ export class KernelManager {
 	private iopub?: Subscriber;
 	private control?: Dealer;
 	private iopubPumpPromise?: Promise<void>;
+	private controlPumpPromise?: Promise<void>;
+	private readonly pendingControlReplies = new Map<string, (message: JupyterMessage) => void>();
 	private connection?: ConnectionInfo;
 	private tempDir?: string;
 	private kernelStderr = "";
@@ -766,6 +769,7 @@ export class KernelManager {
 		this.iopub.connect(`${conn.transport}://${conn.ip}:${conn.iopub_port}`);
 		this.control.connect(`${conn.transport}://${conn.ip}:${conn.control_port}`);
 		this.iopub.subscribe("");
+		this.startControlPump();
 
 		// ZMQ PUB/SUB slow-joiner: give the subscription a brief chance to reach the kernel before first execute.
 		await sleep(IOPUB_SUBSCRIBE_DELAY_MS);
@@ -1024,6 +1028,68 @@ export class KernelManager {
 			clearAbortTimer();
 			opts.signal?.removeEventListener("abort", onAbort);
 		}
+	}
+
+	private startControlPump(): void {
+		if (this.controlPumpPromise) return;
+		this.controlPumpPromise = this.runControlPump();
+	}
+
+	private async runControlPump(): Promise<void> {
+		const control = this.control;
+		if (!control) return;
+		try {
+			for await (const frames of control) {
+				const incoming = decode(frames);
+				if (!incoming) continue;
+				const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+				if (!parentMessageId) continue;
+				this.pendingControlReplies.get(parentMessageId)?.(incoming);
+			}
+		} catch (error) {
+			if ((this.state as string) !== "shutdown") {
+				this.appendKernelDiagnostic(`control pump failed: ${errorMessage(error)}`);
+			}
+		} finally {
+			if (this.control === control) this.controlPumpPromise = undefined;
+		}
+	}
+
+	private waitForControlReply(
+		requestMessageId: string,
+		messageType: string,
+		timeoutMs: number,
+	): { promise: Promise<void>; cancel: () => void } {
+		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+		let settled = false;
+		const cleanup = () => {
+			if (timeout) globalThis.clearTimeout(timeout);
+			timeout = undefined;
+			this.pendingControlReplies.delete(requestMessageId);
+		};
+		const promise = new Promise<void>((resolve, reject) => {
+			this.pendingControlReplies.set(requestMessageId, (incoming) => {
+				if (incoming.header.msg_type !== messageType || settled) return;
+				settled = true;
+				cleanup();
+				resolve();
+			});
+			timeout = globalThis.setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(new Error(`Kernel did not reply to ${messageType} within ${timeoutMs}ms`));
+			}, timeoutMs);
+			timeout.unref?.();
+		});
+		return {
+			promise,
+			cancel: () => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+			},
+		};
 	}
 
 	private startIopubPump(): void {
@@ -1382,10 +1448,12 @@ export class KernelManager {
 		this.shell?.close();
 		this.iopub?.close();
 		this.control?.close();
+		this.pendingControlReplies.clear();
 		this.shell = undefined;
 		this.iopub = undefined;
 		this.control = undefined;
 		this.iopubPumpPromise = undefined;
+		this.controlPumpPromise = undefined;
 		try {
 			if (this.kernel) {
 				this.kernel.kill(killSignal);
@@ -1409,6 +1477,20 @@ export class KernelManager {
 		}
 		this.tempDir = undefined;
 		this.startPromise = undefined;
+	}
+
+	private async waitForKernelExit(): Promise<void> {
+		const kernel = this.kernel;
+		if (kernel) {
+			if (kernel.exitCode !== null || kernel.signalCode !== null) return;
+			await new Promise<void>((resolve) => kernel.once("exit", () => resolve()));
+			return;
+		}
+		const pid = this.kernelPid;
+		if (pid === undefined) return;
+		while (this.kernelPid === pid && !this.forkedKernelDied()) {
+			await sleep(25);
+		}
 	}
 
 	private async waitForHostRequestsToSettle(tasks: Promise<void>[], timeoutMs: number): Promise<void> {
@@ -1445,19 +1527,33 @@ export class KernelManager {
 		this.state = "shutdown";
 		liveKernels.delete(this);
 
+		let replyWait: { promise: Promise<void>; cancel: () => void } | undefined;
+		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		const shutdownDeadline = new Promise<never>((_resolve, reject) => {
+			shutdownTimer = globalThis.setTimeout(
+				() => reject(new Error(`Kernel did not shut down within ${KERNEL_SHUTDOWN_TIMEOUT_MS}ms`)),
+				KERNEL_SHUTDOWN_TIMEOUT_MS,
+			);
+			shutdownTimer.unref?.();
+		});
 		try {
 			if (this.control && this.connection) {
 				const msg = buildMessage("shutdown_request", { restart: false }, this.session, this.options.username);
-				await this.control.send(encode(msg, this.connection.key));
-				await sleep(200);
+				replyWait = this.waitForControlReply(msg.header.msg_id, "shutdown_reply", KERNEL_SHUTDOWN_TIMEOUT_MS);
+				const send = this.control.send(encode(msg, this.connection.key));
+				send.catch(() => undefined);
+				await Promise.race([Promise.all([send, replyWait.promise]), shutdownDeadline]);
+				await Promise.race([this.waitForKernelExit(), shutdownDeadline]);
 			}
 		} catch (error) {
 			this.appendKernelDiagnostic(
-				`shutdown_request send failed (killing instead): ${error instanceof Error ? error.message : String(error)}`,
+				`graceful shutdown failed (killing instead): ${error instanceof Error ? error.message : String(error)}`,
 			);
+		} finally {
+			if (shutdownTimer) globalThis.clearTimeout(shutdownTimer);
+			replyWait?.cancel();
+			this.cleanupResources();
 		}
-
-		this.cleanupResources();
 	}
 
 	async restart(): Promise<void> {

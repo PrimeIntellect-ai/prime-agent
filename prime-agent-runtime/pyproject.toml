@@ -5,6 +5,8 @@ description = "Kernel-side runtime shim for Prime Agent recursion"
 requires-python = ">=3.10"
 dependencies = [
   "ipykernel",
+  "mcp",
+  "httpx",
   "nest-asyncio",
   "tyro",
 ]
