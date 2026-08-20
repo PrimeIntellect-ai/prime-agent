@@ -816,6 +816,19 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
+/**
+ * One-shot settlement for a scheduled post-compaction continuation. `settled`
+ * makes settle idempotent, and a rejection is never re-exposed: the field is
+ * cleared in the same step, so later waiters observe only future work.
+ */
+interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
+	settled: boolean;
+}
+
+function createPostCompactionContinuationSettlement(): PostCompactionContinuationSettlement {
+	return { ...createAgentMessageDeferred(), settled: false };
+}
+
 export interface ModelCycleResult {
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
@@ -1177,7 +1190,7 @@ export class AgentSession {
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
 	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
-	private _postCompactionContinuationSettlement: AgentMessageDeferred | undefined;
+	private _postCompactionContinuationSettlement: PostCompactionContinuationSettlement | undefined;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
@@ -6655,6 +6668,12 @@ export class AgentSession {
 	}
 
 	/** Wait for normal idle and any continuation already owned by compaction. */
+	/**
+	 * Idle for headless callers: also waits out a scheduled post-compaction
+	 * continuation, and rejects when that continuation cannot start — a silent
+	 * resolve would report a turn as finished that never ran. Interactive
+	 * callers use {@link waitForIdle}, which ignores continuations entirely.
+	 */
 	async waitForHeadlessIdle(): Promise<void> {
 		while (true) {
 			await this.waitForIdle();
@@ -7332,11 +7351,16 @@ export class AgentSession {
 		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
 	}
 
-	private _settlePostCompactionContinue(): void {
-		if (this._postCompactionContinuationScheduled || this._postCompactionContinuationTimer) return;
+	private _settlePostCompactionContinue(error?: Error): void {
+		// A failure settles immediately; a resolve defers to any still-scheduled
+		// or timer-pending continuation attempt, which owns the settlement next.
+		if (!error && (this._postCompactionContinuationScheduled || this._postCompactionContinuationTimer)) return;
 		const settlement = this._postCompactionContinuationSettlement;
+		if (!settlement || settlement.settled) return;
+		settlement.settled = true;
 		this._postCompactionContinuationSettlement = undefined;
-		settlement?.resolve();
+		if (error) settlement.reject(error);
+		else settlement.resolve();
 	}
 
 	private _cancelPostCompactionContinue(): void {
@@ -7443,7 +7467,9 @@ export class AgentSession {
 		if (this._postCompactionContinuationScheduled) {
 			return;
 		}
-		this._postCompactionContinuationSettlement ??= createAgentMessageDeferred();
+		if (!this._postCompactionContinuationSettlement || this._postCompactionContinuationSettlement.settled) {
+			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement();
+		}
 		this._postCompactionContinuationScheduled = true;
 		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
 		this._postCompactionContinuationTimer = setTimeout(() => {
@@ -7503,6 +7529,12 @@ export class AgentSession {
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("already processing")) {
 				this._schedulePostCompactionContinue();
+			} else if (!message.includes("continue from")) {
+				// The continuation cannot start: a headless caller waiting for idle must
+				// see the failure, not a clean finish that never happened. "continue
+				// from" errors are the benign race where the turn already completed and
+				// there is nothing left to continue; those settle as a clean finish.
+				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}
 	}
