@@ -513,12 +513,9 @@ async def _config(server: str) -> dict[str, Any]:
 
 
 def _bound_auth(provider: str, config: dict[str, Any]) -> dict[str, Any] | None:
-    """The stored credential, only when bound to this exact endpoint.
-
-    A mismatch means a login finished after the server was retargeted; a
-    missing binding (pre-binding legacy token) has no proof of where it
-    belongs. Neither may be attached — re-login is required.
-    """
+    """The stored credential, only when bound to this exact endpoint: a token
+    that is unbound (legacy) or bound elsewhere (login finished after a
+    retarget) must never be attached — re-login is required."""
     cred = _read_auth(provider)
     if cred is None:
         return None

@@ -136,7 +136,6 @@ describe.sequential("MCP OAuth provider", () => {
 
 		expect(refreshed.access).toBe("access-2");
 		expect(refreshed.refresh).toBe("old-refresh");
-		// A refresh must not re-bind an old token to the provider's current URL.
 		expect((refreshed as { endpoint?: string }).endpoint).toBe("https://old.test/mcp");
 
 		const unbound = await provider.refreshToken({
