@@ -3,7 +3,7 @@
  * Used by scripts/release.mjs; no fs or git side effects here.
  */
 
-export function normalizeFragment(text) {
+function normalizeFragment(text) {
 	const trimmed = text.trim();
 	return trimmed ? `${trimmed}\n` : "";
 }

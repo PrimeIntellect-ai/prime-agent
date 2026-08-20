@@ -138,6 +138,11 @@ function updateChangelogsForRelease(version) {
 	for (const changelog of changelogs) {
 		const content = readFileSync(changelog, "utf-8");
 		const fragments = listFragments(dirname(changelog));
+		const empty = fragments.filter((fragment) => !fragment.content.trim());
+		if (empty.length > 0) {
+			console.error(`Empty changelog fragment(s): ${empty.map((f) => f.name).join(", ")}. Add content or delete them.`);
+			process.exit(1);
+		}
 		const result = buildReleaseSection(content, fragments, version, date);
 
 		if (!result.changed) {
@@ -147,7 +152,8 @@ function updateChangelogsForRelease(version) {
 
 		if (DRY_RUN) {
 			console.log(`\n--- ${changelog} (${fragments.length} fragments) ---`);
-			const sectionRe = new RegExp(`## \\[${version}\\][\\s\\S]*?(?=\\n## \\[|$)`);
+			const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const sectionRe = new RegExp(`## \\[${escapedVersion}\\][\\s\\S]*?(?=\\n## \\[|$)`);
 			console.log((result.content.match(sectionRe) || ["(no release section)"])[0]);
 		} else {
 			writeFileSync(changelog, result.content);

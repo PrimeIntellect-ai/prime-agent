@@ -44,9 +44,11 @@ jobs:
               }
               // Fragments must be direct children of .changes/ — release.mjs ignores nested paths.
               const fragmentRe = new RegExp(`^packages/${pkg}/\\.changes/[^/]+\\.md$`);
+              // f.additions > 0 rejects empty fragment files, which release.mjs refuses to consume.
               const hasFragment = files.some(
                 (f) =>
                   f.status === "added" &&
+                  f.additions > 0 &&
                   fragmentRe.test(f.filename) &&
                   !f.filename.endsWith("/README.md"),
               );
