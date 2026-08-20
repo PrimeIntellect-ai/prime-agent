@@ -5718,6 +5718,7 @@ export class AgentSession {
 		} catch (error) {
 			if (error instanceof CompactionSkippedError) return;
 			const commandError = error instanceof Error ? error : new Error(String(error));
+			if (input.command.name === "refine") this._emitRefineFailed(commandError);
 			try {
 				this._appendDurableSessionCommandMessage(
 					`Command failed: ${commandError.message}`,

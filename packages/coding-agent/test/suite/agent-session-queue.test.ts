@@ -2571,6 +2571,26 @@ describe("AgentSession queue characterization", () => {
 		expect(harness.sessionManager.getBranch(resultEntry!.id).map((entry) => entry.id)).toContain(inputEntry!.id);
 	});
 
+	it("emits refine_failed when a queued /refine command fails", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one")]);
+		await harness.session.prompt("one");
+		vi.spyOn(harness.session, "refine").mockRejectedValue(new Error("planner unavailable"));
+
+		const failures: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "refine_failed") failures.push(event.error);
+		});
+
+		await harness.session.prompt("/refine --local").catch(() => undefined);
+		expect(failures).toEqual(["planner unavailable"]);
+		const errorRow = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "custom_message" && entry.customType === "session_slash_command_result");
+		expect(errorRow).toMatchObject({ content: "Command failed: planner unavailable" });
+	});
+
 	it("allows a /compact extension hook to navigate without deadlocking on the commit fence", async () => {
 		let targetId: string | undefined;
 		let navigateFromContext: ((target: string) => Promise<{ cancelled: boolean }>) | undefined;
