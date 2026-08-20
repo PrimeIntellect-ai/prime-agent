@@ -7,6 +7,7 @@
 - Fixed kernel MCP shutdown budgets exceeding the host's kill deadline; graceful close now finishes inside it, and a kernel that exits without a `shutdown_reply` no longer stalls shutdown for the full deadline.
 - Fixed a shutdown race that could leave an MCP server process running after its generation was dropped from the registry.
 - Fixed the kernel MCP regression test and the Python runtime tests not running in CI.
+- Fixed first IPython calls after an upgrade failing with a raw "Operation was not possible or timed out": kernel startup now tolerates cold venv boots (30s budget; crashes still fail fast via the exit handler), and zmq socket-teardown rejections surface as actionable retriable kernel errors.
 - Fixed headless completion reporting a clean finish when a post-compaction continuation failed to start: ACP and print-mode idle waiters now see the failure, while interactive idle behavior is unchanged.
 - Added a pre-imported generic MCP API and shell/TUI commands to manage persistent Streamable HTTP and stdio servers in user settings.
 - **Breaking**: removed the documented catalog-name override — an `mcpServers` entry named after a built-in integration (e.g. `linear`) no longer repoints the built-in at a custom `url`/`bearerTokenEnvVar`; it now disables the built-in skill and is not served by the generic runtime. Rename the entry (e.g. `linear-proxy`) to keep using a custom endpoint via the generic API. This closes a credential-replay surface where name-keyed tokens could be sent to an override URL.
