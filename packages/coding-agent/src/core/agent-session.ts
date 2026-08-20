@@ -816,6 +816,15 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
+/** One-shot settlement for a scheduled post-compaction continuation; a settled failure is never re-exposed to later waiters. */
+interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
+	settled: boolean;
+}
+
+function createPostCompactionContinuationSettlement(): PostCompactionContinuationSettlement {
+	return { ...createAgentMessageDeferred(), settled: false };
+}
+
 export interface ModelCycleResult {
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
@@ -1177,7 +1186,7 @@ export class AgentSession {
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
 	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
-	private _postCompactionContinuationSettlement: AgentMessageDeferred | undefined;
+	private _postCompactionContinuationSettlement: PostCompactionContinuationSettlement | undefined;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
@@ -6655,7 +6664,7 @@ export class AgentSession {
 		}
 	}
 
-	/** Wait for normal idle and any continuation already owned by compaction. */
+	/** Waits out any owned post-compaction continuation and rejects when one cannot start; {@link waitForIdle} never rejects. */
 	async waitForHeadlessIdle(): Promise<void> {
 		while (true) {
 			await this.waitForIdle();
@@ -7333,11 +7342,14 @@ export class AgentSession {
 		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
 	}
 
-	private _settlePostCompactionContinue(): void {
-		if (this._postCompactionContinuationScheduled || this._postCompactionContinuationTimer) return;
+	private _settlePostCompactionContinue(error?: Error): void {
+		if (!error && (this._postCompactionContinuationScheduled || this._postCompactionContinuationTimer)) return;
 		const settlement = this._postCompactionContinuationSettlement;
+		if (!settlement || settlement.settled) return;
+		settlement.settled = true;
 		this._postCompactionContinuationSettlement = undefined;
-		settlement?.resolve();
+		if (error) settlement.reject(error);
+		else settlement.resolve();
 	}
 
 	private _cancelPostCompactionContinue(): void {
@@ -7444,7 +7456,9 @@ export class AgentSession {
 		if (this._postCompactionContinuationScheduled) {
 			return;
 		}
-		this._postCompactionContinuationSettlement ??= createAgentMessageDeferred();
+		if (!this._postCompactionContinuationSettlement || this._postCompactionContinuationSettlement.settled) {
+			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement();
+		}
 		this._postCompactionContinuationScheduled = true;
 		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
 		this._postCompactionContinuationTimer = setTimeout(() => {
@@ -7504,6 +7518,9 @@ export class AgentSession {
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("already processing")) {
 				this._schedulePostCompactionContinue();
+			} else if (!message.includes("continue from")) {
+				// "continue from" means the turn already completed; anything else must reject headless idle waiters.
+				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}
 	}
