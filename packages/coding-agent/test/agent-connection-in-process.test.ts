@@ -108,6 +108,7 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 		getActiveToolNames: () => ["ipython"],
 		getContextUsage: () => undefined,
 		cancelRlmChildRun: (childId: string) => childId === "child-1",
+		getRlmChildSnapshots: () => [],
 		getToolDefinition: (toolName: string) => ({
 			name: toolName,
 			label: toolName,

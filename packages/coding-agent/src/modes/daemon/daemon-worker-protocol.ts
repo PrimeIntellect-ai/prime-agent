@@ -38,6 +38,20 @@ export type DaemonWorkerFrameHeader =
 
 export type DaemonCreateCommand = Extract<DaemonCommand, { type: "create" }>;
 
+export interface DurableDaemonCreateCommand {
+	type: "create";
+	sessionPath?: string;
+	noSession?: boolean;
+}
+
+export function durableDaemonCreateCommand(command: DaemonCreateCommand): DurableDaemonCreateCommand {
+	return {
+		type: "create",
+		...(command.sessionPath !== undefined ? { sessionPath: command.sessionPath } : {}),
+		...(command.noSession !== undefined ? { noSession: command.noSession } : {}),
+	};
+}
+
 export type DaemonWorkerCommand =
 	| {
 			id?: string;
@@ -84,7 +98,7 @@ export type DaemonWorkerCommandBody = DaemonWorkerCommand extends infer TCommand
 	: never;
 
 export interface DaemonWorkerDescriptor {
-	version: 1;
+	version: 1 | 2;
 	workerId: string;
 	pid: number;
 	processStartId?: string;
@@ -98,10 +112,12 @@ export interface DaemonWorkerDescriptor {
 	ownerClientId?: string;
 	rootSessionId?: string;
 	sessionFile?: string;
+	sessionDir?: string;
+	telemetryDisabled?: true;
 	createdAt: string;
 	updatedAt: string;
 	lifecycle: DaemonWorkerLifecycle;
-	createCommand: DaemonCreateCommand;
+	createCommand: DurableDaemonCreateCommand;
 	consecutiveFailures: number;
 	/** Durable intent written before root termination so replacement supervisors never recover it. */
 	stopRequestedAt?: string;
@@ -109,6 +125,48 @@ export interface DaemonWorkerDescriptor {
 	archiveOnStop?: boolean;
 	lastFailureAt?: string;
 	lastError?: string;
+}
+
+export function durableDaemonWorkerDescriptor(descriptor: DaemonWorkerDescriptor): DaemonWorkerDescriptor {
+	const versionOneCreateCommand = descriptor.createCommand as unknown as { config?: unknown };
+	const versionOneConfig =
+		descriptor.version === 1 &&
+		typeof versionOneCreateCommand.config === "object" &&
+		versionOneCreateCommand.config !== null
+			? (versionOneCreateCommand.config as Record<string, unknown>)
+			: undefined;
+	const sessionDir =
+		descriptor.sessionDir ??
+		(typeof versionOneConfig?.sessionDir === "string" ? versionOneConfig.sessionDir : undefined);
+	const telemetryDisabled = descriptor.telemetryDisabled === true || versionOneConfig?.telemetryDisabled === true;
+	return {
+		version: 2,
+		workerId: descriptor.workerId,
+		pid: descriptor.pid,
+		...(descriptor.processStartId !== undefined ? { processStartId: descriptor.processStartId } : {}),
+		socketPath: descriptor.socketPath,
+		recoveryJournalPath: descriptor.recoveryJournalPath,
+		...(descriptor.orphanProcessJournalPath !== undefined
+			? { orphanProcessJournalPath: descriptor.orphanProcessJournalPath }
+			: {}),
+		supervisorSocketPath: descriptor.supervisorSocketPath,
+		authenticationToken: descriptor.authenticationToken,
+		rootActiveSessionId: descriptor.rootActiveSessionId,
+		...(descriptor.ownerClientId !== undefined ? { ownerClientId: descriptor.ownerClientId } : {}),
+		...(descriptor.rootSessionId !== undefined ? { rootSessionId: descriptor.rootSessionId } : {}),
+		...(descriptor.sessionFile !== undefined ? { sessionFile: descriptor.sessionFile } : {}),
+		...(sessionDir !== undefined ? { sessionDir } : {}),
+		...(telemetryDisabled ? { telemetryDisabled: true as const } : {}),
+		createdAt: descriptor.createdAt,
+		updatedAt: descriptor.updatedAt,
+		lifecycle: descriptor.lifecycle,
+		createCommand: durableDaemonCreateCommand(descriptor.createCommand),
+		consecutiveFailures: descriptor.consecutiveFailures,
+		...(descriptor.stopRequestedAt !== undefined ? { stopRequestedAt: descriptor.stopRequestedAt } : {}),
+		...(descriptor.archiveOnStop !== undefined ? { archiveOnStop: descriptor.archiveOnStop } : {}),
+		...(descriptor.lastFailureAt !== undefined ? { lastFailureAt: descriptor.lastFailureAt } : {}),
+		...(descriptor.lifecycle === "failed" ? { lastError: "Waiting for a client with fresh runtime context" } : {}),
+	};
 }
 
 export function isDaemonWorkerProcess(environment: NodeJS.ProcessEnv = process.env): boolean {

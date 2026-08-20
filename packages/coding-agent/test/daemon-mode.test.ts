@@ -9053,7 +9053,7 @@ describe("daemon mode helpers", () => {
 		},
 	);
 
-	it("cancels only pre-ownership prompt admission and cleans up its controller", async () => {
+	it("capability-gates cancellation after prompt ownership", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -9112,7 +9112,7 @@ describe("daemon mode helpers", () => {
 		).resolves.toMatchObject({ success: true, data: { status: "cancelled" } });
 		await vi.waitFor(() => expect(internals.promptAdmissions.size).toBe(0));
 
-		// Once ownership commits the same cancellation is a no-op.
+		// Old clients retain the pre-ownership-only behavior.
 		internals.parseCommandAndRegisterPromptAdmission(
 			client,
 			JSON.stringify({
@@ -9139,6 +9139,19 @@ describe("daemon mode helpers", () => {
 				admissionId: "admission-2",
 			}),
 		).resolves.toMatchObject({ success: true, data: { status: "owned" } });
+		expect(promptOptions?.signal?.aborted).toBe(false);
+
+		// New clients request the capability-gated session-owned cancellation.
+		await expect(
+			internals.handleCommand(client, {
+				id: "cancel-3",
+				type: "cancel_prompt_admission",
+				activeSessionId: state.activeSessionId,
+				admissionId: "admission-2",
+				cancelOwned: true,
+			}),
+		).resolves.toMatchObject({ success: true, data: { status: "owned" } });
+		expect(promptOptions?.signal?.aborted).toBe(true);
 		rejectPrompt?.(new Error("test cleanup"));
 	});
 
