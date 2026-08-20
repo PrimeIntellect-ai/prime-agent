@@ -4343,12 +4343,32 @@ export class AgentSession {
 		const outcome = this._agentMessageOutcome(agentMessageId);
 		outcome.completion = createAgentMessageDeferred();
 		const completion = outcome.completion.promise;
+		const signal = options?.signal;
+		let cancelQueuedPrompt: (() => void) | undefined;
 		try {
 			await this.promptUntilAccepted(text, { ...options, agentMessageId });
+			if (signal) {
+				cancelQueuedPrompt = () => {
+					const error = new Error("Prompt was cancelled before it started.");
+					const cancelled = this._cancelSessionActions(
+						(action) => action.agentMessageId === agentMessageId && action.payload.kind === "turn",
+						error,
+					);
+					if (cancelled.length > 0) {
+						this._settleAgentMessage(agentMessageId, "completion", error);
+					}
+				};
+				signal.addEventListener("abort", cancelQueuedPrompt, { once: true });
+				if (signal.aborted) cancelQueuedPrompt();
+			}
 			await completion;
 		} catch (error) {
 			this._settleAgentMessage(agentMessageId, "completion", this._asError(error));
 			throw error;
+		} finally {
+			if (signal && cancelQueuedPrompt) {
+				signal.removeEventListener("abort", cancelQueuedPrompt);
+			}
 		}
 	}
 

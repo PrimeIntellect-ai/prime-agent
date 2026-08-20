@@ -4037,6 +4037,7 @@ export class AgentDaemon {
 					});
 				}
 				if (admission.status === "owned") {
+					if (command.cancelOwned) admission.controller?.abort();
 					return success(command.id, command.type, {
 						status: "owned" as const,
 					});

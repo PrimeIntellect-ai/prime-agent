@@ -60,8 +60,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-export const DAEMON_SCHEMA_REVISION = 16;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-16-1bcb9e7f1a49";
+// Revision 17 lets cancellation target a prompt the session owns but has not started.
+export const DAEMON_SCHEMA_REVISION = 17;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-78200ccd9972";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -100,6 +101,7 @@ export type DaemonServerCapability =
 	| "transient_bash"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
+	| "owned_prompt_cancellation"
 	| "queue_message_mutation";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
@@ -138,6 +140,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"transient_bash",
 	"session_input_admission",
 	"prompt_admission_cancellation",
+	"owned_prompt_cancellation",
 	"queue_message_mutation",
 ];
 
@@ -414,6 +417,8 @@ export type DaemonCommand =
 			type: "cancel_prompt_admission";
 			activeSessionId: string;
 			admissionId: string;
+			/** Cancel session-owned work too when it has not started delivery. */
+			cancelOwned?: boolean;
 	  }
 	| {
 			id?: string;
@@ -639,6 +644,11 @@ const PROMPT_ADMISSION_CANCELLATION_COMMAND = {
 	minSchemaRevision: 8,
 	capability: "prompt_admission_cancellation",
 } as const;
+const OWNED_PROMPT_CANCELLATION_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "owned_prompt_cancellation",
+} as const;
 const CLIENT_OWNED_DAEMON_COMMAND = {
 	minProtocol: 7,
 	capability: "client_owned_sessions",
@@ -761,6 +771,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	}
 	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 		return [PROMPT_ADMISSION_CANCELLATION_COMMAND, compatibility];
+	}
+	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
+		return [OWNED_PROMPT_CANCELLATION_COMMAND, compatibility];
 	}
 	return [compatibility];
 }

@@ -834,6 +834,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					type: "cancel_prompt_admission",
 					activeSessionId: this.activeSessionId,
 					admissionId,
+					...(this.client.supportsServerCapability("owned_prompt_cancellation") ? { cancelOwned: true } : {}),
 				});
 				status = result.status;
 			} catch {

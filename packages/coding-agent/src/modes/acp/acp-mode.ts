@@ -336,7 +336,16 @@ export async function runAcpModeWithConnection(
 				// rebuild the transcript mid-turn, so record the pre-turn messages
 				// themselves rather than how many there were.
 				const priorMessages = turnBoundary(await connection.getMessages());
-				await connection.promptAndWait(text, images.length > 0 ? { images } : undefined);
+				// A follow-up prompt can arrive while injected work (subagent replies,
+				// heartbeats) keeps the resident session busy. ACP has no native queue
+				// field, so queue the host turn behind that work with follow-up
+				// semantics instead of rejecting it as "Agent is already processing".
+				await connection.promptAndWait(text, {
+					...(images.length > 0 ? { images } : {}),
+					streamingBehavior: "followUp",
+					queueIfBusy: true,
+					signal: abort.signal,
+				});
 				// Autonomous gates continue inside this same prompt turn: the turn is
 				// only over once the gate loop settles.
 				const status = await connection.waitForHeadlessCompletion();

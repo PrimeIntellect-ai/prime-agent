@@ -799,8 +799,33 @@ describe("DaemonAgentConnection", () => {
 		await vi.waitFor(() =>
 			expect(fakeClient.requests.map((request) => request.type)).toContain("cancel_prompt_admission"),
 		);
+		expect(fakeClient.requests.find((request) => request.type === "cancel_prompt_admission")).not.toHaveProperty(
+			"cancelOwned",
+		);
 		releasePrompt();
 
+		await expect(prompt).resolves.toBeUndefined();
+	});
+
+	it("requests owned prompt cancellation when the daemon advertises it", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("owned_prompt_cancellation");
+		let releasePrompt = () => {};
+		fakeClient.promptGate = new Promise<void>((resolve) => {
+			releasePrompt = resolve;
+		});
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		const abort = new AbortController();
+
+		const prompt = connection.prompt("startup", { signal: abort.signal });
+		abort.abort();
+		await vi.waitFor(() =>
+			expect(fakeClient.requests.map((request) => request.type)).toContain("cancel_prompt_admission"),
+		);
+		expect(fakeClient.requests.find((request) => request.type === "cancel_prompt_admission")).toMatchObject({
+			cancelOwned: true,
+		});
+		releasePrompt();
 		await expect(prompt).resolves.toBeUndefined();
 	});
 

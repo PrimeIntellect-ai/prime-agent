@@ -130,6 +130,16 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("prompt_admission_cancellation");
 	});
 
+	it("capability-gates cancellation after prompt ownership", () => {
+		const legacy = { type: "cancel_prompt_admission", activeSessionId: "active-1", admissionId: "a-1" } as const;
+		expect(getDaemonCommandCompatibilities(legacy)).toEqual([DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission]);
+		expect(getDaemonCommandCompatibilities({ ...legacy, cancelOwned: true })).toEqual([
+			{ minProtocol: 7, minSchemaRevision: 17, capability: "owned_prompt_cancellation" },
+			DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission,
+		]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("owned_prompt_cancellation");
+	});
+
 	it("gates honest worker-state reporting at its introducing schema revision", () => {
 		// Revision 16 adds the "stopping" workerState and stops reporting
 		// disconnected workers as "ready". The field is optional and old clients
