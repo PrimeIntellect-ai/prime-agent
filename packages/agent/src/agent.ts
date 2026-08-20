@@ -170,6 +170,7 @@ type ActiveRun = {
 	promise: Promise<void>;
 	resolve: () => void;
 	abortController: AbortController;
+	stale: boolean;
 };
 
 export class Agent {
@@ -316,8 +317,12 @@ export class Agent {
 	}
 
 	reset(): void {
+		const activeRun = this.activeRun;
+		if (activeRun) {
+			activeRun.stale = true;
+			activeRun.abortController.abort();
+		}
 		this._state.messages = [];
-		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
 		this._state.errorMessage = undefined;
@@ -488,7 +493,7 @@ export class Agent {
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});
-		this.activeRun = { promise, resolve: resolvePromise, abortController };
+		this.activeRun = { promise, resolve: resolvePromise, abortController, stale: false };
 
 		this._state.isStreaming = true;
 		this._state.streamingMessage = undefined;
@@ -504,6 +509,9 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
+		if (this.activeRun?.stale) {
+			return;
+		}
 		const failureMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
@@ -540,6 +548,9 @@ export class Agent {
 	 * and `finishRun()` clears runtime-owned state.
 	 */
 	private async processEvents(event: AgentEvent): Promise<void> {
+		if (this.activeRun?.stale) {
+			return;
+		}
 		switch (event.type) {
 			case "message_start":
 				this._state.streamingMessage = event.message;

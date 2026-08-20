@@ -7,6 +7,7 @@ import {
 	type AgentLoopConfig,
 	type AgentMessage,
 	type AgentTool,
+	type AgentToolResult,
 	agentLoop,
 } from "../src/index.js";
 
@@ -402,6 +403,68 @@ describe("Agent", () => {
 		}
 		expect(agent.state.pendingToolCalls.size).toBe(0);
 		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("reset() during an active run drops the cancelled run's events and does not repopulate state", async () => {
+		const schema = Type.Object({});
+		let resolveTool: ((result: AgentToolResult<Record<string, never>>) => void) | undefined;
+		const toolDone = new Promise<AgentToolResult<Record<string, never>>>((resolve) => {
+			resolveTool = resolve;
+		});
+		let signalToolStarted: (() => void) | undefined;
+		const toolStarted = new Promise<void>((resolve) => {
+			signalToolStarted = resolve;
+		});
+		const deferredTool: AgentTool<typeof schema, Record<string, never>> = {
+			name: "hang",
+			label: "Hang",
+			description: "Deferred tool",
+			parameters: schema,
+			execute: async () => {
+				signalToolStarted?.();
+				return toolDone;
+			},
+		};
+		const agent = new Agent({
+			initialState: { tools: [deferredTool] },
+			toolExecution: "sequential",
+			shouldStopAfterTurn: () => true,
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "toolUse", message: createToolUseMessage("hang") });
+				});
+				return stream;
+			},
+		});
+
+		const promptPromise = agent.prompt("run");
+		await toolStarted;
+
+		expect(agent.state.isStreaming).toBe(true);
+		expect(agent.state.pendingToolCalls.size).toBe(1);
+
+		agent.reset();
+
+		// reset() clears the visible state, but the cancelled run is still winding down.
+		expect(agent.state.messages).toEqual([]);
+		expect(agent.state.pendingToolCalls.size).toBe(0);
+		expect(agent.state.isStreaming).toBe(true);
+
+		// Let the cancelled run settle and emit its teardown events.
+		resolveTool?.({ content: [{ type: "text", text: "done" }], details: {} });
+		await promptPromise;
+		await agent.waitForIdle();
+
+		// The stale run must not repopulate the transcript reset() cleared.
+		expect(agent.state.messages).toEqual([]);
+		expect(agent.state.pendingToolCalls.size).toBe(0);
+		expect(agent.state.streamingMessage).toBeUndefined();
+		expect(agent.state.errorMessage).toBeUndefined();
+
+		// The run finished and the single-run lifecycle is cleared.
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.signal).toBeUndefined();
 	});
 
 	it("should preserve the original failure when the recovery agent_end listener throws", async () => {
