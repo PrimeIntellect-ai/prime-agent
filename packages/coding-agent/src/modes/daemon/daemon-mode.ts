@@ -1489,7 +1489,7 @@ export class AgentDaemon {
 	}
 
 	private refreshReplacedSessionState(state: ActiveSessionState): void {
-		this.acpMcpOwners.delete(state.activeSessionId);
+		this.acpMcpOwners?.delete(state.activeSessionId);
 		for (const client of state.clients) {
 			this.abortSideQuestionsFor(client, state.activeSessionId);
 		}
