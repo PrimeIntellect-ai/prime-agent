@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-19
+
 ## [0.7.3] - 2026-08-17
 
 - Changed explicit `off` reasoning selections to reach providers instead of being omitted, preserving provider-specific disable behavior.
