@@ -65,7 +65,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 19 adds daemon-held session input pauses.
 // Revision 20 lets cancellation target a prompt the session owns but has not started.
 export const DAEMON_SCHEMA_REVISION = 20;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-20-4c1f0e2a8d51";
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-20-ed994cc39507";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;

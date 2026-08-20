@@ -238,7 +238,7 @@ describe("daemon protocol helpers", () => {
 		const legacy = { type: "cancel_prompt_admission", activeSessionId: "active-1", admissionId: "a-1" } as const;
 		expect(getDaemonCommandCompatibilities(legacy)).toEqual([DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission]);
 		expect(getDaemonCommandCompatibilities({ ...legacy, cancelOwned: true })).toEqual([
-			{ minProtocol: 7, minSchemaRevision: 17, capability: "owned_prompt_cancellation" },
+			{ minProtocol: 7, minSchemaRevision: 20, capability: "owned_prompt_cancellation" },
 			DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission,
 		]);
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("owned_prompt_cancellation");

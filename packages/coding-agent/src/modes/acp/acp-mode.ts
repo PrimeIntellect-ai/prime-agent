@@ -799,7 +799,10 @@ export async function runAcpModeWithConnection(
 			await entry.pendingTerminal?.task;
 			if (session !== entry) throw new Error(`Unknown ACP session: ${params.sessionId}`);
 			if (sessionCloseInFlight) throw new Error(`ACP session is closing: ${params.sessionId}`);
-			if (entry.cancelling) throw new Error(`ACP session is cancelling: ${params.sessionId}`);
+			// This prompt was admitted before the cancellation started; it is dropped
+			// by the cancel rather than malformed, so report the protocol stop reason
+			// instead of a request error.
+			if (entry.cancelling) return { stopReason: "cancelled" satisfies AcpStopReason };
 			if (entry.stopFailure) throw new Error(`ACP session stop failed: ${entry.stopFailure}`);
 			if (entry.pendingTerminal?.failure) {
 				throw new Error(`ACP lifecycle reconciliation failed: ${entry.pendingTerminal.failure}`);
