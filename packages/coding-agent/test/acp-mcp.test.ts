@@ -19,6 +19,7 @@ describe("ACP MCP servers", () => {
 	it("advertises capability, installs session-scoped config, and clears it on close", async () => {
 		const harness = await createHarness();
 		const replace = vi.spyOn(harness.session, "replaceAcpMcpServers").mockImplementation(() => undefined);
+		const release = vi.spyOn(harness.session, "releaseAcpMcpServers").mockResolvedValue(undefined);
 		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
 		const agentCwd = (await connection.getState()).cwd;
 		const toAgent = new TransformStream<Uint8Array, Uint8Array>();
@@ -75,7 +76,7 @@ describe("ACP MCP servers", () => {
 				ownerId,
 			);
 			await handle.agent.request("session/close", { sessionId: created.sessionId });
-			expect(replace).toHaveBeenLastCalledWith([], ownerId);
+			expect(release).toHaveBeenCalledWith(ownerId, ["TaskTools", "LocalTools"]);
 		} finally {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);
@@ -90,6 +91,7 @@ describe("ACP MCP servers", () => {
 		const replace = vi.spyOn(connection, "replaceAcpMcpServers").mockImplementation(async (servers) => {
 			if (servers.length > 0) throw new Error("replacement acknowledgement lost");
 		});
+		const release = vi.spyOn(connection, "releaseAcpMcpServers").mockResolvedValue(undefined);
 		const toAgent = new TransformStream<Uint8Array, Uint8Array>();
 		const toClient = new TransformStream<Uint8Array, Uint8Array>();
 		const modeDone = runAcpModeWithConnection(connection, {
@@ -120,7 +122,7 @@ describe("ACP MCP servers", () => {
 			expect(replace.mock.calls[0]?.[0]).toHaveLength(1);
 			const ownerId = replace.mock.calls[0]?.[1];
 			expect(ownerId).toEqual(expect.any(String));
-			expect(replace.mock.calls[1]).toEqual([[], ownerId]);
+			expect(release).toHaveBeenCalledWith(ownerId, ["TaskTools"]);
 		} finally {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);

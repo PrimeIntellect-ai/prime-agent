@@ -1314,12 +1314,46 @@ export class AgentSession {
 		this._rebuildRuntimeForAcpMcpServers();
 	}
 
-	releaseAcpMcpServers(ownerId: string): void {
-		if (!this._mcpManager?.replaceAcpServers([], ownerId)) return;
-		// Host MCP handlers read this manager dynamically, so credentials disappear
-		// immediately without rebuilding a kernel that may still be running.
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	async releaseAcpMcpServers(ownerId: string, serverNames: readonly string[]): Promise<void> {
+		if (!this._mcpManager?.canReleaseAcpServers(ownerId)) return;
+		if (this._mcpManager.replaceAcpServers([], ownerId)) {
+			// Host MCP handlers read this manager dynamically, so credentials disappear
+			// before the kernel-side transport is closed.
+			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+			this.agent.state.systemPrompt = this._baseSystemPrompt;
+		}
+		const names = [...new Set(serverNames)];
+		if (names.length === 0) return;
+
+		const inputPause = this.acquireSessionInputPause();
+		try {
+			// Do not rebuild or kill the notebook. Wait for the current turn, then ask
+			// the kernel-owned MCP registry to close only these cached transports.
+			await this.agent.waitForIdle();
+			await this._agentEventQueue;
+			const manager = this._ipythonKernelProvisioner?.manager;
+			if (!manager?.isRunning) return;
+			const code = [
+				"import importlib as _prime_importlib",
+				'_prime_mcp = _prime_importlib.import_module("rlm.mcp")',
+				`_prime_mcp_names = ${JSON.stringify(names)}`,
+				"_prime_mcp_errors = []",
+				"for _prime_mcp_name in _prime_mcp_names:",
+				"    try:",
+				"        await _prime_mcp.reload(_prime_mcp_name)",
+				"    except BaseException as _prime_mcp_error:",
+				"        _prime_mcp_errors.append(_prime_mcp_error)",
+				"if _prime_mcp_errors:",
+				"    raise _prime_mcp_errors[0]",
+				"del _prime_mcp, _prime_importlib, _prime_mcp_names, _prime_mcp_errors, _prime_mcp_name",
+			].join("\n");
+			const result = await manager.execute(code);
+			if (result.status !== "ok") {
+				throw new Error(`Failed to close ACP MCP kernel transports: ${result.stderr || "kernel error"}`);
+			}
+		} finally {
+			inputPause.release();
+		}
 	}
 
 	private _rebuildRuntimeForAcpMcpServers(): void {

@@ -21,6 +21,8 @@ from rlm.mcp_base import _parse_result
 
 
 _STDIO_FIXTURE = r"""import asyncio, json, os, sys
+if pid_file := os.environ.get("FIXTURE_PID_FILE"):
+    open(pid_file, "w").write(str(os.getpid()))
 async def main():
     while line := await asyncio.get_running_loop().run_in_executor(None, sys.stdin.readline):
         request = json.loads(line)
@@ -144,6 +146,22 @@ class McpRegistryTest(unittest.TestCase):
         first, second = run(scenario())
         self.assertTrue(first.closed)
         self.assertIs(second, opened[-1])
+
+    def test_missing_config_closes_cached_generation(self):
+        generation = self.generation({"type": "http", "url": "a"}, [])
+        mcp._registry._generations["svc"] = generation
+
+        async def missing(_server):
+            raise KeyError("removed")
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", missing):
+                with self.assertRaises(KeyError):
+                    await mcp._registry.get("svc")
+
+        run(scenario())
+        self.assertTrue(generation.closed)
+        self.assertNotIn("svc", mcp._registry._generations)
 
     def test_reload_waits_for_in_flight_first_open(self):
         opening = asyncio.Event()
@@ -486,6 +504,32 @@ class McpRegistryTest(unittest.TestCase):
         self.assertEqual(Path(output["cwd"]).resolve(), fixture.parent.resolve())
         self.assertEqual(output["env"], "task-secret")
         self.assertIsNone(output["ambient"])
+
+    def test_reload_reaps_real_acp_stdio_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "stdio_server.py"
+            pid_file = Path(tmp) / "stdio.pid"
+            fixture.write_text(_STDIO_FIXTURE)
+            config = {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(fixture)],
+                "cwd": str(fixture.parent),
+                "env": {"FIXTURE_PID_FILE": str(pid_file)},
+                "credentialSource": "acp",
+            }
+
+            async def scenario():
+                with mock.patch.object(mcp, "_config", new=mock.AsyncMock(return_value=config)):
+                    await mcp._registry.tools("task-tools")
+                    pid = int(pid_file.read_text())
+                    os.kill(pid, 0)
+                    await mcp._registry.reload("task-tools")
+                    return pid
+
+            pid = run(scenario())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
     def test_real_stdio_startup_diagnostic_is_safe_bounded_and_reaped(self):
         secret = "stdio-secret-SENTINEL"

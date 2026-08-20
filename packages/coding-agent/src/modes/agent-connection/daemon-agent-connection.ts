@@ -516,6 +516,10 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 	}
 
+	async releaseAcpMcpServers(ownerId: string, _serverNames: readonly string[]): Promise<void> {
+		await this.replaceAcpMcpServers([], ownerId);
+	}
+
 	async getAvailableModels(): Promise<AgentConnectionModel[]> {
 		const data = await this.requestData<{ models: AgentConnectionModel[] }>({
 			type: "get_available_models",

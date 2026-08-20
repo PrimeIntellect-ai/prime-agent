@@ -56,6 +56,10 @@ export class McpManager {
 		this.registerProviders();
 	}
 
+	canReleaseAcpServers(ownerId: string): boolean {
+		return this.acpOwnerId === undefined || this.acpOwnerId === ownerId;
+	}
+
 	replaceAcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): boolean {
 		if (!ownerId) throw new Error("ACP MCP owner id is required");
 		if (servers.length === 0 && this.acpOwnerId !== ownerId) return false;

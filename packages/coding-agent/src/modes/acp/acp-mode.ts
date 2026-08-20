@@ -468,29 +468,32 @@ export async function runAcpModeWithConnection(
 		takeOverStdout();
 	}
 	const supportsMcpServers =
-		connection.supportsAcpMcpServers?.() === true && connection.replaceAcpMcpServers !== undefined;
+		connection.supportsAcpMcpServers?.() === true &&
+		connection.replaceAcpMcpServers !== undefined &&
+		connection.releaseAcpMcpServers !== undefined;
 	const acpMcpOwnerId = randomUUID();
-	let hasAcpMcpServers = false;
-	const clearAcpMcpServers = async (): Promise<void> => {
-		if (!supportsMcpServers || !connection.replaceAcpMcpServers) return;
-		await connection.replaceAcpMcpServers([], acpMcpOwnerId);
-		hasAcpMcpServers = false;
+	let acpMcpServerNames: string[] = [];
+	const clearAcpMcpServers = async (serverNames = acpMcpServerNames): Promise<void> => {
+		if (!supportsMcpServers || !connection.releaseAcpMcpServers) return;
+		await connection.releaseAcpMcpServers(acpMcpOwnerId, serverNames);
+		acpMcpServerNames = [];
 	};
 	const replaceAcpMcpServers = async (servers: readonly acp.McpServer[], cwd: string): Promise<void> => {
-		if (servers.length === 0 && !hasAcpMcpServers) return;
+		if (servers.length === 0 && acpMcpServerNames.length === 0) return;
 		if (!supportsMcpServers || !connection.replaceAcpMcpServers) {
 			throw acp.RequestError.invalidParams({ reason: "MCP servers are unavailable in this ACP host" });
 		}
 		const resolved = resolveAcpMcpServers(servers, cwd);
+		const serverNames = resolved.map((server) => server.name);
 		try {
 			await connection.replaceAcpMcpServers(resolved, acpMcpOwnerId);
 		} catch (error) {
 			// The daemon may have applied the configuration before its acknowledgement
 			// was lost. Always attempt owner-scoped cleanup before rejecting admission.
-			await clearAcpMcpServers().catch(() => undefined);
+			await clearAcpMcpServers(serverNames).catch(() => undefined);
 			throw error;
 		}
-		hasAcpMcpServers = servers.length > 0;
+		acpMcpServerNames = serverNames;
 	};
 
 	// One ACP connection drives one AgentConnection, whose newSession() replaces

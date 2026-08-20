@@ -190,7 +190,7 @@ describe("daemon mode helpers", () => {
 		const owner = makeClient("owner", "active");
 		const other = makeClient("other", "active");
 		const replaceAcpMcpServers = vi.fn();
-		const releaseAcpMcpServers = vi.fn();
+		const releaseAcpMcpServers = vi.fn(async () => {});
 		const state = makeState("active");
 		state.clientEnv = {};
 		state.clients.add(owner);
@@ -198,7 +198,11 @@ describe("daemon mode helpers", () => {
 		state.extensionUiRequests = new Map();
 		state.runtime = {
 			...state.runtime,
-			session: { replaceAcpMcpServers, releaseAcpMcpServers },
+			session: {
+				replaceAcpMcpServers,
+				releaseAcpMcpServers,
+				acquireSessionInputPause: () => ({ release: vi.fn() }),
+			},
 		} as never;
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
@@ -220,7 +224,7 @@ describe("daemon mode helpers", () => {
 				servers: [{ name: "failed", type: "http", url: "https://failed.example/mcp", headers: {} }],
 			}),
 		).rejects.toThrow("replacement failed");
-		expect(releaseAcpMcpServers).toHaveBeenLastCalledWith("owner-token");
+		expect(releaseAcpMcpServers).toHaveBeenLastCalledWith("owner-token", ["failed"]);
 
 		await internals.handleCommand(owner, {
 			type: "replace_acp_mcp_servers",
@@ -238,7 +242,7 @@ describe("daemon mode helpers", () => {
 		).rejects.toThrow("owned by another daemon client");
 
 		internals.detachClientFromSession(owner, state);
-		expect(releaseAcpMcpServers).toHaveBeenCalledWith("owner-token");
+		expect(releaseAcpMcpServers).toHaveBeenCalledWith("owner-token", ["task"]);
 
 		await internals.handleCommand(other, {
 			type: "replace_acp_mcp_servers",
@@ -250,6 +254,14 @@ describe("daemon mode helpers", () => {
 			[{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
 			"other-token",
 		);
+
+		await internals.handleCommand(other, {
+			type: "replace_acp_mcp_servers",
+			activeSessionId: state.activeSessionId,
+			ownerId: "other-token",
+			servers: [],
+		});
+		expect(releaseAcpMcpServers).toHaveBeenLastCalledWith("other-token", ["other"]);
 	});
 
 	it("cancels pending extension UI requests directly", () => {

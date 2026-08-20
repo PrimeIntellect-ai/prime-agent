@@ -2594,7 +2594,7 @@ describe("DaemonAgentConnection", () => {
 
 		fakeClient.serverCapabilities.add("acp_mcp_servers");
 		expect(connection.supportsAcpMcpServers()).toBe(true);
-		await connection.replaceAcpMcpServers([], "owner-a");
+		await connection.releaseAcpMcpServers("owner-a", ["task"]);
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "replace_acp_mcp_servers",
 			ownerId: "owner-a",

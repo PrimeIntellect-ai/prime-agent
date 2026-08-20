@@ -186,8 +186,15 @@ describe("createAgentSessionFromServices", () => {
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `task`, `zebra`.");
 			expect(session.systemPrompt).not.toContain("task-secret");
 			rebuildRuntime.mockClear();
-			await session.releaseAcpMcpServers("owner-a");
+			const originalProvisioner = Reflect.get(session, "_ipythonKernelProvisioner");
+			const execute = vi.fn(async (_code: string) => ({ status: "ok" }));
+			Reflect.set(session, "_ipythonKernelProvisioner", { manager: { isRunning: true, execute } });
+			await session.releaseAcpMcpServers("owner-a", ["task"]);
+			Reflect.set(session, "_ipythonKernelProvisioner", originalProvisioner);
 			expect(rebuildRuntime).not.toHaveBeenCalled();
+			expect(execute).toHaveBeenCalledOnce();
+			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");
+			expect(execute.mock.calls[0]?.[0]).toContain('["task"]');
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 
 			settingsManager.setGlobalMcpServer("added", { type: "stdio", command: "new-secret" });
