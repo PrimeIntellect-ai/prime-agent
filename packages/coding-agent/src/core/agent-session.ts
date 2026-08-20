@@ -816,11 +816,7 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
-/**
- * One-shot settlement for a scheduled post-compaction continuation. `settled`
- * makes settle idempotent, and a rejection is never re-exposed: the field is
- * cleared in the same step, so later waiters observe only future work.
- */
+/** One-shot settlement for a scheduled post-compaction continuation; a settled failure is never re-exposed to later waiters. */
 interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
 	settled: boolean;
 }
@@ -6667,13 +6663,7 @@ export class AgentSession {
 		}
 	}
 
-	/** Wait for normal idle and any continuation already owned by compaction. */
-	/**
-	 * Idle for headless callers: also waits out a scheduled post-compaction
-	 * continuation, and rejects when that continuation cannot start — a silent
-	 * resolve would report a turn as finished that never ran. Interactive
-	 * callers use {@link waitForIdle}, which ignores continuations entirely.
-	 */
+	/** Waits out any owned post-compaction continuation and rejects when one cannot start; {@link waitForIdle} never rejects. */
 	async waitForHeadlessIdle(): Promise<void> {
 		while (true) {
 			await this.waitForIdle();
@@ -7352,8 +7342,6 @@ export class AgentSession {
 	}
 
 	private _settlePostCompactionContinue(error?: Error): void {
-		// A failure settles immediately; a resolve defers to any still-scheduled
-		// or timer-pending continuation attempt, which owns the settlement next.
 		if (!error && (this._postCompactionContinuationScheduled || this._postCompactionContinuationTimer)) return;
 		const settlement = this._postCompactionContinuationSettlement;
 		if (!settlement || settlement.settled) return;
@@ -7530,10 +7518,7 @@ export class AgentSession {
 			if (message.includes("already processing")) {
 				this._schedulePostCompactionContinue();
 			} else if (!message.includes("continue from")) {
-				// The continuation cannot start: a headless caller waiting for idle must
-				// see the failure, not a clean finish that never happened. "continue
-				// from" errors are the benign race where the turn already completed and
-				// there is nothing left to continue; those settle as a clean finish.
+				// "continue from" means the turn already completed; anything else must reject headless idle waiters.
 				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}
