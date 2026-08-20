@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed ACP rejecting an immediate follow-up prompt when injected work restarted the session; follow-ups now queue behind in-flight work, and cancellation drops queued follow-ups before they start.
+- Fixed ACP returning a silent `end_turn` before a requested compaction resumed the agent.
 
 ## [0.7.4] - 2026-08-19
 

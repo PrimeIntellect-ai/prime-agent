@@ -947,14 +947,73 @@ describe("AgentSession compaction characterization", () => {
 		];
 		const continueSpy = vi
 			.spyOn(harness.session.agent, "continue")
-			.mockRejectedValueOnce(new Error("already processing"));
+			.mockRejectedValueOnce(new Error("already processing"))
+			.mockResolvedValueOnce();
 
 		sessionInternals._schedulePostCompactionContinue();
+		let idleSettled = false;
+		const idle = harness.session.waitForIdle().finally(() => {
+			idleSettled = true;
+		});
 		await vi.advanceTimersByTimeAsync(100);
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
 		expect(sessionInternals._postCompactionContinuationScheduled).toBe(true);
+		expect(idleSettled).toBe(false);
+
+		await vi.advanceTimersByTimeAsync(100);
+		await idle;
+		expect(continueSpy).toHaveBeenCalledTimes(2);
+		expect(idleSettled).toBe(true);
+	});
+
+	it("releases post-compaction idle waiters when continuation is cancelled", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+			_cancelPostCompactionContinue(): void;
+		};
+
+		sessionInternals._schedulePostCompactionContinue();
+		const idle = harness.session.waitForIdle();
+		sessionInternals._cancelPostCompactionContinue();
+
+		await expect(idle).resolves.toBeUndefined();
+	});
+
+	it("rejects idle waiters when post-compaction continuation cannot start", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
+
+		sessionInternals._schedulePostCompactionContinue();
+		const idle = harness.session.waitForIdle();
+		const rejectedIdle = expect(idle).rejects.toThrow("continuation failed");
+		await vi.advanceTimersByTimeAsync(100);
+
+		await rejectedIdle;
+	});
+
+	it("does not expose failed post-compaction continuations to later idle waiters", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
+
+		sessionInternals._schedulePostCompactionContinue();
+		await vi.advanceTimersByTimeAsync(100);
+
+		await expect(harness.session.waitForIdle()).resolves.toBeUndefined();
 	});
 
 	it("clears queued autonomous threshold continuations when autonomous mode is disabled", async () => {
@@ -1029,6 +1088,8 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.getFollowUpMessages()).toHaveLength(1);
 
 		await harness.session.prompt("/autonomous off");
+		// waitForIdle now owns the timer-scheduled post-compaction continuation.
+		await vi.advanceTimersByTimeAsync(100);
 		await harness.session.waitForIdle();
 		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
 		expect(harness.session.getFollowUpMessages()).toEqual([]);
