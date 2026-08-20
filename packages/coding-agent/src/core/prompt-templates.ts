@@ -26,6 +26,8 @@ export function parseCommandArgs(argsString: string): string[] {
 	const args: string[] = [];
 	let current = "";
 	let inQuote: string | null = null;
+	// An explicitly quoted token is an argument even when empty ("" or '').
+	let quoted = false;
 
 	for (let i = 0; i < argsString.length; i++) {
 		const char = argsString[i];
@@ -38,17 +40,19 @@ export function parseCommandArgs(argsString: string): string[] {
 			}
 		} else if (char === '"' || char === "'") {
 			inQuote = char;
+			quoted = true;
 		} else if (/[\t\p{Zs}]/u.test(char)) {
-			if (current) {
+			if (current || quoted) {
 				args.push(current);
 				current = "";
+				quoted = false;
 			}
 		} else {
 			current += char;
 		}
 	}
 
-	if (current) {
+	if (current || quoted) {
 		args.push(current);
 	}
 

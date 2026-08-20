@@ -1032,6 +1032,32 @@ describe("AuthStorage", () => {
 			expect(raw).toBe("{invalid-json");
 		});
 
+		test("removeVerified deletes from disk and memory", () => {
+			writeAuthJson({
+				"mcp:remote": { type: "api_key", key: "token" },
+				openai: { type: "api_key", key: "openai-key" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			authStorage.removeVerified("mcp:remote");
+
+			const updated = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, unknown>;
+			expect(updated["mcp:remote"]).toBeUndefined();
+			expect(authStorage.get("mcp:remote")).toBeUndefined();
+			expect((updated.openai as { key: string }).key).toBe("openai-key");
+		});
+
+		test("removeVerified throws while the credential may still exist on disk", () => {
+			writeAuthJson({
+				"mcp:remote": { type: "api_key", key: "token" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			writeFileSync(authJsonPath, "{invalid-json", "utf-8");
+
+			expect(() => authStorage.removeVerified("mcp:remote")).toThrow();
+		});
+
 		test("reload records parse errors and drainErrors clears buffer", () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "anthropic-key" },
