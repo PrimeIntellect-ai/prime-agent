@@ -693,7 +693,6 @@ export class AuthStorage {
 	 * and idempotent — in-memory state is only updated after the write succeeds.
 	 */
 	removeVerified(provider: string): void {
-		this.clearStaleAuthSource(provider, "stored");
 		this.storage.withLock((current) => {
 			const currentData = this.parseStorageData(current);
 			if (!(provider in currentData)) return { result: undefined };
@@ -702,6 +701,8 @@ export class AuthStorage {
 			return { result: undefined, next: JSON.stringify(merged, null, 2) };
 		});
 		delete this.data[provider];
+		// Post-success only: a failed removal must not make a stale-marked credential selectable again.
+		this.clearStaleAuthSource(provider, "stored");
 	}
 
 	/**

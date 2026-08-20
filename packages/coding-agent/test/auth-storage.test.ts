@@ -1055,8 +1055,6 @@ describe("AuthStorage", () => {
 			authStorage = AuthStorage.create(authJsonPath);
 			writeFileSync(authJsonPath, "{invalid-json", "utf-8");
 
-			// Corrupt disk state: the removal cannot be verified, so it must throw
-			// rather than report success while the token may survive.
 			expect(() => authStorage.removeVerified("mcp:remote")).toThrow();
 		});
 

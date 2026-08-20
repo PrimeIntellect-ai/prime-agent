@@ -222,8 +222,7 @@ class _Generation:
         if "headers" in inspect.signature(transport).parameters:
             streams = await self.stack.enter_async_context(transport(url, headers=headers))
         else:
-            # This SDK shape requires its companion httpx2 client (the transport
-            # calls client.sse() for server-initiated streams and reconnects).
+            # This SDK shape requires its companion httpx2 client (the transport calls client.sse()).
             import httpx2
 
             # SDK-factory timeouts (30s ops / 300s SSE reads); reads must also outlast the session-enforced call timeout.

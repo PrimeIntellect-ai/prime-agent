@@ -190,12 +190,9 @@ class McpIntegration:
     # -- connection ---------------------------------------------------------
 
     async def _resolve_config(self) -> tuple[str | None, dict[str, str]]:
-        """The integration's own (url, extra_headers).
-
-        Never consults user ``mcpServers`` entries: a same-named entry must not
-        repoint an authored integration, whose credentials (auth.json or a
-        bearer-token env var) would follow to the configured URL. Custom
-        endpoints go through the generic runtime under their own name.
+        """The integration's own (url, extra_headers). Never consults user
+        ``mcpServers`` entries: a same-named entry must not repoint an authored
+        integration, whose credentials (stored or env-sourced) would follow.
         """
         return self.url, {}
 
@@ -224,8 +221,7 @@ class McpIntegration:
         if "headers" in params:
             cm = transport(url, headers=auth_header)
         elif "http_client" in params:
-            # This SDK shape requires its companion httpx2 client (the transport
-            # calls client.sse() for server-initiated streams and reconnects).
+            # This SDK shape requires its companion httpx2 client (the transport calls client.sse()).
             import httpx2  # noqa: PLC0415
 
             # SDK-factory timeouts; a default client's 5s read cap drops idle SSE streams.
