@@ -98,7 +98,11 @@ export class SubagentSummaryLine implements Component, Focusable {
 			theme.fg("warning", `◐ ${this.counts.idle} idle`) +
 			"   " +
 			theme.fg("dim", `○ ${this.counts.inactive} inactive`);
-		const openHint = this.openable ? `${keyText("tui.select.confirm")}/${keyText("app.agents.open")} open` : "";
+		const openHint = this.openable
+			? this.focused
+				? `${keyText("tui.select.confirm")}/${keyText("app.agents.open")} open`
+				: `${keyText("tui.editor.cursorDown", { primaryOnly: true })} select`
+			: "";
 		const gap = Math.max(1, inner - 2 - visibleWidth(counts) - visibleWidth(openHint));
 		const body = truncateToWidth(` ${counts}${" ".repeat(gap)}${theme.fg("dim", openHint)} `, inner, "…");
 		const pad = " ".repeat(Math.max(0, inner - visibleWidth(body)));

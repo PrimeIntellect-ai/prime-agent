@@ -39,6 +39,19 @@ describe("SubagentSummaryLine", () => {
 		expect(rendered[1]).toContain("● 1 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
+	it("hints ↓ select when unfocused and Enter/→ open when focused", () => {
+		const line = new SubagentSummaryLine();
+		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
+		line.setOpenable(true);
+
+		expect(stripAnsi(line.render(120)[1])).toContain("↓ select");
+
+		line.focused = true;
+		const focused = stripAnsi(line.render(120)[1]);
+		expect(focused).toContain("open");
+		expect(focused).not.toContain("↓ select");
+	});
+
 	it("keeps the selection background across truncation resets when focused", () => {
 		const line = new SubagentSummaryLine();
 		line.setSubagentCounts({ total: 3, running: 1, idle: 1, inactive: 1 });
