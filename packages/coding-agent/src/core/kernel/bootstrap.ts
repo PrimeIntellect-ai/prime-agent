@@ -65,6 +65,8 @@ export type KernelBootstrapProgressHandler = (message: string) => void;
 export interface EnsureKernelPythonOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	onProgress?: KernelBootstrapProgressHandler;
+	/** Called when the venv was (re)provisioned or resynced, so the first boot can expect a cold start. */
+	onProvisioned?: () => void;
 }
 
 interface BootstrapPythonSkill {
@@ -895,6 +897,7 @@ async function ensureKernelPythonUncached(
 		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
 			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
+			options.onProvisioned?.();
 			return python;
 		}
 
@@ -906,6 +909,7 @@ async function ensureKernelPythonUncached(
 		}
 
 		await bootstrapVenv(venv, pythonSkills, options);
+		options.onProvisioned?.();
 	} catch (error) {
 		throw formatBootstrapFailure(error);
 	} finally {

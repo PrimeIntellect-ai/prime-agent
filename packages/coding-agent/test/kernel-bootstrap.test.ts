@@ -179,7 +179,9 @@ describe("kernel bootstrap", () => {
 		const venv = join(tempDir, "kernel-venv");
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
-		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+		const onProvisioned = vi.fn();
+		await expect(ensureKernelPython({ onProvisioned })).resolves.toBe(join(venv, "bin", "python"));
+		expect(onProvisioned).toHaveBeenCalledTimes(1);
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log).toContain("python install 3.11");
@@ -329,7 +331,9 @@ dependencies = ["httpx"]
 		);
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
-		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(python);
+		const onProvisioned = vi.fn();
+		await expect(ensureKernelPython({ pythonSkills: [pythonSkill], onProvisioned })).resolves.toBe(python);
+		expect(onProvisioned).toHaveBeenCalledTimes(1);
 
 		const log = readFileSync(logPath, "utf8");
 		expect(log).not.toContain(`venv ${venv} --python 3.11 --seed`);
@@ -424,7 +428,9 @@ dependencies = ["httpx"]
 		writeBootstrapVersion(venv);
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
-		await expect(ensureKernelPython()).resolves.toBe(python);
+		const onProvisioned = vi.fn();
+		await expect(ensureKernelPython({ onProvisioned })).resolves.toBe(python);
+		expect(onProvisioned).not.toHaveBeenCalled();
 	});
 
 	it("rebuilds a warm venv whose recorded runtime hash no longer matches local source", async () => {
