@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +23,11 @@ function pyprojectHash(pyprojectPath: string): string {
 function writeExecutable(filePath: string, content: string): void {
 	writeFileSync(filePath, content);
 	chmodSync(filePath, 0o755);
+}
+
+function backdateBootstrapVersion(venv: string, ageMs = 10 * 60 * 1000): void {
+	const then = new Date(Date.now() - ageMs);
+	utimesSync(join(venv, ".bootstrap-version"), then, then);
 }
 
 function writeBootstrapVersion(venv: string, pythonSkills: readonly KernelPythonSkill[] = []): void {
@@ -426,11 +431,40 @@ dependencies = ["httpx"]
 		mkdirSync(join(venv, "bin"), { recursive: true });
 		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
 		writeBootstrapVersion(venv);
+		backdateBootstrapVersion(venv);
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
 		const onProvisioned = vi.fn();
 		await expect(ensureKernelPython({ onProvisioned })).resolves.toBe(python);
 		expect(onProvisioned).not.toHaveBeenCalled();
+	});
+
+	it("treats a venv another process provisioned moments ago as a cold boot", async () => {
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["ipykernel", "rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		const onProvisioned = vi.fn();
+		await expect(ensureKernelPython({ onProvisioned })).resolves.toBe(python);
+		expect(onProvisioned).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports provisioning to every coalesced concurrent caller", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		const first = vi.fn();
+		const second = vi.fn();
+		await expect(
+			Promise.all([ensureKernelPython({ onProvisioned: first }), ensureKernelPython({ onProvisioned: second })]),
+		).resolves.toEqual([python, python]);
+		expect(first).toHaveBeenCalledTimes(1);
+		expect(second).toHaveBeenCalledTimes(1);
 	});
 
 	it("rebuilds a warm venv whose recorded runtime hash no longer matches local source", async () => {
