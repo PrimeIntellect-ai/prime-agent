@@ -13,11 +13,11 @@ import {
 	createDefaultPrimeWorkflowWorkerLauncher,
 } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import type { DefaultPrimeTaskRuntimeAuthorityFactory } from "../src/core/workflow/default-prime.js";
 import type { DefaultPrimeWorkerTaskCapsule } from "../src/core/workflow/default-task-runtime.js";
 import type { WorkflowPrimeStageEvidenceAdapter } from "../src/core/workflow/task-runtime-authority.js";

@@ -421,7 +421,7 @@ function createApprovalManagerFixture(failDelivery = false): ManagerFixture {
 				createFixtureHostReceipt({
 					receiptKind: "clock",
 					receiptId: "approval-clock",
-					issuerId: "approval-host",
+					issuerId: "fixture-host",
 					workflowId,
 					bindingDigest,
 					payloadDigest: "clock-payload",
@@ -771,7 +771,7 @@ function createDecisionContextReceipt(
 		receiptKind: "decision",
 		oneUse: false,
 		receiptId: "approval-decision",
-		issuerId: "approval-decision-host",
+		issuerId: "fixture-host",
 		workflowId,
 		bindingDigest: digestObject({
 			kind: "approval_decision_context",

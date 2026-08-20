@@ -2426,12 +2426,23 @@ export class DaemonSupervisor {
 		const supportsExtensionUi = [...this.clients].some(
 			(client) => client.attachedActiveSessionIds.has(activeSessionId) && client.supportsExtensionUi,
 		);
+		const supportsWorkflowStatus = [...this.clients].some(
+			(client) =>
+				client.attachedActiveSessionIds.has(activeSessionId) &&
+				client.capabilities.has("workflow_status_projection"),
+		);
+		const capabilities: DaemonClientCapability[] = [
+			"attach_snapshot",
+			"event_sequence",
+			"slim_attach",
+			"chunked_snapshot",
+			...(supportsExtensionUi ? ["extension_ui" as const] : []),
+			...(supportsWorkflowStatus ? ["workflow_status_projection" as const] : []),
+		];
 		const response = await worker.client.requestWorker({
 			type: "worker_subscribe",
 			activeSessionId,
-			capabilities: supportsExtensionUi
-				? ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"]
-				: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
+			capabilities,
 			supportsExtensionUi,
 		});
 		if (!response.success) {
@@ -3425,6 +3436,14 @@ export class DaemonSupervisor {
 		) {
 			result = undefined;
 		}
+		if (
+			result &&
+			client.capabilities.has("workflow_status_projection") &&
+			match.summary.workflowStatus !== undefined &&
+			result.snapshot.summary.workflowStatus === undefined
+		) {
+			result = undefined;
+		}
 		if (!result) {
 			const snapshotLoadKey = `${activeSessionId}:${client.capabilities.has("chunked_snapshot") ? "chunked" : "full"}`;
 			let retryInvalidatedLoad = true;
@@ -3439,15 +3458,13 @@ export class DaemonSupervisor {
 						const response = await workerClient.request({
 							type: "attach",
 							activeSessionId,
-						capabilities: [
-							"attach_snapshot",
+							capabilities: [
+								"attach_snapshot",
 								"event_sequence",
 								"slim_attach",
 								...(client.capabilities.has("chunked_snapshot") ? ["chunked_snapshot"] : []),
-							...(client.capabilities.has("workflow_status_projection")
-								? ["workflow_status_projection"]
-								: []),
-						] as DaemonClientCapability[],
+								"workflow_status_projection",
+							] as DaemonClientCapability[],
 							supportsExtensionUi: false,
 							env: command.env ?? collectDaemonClientEnv(),
 						});
@@ -3892,7 +3909,7 @@ export class DaemonSupervisor {
 				) {
 					throw new Error("Worker returned an invalid snapshot begin frame");
 				}
-				const publicSummary = this.publicSummary(worker, begin.snapshot.summary);
+				const publicSummary = this.publicSummary(worker, begin.snapshot.summary, true);
 				const snapshot = {
 					...begin.snapshot,
 					summary: publicSummary,

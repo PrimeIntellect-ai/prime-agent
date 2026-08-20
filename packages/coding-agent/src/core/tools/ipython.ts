@@ -20,11 +20,12 @@ import {
 	type KernelSnapshotConfig,
 } from "../kernel/index.js";
 import {
+	commitKernelSnapshot,
 	createKernelOutputScratch,
-	kernelOutputPathIsProtected,
-	removeKernelOutputScratch,
 	type KernelContainerIsolationOptions,
 	type KernelContainerIsolationResolver,
+	removeKernelOutputScratch,
+	stageKernelSnapshot,
 } from "../kernel/isolation.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
@@ -46,11 +47,10 @@ function appendIpythonOutput(current: string, next: string): string {
 }
 
 function isKernelContainerCleanupFailure(error: unknown): boolean {
-	return error instanceof KernelContainerCleanupError || (
-		error instanceof Error &&
-		typeof (error as { readonly code?: unknown }).code === "string" &&
-		(error as { readonly code: string }).code.startsWith("KERNEL_CONTAINER_")
-	);
+	if (error instanceof KernelContainerCleanupError) return true;
+	if (!(error instanceof Error)) return false;
+	const code = (error as unknown as { readonly code?: unknown }).code;
+	return typeof code === "string" && code.startsWith("KERNEL_CONTAINER_");
 }
 
 function truncateIpythonTraceback(traceback: readonly string[]): string[] {
@@ -430,8 +430,17 @@ export class IpythonKernelProvisioner {
 
 	private removeIsolationOutputScratch(): void {
 		const scratch = this.isolationOutputScratch;
+		if (scratch === undefined) return;
+		removeKernelOutputScratch(scratch);
 		this.isolationOutputScratch = undefined;
-		if (scratch !== undefined) removeKernelOutputScratch(scratch);
+	}
+
+	private commitAndRemoveIsolationSnapshot(): void {
+		const scratch = this.isolationOutputScratch;
+		if (scratch === undefined) return;
+		const durableRoot = this.options?.isolation ? this.options.snapshotDir : undefined;
+		if (durableRoot !== undefined) commitKernelSnapshot(scratch, durableRoot);
+		this.removeIsolationOutputScratch();
 	}
 
 	/** Whether a kernel has finished starting and is currently running. */
@@ -453,54 +462,69 @@ export class IpythonKernelProvisioner {
 		this.disposeController.abort();
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
-		this.startedManager = undefined;
 		if (this.options?.kernelManagerRef) {
-			this.options.kernelManagerRef.current = undefined;
+			this.options.kernelManagerRef.current = this.startedManager;
 		}
 		let cleanupError: unknown;
+		let managerDisposed = false;
+		let noContainerStarted = pending === undefined;
 		if (pending) {
 			try {
 				const manager = await pending;
 				await manager.dispose();
+				managerDisposed = true;
 			} catch (error) {
-				if (!this.disposeController.signal.aborted || isKernelContainerCleanupFailure(error)) cleanupError = error;
+				if (
+					error instanceof Error &&
+					(error.message === "Kernel provisioner disposed before start" ||
+						error.message === "IPython execution aborted")
+				) {
+					noContainerStarted = true;
+				} else if (!this.disposeController.signal.aborted || isKernelContainerCleanupFailure(error)) {
+					cleanupError = error;
+				}
 			}
 		}
-		try {
-			this.removeIsolationOutputScratch();
-		} catch (error) {
-			cleanupError ??= error;
+		if (cleanupError === undefined && (managerDisposed || noContainerStarted)) {
+			try {
+				this.commitAndRemoveIsolationSnapshot();
+			} catch (error) {
+				cleanupError = error;
+			}
+		}
+		if (cleanupError === undefined) {
+			this.startedManager = undefined;
+			this.startingManager = undefined;
+			if (this.options?.kernelManagerRef) this.options.kernelManagerRef.current = undefined;
 		}
 		if (cleanupError !== undefined) throw cleanupError;
 	}
 
 	async kill(): Promise<void> {
-		let fenceError: unknown;
 		if (this.runtimeFence) {
+			let fenceError: unknown;
 			try {
 				await this.runtimeFence;
 			} catch (error) {
 				fenceError = error;
 			}
-			try {
-				this.removeIsolationOutputScratch();
-			} catch (error) {
-				fenceError ??= error;
+			if (fenceError === undefined) {
+				try {
+					this.commitAndRemoveIsolationSnapshot();
+				} catch (error) {
+					fenceError = error;
+				}
 			}
 			if (fenceError !== undefined) throw fenceError;
 			return;
 		}
 		const pending = this.managerPromise;
-		const startingManager = this.startingManager;
+		const activeManager = this.startingManager ?? this.startedManager;
 		this.managerPromise = undefined;
-		this.startedManager = undefined;
-		if (this.options?.kernelManagerRef) {
-			this.options.kernelManagerRef.current = undefined;
-		}
 		const fence = (async () => {
 			let cleanupError: unknown;
 			try {
-				await startingManager?.kill();
+				await activeManager?.kill();
 			} catch (error) {
 				cleanupError = error;
 			}
@@ -508,15 +532,23 @@ export class IpythonKernelProvisioner {
 				if (cleanupError !== undefined) throw cleanupError;
 				return;
 			}
+			let manager: KernelManager | undefined;
 			try {
-				const manager = await pending;
-				if (manager !== startingManager) await manager.kill();
+				manager = await pending;
 			} catch (error) {
 				if (isKernelContainerCleanupFailure(error)) cleanupError ??= error;
+			}
+			if (manager !== undefined && manager !== activeManager) {
+				try {
+					await manager.kill();
+				} catch (error) {
+					cleanupError ??= error;
+				}
 			}
 			if (cleanupError !== undefined) throw cleanupError;
 		})();
 		this.runtimeFence = fence;
+		let fenceError: unknown;
 		try {
 			await fence;
 		} catch (error) {
@@ -524,10 +556,20 @@ export class IpythonKernelProvisioner {
 		} finally {
 			if (this.runtimeFence === fence) this.runtimeFence = undefined;
 		}
-		try {
-			this.removeIsolationOutputScratch();
-		} catch (error) {
-			fenceError ??= error;
+		if (fenceError === undefined) {
+			try {
+				this.commitAndRemoveIsolationSnapshot();
+			} catch (error) {
+				fenceError = error;
+			}
+		}
+		if (fenceError === undefined) {
+			this.startedManager = undefined;
+			this.startingManager = undefined;
+			if (this.options?.kernelManagerRef) this.options.kernelManagerRef.current = undefined;
+		} else if (activeManager !== undefined) {
+			this.startedManager = activeManager;
+			if (this.options?.kernelManagerRef) this.options.kernelManagerRef.current = activeManager;
 		}
 		if (fenceError !== undefined) throw fenceError;
 	}
@@ -592,6 +634,8 @@ export class IpythonKernelProvisioner {
 		const startupAbort = createLinkedAbortSignal([this.disposeController.signal, signal]);
 		const startupSignal = startupAbort.signal;
 		let startingManager: KernelManager | undefined;
+		let createdManager: KernelManager | undefined;
+		let managerCreated = false;
 		// Wait for a previous provisioner (e.g. on /reload) to finish disposing — and
 		// flushing its final snapshot — before we read that snapshot back, so the two
 		// kernels can't race over the same on-disk file. Guarded so the common
@@ -610,10 +654,9 @@ export class IpythonKernelProvisioner {
 			if (isolation) {
 				const outputScratch = createKernelOutputScratch(isolation);
 				this.isolationOutputScratch = outputScratch;
-				if (snapshotDir === undefined || kernelOutputPathIsProtected(snapshotDir, isolation.protectedPaths)) {
-					snapshotDir = outputScratch;
-					isolationOutputPaths = [outputScratch];
-				}
+				if (snapshotDir !== undefined) stageKernelSnapshot(snapshotDir, outputScratch);
+				snapshotDir = outputScratch;
+				isolationOutputPaths = [outputScratch];
 			}
 			const m = new KernelManager({
 				python: this.options?.python,
@@ -635,6 +678,8 @@ export class IpythonKernelProvisioner {
 						}
 					: undefined,
 			});
+			createdManager = m;
+			managerCreated = true;
 			startingManager = m;
 			this.startingManager = m;
 			let pendingRestore: RestoreResult | undefined;
@@ -682,13 +727,9 @@ export class IpythonKernelProvisioner {
 				let cleanupError: unknown;
 				try {
 					await m.kill();
+					this.commitAndRemoveIsolationSnapshot();
 				} catch (killError) {
 					cleanupError = killError;
-				}
-				try {
-					this.removeIsolationOutputScratch();
-				} catch (scratchError) {
-					cleanupError ??= scratchError;
 				}
 				throw cleanupError ?? error;
 			}
@@ -702,6 +743,28 @@ export class IpythonKernelProvisioner {
 				this.options.kernelManagerRef.current = m;
 			}
 			return m;
+		} catch (error) {
+			if (managerCreated) {
+				let cleanupError: unknown;
+				try {
+					await createdManager?.kill();
+					this.commitAndRemoveIsolationSnapshot();
+				} catch (killError) {
+					cleanupError = killError;
+					if (createdManager !== undefined) {
+						this.startedManager = createdManager;
+						if (this.options?.kernelManagerRef) this.options.kernelManagerRef.current = createdManager;
+					}
+				}
+				throw cleanupError ?? error;
+			}
+			let cleanupError: unknown;
+			try {
+				this.removeIsolationOutputScratch();
+			} catch (scratchError) {
+				cleanupError = scratchError;
+			}
+			throw cleanupError ?? error;
 		} finally {
 			if (this.startingManager === startingManager) this.startingManager = undefined;
 			startupAbort.cleanup();

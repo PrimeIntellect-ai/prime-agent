@@ -2109,7 +2109,11 @@ function assertDecisionWorkflowBinding(decisionRef: WorkflowDecisionRef, workflo
 
 function assertDecisionEpochBinding(decisionRef: WorkflowDecisionRef, epochRef: WorkflowEpochRef, label: string): void {
 	assertEpochRef(epochRef, `${label} epoch`);
-	if (decisionRef.storeEpoch !== epochRef.storeEpoch || decisionRef.coordinatorEpoch !== epochRef.coordinatorEpoch)
+	// Store epoch is the durable anchor and must match: a rotated store is a different history.
+	// Coordinator epoch is deliberately excluded. It rotates on every resume as live-coordinator
+	// fencing, so requiring it would mean no decision recorded before a restart could ever be
+	// referenced after one — the decision itself (id, revision, digest) is unchanged.
+	if (decisionRef.storeEpoch !== epochRef.storeEpoch)
 		throw new Error(`Skill ${label} decision reference is bound to a different epoch.`);
 }
 

@@ -71,12 +71,7 @@ function leaseRef(leaseId: string, acquisitionEventSequence: number): WorkflowLe
 	};
 }
 
-function resourceLease(
-	attemptId: string,
-	executionKey: string,
-	leaseId: string,
-	acquisitionEventSequence: number,
-): WorkflowResourceLease {
+function resourceLease(attemptId: string, leaseId: string, acquisitionEventSequence: number): WorkflowResourceLease {
 	return {
 		leaseId,
 		workflowId: WORKFLOW_ID,
@@ -94,7 +89,6 @@ function resourceLease(
 		acquiredAt: "2030-01-01T00:00:00.000Z",
 		expiresAt: "2030-01-01T00:10:00.000Z",
 		releaseEventSequence: null,
-		...({ executionKey } as never),
 	};
 }
 
@@ -124,7 +118,7 @@ function dispatchInput(attemptId: string, executionKey: string): WorkflowCanonic
 		decisionRef: decisionRef(),
 		epochRef: EPOCH,
 		rootLeaseRef: leaseRef("root-lease", 1),
-		resourceLease: resourceLease(attemptId, executionKey, `queued:${attemptId}`, 1),
+		resourceLease: resourceLease(attemptId, `queued:${attemptId}`, 1),
 		ownershipLease: null,
 		childAuthority: {
 			capabilities: ["read_only"],
@@ -266,7 +260,7 @@ it("reopens a queue-committed marker, rolls back once, and admits a fresh fenced
 		currentHead = head(sequence, eventDigest);
 	};
 	const oldExecutionKey = executionKeyFor(ATTEMPT_ID);
-	const oldResourceLease = resourceLease(ATTEMPT_ID, oldExecutionKey, "resource:old", 1);
+	const oldResourceLease = resourceLease(ATTEMPT_ID, "resource:old", 1);
 	const oldOwnershipLease = ownershipLease(ATTEMPT_ID, "ownership:old", 2);
 	append(
 		{ kind: "workflow_resource_lease_acquired", workflowId: WORKFLOW_ID, lease: oldResourceLease, epochRef: EPOCH },
@@ -315,7 +309,7 @@ it("reopens a queue-committed marker, rolls back once, and admits a fresh fenced
 	const leaseManager = {
 		reserveDispatch: async (input: Parameters<NonNullable<WorkflowLeaseManager["reserveDispatch"]>>[0]) => {
 			reservations += 1;
-			const resource = resourceLease(freshAttemptId, freshExecutionKey, "resource:fresh", currentHead.sequence + 1);
+			const resource = resourceLease(freshAttemptId, "resource:fresh", currentHead.sequence + 1);
 			const ownership = ownershipLease(freshAttemptId, "ownership:fresh", currentHead.sequence + 2);
 			append(
 				{ kind: "workflow_resource_lease_acquired", workflowId: WORKFLOW_ID, lease: resource, epochRef: EPOCH },

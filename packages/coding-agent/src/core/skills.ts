@@ -556,17 +556,24 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 
 			const existing = skillMap.get(skill.name);
 			if (existing) {
-				collisionDiagnostics.push({
-					type: "collision",
-					message: `name "${skill.name}" collision`,
-					path: skill.filePath,
-					collision: {
-						resourceType: "skill",
-						name: skill.name,
-						winnerPath: existing.filePath,
-						loserPath: skill.filePath,
-					},
-				});
+				// A user-provided skill shadowing a bundled one of the same name is intended
+				// precedence, not a conflict: the vendored copy exists so the skill works out of
+				// the box, and a local checkout is meant to win. Only report genuinely ambiguous
+				// collisions, where neither side is the bundled fallback.
+				const shadowsBundled = skill.sourceInfo.source === "builtin" && existing.sourceInfo.source !== "builtin";
+				if (!shadowsBundled) {
+					collisionDiagnostics.push({
+						type: "collision",
+						message: `name "${skill.name}" collision`,
+						path: skill.filePath,
+						collision: {
+							resourceType: "skill",
+							name: skill.name,
+							winnerPath: existing.filePath,
+							loserPath: skill.filePath,
+						},
+					});
+				}
 			} else {
 				skillMap.set(skill.name, skill);
 				realPathSet.add(realPath);

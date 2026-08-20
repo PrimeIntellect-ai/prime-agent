@@ -4,6 +4,8 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { type AgentCollaborationOptions, resolveAgentCollaboration } from "./workflow/agent-collaboration.js";
+import type { WorkflowComputeClass } from "./workflow/default-task-runtime.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -164,6 +166,9 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	workflowWorkerModelsByComputeClass?: Partial<Record<WorkflowComputeClass, string>>; // Model selector per Prime workflow compute-class tier ("cheap"/"standard"/"deep"); unset tiers fall back to the session default
+	agentMessageMidRunDelivery?: boolean; // Deliver an agent-to-agent message at the recipient's next turn boundary instead of waiting for its whole task to finish. Off by default: mid-run delivery keeps the recipient's loop alive, so mutual sends can hold each other running.
+	agentCollaboration?: Partial<AgentCollaborationOptions>; // How sibling workers share work: mode "blind" | "push_diffs" | "full_comms", plus midRunDelivery, finalCheck, maxDiffBytes
 }
 
 export interface AgentTracesSettings {
@@ -1104,6 +1109,28 @@ export class SettingsManager {
 
 	getThinkingBudgets(): ThinkingBudgetsSettings | undefined {
 		return this.settings.thinkingBudgets;
+	}
+
+	getWorkflowWorkerModelsByComputeClass(): Partial<Record<WorkflowComputeClass, string>> | undefined {
+		return this.settings.workflowWorkerModelsByComputeClass;
+	}
+
+	/**
+	 * Whether agent-to-agent messages may be delivered mid-run.
+	 *
+	 * Return: True when the recipient should receive a message at its next turn boundary.
+	 */
+	getAgentMessageMidRunDelivery(): boolean {
+		return this.settings.agentMessageMidRunDelivery === true;
+	}
+
+	/**
+	 * Resolved sibling-collaboration options.
+	 *
+	 * Return: Complete options, defaulting to blind collaboration with a final check.
+	 */
+	getAgentCollaboration(): AgentCollaborationOptions {
+		return resolveAgentCollaboration(this.settings.agentCollaboration);
 	}
 
 	getShowImages(): boolean {

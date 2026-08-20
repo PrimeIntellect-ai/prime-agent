@@ -58,6 +58,17 @@ export const WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS = Object.freeze([
 	"adversarial-review",
 ] as const);
 
+/** Registered host role backing each intent-TDD stage id. Stage ids are not themselves roles. */
+const INTENT_TDD_STAGE_ROLES: Readonly<Record<string, string>> = Object.freeze({
+	intent: "recon",
+	"acceptance-red": "verify",
+	"implementation-green": "implementation",
+	integration: "integration",
+	metamorphic: "verification",
+	"independent-verification": "verification",
+	"adversarial-review": "red-team",
+});
+
 export const WORKFLOW_RECIPE_INTENT_TDD_EVIDENCE_KINDS = Object.freeze([
 	"intent_forbidden_outcomes",
 	"black_box_acceptance_red",
@@ -572,7 +583,12 @@ export interface StageSpec {
 	capabilities?: readonly string[];
 	generatedOutputPaths?: readonly string[];
 	lockPaths?: readonly string[];
+	/** Cheapest worker tier that can do this stage's work; the host maps it to a model selector. */
+	computeClass?: WorkflowRecipeComputeClass;
 }
+
+export const WORKFLOW_RECIPE_COMPUTE_CLASSES = Object.freeze(["cheap", "standard", "deep"] as const);
+export type WorkflowRecipeComputeClass = (typeof WORKFLOW_RECIPE_COMPUTE_CLASSES)[number];
 
 /** Host-resolved gate metadata. A gate can propose evidence but cannot authorize. */
 export interface GateSpec {
@@ -1015,6 +1031,33 @@ const WORKFLOW_RECIPE_CAPABILITY_NAMES = Object.freeze({
 	superpowers: "superpowers",
 });
 
+/**
+ * Roles a task may declare. The DAG shape is the planner's to choose; the vocabulary is not.
+ * A stage outside this list is rejected rather than silently treated as ordinary implementation.
+ */
+export const WORKFLOW_TASK_ROLES = Object.freeze([
+	"recon",
+	"lens",
+	"verify",
+	"verification",
+	"synthesize",
+	"red-team",
+	"attack",
+	"architect",
+	"judge",
+	"unify",
+	"edge-test",
+	"implementation",
+	"integration",
+	"planning",
+	"design",
+	"review",
+] as const);
+export type WorkflowTaskRole = (typeof WORKFLOW_TASK_ROLES)[number];
+
+/** Roles that must appear somewhere in an accepted graph, so checks cannot be omitted. */
+export const WORKFLOW_REQUIRED_TASK_ROLES = Object.freeze(["verification", "red-team"] as const);
+
 const WORKFLOW_RECIPE_REGISTRY_MANIFEST_PREIMAGE = Object.freeze({
 	registryId: WORKFLOW_RECIPE_REGISTRY_ID,
 	registryRevision: WORKFLOW_RECIPE_REGISTRY_REVISION,
@@ -1077,6 +1120,7 @@ export type WorkflowRecipeErrorCode =
 	| "unknown_gate"
 	| "unknown_capability"
 	| "capability_status_invalid"
+	| "stage_compute_class_invalid"
 	| "missing_evidence"
 	| "missing_universal_gate"
 	| "missing_overfitting_review"
@@ -1641,7 +1685,11 @@ function normalizeStage(value: unknown): StageSpec {
 		"capabilities",
 		"generatedOutputPaths",
 		"lockPaths",
+		"computeClass",
 	]);
+	const computeClass = record.computeClass;
+	if (computeClass !== undefined && !(WORKFLOW_RECIPE_COMPUTE_CLASSES as readonly unknown[]).includes(computeClass))
+		fail("stage_compute_class_invalid", "stage.computeClass must be cheap, standard, or deep.");
 	return {
 		id: nonEmptyString(record.id, "stage.id"),
 		role: nonEmptyString(record.role, "stage.role"),
@@ -1650,6 +1698,7 @@ function normalizeStage(value: unknown): StageSpec {
 		capabilityIds: readStringArray(record, "capabilityIds", "capabilities", "stage"),
 		generatedOutputPaths: sortedUniqueStrings(record.generatedOutputPaths ?? [], "stage.generatedOutputPaths"),
 		lockPaths: sortedUniqueStrings(record.lockPaths ?? [], "stage.lockPaths"),
+		...(computeClass === undefined ? {} : { computeClass: computeClass as WorkflowRecipeComputeClass }),
 	};
 }
 
@@ -4553,8 +4602,10 @@ function compileWorkflowRecipeInternal(
 			pathBoundary: sidecar.pathBoundary,
 		},
 	});
-	if (!proposal.recipeId.startsWith("builtin:") && proposal.effectiveGraphDigest === undefined)
-		fail("compiled_graph_mismatch", "recipe must bind the effective graph and sidecar digest.");
+	// A supplied digest must still agree (checked immediately below). Requiring one to be
+	// supplied added no guarantee: the host computes it here from the graph, context and sidecar,
+	// so a producer could only restate that computation. Demanding it made every dynamic task
+	// graph uncompilable, since the dynamic producer has no access to the sidecar.
 	if (proposal.effectiveGraphDigest !== undefined && proposal.effectiveGraphDigest !== effectiveGraphDigest)
 		fail("compiled_graph_mismatch", "recipe effective graph digest does not match the validated sidecar.");
 	const canonicalProposal = freezeDeep(
@@ -5743,17 +5794,46 @@ function builtinOverlays(recipeKey: string): WorkflowRecipeOverlays {
 	};
 }
 
+/**
+ * Per-role default compute tier and fan-out width.
+ * Read-only survey stages run cheap and wide; adjudicating stages run deep.
+ * Absent roles fall back to one standard-tier branch.
+ */
+const BUILTIN_STAGE_COMPUTE: Readonly<Record<string, WorkflowRecipeComputeClass>> = Object.freeze({
+	recon: "cheap",
+	lens: "cheap",
+	attack: "cheap",
+	verify: "standard",
+	architect: "standard",
+	"edge-test": "standard",
+	synthesize: "deep",
+	"red-team": "deep",
+	judge: "deep",
+	unify: "deep",
+});
+
+/** Capability a role needs beyond plain workspace reads. */
+const BUILTIN_STAGE_CAPABILITIES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+	verify: ["read", "verification"],
+	"red-team": ["read", "red_team"],
+	attack: ["read", "red_team"],
+	"edge-test": ["read", "verification"],
+});
+
 function builtinStages(stageIds: readonly string[]): readonly StageSpec[] {
 	return Object.freeze(
-		stageIds.map((stageId) => ({
-			id: stageId,
-			role: stageId,
-			taskId: stageId,
-			evidencePolicyId: `evidence-${stageId}`,
-			capabilityIds: ["read"],
-			generatedOutputPaths: [`artifacts/out/${stageId}.json`],
-			lockPaths: [],
-		})),
+		stageIds.map((stageId) => {
+			return {
+				id: stageId,
+				role: stageId,
+				taskId: stageId,
+				evidencePolicyId: `evidence-${stageId}`,
+				capabilityIds: BUILTIN_STAGE_CAPABILITIES[stageId] ?? ["read"],
+				generatedOutputPaths: [`artifacts/out/${stageId}.json`],
+				lockPaths: [],
+				computeClass: BUILTIN_STAGE_COMPUTE[stageId] ?? "standard",
+			};
+		}),
 	);
 }
 
@@ -5762,6 +5842,8 @@ function builtinCapabilities(): readonly CapabilityRequirement[] {
 		{ id: "autoresearch", name: "autoresearch" },
 		{ id: "mempalace", name: "mempalace" },
 		{ id: "read", name: "read_workspace" },
+		{ id: "red_team", name: "red_team" },
+		{ id: "verification", name: "verification" },
 	]);
 }
 
@@ -5775,19 +5857,10 @@ function builtinImplementationStages(): readonly StageSpec[] {
 		"independent-verification": ["read", "verification"],
 		"adversarial-review": ["read", "red_team"],
 	};
-	const roles: Readonly<Record<string, string>> = {
-		intent: "recon",
-		"acceptance-red": "verify",
-		"implementation-green": "implementation",
-		integration: "integration",
-		metamorphic: "verification",
-		"independent-verification": "verification",
-		"adversarial-review": "red-team",
-	};
 	return Object.freeze(
 		WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS.map((stageId) => ({
 			id: stageId,
-			role: roles[stageId],
+			role: INTENT_TDD_STAGE_ROLES[stageId],
 			taskId: stageId,
 			evidencePolicyId: `tdd-${stageId}`,
 			capabilityIds: capabilityIdsByStage[stageId],
@@ -5819,8 +5892,6 @@ function builtinImplementationCapabilities(): readonly CapabilityRequirement[] {
 		{ id: "edit", name: "edit" },
 		{ id: "write_owned_paths", name: "write_owned_paths" },
 		{ id: "invoke_host_effect", name: "invoke_host_effect" },
-		{ id: "verification", name: "verification" },
-		{ id: "red_team", name: "red_team" },
 	]);
 }
 
@@ -5854,10 +5925,14 @@ export const BUILTIN_SUPERPOWERS_PRIME_IMPLEMENTATION_RECIPE: WorkflowRecipeProp
 
 export const BUILTIN_SUPERPOWERS_IMPLEMENTATION_RECIPE = BUILTIN_SUPERPOWERS_PRIME_IMPLEMENTATION_RECIPE;
 
+const RECON_LENS_STAGE_IDS = Object.freeze(["recon", "lens", "verify", "synthesize", "red-team"] as const);
+const ATTACK_ARCHITECT_STAGE_IDS = Object.freeze(["attack", "architect", "judge", "unify", "edge-test"] as const);
+const DEFAULT_PRIME_STAGE_IDS = Object.freeze([...RECON_LENS_STAGE_IDS, ...ATTACK_ARCHITECT_STAGE_IDS] as const);
+
 export const BUILTIN_RECON_LENS_VERIFY_SYNTHESIZE_RED_TEAM: WorkflowRecipeProposal = freezeDeep({
 	recipeId: "builtin:recon-lens-verify-synthesize-red-team",
 	revision: 1,
-	stages: builtinStages(["recon", "lens", "verify", "synthesize", "red-team"]),
+	stages: builtinStages(RECON_LENS_STAGE_IDS),
 	gates: [
 		{ id: WORKFLOW_RECIPE_UNIVERSAL_HOST_GATE_ID, kind: "host_adjudication", evidencePolicyId: "universal" },
 		{ id: WORKFLOW_RECIPE_OVERFITTING_REVIEW_ID, kind: "overfitting_review", evidencePolicyId: "overfit" },
@@ -5878,7 +5953,7 @@ export const BUILTIN_RECON_LENS_VERIFY_SYNTHESIZE_RED_TEAM: WorkflowRecipePropos
 export const BUILTIN_ATTACK_ARCHITECT_JUDGE_UNIFY_EDGE_TEST: WorkflowRecipeProposal = freezeDeep({
 	recipeId: "builtin:attack-architect-judge-unify-edge-test",
 	revision: 1,
-	stages: builtinStages(["attack", "architect", "judge", "unify", "edge-test"]),
+	stages: builtinStages(ATTACK_ARCHITECT_STAGE_IDS),
 	gates: [
 		{ id: WORKFLOW_RECIPE_UNIVERSAL_HOST_GATE_ID, kind: "host_adjudication", evidencePolicyId: "universal" },
 		{ id: WORKFLOW_RECIPE_OVERFITTING_REVIEW_ID, kind: "overfitting_review", evidencePolicyId: "overfit" },
@@ -5910,21 +5985,177 @@ export const BUILTIN_ATTACK_ARCHITECT_JUDGE_UNIFY_EDGE_TEST: WorkflowRecipePropo
 	overlays: builtinOverlays("attack-architect-judge-unify-edge-test"),
 });
 
+/**
+ * Stage ids for the comprehensive topology: a fanned-out decision pipeline that
+ * feeds the intent-TDD implementation chain. Recon and lens branches divide the
+ * work by charter rather than repeating it, so each join is a union of findings.
+ */
+export const COMPREHENSIVE_STAGE_IDS = Object.freeze([
+	"scope",
+	"recon-code",
+	"recon-tests",
+	"recon-history",
+	"synthesize-recon",
+	"lens-intent",
+	"lens-correctness",
+	"lens-security",
+	"synthesize",
+	"red-team",
+	"adjudicate",
+	...WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS,
+] as const);
+
+/** Charter per fanned-out branch. Distinct charters are what make a fan-out divide work instead of repeat it. */
+export const COMPREHENSIVE_BRANCH_CHARTERS: Readonly<Record<string, string>> = Object.freeze({
+	"recon-code": "Read the implementation the objective touches. Report what exists, not what should exist.",
+	"recon-tests": "Read the tests and fixtures covering this area. Report what is actually asserted today.",
+	"recon-history": "Read git history and prior decisions for this area. Report what was already tried and why.",
+	"lens-intent": "Does the proposal serve the stated objective? Name any drift from what was asked.",
+	"lens-correctness": "Where is the proposal wrong? Name concrete inputs producing a wrong result.",
+	"lens-security": "What does the proposal expose? Name the trust boundary it crosses.",
+});
+
+const COMPREHENSIVE_RECON_BRANCHES = Object.freeze(["recon-code", "recon-tests", "recon-history"] as const);
+const COMPREHENSIVE_LENS_BRANCHES = Object.freeze(["lens-intent", "lens-correctness", "lens-security"] as const);
+
+const COMPREHENSIVE_COMPUTE: Readonly<Record<string, WorkflowRecipeComputeClass>> = Object.freeze({
+	scope: "cheap",
+	"recon-code": "cheap",
+	"recon-tests": "cheap",
+	"recon-history": "cheap",
+	"synthesize-recon": "standard",
+	"lens-intent": "cheap",
+	"lens-correctness": "cheap",
+	"lens-security": "cheap",
+	synthesize: "deep",
+	"red-team": "deep",
+	adjudicate: "deep",
+	intent: "standard",
+	"acceptance-red": "standard",
+	"implementation-green": "standard",
+	integration: "standard",
+	metamorphic: "standard",
+	"independent-verification": "deep",
+	"adversarial-review": "deep",
+});
+
+const COMPREHENSIVE_CAPABILITIES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+	"red-team": ["read", "red_team"],
+	"adversarial-review": ["read", "red_team"],
+	"lens-security": ["read", "red_team"],
+	"independent-verification": ["read", "verification"],
+	"acceptance-red": ["read", "verification"],
+	metamorphic: ["read", "verification"],
+	"implementation-green": ["read", "edit", "write_owned_paths"],
+	integration: ["read", "invoke_host_effect"],
+});
+
+function comprehensiveStages(): readonly StageSpec[] {
+	return Object.freeze(
+		COMPREHENSIVE_STAGE_IDS.map((stageId) => ({
+			id: stageId,
+			role: INTENT_TDD_STAGE_ROLES[stageId] ?? comprehensiveRole(stageId),
+			taskId: stageId,
+			evidencePolicyId: `evidence-${stageId}`,
+			capabilityIds: COMPREHENSIVE_CAPABILITIES[stageId] ?? ["read"],
+			generatedOutputPaths: [`artifacts/out/${stageId}.json`],
+			lockPaths: [],
+			computeClass: COMPREHENSIVE_COMPUTE[stageId] ?? "standard",
+		})),
+	);
+}
+
+/** Branch stages carry their family's registry role; only the charter differs per branch. */
+function comprehensiveRole(stageId: string): string {
+	if (stageId.startsWith("recon")) return "recon";
+	if (stageId.startsWith("lens")) return "lens";
+	if (stageId === "synthesize-recon") return "synthesize";
+	if (stageId === "scope") return "planning";
+	if (stageId === "adjudicate") return "host_adjudication";
+	return stageId;
+}
+
+/**
+ * The comprehensive built-in topology: fanned-out recon and lenses, a deep
+ * synthesis/red-team/adjudication spine, then the full intent-TDD chain.
+ * This is the recipe to select when an objective needs both a decision and an
+ * implementation, rather than one or the other.
+ */
+export const BUILTIN_COMPREHENSIVE_RECIPE: WorkflowRecipeProposal = freezeDeep({
+	recipeId: "builtin:comprehensive",
+	revision: 1,
+	stages: comprehensiveStages(),
+	gates: [
+		{ id: WORKFLOW_RECIPE_UNIVERSAL_HOST_GATE_ID, kind: "host_adjudication", evidencePolicyId: "universal" },
+		{ id: WORKFLOW_RECIPE_OVERFITTING_REVIEW_ID, kind: "overfitting_review", evidencePolicyId: "overfit" },
+		{
+			id: WORKFLOW_RECIPE_INTENT_TDD_GATE_ID,
+			kind: "tdd_lifecycle",
+			stageIds: [...WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS],
+			evidencePolicyId: "evidence-intent",
+		},
+	],
+	capabilities: builtinImplementationCapabilities(),
+	evidencePolicies: builtinEvidence([...COMPREHENSIVE_STAGE_IDS]),
+	edges: [
+		...COMPREHENSIVE_RECON_BRANCHES.map((stageId) => ({
+			id: `scope-to-${stageId}`,
+			from: "scope",
+			to: stageId,
+			kind: "forward" as const,
+		})),
+		...COMPREHENSIVE_RECON_BRANCHES.map((stageId) => ({
+			id: `${stageId}-to-synthesize-recon`,
+			from: stageId,
+			to: "synthesize-recon",
+			kind: "forward" as const,
+		})),
+		...COMPREHENSIVE_LENS_BRANCHES.map((stageId) => ({
+			id: `synthesize-recon-to-${stageId}`,
+			from: "synthesize-recon",
+			to: stageId,
+			kind: "forward" as const,
+		})),
+		...COMPREHENSIVE_LENS_BRANCHES.map((stageId) => ({
+			id: `${stageId}-to-synthesize`,
+			from: stageId,
+			to: "synthesize",
+			kind: "forward" as const,
+		})),
+		{ id: "synthesize-to-red-team", from: "synthesize", to: "red-team", kind: "forward" },
+		{ id: "red-team-to-adjudicate", from: "red-team", to: "adjudicate", kind: "forward" },
+		{ id: "adjudicate-to-intent", from: "adjudicate", to: "intent", kind: "forward" },
+		...WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS.slice(1).map((stageId, index) => ({
+			id: `${WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS[index]}-to-${stageId}`,
+			from: WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS[index],
+			to: stageId,
+			kind: "forward" as const,
+		})),
+	],
+	fanOuts: [
+		{
+			id: "fanout-recon",
+			from: "scope",
+			branchStageIds: [...COMPREHENSIVE_RECON_BRANCHES],
+			joinStageId: "synthesize-recon",
+			maxBranches: COMPREHENSIVE_RECON_BRANCHES.length,
+		},
+		{
+			id: "fanout-lens",
+			from: "synthesize-recon",
+			branchStageIds: [...COMPREHENSIVE_LENS_BRANCHES],
+			joinStageId: "synthesize",
+			maxBranches: COMPREHENSIVE_LENS_BRANCHES.length,
+		},
+	],
+	loops: [],
+	overlays: builtinOverlays("comprehensive"),
+});
+
 export const BUILTIN_DEFAULT_PRIME_ADAPTIVE_RECIPE: WorkflowRecipeProposal = freezeDeep({
 	recipeId: "builtin:recon-lens-verify-synthesize-red-team-attack-architect-judge-unify-edge-test",
 	revision: 1,
-	stages: builtinStages([
-		"recon",
-		"lens",
-		"verify",
-		"synthesize",
-		"red-team",
-		"attack",
-		"architect",
-		"judge",
-		"unify",
-		"edge-test",
-	]),
+	stages: builtinStages(DEFAULT_PRIME_STAGE_IDS),
 	gates: [
 		{ id: WORKFLOW_RECIPE_UNIVERSAL_HOST_GATE_ID, kind: "host_adjudication", evidencePolicyId: "universal" },
 		{ id: WORKFLOW_RECIPE_OVERFITTING_REVIEW_ID, kind: "overfitting_review", evidencePolicyId: "overfit" },

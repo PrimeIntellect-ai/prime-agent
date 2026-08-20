@@ -134,6 +134,8 @@ interface InspectableRlmSession {
 	_rlmChildSessions: Map<string, AgentSession>;
 	_rlmChildUnsubscribes: Map<string, () => void>;
 	_createKernelHostHandlers(): HostRequestHandlers;
+	_bindWorkflowTask(binding: unknown, isActive: () => boolean): void;
+	_ipythonKernelProvisioner?: { options?: { env?: Record<string, string> } };
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
 
@@ -2390,9 +2392,9 @@ describe("AgentSession rlm recursion", () => {
 			await terminalFence;
 		});
 		const childAbort = child.abort.bind(child);
-		child.abort = () => {
+		child.abort = async () => {
 			order.push("abort");
-			childAbort();
+			await childAbort();
 			childInternals._emit({
 				type: "tool_execution_end",
 				toolCallId: "late-tool",
@@ -3791,6 +3793,8 @@ print(_result.name)
 interface InspectableRlmDirSession {
 	_ensureRlmSessionDir(): string | undefined;
 	_rlmKernelEnv(): Record<string, string>;
+	_bindWorkflowTask(binding: unknown, isActive: () => boolean): void;
+	_ipythonKernelProvisioner?: { options?: { env?: Record<string, string> } };
 }
 
 describe("AgentSession RLM session dir", () => {
@@ -3863,10 +3867,45 @@ describe("AgentSession RLM session dir", () => {
 		expect(env.RLM_SESSION_DIR).toBeUndefined();
 		expect(env.RLM_HARNESS_STATE_DIR).toBeUndefined();
 		expect(env.RLM_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
+		expect(env.RLM_HARNESS_READ_ONLY).toBeUndefined();
 		expect(env).toMatchObject({ RLM_DEPTH: "0" });
 
 		const after = readdirSync(tmpdir()).filter((name) => name.startsWith("prime-agent-rlm-"));
 		expect(after).toEqual(before);
+	});
+
+	it("marks workflow-owned kernels read-only and rebuilds after task binding", () => {
+		const root = createSession(SessionManager.inMemory(tempDir));
+		const inspectable = root as unknown as InspectableRlmDirSession;
+		const before = inspectable._ipythonKernelProvisioner;
+
+		root.setWorkflowHost({
+			execute: async () => {
+				throw new Error("not used");
+			},
+			status: () => ({ status: "active", workflowId: "workflow-env", stateDigest: "workflow-head" }) as never,
+		} as never);
+
+		expect(inspectable._rlmKernelEnv().RLM_HARNESS_READ_ONLY).toBe("1");
+
+		inspectable._bindWorkflowTask(
+			{
+				schemaVersion: 1,
+				kind: "workflow_task_binding",
+				workflowId: "workflow-env",
+				taskId: "task-env",
+				attemptId: "attempt-env",
+				executionKey: "execution-env",
+				epochRef: { storeEpoch: 1, coordinatorEpoch: 1 },
+				deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+				capsuleDigest: "capsule-env",
+			},
+			() => true,
+		);
+
+		const after = inspectable._ipythonKernelProvisioner;
+		expect(after).not.toBe(before);
+		expect(after?.options?.env?.RLM_HARNESS_READ_ONLY).toBe("1");
 	});
 
 	it("uses the persistent artifact dir and sets RLM_SESSION_DIR for a persisted session", () => {

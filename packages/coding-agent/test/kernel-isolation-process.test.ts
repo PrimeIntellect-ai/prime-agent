@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
 import type { KernelContainerIsolationOptions } from "../src/core/kernel/isolation.js";
+import { manifestPathIn, snapshotPathIn } from "../src/core/kernel/state-snapshot.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
 const execFileAsync = promisify(execFile);
@@ -124,7 +125,7 @@ describe("KernelManager physical isolation", () => {
 				type: "docker",
 				image: DOCKER_IMAGE,
 				ownerIdentity,
-				protectedPaths: [runRoot, keyring, journal, sharedTempSecret],
+				protectedPaths: [runRoot, keyring, journal, sharedTempSecret, output],
 				sessionId: `session-${process.pid}`,
 				sessionPath,
 				workflowId: "workflow-isolation",
@@ -184,10 +185,12 @@ describe("KernelManager physical isolation", () => {
 			expect(bindMounts).toHaveLength(3);
 			const workspaceMount = bindMounts.find((mount) => mount.Source === workspaceSource);
 			expect(workspaceMount).toMatchObject({ Destination: workspaceSource, RW: false });
-			const outputMount = bindMounts.find((mount) => mount.Source === outputSource);
-			expect(outputMount).toMatchObject({ Destination: outputSource, RW: true });
+			const scratchMount = bindMounts.find((mount) => mount.RW);
+			expect(scratchMount).toMatchObject({ RW: true });
+			expect(scratchMount?.Source).toMatch(/prime-agent-kernel-output-/);
+			expect(scratchMount?.Source).not.toBe(outputSource);
 			for (const mount of bindMounts) {
-				if (mount.Source !== outputSource) expect(mount.RW).toBe(false);
+				if (mount !== scratchMount) expect(mount.RW).toBe(false);
 				expect(mount.Source).not.toBe(runRoot);
 				expect(mount.Source).not.toBe(keyring);
 				expect(mount.Source).not.toBe(journal);
@@ -293,6 +296,8 @@ print(json.dumps({
 		}
 
 		await expect(execFileAsync("docker", ["inspect", containerId])).rejects.toThrow();
+		await expect(readFile(snapshotPathIn(output))).resolves.toBeTruthy();
+		await expect(readFile(manifestPathIn(output))).resolves.toBeTruthy();
 		await rm(sharedTempSecret, { force: true });
 	});
 
@@ -336,7 +341,16 @@ print(json.dumps({
 			await provisioner.kill();
 		}
 
-		await expect(execFileAsync("docker", ["ps", "--all", "--filter", `label=prime-agent.kernel-owner=${ownerIdentity}`, "--format", "{{.ID}}"])).resolves.toMatchObject({ stdout: "" });
+		await expect(
+			execFileAsync("docker", [
+				"ps",
+				"--all",
+				"--filter",
+				`label=prime-agent.kernel-owner=${ownerIdentity}`,
+				"--format",
+				"{{.ID}}",
+			]),
+		).resolves.toMatchObject({ stdout: "" });
 	});
 
 	it("retains the created container identity when docker create fails before manager assignment", async () => {
@@ -396,7 +410,10 @@ exec "${dockerBinary}" "$@"
 		try {
 			const error = await manager.start().catch((value: unknown) => value);
 			createdId = (await readFile(markerPath, "utf8").catch(() => "")).trim();
-			if (!createdId) throw new Error(`docker create wrapper did not record an id: ${error instanceof Error ? error.message : String(error)}`);
+			if (!createdId)
+				throw new Error(
+					`docker create wrapper did not record an id: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			expect(error).toBeInstanceOf(Error);
 			expect(error).toMatchObject({ containerId: createdId });
 			expect(createdId).toMatch(/^[0-9a-f]{12,64}$/);
@@ -406,6 +423,296 @@ exec "${dockerBinary}" "$@"
 			if (createdId) await execFileAsync(dockerBinary, ["rm", "--force", createdId]).catch(() => {});
 		}
 		await expect(execFileAsync(dockerBinary, ["inspect", createdId])).rejects.toThrow();
+	});
+
+	it("propagates a typed owner lookup fence failure instead of abandoning an orphan", async () => {
+		await requireDocker();
+
+		root = await mkdtemp(join(tmpdir(), "prime-agent-kernel-isolation-owner-lookup-"));
+		const workspace = join(root, "workspace");
+		const authority = join(root, "authority");
+		await Promise.all([mkdir(workspace, { recursive: true }), mkdir(authority, { recursive: true })]);
+		const sessionPath = join(root, "session.jsonl");
+		await writeFile(sessionPath, "session\n");
+		const dockerBinary = (await execFileAsync("which", ["docker"])).stdout.trim();
+		const markerPath = join(root, "created-container-id");
+		const wrapperPath = join(root, "docker-owner-lookup-failure");
+		await writeFile(
+			wrapperPath,
+			`#!/bin/sh
+if [ "$1" = "create" ]; then
+  id=$("${dockerBinary}" "$@") || exit $?
+  printf '%s' "$id" > "${markerPath}"
+  exit 42
+fi
+if [ "$1" = "ps" ]; then
+  printf '%s\n' 'owner lookup failed' >&2
+  exit 43
+fi
+exec "${dockerBinary}" "$@"
+`,
+			{ mode: 0o755 },
+		);
+		await chmod(wrapperPath, 0o755);
+		const ownerIdentity = `kernel-owner-lookup-${process.pid}-${Date.now()}`;
+		const manager = new KernelManager({
+			cwd: workspace,
+			isolation: {
+				type: "docker",
+				image: DOCKER_IMAGE,
+				ownerIdentity,
+				protectedPaths: [authority],
+				sessionId: "session-owner-lookup",
+				sessionPath,
+				workflowId: "workflow-owner-lookup",
+				taskId: "task-owner-lookup",
+				attemptId: "attempt-owner-lookup",
+				executionKey: "execution-owner-lookup",
+				dockerBinary: wrapperPath,
+			},
+		});
+		let createdId = "";
+		try {
+			const error = await manager.start().catch((value: unknown) => value);
+			createdId = (await readFile(markerPath, "utf8").catch(() => "")).trim();
+			expect(error).toMatchObject({ code: "KERNEL_CONTAINER_CLEANUP_FAILED", ownerIdentity });
+		} finally {
+			if (!createdId) createdId = (await readFile(markerPath, "utf8").catch(() => "")).trim();
+			if (createdId) await execFileAsync(dockerBinary, ["rm", "--force", createdId]).catch(() => {});
+		}
+	});
+
+	it("reconciles every duplicate owner container before reporting a typed fence failure", async () => {
+		await requireDocker();
+
+		root = await mkdtemp(join(tmpdir(), "prime-agent-kernel-isolation-owner-duplicates-"));
+		const workspace = join(root, "workspace");
+		const authority = join(root, "authority");
+		await Promise.all([mkdir(workspace, { recursive: true }), mkdir(authority, { recursive: true })]);
+		const sessionPath = join(root, "session.jsonl");
+		await writeFile(sessionPath, "session\n");
+		const dockerBinary = (await execFileAsync("which", ["docker"])).stdout.trim();
+		const markerPath = join(root, "created-container-ids");
+		const wrapperPath = join(root, "docker-owner-duplicates");
+		await writeFile(
+			wrapperPath,
+			`#!/bin/sh
+if [ "$1" = "create" ]; then
+  first=$("${dockerBinary}" "$@") || exit $?
+  second=$("${dockerBinary}" "$@") || exit $?
+  printf '%s\n%s\n' "$first" "$second" > "${markerPath}"
+  exit 42
+fi
+if [ "$1" = "ps" ]; then
+  cat "${markerPath}"
+  exit 0
+fi
+exec "${dockerBinary}" "$@"
+`,
+			{ mode: 0o755 },
+		);
+		await chmod(wrapperPath, 0o755);
+		const ownerIdentity = `kernel-owner-duplicates-${process.pid}-${Date.now()}`;
+		const manager = new KernelManager({
+			cwd: workspace,
+			isolation: {
+				type: "docker",
+				image: DOCKER_IMAGE,
+				ownerIdentity,
+				protectedPaths: [authority],
+				sessionId: "session-owner-duplicates",
+				sessionPath,
+				workflowId: "workflow-owner-duplicates",
+				taskId: "task-owner-duplicates",
+				attemptId: "attempt-owner-duplicates",
+				executionKey: "execution-owner-duplicates",
+				dockerBinary: wrapperPath,
+			},
+		});
+		let createdIds: string[] = [];
+		try {
+			const error = await manager.start().catch((value: unknown) => value);
+			createdIds = (await readFile(markerPath, "utf8").catch(() => "")).trim().split("\n").filter(Boolean);
+			expect(error).toMatchObject({
+				code: "KERNEL_CONTAINER_CLEANUP_FAILED",
+				ownerIdentity,
+				containerIds: createdIds,
+			});
+			for (const id of createdIds) await expect(execFileAsync(dockerBinary, ["inspect", id])).rejects.toThrow();
+		} finally {
+			for (const id of createdIds) await execFileAsync(dockerBinary, ["rm", "--force", id]).catch(() => {});
+		}
+	});
+
+	it("retains owner-reconciled container identity when create cleanup fails before manager assignment", async () => {
+		await requireDocker();
+
+		root = await mkdtemp(join(tmpdir(), "prime-agent-kernel-isolation-owner-cleanup-retry-"));
+		const workspace = join(root, "workspace");
+		const authority = join(root, "authority");
+		await Promise.all([mkdir(workspace, { recursive: true }), mkdir(authority, { recursive: true })]);
+		const sessionPath = join(root, "session.jsonl");
+		await writeFile(sessionPath, "session\n");
+		const dockerBinary = (await execFileAsync("which", ["docker"])).stdout.trim();
+		const markerPath = join(root, "created-container-id");
+		const wrapperPath = join(root, "docker-owner-cleanup-retry");
+		const writeWrapper = async (failRm: boolean): Promise<void> => {
+			await writeFile(
+				wrapperPath,
+				`#!/bin/sh
+if [ "$1" = "create" ]; then
+  id=$("${dockerBinary}" "$@") || exit $?
+  printf '%s' "$id" > "${markerPath}"
+  exit 42
+fi
+${failRm ? `if [ "$1" = "rm" ]; then exit 42; fi` : ""}
+exec "${dockerBinary}" "$@"
+`,
+				{ mode: 0o755 },
+			);
+			await chmod(wrapperPath, 0o755);
+		};
+		await writeWrapper(true);
+		const ownerIdentity = `kernel-owner-cleanup-retry-${process.pid}-${Date.now()}`;
+		const manager = new KernelManager({
+			cwd: workspace,
+			isolation: {
+				type: "docker",
+				image: DOCKER_IMAGE,
+				ownerIdentity,
+				protectedPaths: [authority],
+				sessionId: "session-owner-cleanup-retry",
+				sessionPath,
+				workflowId: "workflow-owner-cleanup-retry",
+				taskId: "task-owner-cleanup-retry",
+				attemptId: "attempt-owner-cleanup-retry",
+				executionKey: "execution-owner-cleanup-retry",
+				dockerBinary: wrapperPath,
+			},
+		});
+		let createdId = "";
+		try {
+			const error = await manager.start().catch((value: unknown) => value);
+			createdId = (await readFile(markerPath, "utf8").catch(() => "")).trim();
+			expect(error).toMatchObject({
+				code: "KERNEL_CONTAINER_CLEANUP_FAILED",
+				containerIds: [createdId],
+			});
+			await expect(execFileAsync(dockerBinary, ["inspect", createdId])).resolves.toBeTruthy();
+			await writeWrapper(false);
+			await manager.kill();
+			await expect(execFileAsync(dockerBinary, ["inspect", createdId])).rejects.toThrow();
+		} finally {
+			if (!createdId) createdId = (await readFile(markerPath, "utf8").catch(() => "")).trim();
+			if (createdId) await execFileAsync(dockerBinary, ["rm", "--force", createdId]).catch(() => {});
+		}
+	});
+
+	it("retains scratch after an unverified container death and commits only after a later fence proof", async () => {
+		await requireDocker();
+
+		root = await mkdtemp(join(tmpdir(), "prime-agent-kernel-isolation-fence-"));
+		const workspace = join(root, "workspace");
+		const artifactRoot = join(root, "artifacts");
+		await Promise.all([mkdir(workspace, { recursive: true }), mkdir(artifactRoot, { recursive: true, mode: 0o700 })]);
+		const sessionPath = join(root, "session.jsonl");
+		await writeFile(sessionPath, "session\n");
+		const dockerBinary = (await execFileAsync("which", ["docker"])).stdout.trim();
+		const wrapperPath = join(root, "docker-cleanup-failure");
+		const writeWrapper = async (failRm: boolean): Promise<void> => {
+			await writeFile(
+				wrapperPath,
+				`#!/bin/sh
+if [ "$1" = "create" ]; then
+  args=""
+  for arg in "$@"; do
+    if [ "$arg" != "--rm" ]; then args="$args '$arg'"; fi
+  done
+  eval "${dockerBinary} $args"
+  exit $?
+fi
+${failRm ? `if [ "$1" = "rm" ]; then exit 42; fi` : ""}
+exec "${dockerBinary}" "$@"
+`,
+				{ mode: 0o755 },
+			);
+			await chmod(wrapperPath, 0o755);
+		};
+		await writeWrapper(true);
+		const ownerIdentity = `kernel-fence-${process.pid}-${Date.now()}`;
+		const provisioner = new IpythonKernelProvisioner(workspace, {
+			snapshotDir: artifactRoot,
+			isolation: {
+				type: "docker",
+				image: DOCKER_IMAGE,
+				ownerIdentity,
+				protectedPaths: [artifactRoot],
+				sessionId: "session-fence",
+				sessionPath,
+				workflowId: "workflow-fence",
+				taskId: "task-fence",
+				attemptId: "attempt-fence",
+				executionKey: "execution-fence",
+				dockerBinary: wrapperPath,
+			},
+		});
+		let scratch = "";
+		try {
+			await provisioner.ensure();
+			const owned = await inspectOwnedContainer(ownerIdentity);
+			scratch = owned.inspection.Mounts.find((mount) => mount.Type === "bind" && mount.RW)?.Source ?? "";
+			expect(scratch).toMatch(/prime-agent-kernel-output-/);
+			await expect(provisioner.kill()).rejects.toMatchObject({ code: "KERNEL_CONTAINER_CLEANUP_FAILED" });
+			await expect(stat(scratch)).resolves.toBeTruthy();
+			await writeWrapper(false);
+			await provisioner.kill();
+			await expect(stat(scratch)).rejects.toThrow();
+		} finally {
+			await provisioner.kill().catch(() => {});
+		}
+	});
+
+	it("stages durable snapshots into scratch and commits them only after isolated death", async () => {
+		await requireDocker();
+
+		root = await mkdtemp(join(tmpdir(), "prime-agent-kernel-isolation-snapshot-continuity-"));
+		const workspace = join(root, "workspace");
+		const artifactRoot = join(root, "artifacts");
+		await Promise.all([mkdir(workspace, { recursive: true }), mkdir(artifactRoot, { recursive: true, mode: 0o700 })]);
+		const sessionPath = join(root, "session.jsonl");
+		await writeFile(sessionPath, "session\n");
+		const makeProvisioner = (ownerIdentity: string): IpythonKernelProvisioner =>
+			new IpythonKernelProvisioner(workspace, {
+				snapshotDir: artifactRoot,
+				isolation: {
+					type: "docker",
+					image: DOCKER_IMAGE,
+					ownerIdentity,
+					protectedPaths: [artifactRoot],
+					sessionId: "session-snapshot-continuity",
+					sessionPath,
+					workflowId: "workflow-snapshot-continuity",
+					taskId: "task-snapshot-continuity",
+					attemptId: "attempt-snapshot-continuity",
+					executionKey: `execution-${ownerIdentity}`,
+				},
+			});
+		const first = makeProvisioner(`kernel-snapshot-first-${process.pid}-${Date.now()}`);
+		await first.ensure().then((manager) => manager.execute("persisted_value = 'durable-state'"));
+		const firstManager = first.manager;
+		if (!firstManager) throw new Error("first isolated manager missing");
+		await expect(firstManager.snapshotState()).resolves.not.toBeNull();
+		await first.kill();
+		await expect(readFile(snapshotPathIn(artifactRoot))).resolves.toBeTruthy();
+		await expect(readFile(manifestPathIn(artifactRoot))).resolves.toBeTruthy();
+
+		const second = makeProvisioner(`kernel-snapshot-second-${process.pid}-${Date.now()}`);
+		try {
+			const result = await (await second.ensure()).execute("print(persisted_value)");
+			expect(result.stdout.trim()).toBe("durable-state");
+		} finally {
+			await second.kill();
+		}
 	});
 
 	it("rejects a workspace overlapping protected host authority before container start", async () => {

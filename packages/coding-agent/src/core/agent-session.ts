@@ -55,6 +55,7 @@ import {
 	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
+import type { DaemonWorkflowStatusProjection } from "../modes/daemon/daemon-session-list.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -320,6 +321,7 @@ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapp
 import { addAssistantUsage, emptyUsage } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
 import type { PrimeAdaptiveRuntimeState } from "./workflow/adaptive-runtime.js";
+import { changedPaths, computePathDiff, formatDiffPush, sharesDiffs } from "./workflow/agent-collaboration.js";
 import {
 	createWorkflowBrainstormState,
 	createWorkflowProposalTool,
@@ -333,7 +335,7 @@ import {
 	workflowStartRequestFromProposal,
 } from "./workflow/brainstorm.js";
 import { readWorkflowCliApprovalDelivery, removeWorkflowCliApprovalDelivery } from "./workflow/cli-approval.js";
-import { digestObject } from "./workflow/contracts.js";
+import { digestObject, sha256Hex } from "./workflow/contracts.js";
 import type { DefaultPrimeWorkerFailureNotice } from "./workflow/default-task-runtime.js";
 import type {
 	WorkflowExecutionEvidenceSource,
@@ -351,6 +353,10 @@ import {
 	validateWorkflowGoalProjectionAuthorization,
 	type WorkflowGoalProjectionAuthorization,
 } from "./workflow/journal.js";
+import type {
+	WorkflowLearningPromotionApplication,
+	WorkflowLearningPromotionConsumeAndApplyInput,
+} from "./workflow/learning-promotion-authority.js";
 import type { WorkflowLearningRuntimeAdapter } from "./workflow/learning-runtime-adapter.js";
 import { digestWorkflowGoalState, workflowGoalProjectionSnapshot } from "./workflow/projections.js";
 import type { WorkflowSchedulerState } from "./workflow/scheduler.js";
@@ -1245,6 +1251,11 @@ interface WorkflowKernelHostBindings {
 	};
 }
 
+interface WorkflowKernelOwnership {
+	readonly workflowId: string | undefined;
+	readonly workflowBound: boolean;
+}
+
 export type AgentSessionWorkflowWorkerLaunchContext = Omit<
 	WorkerModelCapabilityLaunchInput,
 	"prompt" | "sessionName" | "selector" | "provider" | "model" | "reasoning" | "allowFallback"
@@ -1474,6 +1485,28 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 const DEFAULT_PRIME_WORKER_MODEL = WORKER_MODEL_SELECTOR;
+/** Upper bound on back-to-back mid-run messages accepted from one sender within a single run. */
+const MAX_CONSECUTIVE_AGENT_MESSAGE_STEERS = 3;
+
+/**
+ * Tools brainstorming may use. Reconnaissance needs to read the workspace, so the
+ * propose tool alone leaves the planner blind and it asks the user for file contents
+ * it could have read. The read-only boundary is instructed in the brainstorm prompt
+ * and enforced for real at the recon stage, which runs under the read_workspace
+ * capability rather than session tools.
+ */
+const WORKFLOW_BRAINSTORM_TOOL_NAMES = [WORKFLOW_PROPOSE_TOOL_NAME, "ipython"] as const;
+
+/** Split a `provider/model-id` worker selector; model ids may themselves contain slashes. */
+function workerModelProvider(selector: string): string {
+	const separator = selector.indexOf("/");
+	return separator < 0 ? selector : selector.slice(0, separator);
+}
+
+function workerModelId(selector: string): string {
+	const separator = selector.indexOf("/");
+	return separator < 0 ? "" : selector.slice(separator + 1);
+}
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1486,8 +1519,18 @@ Reviewer instructions: ${review.instructions}`
 	return `Automatic refine review triggered by ${reason}. Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories. Do not promote anything global unless explicitly requested. Reviewer rationale: ${review.rationale}${detail}`;
 }
 
-const WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED =
-	"workflow refinement requires an authenticated learning promotion receipt bound to an accepted stage result";
+export const NONAUTHORITATIVE_REFINEMENT_REJECTED = "nonauthoritative_refinement_rejected" as const;
+
+const WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED = `${NONAUTHORITATIVE_REFINEMENT_REJECTED}: workflow refinement requires an authenticated learning promotion receipt bound to an accepted stage result`;
+
+export class AgentSessionRefinementError extends Error {
+	readonly code = NONAUTHORITATIVE_REFINEMENT_REJECTED;
+
+	constructor() {
+		super(WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED);
+		this.name = "AgentSessionRefinementError";
+	}
+}
 
 function isNonNegativeInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -1682,6 +1725,12 @@ export class AgentSession {
 	private _sessionInputArrivalEpoch = 0;
 	// Persists abort/restart suspension after the initiating call returns.
 	private _sessionInputPumpSuspended = false;
+	/** Per-sender consecutive steer count, reset when the recipient finishes a run. */
+	private readonly _consecutiveSteersBySender = new Map<string, number>();
+	/** Content fingerprints already steered, so a repeated message cannot re-enter the loop. */
+	private readonly _steeredAgentMessageFingerprints = new Set<string>();
+	/** Sibling sessions that receive this worker's diffs, and how this worker identifies itself. */
+	private _collaborationPeers?: { readonly author: string; readonly reviewers: readonly string[] };
 	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
@@ -2101,10 +2150,11 @@ export class AgentSession {
 			if (this._workflowHostRequestHandlers === undefined)
 				throw new Error("Workflow kernel host handlers were not installed before workflow binding.");
 			Object.assign(this._workflowHostRequestHandlers, bindings.hostRequestHandlers);
-			// KernelManager snapshots its gateway handler map at construction. Rebuild
-			// after durable binding so a prewarmed kernel cannot retain the pre-host map.
-			this._buildRuntime({ activeToolNames: this.getActiveToolNames(), includeAllExtensionTools: true });
 		}
+		// KernelManager snapshots both its gateway handler map and environment at
+		// construction. Rebuild after durable binding so a prewarmed kernel cannot
+		// retain pre-host refinement permissions or a writable harness.
+		this._buildRuntime({ activeToolNames: this.getActiveToolNames(), includeAllExtensionTools: true });
 		if (host !== undefined) this.registerDisposeCallback(() => host.dispose?.());
 		this._releaseDeferredIpythonPrewarm();
 	}
@@ -2119,6 +2169,57 @@ export class AgentSession {
 		if (this._workflowHost !== undefined || this._workflowHostLoader !== undefined)
 			throw new Error("The durable workflow host loader is already configured.");
 		this._workflowHostLoader = loader;
+	}
+
+	/**
+	 * Read safe workflow status from the already-bound host without loading workflow runtime state.
+
+	 * Return: Safe workflow status projection, or undefined before host binding.
+	 */
+	getWorkflowStatusProjection(): DaemonWorkflowStatusProjection | undefined {
+		const status = this._workflowHost?.status();
+		if (status === undefined) return undefined;
+		const blocked = status.blocked;
+		const approvalRequest = status.approvalRequest;
+		return {
+			workflowId: status.workflowId,
+			status: status.status,
+			phase: status.phase === "recovering" ? null : status.phase,
+			nextGate: null,
+			nextTask: null,
+			blocker:
+				blocked === undefined
+					? null
+					: {
+							kind: blocked.kind,
+							reason: blocked.reason,
+							...(blocked.blockerId === undefined ? {} : { blockerId: blocked.blockerId }),
+							...(blocked.blockerDigest === undefined ? {} : { blockerDigest: blocked.blockerDigest }),
+							...(blocked.owner === undefined ? {} : { owner: blocked.owner }),
+							...(blocked.resumeEventKind === undefined ? {} : { resumeEventKind: blocked.resumeEventKind }),
+							...(blocked.resumePredicateDigest === undefined
+								? {}
+								: { resumePredicateDigest: blocked.resumePredicateDigest }),
+							...(blocked.nextEligibleAt === undefined ? {} : { nextEligibleAt: blocked.nextEligibleAt }),
+						},
+			headDigest: status.stateDigest,
+			approvalRequest:
+				approvalRequest === null
+					? null
+					: {
+							approvalRequestId: approvalRequest.approvalRequestId,
+							question: approvalRequest.question,
+							expiresAt: approvalRequest.expiresAt,
+							expectedResponseSequence: approvalRequest.expectedResponseSequence,
+							headDigest: approvalRequest.headDigest,
+							stateDigest: approvalRequest.stateDigest,
+							options: approvalRequest.options.map(({ optionId, label, effectDigest }) => ({
+								optionId,
+								label,
+								effectDigest,
+							})),
+						},
+		};
 	}
 
 	private async _ensureWorkflowHost(): Promise<WorkflowShell> {
@@ -2189,7 +2290,7 @@ export class AgentSession {
 							previousToolNames: this.getActiveToolNames().filter((name) => name !== WORKFLOW_PROPOSE_TOOL_NAME),
 						});
 			if (this._workflowBrainstorm !== state) this._persistWorkflowBrainstormState(state);
-			this.setActiveToolsByName([WORKFLOW_PROPOSE_TOOL_NAME]);
+			this.setActiveToolsByName([...WORKFLOW_BRAINSTORM_TOOL_NAMES]);
 			return WORKFLOW_BRAINSTORM_CONTEXT_QUESTION;
 		}
 		const state =
@@ -2203,8 +2304,7 @@ export class AgentSession {
 						previousToolNames: this.getActiveToolNames().filter((name) => name !== WORKFLOW_PROPOSE_TOOL_NAME),
 					});
 		if (this._workflowBrainstorm !== state) this._persistWorkflowBrainstormState(state);
-		await this._ipythonKernelProvisioner?.kill();
-		this.setActiveToolsByName([WORKFLOW_PROPOSE_TOOL_NAME]);
+		this.setActiveToolsByName([...WORKFLOW_BRAINSTORM_TOOL_NAMES]);
 		await this._queuePreparedPrompt("followUp", workflowBrainstormPrompt(state), undefined, {
 			resumeIfIdle: true,
 			source: "internal",
@@ -2360,6 +2460,25 @@ export class AgentSession {
 		});
 		await workflowHost.primeWorkflow?.recordSkillOutcome?.(input.skillName, result);
 		return result;
+	}
+
+	/**
+	 * Apply one host-authenticated learning promotion to the canonical workflow refinement store.
+	 *
+	 * Args:
+	 * input: One-use promotion receipt and the host-validated refinement payload.
+	 * Return: Canonical application result returned by the workflow authority.
+	 */
+	async applyWorkflowLearningPromotionRefinement(
+		input: WorkflowLearningPromotionConsumeAndApplyInput,
+	): Promise<WorkflowLearningPromotionApplication> {
+		const workflowHost = this._workflowHost;
+		if (workflowHost === undefined)
+			throw new Error("Workflow learning promotion refinement requires a persisted session host.");
+		const receipts = workflowHost.learningPromotionReceipts;
+		if (receipts === undefined)
+			throw new Error("Workflow learning promotion refinement is unavailable on this host.");
+		return receipts.consumeAndApply(input);
 	}
 
 	/**
@@ -2658,6 +2777,11 @@ export class AgentSession {
 			this.sessionManager.appendCustomEntryWithRollback(WORKFLOW_TASK_BINDING_CUSTOM_ENTRY, bindingData);
 			this.sessionManager.flushNow();
 		}
+		// A child may have built its provisioner before the scheduler issued the
+		// task binding. Rebuild it now so isolation, host handlers, and the
+		// read-only harness marker are captured before any deferred prewarm.
+		this._buildRuntime({ activeToolNames: this.getActiveToolNames(), includeAllExtensionTools: true });
+		this._releaseDeferredIpythonPrewarm();
 	}
 
 	private _workflowTaskAdmissionBlockReason(): string | undefined {
@@ -2986,22 +3110,37 @@ export class AgentSession {
 		this.sessionManager.flushNow();
 	}
 
-	private _workflowOwnsGoalState(): boolean {
-		if (this._loadPersistedGoalState().workflowId !== undefined) return true;
-		const workflowHost = this._workflowHost;
-		if (workflowHost === undefined) return false;
-		try {
-			const workflowId = workflowHost.status().workflowId;
-			return workflowId !== undefined && workflowId !== null;
-		} catch (error) {
-			if (
-				error instanceof Error &&
-				(error.message.includes("durable acceptance projection") ||
-					error.message.includes("Workflow start approval is incomplete"))
-			)
-				return true;
-			throw error;
+	private _resolveWorkflowKernelOwnership(): WorkflowKernelOwnership {
+		const binding = this._workflowTaskBinding;
+		let workflowId = binding?.workflowId;
+		let workflowBound = binding !== undefined;
+		if (workflowId === undefined) {
+			try {
+				workflowId = this._workflowHost?.status().workflowId ?? undefined;
+				workflowBound = workflowId !== undefined;
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					(error.message.includes("durable acceptance projection") ||
+						error.message.includes("Workflow start approval is incomplete"))
+				) {
+					workflowBound = true;
+				} else {
+					throw error;
+				}
+			}
 		}
+		workflowId ??= this._loadPersistedGoalState().workflowId;
+		return { workflowId, workflowBound };
+	}
+
+	private _workflowOwnsGoalState(): boolean {
+		const ownership = this._resolveWorkflowKernelOwnership();
+		return ownership.workflowId !== undefined || ownership.workflowBound;
+	}
+
+	private _assertRefinementAuthority(): void {
+		if (this._workflowOwnsGoalState()) throw new AgentSessionRefinementError();
 	}
 
 	private _setGoalState(
@@ -3668,6 +3807,10 @@ export class AgentSession {
 	 * in-flight guards and counter resets.
 	 */
 	private async _runSerializedRefineCheckpoint(): Promise<void> {
+		// Automatic refinement is a background courtesy. When a workflow owns the goal the
+		// refinement must go through its learning path instead, so skip quietly rather than
+		// failing the turn — throwing here replaced the assistant's actual response.
+		if (this._workflowOwnsGoalState()) return;
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -3757,6 +3900,7 @@ export class AgentSession {
 	}
 
 	private async _runSerializedRefineCheckpointAfterBackground(branchVersion: number): Promise<void> {
+		this._assertRefinementAuthority();
 		// No background result, or a refine.run arrived while the background result was
 		// in flight. Fall through so an explicit pending request is serviced at this boundary.
 
@@ -3824,6 +3968,7 @@ export class AgentSession {
 		reason: "compact" | "turn_interval",
 		branchVersion: number,
 	): Promise<void> {
+		this._assertRefinementAuthority();
 		const reviewAbort = new AbortController();
 		this._autoRefineReviewAbort = reviewAbort;
 		this._autoRefineInProgress = true;
@@ -3905,6 +4050,7 @@ export class AgentSession {
 	private async _applySerializedPlan(
 		bgResult: Extract<SerializedBackgroundPlanResult, { status: "plan" }>,
 	): Promise<void> {
+		this._assertRefinementAuthority();
 		let resolveApplySettled: () => void = () => {};
 		const applySettled = new Promise<void>((resolve) => {
 			resolveApplySettled = resolve;
@@ -3931,6 +4077,7 @@ export class AgentSession {
 		if (!this._serializedRefine || this._disposed || this._disposing) {
 			return;
 		}
+		if (this._workflowOwnsGoalState()) return;
 		// Don't start if a plan is already in flight.
 		if (this._serializedPlanInFlight || this._refineInFlight || this._refinePlanInFlight) {
 			return;
@@ -3990,6 +4137,7 @@ export class AgentSession {
 		skipReview = false,
 	): Promise<SerializedBackgroundPlanResult | undefined> {
 		try {
+			this._assertRefinementAuthority();
 			let planOptions = options;
 			if (!skipReview) {
 				// Interval-triggered: run the review gate first, then derive
@@ -4053,6 +4201,7 @@ export class AgentSession {
 		rollbackId?: string;
 		global?: boolean;
 	}): Promise<void> {
+		this._assertRefinementAuthority();
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -4359,6 +4508,15 @@ export class AgentSession {
 				};
 			}
 			case "refine.run": {
+				if (this._workflowOwnsGoalState()) {
+					const rejection = new AgentSessionRefinementError();
+					return {
+						scheduled: false,
+						status: "rejected",
+						code: rejection.code,
+						reason: rejection.message,
+					};
+				}
 				const instructions = payload.instructions;
 				if (instructions !== undefined && typeof instructions !== "string") {
 					throw new Error("refine.run instructions must be a string when provided");
@@ -4366,12 +4524,6 @@ export class AgentSession {
 				const globalFlag = payload.global;
 				if (globalFlag !== undefined && typeof globalFlag !== "boolean") {
 					throw new Error("refine.run global must be a boolean when provided");
-				}
-				if (this._workflowOwnsGoalState()) {
-					return {
-						scheduled: false,
-						reason: WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED,
-					};
 				}
 				if (!this.isStreaming) {
 					return {
@@ -5047,6 +5199,9 @@ export class AgentSession {
 				isError: event.isError,
 				resultDigest: workflowExecutionToolResultDigest(event.result, event.isError),
 			});
+			// A successful mutation is the trigger for sharing work in progress. The host computes
+			// and delivers the diff, so neither the author nor the reviewer spends a model turn.
+			if (!event.isError && this._collaborationPeers !== undefined) void this._pushChangedDiffs();
 			return;
 		}
 		if (event.type !== "turn_end" || event.message.role !== "assistant") return;
@@ -5096,6 +5251,9 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "agent_end") {
+			// A completed run ends the steer budget: the next task starts with a fresh allowance
+			// and previously-seen content may legitimately be sent again.
+			this._resetAgentMessageSteerBudget();
 			const cleared = this._actionStore
 				.ownedActions()
 				.filter(
@@ -5483,6 +5641,22 @@ export class AgentSession {
 			clearTimeout(timer);
 		}
 		this._scheduledAutoRefineTimers.clear();
+		if (this._workflowOwnsGoalState()) {
+			this._autoRefineReviewAbort?.abort();
+			this._refineAbortController?.abort();
+			this._pendingRequestedRefine = undefined;
+			this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+			while (this._refineInFlight || this._refinePlanInFlight || this._serializedPlanInFlight) {
+				if (this._refineInFlight) {
+					await this._refineInFlight;
+				} else if (this._refinePlanInFlight) {
+					await this._refinePlanInFlight;
+				} else {
+					await this._consumeSerializedBackgroundPlan(async () => true);
+				}
+			}
+			return;
+		}
 		// Wait for in-flight refinement (including serialized background plan) to settle.
 		while (this._refineInFlight || this._refinePlanInFlight || this._serializedPlanInFlight) {
 			if (this._refineInFlight) {
@@ -6499,6 +6673,101 @@ export class AgentSession {
 			const details = entry.details;
 			return isObjectRecord(details) && details.id === messageId;
 		});
+	}
+
+	/**
+	 * Deliver an agent-to-agent message at the recipient's next turn boundary.
+	 *
+	 * The session-level queue waits for the whole run to finish, so a message to a busy agent
+	 * cannot reach it mid-task. Steering injects at the next turn boundary instead. Steering
+	 * also keeps the recipient's loop alive (agent-loop drains it and declines to stop), so two
+	 * agents can hold each other running — the bounds below are what make this safe.
+	 *
+	 * Args:
+	 * prompt: Rendered message text delivered to the recipient.
+	 * message: Structured agent message, used for identity and de-duplication.
+	 * Return: True when the message was steered; false when the caller should fall back to queueing.
+	 */
+	/**
+	 * Register who this worker is and which siblings review its changes.
+	 *
+	 * Args:
+	 * peers: Author identity and reviewer session ids, or undefined to stop sharing.
+	 * Return: No value.
+	 */
+	setCollaborationPeers(peers: { readonly author: string; readonly reviewers: readonly string[] } | undefined): void {
+		this._collaborationPeers = peers;
+	}
+
+	/**
+	 * Deliver the diff for a just-edited path to this worker's reviewers.
+	 *
+	 * The diff is computed by the host, so the editing worker spends no model turn producing it
+	 * and reviewers spend none polling for it. That is the entire cost argument for sharing work
+	 * in progress rather than having each side fetch it.
+	 *
+	 * Args:
+	 * path: File the worker just changed.
+	 * Return: Number of reviewers the diff reached.
+	 */
+	async pushDiffToReviewers(path: string): Promise<number> {
+		const peers = this._collaborationPeers;
+		if (peers === undefined || peers.reviewers.length === 0) return 0;
+		const collaboration = this.settingsManager.getAgentCollaboration();
+		if (!sharesDiffs(collaboration)) return 0;
+		const cwd = this.sessionManager.getCwd?.() ?? process.cwd();
+		const diff = await computePathDiff(cwd, path, collaboration.maxDiffBytes).catch(() => undefined);
+		if (diff === undefined) return 0;
+		const body = formatDiffPush(diff, peers.author);
+		let delivered = 0;
+		for (const reviewer of peers.reviewers) {
+			const sent = await this._deliverCollaborationMessage(reviewer, body).catch(() => false);
+			if (sent) delivered += 1;
+		}
+		return delivered;
+	}
+
+	/** Push a diff for every path changed in the working tree; duplicates are dropped downstream. */
+	private async _pushChangedDiffs(): Promise<void> {
+		const cwd = this.sessionManager.getCwd?.() ?? process.cwd();
+		const paths = await changedPaths(cwd).catch(() => []);
+		for (const path of paths) await this.pushDiffToReviewers(path).catch(() => {});
+	}
+
+	/** Send one collaboration message to a sibling; returns whether it was accepted. */
+	private async _deliverCollaborationMessage(target: string, body: string): Promise<boolean> {
+		const controller = this._agentMessageController;
+		if (controller === undefined) return false;
+		const receipt = await controller.sendAgentMessage({ target, message: body });
+		return receipt?.deliveryStatus === "delivered" || receipt?.deliveryStatus === "queued";
+	}
+
+	steerAgentMessage(prompt: string, message: AgentSessionMessage): boolean {
+		if (!this.settingsManager.getAgentMessageMidRunDelivery()) return false;
+		if (this._disposed || this._disposing) return false;
+		// Only useful while a run is active; otherwise the ordinary queue delivers promptly.
+		if (!this.isStreaming) return false;
+
+		const senderEndpoint = message.details.from;
+		const sender = senderEndpoint?.sessionId ?? "unknown";
+		// Identical content from the same sender cannot carry new information. This mirrors the
+		// existing autonomous-gate rule that refuses to re-run a gate when nothing changed.
+		const fingerprint = `${sender}:${sha256Hex(prompt)}`;
+		if (this._steeredAgentMessageFingerprints.has(fingerprint)) return false;
+
+		const consecutive = (this._consecutiveSteersBySender.get(sender) ?? 0) + 1;
+		if (consecutive > MAX_CONSECUTIVE_AGENT_MESSAGE_STEERS) return false;
+
+		this._steeredAgentMessageFingerprints.add(fingerprint);
+		this._consecutiveSteersBySender.set(sender, consecutive);
+		this.agent.steer({ role: "user", content: prompt, timestamp: Date.now() } satisfies UserMessage);
+		return true;
+	}
+
+	/** Clear steer budgets once the recipient completes a run, so the next task starts fresh. */
+	private _resetAgentMessageSteerBudget(): void {
+		this._consecutiveSteersBySender.clear();
+		this._steeredAgentMessageFingerprints.clear();
 	}
 
 	async queueAgentMessagePrompt(
@@ -8782,6 +9051,19 @@ export class AgentSession {
 		return this._resourceLoader;
 	}
 
+	/**
+	 * Clear the abort suspension and restart the pump when any input is still selectable.
+	 *
+	 * Return: No value.
+	 */
+	private _resumeSessionInputPumpAfterAbort(): void {
+		if (this._disposed || this._disposing) return;
+		if (!this._hasSelectableSessionInput()) return;
+		this._sessionInputPumpSuspended = false;
+		this._notifySessionInputCheckpointChange();
+		this._scheduleSessionInputPump();
+	}
+
 	requestAbort(): void {
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
@@ -8800,6 +9082,14 @@ export class AgentSession {
 		this._autoRefineReviewAbort?.abort();
 		this._refineAbortController?.abort();
 		this.agent.abort();
+		// abort() has its own recovery in a finally block; callers that use requestAbort()
+		// directly (daemon-mode, in-process-agent-connection) would otherwise strand the queue.
+		void this.agent
+			.waitForIdle()
+			.catch(() => {})
+			.then(() => {
+				if (!this._abortInProgress) this._resumeSessionInputPumpAfterAbort();
+			});
 	}
 
 	/**
@@ -8822,11 +9112,10 @@ export class AgentSession {
 		} finally {
 			this._goalAbortInProgress = false;
 			this._abortInProgress = false;
-			if (this._hasSelectableAgentMessageInput()) {
-				this._sessionInputPumpSuspended = false;
-				this._notifySessionInputCheckpointChange();
-				this._scheduleSessionInputPump();
-			}
+			// Must match the pump's own gate (_hasSelectableSessionInput). Recovering only for
+			// agent-to-agent messages stranded every other queued input — follow-ups, heartbeats,
+			// cron prompts — with the pump suspended and nothing left to restart it.
+			this._resumeSessionInputPumpAfterAbort();
 		}
 	}
 
@@ -9604,6 +9893,11 @@ export class AgentSession {
 	}
 
 	private _consumePendingRequestedRefine(): boolean {
+		if (this._workflowOwnsGoalState()) {
+			this._pendingRequestedRefine = undefined;
+			this._emitRefineFailed(new AgentSessionRefinementError());
+			return false;
+		}
 		const pending = this._pendingRequestedRefine;
 		if (!pending) return false;
 		this._pendingRequestedRefine = undefined;
@@ -9762,6 +10056,7 @@ export class AgentSession {
 	}
 
 	private async _maybeAutoRefine(reason: AutoRefineReason): Promise<void> {
+		this._assertRefinementAuthority();
 		if (this._disposed || this._disposing) {
 			this._discardPendingAutoRefine();
 			return;
@@ -9875,6 +10170,7 @@ export class AgentSession {
 	}
 
 	private async _runApprovedRefine(reason: AutoRefineReason, review: AutoRefineReview): Promise<void> {
+		this._assertRefinementAuthority();
 		this._autoRefineInProgress = true;
 		try {
 			await this.refine({
@@ -9952,9 +10248,7 @@ export class AgentSession {
 		} = {},
 		internal: { skipAbort?: boolean } = {},
 	): Promise<RefinementResult> {
-		if (this._workflowOwnsGoalState()) {
-			throw new Error(WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED);
-		}
+		this._assertRefinementAuthority();
 		// Queued /refine executes from the session-input pump between turns;
 		// refine never aborts the agent (planning is backgrounded and the apply
 		// phase waits for quiescence), so skipAbort only asserts the pump's
@@ -10081,6 +10375,7 @@ export class AgentSession {
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
 		signal: AbortSignal,
 	): Promise<RefinementPlan> {
+		this._assertRefinementAuthority();
 		if (this._disposed) {
 			throw new Error("Cannot refine a disposed session.");
 		}
@@ -10148,11 +10443,9 @@ export class AgentSession {
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
 		refineAbort: AbortController,
 	): Promise<RefinementResult> {
+		this._assertRefinementAuthority();
 		if (this._disposed) {
 			throw new Error("Cannot refine a disposed session.");
-		}
-		if (this._workflowOwnsGoalState()) {
-			throw new Error(WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED);
 		}
 		// The caller has already set _refineInFlight and waited for agent idle.
 		// Disconnect only for the brief apply + save + reconnect critical section.
@@ -10928,28 +11221,12 @@ export class AgentSession {
 
 	private _resolveKernelIsolation(): KernelContainerIsolationOptions | undefined {
 		const binding = this._workflowTaskBinding;
-		let workflowId = binding?.workflowId;
-		let workflowBound = binding !== undefined;
+		const { workflowId, workflowBound } = this._resolveWorkflowKernelOwnership();
 		if (workflowId === undefined) {
-			try {
-				workflowId = this._workflowHost?.status().workflowId ?? undefined;
-				workflowBound = workflowId !== undefined;
-			} catch (error) {
-				if (
-					error instanceof Error &&
-					(error.message.includes("durable acceptance projection") ||
-						error.message.includes("Workflow start approval is incomplete"))
-				) {
-					workflowBound = true;
-				} else {
-					throw error;
-				}
-			}
-		}
-		workflowId ??= this._loadPersistedGoalState().workflowId;
-		if (workflowId === undefined) {
-			if (workflowBound || this._workflowHostLoader !== undefined)
-				throw new Error("workflow kernel isolation requires a bound workflow identity");
+			// A registered loader only means this session *can* run a workflow. Isolation is
+			// required once one is actually bound; demanding it earlier breaks IPython for
+			// every ordinary session.
+			if (workflowBound) throw new Error("workflow kernel isolation requires a bound workflow identity");
 			return undefined;
 		}
 		if (!workflowBound && this._workflowHost !== undefined) {
@@ -10963,7 +11240,11 @@ export class AgentSession {
 		}
 		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
 		const image = process.env.PRIME_AGENT_KERNEL_IMAGE;
-		if (!image) throw new Error("workflow kernel isolation requires PRIME_AGENT_KERNEL_IMAGE");
+		// Container isolation is a hardening measure, not a correctness requirement: the kernel
+		// runs unisolated when no image is configured, exactly as an ordinary session does. Making
+		// it mandatory meant a workflow could never dispatch a worker on a machine without a
+		// configured image, which is most local machines.
+		if (!image) return undefined;
 
 		const taskId = binding?.taskId ?? "coordinator";
 		const attemptId = binding?.attemptId ?? "coordinator";
@@ -10992,8 +11273,8 @@ export class AgentSession {
 		this._ipythonPrewarmPending = true;
 		void this._workflowSetupGate.then(
 			() => {
-			if (this._ipythonKernelProvisioner !== provisioner) return;
-			this._releaseDeferredIpythonPrewarm();
+				if (this._ipythonKernelProvisioner !== provisioner) return;
+				this._releaseDeferredIpythonPrewarm();
 			},
 			() => undefined,
 		);
@@ -11243,7 +11524,7 @@ export class AgentSession {
 				handlers[type] = async (payload) => this.handleCompactHostRequest(type, payload);
 			}
 		}
-		if (this._autoRefineAllowedForSession()) {
+		if (this._autoRefineAllowedForSession() || this._workflowOwnsGoalState()) {
 			for (const type of ["refine.run", "refine.status"]) {
 				handlers[type] = async (payload) => this.handleRefineHostRequest(type, payload);
 			}
@@ -11375,6 +11656,10 @@ export class AgentSession {
 			RLM_MAX_DEPTH: String(this._rlmMaxDepth),
 			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
 		};
+		const ownership = this._resolveWorkflowKernelOwnership();
+		if (ownership.workflowId !== undefined || ownership.workflowBound) {
+			env.RLM_HARNESS_READ_ONLY = "1";
+		}
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {
 			env.RLM_SESSION_DIR = rlmSessionDir;
@@ -12303,6 +12588,7 @@ export class AgentSession {
 		onMeaningfulProgress?: (progressDigest: string) => void,
 		workflowTaskDeadlineAt?: string,
 		workflowTaskBinding?: WorkflowTaskBindingData,
+		allowedToolNames?: readonly string[],
 	): Promise<RlmSpawnHandle> {
 		const workflowTaskDeadlineAtMs =
 			workflowTaskDeadlineAt === undefined ? undefined : Date.parse(workflowTaskDeadlineAt);
@@ -12420,6 +12706,10 @@ export class AgentSession {
 					return activeRun === run && (run.status === "queued" || run.status === "running");
 				});
 			}
+			// A stage's declared capabilities become a real restriction here. Without this the
+			// child inherits the parent's full tool set and any "read-only" or "diffs only"
+			// role is advisory prose the worker may ignore.
+			if (allowedToolNames !== undefined) child.setActiveToolsByName([...allowedToolNames]);
 			child._releaseDeferredIpythonPrewarm();
 			if (workflowTaskDeadlineDelayMs !== undefined && workflowDeadlineTimer === undefined) {
 				child._workflowTaskDeadlineMonotonicAtMs = performance.now() + workflowTaskDeadlineDelayMs;
@@ -12822,11 +13112,8 @@ export class AgentSession {
 		model: string = DEFAULT_PRIME_WORKER_MODEL,
 		launchContext?: AgentSessionWorkflowWorkerLaunchContext,
 		onMeaningfulProgress?: (progressDigest: string) => void,
+		allowedToolNames?: readonly string[],
 	): Promise<RlmSpawnHandle> {
-		if (model !== WORKER_MODEL_SELECTOR)
-			throw new Error(
-				"blocked_model_capability: workflow workers require the exact Luna selector with fallback disabled",
-			);
 		if (launchContext === undefined)
 			throw new Error("CONTRACT_CHANGE: workflow worker launch context is required for model admission");
 		const bindings = this._workflowHost as WorkflowKernelHostBindings | undefined;
@@ -12839,9 +13126,9 @@ export class AgentSession {
 			...launchContext,
 			prompt,
 			sessionName,
-			selector: WORKER_MODEL_SELECTOR,
-			provider: WORKER_MODEL_PROVIDER,
-			model: WORKER_MODEL_ID,
+			selector: model,
+			provider: workerModelProvider(model),
+			model: workerModelId(model),
 			reasoning: WORKER_MODEL_REASONING,
 			allowFallback: false,
 		});
@@ -12891,10 +13178,11 @@ export class AgentSession {
 			onMeaningfulProgress,
 			launchContext.deadlineAt,
 			workflowTaskBinding,
+			allowedToolNames,
 		);
-		if (handle.model !== WORKER_MODEL_SELECTOR) {
+		if (handle.model !== model) {
 			this.cancelRlmChildRun(handle.rlm_child_id, "worker model handshake mismatch");
-			throw new Error("blocked_model_capability: spawned worker model differs from admitted Luna selector");
+			throw new Error("blocked_model_capability: spawned worker model differs from the admitted selector");
 		}
 		return handle;
 	}

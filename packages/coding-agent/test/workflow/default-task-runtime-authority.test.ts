@@ -277,15 +277,19 @@ function taskCapsuleFactory(
 	};
 }
 
-function decisionRef(): WorkflowDecisionRef {
+function decisionRefFor(epoch: WorkflowEpochRef = EPOCH): WorkflowDecisionRef {
 	return {
 		decisionScope: { kind: "workflow", workflowId: WORKFLOW_ID, rootSessionId: ROOT_SESSION_ID },
 		decisionId: "decision-fast",
 		revision: 1,
-		storeEpoch: EPOCH.storeEpoch,
-		coordinatorEpoch: EPOCH.coordinatorEpoch,
+		storeEpoch: epoch.storeEpoch,
+		coordinatorEpoch: epoch.coordinatorEpoch,
 		decisionDigest: "decision-fast-digest",
 	};
+}
+
+function decisionRef(): WorkflowDecisionRef {
+	return decisionRefFor();
 }
 
 it("rejects an unsatisfiable generated-output contract before worker launch", async () => {
@@ -560,11 +564,14 @@ function runtimeStoreFixture(): {
 	failBeforeCommitKind(kind: WorkflowEventPayload["kind"]): void;
 	failBeforeCommitKindWithError(kind: WorkflowEventPayload["kind"], message: string): void;
 	failEveryCommitKindWithError(kind: WorkflowEventPayload["kind"], message: string): void;
+	setCurrentEpoch(epoch: WorkflowEpochRef, generationId?: string): void;
 } {
 	const events: WorkflowJournalCommit<WorkflowEventPayload>[] = [];
 	const auxiliary = new Map<string, Uint8Array>();
 	const artifacts = new Map<string, Uint8Array>();
 	const commits = new Map<string, WorkflowStoreCommitResult<WorkflowEventPayload>>();
+	let currentEpoch = EPOCH;
+	let currentGenerationId = "generation-fast";
 	let advanceHeadBeforeNextCommit = false;
 	let advanceJournalHeadBeforeNextCommit = false;
 	let advanceHeadBeforeEveryCommit = false;
@@ -591,7 +598,7 @@ function runtimeStoreFixture(): {
 			workflowId: WORKFLOW_ID,
 			sequence: event?.sequence ?? 1,
 			eventDigest: event?.eventDigest ?? digestObject({ kind: "w0-fast" }),
-			epochRef: EPOCH,
+			epochRef: currentEpoch,
 		};
 	};
 	const commit = async <TPayload extends WorkflowEventPayload>(
@@ -626,7 +633,7 @@ function runtimeStoreFixture(): {
 			const payload: WorkflowEventPayload = {
 				kind: "workflow_recovery_started",
 				workflowId: WORKFLOW_ID,
-				epochRef: EPOCH,
+				epochRef: currentEpoch,
 				journalHeadDigest: concurrentHead.eventDigest ?? "",
 			};
 			const sequence = concurrentHead.sequence + 1;
@@ -664,9 +671,22 @@ function runtimeStoreFixture(): {
 			priorEventDigest: head().eventDigest,
 			eventDigest,
 			expectedHead: input.expectedHead,
-			epochRef: EPOCH,
+			epochRef: input.epochRef,
 			leaseRef,
 			idempotencyKey: input.idempotencyKey,
+			recordVersion: 1,
+			generationId: currentGenerationId,
+			recordMac: "record-mac",
+			recordChecksum: "record-checksum",
+			returnProofId: `return-proof:${input.idempotencyKey}`,
+			commitReturnProof: {} as WorkflowJournalCommit<WorkflowEventPayload>["commitReturnProof"],
+			preparedFrameDigest: "prepared-frame-digest",
+			committedFrameDigest: "committed-frame-digest",
+			keyId: "key-fast",
+			preparedFrameMac: "prepared-frame-mac",
+			committedFrameMac: "committed-frame-mac",
+			preparedFrameChecksum: "prepared-frame-checksum",
+			committedFrameChecksum: "committed-frame-checksum",
 			semanticBinding: input.semanticBinding,
 			executionKey: input.executionKey,
 			writerIdentity: input.writerIdentity,
@@ -711,8 +731,12 @@ function runtimeStoreFixture(): {
 			identityDigest: "default-task-runtime-fast-digest",
 		},
 		durableContext: {
-			generationId: "generation-fast",
-			epochRef: EPOCH,
+			get generationId(): string {
+				return currentGenerationId;
+			},
+			get epochRef(): WorkflowEpochRef {
+				return currentEpoch;
+			},
 			currentLeaseRef: () => leaseRef,
 			outbox: {
 				append: async () => ({ status: "appended" as const, sequence: 1, entryDigest: "outbox" }),
@@ -814,8 +838,197 @@ function runtimeStoreFixture(): {
 			repeatedlyFailedCommitKind = kind;
 			repeatedlyFailedCommitMessage = message;
 		},
+		setCurrentEpoch: (epoch, generationId = currentGenerationId) => {
+			currentEpoch = epoch;
+			currentGenerationId = generationId;
+		},
 	};
 }
+
+type TestDispatchCommit = WorkflowJournalCommit<Extract<WorkflowEventPayload, { kind: "workflow_dispatch_intent" }>>;
+type TestResourceCommit = WorkflowJournalCommit<
+	Extract<WorkflowEventPayload, { kind: "workflow_resource_lease_acquired" }>
+>;
+
+function persistedAttemptEvents(fixture: ReturnType<typeof runtimeStoreFixture>): {
+	readonly dispatch: TestDispatchCommit;
+	readonly resource: TestResourceCommit;
+} {
+	const dispatch = fixture.events.find((event) => event.payload.kind === "workflow_dispatch_intent");
+	const resource = fixture.events.find((event) => event.payload.kind === "workflow_resource_lease_acquired");
+	if (dispatch?.payload.kind !== "workflow_dispatch_intent") throw new Error("fast_fixture_dispatch_intent_missing");
+	if (resource?.payload.kind !== "workflow_resource_lease_acquired")
+		throw new Error("fast_fixture_resource_lease_missing");
+	return { dispatch: dispatch as TestDispatchCommit, resource: resource as TestResourceCommit };
+}
+
+async function seedUnfinishedAttempt(fixture: ReturnType<typeof runtimeStoreFixture>): Promise<{
+	readonly launchWorker: ReturnType<typeof vi.fn>;
+	readonly attemptId: string;
+	readonly executionKey: string;
+}> {
+	const launchWorker = vi.fn(async (input: { readonly taskId: string; readonly executionKey: string }) => ({
+		workerId: `worker:${input.taskId}`,
+		executionIdentity: `rlm:worker:${input.taskId}:${input.executionKey}`,
+		processStartId: "host:123:456",
+		processGroupId: "process-group:123",
+		launchedAt: NOW,
+	}));
+	const authority = createDefaultTaskRuntimeAuthority({
+		runtimeStore: fixture.store,
+		workflowId: WORKFLOW_ID,
+		rootSessionId: ROOT_SESSION_ID,
+		epochRef: EPOCH,
+		decisionRef: decisionRef(),
+		goalRevisionDigest: GOAL_REVISION_DIGEST,
+		graph: graph(),
+		maxWorkers: 1,
+		now: () => NOW,
+		workerLauncher: launchWorker,
+		prime: primeAdapter(),
+	});
+	await authority.start();
+	const { dispatch } = persistedAttemptEvents(fixture);
+	fixture.auxiliary.delete("default-prime-task-runtime-v1.json");
+	return {
+		launchWorker,
+		attemptId: dispatch.payload.attemptId,
+		executionKey: dispatch.payload.executionKey,
+	};
+}
+
+it("reconstructs a persisted dispatch from the predecessor coordinator epoch after rollover", async () => {
+	const fixture = runtimeStoreFixture();
+	const { launchWorker, attemptId } = await seedUnfinishedAttempt(fixture);
+	const currentEpoch: WorkflowEpochRef = {
+		storeEpoch: EPOCH.storeEpoch,
+		coordinatorEpoch: EPOCH.coordinatorEpoch + 1,
+	};
+	fixture.setCurrentEpoch(currentEpoch, "generation-successor");
+	const reopened = createDefaultTaskRuntimeAuthority({
+		runtimeStore: fixture.store,
+		workflowId: WORKFLOW_ID,
+		rootSessionId: ROOT_SESSION_ID,
+		epochRef: currentEpoch,
+		decisionRef: decisionRefFor(currentEpoch),
+		goalRevisionDigest: GOAL_REVISION_DIGEST,
+		graph: graph(),
+		maxWorkers: 1,
+		now: () => NOW,
+		prime: primeAdapter(),
+	});
+
+	await reopened.start();
+	expect(launchWorker).toHaveBeenCalledTimes(1);
+	await expect(reopened.readState()).resolves.toMatchObject({ activeAttemptIds: [attemptId] });
+});
+
+it("rejects a replayed dispatch from a future coordinator epoch", async () => {
+	const fixture = runtimeStoreFixture();
+	await seedUnfinishedAttempt(fixture);
+	const { dispatch, resource } = persistedAttemptEvents(fixture);
+	const futureEpoch: WorkflowEpochRef = { storeEpoch: EPOCH.storeEpoch, coordinatorEpoch: EPOCH.coordinatorEpoch + 2 };
+	dispatch.payload = {
+		...dispatch.payload,
+		epochRef: futureEpoch,
+		decisionRef: decisionRefFor(futureEpoch),
+		executionKey: digestObject({
+			kind: "default-prime-task-attempt",
+			workflowId: WORKFLOW_ID,
+			taskId: dispatch.payload.taskId,
+			attemptId: dispatch.payload.attemptId,
+			epochRef: futureEpoch,
+		}),
+	};
+	resource.payload = {
+		...resource.payload,
+		epochRef: futureEpoch,
+		lease: { ...resource.payload.lease, ...futureEpoch },
+	};
+	const currentEpoch: WorkflowEpochRef = {
+		storeEpoch: EPOCH.storeEpoch,
+		coordinatorEpoch: EPOCH.coordinatorEpoch + 1,
+	};
+	fixture.setCurrentEpoch(currentEpoch, "generation-successor");
+	const reopened = createDefaultTaskRuntimeAuthority({
+		runtimeStore: fixture.store,
+		workflowId: WORKFLOW_ID,
+		rootSessionId: ROOT_SESSION_ID,
+		epochRef: currentEpoch,
+		decisionRef: decisionRefFor(currentEpoch),
+		goalRevisionDigest: GOAL_REVISION_DIGEST,
+		graph: graph(),
+		maxWorkers: 1,
+		now: () => NOW,
+		prime: primeAdapter(),
+	});
+
+	await reopened.start();
+	await expect(reopened.readState()).resolves.toMatchObject({ activeAttemptIds: [] });
+});
+
+it("rejects a replayed dispatch from a different store epoch", async () => {
+	const fixture = runtimeStoreFixture();
+	await seedUnfinishedAttempt(fixture);
+	const { dispatch, resource } = persistedAttemptEvents(fixture);
+	const foreignEpoch: WorkflowEpochRef = {
+		storeEpoch: EPOCH.storeEpoch + 1,
+		coordinatorEpoch: EPOCH.coordinatorEpoch,
+	};
+	dispatch.payload = { ...dispatch.payload, epochRef: foreignEpoch, decisionRef: decisionRefFor(foreignEpoch) };
+	resource.payload = {
+		...resource.payload,
+		epochRef: foreignEpoch,
+		lease: { ...resource.payload.lease, ...foreignEpoch },
+	};
+	const reopened = createDefaultTaskRuntimeAuthority({
+		runtimeStore: fixture.store,
+		workflowId: WORKFLOW_ID,
+		rootSessionId: ROOT_SESSION_ID,
+		epochRef: EPOCH,
+		decisionRef: decisionRef(),
+		goalRevisionDigest: GOAL_REVISION_DIGEST,
+		graph: graph(),
+		maxWorkers: 1,
+		now: () => NOW,
+		prime: primeAdapter(),
+	});
+
+	await reopened.start();
+	await expect(reopened.readState()).resolves.toMatchObject({ activeAttemptIds: [] });
+});
+
+it.each([
+	["execution key", (dispatch: TestDispatchCommit) => ({ ...dispatch.payload, executionKey: "forged-execution-key" })],
+	[
+		"decision reference",
+		(dispatch: TestDispatchCommit) => ({
+			...dispatch.payload,
+			decisionRef: { ...dispatch.payload.decisionRef, decisionDigest: "forged-decision-digest" },
+		}),
+	],
+])("rejects a forged persisted %s binding", async (_binding, forge) => {
+	const fixture = runtimeStoreFixture();
+	await seedUnfinishedAttempt(fixture);
+	const { dispatch } = persistedAttemptEvents(fixture);
+	dispatch.payload = forge(dispatch) as TestDispatchCommit["payload"];
+	fixture.auxiliary.delete("default-prime-task-runtime-v1.json");
+	const reopened = createDefaultTaskRuntimeAuthority({
+		runtimeStore: fixture.store,
+		workflowId: WORKFLOW_ID,
+		rootSessionId: ROOT_SESSION_ID,
+		epochRef: EPOCH,
+		decisionRef: decisionRef(),
+		goalRevisionDigest: GOAL_REVISION_DIGEST,
+		graph: graph(),
+		maxWorkers: 1,
+		now: () => NOW,
+		prime: primeAdapter(),
+	});
+
+	await reopened.start();
+	await expect(reopened.readState()).resolves.toMatchObject({ activeAttemptIds: [] });
+});
 
 it("rebinds a resource lease acquisition sequence after concurrent journal head movement", async () => {
 	const fixture = runtimeStoreFixture();
@@ -2397,6 +2610,15 @@ it("ignores an old completion envelope delivered to retry:1 before accepting its
 		await expect(authority.readAudit()).resolves.toMatchObject({ terminalTaskIds: ["recon"] });
 	});
 	expect(fixture.events.filter((event) => event.payload.kind === "workflow_child_outcome_committed")).toHaveLength(2);
+	const audit = await authority.readAudit();
+	expect(audit.launchEvidenceRefs).toHaveLength(1);
+	expect(audit.launchEvidenceRefs[0]?.digest).not.toBe(audit.workerResults[0]?.resultEvidenceRef.digest);
+	expect(audit.workerResults).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({ attemptId: firstRequest.attemptId, status: "error" }),
+			expect.objectContaining({ attemptId: retryRequest.attemptId, status: "completed" }),
+		]),
+	);
 });
 
 it("ignores a host expiry completion forged by a worker launcher", async () => {

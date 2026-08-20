@@ -16,9 +16,11 @@ import {
 } from "../src/core/workflow/contracts.js";
 import {
 	BUILTIN_ATTACK_ARCHITECT_JUDGE_UNIFY_EDGE_TEST,
+	BUILTIN_COMPREHENSIVE_RECIPE,
 	BUILTIN_RECON_LENS_VERIFY_SYNTHESIZE_RED_TEAM,
 	BUILTIN_SUPERPOWERS_METHODOLOGY_MAPPING,
 	BUILTIN_SUPERPOWERS_PRIME_IMPLEMENTATION_RECIPE,
+	COMPREHENSIVE_BRANCH_CHARTERS,
 	compileWorkflowRecipe as compileWorkflowRecipeImpl,
 	consumeWorkflowRecipeAdmission,
 	consumeWorkflowRecipeAdmissionAtHost,
@@ -636,10 +638,25 @@ function implementationEvidence(
 		),
 	].sort();
 	const worktreeStatusDigest = sha256Hex(worktreeStatus);
-	const baseSha = gitCommit("HEAD~2");
-	const candidateSha = gitCommit("HEAD~1");
-	const integrationSha = gitCommit("HEAD~3");
+	// The intent-TDD gate rejects a merge commit between base and candidate. Picking HEAD~1..~3
+	// blindly makes this fixture pass or fail depending on where the checkout happens to sit, so
+	// find the newest run of four consecutive merge-free first-parent commits instead.
 	const reviewedHeadSha = gitCommit("HEAD");
+	const [candidateSha, baseSha, integrationSha] = ((): readonly string[] => {
+		const firstParent = execFileSync("git", ["rev-list", "--first-parent", "-n", "80", "HEAD"], {
+			encoding: "utf8",
+		})
+			.trim()
+			.split("\n")
+			.filter(Boolean);
+		const isMerge = (sha: string): boolean =>
+			execFileSync("git", ["rev-list", "--merges", "-n", "1", `${sha}^!`], { encoding: "utf8" }).trim().length > 0;
+		for (let index = 0; index + 2 < firstParent.length; index++) {
+			const window = firstParent.slice(index, index + 3);
+			if (window.every((sha) => !isMerge(sha))) return window;
+		}
+		throw new Error("intent-TDD fixture needs three consecutive merge-free commits in the first-parent history");
+	})();
 	return WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS.map((stageId, index) => {
 		const stage = BUILTIN_SUPERPOWERS_PRIME_IMPLEMENTATION_RECIPE.stages.find(
 			(candidate) => candidate.id === stageId,
@@ -1069,6 +1086,26 @@ function proposal(overrides: Partial<WorkflowRecipeProposal> = {}): WorkflowReci
 		...result,
 		effectiveGraphDigest: overrides.effectiveGraphDigest ?? effectiveGraphDigestFor(recipeTasks(), result.stages),
 	} as WorkflowRecipeProposal;
+}
+
+function comprehensiveTasks(): readonly WorkflowTask[] {
+	const tddChain = WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS.map((stageId, index) =>
+		task(stageId, index === 0 ? ["adjudicate"] : [WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS[index - 1]]),
+	);
+	return [
+		task("scope"),
+		task("recon-code", ["scope"]),
+		task("recon-tests", ["scope"]),
+		task("recon-history", ["scope"]),
+		task("synthesize-recon", ["recon-code", "recon-tests", "recon-history"]),
+		task("lens-intent", ["synthesize-recon"]),
+		task("lens-correctness", ["synthesize-recon"]),
+		task("lens-security", ["synthesize-recon"]),
+		task("synthesize", ["lens-intent", "lens-correctness", "lens-security"]),
+		task("red-team", ["synthesize"]),
+		task("adjudicate", ["red-team"]),
+		...tddChain,
+	];
 }
 
 function recipeTasks(): readonly WorkflowTask[] {
@@ -2425,6 +2462,33 @@ describe("compact workflow recipe compiler", () => {
 		});
 		expect(recon.effectiveGraphDigest).toMatch(/^[0-9a-f]{64}$/);
 		expect(attack.recipe.overlays.preEvaluationOverfitting?.blockingBoundaries).toContain("completion");
+	});
+
+	it("compiles the comprehensive topology with dividing fan-outs and per-stage compute classes", () => {
+		const compiled = compileWorkflowRecipe({
+			proposal: BUILTIN_COMPREHENSIVE_RECIPE,
+			tasks: comprehensiveTasks(),
+			graphContext: graphContext(),
+		});
+		expect(compiled.effectiveGraphDigest).toMatch(/^[0-9a-f]{64}$/);
+
+		// Fan-out branches must divide work, so every branch carries a distinct charter.
+		const reconBranches = ["recon-code", "recon-tests", "recon-history"];
+		const charters = reconBranches.map((stageId) => COMPREHENSIVE_BRANCH_CHARTERS[stageId]);
+		expect(new Set(charters).size).toBe(reconBranches.length);
+		expect(charters.every((charter) => charter !== undefined && charter.length > 0)).toBe(true);
+
+		// Survey stages run cheap; adjudicating stages run deep.
+		const computeByStage = new Map(compiled.recipe.stages.map((stage) => [stage.id, stage.computeClass]));
+		expect(computeByStage.get("recon-code")).toBe("cheap");
+		expect(computeByStage.get("lens-security")).toBe("cheap");
+		expect(computeByStage.get("red-team")).toBe("deep");
+		expect(computeByStage.get("adversarial-review")).toBe("deep");
+
+		// The intent-TDD chain is present and stays linear.
+		for (const stageId of WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS) {
+			expect(computeByStage.has(stageId)).toBe(true);
+		}
 	});
 
 	it("requires host-enforced intentional TDD evidence for implementation promotion", () => {

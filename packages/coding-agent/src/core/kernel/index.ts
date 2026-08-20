@@ -21,13 +21,18 @@ import {
 	KernelContainerCleanupError,
 	KernelContainerCreationError,
 	type KernelContainerIsolationOptions,
+	KernelContainerOwnerCleanupError,
 	removeKernelContainer,
 	reserveKernelPorts,
 	writeContainerConnectionFile,
 } from "./isolation.js";
 
 export type { KernelContainerIsolationOptions } from "./isolation.js";
-export { KernelContainerCleanupError, KernelContainerCreationError } from "./isolation.js";
+export {
+	KernelContainerCleanupError,
+	KernelContainerCreationError,
+	KernelContainerOwnerCleanupError,
+} from "./isolation.js";
 
 import {
 	buildListNamesCode,
@@ -66,6 +71,7 @@ const KERNEL_TERMINATE_GRACE_MS = 2000;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
+const MAX_EXECUTION_COLLECTION_ITEMS = 256;
 const MAX_KERNEL_STDERR_CHARS = 65_536;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
 	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
@@ -1556,6 +1562,7 @@ export class KernelManager {
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
 	private containerId?: string;
+	private readonly containerIds = new Set<string>();
 	private readonly commTargets = new Map<string, string>();
 	private readonly handledHostRequestCommIds = new Set<string>();
 	private kernel?: ChildProcess;
@@ -1723,21 +1730,36 @@ export class KernelManager {
 					environment: kernelContainerEnvironment(this.options.env, this.options.pythonSkills),
 				});
 				this.containerId = containerId;
+				this.containerIds.add(containerId);
 				const kernel = spawn(this.options.isolation.dockerBinary ?? "docker", ["start", "--attach", containerId], {
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 				this.attachKernelProcess(kernel);
 			} catch (error) {
-				if (
+				if (error instanceof KernelContainerOwnerCleanupError) {
+					for (const containerId of error.containerIds) this.containerIds.add(containerId);
+					if (error.containerIds.length === 1) this.containerId = error.containerIds[0];
+				} else if (
 					(error instanceof KernelContainerCreationError || error instanceof KernelContainerCleanupError) &&
 					error.containerId !== undefined
 				) {
 					this.containerId = error.containerId;
+					this.containerIds.add(error.containerId);
 				}
 				this.state = "shutdown";
 				liveKernels.delete(this);
 				const cleanupError = this.cleanupResources();
-				if (cleanupError) throw cleanupError;
+				if (cleanupError) {
+					if (error instanceof KernelContainerOwnerCleanupError) {
+						throw new KernelContainerOwnerCleanupError(
+							error.ownerIdentity,
+							error.containerIds,
+							`${error.message}; ${cleanupError.message}`,
+							cleanupError,
+						);
+					}
+					throw cleanupError;
+				}
 				throw error;
 			}
 		} else if (isForkServerEnabled()) {
@@ -2156,7 +2178,7 @@ export class KernelManager {
 		} else if (t === "display_data" || t === "update_display_data") {
 			const c = incoming.content as { data?: Record<string, unknown> };
 			const diff = parseDiffDisplay(c.data?.[DIFF_DISPLAY_MIME]);
-			if (diff) execution.diffs.push(diff);
+			if (diff && execution.diffs.length < MAX_EXECUTION_COLLECTION_ITEMS) execution.diffs.push(diff);
 			const attachment = parseAttachmentDisplay(c.data?.[ATTACHMENT_DISPLAY_MIME]);
 			if (attachment === "oversized") {
 				const message = `${execution.stderr ? "\n" : ""}attachment dropped: exceeds ${MAX_ATTACHMENT_DATA_CHARS} base64 chars`;
@@ -2164,11 +2186,13 @@ export class KernelManager {
 				execution.stderrTruncated ||= nextStderr.length < execution.stderr.length + message.length;
 				execution.stderr = nextStderr;
 				execution.status = "error";
-			} else if (attachment) {
+			} else if (attachment && execution.attachments.length < MAX_EXECUTION_COLLECTION_ITEMS) {
 				execution.attachments.push(attachment);
 			}
 			const sentAgentMessage = parseSentAgentMessage(c.data?.[AGENT_MESSAGE_DISPLAY_MIME]);
-			if (sentAgentMessage) execution.sentAgentMessages.push(sentAgentMessage);
+			if (sentAgentMessage && execution.sentAgentMessages.length < MAX_EXECUTION_COLLECTION_ITEMS) {
+				execution.sentAgentMessages.push(sentAgentMessage);
+			}
 		} else if (t === "error") {
 			const c = incoming.content as { ename: string; evalue: string; traceback: string[] };
 			execution.error = {
@@ -2445,13 +2469,16 @@ export class KernelManager {
 			// Kernel already exited.
 		}
 		let containerCleanupError: KernelContainerCleanupError | undefined;
-		if (this.containerId) {
-			const containerId = this.containerId;
+		const containerIds = new Set(this.containerIds);
+		if (this.containerId) containerIds.add(this.containerId);
+		for (const containerId of containerIds) {
 			try {
 				removeKernelContainer(this.options.isolation?.dockerBinary ?? "docker", containerId);
-				this.containerId = undefined;
+				this.containerIds.delete(containerId);
+				if (this.containerId === containerId) this.containerId = undefined;
 			} catch (error) {
-				containerCleanupError =
+				if (this.containerId === undefined) this.containerId = containerId;
+				containerCleanupError ??=
 					error instanceof KernelContainerCleanupError
 						? error
 						: new KernelContainerCleanupError(containerId, errorMessage(error));

@@ -5646,6 +5646,13 @@ export class AgentDaemon {
 		const prompt = message.content;
 		const streamingBehavior = "steer";
 		if (shouldQueue) {
+			// Opt-in mid-run delivery: reach the recipient at its next turn boundary instead of
+			// after its whole task. Declines (setting off, not streaming, duplicate content, or
+			// steer budget spent) fall through to the fire-and-forget queue below.
+			if (session.steerAgentMessage(prompt, message)) {
+				releaseReservation();
+				return { status: "delivered" };
+			}
 			const didQueue = await session.queueAgentMessagePrompt(prompt, streamingBehavior, message);
 			if (!didQueue) throw new Error("Agent message was not queued");
 			releaseReservation();

@@ -15,6 +15,46 @@ import type {
 	WorkflowTaskRuntimeWorkerResult,
 } from "./task-runtime-authority.js";
 
+/**
+ * Session tools each recipe capability grants a worker.
+ *
+ * A stage declares capabilities; this turns them into the concrete tool set the spawned
+ * worker gets. Absent this mapping, capabilities are a manifest the runtime never consults
+ * and a "read-only" role is prose the worker may ignore.
+ */
+const WORKFLOW_CAPABILITY_TOOLS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+	read: ["ipython"],
+	read_workspace: ["ipython"],
+	shell: ["bash"],
+	ipython: ["ipython"],
+	edit: ["edit"],
+	write_owned_paths: ["edit"],
+	verification: ["ipython", "bash"],
+	// Adversarial roles inspect and probe; they never hold an edit tool, which is what makes
+	// "the reviewer cannot author the work it checks" structural rather than instructed.
+	red_team: ["ipython"],
+});
+
+/**
+ * Resolve the tool allowlist for a set of declared capabilities.
+ *
+ * Args:
+ * capabilityIds: Capability identifiers declared by the stage.
+ * Return: Sorted unique tool names, or undefined when nothing is declared (worker inherits the
+ * session default, preserving existing behaviour).
+ */
+export function workflowToolsForCapabilities(capabilityIds: readonly string[] | undefined): string[] | undefined {
+	if (capabilityIds === undefined || capabilityIds.length === 0) return undefined;
+	const tools = new Set<string>();
+	for (const capability of capabilityIds) {
+		for (const tool of WORKFLOW_CAPABILITY_TOOLS[capability] ?? []) tools.add(tool);
+	}
+	return tools.size === 0 ? undefined : [...tools].sort();
+}
+
+export const WORKFLOW_COMPUTE_CLASSES = Object.freeze(["cheap", "standard", "deep"] as const);
+export type WorkflowComputeClass = (typeof WORKFLOW_COMPUTE_CLASSES)[number];
+
 export type DefaultPrimeWorkerResultStatus = WorkflowTaskRuntimeWorkerResult["status"];
 
 export interface DefaultPrimeWorkerCompletionBinding {
@@ -224,6 +264,10 @@ export type DefaultPrimeWorkerLauncher = (
 		prompt: string;
 		taskCapsule?: DefaultPrimeWorkerTaskCapsule;
 		sessionName: string;
+		/** Cheapest worker tier the planner declared for this task; the launcher maps it to a model. */
+		computeClass?: WorkflowComputeClass;
+		/** Tools the worker may use, derived from the task's declared authority. Undefined inherits the session default. */
+		allowedToolNames?: readonly string[];
 		reportHeartbeat(input: { readonly observedAt: string; readonly progressDigest: string }): Promise<void>;
 	}>,
 ) => Promise<DefaultPrimeWorkerLaunch>;

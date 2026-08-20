@@ -139,13 +139,31 @@ describe("IPython kernel output bounds", () => {
 		expect(output.result?.length ?? 0).toBeLessThanOrEqual(1_000_000);
 	});
 
+	it("caps display collection counts at the execute boundary", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-collection-bounds-"));
+		provisioner = new IpythonKernelProvisioner(tempDir);
+		const manager = await provisioner.ensure();
+		const output = await manager.execute(
+			[
+				"from IPython.display import display",
+				"for i in range(300):",
+				"    display({'application/vnd.prime-agent.diff+json': {'path': f'file-{i}', 'old_str': '', 'new_str': 'x'}}, raw=True)",
+				"for i in range(300):",
+				"    display({'application/vnd.prime-agent.attachment+json': {'mime_type': 'text/plain', 'data': 'x'}}, raw=True)",
+				"for i in range(300):",
+				"    display({'application/vnd.prime-agent.agent-message+json': {'id': str(i), 'message': 'x', 'deliveryStatus': 'delivered', 'target': {'activeSessionId': 'active', 'sessionId': 'session'}}}, raw=True)",
+			].join("\n"),
+		);
+
+		expect(output.diffs?.length ?? 0).toBeLessThanOrEqual(256);
+		expect(output.attachments?.length ?? 0).toBeLessThanOrEqual(256);
+		expect(output.sentAgentMessages?.length ?? 0).toBeLessThanOrEqual(256);
+	});
+
 	it("caps accumulated kernel stderr before startup failure assembly", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-stderr-cap-"));
 		const python = join(tempDir, "python");
-		writeFileSync(
-			python,
-			"#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\000' x >&2\nexit 42\n",
-		);
+		writeFileSync(python, "#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\000' x >&2\nexit 42\n");
 		chmodSync(python, 0o755);
 		const manager = new KernelManager({ python });
 

@@ -1,6 +1,21 @@
 import { execFile, execFileSync } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import {
+	chmodSync,
+	copyFileSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	type Stats,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -15,6 +30,7 @@ const KERNEL_CONTAINER_NETWORK_POLICY = "deny";
 const KERNEL_CONTAINER_TMPFS = "/tmp:rw,nosuid,nodev,noexec,size=256m";
 const KERNEL_CONTAINER_CONTROL_PORTS = 5;
 const KERNEL_OUTPUT_SCRATCH_PREFIX = "prime-agent-kernel-output-";
+const MAX_KERNEL_SNAPSHOT_TRANSFER_BYTES = 256 * 1024 * 1024;
 
 const NETWORK_POLICY_ENTRYPOINT = `#!/bin/sh
 set -eu
@@ -82,6 +98,20 @@ export class KernelContainerCreationError extends Error {
 	}
 }
 
+export class KernelContainerOwnerCleanupError extends Error {
+	readonly code = "KERNEL_CONTAINER_CLEANUP_FAILED" as const;
+
+	constructor(
+		readonly ownerIdentity: string,
+		readonly containerIds: readonly string[],
+		message: string,
+		readonly causeError?: unknown,
+	) {
+		super(message);
+		this.name = "KernelContainerOwnerCleanupError";
+	}
+}
+
 export type KernelContainerIsolationResolver = () => KernelContainerIsolationOptions | undefined;
 
 export interface KernelContainerCreateOptions {
@@ -146,6 +176,208 @@ export function removeKernelOutputScratch(path: string): void {
 		throw new Error("kernel output scratch path escaped the private temporary root");
 	}
 	rmSync(canonicalPath, { recursive: true, force: true });
+}
+
+export class KernelSnapshotTransferError extends Error {
+	readonly code = "KERNEL_SNAPSHOT_TRANSFER_FAILED" as const;
+
+	constructor(
+		message: string,
+		readonly causeError?: unknown,
+	) {
+		super(message);
+		this.name = "KernelSnapshotTransferError";
+	}
+}
+
+interface SnapshotTransferEntry {
+	readonly relativePath: string;
+	readonly sourcePath: string;
+	readonly sizeBytes: number;
+	readonly digest: string;
+}
+
+interface SnapshotTransferPlan {
+	readonly entries: readonly SnapshotTransferEntry[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function snapshotRootPath(root: string, label: string): string {
+	if (!isAbsolute(root)) throw new KernelSnapshotTransferError(`${label} must be absolute`);
+	try {
+		if (lstatSync(root).isSymbolicLink()) throw new Error("symbolic links are not admitted");
+		const canonical = realpathSync(root);
+		if (!statSync(canonical).isDirectory()) throw new Error("snapshot root must be a directory");
+		assertNotBroadRoot(canonical, label);
+		return canonical;
+	} catch (error) {
+		if (error instanceof KernelSnapshotTransferError) throw error;
+		throw new KernelSnapshotTransferError(`${label} is not a safe directory`, error);
+	}
+}
+
+function snapshotFileBytes(path: string, label: string): Buffer {
+	let info: Stats;
+	try {
+		info = lstatSync(path);
+	} catch (error) {
+		throw new KernelSnapshotTransferError(`${label} is missing`, error);
+	}
+	if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1) {
+		throw new KernelSnapshotTransferError(`${label} must be a regular non-linked file`);
+	}
+	if (info.size > MAX_KERNEL_SNAPSHOT_TRANSFER_BYTES) {
+		throw new KernelSnapshotTransferError(`${label} exceeds the snapshot transfer limit`);
+	}
+	const bytes = readFileSync(path);
+	if (bytes.length !== info.size) throw new KernelSnapshotTransferError(`${label} changed during validation`);
+	return bytes;
+}
+
+function snapshotTransferPlan(root: string, label: string): SnapshotTransferPlan | undefined {
+	const canonicalRoot = snapshotRootPath(root, label);
+	const payloadPath = join(canonicalRoot, "kernel-state.dill");
+	const manifestPath = join(canonicalRoot, "kernel-state.json");
+	const payloadExists = existsSync(payloadPath);
+	const manifestExists = existsSync(manifestPath);
+	if (!payloadExists && !manifestExists) return undefined;
+	if (!payloadExists || !manifestExists) {
+		throw new KernelSnapshotTransferError(`${label} has an incomplete snapshot`);
+	}
+	const payload = snapshotFileBytes(payloadPath, `${label} payload`);
+	const manifestBytes = snapshotFileBytes(manifestPath, `${label} manifest`);
+	let manifest: unknown;
+	try {
+		manifest = JSON.parse(manifestBytes.toString("utf8"));
+	} catch (error) {
+		throw new KernelSnapshotTransferError(`${label} manifest is not valid JSON`, error);
+	}
+	if (!isRecord(manifest) || manifest.status !== "committed" || manifest.schemaVersion !== 2) {
+		throw new KernelSnapshotTransferError(`${label} manifest is not a committed snapshot`);
+	}
+	const payloadBytes = manifest.payloadBytes;
+	const payloadDigest = manifest.payloadDigest;
+	if (
+		!Number.isSafeInteger(payloadBytes) ||
+		(payloadBytes as number) < 0 ||
+		typeof payloadDigest !== "string" ||
+		!/^[0-9a-f]{64}$/.test(payloadDigest) ||
+		payload.length !== payloadBytes ||
+		createHash("sha256").update(payload).digest("hex") !== payloadDigest
+	) {
+		throw new KernelSnapshotTransferError(`${label} payload does not match its manifest`);
+	}
+	const entries = new Map<string, SnapshotTransferEntry>();
+	const payloadDigestValue = createHash("sha256").update(payload).digest("hex");
+	entries.set("kernel-state.dill", {
+		relativePath: "kernel-state.dill",
+		sourcePath: payloadPath,
+		sizeBytes: payload.length,
+		digest: payloadDigestValue,
+	});
+	entries.set("kernel-state.json", {
+		relativePath: "kernel-state.json",
+		sourcePath: manifestPath,
+		sizeBytes: manifestBytes.length,
+		digest: createHash("sha256").update(manifestBytes).digest("hex"),
+	});
+	if (manifest.retainedValues !== undefined && !Array.isArray(manifest.retainedValues)) {
+		throw new KernelSnapshotTransferError(`${label} retained values are malformed`);
+	}
+	for (const retained of (manifest.retainedValues ?? []) as unknown[]) {
+		if (!isRecord(retained) || retained.artifactRef === null || retained.artifactRef === undefined) continue;
+		if (!isRecord(retained.artifactRef))
+			throw new KernelSnapshotTransferError(`${label} artifact reference is malformed`);
+		const relativePath = retained.artifactRef.relativePath;
+		const digest = retained.artifactRef.digest;
+		const sizeBytes = retained.artifactRef.sizeBytes;
+		if (
+			typeof relativePath !== "string" ||
+			!/^(kernel-state-artifacts\/[0-9a-f]{64}\.dill)$/.test(relativePath) ||
+			typeof digest !== "string" ||
+			digest !== relativePath.slice("kernel-state-artifacts/".length, -".dill".length) ||
+			!Number.isSafeInteger(sizeBytes) ||
+			(sizeBytes as number) < 0
+		) {
+			throw new KernelSnapshotTransferError(`${label} artifact reference is unverifiable`);
+		}
+		const artifactPath = resolve(canonicalRoot, relativePath);
+		if (!pathIsWithin(artifactPath, canonicalRoot))
+			throw new KernelSnapshotTransferError(`${label} artifact path escaped`);
+		const artifactBytes = snapshotFileBytes(artifactPath, `${label} artifact`);
+		if (artifactBytes.length !== sizeBytes || createHash("sha256").update(artifactBytes).digest("hex") !== digest) {
+			throw new KernelSnapshotTransferError(`${label} artifact does not match its manifest`);
+		}
+		entries.set(relativePath, {
+			relativePath,
+			sourcePath: artifactPath,
+			sizeBytes: artifactBytes.length,
+			digest,
+		});
+	}
+	return { entries: [...entries.values()] };
+}
+
+function assertSnapshotTargetPath(root: string, targetPath: string): void {
+	if (!pathIsWithin(targetPath, root))
+		throw new KernelSnapshotTransferError("snapshot transfer target escaped its root");
+	const relativeTarget = relative(root, targetPath);
+	let current = root;
+	for (const component of relativeTarget.split("/")) {
+		current = join(current, component);
+		if (!existsSync(current)) continue;
+		const info = lstatSync(current);
+		if (info.isSymbolicLink()) throw new KernelSnapshotTransferError("snapshot transfer target contains a symlink");
+	}
+}
+
+function copySnapshotTransfer(plan: SnapshotTransferPlan | undefined, destinationRoot: string): void {
+	if (plan === undefined) return;
+	const canonicalDestination = snapshotRootPath(destinationRoot, "snapshot transfer destination");
+	const destinations = plan.entries.map((entry) => ({
+		entry,
+		targetPath: resolve(canonicalDestination, entry.relativePath),
+	}));
+	for (const { targetPath } of destinations) {
+		const targetParent = dirname(targetPath);
+		mkdirSync(targetParent, { recursive: true, mode: 0o700 });
+		assertSnapshotTargetPath(canonicalDestination, targetPath);
+		if (existsSync(targetPath)) {
+			const targetInfo = lstatSync(targetPath);
+			if (targetInfo.isSymbolicLink() || !targetInfo.isFile() || targetInfo.nlink !== 1) {
+				throw new KernelSnapshotTransferError("snapshot transfer target is not a replaceable regular file");
+			}
+		}
+	}
+	for (const { entry, targetPath } of destinations) {
+		const targetParent = dirname(targetPath);
+		const stagingDirectory = mkdtempSync(join(targetParent, ".prime-agent-snapshot-transfer-"));
+		const stagingPath = join(stagingDirectory, "payload");
+		try {
+			copyFileSync(entry.sourcePath, stagingPath);
+			chmodSync(stagingPath, 0o600);
+			renameSync(stagingPath, targetPath);
+		} finally {
+			rmSync(stagingDirectory, { recursive: true, force: true });
+		}
+	}
+}
+
+export function stageKernelSnapshot(durableRoot: string, scratchRoot: string): void {
+	if (!basename(resolve(scratchRoot)).startsWith(KERNEL_OUTPUT_SCRATCH_PREFIX)) {
+		throw new KernelSnapshotTransferError("snapshot staging requires a host-owned kernel scratch root");
+	}
+	copySnapshotTransfer(snapshotTransferPlan(durableRoot, "durable snapshot"), scratchRoot);
+}
+
+export function commitKernelSnapshot(scratchRoot: string, durableRoot: string): void {
+	if (!basename(resolve(scratchRoot)).startsWith(KERNEL_OUTPUT_SCRATCH_PREFIX)) {
+		throw new KernelSnapshotTransferError("snapshot commit requires a host-owned kernel scratch root");
+	}
+	copySnapshotTransfer(snapshotTransferPlan(scratchRoot, "kernel scratch snapshot"), durableRoot);
 }
 
 interface DockerMount {
@@ -567,9 +799,10 @@ async function inspectContainer(dockerBinary: string, containerId: string): Prom
 	return parseInspection(stdout);
 }
 
-function findContainerByOwner(dockerBinary: string, ownerIdentity: string): string | undefined {
+function findContainersByOwner(dockerBinary: string, ownerIdentity: string): readonly string[] {
+	let output: string;
 	try {
-		const output = execFileSync(
+		output = execFileSync(
 			dockerBinary,
 			[
 				"ps",
@@ -582,12 +815,15 @@ function findContainerByOwner(dockerBinary: string, ownerIdentity: string): stri
 			],
 			{ encoding: "utf8", maxBuffer: 128 * 1024, timeout: 5_000 },
 		);
-		const ids = output.trim().split("\n").filter(Boolean);
-		if (ids.length > 1) throw new Error("multiple kernel containers share one owner identity");
-		return ids[0];
-	} catch {
-		return undefined;
+	} catch (error) {
+		throw new KernelContainerOwnerCleanupError(
+			ownerIdentity,
+			[],
+			`kernel container owner lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+			error,
+		);
 	}
+	return [...new Set(output.trim().split("\n").filter(Boolean))];
 }
 
 export async function reserveKernelPorts(): Promise<readonly number[]> {
@@ -653,14 +889,28 @@ export async function createKernelContainer(options: KernelContainerCreateOption
 		assertContainerAttestation(inspection, options, safePaths);
 		return containerId;
 	} catch (error) {
-		containerId ||= findContainerByOwner(dockerBinary, options.isolation.ownerIdentity) ?? "";
-		if (containerId) {
+		const ownedContainerIds = containerId
+			? [containerId]
+			: findContainersByOwner(dockerBinary, options.isolation.ownerIdentity);
+		const cleanupErrors: unknown[] = [];
+		for (const ownedContainerId of ownedContainerIds) {
 			try {
-				removeKernelContainer(dockerBinary, containerId);
+				removeKernelContainer(dockerBinary, ownedContainerId);
 			} catch (cleanupError) {
-				throw cleanupError;
+				cleanupErrors.push(cleanupError);
 			}
 		}
+		if (cleanupErrors.length > 0 || ownedContainerIds.length > 1) {
+			throw new KernelContainerOwnerCleanupError(
+				options.isolation.ownerIdentity,
+				ownedContainerIds,
+				cleanupErrors.length > 0
+					? `kernel container owner reconciliation failed for ${ownedContainerIds.length} container(s)`
+					: `kernel container owner identity matched ${ownedContainerIds.length} containers`,
+				cleanupErrors.length > 0 ? cleanupErrors : error,
+			);
+		}
+		containerId ||= ownedContainerIds[0] ?? "";
 		throw new KernelContainerCreationError(
 			containerId || undefined,
 			error instanceof Error ? error.message : String(error),

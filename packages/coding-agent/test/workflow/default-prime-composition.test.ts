@@ -9,14 +9,10 @@ import { AuthStorage } from "../../src/core/auth-storage.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import {
-	canonicalJsonBytes,
-	sha256Hex,
-	type DurableApprovalSecretProof,
-} from "../../src/core/workflow/contracts.js";
-import {
 	normalizeWorkflowTaskGraphSource,
 	workflowTaskGraphSourceBindingDigest,
 } from "../../src/core/workflow/brainstorm.js";
+import { canonicalJsonBytes, type DurableApprovalSecretProof, sha256Hex } from "../../src/core/workflow/contracts.js";
 import { createDefaultPrimeWorkflowProvider } from "../../src/core/workflow/default-prime.js";
 import type { WorkflowGoalContractRequest } from "../../src/core/workflow/shell.js";
 

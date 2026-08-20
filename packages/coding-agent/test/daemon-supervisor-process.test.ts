@@ -21,6 +21,7 @@ import type { DaemonWorkerDescriptor } from "../src/modes/daemon/daemon-worker-p
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
 const blockingProcessPath = resolve(__dirname, "fixtures/blocking-process.mjs");
+const workflowFixturePath = resolve(__dirname, "fixtures/workflow-brainstorm-process.ts");
 const tempDirs: string[] = [];
 const children = new Set<ChildProcess>();
 const workerPids = new Set<number>();
@@ -222,6 +223,17 @@ function requireSummary(responseData: unknown): SessionSummary {
 	return responseData as SessionSummary;
 }
 
+function requireAttachSummary(responseData: unknown): Record<string, unknown> {
+	if (!responseData || typeof responseData !== "object" || !("snapshot" in responseData)) {
+		throw new Error("Missing daemon attach snapshot");
+	}
+	const { snapshot } = responseData as { snapshot: unknown };
+	if (!snapshot || typeof snapshot !== "object" || !("summary" in snapshot)) {
+		throw new Error("Missing daemon attach snapshot summary");
+	}
+	return (snapshot as { summary: Record<string, unknown> }).summary;
+}
+
 function requireSessionList(responseData: unknown): SessionSummary[] {
 	if (!responseData || typeof responseData !== "object" || !("sessions" in responseData)) {
 		throw new Error("Missing daemon session list");
@@ -242,6 +254,44 @@ async function waitForExit(child: ChildProcess): Promise<void> {
 		child.once("exit", () => {
 			clearTimeout(timeout);
 			resolveExit();
+		});
+	});
+}
+
+async function runWorkflowFixture(mode: "draft" | "propose", rootDir: string): Promise<void> {
+	const child = spawn(process.execPath, [tsxPath, workflowFixturePath, mode, rootDir], {
+		env: { ...process.env, TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json") },
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	children.add(child);
+	const diagnostics = { stdout: "", stderr: "" };
+	childDiagnostics.set(child, diagnostics);
+	child.stdout?.on("data", (chunk: Buffer) => {
+		diagnostics.stdout += chunk.toString("utf8");
+	});
+	child.stderr?.on("data", (chunk: Buffer) => {
+		diagnostics.stderr += chunk.toString("utf8");
+	});
+	await new Promise<void>((resolveExit, reject) => {
+		const timeout = setTimeout(() => {
+			child.kill("SIGTERM");
+			reject(
+				new Error(
+					`Timed out waiting for workflow fixture (${mode})\nstdout:\n${diagnostics.stdout}\nstderr:\n${diagnostics.stderr}`,
+				),
+			);
+		}, 90_000);
+		child.once("exit", (code, signal) => {
+			clearTimeout(timeout);
+			if (code === 0 && signal === null) {
+				resolveExit();
+				return;
+			}
+			reject(
+				new Error(
+					`Workflow fixture failed (${mode}): code=${code} signal=${signal}\nstdout:\n${diagnostics.stdout}\nstderr:\n${diagnostics.stderr}`,
+				),
+			);
 		});
 	});
 }
@@ -286,6 +336,185 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("publishes a negotiated workflow projection without lazy artifacts or unsafe approval fields", async () => {
+		const root = tempDir();
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-workflow-status-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		await runWorkflowFixture("draft", root);
+		await runWorkflowFixture("propose", root);
+		const metadata = JSON.parse(readFileSync(join(root, "metadata.json"), "utf8")) as {
+			sessionFile: string;
+			sessionDir: string;
+		};
+
+		const supervisor = spawnSupervisor(root, socketPath, root);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			sessionPath: metadata.sessionFile,
+			config: { cwd: root, agentDir: root, sessionDir: metadata.sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const createdSummary = requireSummary(created.data);
+		if (!createdSummary.activeSessionId || !createdSummary.workerPid)
+			throw new Error("Workflow fixture session did not become active");
+		workerPids.add(createdSummary.workerPid);
+
+		const modernList = await client.request({ type: "list", capabilities: ["workflow_status_projection"] });
+		if (!modernList.success) throw new Error(modernList.error);
+		const modernSummary = requireSessionList(modernList.data).find(
+			(summary) => summary.activeSessionId === createdSummary.activeSessionId,
+		);
+		expect(modernSummary?.workflowStatus).toMatchObject({
+			workflowId: expect.any(String),
+			status: "awaiting_user",
+			phase: "adjudicating",
+			nextGate: null,
+			nextTask: null,
+			headDigest: expect.any(String),
+			approvalRequest: {
+				approvalRequestId: expect.any(String),
+				question: expect.any(String),
+				expiresAt: expect.any(String),
+				expectedResponseSequence: expect.any(Number),
+				headDigest: expect.any(String),
+				stateDigest: expect.any(String),
+				options: expect.any(Array),
+			},
+		});
+		const serializedWorkflowStatus = JSON.stringify(modernSummary?.workflowStatus);
+		expect(serializedWorkflowStatus).not.toContain("tokenHash");
+		expect(serializedWorkflowStatus).not.toContain("credentialDigest");
+		expect(serializedWorkflowStatus).not.toContain("trustedPrincipal");
+		expect(serializedWorkflowStatus).not.toContain("requestingClientSessionId");
+
+		const legacyClient = await connectEventually(socketPath, supervisor);
+		const legacyList = await legacyClient.request({ type: "list" });
+		if (!legacyList.success) throw new Error(legacyList.error);
+		const legacySummary = requireSessionList(legacyList.data).find(
+			(summary) => summary.activeSessionId === createdSummary.activeSessionId,
+		);
+		expect(legacySummary).not.toHaveProperty("workflowStatus");
+		legacyClient.close();
+
+		const freshSessionDir = join(root, "fresh-sessions");
+		const fresh = await client.request({
+			type: "create",
+			config: { cwd: root, agentDir: root, sessionDir: freshSessionDir, noTools: true, noExtensions: true },
+		});
+		if (!fresh.success) throw new Error(fresh.error);
+		const freshSummary = requireSummary(fresh.data);
+		const freshWorkflowDir = join(dirname(freshSessionDir), "session-artifacts", freshSummary.sessionId, "workflows");
+		const freshList = await client.request({ type: "list", capabilities: ["workflow_status_projection"] });
+		if (!freshList.success) throw new Error(freshList.error);
+		const listedFreshSummary = requireSessionList(freshList.data).find(
+			(summary) => summary.activeSessionId === freshSummary.activeSessionId,
+		);
+		expect(listedFreshSummary).not.toHaveProperty("workflowStatus");
+		expect(existsSync(freshWorkflowDir)).toBe(false);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 120_000);
+
+	it("refreshes workflow projections across legacy and modern attach snapshots", async () => {
+		const root = tempDir();
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-workflow-attach-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		await runWorkflowFixture("draft", root);
+		await runWorkflowFixture("propose", root);
+		const firstMetadata = JSON.parse(readFileSync(join(root, "metadata.json"), "utf8")) as {
+			sessionFile: string;
+			sessionDir: string;
+		};
+		await runWorkflowFixture("draft", root);
+		await runWorkflowFixture("propose", root);
+		const secondMetadata = JSON.parse(readFileSync(join(root, "metadata.json"), "utf8")) as {
+			sessionFile: string;
+			sessionDir: string;
+		};
+
+		const supervisor = spawnSupervisor(root, socketPath, root);
+		const legacyClient = await connectEventually(socketPath, supervisor);
+		const createWorkflowSession = async (metadata: { sessionFile: string; sessionDir: string }) => {
+			const created = await legacyClient.request({
+				type: "create",
+				sessionPath: metadata.sessionFile,
+				config: { cwd: root, agentDir: root, sessionDir: metadata.sessionDir, noTools: true, noExtensions: true },
+			});
+			if (!created.success) throw new Error(created.error);
+			const summary = requireSummary(created.data);
+			const { activeSessionId, workerPid } = summary;
+			if (!activeSessionId || !workerPid) {
+				throw new Error("Workflow fixture session did not become active");
+			}
+			workerPids.add(workerPid);
+			return { ...summary, activeSessionId, workerPid };
+		};
+		const firstSummary = await createWorkflowSession(firstMetadata);
+		const secondSummary = await createWorkflowSession(secondMetadata);
+
+		const legacyCapabilities = ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"] as const;
+		const modernCapabilities = [...legacyCapabilities, "workflow_status_projection"] as const;
+		const legacyFirst = await legacyClient.request({
+			type: "attach",
+			activeSessionId: firstSummary.activeSessionId,
+			capabilities: legacyCapabilities,
+		});
+		if (!legacyFirst.success) throw new Error(legacyFirst.error);
+		expect(requireAttachSummary(legacyFirst.data)).not.toHaveProperty("workflowStatus");
+
+		const modernClient = await connectEventually(socketPath, supervisor);
+		const modernFirst = await modernClient.request({
+			type: "attach",
+			activeSessionId: secondSummary.activeSessionId,
+			capabilities: modernCapabilities,
+		});
+		if (!modernFirst.success) throw new Error(modernFirst.error);
+		expect(requireAttachSummary(modernFirst.data).workflowStatus).toMatchObject({
+			workflowId: expect.any(String),
+			status: "awaiting_user",
+			phase: "adjudicating",
+			nextGate: null,
+			nextTask: null,
+			headDigest: expect.any(String),
+		});
+
+		const legacyAfterModern = await legacyClient.request({
+			type: "attach",
+			activeSessionId: secondSummary.activeSessionId,
+			capabilities: legacyCapabilities,
+		});
+		if (!legacyAfterModern.success) throw new Error(legacyAfterModern.error);
+		expect(requireAttachSummary(legacyAfterModern.data)).not.toHaveProperty("workflowStatus");
+
+		const modernReattach = await modernClient.request({
+			type: "reattach",
+			activeSessionId: secondSummary.activeSessionId,
+			targetActiveSessionId: firstSummary.activeSessionId,
+			capabilities: modernCapabilities,
+		});
+		if (!modernReattach.success) throw new Error(modernReattach.error);
+		expect(requireAttachSummary(modernReattach.data).workflowStatus).toMatchObject({
+			workflowId: expect.any(String),
+			status: "awaiting_user",
+			phase: "adjudicating",
+			nextGate: null,
+			nextTask: null,
+			headDigest: expect.any(String),
+		});
+
+		await legacyClient.request({ type: "shutdown" });
+		legacyClient.close();
+		modernClient.close();
+		await waitForSocketGone(socketPath);
+	}, 120_000);
+
 	it("lists, creates, and attaches passive children through their owning worker", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");

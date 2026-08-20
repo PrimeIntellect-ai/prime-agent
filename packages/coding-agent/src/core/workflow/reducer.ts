@@ -600,6 +600,20 @@ function applyKnownWorkflowPayload(
 				},
 				commit,
 			);
+		case "approval_epoch_reanchored":
+			// A coordinator-epoch fence advances the live epoch without touching the pending approval
+			// request, which stays bound (decision refs, headless signature, one-use secret) to the
+			// epoch it was requested under. This event only re-baselines the durable head that
+			// consumption freshness is checked against; it must never rewrite the request itself.
+			if (
+				payload.workflowId !== state.workflowId ||
+				state.status !== "awaiting_user" ||
+				state.approvalRequest?.approvalRequestId !== payload.approvalRequestId ||
+				state.approvalRequest.stateDigest !== payload.stateDigest ||
+				!sameEpoch(payload.nextEpoch, currentEpoch(state))
+			)
+				throw new Error("Approval epoch reanchor is not bound to the pending request and the live epoch.");
+			return advanceEventMetadata(state, commit);
 		case "fresh_planner_started":
 			if (
 				payload.workflowId !== state.workflowId ||

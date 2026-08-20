@@ -1473,6 +1473,8 @@ export interface WorkflowTask {
 	boundaryIds?: readonly string[];
 	/** Dynamic task outputs retained from the approved graph source. */
 	outputRefs?: readonly string[];
+	/** Cheapest worker tier retained from the approved graph source; absent means the session default. */
+	computeClass?: "cheap" | "standard" | "deep";
 	/** Dynamic task evidence limits retained from the approved graph source. */
 	evidencePolicy?: {
 		kind: string;
@@ -3484,6 +3486,7 @@ export type WorkflowEventKind =
 	| "resource_envelope_proposed"
 	| "approval_requested"
 	| "approval_consumed"
+	| "approval_epoch_reanchored"
 	| "fresh_planner_started"
 	| "resource_approved"
 	| "workflow_status_changed"
@@ -3880,6 +3883,13 @@ export type WorkflowKernelEventPayload =
 			awaitingUser: WorkflowApprovalAwaitingUserTransition;
 	  }
 	| { kind: "approval_consumed"; receipt: WorkflowApprovalReceipt; resumeTransition: WorkflowApprovalResumeTransition }
+	| {
+			kind: "approval_epoch_reanchored";
+			workflowId: string;
+			approvalRequestId: string;
+			stateDigest: string;
+			nextEpoch: WorkflowEpochRef;
+	  }
 	| {
 			kind: "fresh_planner_started";
 			workflowId: string;
@@ -5227,6 +5237,7 @@ export const WORKFLOW_EVENT_KINDS: ReadonlySet<WorkflowEventKind> = new Set<Work
 	"resource_envelope_proposed",
 	"approval_requested",
 	"approval_consumed",
+	"approval_epoch_reanchored",
 	"fresh_planner_started",
 	"resource_approved",
 	"workflow_status_changed",

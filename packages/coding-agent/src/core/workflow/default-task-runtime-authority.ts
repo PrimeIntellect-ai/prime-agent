@@ -29,6 +29,7 @@ import type {
 import {
 	defaultPrimeWorkerTaskCapsuleDigest,
 	defaultPrimeWorkerTaskCapsuleReceiptBindingDigest,
+	workflowToolsForCapabilities,
 } from "./default-task-runtime.js";
 import type { WorkflowDispatcher, WorkflowDispatchResult } from "./dispatch.js";
 import { leaseRefOf } from "./dispatch.js";
@@ -404,7 +405,11 @@ function isTerminalArtifactBoundToCapsule(
 ): boolean {
 	if (!isDefaultTaskRuntimeGeneratedOutput(artifact)) {
 		if (capsule !== null) return true;
-		return task !== undefined && launchReceipt.taskCapsuleDigest === null && launchReceipt.taskCapsuleReceiptDigest === null;
+		return (
+			task !== undefined &&
+			launchReceipt.taskCapsuleDigest === null &&
+			launchReceipt.taskCapsuleReceiptDigest === null
+		);
 	}
 	if (capsule === null) {
 		return (
@@ -650,12 +655,15 @@ export function createDefaultTaskRuntimeAuthority(
 	if (durable === undefined) throw new Error("default_prime_task_runtime_durable_store_required");
 	if (input.runtimeStore.identity.workflowId !== input.workflowId)
 		throw new Error("default_prime_task_runtime_store_binding_invalid");
+	// Store epoch is the durable anchor and must match: a rotated store is a different history.
+	// Coordinator epoch is excluded — it rotates on every resume as live-coordinator fencing, so
+	// requiring it would mean a decision recorded before a restart could never be acted on, which
+	// is exactly what an approved-then-resumed workflow needs to do.
 	if (
 		input.decisionRef.decisionScope.kind !== "workflow" ||
 		input.decisionRef.decisionScope.workflowId !== input.workflowId ||
 		input.decisionRef.decisionScope.rootSessionId !== input.rootSessionId ||
-		input.decisionRef.storeEpoch !== input.epochRef.storeEpoch ||
-		input.decisionRef.coordinatorEpoch !== input.epochRef.coordinatorEpoch
+		input.decisionRef.storeEpoch !== input.epochRef.storeEpoch
 	)
 		throw new Error("default_prime_task_runtime_decision_binding_invalid");
 	if (!/^[0-9a-f]{64}$/u.test(input.goalRevisionDigest))
@@ -3092,6 +3100,14 @@ export function createDefaultTaskRuntimeAuthority(
 				prompt: taskCapsule === null ? request.task.objective : taskCapsulePrompt(taskCapsule),
 				taskCapsule: taskCapsule ?? undefined,
 				sessionName: `prime-${request.task.taskId}`,
+				...(request.task.computeClass === undefined ? {} : { computeClass: request.task.computeClass }),
+				// A task's declared authority becomes the worker's actual tool set. Without this a
+				// review role would launch holding an edit tool, and "the reviewer cannot author the
+				// work it checks" would be prose rather than a property of the process.
+				...(() => {
+					const allowedToolNames = workflowToolsForCapabilities(request.task.authority);
+					return allowedToolNames === undefined ? {} : { allowedToolNames };
+				})(),
 				reportHeartbeat: (heartbeat) =>
 					reportTaskHeartbeat(request.task.taskId, request.attemptId, request.executionKey, heartbeat),
 			});

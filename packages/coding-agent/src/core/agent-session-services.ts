@@ -24,7 +24,11 @@ import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
 import { persistWorkflowCliApprovalDelivery } from "./workflow/cli-approval.js";
 import { type DurableApprovalSecretProof, digestObject, type WorkflowApprovalRequest } from "./workflow/contracts.js";
 import type { DefaultPrimeTaskRuntimeAuthorityFactory } from "./workflow/default-prime.js";
-import type { DefaultPrimeWorkerFailureNotice, DefaultPrimeWorkerLauncher } from "./workflow/default-task-runtime.js";
+import type {
+	DefaultPrimeWorkerFailureNotice,
+	DefaultPrimeWorkerLauncher,
+	WorkflowComputeClass,
+} from "./workflow/default-task-runtime.js";
 import type { DefaultTaskRuntimeProgressWakeObligation } from "./workflow/default-task-runtime-authority.js";
 import type { WorkflowExecutionEvidenceSource } from "./workflow/execution-evidence.js";
 import {
@@ -88,6 +92,8 @@ export interface CreateAgentSessionServicesOptions {
 	taskRuntimePrimeAdapter?: WorkflowPrimeStageEvidenceAdapter;
 	primeWorkflowWorkerLauncher?: DefaultPrimeWorkerLauncher;
 	primeWorkflowWorkerModel?: string;
+	/** Selector per compute-class tier; absent tiers fall back to primeWorkflowWorkerModel. */
+	primeWorkflowWorkerModelsByComputeClass?: Partial<Record<WorkflowComputeClass, string>>;
 	/** Host-sealed worker admission; absent means workflow child launch fails closed. */
 	workerModelCapabilityAdmission?: WorkerModelCapabilityLaunchAuthorizer;
 	/** Optional redacted model availability override used by the persisted admission gate. */
@@ -198,6 +204,7 @@ export interface AgentSessionServices {
 	taskRuntimePrimeAdapter?: WorkflowPrimeStageEvidenceAdapter;
 	primeWorkflowWorkerLauncher?: DefaultPrimeWorkerLauncher;
 	primeWorkflowWorkerModel?: string;
+	primeWorkflowWorkerModelsByComputeClass?: Partial<Record<WorkflowComputeClass, string>>;
 	workerModelCapabilityAdmission?: WorkerModelCapabilityLaunchAuthorizer;
 	workerModelCapabilityAvailability?: WorkerModelCapabilityAvailabilityResolver;
 	primeWorkflowWorkerFailureDelivery?: (notice: DefaultPrimeWorkerFailureNotice) => Promise<void> | void;
@@ -270,9 +277,29 @@ type PrimeWorkflowWorkerSession = Pick<
 >;
 
 /** Create the host-owned workflow child launcher with bounded heartbeat admission. */
+/**
+ * Resolve the model selector for a task's declared compute class.
+ *
+ * Args:
+ * computeClass: Tier the planner declared, or undefined for the session default.
+ * models: Configured selector per tier; a missing tier falls back to the default selector.
+ * fallback: Selector used when no tier is declared or configured.
+ * Return: Model selector to launch the worker with.
+ */
+export function resolveWorkerModelForComputeClass(
+	computeClass: WorkflowComputeClass | undefined,
+	models: Partial<Record<WorkflowComputeClass, string>> | undefined,
+	fallback: string,
+): string {
+	if (computeClass === undefined) return fallback;
+	return models?.[computeClass] ?? fallback;
+}
+
 export function createDefaultPrimeWorkflowWorkerLauncher(input: {
 	readonly session: PrimeWorkflowWorkerSession;
 	readonly workerModel?: string;
+	/** Selector per compute class. Absent tiers fall back to workerModel. */
+	readonly workerModelsByComputeClass?: Partial<Record<WorkflowComputeClass, string>>;
 }): DefaultPrimeWorkerLauncher {
 	return async (request) => {
 		let heartbeatInFlight: Promise<void> | null = null;
@@ -299,8 +326,11 @@ export function createDefaultPrimeWorkflowWorkerLauncher(input: {
 		const capsuleDigest = request.taskCapsule?.capsuleDigest;
 		if (capsuleDigest === undefined || capsuleDigest.length === 0)
 			throw new Error("workflow_worker_task_capsule_required");
-		const workerModel = input.workerModel ?? WORKER_MODEL_SELECTOR;
-		if (workerModel !== WORKER_MODEL_SELECTOR) throw new Error("worker_model_policy_selector_denied");
+		const workerModel = resolveWorkerModelForComputeClass(
+			request.computeClass,
+			input.workerModelsByComputeClass,
+			input.workerModel ?? WORKER_MODEL_SELECTOR,
+		);
 		const handle = await input.session.runWorkflowRlmChild(
 			request.prompt,
 			request.sessionName,
@@ -315,6 +345,7 @@ export function createDefaultPrimeWorkflowWorkerLauncher(input: {
 				capsuleDigest,
 			},
 			reportMeaningfulProgress,
+			request.allowedToolNames,
 		);
 		return {
 			workerId: handle.rlm_child_id,
@@ -586,6 +617,8 @@ export async function createAgentSessionServices(
 		taskRuntimePrimeAdapter: options.taskRuntimePrimeAdapter,
 		primeWorkflowWorkerLauncher: options.primeWorkflowWorkerLauncher,
 		primeWorkflowWorkerModel: options.primeWorkflowWorkerModel ?? WORKER_MODEL_SELECTOR,
+		primeWorkflowWorkerModelsByComputeClass:
+			options.primeWorkflowWorkerModelsByComputeClass ?? settingsManager.getWorkflowWorkerModelsByComputeClass(),
 		workerModelCapabilityAdmission: options.workerModelCapabilityAdmission,
 		workerModelCapabilityAvailability,
 		primeWorkflowWorkerFailureDelivery: options.primeWorkflowWorkerFailureDelivery,
@@ -676,6 +709,7 @@ export async function createAgentSessionFromServices(
 		createDefaultPrimeWorkflowWorkerLauncher({
 			session: result.session,
 			workerModel: options.services.primeWorkflowWorkerModel,
+			workerModelsByComputeClass: options.services.primeWorkflowWorkerModelsByComputeClass,
 		});
 	const primeWorkflowWorkerFailureDelivery =
 		options.services.primeWorkflowWorkerFailureDelivery ??

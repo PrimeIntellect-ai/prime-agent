@@ -108,10 +108,11 @@ export interface WorkerModelCapabilityLaunchInput {
 	readonly epochRef: WorkflowEpochRef;
 	readonly prompt: string;
 	readonly sessionName: string;
-	readonly selector: typeof WORKER_MODEL_SELECTOR;
-	readonly provider: typeof WORKER_MODEL_PROVIDER;
-	readonly model: typeof WORKER_MODEL_ID;
-	readonly reasoning: typeof WORKER_MODEL_REASONING;
+	readonly selector: string;
+	readonly provider: string;
+	readonly model: string;
+	readonly reasoning: string;
+	/** Fallback stays disabled so a worker can never silently run on a model the host did not admit. */
 	readonly allowFallback: false;
 }
 
@@ -427,8 +428,6 @@ function normalizePolicy(input: WorkerModelPolicyInput): WorkerModelPolicy {
 	const reasoning = safeString(input.reasoning, "worker_model_policy_reasoning", 128);
 	if (input.allowFallback !== false) throw new Error("worker_model_policy_fallback_forbidden");
 	const policyRevision = safeString(input.policyRevision, "worker_model_policy_revision", 256);
-	if (provider !== WORKER_MODEL_PROVIDER || model !== WORKER_MODEL_ID || reasoning !== WORKER_MODEL_REASONING)
-		throw new Error("worker_model_policy_selector_denied");
 	return { provider, model, reasoning, allowFallback: false, policyRevision };
 }
 

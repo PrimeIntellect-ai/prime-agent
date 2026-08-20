@@ -1790,6 +1790,123 @@ setInterval(() => undefined, 1_000);
 	}
 }, 60_000);
 
+it("consumes a pending approval after a session resume rotates the coordinator epoch", async () => {
+	const artifactRoot = await mkdtemp(join(tmpdir(), "workflow-session-host-factory-approval-resume-rotation-"));
+	const factoryModule = pathToFileURL(join(process.cwd(), "src/core/workflow/session-host-factory.ts")).href;
+	const goalsModule = pathToFileURL(join(process.cwd(), "src/core/goals.ts")).href;
+	const childSource = `
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createPersistedSessionWorkflowHost } from ${JSON.stringify(factoryModule)};
+import { emptyGoalState } from ${JSON.stringify(goalsModule)};
+
+const artifactRoot = process.argv[1];
+const mode = process.argv[2] ?? "await";
+const workflowId = "workflow-approval-resume-rotation";
+const rootSessionId = "session-approval-resume-rotation";
+const goalPath = join(artifactRoot, "goal.json");
+const approvalProofPath = join(artifactRoot, "approval-proof.json");
+const readGoal = () => {
+  try { return JSON.parse(readFileSync(goalPath, "utf8")); }
+  catch { const initial = emptyGoalState(); writeFileSync(goalPath, JSON.stringify(initial)); return initial; }
+};
+const goalProjection = {
+  read: () => readGoal(),
+  compareAndSwap: (expected, next) => { if (JSON.stringify(readGoal()) !== JSON.stringify(expected)) return false; writeFileSync(goalPath, JSON.stringify(next)); return true; },
+};
+const host = await createPersistedSessionWorkflowHost({
+  artifactRoot,
+  rootSessionId,
+  workflowId,
+  goalProjection,
+  approvalSecretDelivery: ({ request, proof }) => writeFileSync(approvalProofPath, JSON.stringify({ request, proof })),
+  genesisEpoch: { storeEpoch: 1, coordinatorEpoch: 1 },
+});
+if (mode === "await") {
+  const started = await host.execute({ kind: "start", request: { workflowId, objective: "survive owner death before responding", acceptanceChecks: ["rotation"] } });
+  if (started.status !== "awaiting_user" || started.approvalRequest === null) throw new Error("owner worker did not receive the durable approval request");
+  console.log("ready:" + JSON.stringify({ status: started.status, approvalRequestId: started.approvalRequest.approvalRequestId }));
+} else {
+  const status = await host.execute({ kind: "status" });
+  if (status.status !== "awaiting_user" || status.approvalRequest === null) throw new Error("reopened workflow lost its awaiting_user approval");
+  const coordinatorEpochAfterResume = host.runtimeStore.durableContext?.epochRef.coordinatorEpoch;
+  const delivered = JSON.parse(readFileSync(approvalProofPath, "utf8"));
+  const request = status.approvalRequest;
+  const option = request.options.find((candidate) => candidate.optionId === "approve");
+  if (option === undefined) throw new Error("reopened workflow lost its approve option");
+  const responded = await host.execute({ kind: "respond", approvalRequestId: request.approvalRequestId, optionId: option.optionId, proof: delivered.proof });
+  console.log("resumed:" + JSON.stringify({ coordinatorEpochAfterResume, status: responded.status, phase: responded.phase }));
+}
+process.stdin.resume();
+setInterval(() => undefined, 1_000);
+`;
+	type Worker = { child: ReturnType<typeof spawn>; waitFor(prefix: string): Promise<string>; stderr(): string };
+	const workers: Worker[] = [];
+	const spawnWorker = (mode: "await" | "reopen"): Worker => {
+		const child = spawn(
+			process.execPath,
+			["--import", "tsx/esm", "--input-type=module", "-e", childSource, artifactRoot, mode],
+			{ cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
+		);
+		let stdout = "";
+		let stderr = "";
+		const waiters = new Map<string, { resolve(line: string): void; reject(error: Error): void }>();
+		const find = (prefix: string): string | undefined => stdout.split("\\n").find((line) => line.startsWith(prefix));
+		child.stdout.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString();
+			for (const [prefix, waiter] of waiters) {
+				const line = find(prefix);
+				if (line === undefined) continue;
+				waiters.delete(prefix);
+				waiter.resolve(line);
+			}
+		});
+		child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+		child.once("close", (code, signal) => {
+			for (const [prefix, waiter] of waiters)
+				waiter.reject(
+					new Error(
+						`approval resume rotation worker closed before ${prefix} (${code ?? "null"}/${signal ?? "none"}): ${stderr}`,
+					),
+				);
+		});
+		return {
+			child,
+			stderr: () => stderr,
+			waitFor: (prefix) =>
+				new Promise((resolve, reject) => {
+					const line = find(prefix);
+					if (line !== undefined) return resolve(line);
+					waiters.set(prefix, { resolve, reject });
+				}),
+		};
+	};
+	const stopWorker = async (worker: Worker): Promise<void> => {
+		if (worker.child.exitCode !== null || worker.child.signalCode !== null) return;
+		worker.child.kill("SIGKILL");
+		await new Promise<void>((resolve) => worker.child.once("close", () => resolve()));
+		if (worker.stderr().length > 0) throw new Error(`approval resume rotation worker failed: ${worker.stderr()}`);
+	};
+	try {
+		const owner = spawnWorker("await");
+		workers.push(owner);
+		const ready = await owner.waitFor("ready:");
+		expect(JSON.parse(ready.slice("ready:".length))).toMatchObject({ status: "awaiting_user" });
+		await stopWorker(owner);
+		const successor = spawnWorker("reopen");
+		workers.push(successor);
+		const resumed = await successor.waitFor("resumed:");
+		expect(JSON.parse(resumed.slice("resumed:".length))).toMatchObject({
+			coordinatorEpochAfterResume: 2,
+			status: "active",
+			phase: "planning",
+		});
+	} finally {
+		for (const worker of workers) await stopWorker(worker).catch(() => undefined);
+		await rm(artifactRoot, { recursive: true, force: true });
+	}
+}, 60_000);
+
 it("recovers a coordinator rotation killed after successor lease CAS before active publication", async () => {
 	const artifactRoot = await mkdtemp(join(tmpdir(), "workflow-session-host-factory-rotation-killed-"));
 	const factoryModule = pathToFileURL(join(process.cwd(), "src/core/workflow/session-host-factory.ts")).href;

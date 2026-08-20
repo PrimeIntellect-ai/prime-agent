@@ -128,7 +128,6 @@ import {
 	createLocalAppendLease,
 	createLocalAppendLeaseProcessIdentity,
 	type LocalAppendLease,
-	WorkflowLocalAppendLeaseError,
 } from "./local-append-lease.js";
 import { createLocalWorkflowJournalKeyProvider } from "./local-journal-keyring.js";
 import { createNodeWorkflowDescriptorFs as createNodeDescriptorFs } from "./node-descriptor-fs.js";
@@ -750,7 +749,7 @@ export async function createPersistedSessionWorkflowHost(
 				}));
 	const publicRuntimeStore = createPublicWorkflowRuntimeStore(runtimeStore);
 	const publicReceiptContext = freezeWorkflowHostReceiptContext(receiptAuthority.receiptContext);
-	const approvals = createPersistedWorkflowApprovalManager({
+	const approvals = await createPersistedWorkflowApprovalManager({
 		runtimeStore,
 		store,
 		workflowId: input.workflowId,
@@ -970,6 +969,7 @@ export async function createPersistedSessionWorkflowHost(
 			replay.head.epochRef.coordinatorEpoch !== durable.epochRef.coordinatorEpoch
 		)
 			return null;
+		const promotion = promotedReview.promotion;
 		const goalContract = status.goalContract;
 		const goalRevisionEvent = replay.events.find(
 			(event) =>
@@ -1024,9 +1024,9 @@ export async function createPersistedSessionWorkflowHost(
 			graphDigest: workflow.taskGraph.graphDigest,
 			acceptedHead: structuredClone(replay.head),
 			candidateId: candidate.candidateId,
-			promotionId: promotedReview.promotion.promotionId,
-			revisionId: promotedReview.promotion.revisionId,
-			policyDigest: promotedReview.promotion.policyDigest,
+			promotionId: promotion.promotionId,
+			revisionId: promotion.revisionId,
+			policyDigest: promotion.policyDigest,
 			proposalDigest,
 			proposalRef: structuredClone(candidate.proposalRef),
 			transferDigest,
@@ -1155,11 +1155,12 @@ export async function createPersistedSessionWorkflowHost(
 			)
 			.catch((error: unknown) => {
 				const leaseIsLive = Date.parse(publication.journal.currentLeaseRef().expiresAt) > Date.parse(now());
-				if (
-					error instanceof WorkflowLocalAppendLeaseError &&
-					error.code === "workflow_append_lease_guard_timeout" &&
-					leaseIsLive
-				) {
+				// A renewal failure is only fatal when the lease is actually gone. While it is still
+				// live, any failure is transient and retryable — the previous rule retried a guard
+				// timeout but treated every other error as permanent, and because the failure is
+				// never cleared, one transient fault poisoned every later lease operation for the
+				// life of the workflow.
+				if (leaseIsLive) {
 					if (!leaseHeartbeatStopped && leaseHeartbeatRetry === undefined)
 						leaseHeartbeatRetry = setTimeout(() => {
 							leaseHeartbeatRetry = undefined;
@@ -3162,6 +3163,14 @@ async function createPersistedWorkflowReceiptAuthority(input: {
 			const preparedApproval = replay.quarantined
 				? false
 				: replay.events.some((event) => {
+						if (event.payload.kind === "approval_epoch_reanchored") {
+							return (
+								event.payload.stateDigest === stateDigest &&
+								event.payload.nextEpoch.storeEpoch === state.storeEpoch &&
+								event.payload.nextEpoch.coordinatorEpoch === state.coordinatorEpoch &&
+								event.sequence === revision + 1
+							);
+						}
 						if (event.payload.kind !== "approval_requested") return false;
 						const approval = event.payload.approval;
 						return (
@@ -3454,7 +3463,7 @@ function createPersistedWorkflowGoalAccounting(input: {
 	};
 }
 
-function createPersistedWorkflowApprovalManager(input: {
+async function createPersistedWorkflowApprovalManager(input: {
 	runtimeStore: WorkflowRuntimeStore;
 	store: WorkflowStore;
 	workflowId: string;
@@ -3470,7 +3479,7 @@ function createPersistedWorkflowApprovalManager(input: {
 		/** One-use proofs bound to each structured option in the request. */
 		readonly proofs: Readonly<Record<string, DurableApprovalSecretProof>>;
 	}) => Promise<void> | void;
-}): WorkflowApprovalManagerWithOutcome {
+}): Promise<WorkflowApprovalManagerWithOutcome> {
 	const durable = input.runtimeStore.durableContext;
 	if (durable === undefined) throw new Error("workflow_approval_manager_requires_persisted_runtime");
 	const trustedPrincipal: WorkflowTrustedPrincipal = {
@@ -3519,8 +3528,10 @@ function createPersistedWorkflowApprovalManager(input: {
 		const events = await replay();
 		for (const event of [...events].reverse()) {
 			if (
-				event.payload.kind === "approval_requested" &&
-				event.payload.approval.approvalRequestId === approvalRequestId
+				(event.payload.kind === "approval_requested" &&
+					event.payload.approval.approvalRequestId === approvalRequestId) ||
+				(event.payload.kind === "approval_epoch_reanchored" &&
+					event.payload.approvalRequestId === approvalRequestId)
 			)
 				return event;
 		}
@@ -4025,6 +4036,26 @@ function createPersistedWorkflowApprovalManager(input: {
 			return receipt;
 		},
 	};
+	// A coordinator-epoch rotation on resume (dead-owner recovery) fences the workflow onto a new
+	// epoch without touching the durable approval request, which still carries the epoch it was
+	// originally requested under (its decision refs, headless signature, and one-use secret are all
+	// bound to that epoch and must not be rewritten). Instead, re-baseline the durable head that
+	// consumption freshness is checked against, here, once, as an explicit journalled transition —
+	// so a pending approval survives a session restart instead of being stuck behind a stale head.
+	const resumedState = await input.store.reload();
+	if (resumedState !== null && resumedState.status === "awaiting_user" && resumedState.approvalRequest !== null) {
+		const liveEpoch = { storeEpoch: resumedState.storeEpoch, coordinatorEpoch: resumedState.coordinatorEpoch };
+		const anchorEvent = await findRequestedEvent(resumedState.approvalRequest.approvalRequestId);
+		if (anchorEvent !== null && digestObject(anchorEvent.epochRef) !== digestObject(liveEpoch)) {
+			await commitPayload({
+				kind: "approval_epoch_reanchored",
+				workflowId: input.workflowId,
+				approvalRequestId: resumedState.approvalRequest.approvalRequestId,
+				stateDigest: resumedState.approvalRequest.stateDigest,
+				nextEpoch: liveEpoch,
+			});
+		}
+	}
 	return createDurableApprovalManager({
 		store: approvalStore,
 		hostStore: input.store,

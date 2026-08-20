@@ -40,7 +40,6 @@ import type {
 	WorkflowVerifiedHostReceipt,
 } from "./contracts.js";
 import { canonicalJsonBytes, digestObject, parseCanonicalJsonBytes } from "./contracts.js";
-import type { WorkflowEfficiencyRedTeamRuntime } from "./efficiency-reviewer.js";
 import type { WorkflowExecutionEvidenceRuntime } from "./execution-evidence.js";
 import type { WorkflowLearningRuntimeAdapter } from "./learning-runtime-adapter.js";
 import {
@@ -76,7 +75,6 @@ export const PRIME_WORKFLOW_INITIALIZATION_ORDER = Object.freeze([
 	"decision_approval_goal",
 	"completion",
 	"scheduler_resources",
-	"efficiency_reviewer",
 	"knowledge_mempalace",
 	"learning",
 	"autoresearch",
@@ -139,7 +137,6 @@ export interface PrimeWorkflowAuthenticatedAdapters {
 	/** Optional only as an explicit fail-closed capability: no scheduler is constructed when absent. */
 	readonly scheduler?: WorkflowScheduler;
 	/** Optional only as an explicit fail-closed capability: no reviewer is constructed when absent. */
-	readonly efficiencyReviewer?: WorkflowEfficiencyRedTeamRuntime;
 	/** Must be supplied with the learning owner's durable promotion/rollback ports before learning is used. */
 	readonly learning?: WorkflowLearningRuntimeAdapter;
 	readonly pipeline?: PrimeWorkflowPipelineRuntime;
@@ -193,7 +190,6 @@ export interface ProductionPrimeWorkflow {
 	readonly knowledgeStore?: KnowledgeStore;
 	readonly mempalace?: KnowledgeMempalaceBoundary;
 	readonly scheduler?: WorkflowScheduler;
-	readonly efficiencyReviewer?: WorkflowEfficiencyRedTeamRuntime;
 	readonly learning?: WorkflowLearningRuntimeAdapter;
 	readonly learningReviewHandler?: HostRequestHandler;
 	readonly learningRollbackHandler?: HostRequestHandler;
@@ -221,7 +217,6 @@ export interface ProductionPrimeWorkflow {
 	/** Subsystems omitted by the host are explicitly unavailable rather than silently replaced. */
 	readonly unavailableSubsystems: readonly (
 		| "scheduler_resources"
-		| "efficiency_reviewer"
 		| "learning"
 		| "pipeline"
 		| "execution_evidence"
@@ -252,7 +247,6 @@ export interface PrimeWorkflowBuiltinHostDependencies {
 	}) => Promise<WorkflowVerifiedHostReceipt>;
 	readonly now?: () => string;
 	readonly scheduler?: WorkflowScheduler;
-	readonly efficiencyReviewer?: WorkflowEfficiencyRedTeamRuntime;
 	readonly learning?: WorkflowLearningRuntimeAdapter;
 	readonly learningReviewHandler?: HostRequestHandler;
 	readonly learningRollbackHandler?: HostRequestHandler;
@@ -992,7 +986,6 @@ export function createPrimeWorkflowBuiltinAdapters(
 		knowledgeStore,
 		mempalace,
 		scheduler: input.scheduler,
-		efficiencyReviewer: input.efficiencyReviewer,
 		learning: input.learning,
 		pipeline: input.pipeline,
 		executionEvidence: input.executionEvidence,
@@ -1765,7 +1758,6 @@ export async function createProductionPrimeWorkflow(
 		knowledgeStore: input.adapters.knowledgeStore,
 		mempalace: input.adapters.mempalace,
 		scheduler: input.adapters.scheduler,
-		efficiencyReviewer: input.adapters.efficiencyReviewer,
 		learning: input.adapters.learning,
 		pipeline: input.adapters.pipeline,
 		executionEvidence: input.adapters.executionEvidence,
@@ -1776,7 +1768,6 @@ export async function createProductionPrimeWorkflow(
 		recordSkillOutcome: input.recordSkillOutcome,
 		unavailableSubsystems: [
 			...(input.adapters.scheduler === undefined ? (["scheduler_resources"] as const) : []),
-			...(input.adapters.efficiencyReviewer === undefined ? (["efficiency_reviewer"] as const) : []),
 			...(input.adapters.learning === undefined ? (["learning"] as const) : []),
 			...(input.adapters.pipeline === undefined ? (["pipeline"] as const) : []),
 			...(input.adapters.executionEvidence === undefined ? (["execution_evidence"] as const) : []),

@@ -363,12 +363,12 @@ describe("IpythonKernelProvisioner", () => {
 		} as unknown as IpythonKernelProvisioner;
 		const tool = createIpythonToolDefinition(tempDir, { provisioner });
 
-		const result = await tool.execute("tool-call", { code: "x" }, undefined, undefined, undefined);
+		const result = await tool.execute("tool-call", { code: "x" }, undefined, undefined, {} as ExtensionContext);
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text.length).toBeLessThanOrEqual(1_000_000);
-		expect(result.details.stdout.length).toBeLessThanOrEqual(1_000_000);
-		expect(result.details.stderr.length).toBeLessThanOrEqual(1_000_000);
+		expect(result.details.stdout?.length ?? 0).toBeLessThanOrEqual(1_000_000);
+		expect(result.details.stderr?.length ?? 0).toBeLessThanOrEqual(1_000_000);
 		expect(result.details.result?.length ?? 0).toBeLessThanOrEqual(1_000_000);
 		expect(result.details.error?.evalue.length ?? 0).toBeLessThanOrEqual(1_000_000);
 		expect(result.details.error?.traceback.join("\n").length ?? 0).toBeLessThanOrEqual(1_000_000);

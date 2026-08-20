@@ -50,7 +50,6 @@ import {
 	type WorkflowHostReceiptConsumerContext,
 	type WorkflowImprovementProposal,
 	type WorkflowLeaseRef,
-	type WorkflowMetricEvaluation,
 	type WorkflowResourceVector,
 	type WorkflowRevisionTuple,
 	type WorkflowRuntimeConfigSnapshot,
@@ -764,7 +763,15 @@ async function composeDefaultPrimeWorkflow(
 		);
 	} else {
 		const freshSkillParts: DefaultSkillParts[] = [];
-		for (const skillName of ["workflow-autoresearch", "mempalace"] as const) {
+		for (const skillName of [
+			"workflow-autoresearch",
+			"mempalace",
+			"brainstorming",
+			"writing-plans",
+			"test-driven-development",
+			"systematic-debugging",
+			"verification-before-completion",
+		] as const) {
 			const parts = await createDefaultSkillSnapshot({
 				...input,
 				resourceLoader: canonicalBuiltinLoader,
@@ -786,9 +793,13 @@ async function composeDefaultPrimeWorkflow(
 			contentDigests: freshSkillParts.map((parts) => parts.contentDigest),
 			publish,
 		});
-		const skills = await Promise.all(
-			freshSkillParts.map((parts) =>
-				createSkillWithConfig({
+		// Sequential: concurrent snapshot creation makes every fresh skill contend for the
+		// same per-workflow receipt-consumption lease (they share one loader-issuance receipt),
+		// and enough concurrent contenders can exceed the lease's fixed acquisition timeout.
+		const skills: WorkflowSkillSnapshot[] = [];
+		for (const parts of freshSkillParts) {
+			skills.push(
+				await createSkillWithConfig({
 					...input,
 					...parts,
 					configDigest: config.resolvedConfigDigest,
@@ -796,8 +807,8 @@ async function composeDefaultPrimeWorkflow(
 					headDigest,
 					trustedNow: parts.trustedNow,
 				}),
-			),
-		);
+			);
+		}
 		const compiledRecipe = await createDefaultRecipe({
 			...input,
 			headDigest: replay.head.eventDigest,
@@ -830,7 +841,13 @@ async function composeDefaultPrimeWorkflow(
 		headDigest: replay.head.eventDigest,
 		recipeDigest: snapshots.recipe.recipeDigest,
 	});
-	const defaultLearning = await createDefaultLearningRuntime(input, snapshots, autoResearchRecipe, executionKey);
+	const defaultLearning = await createDefaultLearningRuntime(
+		input,
+		snapshots,
+		autoResearchRecipe,
+		executionKey,
+		taskGraph,
+	);
 	const learning = defaultLearning.runtime;
 	const adaptiveRuntime = createPrimeAdaptiveRuntime({
 		host: input.host,
@@ -1242,6 +1259,10 @@ async function composeDefaultPrimeWorkflow(
 			workflowId: input.workflowId,
 			rootSessionId: input.rootSessionId,
 			objective: status.goal.objective,
+			recipeCapability:
+				snapshots.recipe.recipeId === BUILTIN_DEFAULT_PRIME_ADAPTIVE_RECIPE.recipeId
+					? "builtin_adaptive_prime"
+					: "dynamic_task_graph",
 			goalContract: structuredClone(status.goalContract),
 			acceptanceCheckIds: [...status.acceptanceCheckIds],
 			protectedInvariantIds: [...status.protectedInvariantIds],
@@ -2931,10 +2952,7 @@ async function createDefaultRecipe(input: {
 function assertBuiltinTaskGraphSource(source: WorkflowTaskGraphSource): void {
 	const expectedStageIds = BUILTIN_DEFAULT_PRIME_ADAPTIVE_RECIPE.stages.map((stage) => stage.id);
 	const taskById = new Map(source.tasks.map((task) => [task.taskId, task]));
-	if (
-		taskById.size !== expectedStageIds.length ||
-		expectedStageIds.some((taskId) => !taskById.has(taskId))
-	)
+	if (taskById.size !== expectedStageIds.length || expectedStageIds.some((taskId) => !taskById.has(taskId)))
 		throw new Error("default_prime_builtin_task_graph_source_invalid");
 	for (const taskId of expectedStageIds) {
 		const task = taskById.get(taskId);
@@ -2983,7 +3001,10 @@ function createDefaultPrimeRecipeProposal(source: WorkflowTaskGraphSource): Work
 		revision: source.graphRevision,
 		stages: source.tasks.map((task) => ({
 			id: task.taskId,
-			role: "implementation",
+			// The planner's declared role, not a blanket "implementation". Hardcoding it meant a
+			// verification or red-team task was indistinguishable from the code it was meant to
+			// check, so every role-specific gate and capability restriction was inert.
+			role: task.role ?? "implementation",
 			taskId: task.taskId,
 			evidencePolicyId: `evidence-${task.taskId}`,
 			capabilityIds: [
@@ -3083,6 +3104,7 @@ function defaultTasks(input: {
 		inputRefs: [...task.inputRefs],
 		boundaryIds: [...task.boundaryIds],
 		outputRefs: [...task.outputRefs],
+		...(task.computeClass === undefined ? {} : { computeClass: task.computeClass }),
 		evidencePolicy: { ...task.evidencePolicy },
 		evidenceKind: task.evidencePolicy.kind,
 		budget: { ...task.budget },
@@ -3098,11 +3120,11 @@ function defaultTasks(input: {
 			wallMilliseconds: task.budget.wallTimeLimitSeconds * 1_000,
 			monetaryMicrounits: task.budget.spendLimitMicrounits,
 		},
-		declaredControlCapacity: {
-			...controlCapacity,
-			modelInputTokens: task.budget.tokenLimit,
-			recoverySlots: task.recovery === "retry" ? 1 : 0,
-		},
+		// Control capacity is the coordinator's, not a worker's: the runtime rejects any worker
+		// task declaring non-zero control slots. The task's token and retry budget already live in
+		// declaredResourceVector and the recovery policy, so putting them here both conflated two
+		// different pools and made every dispatch fail capacity validation.
+		declaredControlCapacity: { ...controlCapacity },
 		status: "ready" as const,
 		attemptIds: [],
 	}));
@@ -3373,6 +3395,7 @@ async function createDefaultLearningRuntime(
 	snapshots: PrimeWorkflowSnapshots,
 	autoResearchRecipe: AutoResearchDurableRecipe,
 	executionKey: string,
+	taskGraph: WorkflowTaskGraph,
 ): Promise<DefaultLearningRuntime> {
 	const durable = input.runtimeStore.durableContext;
 	if (durable === undefined) throw new Error("default_prime_learning_requires_durable_runtime");

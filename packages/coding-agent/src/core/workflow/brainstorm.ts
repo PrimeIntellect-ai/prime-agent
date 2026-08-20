@@ -12,6 +12,8 @@ import {
 	sha256Hex,
 	type WorkflowAuthorityCapability,
 } from "./contracts.js";
+import { WORKFLOW_COMPUTE_CLASSES, type WorkflowComputeClass } from "./default-task-runtime.js";
+import { WORKFLOW_REQUIRED_TASK_ROLES, WORKFLOW_TASK_ROLES, type WorkflowTaskRole } from "./recipes.js";
 import type {
 	WorkflowGoalAuthoritySourceRequest,
 	WorkflowGoalBudgets,
@@ -98,6 +100,10 @@ export interface WorkflowTaskGraphSourceTask {
 	};
 	readonly budget: WorkflowGoalBudgets;
 	readonly recovery: "retry" | "replan" | "block";
+	/** Cheapest worker tier this task needs. Omitted means standard. */
+	readonly computeClass?: WorkflowComputeClass;
+	/** Role this task plays, drawn from the closed host vocabulary. Omitted means implementation. */
+	readonly role?: WorkflowTaskRole;
 	readonly authority: readonly WorkflowAuthorityCapability[];
 	readonly ownedPaths?: readonly string[];
 	readonly ownedContracts?: readonly string[];
@@ -216,6 +222,8 @@ function normalizeTaskGraphSourceTask(value: unknown): WorkflowTaskGraphSourceTa
 		"authority",
 		"ownedPaths",
 		"ownedContracts",
+		"computeClass",
+		"role",
 	]);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key)))
 		throw new Error("workflow_task_graph_source_task_unknown_field");
@@ -225,6 +233,13 @@ function normalizeTaskGraphSourceTask(value: unknown): WorkflowTaskGraphSourceTa
 		throw new Error("workflow_task_graph_source_task_identity_invalid");
 	if (taskId === "." || taskId === ".." || taskId.includes("/") || taskId.includes("\\") || taskId.includes("\0"))
 		throw new Error("workflow_task_graph_source_task_id_invalid");
+	const rawRole = value.role;
+	const role = WORKFLOW_TASK_ROLES.find((candidate) => candidate === rawRole);
+	if (rawRole !== undefined && role === undefined) throw new Error("workflow_task_graph_source_task_role_invalid");
+	const rawComputeClass = value.computeClass;
+	const computeClass = WORKFLOW_COMPUTE_CLASSES.find((candidate) => candidate === rawComputeClass);
+	if (rawComputeClass !== undefined && computeClass === undefined)
+		throw new Error("workflow_task_graph_source_task_compute_class_invalid");
 	const requirementIds = canonicalStrings(value.requirementIds, "requirements", false, 256);
 	const completionCriteria = canonicalStrings(value.completionCriteria, "completion", false, 8_192);
 	const dependencyTaskIds = canonicalStrings(value.dependencyTaskIds, "dependencies", true, 128);
@@ -317,6 +332,8 @@ function normalizeTaskGraphSourceTask(value: unknown): WorkflowTaskGraphSourceTa
 		authority: authority as readonly WorkflowAuthorityCapability[],
 		...(ownedPaths.length === 0 ? {} : { ownedPaths }),
 		...(ownedContracts.length === 0 ? {} : { ownedContracts }),
+		...(computeClass === undefined ? {} : { computeClass }),
+		...(role === undefined ? {} : { role }),
 	});
 }
 
@@ -331,6 +348,15 @@ export function normalizeWorkflowTaskGraphSource(
 	value: unknown,
 	binding?: WorkflowTaskGraphSourceBinding,
 ): WorkflowTaskGraphSource {
+	// Models routinely emit a nested object parameter as a JSON string. The encoded object is
+	// unambiguous, so decode it once here rather than rejecting an otherwise-valid graph.
+	if (typeof value === "string") {
+		try {
+			value = JSON.parse(value) as unknown;
+		} catch {
+			throw new Error("workflow_task_graph_source_invalid");
+		}
+	}
 	if (!isRecord(value)) throw new Error("workflow_task_graph_source_invalid");
 	const allowedKeys = new Set(["schemaVersion", "graphRevision", "tasks", "graphDigest", "recipeCapability"]);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key)))
@@ -343,11 +369,13 @@ export function normalizeWorkflowTaskGraphSource(
 	)
 		throw new Error("workflow_task_graph_source_revision_invalid");
 	const graphRevision = value.graphRevision as number;
-	if (
-		value.recipeCapability !== undefined &&
-		value.recipeCapability !== "dynamic_task_graph" &&
-		value.recipeCapability !== "builtin_adaptive_prime"
-	)
+	const rawRecipeCapability = value.recipeCapability;
+	const recipeCapability =
+		typeof rawRecipeCapability === "string" &&
+		(rawRecipeCapability === "dynamic_task_graph" || rawRecipeCapability === "builtin_adaptive_prime")
+			? rawRecipeCapability
+			: undefined;
+	if (rawRecipeCapability !== undefined && recipeCapability === undefined)
 		throw new Error("workflow_task_graph_source_recipe_capability_invalid");
 	if (!Array.isArray(value.tasks) || value.tasks.length === 0 || value.tasks.length > 64)
 		throw new Error("workflow_task_graph_source_tasks_invalid");
@@ -365,6 +393,22 @@ export function normalizeWorkflowTaskGraphSource(
 		if (task.dependencyTaskIds.some((dependencyTaskId) => !taskIds.has(dependencyTaskId)))
 			throw new Error("workflow_task_graph_source_missing_dependency");
 	}
+	// The planner chooses the shape; it does not get to omit the checks. Without this a graph of
+	// pure implementation nodes silently bypasses verification and adversarial review entirely.
+	const declaredRoles = new Set(tasks.map((task) => task.role ?? "implementation"));
+	for (const required of WORKFLOW_REQUIRED_TASK_ROLES) {
+		if (!declaredRoles.has(required)) throw new Error(`workflow_task_graph_source_missing_role_${required}`);
+	}
+	// A red-team task must review finished work, not an empty tree. Each task runs in a fresh
+	// worker context, so a red-team task that nothing depends on and that depends on real work is
+	// exactly a fresh-context review of the completed artifact — which is the one check that
+	// reliably caught a contract defect in testing. Without this the role requirement is satisfied
+	// vacuously by a red-team task scheduled first.
+	const dependedUpon = new Set(tasks.flatMap((task) => task.dependencyTaskIds));
+	const terminalRedTeam = tasks.filter(
+		(task) => task.role === "red-team" && !dependedUpon.has(task.taskId) && task.dependencyTaskIds.length > 0,
+	);
+	if (terminalRedTeam.length === 0) throw new Error("workflow_task_graph_source_red_team_not_terminal");
 	const byId = new Map(tasks.map((task) => [task.taskId, task]));
 	const visiting = new Set<string>();
 	const visited = new Set<string>();
@@ -377,11 +421,11 @@ export function normalizeWorkflowTaskGraphSource(
 		visited.add(taskId);
 	};
 	for (const task of tasks) visit(task.taskId);
-	const withoutDigest = {
+	const withoutDigest: Omit<WorkflowTaskGraphSource, "graphDigest"> = {
 		schemaVersion: 1 as const,
 		graphRevision,
 		tasks,
-		...(value.recipeCapability === undefined ? {} : { recipeCapability: value.recipeCapability }),
+		...(recipeCapability === undefined ? {} : { recipeCapability }),
 	};
 	const graphDigest = digestObject(binding === undefined ? withoutDigest : { ...withoutDigest, binding });
 	if (value.graphDigest !== undefined && value.graphDigest !== graphDigest)
@@ -526,11 +570,21 @@ export function workflowBrainstormPrompt(state: WorkflowBrainstormState): string
 	return [
 		"Start the workflow completeness preflight for the task below.",
 		"Use conversational brainstorming: inspect the supplied context, identify only material unknowns, and ask one concise question at a time.",
+		"Read the workspace before asking: list files, read the exact sources, tests, and configuration the objective names, and check recent history. Ask the user only for decisions the repository cannot answer.",
+		"When you do need a decision only the user can make, ask it as your final message and stop. Never call a tool while waiting for an answer: repeating no-op tool calls to pass the time cannot produce one, and it burns the turn and the request budget.",
+		"This phase is read-only. Do not edit, create, delete, move, or format any file, do not run installers or migrations, and do not run commands with side effects outside the workspace. Nothing is approved yet.",
+		"Reconnaissance findings belong in the proposal's task objectives and completion criteria, not in a separate report.",
 		"Do not propose architecture or implementation when a smaller outcome definition is sufficient.",
 		"When objective, causal metrics, protected invariants, non-goals, budgets, boundaries, and gates are complete, call workflow_propose exactly once.",
 		"Derive a finite taskGraphSource with prompt-specific task IDs, objectives, requirementIds, completionCriteria, dependencies, neutral boundaries, inputs, outputs, evidence policy, budget, recovery, and authority; do not reuse a fixed workflow stage list.",
 		"taskGraphSource is mandatory; never omit it or rely on a host-generated fallback graph.",
+		'Set computeClass per task to the cheapest tier that can do it: "cheap" for reading, searching, and summarizing; "standard" for ordinary implementation and verification; "deep" only for adjudication, synthesis, and adversarial review. Omit it when unsure.',
+		"Divide fanned-out work by charter rather than repeating it: sibling tasks with no dependency between them must have distinct objectives, not the same objective run twice.",
+		'Set role per task from exactly this list: recon, lens, verify, verification, synthesize, red-team, attack, architect, judge, unify, edge-test, implementation, integration, planning, design, review. The graph is REJECTED unless at least one task has role "verification" and at least one has role "red-team" — a check task depends on the work it checks and must not own the same paths. Give checking tasks authority ["read_workspace"] only, and give every task at least one outputRef (an evidence artifact path is fine for a checking task).',
 		"Leave taskGraphSource.graphDigest unset; the host binds it to the full prompt and approved contract before sealing.",
+		"Omit authoritativeSource entirely. The host derives it from this session; supplying your own URI is rejected as workflow_task_graph_source_requires_session_source.",
+		"Cross-reference rule, the most common cause of rejection: every task's requirementIds must all appear in acceptanceChecks; every task's completionCriteria must all appear in protectedInvariants; and every task's boundaryIds must equal protectedInvariants exactly. Reuse those exact identifiers, do not invent parallel ones and do not put prose in completionCriteria.",
+		'Worked example whose identifiers line up. acceptanceChecks ["check-test-passes"], protectedInvariants ["inv-test-file-unmodified"], and taskGraphSource {"schemaVersion":1,"graphRevision":1,"tasks":[{"taskId":"fix-add","objective":"Change add() in calc.py to return a + b","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":[],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["calc.py"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":20000,"wallTimeLimitSeconds":300,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"standard","role":"implementation"},{"taskId":"verify-add","objective":"Run test_calc.py and confirm it passes","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":["fix-add"],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["artifacts/verify-add.json"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":8000,"wallTimeLimitSeconds":120,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"standard","role":"verification"},{"taskId":"attack-add","objective":"Attempt to break add() with edge-case inputs and report defects","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":["verify-add"],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["artifacts/attack-add.json"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":8000,"wallTimeLimitSeconds":120,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"deep","role":"red-team"}]}',
 		"Keep the proposal compact. acceptanceChecks and protectedInvariants are stable identifiers; bind detailed semantics through the immutable task source and objective.",
 		"boundaryIds must exactly equal protectedInvariants, gateIds must exactly equal acceptanceChecks, and metric requirementId/guardIds must reference those exact identifiers.",
 		"Do not claim approval and do not perform task work; the host will separately request trusted user approval.",

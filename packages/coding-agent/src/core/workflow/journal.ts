@@ -6750,6 +6750,16 @@ const WORKFLOW_EVENT_SHAPES = {
 				),
 		},
 	},
+	approval_epoch_reanchored: {
+		keys: ["kind", "workflowId", "approvalRequestId", "stateDigest", "nextEpoch"] as const,
+		fields: {
+			kind: (value: unknown): boolean => value === "approval_epoch_reanchored",
+			workflowId: isStringValue,
+			approvalRequestId: isStringValue,
+			stateDigest: isStringValue,
+			nextEpoch: isEpochRefValue,
+		},
+	},
 	fresh_planner_started: {
 		keys: ["kind", "workflowId", "approvalRequestId", "stateDigest", "epochRef", "plannerEventDigest"] as const,
 		fields: {

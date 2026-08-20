@@ -12,6 +12,10 @@ type SessionInternals = {
 	_serializedExplicitRefineOptions?: { instructions?: string; global?: boolean };
 	_refineAbortController?: AbortController;
 	_createKernelHostHandlers: () => Record<string, unknown>;
+	_planRefine: (...args: unknown[]) => Promise<unknown>;
+	_runSerializedRefine: (...args: unknown[]) => Promise<void>;
+	_runSerializedRefineCheckpoint: () => Promise<void>;
+	_maybeAutoRefine: (...args: unknown[]) => Promise<void>;
 	refine: (options: { instructions?: string; global?: boolean }) => Promise<unknown>;
 };
 
@@ -180,7 +184,7 @@ describe("AgentSession refine skill host requests", () => {
 		};
 		harness.session.setWorkflowHost(workflowHost);
 		const workflowHandlers = (harness.session as unknown as SessionInternals)._createKernelHostHandlers();
-		expect(Object.keys(workflowHandlers)).not.toContain("refine.run");
+		expect(Object.keys(workflowHandlers)).toContain("refine.run");
 
 		setStreaming(harness, true);
 		const result = harness.session.handleRefineHostRequest("refine.run", {
@@ -191,12 +195,36 @@ describe("AgentSession refine skill host requests", () => {
 
 		expect(result).toMatchObject({
 			scheduled: false,
+			status: "rejected",
+			code: "nonauthoritative_refinement_rejected",
 			reason: expect.stringContaining("authenticated learning promotion receipt"),
 		});
 		expect(harness.session.handleRefineHostRequest("refine.status").pending).toBe(false);
 		await expect(
 			harness.session.refine({ instructions: "promote NONAUTHORITATIVE_RECON_ONLY checkpoint", global: true }),
-		).rejects.toThrow("authenticated learning promotion receipt");
+		).rejects.toMatchObject({
+			code: "nonauthoritative_refinement_rejected",
+			message: expect.stringContaining("authenticated learning promotion receipt"),
+		});
+
+		const internals = harness.session as unknown as SessionInternals;
+		const planRefine = vi.spyOn(internals, "_planRefine");
+		const runSerializedRefine = vi.spyOn(internals, "_runSerializedRefine");
+		const maybeAutoRefine = vi.spyOn(internals, "_maybeAutoRefine");
+		internals._pendingRequestedRefine = { instructions: "must not plan" };
+		await expect(internals._runSerializedRefine({ instructions: "must not plan" })).rejects.toMatchObject({
+			code: "nonauthoritative_refinement_rejected",
+		});
+		await expect(internals._runSerializedRefineCheckpoint()).rejects.toMatchObject({
+			code: "nonauthoritative_refinement_rejected",
+		});
+		await expect(internals._maybeAutoRefine("turn_interval")).rejects.toMatchObject({
+			code: "nonauthoritative_refinement_rejected",
+		});
+		expect(internals._consumePendingRequestedRefine()).toBe(false);
+		expect(planRefine).not.toHaveBeenCalled();
+		expect(runSerializedRefine).toHaveBeenCalledTimes(1);
+		expect(maybeAutoRefine).toHaveBeenCalledTimes(1);
 
 		await harness.session.compact();
 		const harnessStatePath = join(
@@ -205,6 +233,39 @@ describe("AgentSession refine skill host requests", () => {
 			"harness_state.json",
 		);
 		expect(existsSync(harnessStatePath)).toBe(false);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === "prime-agent.refinement"),
+		).toBe(false);
+	});
+
+	it("routes an authenticated learning promotion through the host authority exactly once", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		await harness.session.prompt("one");
+
+		const consumeAndApply = vi.fn().mockResolvedValue({
+			applicationId: "application-1",
+			appliedBytesDigest: "a".repeat(64),
+			previousBytesDigest: null,
+			rollbackToken: "rollback-1",
+		});
+		harness.session.setWorkflowHost({
+			execute: async () => {
+				throw new Error("not used");
+			},
+			status: () =>
+				({ status: "active", workflowId: harness.session.sessionId, stateDigest: "workflow-head" }) as never,
+			learningPromotionReceipts: { consumeAndApply } as never,
+		} as never);
+
+		const input = { receipt: { receiptId: "receipt-1" }, refinement: { action: "create" } };
+		await expect(harness.session.applyWorkflowLearningPromotionRefinement(input as never)).resolves.toMatchObject({
+			applicationId: "application-1",
+		});
+		expect(consumeAndApply).toHaveBeenCalledTimes(1);
+		expect(consumeAndApply).toHaveBeenCalledWith(input);
 		expect(
 			harness.sessionManager
 				.getEntries()

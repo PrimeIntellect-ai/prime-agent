@@ -549,6 +549,11 @@ it("retries an arbitrary dynamic task and preserves its completion watermark acr
 			readonly terminalTaskIds: readonly string[];
 			readonly workerResults: readonly { readonly resultEvidenceRef: { readonly digest: string } }[];
 		};
+		readonly outcomeHistory: readonly {
+			readonly attemptId: string;
+			readonly status: string;
+			readonly attemptStatus: string;
+		}[];
 		readonly completionWatermark: {
 			readonly taskId: string;
 			readonly disposition: string;
