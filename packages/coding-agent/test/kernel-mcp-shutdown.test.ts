@@ -11,9 +11,7 @@ const fallbackPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", 
 function resolveKernelPython(): string | null {
 	for (const python of [process.env.PRIME_AGENT_KERNEL_PYTHON, runtimePython, fallbackPython]) {
 		if (!python || !existsSync(python)) continue;
-		const check = spawnSync(python, ["-c", "import ipykernel, mcp, rlm; assert ipykernel.__version__ == '7.3.0'"], {
-			encoding: "utf8",
-		});
+		const check = spawnSync(python, ["-c", "import ipykernel, mcp, rlm"], { encoding: "utf8" });
 		if (check.status === 0) return python;
 	}
 	return null;

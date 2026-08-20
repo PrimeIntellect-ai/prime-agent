@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
 
@@ -92,6 +94,22 @@ describe("KernelManager graceful shutdown", () => {
 		expect(internals.pendingControlReplies.size).toBe(0);
 	});
 
+	it("finishes promptly when the kernel exits without sending shutdown_reply", async () => {
+		const { manager, internals } = configuredManager((state) => {
+			state.kernel.exitCode = 0;
+			state.kernel.emit("exit", 0, null);
+		});
+		vi.useFakeTimers();
+		try {
+			const shutdown = manager.shutdown();
+			await vi.advanceTimersByTimeAsync(100);
+			await shutdown;
+			expect(internals.kernel).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("waits for the matching shutdown reply and removes its listener", async () => {
 		const { manager, internals } = configuredManager(async (state) => {
 			const [requestMessageId, dispatch] = [...state.pendingControlReplies.entries()][0] ?? [];
@@ -112,5 +130,13 @@ describe("KernelManager graceful shutdown", () => {
 
 		expect(internals.pendingControlReplies.size).toBe(0);
 		expect(internals.kernel).toBeUndefined();
+	});
+
+	it("keeps the kernel MCP close budget strictly inside the host shutdown deadline", () => {
+		const source = readFileSync(resolve(__dirname, "../../../prime-agent-runtime/src/rlm/mcp.py"), "utf8");
+		const match = source.match(/^_SHUTDOWN_TIMEOUT = ([\d.]+)$/m);
+		expect(match).not.toBeNull();
+		// +1s dispatch slack in mcp.py close(); the sum must undercut the host's 5s kill deadline.
+		expect((Number(match![1]) + 1) * 1000).toBeLessThan(5000);
 	});
 });

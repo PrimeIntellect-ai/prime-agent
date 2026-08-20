@@ -1542,8 +1542,10 @@ export class KernelManager {
 				replyWait = this.waitForControlReply(msg.header.msg_id, "shutdown_reply", KERNEL_SHUTDOWN_TIMEOUT_MS);
 				const send = this.control.send(encode(msg, this.connection.key));
 				send.catch(() => undefined);
-				await Promise.race([Promise.all([send, replyWait.promise]), shutdownDeadline]);
-				await Promise.race([this.waitForKernelExit(), shutdownDeadline]);
+				// A kernel that exits without delivering shutdown_reply must not stall the deadline.
+				const kernelExit = this.waitForKernelExit();
+				await Promise.race([Promise.all([send, replyWait.promise]), kernelExit, shutdownDeadline]);
+				await Promise.race([kernelExit, shutdownDeadline]);
 			}
 		} catch (error) {
 			this.appendKernelDiagnostic(

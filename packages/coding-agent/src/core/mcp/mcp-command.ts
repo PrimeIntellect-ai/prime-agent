@@ -60,9 +60,9 @@ export async function runMcpManagementCommand(
 		const replaced = settingsManager.getGlobalMcpServers()?.[name] !== undefined;
 		settingsManager.setGlobalMcpServer(name, config, force);
 		await flushGlobalSettings(settingsManager);
-		// A replaced entry may point at a different endpoint; a token issued for
-		// the old URL must never replay to the new one.
-		if (replaced) dropServerCredentials(name, authStorage);
+		// Any add may repoint the name at a new endpoint (authored non-catalog
+		// skills like slack resolve their URL by name); a stored token must never replay there.
+		dropServerCredentials(name, authStorage);
 		return {
 			action,
 			message: `${replaced ? "Replaced" : "Added"} MCP server "${name}".`,
@@ -106,7 +106,7 @@ export function parseMcpAddArgs(args: readonly string[]): {
 			throw new Error(`Unknown MCP add option: ${option}`);
 		}
 		const value = optionArgs[++index];
-		if (!value) throw new Error(`${option} requires a value.`);
+		if (value === undefined || value === "") throw new Error(`${option} requires a value.`);
 		if (option === "--url") url = value;
 		else if (option === "--bearer-token-env-var") bearerTokenEnvVar = validateEnvName(value, option);
 		else if (option === "--cwd") cwd = value;

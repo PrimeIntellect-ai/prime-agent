@@ -21,7 +21,9 @@ __all__ = ["McpStartupError", "call_tool", "close", "list_tools", "reload"]
 
 _DEFAULT_STARTUP_TIMEOUT = 20.0
 _DEFAULT_CALL_TIMEOUT = 60.0
-_SHUTDOWN_TIMEOUT = 5.0
+# Must stay strictly below the host's KERNEL_SHUTDOWN_TIMEOUT_MS (5s) so graceful
+# MCP close finishes before the host's kill deadline.
+_SHUTDOWN_TIMEOUT = 2.5
 _T = TypeVar("_T")
 _STDERR_BYTE_LIMIT = 8 * 1024
 _STDERR_LINE_LIMIT = 40
@@ -208,15 +210,25 @@ class _Generation:
         raise ValueError(f"MCP server '{self.server}' has unsupported transport {kind!r}")
 
     async def _open_http(self):
-        from mcp.client.streamable_http import streamable_http_client
-        from mcp.shared._httpx_utils import create_mcp_http_client
+        import inspect
+
+        from .mcp_base import _resolve_streamable_http
 
         url = self.config.get("url")
         if not isinstance(url, str) or not url:
             raise ValueError(f"MCP server '{self.server}' requires a URL")
         headers = await _headers(self.server, self.config)
-        client = await self.stack.enter_async_context(create_mcp_http_client(headers=headers))
-        streams = await self.stack.enter_async_context(streamable_http_client(url, http_client=client))
+        transport = _resolve_streamable_http()
+        # SDK signatures vary: some take headers=, others only http_client=.
+        if "headers" in inspect.signature(transport).parameters:
+            streams = await self.stack.enter_async_context(transport(url, headers=headers))
+        else:
+            import httpx
+
+            client = await self.stack.enter_async_context(
+                httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True)
+            )
+            streams = await self.stack.enter_async_context(transport(url, http_client=client))
         return streams[0], streams[1]
 
     async def _open_stdio(self):
@@ -353,7 +365,6 @@ class _Registry:
         self._generations[server] = generation
         try:
             await generation.open()
-            self._accepting_work()
         except BaseException:
             if self._generations.get(server) is generation:
                 self._generations.pop(server, None)
@@ -381,7 +392,10 @@ class _Registry:
     async def reload(self, server: str | None = None) -> None:
         async def operation() -> None:
             names = [server] if server is not None else list(set(self._locks) | set(self._generations))
-            await asyncio.gather(*(self._close_name(name) for name in names))
+            results = await asyncio.gather(*(self._close_name(name) for name in names), return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
         await self._tracked(operation)
 
@@ -415,7 +429,7 @@ class _Registry:
             if operations:
                 await asyncio.gather(*operations, return_exceptions=True)
             names = set(self._locks) | set(self._generations)
-            await asyncio.gather(*(self._close_name(name) for name in names))
+            await asyncio.gather(*(self._close_name(name) for name in names), return_exceptions=True)
         self._state = "shut_down"
 
 
