@@ -1,0 +1,61 @@
+{
+  "id": "model-routing-v1",
+  "minimum_overall_score": 0.75,
+  "minimum_role_score": 0.5,
+  "minimum_tasks_per_candidate": 3,
+  "oracle_created_after_response_capture": true,
+  "role_weights": {
+    "adversarial-reviewer": {
+      "audit-swallowed-mismatch": 0.7,
+      "provenance-task-scope": 0.3
+    },
+    "experiment-operator": {
+      "conv-fourth-order": 0.3,
+      "inv-zero-momentum": 0.3,
+      "num-expm1-cancellation": 0.2,
+      "provenance-task-scope": 0.2
+    },
+    "implementation-engineer": {
+      "audit-swallowed-mismatch": 0.35,
+      "conv-fourth-order": 0.1,
+      "inv-zero-momentum": 0.1,
+      "num-expm1-cancellation": 0.1,
+      "provenance-task-scope": 0.2,
+      "sym-sqrt-square-sign": 0.15
+    },
+    "literature-engineer": {
+      "provenance-task-scope": 0.6,
+      "sym-sqrt-square-sign": 0.4
+    },
+    "numerical-auditor": {
+      "conv-fourth-order": 0.3,
+      "inv-zero-momentum": 0.3,
+      "num-expm1-cancellation": 0.4
+    },
+    "symbolic-auditor": {
+      "provenance-task-scope": 0.3,
+      "sym-sqrt-square-sign": 0.7
+    }
+  },
+  "schema_version": 1,
+  "tasks": [
+    {
+      "id": "sym-sqrt-square-sign"
+    },
+    {
+      "id": "num-expm1-cancellation"
+    },
+    {
+      "id": "conv-fourth-order"
+    },
+    {
+      "id": "inv-zero-momentum"
+    },
+    {
+      "id": "audit-swallowed-mismatch"
+    },
+    {
+      "id": "provenance-task-scope"
+    }
+  ]
+}

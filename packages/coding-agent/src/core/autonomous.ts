@@ -496,6 +496,7 @@ function runChildProcess(
 			detached: process.platform !== "win32",
 			shell: options.shell === true,
 			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: process.platform === "win32",
 		});
 		if (child.pid) {
 			trackDetachedChildPid(child.pid);

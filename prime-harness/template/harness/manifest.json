@@ -1,0 +1,162 @@
+{
+  "_readme": "Gate profiles for harness/verify.py. Checks run with shell=true from the repo root; a leading bare `python` is rewritten to the interpreter running verify.py. 'skip_if_missing' skips a check when the named path is absent (lets the template work before your project structure exists — replace these with your real commands). 'when_changed' gates conditional checks on changed-file globs (** supported). INVARIANTS: (1) the sum of a profile's applicable timeout_seconds must stay below the burst launcher's --autonomous-gate-timeout-ms for that profile — verify.py per-check timeouts do not help if Prime Agent kills the whole gate first; (2) test suites live under checks/, NEVER under a directory named 'verification' — Prime Agent's autonomous gate excludes that exact name from changed-workspace detection, which silently breaks gate retries.",
+  "profiles": {
+    "quick": {
+      "required": [
+        {
+          "name": "compile",
+          "command": "python -m compileall -q src",
+          "skip_if_missing": "src",
+          "timeout_seconds": 120
+        },
+        {
+          "name": "unit-fast",
+          "command": "python -m pytest -q -x tests",
+          "skip_if_missing": "tests",
+          "timeout_seconds": 300
+        }
+      ],
+      "conditional": [],
+      "min_applicable_checks": 1
+    },
+    "default": {
+      "required": [
+        {
+          "name": "compile",
+          "command": "python -m compileall -q src",
+          "skip_if_missing": "src",
+          "timeout_seconds": 120
+        },
+        {
+          "name": "unit",
+          "command": "python -m pytest -q tests",
+          "skip_if_missing": "tests",
+          "timeout_seconds": 900
+        },
+        {
+          "name": "properties",
+          "command": "python -m pytest -q checks/properties",
+          "skip_if_missing": "checks/properties",
+          "timeout_seconds": 900
+        }
+      ],
+      "conditional": [
+        {
+          "name": "symbolic-assumptions",
+          "command": "python -m pytest -q checks/invariants",
+          "when_changed": [
+            "src/symbolic/**",
+            "checks/invariants/**"
+          ],
+          "skip_if_missing": "checks/invariants",
+          "timeout_seconds": 600
+        },
+        {
+          "name": "convergence",
+          "command": "python -m pytest -q checks/reference_cases",
+          "when_changed": [
+            "src/simulation/**",
+            "src/integrators/**"
+          ],
+          "skip_if_missing": "checks/reference_cases",
+          "timeout_seconds": 900
+        },
+        {
+          "name": "lean-build",
+          "command": "lake build",
+          "when_changed": [
+            "formal/**",
+            "checks/lean/**"
+          ],
+          "skip_if_missing": "checks/lean",
+          "timeout_seconds": 900
+        }
+      ],
+      "min_applicable_checks": 1
+    },
+    "changed-files": {
+      "required": [
+        {
+          "name": "compile",
+          "command": "python -m compileall -q src",
+          "skip_if_missing": "src",
+          "timeout_seconds": 120
+        },
+        {
+          "name": "unit",
+          "command": "python -m pytest -q tests",
+          "skip_if_missing": "tests",
+          "timeout_seconds": 900
+        }
+      ],
+      "conditional": [
+        {
+          "name": "properties",
+          "command": "python -m pytest -q checks/properties",
+          "when_changed": [
+            "src/**",
+            "checks/properties/**"
+          ],
+          "skip_if_missing": "checks/properties",
+          "timeout_seconds": 900
+        },
+        {
+          "name": "symbolic-assumptions",
+          "command": "python -m pytest -q checks/invariants",
+          "when_changed": [
+            "src/symbolic/**",
+            "checks/invariants/**"
+          ],
+          "skip_if_missing": "checks/invariants",
+          "timeout_seconds": 600
+        },
+        {
+          "name": "convergence",
+          "command": "python -m pytest -q checks/reference_cases",
+          "when_changed": [
+            "src/simulation/**",
+            "src/integrators/**"
+          ],
+          "skip_if_missing": "checks/reference_cases",
+          "timeout_seconds": 900
+        },
+        {
+          "name": "lean-build",
+          "command": "lake build",
+          "when_changed": [
+            "formal/**",
+            "checks/lean/**"
+          ],
+          "skip_if_missing": "checks/lean",
+          "timeout_seconds": 900
+        }
+      ],
+      "min_applicable_checks": 1
+    },
+    "holdout": {
+      "_comment": "Run by humans/CI only — never referenced in agent prompts or the autonomous gate.",
+      "required": [
+        {
+          "name": "hidden-holdout",
+          "command": "python -m pytest -q checks/hidden_holdout",
+          "skip_if_missing": "checks/hidden_holdout",
+          "timeout_seconds": 1800
+        }
+      ],
+      "conditional": [],
+      "min_applicable_checks": 1
+    },
+    "final": {
+      "conditional": [],
+      "min_applicable_checks": 1,
+      "required": [
+        {
+          "command": "python -S harness/scorecard.py --completion --fail-on critical --output artifacts/harness/completion-scorecard.json",
+          "name": "verification-coverage-completion",
+          "skip_if_missing": "harness/scorecard.py",
+          "timeout_seconds": 180
+        }
+      ]
+    }
+  }
+}

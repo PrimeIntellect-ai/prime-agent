@@ -696,6 +696,7 @@ async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
 		detached: true,
 		env: process.env,
 		stdio: "ignore",
+		windowsHide: process.platform === "win32",
 	});
 	child.unref();
 

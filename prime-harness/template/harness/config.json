@@ -1,0 +1,11 @@
+{
+  "artifacts_dir": "artifacts/harness",
+  "max_active_children": 6,
+  "min_goal_tokens_to_spawn": 20000,
+  "child_summary_max_chars": 600,
+  "critic": {
+    "command": null,
+    "order": ["claude", "codex"],
+    "timeout_seconds": 900
+  }
+}

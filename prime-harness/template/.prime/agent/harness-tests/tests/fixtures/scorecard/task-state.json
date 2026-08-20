@@ -1,0 +1,27 @@
+{
+  "task_id": "fixture-task",
+  "objective": "PRIVATE FIXTURE OBJECTIVE MUST NOT LEAK",
+  "base_commit": "BASE_COMMIT",
+  "working_branch": "main",
+  "assumptions": {},
+  "unresolved_claims": [],
+  "evidence_ids": [
+    "verified",
+    "refuted",
+    "bad-verifier",
+    "missing-id"
+  ],
+  "active_child_names": [
+    "ghost-active"
+  ],
+  "quality_gate_status": {
+    "phase_0": "pass",
+    "phase_1": "in_progress",
+    "phase_2": "not_started"
+  },
+  "next_actions": [
+    "private action"
+  ],
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-02T00:00:00Z"
+}

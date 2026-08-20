@@ -1,0 +1,16 @@
+{
+  "status": "fail",
+  "profile": "default",
+  "passed": [],
+  "failed": [
+    "unit"
+  ],
+  "skipped": [],
+  "results": [
+    {
+      "name": "unit",
+      "status": "fail",
+      "returncode": 1
+    }
+  ]
+}

@@ -92,6 +92,21 @@ function streamAnswer(text: string): ReturnType<typeof createAssistantMessageEve
 	return stream;
 }
 
+function streamError(errorMessage: string): ReturnType<typeof createAssistantMessageEventStream> {
+	const stream = createAssistantMessageEventStream();
+	queueMicrotask(() => {
+		const message: AssistantMessage = {
+			...assistantMessage(""),
+			content: [],
+			stopReason: "error",
+			errorMessage,
+		};
+		stream.push({ type: "error", reason: "error", error: message });
+		stream.end(message);
+	});
+	return stream;
+}
+
 interface TestCommMessage {
 	header: { msg_type: string };
 	parent_header: Record<string, unknown>;
@@ -1308,6 +1323,40 @@ describe("AgentSession rlm recursion", () => {
 			expect(root.messages).toContainEqual(
 				expect.objectContaining({ content: expect.stringContaining("kernel startup failed") }),
 			);
+		});
+	});
+
+	it("surfaces a terminal child provider error instead of reporting silent completion", async () => {
+		const settingsManager = SettingsManager.create(
+			join(tempDir, "provider-error-settings"),
+			join(tempDir, "provider-error-settings"),
+		);
+		settingsManager.setRetryEnabled(false);
+		const providerError = "402 Insufficient balance. Please add funds to continue.";
+		const root = createSession({
+			settingsManager,
+			streamFn: () => streamError(providerError),
+		});
+
+		const spawned = await root.runRlmChild("provider failing child", { name: "provider-error-worker" });
+		await vi.waitFor(async () => {
+			expect((await root.listRlmSubagents()).subagents).toContainEqual(
+				expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "error" }),
+			);
+		});
+		await vi.waitFor(() => {
+			expect(root.messages).toContainEqual(
+				expect.objectContaining({
+					role: "custom",
+					customType: "rlm_child_failure",
+					content: expect.stringContaining(providerError),
+				}),
+			);
+			expect(
+				root.messages.filter(
+					(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+				),
+			).toHaveLength(0);
 		});
 	});
 

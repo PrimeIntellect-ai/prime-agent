@@ -1,0 +1,22 @@
+{
+  "auditor-a": {
+    "role": "adversarial-reviewer",
+    "status": "running",
+    "fingerprint": "fixture-a",
+    "task_preview": "PRIVATE CHILD TASK MUST NOT LEAK",
+    "result_path": "RESULT_A",
+    "reserved_at": "2026-01-01T01:00:29Z",
+    "spawned_at": "2026-01-01T01:00:30Z",
+    "commit": "fixture"
+  },
+  "auditor-dead": {
+    "role": "adversarial-reviewer",
+    "status": "running",
+    "fingerprint": "fixture-b",
+    "task_preview": "PRIVATE DEAD TASK MUST NOT LEAK",
+    "result_path": "MISSING_RESULT",
+    "reserved_at": "2026-01-01T02:59:59Z",
+    "spawned_at": "2026-01-01T03:00:00Z",
+    "commit": "fixture"
+  }
+}

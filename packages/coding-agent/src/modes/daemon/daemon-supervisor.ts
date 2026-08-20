@@ -2441,6 +2441,7 @@ export class DaemonSupervisor {
 			detached: true,
 			env: workerEnvironment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
+			windowsHide: process.platform === "win32",
 		});
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
@@ -5517,6 +5518,7 @@ export class DaemonSupervisor {
 				detached: true,
 				env: environment,
 				stdio: "ignore",
+				windowsHide: process.platform === "win32",
 			});
 			replacement.unref();
 		}

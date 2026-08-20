@@ -379,6 +379,7 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 			// (EPIPE once it exits); crash details come from the daemon log,
 			// which the supervisor writes to before rethrowing startup errors.
 			stdio: "ignore",
+			windowsHide: process.platform === "win32",
 		},
 	);
 	let childFailure:

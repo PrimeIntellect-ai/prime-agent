@@ -1,0 +1,10 @@
+{
+  "task": "PRIVATE RESULT TASK MUST NOT LEAK",
+  "status": "pass",
+  "summary": "PRIVATE RESULT SUMMARY MUST NOT LEAK",
+  "assumptions": [],
+  "evidence": {},
+  "counterexamples": [],
+  "artifacts": [],
+  "recommended_action": "none"
+}

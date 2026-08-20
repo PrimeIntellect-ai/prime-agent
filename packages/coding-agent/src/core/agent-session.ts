@@ -10300,6 +10300,10 @@ export class AgentSession {
 				});
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
+				const terminalAssistant = child._findLastAssistantMessage();
+				if (terminalAssistant?.stopReason === "error") {
+					throw new Error(terminalAssistant.errorMessage ?? "RLM child provider request failed");
+				}
 				run.status = "done";
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
@@ -10457,6 +10461,10 @@ export class AgentSession {
 			return false;
 		}
 
+		if (this._isPermanentProviderBillingFailure(message)) {
+			return false;
+		}
+
 		if (this._isStructuredPermanentProviderRetryExhausted(message)) {
 			return false;
 		}
@@ -10470,6 +10478,15 @@ export class AgentSession {
 
 	private _isAgentLifecycleFailure(message: AssistantMessage): boolean {
 		return message.diagnostics?.some((diagnostic) => diagnostic.type === "agent_lifecycle_failure") ?? false;
+	}
+
+	private _isPermanentProviderBillingFailure(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error" || !message.errorMessage) return false;
+		return (
+			/\binsufficient balance\b/i.test(message.errorMessage) ||
+			(/\b402\b/.test(message.errorMessage) &&
+				/\b(?:status|payment|required|balance|billing|funds?|credits?|overdraft)\b/i.test(message.errorMessage))
+		);
 	}
 
 	private _getProviderStreamFailureDetails(message: AssistantMessage): Record<string, unknown> | undefined {

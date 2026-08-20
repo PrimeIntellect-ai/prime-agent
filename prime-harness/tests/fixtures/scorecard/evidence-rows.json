@@ -1,0 +1,32 @@
+[
+  {
+    "id": "before",
+    "status": "verified",
+    "verifier": "old",
+    "created_at": "2025-12-01T00:00:00Z"
+  },
+  {
+    "id": "verified",
+    "status": "verified",
+    "verifier": "oracle",
+    "created_at": "2026-01-01T05:00:00Z"
+  },
+  {
+    "id": "refuted",
+    "status": "refuted",
+    "verifier": "counterexample",
+    "created_at": "2026-01-02T05:00:00Z"
+  },
+  {
+    "id": "bad-verifier",
+    "status": "verified",
+    "verifier": null,
+    "created_at": "2026-01-02T06:00:00Z"
+  },
+  {
+    "id": "unrelated",
+    "status": "verified",
+    "verifier": "other",
+    "created_at": "2026-01-02T07:00:00Z"
+  }
+]

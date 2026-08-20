@@ -1,0 +1,19 @@
+{
+  "corpus_sha256": "93cf3d74c7cc91fb30b2b841637d8163b7c5a6571cc50661374affe634f40024",
+  "executor_sha256": "ed4f139817f312ffbb8bd1776b9167a5bdd9a38abf1d3cf42cf26db52a8818e0",
+  "harness_state": {
+    "global": {
+      "entries": {},
+      "refinements": []
+    },
+    "local": {
+      "behavior": "reference-oracle-v1",
+      "entries": {},
+      "refinements": []
+    }
+  },
+  "role": "baseline",
+  "schema_version": 1,
+  "seed": 20260808,
+  "snapshot_id": "prime-harness-evalset-baseline-v1"
+}

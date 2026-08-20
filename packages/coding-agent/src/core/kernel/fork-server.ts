@@ -208,6 +208,7 @@ export class ForkServer {
 				const proc = spawn(this.params.python, args, {
 					env: this.launchEnv,
 					stdio: ["ignore", "ignore", "pipe"],
+					windowsHide: true,
 				});
 				this.proc = proc;
 				if (proc.pid !== undefined) recordOrphanProcessState(proc.pid, true);

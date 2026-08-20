@@ -550,6 +550,7 @@ export async function launchDaemonUpdateRestartCoordinator(
 		detached: true,
 		env: coordinatorEnvironment(agentDir),
 		stdio: "ignore",
+		windowsHide: process.platform === "win32",
 	});
 	let launchError: Error | undefined;
 	let exitDescription: string | undefined;
