@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
+import {
+	type AgentSessionRuntimeConfig,
+	durableAgentSessionRuntimeConfig,
+	mergeAgentSessionRuntimeConfig,
+} from "../src/core/agent-session-config.js";
 
 describe("mergeAgentSessionRuntimeConfig", () => {
 	it("applies session overrides without mutating default config", () => {
@@ -167,5 +171,34 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 		expect(mergeAgentSessionRuntimeConfig({ telemetryDisabled: true }, {}).telemetryDisabled).toBe(true);
 		expect(mergeAgentSessionRuntimeConfig({}, { telemetryDisabled: true }).telemetryDisabled).toBe(true);
 		expect(mergeAgentSessionRuntimeConfig({}, {}).telemetryDisabled).toBeUndefined();
+	});
+
+	it("persists only typed daemon host settings", () => {
+		const durable = durableAgentSessionRuntimeConfig({
+			cwd: "/repo",
+			agentDir: "/agent",
+			sessionDir: "/sessions",
+			telemetryDisabled: true,
+			provider: "intercept",
+			model: "openai/example",
+			apiKey: "secret-api-key",
+			extensionFlagValues: { providerSecretKey: "secret-extension-key" },
+			initialGoal: { objective: "transient" },
+		});
+
+		expect(durable).toEqual({
+			cwd: "/repo",
+			agentDir: "/agent",
+			sessionDir: "/sessions",
+			telemetryDisabled: true,
+		});
+		expect(
+			durableAgentSessionRuntimeConfig({
+				cwd: 1,
+				agentDir: "/agent",
+				sessionDir: false,
+				telemetryDisabled: "yes",
+			} as unknown as AgentSessionRuntimeConfig),
+		).toEqual({ agentDir: "/agent" });
 	});
 });
