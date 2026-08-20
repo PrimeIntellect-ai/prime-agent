@@ -71,11 +71,20 @@ function autonomousProgressKey(status: AgentAutonomousStatus): string {
 	].join(":");
 }
 
-export async function waitForHeadlessCompletion(session: AgentSession): Promise<AgentAutonomousStatus> {
+export interface HeadlessCompletionOptions {
+	/** Include descendant settlement and the parent turns caused by their results. */
+	waitForRlmQuiescence?: boolean;
+}
+
+export async function waitForHeadlessCompletion(
+	session: AgentSession,
+	options: HeadlessCompletionOptions = {},
+): Promise<AgentAutonomousStatus> {
 	let lastPromptedProgressKey: string | undefined;
 	let repeatedProgressPrompts = 0;
 	while (true) {
-		await session.waitForIdle();
+		if (options.waitForRlmQuiescence) await session.waitForRlmQuiescence();
+		else await session.waitForHeadlessIdle();
 		const status = session.getAutonomousStatus();
 		if (!shouldContinueAutonomousGates(status) || !status.lastGateFailure) {
 			return status;
@@ -111,6 +120,7 @@ export async function waitForHeadlessCompletion(session: AgentSession): Promise<
 				if (shouldContinueAutonomousGates(postErrorStatus) && postErrorStatus.lastGateFailure) {
 					continue;
 				}
+				if (options.waitForRlmQuiescence) continue;
 				return postErrorStatus;
 			}
 		}
