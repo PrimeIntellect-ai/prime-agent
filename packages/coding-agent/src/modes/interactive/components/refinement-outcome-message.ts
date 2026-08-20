@@ -1,9 +1,10 @@
-import { Box, Spacer, Text } from "@earendil-works/pi-tui";
+import { Spacer, Text } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
 import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { theme } from "../theme/theme.js";
 import { renderDiff } from "./diff.js";
+import { customMessageLabel, ExpandableCustomMessageBox } from "./expandable-custom-message.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
 function editableEntry(entry: HarnessEntry): Record<string, unknown> {
@@ -59,48 +60,27 @@ function editCount(edits: AppliedRefinementEdit[]): string {
 		: `${applied}/${edits.length} edits applied`;
 }
 
-/**
- * Renders a durable refinement outcome with collapsed/expanded state.
- * Mirrors the compaction-summary and skill-invocation components: a
- * custom-message box with a bold [refinement] label, collapsed to a single
- * line and expanded via the shared tool-output expansion toggle.
- */
-export class RefinementOutcomeMessageComponent extends Box {
-	private expanded = false;
-
+/** Durable refinement outcome card: per-edit rows with before/after diffs when expanded. */
+export class RefinementOutcomeMessageComponent extends ExpandableCustomMessageBox {
 	constructor(private readonly message: RefinementOutcomeMessage) {
-		super(1, 1, (t) => theme.bg("customMessageBg", t));
+		super();
 		this.updateDisplay();
 	}
 
-	setExpanded(expanded: boolean): void {
-		if (this.expanded === expanded) return;
-		this.expanded = expanded;
-		this.updateDisplay();
-	}
-
-	override invalidate(): void {
-		super.invalidate();
-		this.updateDisplay();
-	}
-
-	private updateDisplay(): void {
+	protected updateDisplay(): void {
 		this.clear();
 
 		const { summary, edits, scope } = this.message.details;
-		const label = theme.fg("customMessageLabel", `\x1b[1m[refinement]\x1b[22m`);
+		const label = customMessageLabel("refinement");
+		const headline = theme.fg("customMessageText", `${summary} · ${editCount(edits)}`);
 		if (!this.expanded) {
-			const line =
-				`${label} ` +
-				theme.fg("customMessageText", `${summary} · ${editCount(edits)}`) +
-				` ${expandCollapseHint("app.tools.expand", false)}`;
-			this.addChild(new Text(line, 0, 0));
+			this.addChild(new Text(`${label} ${headline} ${expandCollapseHint("app.tools.expand", false)}`, 0, 0));
 			return;
 		}
 
 		this.addChild(new Text(label, 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("customMessageText", `${summary} · ${editCount(edits)}`), 0, 0));
+		this.addChild(new Text(headline, 0, 0));
 		for (const edit of edits) {
 			this.addChild(new Text(`${theme.fg("dim", "  ╰─ ")}${editLabel(edit, scope)}`, 0, 0));
 			const diff = editDiff(edit);
@@ -109,11 +89,14 @@ export class RefinementOutcomeMessageComponent extends Box {
 	}
 }
 
-export class MalformedRefinementOutcomeMessageComponent extends Box {
+export class MalformedRefinementOutcomeMessageComponent extends ExpandableCustomMessageBox {
 	constructor() {
-		super(1, 1, (t) => theme.bg("customMessageBg", t));
-		this.addChild(new Text(theme.fg("error", "[Malformed refinement outcome message]"), 0, 0));
+		super();
+		this.updateDisplay();
 	}
 
-	setExpanded(_expanded: boolean): void {}
+	protected updateDisplay(): void {
+		this.clear();
+		this.addChild(new Text(theme.fg("error", "[Malformed refinement outcome message]"), 0, 0));
+	}
 }
