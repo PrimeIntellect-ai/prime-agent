@@ -693,7 +693,7 @@ export interface AgentConnection {
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
 	supportsAcpMcpServers?(): boolean;
-	replaceAcpMcpServers?(servers: readonly AcpMcpServerConfig[]): Promise<void>;
+	replaceAcpMcpServers?(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;

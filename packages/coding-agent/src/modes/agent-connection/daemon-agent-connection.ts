@@ -504,13 +504,14 @@ export class DaemonAgentConnection implements AgentConnection {
 		return this.client.supportsServerCapability("acp_mcp_servers");
 	}
 
-	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[]): Promise<void> {
+	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void> {
 		if (!this.supportsAcpMcpServers()) {
 			throw new DaemonCapabilityUnavailableError("replace_acp_mcp_servers", "acp_mcp_servers");
 		}
 		await this.requestOk({
 			type: "replace_acp_mcp_servers",
 			activeSessionId: this.activeSessionId,
+			ownerId,
 			servers: [...servers],
 		});
 	}

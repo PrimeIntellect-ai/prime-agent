@@ -469,13 +469,27 @@ export async function runAcpModeWithConnection(
 	}
 	const supportsMcpServers =
 		connection.supportsAcpMcpServers?.() === true && connection.replaceAcpMcpServers !== undefined;
+	const acpMcpOwnerId = randomUUID();
 	let hasAcpMcpServers = false;
+	const clearAcpMcpServers = async (): Promise<void> => {
+		if (!supportsMcpServers || !connection.replaceAcpMcpServers) return;
+		await connection.replaceAcpMcpServers([], acpMcpOwnerId);
+		hasAcpMcpServers = false;
+	};
 	const replaceAcpMcpServers = async (servers: readonly acp.McpServer[], cwd: string): Promise<void> => {
 		if (servers.length === 0 && !hasAcpMcpServers) return;
 		if (!supportsMcpServers || !connection.replaceAcpMcpServers) {
 			throw acp.RequestError.invalidParams({ reason: "MCP servers are unavailable in this ACP host" });
 		}
-		await connection.replaceAcpMcpServers(resolveAcpMcpServers(servers, cwd));
+		const resolved = resolveAcpMcpServers(servers, cwd);
+		try {
+			await connection.replaceAcpMcpServers(resolved, acpMcpOwnerId);
+		} catch (error) {
+			// The daemon may have applied the configuration before its acknowledgement
+			// was lost. Always attempt owner-scoped cleanup before rejecting admission.
+			await clearAcpMcpServers().catch(() => undefined);
+			throw error;
+		}
 		hasAcpMcpServers = servers.length > 0;
 	};
 
@@ -789,7 +803,7 @@ export async function runAcpModeWithConnection(
 				} catch (error) {
 					producer.failSessionNewAdmission();
 					unsubscribe();
-					await replaceAcpMcpServers([], actualCwd ?? "").catch(() => undefined);
+					await clearAcpMcpServers().catch(() => undefined);
 					throw error;
 				}
 				// Claim the single-session slot only once the subscription and snapshot are
@@ -982,7 +996,7 @@ export async function runAcpModeWithConnection(
 					closing.unsubscribe?.();
 					// Keep the backing session fenced until a replacement ACP session is admitted.
 					await closing.producer.close();
-					await replaceAcpMcpServers([], "");
+					await clearAcpMcpServers();
 					closedInputPause = inputPause;
 					closedInputPauseKey = inputPauseKey;
 					if (closing.inputPause === inputPause) {
@@ -1064,7 +1078,7 @@ export async function runAcpModeWithConnection(
 	await closedInputPause?.release().catch(() => undefined);
 	closedInputPause = undefined;
 	closedInputPauseKey = undefined;
-	await replaceAcpMcpServers([], "").catch(() => undefined);
+	await clearAcpMcpServers().catch(() => undefined);
 	await connection.dispose().catch(() => undefined);
 	// Only the real stdio entrypoint owns the process; a caller-supplied transport
 	// (tests, embedding) must never have its host exited from under it.

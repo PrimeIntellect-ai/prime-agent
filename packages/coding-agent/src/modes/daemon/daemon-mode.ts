@@ -4521,7 +4521,7 @@ export class AgentDaemon {
 			case "replace_acp_mcp_servers": {
 				const state = this.getSessionState(command.activeSessionId);
 				await withClientEnv(state.clientEnv, async () =>
-					state.runtime.session.replaceAcpMcpServers(command.servers),
+					state.runtime.session.replaceAcpMcpServers(command.servers, command.ownerId),
 				);
 				return success(command.id, "replace_acp_mcp_servers");
 			}

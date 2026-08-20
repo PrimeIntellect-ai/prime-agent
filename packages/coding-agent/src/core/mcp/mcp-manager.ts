@@ -38,6 +38,7 @@ export class McpManager {
 	private readonly beginLogin?: (server: string) => Promise<void>;
 	private integrations = new Map<string, ResolvedIntegration>();
 	private acpServers = new Map<string, AcpMcpServerConfig>();
+	private acpOwnerId?: string;
 	/** Provider ids we registered for user servers, so refresh can drop removed ones. */
 	private registeredUserProviderIds = new Set<string>();
 
@@ -55,7 +56,13 @@ export class McpManager {
 		this.registerProviders();
 	}
 
-	replaceAcpServers(servers: readonly AcpMcpServerConfig[]): boolean {
+	replaceAcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): boolean {
+		if (!ownerId) throw new Error("ACP MCP owner id is required");
+		if (servers.length === 0 && this.acpOwnerId !== ownerId) return false;
+		if (servers.length > 0 && this.acpOwnerId && this.acpOwnerId !== ownerId) {
+			throw new Error("ACP MCP configuration is owned by another client");
+		}
+
 		const next = new Map<string, AcpMcpServerConfig>();
 		for (const server of servers) {
 			if (next.has(server.name)) throw new Error(`Duplicate ACP MCP server: ${server.name}`);
@@ -68,6 +75,7 @@ export class McpManager {
 			);
 		if (unchanged) return false;
 		this.acpServers = next;
+		this.acpOwnerId = next.size > 0 ? ownerId : undefined;
 		return true;
 	}
 

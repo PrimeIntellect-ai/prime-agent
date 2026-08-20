@@ -45,7 +45,8 @@ environment, and the exact environment values supplied by the ACP client.
 
 The configuration is removed when the ACP session closes or the client disconnects. A same-named
 persistent MCP server can therefore be shadowed for the ACP session without sending its stored
-OAuth credential to the client-supplied HTTP endpoint.
+OAuth credential to the client-supplied HTTP endpoint. Daemon-backed configuration is bound to the
+ACP connection that installed it, so another attached client cannot replace or clear it.
 
 ACP stdio is a trusted-code boundary, not a sandbox. The requested command runs as the Prime Agent
 user and can access any files that user can access, including credential stores. Only accept stdio

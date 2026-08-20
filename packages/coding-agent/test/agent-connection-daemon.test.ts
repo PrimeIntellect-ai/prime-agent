@@ -2579,20 +2579,27 @@ describe("DaemonAgentConnection", () => {
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "session-1");
 		expect(connection.supportsAcpMcpServers()).toBe(false);
 		await expect(
-			connection.replaceAcpMcpServers([
-				{
-					name: "task",
-					type: "http",
-					url: "https://task.example/mcp",
-					headers: { Authorization: "Bearer task" },
-				},
-			]),
+			connection.replaceAcpMcpServers(
+				[
+					{
+						name: "task",
+						type: "http",
+						url: "https://task.example/mcp",
+						headers: { Authorization: "Bearer task" },
+					},
+				],
+				"owner-a",
+			),
 		).rejects.toBeInstanceOf(DaemonCapabilityUnavailableError);
 
 		fakeClient.serverCapabilities.add("acp_mcp_servers");
 		expect(connection.supportsAcpMcpServers()).toBe(true);
-		await connection.replaceAcpMcpServers([]);
-		expect(fakeClient.requests.at(-1)).toMatchObject({ type: "replace_acp_mcp_servers", servers: [] });
+		await connection.replaceAcpMcpServers([], "owner-a");
+		expect(fakeClient.requests.at(-1)).toMatchObject({
+			type: "replace_acp_mcp_servers",
+			ownerId: "owner-a",
+			servers: [],
+		});
 		await connection.dispose();
 	});
 

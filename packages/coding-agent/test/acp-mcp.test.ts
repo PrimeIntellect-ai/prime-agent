@@ -53,24 +53,74 @@ describe("ACP MCP servers", () => {
 					},
 				],
 			});
-			expect(replace).toHaveBeenCalledWith([
-				{
-					name: "TaskTools",
-					type: "http",
-					url: "https://task.example/mcp",
-					headers: { Authorization: "Bearer task" },
-				},
-				{
-					name: "LocalTools",
-					type: "stdio",
-					command: "node",
-					args: ["server.js"],
-					cwd: agentCwd,
-					env: { TASK_TOKEN: "task-secret" },
-				},
-			]);
+			const ownerId = replace.mock.calls[0]?.[1];
+			expect(ownerId).toEqual(expect.any(String));
+			expect(replace).toHaveBeenCalledWith(
+				[
+					{
+						name: "TaskTools",
+						type: "http",
+						url: "https://task.example/mcp",
+						headers: { Authorization: "Bearer task" },
+					},
+					{
+						name: "LocalTools",
+						type: "stdio",
+						command: "node",
+						args: ["server.js"],
+						cwd: agentCwd,
+						env: { TASK_TOKEN: "task-secret" },
+					},
+				],
+				ownerId,
+			);
 			await handle.agent.request("session/close", { sessionId: created.sessionId });
-			expect(replace).toHaveBeenLastCalledWith([]);
+			expect(replace).toHaveBeenLastCalledWith([], ownerId);
+		} finally {
+			handle.close();
+			await toAgent.writable.close().catch(() => undefined);
+			await modeDone;
+			harness.cleanup();
+		}
+	}, 30_000);
+
+	it("clears owner-scoped config when daemon acknowledgement is lost", async () => {
+		const harness = await createHarness();
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const replace = vi.spyOn(connection, "replaceAcpMcpServers").mockImplementation(async (servers) => {
+			if (servers.length > 0) throw new Error("replacement acknowledgement lost");
+		});
+		const toAgent = new TransformStream<Uint8Array, Uint8Array>();
+		const toClient = new TransformStream<Uint8Array, Uint8Array>();
+		const modeDone = runAcpModeWithConnection(connection, {
+			stream: acp.ndJsonStream(toClient.writable, toAgent.readable),
+		});
+		const handle = acp
+			.client({ name: "mcp-lost-ack-test-client" })
+			.connect(acp.ndJsonStream(toAgent.writable, toClient.readable));
+		try {
+			await handle.agent.request("initialize", {
+				protocolVersion: acp.PROTOCOL_VERSION,
+				clientCapabilities: {},
+			});
+			await expect(
+				handle.agent.request("session/new", {
+					cwd: harness.tempDir,
+					mcpServers: [
+						{
+							type: "http",
+							name: "TaskTools",
+							url: "https://task.example/mcp",
+							headers: [],
+						},
+					],
+				}),
+			).rejects.toThrow();
+
+			expect(replace.mock.calls[0]?.[0]).toHaveLength(1);
+			const ownerId = replace.mock.calls[0]?.[1];
+			expect(ownerId).toEqual(expect.any(String));
+			expect(replace.mock.calls[1]).toEqual([[], ownerId]);
 		} finally {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);

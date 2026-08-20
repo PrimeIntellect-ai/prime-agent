@@ -130,7 +130,7 @@ describe("daemon protocol helpers", () => {
 	it("capability- and schema-gates ACP MCP server replacement", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.replace_acp_mcp_servers).toEqual({
 			minProtocol: 7,
-			minSchemaRevision: 21,
+			minSchemaRevision: 22,
 			capability: "acp_mcp_servers",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("acp_mcp_servers");

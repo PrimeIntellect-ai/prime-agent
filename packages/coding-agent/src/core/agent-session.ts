@@ -1304,13 +1304,13 @@ export class AgentSession {
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
-	replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[]): void {
+	replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): void {
 		if (this.isStreaming) throw new Error("Cannot replace ACP MCP servers while the agent is running");
 		if (!this._mcpManager) {
 			if (servers.length > 0) throw new Error("MCP is unavailable in this session");
 			return;
 		}
-		if (!this._mcpManager.replaceAcpServers(servers)) return;
+		if (!this._mcpManager.replaceAcpServers(servers, ownerId)) return;
 		this._buildRuntime({
 			activeToolNames: this.getActiveToolNames(),
 			includeAllExtensionTools: true,

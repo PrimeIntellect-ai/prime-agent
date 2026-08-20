@@ -168,17 +168,20 @@ describe("createAgentSessionFromServices", () => {
 			}
 			expect(initialPrompt).not.toContain("Enabled generic MCP servers: `linear`");
 
-			session.replaceAcpMcpServers([
-				{
-					name: "task",
-					type: "http",
-					url: "https://task-secret.example/mcp",
-					headers: { Authorization: "Bearer task-secret" },
-				},
-			]);
+			session.replaceAcpMcpServers(
+				[
+					{
+						name: "task",
+						type: "http",
+						url: "https://task-secret.example/mcp",
+						headers: { Authorization: "Bearer task-secret" },
+					},
+				],
+				"owner-a",
+			);
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `task`, `zebra`.");
 			expect(session.systemPrompt).not.toContain("task-secret");
-			session.replaceAcpMcpServers([]);
+			session.replaceAcpMcpServers([], "owner-a");
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 
 			settingsManager.setGlobalMcpServer("added", { type: "stdio", command: "new-secret" });

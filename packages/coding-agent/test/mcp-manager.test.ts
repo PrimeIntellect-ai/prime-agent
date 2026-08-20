@@ -247,14 +247,17 @@ describe("McpManager", () => {
 			getUserServers: () => ({ task: { type: "http", url: "https://user.example/mcp", oauth: true } }),
 		});
 		expect(
-			manager.replaceAcpServers([
-				{
-					name: "task",
-					type: "http",
-					url: "https://task.example/mcp",
-					headers: { Authorization: "Bearer task-token" },
-				},
-			]),
+			manager.replaceAcpServers(
+				[
+					{
+						name: "task",
+						type: "http",
+						url: "https://task.example/mcp",
+						headers: { Authorization: "Bearer task-token" },
+					},
+				],
+				"owner-a",
+			),
 		).toBe(true);
 		const handlers = manager.hostHandlers();
 		expect(await handlers["mcp.config"]({ server: "task" })).toEqual({
@@ -266,7 +269,19 @@ describe("McpManager", () => {
 		await expect(handlers["mcp.refresh"]({ server: "task" })).rejects.toThrow("does not use host OAuth");
 		expect(manager.getEnabledGenericServers()).toContain("task");
 
-		expect(manager.replaceAcpServers([])).toBe(true);
+		expect(manager.replaceAcpServers([], "owner-b")).toBe(false);
+		expect(() =>
+			manager.replaceAcpServers(
+				[{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+				"owner-b",
+			),
+		).toThrow("owned by another client");
+		expect(await handlers["mcp.config"]({ server: "task" })).toMatchObject({
+			url: "https://task.example/mcp",
+			credentialSource: "acp",
+		});
+
+		expect(manager.replaceAcpServers([], "owner-a")).toBe(true);
 		expect(await handlers["mcp.config"]({ server: "task" })).toEqual({
 			type: "http",
 			url: "https://user.example/mcp",

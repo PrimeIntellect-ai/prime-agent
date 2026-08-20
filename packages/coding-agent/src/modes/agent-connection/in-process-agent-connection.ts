@@ -115,8 +115,8 @@ export class InProcessAgentConnection implements AgentConnection {
 		return true;
 	}
 
-	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[]): Promise<void> {
-		this.runtimeHost.session.replaceAcpMcpServers(servers);
+	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void> {
+		this.runtimeHost.session.replaceAcpMcpServers(servers, ownerId);
 	}
 
 	subscribe(listener: AgentConnectionEventListener): () => void {
