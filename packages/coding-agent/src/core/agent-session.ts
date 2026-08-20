@@ -1314,12 +1314,12 @@ export class AgentSession {
 		this._rebuildRuntimeForAcpMcpServers();
 	}
 
-	async releaseAcpMcpServers(ownerId: string): Promise<void> {
+	releaseAcpMcpServers(ownerId: string): void {
 		if (!this._mcpManager?.replaceAcpServers([], ownerId)) return;
-		// Drop the owner-scoped config immediately, even if its daemon client
-		// disappears while the agent is running. Rebuild only at the safe boundary.
-		await this.waitForIdle();
-		this._rebuildRuntimeForAcpMcpServers();
+		// Host MCP handlers read this manager dynamically, so credentials disappear
+		// immediately without rebuilding a kernel that may still be running.
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
 	private _rebuildRuntimeForAcpMcpServers(): void {

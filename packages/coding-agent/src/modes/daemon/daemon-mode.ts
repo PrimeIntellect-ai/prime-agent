@@ -4529,17 +4529,42 @@ export class AgentDaemon {
 				if (command.servers.length === 0 && !ownedByClient) {
 					return success(command.id, "replace_acp_mcp_servers");
 				}
-				if (command.servers.length > 0) {
-					if (currentOwner && !ownedByClient) {
-						throw new Error("ACP MCP configuration is owned by another daemon client");
-					}
-					this.acpMcpOwners.set(state.activeSessionId, { client, ownerId: command.ownerId });
-				}
-				await withClientEnv(state.clientEnv, async () =>
-					state.runtime.session.replaceAcpMcpServers(command.servers, command.ownerId),
-				);
 				if (command.servers.length === 0) {
-					this.acpMcpOwners.delete(state.activeSessionId);
+					await withClientEnv(state.clientEnv, async () =>
+						state.runtime.session.replaceAcpMcpServers([], command.ownerId),
+					);
+					if (this.acpMcpOwners.get(state.activeSessionId) === currentOwner) {
+						this.acpMcpOwners.delete(state.activeSessionId);
+					}
+					return success(command.id, "replace_acp_mcp_servers");
+				}
+
+				if (currentOwner && !ownedByClient) {
+					throw new Error("ACP MCP configuration is owned by another daemon client");
+				}
+				const claim = currentOwner ?? { client, ownerId: command.ownerId };
+				this.acpMcpOwners.set(state.activeSessionId, claim);
+				const rollback = (): void => {
+					try {
+						state.runtime.session.releaseAcpMcpServers(command.ownerId);
+					} catch (error) {
+						this.log(`failed to roll back ACP MCP config: ${String(error)}`);
+					}
+					if (this.acpMcpOwners.get(state.activeSessionId) === claim) {
+						this.acpMcpOwners.delete(state.activeSessionId);
+					}
+				};
+				try {
+					await withClientEnv(state.clientEnv, async () =>
+						state.runtime.session.replaceAcpMcpServers(command.servers, command.ownerId),
+					);
+				} catch (error) {
+					rollback();
+					throw error;
+				}
+				if (!state.clients.has(client) || this.acpMcpOwners.get(state.activeSessionId) !== claim) {
+					rollback();
+					throw new Error("Daemon client detached during ACP MCP replacement");
 				}
 				return success(command.id, "replace_acp_mcp_servers");
 			}
@@ -5958,10 +5983,15 @@ export class AgentDaemon {
 	private detachClientFromSession(client: DaemonSocketClient, state: ActiveSessionState): void {
 		const acpMcpOwner = this.acpMcpOwners.get(state.activeSessionId);
 		if (acpMcpOwner?.client === client) {
-			this.acpMcpOwners.delete(state.activeSessionId);
-			void state.runtime.session
-				.releaseAcpMcpServers(acpMcpOwner.ownerId)
-				.catch((error) => this.log(`failed to release detached ACP MCP config: ${String(error)}`));
+			try {
+				state.runtime.session.releaseAcpMcpServers(acpMcpOwner.ownerId);
+			} catch (error) {
+				this.log(`failed to release detached ACP MCP config: ${String(error)}`);
+			} finally {
+				if (this.acpMcpOwners.get(state.activeSessionId) === acpMcpOwner) {
+					this.acpMcpOwners.delete(state.activeSessionId);
+				}
+			}
 		}
 		this.abortSideQuestionsFor(client, state.activeSessionId);
 		abortClientSnapshotStreaming(client, state.activeSessionId);

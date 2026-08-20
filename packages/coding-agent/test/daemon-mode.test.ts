@@ -190,7 +190,7 @@ describe("daemon mode helpers", () => {
 		const owner = makeClient("owner", "active");
 		const other = makeClient("other", "active");
 		const replaceAcpMcpServers = vi.fn();
-		const releaseAcpMcpServers = vi.fn(async () => {});
+		const releaseAcpMcpServers = vi.fn();
 		const state = makeState("active");
 		state.clientEnv = {};
 		state.clients.add(owner);
@@ -208,6 +208,19 @@ describe("daemon mode helpers", () => {
 		};
 		internals.sessions.set(state.activeSessionId, state);
 		internals.write = vi.fn();
+
+		replaceAcpMcpServers.mockImplementationOnce(() => {
+			throw new Error("replacement failed");
+		});
+		await expect(
+			internals.handleCommand(owner, {
+				type: "replace_acp_mcp_servers",
+				activeSessionId: state.activeSessionId,
+				ownerId: "owner-token",
+				servers: [{ name: "failed", type: "http", url: "https://failed.example/mcp", headers: {} }],
+			}),
+		).rejects.toThrow("replacement failed");
+		expect(releaseAcpMcpServers).toHaveBeenLastCalledWith("owner-token");
 
 		await internals.handleCommand(owner, {
 			type: "replace_acp_mcp_servers",

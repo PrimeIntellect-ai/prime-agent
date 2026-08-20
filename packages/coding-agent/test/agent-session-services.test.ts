@@ -168,6 +168,10 @@ describe("createAgentSessionFromServices", () => {
 			}
 			expect(initialPrompt).not.toContain("Enabled generic MCP servers: `linear`");
 
+			const rebuildRuntime = vi.spyOn(
+				session as unknown as { _rebuildRuntimeForAcpMcpServers(): void },
+				"_rebuildRuntimeForAcpMcpServers",
+			);
 			session.replaceAcpMcpServers(
 				[
 					{
@@ -181,7 +185,9 @@ describe("createAgentSessionFromServices", () => {
 			);
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `task`, `zebra`.");
 			expect(session.systemPrompt).not.toContain("task-secret");
+			rebuildRuntime.mockClear();
 			await session.releaseAcpMcpServers("owner-a");
+			expect(rebuildRuntime).not.toHaveBeenCalled();
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 
 			settingsManager.setGlobalMcpServer("added", { type: "stdio", command: "new-secret" });
