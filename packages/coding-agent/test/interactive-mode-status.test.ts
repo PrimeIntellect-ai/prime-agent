@@ -5122,3 +5122,29 @@ test("shows a refine loader from the /refine command message until refine_comple
 	expect(statusContainer.children.length).toBe(0);
 	expect((fakeThis as unknown as { syncWorkingLoader: () => void }).syncWorkingLoader).toHaveBeenCalled();
 });
+
+test("syncWorkingLoader remounts a refine loader that a compaction cleared", () => {
+	initTheme("dark");
+	const statusContainer = new Container();
+	const fakeThis = {
+		ui: { requestRender: vi.fn() } as unknown as TUI,
+		statusContainer,
+		refineLoader: undefined,
+		autoCompactionLoader: undefined,
+		retryLoader: undefined,
+		stopWorkingLoader: vi.fn(),
+		isAgentCompacting: () => false,
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		startRefineLoader(this: InteractiveMode): void;
+		syncWorkingLoader(this: InteractiveMode): void;
+	};
+
+	prototype.startRefineLoader.call(fakeThis);
+	statusContainer.clear();
+	expect(statusContainer.children.length).toBe(0);
+
+	prototype.syncWorkingLoader.call(fakeThis);
+	expect(statusContainer.children.length).toBe(1);
+});

@@ -95,6 +95,12 @@ describe("RefinementOutcomeMessageComponent", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		}
+
+		for (const width of [40, 24, 12]) {
+			for (const line of component.render(width)) {
+				expect(visibleWidth(stripAnsi(line))).toBeLessThanOrEqual(width);
+			}
+		}
 	});
 
 	test("renders exact before and after payloads for updates and deletes", () => {

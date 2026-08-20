@@ -3411,8 +3411,16 @@ export class InteractiveMode {
 			this.startCompactionLoader("manual");
 			return;
 		}
-		// Compaction/retry/refine own the status container while active; don't fight them.
-		if (this.autoCompactionLoader || this.retryLoader || this.refineLoader) {
+		// Compaction/retry own the status container while active; don't fight them.
+		if (this.autoCompactionLoader || this.retryLoader) {
+			return;
+		}
+		// Remount the refine loader if another owner (e.g. a compaction) cleared it.
+		if (this.refineLoader) {
+			if (!this.statusContainer.children.includes(this.refineLoader)) {
+				this.statusContainer.clear();
+				this.statusContainer.addChild(this.refineLoader);
+			}
 			return;
 		}
 		if (this.shouldShowWorkingLoader()) {

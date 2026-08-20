@@ -69,7 +69,8 @@ class CollapsedOutcomeLine implements Component {
 
 	render(width: number): string[] {
 		const room = Math.max(20, width - visibleWidth(this.suffix) - 1);
-		return [`${theme.fg("customMessageText", truncateToWidth(this.summary, room, "…"))} ${this.suffix}`];
+		const line = `${theme.fg("customMessageText", truncateToWidth(this.summary, room, "…"))} ${this.suffix}`;
+		return [truncateToWidth(line, Math.max(1, width), "")];
 	}
 
 	invalidate(): void {}
