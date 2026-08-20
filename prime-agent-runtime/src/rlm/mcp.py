@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 import re
+import sys
 import threading
 import time
 from contextlib import AsyncExitStack
@@ -21,7 +22,6 @@ __all__ = ["McpStartupError", "call_tool", "close", "list_tools", "reload"]
 _DEFAULT_STARTUP_TIMEOUT = 20.0
 _DEFAULT_CALL_TIMEOUT = 60.0
 _SHUTDOWN_TIMEOUT = 5.0
-_CROSS_LOOP_TIMEOUT = 65.0
 _T = TypeVar("_T")
 _STDERR_BYTE_LIMIT = 8 * 1024
 _STDERR_LINE_LIMIT = 40
@@ -126,7 +126,9 @@ class _Generation:
         try:
             await asyncio.shield(ready)
         except BaseException:
-            if not ready.done():
+            if ready.done():
+                self._close_requested.set()
+            else:
                 self._lifecycle.cancel()
             try:
                 await asyncio.shield(self._lifecycle)
@@ -421,7 +423,7 @@ _registry = _Registry()
 
 
 async def _dispatch(
-    operation: Callable[[], Awaitable[_T]], *, timeout: float = _CROSS_LOOP_TIMEOUT
+    operation: Callable[[], Awaitable[_T]], *, timeout: float | None = None
 ) -> _T:
     current = asyncio.get_running_loop()
     owner = _registry.bind_owner()
@@ -626,7 +628,10 @@ def install_shutdown_hook() -> None:
     original = kernel.do_shutdown
 
     async def do_shutdown(restart: bool):
-        await close()
+        try:
+            await close()
+        except BaseException as exc:
+            print(f"Prime Agent MCP shutdown failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         result = original(restart)
         if hasattr(result, "__await__"):
             return await result

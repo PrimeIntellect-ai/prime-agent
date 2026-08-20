@@ -44,6 +44,29 @@ function configuredManager(onSend: (internals: ShutdownInternals) => void | Prom
 }
 
 describe("KernelManager graceful shutdown", () => {
+	it("does not finish shutdown before the control send settles", async () => {
+		let finishSend: (() => void) | undefined;
+		const sendBlocked = new Promise<void>((resolve) => {
+			finishSend = resolve;
+		});
+		const { manager, internals } = configuredManager(async (state) => {
+			const [requestMessageId, dispatch] = [...state.pendingControlReplies.entries()][0] ?? [];
+			if (!requestMessageId || !dispatch) throw new Error("missing shutdown reply listener");
+			dispatch(shutdownReply(requestMessageId));
+			await sendBlocked;
+		});
+
+		let finished = false;
+		const shutdown = manager.shutdown().then(() => {
+			finished = true;
+		});
+		await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+		expect(finished).toBe(false);
+		finishSend?.();
+		await shutdown;
+		expect(internals.pendingControlReplies.size).toBe(0);
+	});
+
 	it("waits for the matching shutdown reply and removes its listener", async () => {
 		const { manager, internals } = configuredManager(async (state) => {
 			const [requestMessageId, dispatch] = [...state.pendingControlReplies.entries()][0] ?? [];

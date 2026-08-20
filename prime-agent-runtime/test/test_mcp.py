@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import sys
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -210,6 +212,55 @@ class McpRegistryTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             run(generation.call("slow", {}))
         self.assertTrue(cancelled)
+
+    def test_cross_loop_dispatch_does_not_impose_a_second_deadline(self):
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+        try:
+            mcp._registry._owner_loop = loop
+            observed_timeout = object()
+            real_wait = asyncio.wait
+
+            async def operation():
+                await asyncio.sleep(0.01)
+                return "done"
+
+            async def capture_wait(*args, **kwargs):
+                nonlocal observed_timeout
+                observed_timeout = kwargs.get("timeout")
+                return await real_wait(*args, **kwargs)
+
+            with mock.patch.object(mcp.asyncio, "wait", capture_wait):
+                self.assertEqual(run(mcp._dispatch(operation)), "done")
+            self.assertIsNone(observed_timeout)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join()
+            loop.close()
+
+    def test_open_cancellation_after_ready_closes_lifecycle(self):
+        generation = mcp._Generation("svc", {"type": "http"})
+
+        async def lifecycle(ready):
+            ready.set_result(None)
+            asyncio.current_task().get_loop().call_soon(opening.cancel)
+            try:
+                await generation._close_requested.wait()
+            finally:
+                generation.closed = True
+
+        async def scenario():
+            nonlocal opening
+            with mock.patch.object(generation, "_run_lifecycle", lifecycle):
+                opening = asyncio.create_task(generation.open())
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(opening, 0.1)
+            self.assertTrue(generation.closed)
+            self.assertTrue(generation._close_requested.is_set())
+
+        opening = None
+        run(scenario())
 
     def test_stdio_env_is_scrubbed_and_tagged(self):
         with mock.patch.dict(os.environ, {"PATH": "/bin", "SECRET": "value", "UNRELATED": "no"}, clear=True):
@@ -526,6 +577,22 @@ class McpRegistryTest(unittest.TestCase):
             with mock.patch.object(mcp, "close", mock.AsyncMock()) as close:
                 self.assertEqual(await kernel.do_shutdown(False), {"status": "ok", "restart": False})
             close.assert_awaited_once()
+
+        run(scenario())
+
+    def test_shutdown_hook_runs_kernel_handler_when_mcp_close_fails(self):
+        original = mock.AsyncMock(return_value={"status": "ok", "restart": False})
+        kernel = SimpleNamespace(_prime_agent_mcp_shutdown=False, do_shutdown=original)
+        shell = SimpleNamespace(kernel=kernel)
+
+        async def scenario():
+            with mock.patch.object(mcp, "get_ipython", create=True, return_value=shell):
+                mcp.install_shutdown_hook()
+            with mock.patch.object(mcp, "close", mock.AsyncMock(side_effect=TimeoutError("close deadline"))):
+                with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    self.assertEqual(await kernel.do_shutdown(False), {"status": "ok", "restart": False})
+                    self.assertIn("MCP shutdown failed: TimeoutError: close deadline", stderr.getvalue())
+            original.assert_awaited_once_with(False)
 
         run(scenario())
 

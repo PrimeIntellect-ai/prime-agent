@@ -92,10 +92,11 @@ export class McpManager {
 	registerUserProviders(): void {
 		const current = new Set<string>();
 		for (const integration of this.integrations.values()) {
-			if (!integration.userDeclared || integration.config.type !== "http") continue;
+			if (!integration.userDeclared || integration.config.type !== "http" || getCatalogEntry(integration.server)) {
+				continue;
+			}
 			const id = this.providerId(integration.server);
 			if (integration.usesOAuth) {
-				// Register pointing at the user's URL (overrides a catalog default too).
 				current.add(id);
 				registerOAuthProvider(
 					createMcpOAuthProvider({
@@ -104,10 +105,6 @@ export class McpManager {
 						url: integration.config.url,
 					}),
 				);
-			} else if (getCatalogEntry(integration.server)) {
-				// User overrode a catalog server with a custom URL but no oauth: drop the
-				// built-in provider so we never send the official token to that URL.
-				unregisterOAuthProvider(id);
 			}
 		}
 		// Drop providers for user servers removed since the last registration.

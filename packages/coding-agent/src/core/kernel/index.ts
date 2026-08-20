@@ -1518,9 +1518,9 @@ export class KernelManager {
 			if (this.control && this.connection) {
 				const msg = buildMessage("shutdown_request", { restart: false }, this.session, this.options.username);
 				replyWait = this.waitForControlReply(msg.header.msg_id, "shutdown_reply", KERNEL_SHUTDOWN_TIMEOUT_MS);
-				const wait = replyWait;
-				const send = this.control.send(encode(msg, this.connection.key));
-				await Promise.race([send.then(() => wait.promise), wait.promise]);
+				replyWait.promise.catch(() => undefined);
+				await this.control.send(encode(msg, this.connection.key));
+				await replyWait.promise;
 			}
 		} catch (error) {
 			this.appendKernelDiagnostic(
