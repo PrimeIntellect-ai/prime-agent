@@ -24,8 +24,8 @@ const PLANE_META = {
 	registration_endpoint: "https://mcp.plane.so/http/register",
 	scopes_supported: ["read", "write"],
 };
-const LEGACY_URL = "https://srv.test/mcp";
-const LEGACY_META = {
+const ORIGIN_URL = "https://srv.test/mcp";
+const ORIGIN_META = {
 	issuer: "https://srv.test",
 	authorization_endpoint: "https://srv.test/authorize",
 	token_endpoint: "https://srv.test/token",
@@ -35,7 +35,7 @@ const LEGACY_META = {
 
 function absentPrm(input: unknown): Response | undefined {
 	const url = urlOf(input);
-	if (url === LEGACY_URL) return new Response("", { status: 404 });
+	if (url === ORIGIN_URL) return new Response("", { status: 404 });
 	if (url === "https://srv.test/.well-known/oauth-protected-resource/mcp") return new Response("", { status: 404 });
 	if (url === "https://srv.test/.well-known/oauth-protected-resource") return new Response("", { status: 404 });
 	return undefined;
@@ -64,7 +64,7 @@ describe.sequential("MCP OAuth provider", () => {
 	});
 
 	it("has a namespaced id and label", () => {
-		const provider = createMcpOAuthProvider({ server: "linear", label: "Linear", url: LEGACY_URL });
+		const provider = createMcpOAuthProvider({ server: "linear", label: "Linear", url: ORIGIN_URL });
 		expect(provider.id).toBe("mcp:linear");
 		expect(provider.name).toBe("Linear");
 		expect(provider.usesCallbackServer).toBe(true);
@@ -109,7 +109,7 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(fetchMock).toHaveBeenCalledWith(RESOURCE, expect.objectContaining({ redirect: "error" }));
 	});
 
-	it("uses derived protected-resource metadata with an external pathful OIDC issuer", async () => {
+	it("uses pathful OIDC metadata when RFC 8414 returns a non-metadata document", async () => {
 		const issuer = "https://login.example/tenant";
 		const oidcMeta = "https://login.example/tenant/.well-known/openid-configuration";
 		const metadata = {
@@ -126,7 +126,10 @@ describe.sequential("MCP OAuth provider", () => {
 				if (url === RESOURCE) return new Response("", { status: 404 });
 				if (url === PLANE_PRM_URL) return jsonResponse({ resource: RESOURCE, authorization_servers: [issuer] });
 				if (url === "https://login.example/.well-known/oauth-authorization-server/tenant")
-					return new Response("", { status: 404 });
+					return new Response("<html>not metadata</html>", {
+						status: 200,
+						headers: { "Content-Type": "text/html" },
+					});
 				if (url === oidcMeta) return jsonResponse(metadata);
 				if (url === metadata.registration_endpoint) return jsonResponse({ client_id: "c" });
 				if (url === metadata.token_endpoint) return jsonResponse({ access_token: "a", expires_in: 60 });
@@ -163,27 +166,27 @@ describe.sequential("MCP OAuth provider", () => {
 		).rejects.toThrow("issuer does not exactly match");
 	});
 
-	it("uses legacy root authorization-server metadata only when protected-resource metadata is absent", async () => {
+	it("uses origin-level authorization-server metadata only when protected-resource metadata is absent", async () => {
 		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
 			const missing = absentPrm(input);
 			if (missing) return missing;
 			const url = urlOf(input);
-			if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(LEGACY_META);
-			if (url === LEGACY_META.registration_endpoint) return jsonResponse({ client_id: "legacy-client" });
-			if (url === LEGACY_META.token_endpoint) {
+			if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
+			if (url === ORIGIN_META.registration_endpoint) return jsonResponse({ client_id: "origin-client" });
+			if (url === ORIGIN_META.token_endpoint) {
 				const params = new URLSearchParams(String(init?.body));
 				expect(params.get("resource")).toBeNull();
-				return jsonResponse({ access_token: "legacy-access", refresh_token: "legacy-refresh", expires_in: 3600 });
+				return jsonResponse({ access_token: "origin-access", refresh_token: "origin-refresh", expires_in: 3600 });
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		});
 		vi.stubGlobal("fetch", fetchMock);
 		const { creds, authUrl } = await loginWithManualCode(
-			createMcpOAuthProvider({ server: "legacy", url: LEGACY_URL }),
+			createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL }),
 		);
 		expect(creds).toMatchObject({
-			access: "legacy-access",
-			endpoint: LEGACY_URL,
+			access: "origin-access",
+			endpoint: ORIGIN_URL,
 			resource: undefined,
 			issuer: undefined,
 		});
@@ -247,6 +250,34 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(fetchMock.mock.calls.map(([input]) => urlOf(input))).not.toContain("https://attacker.example/token");
 	});
 
+	it("keeps an origin-level resource identifier free of a synthetic trailing slash", async () => {
+		const resource = "https://root.example";
+		const prm = "https://root.example/.well-known/oauth-protected-resource";
+		const issuer = "https://root.example";
+		const asMetadata = "https://root.example/.well-known/oauth-authorization-server";
+		const metadata = {
+			issuer,
+			authorization_endpoint: "https://root.example/authorize",
+			token_endpoint: "https://root.example/token",
+		};
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown): Promise<Response> => {
+				const url = urlOf(input);
+				if (url === "https://root.example/") return new Response("", { status: 401 });
+				if (url === prm) return jsonResponse({ resource, authorization_servers: [issuer] });
+				if (url === asMetadata) return jsonResponse(metadata);
+				if (url === metadata.token_endpoint) return jsonResponse({ access_token: "root-access" });
+				throw new Error(`unexpected fetch: ${url}`);
+			}),
+		);
+		const { creds, authUrl } = await loginWithManualCode(
+			createMcpOAuthProvider({ server: "root", url: resource, clientId: "root-client" }),
+		);
+		expect(creds).toMatchObject({ endpoint: resource, resource, issuer });
+		expect(new URL(authUrl).searchParams.get("resource")).toBe(resource);
+	});
+
 	it("preserves the resource query in RFC 9728 discovery and never probes root metadata", async () => {
 		const resource = "https://mcp.example/mcp?tenant=a";
 		const prm = "https://mcp.example/.well-known/oauth-protected-resource/mcp?tenant=a";
@@ -275,7 +306,7 @@ describe.sequential("MCP OAuth provider", () => {
 		);
 	});
 
-	it("requires re-login when refresh discovery changes from legacy to resource-bound", async () => {
+	it("requires re-login when refresh discovery changes from origin-only to resource-bound", async () => {
 		const fetchMock = vi.fn(async (input: unknown): Promise<Response> => {
 			const url = urlOf(input);
 			if (url === RESOURCE) return new Response("", { status: 401 });
@@ -286,12 +317,12 @@ describe.sequential("MCP OAuth provider", () => {
 		vi.stubGlobal("fetch", fetchMock);
 		await expect(
 			createMcpOAuthProvider({ server: "plane", url: RESOURCE }).refreshToken({
-				access: "legacy-access",
-				refresh: "legacy-refresh",
+				access: "origin-access",
+				refresh: "origin-refresh",
 				expires: 0,
 				endpoint: RESOURCE,
 				tokenEndpoint: PLANE_META.token_endpoint,
-				clientId: "legacy-client",
+				clientId: "origin-client",
 			} as never),
 		).rejects.toThrow("discovery mode changed");
 		expect(fetchMock.mock.calls.map(([input]) => urlOf(input))).not.toContain(PLANE_META.token_endpoint);
@@ -304,22 +335,22 @@ describe.sequential("MCP OAuth provider", () => {
 				const missing = absentPrm(input);
 				if (missing) return missing;
 				const url = urlOf(input);
-				if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(LEGACY_META);
-				if (url === LEGACY_META.token_endpoint) {
+				if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
+				if (url === ORIGIN_META.token_endpoint) {
 					expect(init?.redirect).toBe("error");
 					return new Response("redirect", { status: 302, headers: { Location: "https://evil.test/token" } });
 				}
 				throw new Error(`unexpected fetch: ${url}`);
 			}),
 		);
-		const provider = createMcpOAuthProvider({ server: "legacy", url: LEGACY_URL, clientId: "c" });
+		const provider = createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL, clientId: "c" });
 		await expect(
 			provider.refreshToken({
 				access: "a",
 				refresh: "r",
 				expires: 0,
-				endpoint: LEGACY_URL,
-				tokenEndpoint: LEGACY_META.token_endpoint,
+				endpoint: ORIGIN_URL,
+				tokenEndpoint: ORIGIN_META.token_endpoint,
 			} as never),
 		).rejects.toThrow("Token request");
 	});
@@ -379,13 +410,13 @@ describe.sequential("MCP OAuth provider", () => {
 					const missing = absentPrm(input);
 					if (missing) return missing;
 					const url = urlOf(input);
-					if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(LEGACY_META);
-					if (url === LEGACY_META.registration_endpoint) return jsonResponse({ client_id: "c" });
-					if (url === LEGACY_META.token_endpoint) return jsonResponse({ access_token: "a", expires_in: 60 });
+					if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
+					if (url === ORIGIN_META.registration_endpoint) return jsonResponse({ client_id: "c" });
+					if (url === ORIGIN_META.token_endpoint) return jsonResponse({ access_token: "a", expires_in: 60 });
 					throw new Error(`unexpected fetch: ${url}`);
 				}),
 			);
-			const { authUrl } = await loginWithManualCode(createMcpOAuthProvider({ server: "demo", url: LEGACY_URL }));
+			const { authUrl } = await loginWithManualCode(createMcpOAuthProvider({ server: "demo", url: ORIGIN_URL }));
 			const redirect = new URL(authUrl).searchParams.get("redirect_uri") ?? "";
 			expect(redirect).not.toContain(":53700/");
 			expect(redirect).toContain(":5370");
@@ -402,12 +433,12 @@ describe.sequential("MCP OAuth provider", () => {
 				if (missing) return missing;
 				const url = urlOf(input);
 				if (url === "https://srv.test/.well-known/oauth-authorization-server")
-					return jsonResponse({ ...LEGACY_META, registration_endpoint: undefined });
+					return jsonResponse({ ...ORIGIN_META, registration_endpoint: undefined });
 				throw new Error(`unexpected fetch: ${url}`);
 			}),
 		);
 		await expect(
-			createMcpOAuthProvider({ server: "slackish", url: LEGACY_URL }).login({
+			createMcpOAuthProvider({ server: "slackish", url: ORIGIN_URL }).login({
 				onAuth: () => {},
 				onPrompt: async () => "",
 			}),

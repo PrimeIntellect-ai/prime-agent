@@ -70,6 +70,11 @@ function validatedHttpsUrl(value: string, name: string): URL {
 	return url;
 }
 
+function canonicalResource(url: URL): string {
+	if (url.pathname === "/" && !url.search) return url.origin;
+	return `${url.origin}${url.pathname}${url.search}`;
+}
+
 function authorizationServerMetadataUrls(issuer: string): string[] {
 	const url = validatedHttpsUrl(issuer, "Authorization server issuer");
 	if (url.search) throw new Error("Authorization server issuer must not contain a query string");
@@ -109,7 +114,7 @@ function authorizationServerMetadata(value: unknown, issuer: string, requireExac
 			advertisedIssuer.pathname !== "/" ||
 			advertisedIssuer.search
 		) {
-			throw new Error(`Legacy authorization server metadata issuer must identify ${new URL(issuer).origin}`);
+			throw new Error(`Origin authorization server metadata issuer must identify ${new URL(issuer).origin}`);
 		}
 	}
 	if (typeof metadata.authorization_endpoint !== "string" || typeof metadata.token_endpoint !== "string") {
@@ -130,12 +135,19 @@ async function jsonMetadata(response: Response, url: string): Promise<unknown> {
 
 async function discoverAuthorizationServer(issuer: string, requireExactIssuer: boolean): Promise<AuthServerMetadata> {
 	const candidates = authorizationServerMetadataUrls(issuer);
+	let lastError: unknown;
 	for (const candidate of candidates) {
-		const response = await fetchResponse(candidate);
-		if (response.status === 404) continue;
-		return authorizationServerMetadata(await jsonMetadata(response, candidate), issuer, requireExactIssuer);
+		try {
+			const response = await fetchResponse(candidate);
+			if (response.status === 404) continue;
+			return authorizationServerMetadata(await jsonMetadata(response, candidate), issuer, requireExactIssuer);
+		} catch (error) {
+			lastError = error;
+		}
 	}
-	throw new Error(`Could not discover OAuth metadata for ${issuer}. Tried ${candidates.join(", ")}`);
+	throw new Error(
+		`Could not discover OAuth metadata for ${issuer}. Tried ${candidates.join(", ")}. Last error: ${String(lastError)}`,
+	);
 }
 
 /** Random, URL-safe CSRF `state` value, independent of the PKCE verifier. */
@@ -192,10 +204,10 @@ async function tryProtectedResourceMetadata(url: string): Promise<ProtectedResou
 		: resourceMetadataUrl(resource);
 	const response = await fetchResponse(candidate);
 	if (response.status === 404 && !headerUrl) return undefined;
-	return resourceMetadata(await jsonMetadata(response, candidate), resource.toString());
+	return resourceMetadata(await jsonMetadata(response, candidate), canonicalResource(resource));
 }
 
-/** Discover RFC 9728 protected-resource metadata before the legacy root authorization server. */
+/** Discover RFC 9728 protected-resource metadata before the origin-level authorization server fallback. */
 async function discover(url: string): Promise<Discovery> {
 	const protectedResource = await tryProtectedResourceMetadata(url);
 	if (protectedResource) {
@@ -513,10 +525,10 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 		if (creds.endpoint !== config.url) {
 			throw new Error(`Stored OAuth credentials are not bound to ${config.url}; re-run /mcp login ${config.server}`);
 		}
-		const canonicalResource = validatedHttpsUrl(config.url, "MCP endpoint").toString();
-		if (creds.resource !== undefined && creds.resource !== canonicalResource) {
+		const configuredResource = canonicalResource(validatedHttpsUrl(config.url, "MCP endpoint"));
+		if (creds.resource !== undefined && creds.resource !== configuredResource) {
 			throw new Error(
-				`Stored OAuth credentials are not bound to ${canonicalResource}; re-run /mcp login ${config.server}`,
+				`Stored OAuth credentials are not bound to ${configuredResource}; re-run /mcp login ${config.server}`,
 			);
 		}
 		if ((creds.resource === undefined) !== (creds.issuer === undefined)) {
