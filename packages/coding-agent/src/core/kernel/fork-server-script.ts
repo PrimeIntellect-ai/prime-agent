@@ -223,12 +223,14 @@ def _serve(control_path):
         # Parent: stay pristine (no loop/threads/ZMQ ever) so the next fork is clean.
         _children[req_id] = [pid, True]
         _pid_to_id[pid] = req_id
-        # FIFO eviction; an evicted-while-alive child's later reap is a no-op.
-        while len(_children) > _history_bound:
-            evicted_id = next(iter(_children))
-            evicted_pid, evicted_alive = _children.pop(evicted_id)
-            if evicted_alive:
-                _pid_to_id.pop(evicted_pid, None)
+        # FIFO-evict only exited entries: dropping a live child would make its
+        # liveness read false and its kill unroutable — the exact leak this
+        # forkserver exists to prevent. Live entries are bounded by real kernels.
+        if len(_children) > _history_bound:
+            for evicted_id in [i for i, e in _children.items() if not e[1]]:
+                if len(_children) <= _history_bound:
+                    break
+                _children.pop(evicted_id)
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
         f.write(json.dumps({"id": req_id, "pid": pid}).encode() + b"\n")
         f.flush()

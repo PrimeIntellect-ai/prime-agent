@@ -190,31 +190,35 @@ describeIf("forkserver kill/liveness protocol (stub python)", () => {
 		}
 	}, 15_000);
 
-	it("evicting a still-alive entry then killing it externally leaves the forkserver healthy", async () => {
-		// Eviction while the child is ALIVE: its later external death hits the
-		// SIGCHLD reaper with a pid no longer in the registry (no-op pop), which
-		// must not crash the forkserver or corrupt the surviving entries.
+	it("keeps live entries answerable past the history bound and evicts only exited ones", async () => {
+		// A live child must never be evicted: an evicted-live entry would read
+		// dead to the liveness monitor and be unroutable for kill — the exact
+		// orphan leak this forkserver exists to prevent.
 		const bounded = new ForkServer({ python: "python3", historyBound: 2 });
 		try {
 			const oldest = await spawnStubKernel(bounded);
 			expect(await oldest.isAlive()).toBe(true);
 			const middle = await spawnStubKernel(bounded);
 			const newest = await spawnStubKernel(bounded);
-			// Three entries against a bound of 2: the alive oldest id is evicted.
-			expect(await oldest.kill("TERM")).toBe("unknown-pid");
-			expect(await oldest.isAlive()).toBe(false);
-			// External death by raw os pid (test harness only, never a src path).
-			process.kill(oldest.pid, "SIGKILL");
-			await vi.waitFor(() => {
-				expect(() => process.kill(oldest.pid, 0)).toThrow();
-			});
-			// The reaper's no-op pop must leave the server answering correctly.
-			expect(await oldest.kill("TERM")).toBe("unknown-pid");
-			expect(await oldest.isAlive()).toBe(false);
+			// Three live entries against a bound of 2: none may be evicted.
+			expect(await oldest.isAlive()).toBe(true);
 			expect(await middle.isAlive()).toBe(true);
 			expect(await newest.isAlive()).toBe(true);
+			// Once dead entries exist, the next fork sweeps them out instead.
+			expect(await oldest.kill("TERM")).toBe("signaled");
 			expect(await middle.kill("TERM")).toBe("signaled");
+			await vi.waitFor(async () => {
+				expect(await oldest.isAlive()).toBe(false);
+				expect(await middle.isAlive()).toBe(false);
+			});
+			const extra = await spawnStubKernel(bounded);
+			// Bound 2 with two dead entries: both are evicted, the live ones stay.
+			expect(await oldest.kill("TERM")).toBe("unknown-pid");
+			expect(await middle.kill("TERM")).toBe("unknown-pid");
+			expect(await newest.isAlive()).toBe(true);
+			expect(await extra.isAlive()).toBe(true);
 			expect(await newest.kill("TERM")).toBe("signaled");
+			expect(await extra.kill("TERM")).toBe("signaled");
 		} finally {
 			bounded.dispose();
 		}
