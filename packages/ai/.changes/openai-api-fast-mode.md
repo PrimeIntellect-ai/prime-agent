@@ -1,0 +1,1 @@
+- Added Fast mode support for eligible models using OpenAI API-key authentication.

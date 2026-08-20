@@ -1,0 +1,1 @@
+- Added `/fast` support for eligible models using OpenAI API-key authentication.

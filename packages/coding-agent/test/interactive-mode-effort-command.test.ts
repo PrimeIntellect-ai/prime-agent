@@ -289,8 +289,11 @@ describe("InteractiveMode /effort", () => {
 	});
 
 	describe("Fast mode", () => {
-		it("enables Fast mode and refreshes the model tray", async () => {
-			const context = makeFastContext();
+		it.each([
+			["ChatGPT", testModel("openai-codex", "gpt-5.5", "openai-codex-responses")],
+			["OpenAI API", testModel("openai", "gpt-5.5", "openai-responses")],
+		])("enables Fast mode through %s and refreshes the model tray", async (_auth, model) => {
+			const context = makeFastContext(model);
 
 			fastInteractiveModePrototype.handleFastCommand.call(context);
 			await vi.waitFor(() => expect(context.showStatus).toHaveBeenCalledWith("Fast mode: on"));
@@ -403,7 +406,7 @@ describe("InteractiveMode /effort", () => {
 
 			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
 			expect(context.showStatus).toHaveBeenCalledWith(
-				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT authentication",
+				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 through ChatGPT or the OpenAI API",
 			);
 		});
 

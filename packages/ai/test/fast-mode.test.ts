@@ -23,10 +23,14 @@ describe("Fast mode", () => {
 		expect(supportsFastMode(model("openai-codex", id, "openai-codex-responses"))).toBe(true);
 	});
 
-	it("rejects unsupported models and API-key providers", () => {
+	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-luna"])("supports %s through OpenAI API-key auth", (id) => {
+		expect(supportsFastMode(model("openai", id, "openai-responses"))).toBe(true);
+	});
+
+	it("rejects unsupported models and providers", () => {
 		expect(supportsFastMode(model("openai-codex", "gpt-5.3-codex", "openai-codex-responses"))).toBe(false);
 		expect(supportsFastMode(model("openai-codex", "gpt-5.4-mini", "openai-codex-responses"))).toBe(false);
-		expect(supportsFastMode(model("openai", "gpt-5.5", "openai-responses"))).toBe(false);
+		expect(supportsFastMode(model("anthropic", "gpt-5.5", "anthropic-messages"))).toBe(false);
 	});
 
 	it("forwards priority through simple stream options", () => {
