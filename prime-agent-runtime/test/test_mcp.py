@@ -278,6 +278,12 @@ class McpRegistryTest(unittest.TestCase):
             headers = asyncio.run(mcp._headers("remote", config))
         self.assertEqual(headers["Authorization"], "Bearer old-token")
 
+    def test_unbound_credential_requires_relogin(self):
+        config = {"oauth": True, "url": "https://srv.example/mcp"}
+        with mock.patch.object(mcp, "_read_auth", return_value={"access": "legacy-token"}):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mcp._headers("remote", config))
+
     def test_diagnostics_do_not_contain_headers_or_env_secrets(self):
         async def host_request(*_args):
             raise RuntimeError("bridge failed")

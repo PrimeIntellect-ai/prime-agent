@@ -138,6 +138,16 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(refreshed.refresh).toBe("old-refresh");
 		// A refresh must not re-bind an old token to the provider's current URL.
 		expect((refreshed as { endpoint?: string }).endpoint).toBe("https://old.test/mcp");
+
+		const unbound = await provider.refreshToken({
+			access: "access-1",
+			refresh: "old-refresh",
+			expires: Date.now() - 1000,
+			tokenEndpoint: META.token_endpoint,
+			clientId: "client-xyz",
+		} as never);
+		// An unbound legacy credential stays unbound, so consumers keep requiring re-login.
+		expect((unbound as { endpoint?: string }).endpoint).toBeUndefined();
 	});
 
 	it("fails clearly when DCR is unavailable and no clientId is set", async () => {

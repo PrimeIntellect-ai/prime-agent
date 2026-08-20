@@ -513,14 +513,17 @@ async def _config(server: str) -> dict[str, Any]:
 
 
 def _bound_auth(provider: str, config: dict[str, Any]) -> dict[str, Any] | None:
-    """The stored credential, unless it is bound to a different endpoint.
+    """The stored credential, only when bound to this exact endpoint.
 
-    A login that finishes after the server was retargeted stores a token bound
-    to the old URL; it must never be attached to the new one.
+    A mismatch means a login finished after the server was retargeted; a
+    missing binding (pre-binding legacy token) has no proof of where it
+    belongs. Neither may be attached — re-login is required.
     """
     cred = _read_auth(provider)
-    endpoint = (cred or {}).get("endpoint")
-    if isinstance(endpoint, str) and endpoint.rstrip("/") != str(config.get("url", "")).rstrip("/"):
+    if cred is None:
+        return None
+    endpoint = cred.get("endpoint")
+    if not isinstance(endpoint, str) or endpoint.rstrip("/") != str(config.get("url", "")).rstrip("/"):
         return None
     return cred
 

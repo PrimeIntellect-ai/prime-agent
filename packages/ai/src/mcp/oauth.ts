@@ -228,7 +228,7 @@ function toCredentials(
 	token: { access_token: string; refresh_token?: string; expires_in?: number },
 	tokenEndpoint: string,
 	clientId: string,
-	endpoint: string,
+	endpoint: string | undefined,
 	previousRefresh?: string,
 ): McpCredentials {
 	return {
@@ -363,7 +363,8 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			refresh_token: creds.refresh,
 			...(clientId ? { client_id: clientId } : {}),
 		});
-		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.endpoint ?? config.url, creds.refresh);
+		// Never infer a binding: refreshing an unbound legacy credential must not rebind it to the current URL.
+		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.endpoint, creds.refresh);
 	}
 
 	return {

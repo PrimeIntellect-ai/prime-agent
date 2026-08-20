@@ -132,9 +132,13 @@ export class McpManager {
 		}
 		const cred = this.authStorage.get(this.providerId(integration.server));
 		if (cred === undefined) return false;
-		// A token bound to a different endpoint (login finished after a retarget) must not enable the server.
+		// Builtin URLs are code-constant; only user-declared endpoints can be retargeted, so only their
+		// tokens must prove where they belong. Mismatched or unbound (legacy) tokens require re-login.
+		if (!integration.userDeclared) return true;
 		const endpoint = (cred as { endpoint?: string }).endpoint;
-		return !endpoint || stripTrailingSlashes(endpoint) === stripTrailingSlashes(integration.config.url);
+		return (
+			typeof endpoint === "string" && stripTrailingSlashes(endpoint) === stripTrailingSlashes(integration.config.url)
+		);
 	}
 
 	/** `-<server>/SKILL.md` overrides for every built-in integration the user isn't logged into. */
