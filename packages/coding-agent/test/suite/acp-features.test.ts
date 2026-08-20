@@ -477,12 +477,13 @@ describe("ACP mode preserves prime-agent features", () => {
 		expect(beforeClose).toBeGreaterThan(0);
 
 		await fixture.agent.request("session/close", { sessionId: fixture.sessionId });
+		const afterClose = fixture.updates.length;
+		expect(afterClose).toBeGreaterThanOrEqual(beforeClose);
 
-		// After close the subscription is released, so further agent activity must
-		// not reach the client.
-		await harness.session.prompt("post-close activity");
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		expect(fixture.updates.length).toBe(beforeClose);
+		// After close the subscription is released and the backing session remains
+		// admission-fenced until its replacement is established.
+		await expect(harness.session.prompt("post-close activity")).rejects.toThrow("session input admission is paused");
+		expect(fixture.updates.length).toBe(afterClose);
 
 		// Closing frees the single-session slot, so a new session is accepted.
 		const next = await fixture.agent.request("session/new", { cwd: harness.tempDir, mcpServers: [] });

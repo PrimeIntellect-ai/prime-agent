@@ -45,6 +45,21 @@ export interface AgentSessionRuntimeConfig {
 	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
+export type DurableAgentSessionRuntimeConfig = Pick<
+	AgentSessionRuntimeConfig,
+	"cwd" | "agentDir" | "sessionDir" | "telemetryDisabled"
+>;
+
+/** Only non-secret host settings needed to locate and govern durable daemon state. */
+export function durableAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): DurableAgentSessionRuntimeConfig {
+	return {
+		...(typeof config.cwd === "string" ? { cwd: config.cwd } : {}),
+		...(typeof config.agentDir === "string" ? { agentDir: config.agentDir } : {}),
+		...(typeof config.sessionDir === "string" ? { sessionDir: config.sessionDir } : {}),
+		...(config.telemetryDisabled === true ? { telemetryDisabled: true as const } : {}),
+	};
+}
+
 export function mergeAgentSessionRuntimeConfig(
 	base: AgentSessionRuntimeConfig,
 	override?: AgentSessionRuntimeConfig,

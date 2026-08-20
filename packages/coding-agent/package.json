@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-coding-agent",
-	"version": "0.7.3",
+	"version": "0.7.4",
 	"description": "Coding agent CLI with IPython-backed tools and session management",
 	"type": "module",
 	"piConfig": {
@@ -48,9 +48,9 @@
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^1.3.0",
-		"@earendil-works/pi-agent-core": "^0.7.3",
-		"@earendil-works/pi-ai": "^0.7.3",
-		"@earendil-works/pi-tui": "^0.7.3",
+		"@earendil-works/pi-agent-core": "^0.7.4",
+		"@earendil-works/pi-ai": "^0.7.4",
+		"@earendil-works/pi-tui": "^0.7.4",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",
