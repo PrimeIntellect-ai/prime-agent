@@ -1,1 +1,1 @@
-- Changed AI package callers to classify `Agent.continue()` precondition failures using stable typed error codes.
+- Fixed generated model pricing and context-window metadata for updated provider catalogs.
