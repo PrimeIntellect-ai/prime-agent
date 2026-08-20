@@ -137,7 +137,12 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
     comm.on_msg(_on_msg)
     # request_type goes last so a payload "type" key cannot reroute the request.
     comm.open(data={**(payload or {}), "type": request_type})
-    return await future
+    try:
+        return await future
+    finally:
+        if not future.done():
+            future.cancel()
+        comm.close()
 
 
 async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:

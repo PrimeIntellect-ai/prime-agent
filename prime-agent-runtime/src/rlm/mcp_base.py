@@ -314,10 +314,11 @@ def _parse_result(result: Any) -> Any:
         text = getattr(block, "text", None)
         if text is not None:
             texts.append(text)
-    if getattr(result, "isError", False):
+    is_error = getattr(result, "is_error", getattr(result, "isError", False))
+    if is_error:
         raise McpToolError("\n".join(texts) or "MCP tool returned an error")
 
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
     if structured is not None:  # falsy-but-valid payloads ({} / []) are real results
         return structured
     if texts:

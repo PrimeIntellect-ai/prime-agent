@@ -95,7 +95,7 @@ describe("McpManager", () => {
 		expect(called).toBe("linear");
 	});
 
-	it("mcp.config returns the resolved URL + headers, honoring a user override of a catalog name", async () => {
+	it("mcp.config keeps catalog names reserved from generic overrides", async () => {
 		const manager = new McpManager({
 			authStorage,
 			getUserServers: () => ({
@@ -103,11 +103,9 @@ describe("McpManager", () => {
 			}),
 		});
 		const handlers = manager.hostHandlers();
-		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({
-			url: "https://proxy.test/mcp",
-			headers: { "X-Extra": "1" },
-		});
-		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({ url: "https://mcp.notion.com/mcp" });
+		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({});
+		// Catalog-only entries are reserved for their authored skills, not the generic API.
+		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({});
 	});
 
 	it("does not treat an oauth override of a catalog name as authed via the official stored cred", () => {
@@ -140,6 +138,20 @@ describe("McpManager", () => {
 		}
 	});
 
+	it("lists only enabled non-catalog user servers in deterministic order", () => {
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				zebra: { type: "stdio", command: "z" },
+				disabled: { type: "stdio", command: "off", enabled: false },
+				linear: { type: "stdio", command: "reserved" },
+				alpha: { type: "http", url: "https://alpha.test/mcp" },
+			}),
+		});
+
+		expect(manager.getEnabledGenericServers()).toEqual(["alpha", "zebra"]);
+	});
+
 	it("picks up mcpServers added after construction on refresh()", () => {
 		let servers: Record<string, McpServerConfig> = {};
 		const manager = new McpManager({ authStorage, getUserServers: () => servers });
@@ -151,13 +163,15 @@ describe("McpManager", () => {
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
 	});
 
-	it("drops the built-in provider when a catalog name is overridden without oauth", () => {
-		const manager = new McpManager({
+	it("keeps the built-in provider when a user server uses a reserved catalog name", () => {
+		new McpManager({
 			authStorage,
-			getUserServers: () => ({ linear: { type: "http", url: "https://proxy.test/mcp" } }),
+			getUserServers: () => ({
+				linear: { type: "http", url: "https://proxy.test/mcp", oauth: true },
+			}),
 		});
-		void manager;
-		expect(getOAuthProvider("mcp:linear")).toBeUndefined();
+		const provider = getOAuthProvider("mcp:linear");
+		expect(provider?.name).toBe("Linear");
 	});
 
 	it("unregisters a user server's OAuth provider when it's removed on refresh()", () => {
@@ -170,5 +184,28 @@ describe("McpManager", () => {
 		servers = {};
 		manager.refresh();
 		expect(getOAuthProvider("mcp:acme")).toBeUndefined();
+	});
+	it("serves user stdio configuration without resolving tagged environment values", async () => {
+		const config: McpServerConfig = {
+			type: "stdio",
+			command: "node",
+			args: ["server.js", "--raw"],
+			cwd: "/tmp/work",
+			env: { TOKEN: { env: "MCP_TOKEN" } },
+			enabledTools: ["raw.tool/name"],
+		};
+		const manager = new McpManager({ authStorage, getUserServers: () => ({ local: config }) });
+		expect(await manager.hostHandlers()["mcp.config"]({ server: "local" })).toEqual(config);
+		expect(manager.listStatus().find((status) => status.server === "local")?.enabled).toBe(true);
+	});
+
+	it("does not enable an authored catalog skill when a generic server shadows its name", () => {
+		for (const config of [
+			{ type: "stdio", command: "node" },
+			{ type: "http", url: "https://proxy.test/mcp" },
+		] satisfies McpServerConfig[]) {
+			const manager = new McpManager({ authStorage, getUserServers: () => ({ linear: config }) });
+			expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
+		}
 	});
 });

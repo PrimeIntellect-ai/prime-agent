@@ -150,7 +150,7 @@ export async function createAgentSessionServices(
 	// integration skills by whether the user is logged in (enable-by-login).
 	const mcpManager = new McpManager({
 		authStorage,
-		getUserServers: () => settingsManager.getMcpServers(),
+		getUserServers: () => settingsManager.getGlobalMcpServers(),
 	});
 	// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
 	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
