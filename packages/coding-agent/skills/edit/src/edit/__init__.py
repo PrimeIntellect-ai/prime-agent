@@ -45,6 +45,10 @@ async def run(path: str, old_str: str, new_str: str) -> str:
     return f"Edited {resolved_path}"
 
 
+# Match the prepared IPython callable name for ordinary package imports.
+edit = run
+
+
 # Keep in sync with DIFF_DISPLAY_MIME in src/core/kernel/index.ts.
 _DIFF_DISPLAY_MIME = "application/vnd.prime-agent.diff+json"
 

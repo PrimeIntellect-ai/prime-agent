@@ -8,8 +8,13 @@ description: Replace an exact, unique string in an existing file. Use for target
 Make a targeted edit to an existing file by replacing one exact, unique
 occurrence of a string. `old_str` must appear exactly once in the file.
 
-Call directly from the kernel:
+Call the prepared callable directly from the kernel:
 
+    await edit(path="pkg/file.py", old_str=old, new_str=new)
+
+In an ordinary Python process, the package exports the same callable name:
+
+    from edit import edit
     await edit(path="pkg/file.py", old_str=old, new_str=new)
 
 Use exact old/new strings. If the text contains triple double quotes, use
