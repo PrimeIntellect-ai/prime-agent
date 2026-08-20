@@ -22,6 +22,12 @@ export interface McpManagerOptions {
 /** A resolved integration: a catalog/user entry plus its provider id. */
 const GENERIC_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
+function stripTrailingSlashes(value: string): string {
+	let end = value.length;
+	while (end > 0 && value[end - 1] === "/") end--;
+	return value.slice(0, end);
+}
+
 interface ResolvedIntegration {
 	server: string;
 	label: string;
@@ -128,7 +134,7 @@ export class McpManager {
 		if (cred === undefined) return false;
 		// A token bound to a different endpoint (login finished after a retarget) must not enable the server.
 		const endpoint = (cred as { endpoint?: string }).endpoint;
-		return !endpoint || endpoint.replace(/\/+$/, "") === integration.config.url.replace(/\/+$/, "");
+		return !endpoint || stripTrailingSlashes(endpoint) === stripTrailingSlashes(integration.config.url);
 	}
 
 	/** `-<server>/SKILL.md` overrides for every built-in integration the user isn't logged into. */
