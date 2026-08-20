@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -351,11 +352,15 @@ describe("kernel parent watchdog", () => {
 			state: string;
 			connection: unknown;
 			control: unknown;
+			kernel: unknown;
 			shutdown(): Promise<boolean>;
 			kill(): Promise<void>;
 		};
 		internals.state = "starting";
 		internals.connection = { key: "" };
+		// A live kernel handle keeps waitForKernelExit parked so the send actually blocks the shutdown.
+		const kernel = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, kill: () => true });
+		internals.kernel = kernel;
 		let releaseSend: () => void = () => {};
 		internals.control = {
 			send: () => new Promise<void>((resolve) => (releaseSend = resolve)),
@@ -365,6 +370,7 @@ describe("kernel parent watchdog", () => {
 		await new Promise((resolve) => setTimeout(resolve, 10)); // park in the control send
 		await internals.kill(); // concurrent teardown wins ownership
 		releaseSend();
+		kernel.emit("exit", 0, null);
 		expect(await shutdownResult).toBe(false); // recovery must not set idle
 		expect(internals.state).toBe("shutdown");
 	});

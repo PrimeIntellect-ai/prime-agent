@@ -1624,6 +1624,7 @@ export class KernelManager {
 
 		let replyWait: { promise: Promise<void>; cancel: () => void } | undefined;
 		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		let performedCleanup = false;
 		const shutdownDeadline = new Promise<never>((_resolve, reject) => {
 			shutdownTimer = globalThis.setTimeout(
 				() => reject(new Error(`Kernel did not shut down within ${KERNEL_SHUTDOWN_TIMEOUT_MS}ms`)),
@@ -1652,12 +1653,15 @@ export class KernelManager {
 		} finally {
 			if (shutdownTimer) globalThis.clearTimeout(shutdownTimer);
 			replyWait?.cancel();
-			// A superseded shutdown must not tear down the newer start's sockets.
-			if (!this.startStale(generation)) this.cleanupResources();
+			// A superseded shutdown must not tear down the newer start's sockets. Ownership is decided
+			// here, before cleanupResources bumps the generation and would misread this call as superseded.
+			if (!this.startStale(generation)) {
+				this.cleanupResources();
+				performedCleanup = true;
+			}
 		}
 
-		if (this.startStale(generation)) return false; // superseded during the awaits: the newer owner already cleaned this kernel
-		return true;
+		return performedCleanup;
 	}
 
 	async restart(): Promise<void> {
