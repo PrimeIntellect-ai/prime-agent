@@ -479,8 +479,9 @@ export async function runAcpModeWithConnection(
 		acpMcpServerNames = [];
 	};
 	const replaceAcpMcpServers = async (servers: readonly acp.McpServer[], cwd: string): Promise<void> => {
-		if (servers.length > 0 && acpMcpServerNames.length > 0) {
-			// Retry a prior best-effort close before admitting another session.
+		if (acpMcpServerNames.length > 0) {
+			// Retry a prior best-effort close before admitting another session,
+			// including one that does not declare replacement MCP servers.
 			await clearAcpMcpServers();
 		}
 		if (servers.length === 0 && acpMcpServerNames.length === 0) return;

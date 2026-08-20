@@ -85,7 +85,7 @@ describe("ACP MCP servers", () => {
 			// must not leave the single-session slot occupied.
 			const replacement = await handle.agent.request("session/new", {
 				cwd: harness.tempDir,
-				mcpServers: [{ type: "http", name: "NextTools", url: "https://next.example/mcp", headers: [] }],
+				mcpServers: [],
 			});
 			expect(release).toHaveBeenCalledWith(ownerId, ["TaskTools", "LocalTools"]);
 			await handle.agent.request("session/close", { sessionId: replacement.sessionId });
