@@ -137,12 +137,13 @@ function updateChangelogsForRelease(version) {
 
 	for (const changelog of changelogs) {
 		const content = readFileSync(changelog, "utf-8");
-		const fragments = listFragments(dirname(changelog));
-		const empty = fragments.filter((fragment) => !fragment.content.trim());
-		if (empty.length > 0) {
-			console.error(`Empty changelog fragment(s): ${empty.map((f) => f.name).join(", ")}. Add content or delete them.`);
-			process.exit(1);
+		const allFragments = listFragments(dirname(changelog));
+		// Empty fragments are skipped, not consumed, so nothing is ever lost silently.
+		const empty = allFragments.filter((fragment) => !fragment.content.trim());
+		for (const fragment of empty) {
+			console.warn(`  Warning: skipping empty fragment ${fragment.name}; delete it or add content.`);
 		}
+		const fragments = allFragments.filter((fragment) => fragment.content.trim());
 		const result = buildReleaseSection(content, fragments, version, date);
 
 		if (!result.changed) {

@@ -1,19 +1,12 @@
-/**
- * Pure helpers for aggregating changelog fragments into a release section.
- * Used by scripts/release.mjs; no fs or git side effects here.
- */
-
 function normalizeFragment(text) {
 	const trimmed = text.trim();
 	return trimmed ? `${trimmed}\n` : "";
 }
 
 /**
- * Insert a [version] - date section built from fragment contents (oldest
- * first; fragments = [{ name, content }] already sorted). If a stray
- * [Unreleased] section exists (an old-style PR merged after the fragment
- * cutover), its entries are absorbed first instead of being stranded.
- * Returns { content, changed }.
+ * Build the `[version] - date` section from pre-sorted fragments. Entries in
+ * a stray [Unreleased] section (old-style PR merged post-cutover) are
+ * absorbed first instead of being stranded.
  */
 export function buildReleaseSection(changelogContent, fragments, version, date) {
 	const unreleasedRe = /## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|$)/;

@@ -44,20 +44,13 @@ jobs:
               }
               // Fragments must be direct children of .changes/ — release.mjs ignores nested paths.
               const fragmentRe = new RegExp(`^packages/${pkg}/\\.changes/[^/]+\\.md$`);
-              const candidates = files.filter(
-                (f) => f.status === "added" && fragmentRe.test(f.filename) && !f.filename.endsWith("/README.md"),
+              const hasFragment = files.some(
+                (f) =>
+                  f.status === "added" &&
+                  f.additions > 0 &&
+                  fragmentRe.test(f.filename) &&
+                  !f.filename.endsWith("/README.md"),
               );
-              // Check real content: release.mjs aborts on whitespace-only fragments,
-              // so an empty one must not pass CI and block the next release.
-              // contents_url targets the PR head repo, so this also works for fork PRs.
-              let hasFragment = false;
-              for (const candidate of candidates) {
-                const { data } = await github.request(candidate.contents_url);
-                if (Buffer.from(data.content, "base64").toString("utf-8").trim()) {
-                  hasFragment = true;
-                  break;
-                }
-              }
               if (!hasFragment) {
                 failing.push(pkg);
               }
