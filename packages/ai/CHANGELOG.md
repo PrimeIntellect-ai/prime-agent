@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added endpoint binding to MCP OAuth credentials: tokens record the URL they were issued for, and refreshes carry the original binding forward.
+
 ## [0.7.4] - 2026-08-19
 
 ## [0.7.3] - 2026-08-17

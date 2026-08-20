@@ -125,7 +125,10 @@ export class McpManager {
 			return true;
 		}
 		const cred = this.authStorage.get(this.providerId(integration.server));
-		return cred !== undefined;
+		if (cred === undefined) return false;
+		// A token bound to a different endpoint (login finished after a retarget) must not enable the server.
+		const endpoint = (cred as { endpoint?: string }).endpoint;
+		return !endpoint || endpoint.replace(/\/+$/, "") === integration.config.url.replace(/\/+$/, "");
 	}
 
 	/** `-<server>/SKILL.md` overrides for every built-in integration the user isn't logged into. */

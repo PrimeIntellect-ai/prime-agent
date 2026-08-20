@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed an OAuth login that finishes after its server was retargeted arming the old-endpoint token against the new URL: credentials are endpoint-bound at issuance, and the host and kernel refuse to use a token bound elsewhere.
 - Fixed `mcp add` keeping a stored `mcp:<name>` credential when the entry was new: any add now drops the name's credential, so tokens for authored non-catalog skills (e.g. slack) cannot replay to a user-configured URL.
 - Fixed kernel MCP shutdown budgets exceeding the host's kill deadline; graceful close now finishes inside it, and a kernel that exits without a `shutdown_reply` no longer stalls shutdown for the full deadline.
 - Fixed a shutdown race that could leave an MCP server process running after its generation was dropped from the registry.

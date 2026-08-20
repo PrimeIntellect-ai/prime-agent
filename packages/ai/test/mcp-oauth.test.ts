@@ -65,6 +65,7 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(creds.access).toBe("access-1");
 		expect(creds.refresh).toBe("refresh-1");
 		expect(creds.expires).toBeGreaterThan(Date.now());
+		expect((creds as { endpoint?: string }).endpoint).toBe("https://srv.test/mcp");
 		const authParams = new URL(authUrl).searchParams;
 		expect(authParams.get("client_id")).toBe("client-xyz");
 		expect(authParams.get("code_challenge")).toBeTruthy();
@@ -130,10 +131,13 @@ describe.sequential("MCP OAuth provider", () => {
 			expires: Date.now() - 1000,
 			tokenEndpoint: META.token_endpoint,
 			clientId: "client-xyz",
+			endpoint: "https://old.test/mcp",
 		} as never);
 
 		expect(refreshed.access).toBe("access-2");
 		expect(refreshed.refresh).toBe("old-refresh");
+		// A refresh must not re-bind an old token to the provider's current URL.
+		expect((refreshed as { endpoint?: string }).endpoint).toBe("https://old.test/mcp");
 	});
 
 	it("fails clearly when DCR is unavailable and no clientId is set", async () => {

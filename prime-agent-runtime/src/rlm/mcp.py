@@ -512,19 +512,32 @@ async def _config(server: str) -> dict[str, Any]:
     return config
 
 
+def _bound_auth(provider: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored credential, unless it is bound to a different endpoint.
+
+    A login that finishes after the server was retargeted stores a token bound
+    to the old URL; it must never be attached to the new one.
+    """
+    cred = _read_auth(provider)
+    endpoint = (cred or {}).get("endpoint")
+    if isinstance(endpoint, str) and endpoint.rstrip("/") != str(config.get("url", "")).rstrip("/"):
+        return None
+    return cred
+
+
 async def _auth_identity(server: str, config: dict[str, Any]) -> str:
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
     if config.get("oauth") is True and not token:
         provider = f"mcp:{server}"
-        cred = _read_auth(provider)
+        cred = _bound_auth(provider, config)
         expires = (cred or {}).get("expires")
         if isinstance(expires, (int, float)) and expires <= time.time() * 1000 + 30_000:
             try:
                 await host_request("mcp.refresh", {"server": server})
             except Exception as exc:
                 raise RuntimeError(f"Could not refresh MCP credentials for '{server}'") from exc
-            cred = _read_auth(provider)
+            cred = _bound_auth(provider, config)
         token = _resolve_config_value(str((cred or {}).get("access") or (cred or {}).get("key") or ""))
     if not token:
         if config.get("oauth") is True or env_name:
@@ -541,7 +554,7 @@ async def _headers(server: str, config: dict[str, Any]) -> dict[str, str]:
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
     if config.get("oauth") is True and not token:
-        cred = _read_auth(f"mcp:{server}")
+        cred = _bound_auth(f"mcp:{server}", config)
         token = _resolve_config_value(str((cred or {}).get("access") or (cred or {}).get("key") or ""))
     if token:
         headers["Authorization"] = f"Bearer {token}"

@@ -268,6 +268,16 @@ class McpRegistryTest(unittest.TestCase):
         self.assertEqual(env, {"PATH": "/bin", "TOKEN": "value"})
         self.assertNotIn("UNRELATED", env)
 
+    def test_endpoint_bound_credential_never_attaches_to_another_url(self):
+        cred = {"access": "old-token", "endpoint": "https://old.example/mcp"}
+        config = {"oauth": True, "url": "https://new.example/mcp"}
+        with mock.patch.object(mcp, "_read_auth", return_value=cred):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mcp._headers("remote", config))
+            config["url"] = "https://old.example/mcp/"
+            headers = asyncio.run(mcp._headers("remote", config))
+        self.assertEqual(headers["Authorization"], "Bearer old-token")
+
     def test_diagnostics_do_not_contain_headers_or_env_secrets(self):
         async def host_request(*_args):
             raise RuntimeError("bridge failed")
