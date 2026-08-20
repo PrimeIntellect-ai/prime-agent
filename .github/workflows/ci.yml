@@ -105,6 +105,10 @@ jobs:
             package: packages/coding-agent
             command: npm run test:kernel
             install_uv: true
+          - name: runtime python
+            package: prime-agent-runtime
+            command: uv run python -m unittest discover -s test
+            install_uv: true
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

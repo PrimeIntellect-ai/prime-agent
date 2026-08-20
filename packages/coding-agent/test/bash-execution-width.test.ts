@@ -1,7 +1,3 @@
-/**
- * Test that BashExecutionComponent's collapsed output respects the render-time width,
- * not a stale captured width. Regression test for #2569.
- */
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.js";
@@ -27,6 +23,7 @@ function createTuiStub(columns: number): { columns: number; stub: any } {
 	return { columns: state.columns, stub };
 }
 
+/** Collapsed output must wrap at render-time width after a resize or split. */
 describe("BashExecutionComponent width handling (#2569)", () => {
 	beforeAll(() => {
 		initTheme(undefined, false);
@@ -43,7 +40,6 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		const longLine = "x".repeat(150);
 		component.appendOutput(`${longLine}\n${longLine}\n`);
 
-		// Complete the command so it enters collapsed mode
 		component.setComplete(0, false);
 
 		// Render at the narrow width (simulating a resize or split pane)

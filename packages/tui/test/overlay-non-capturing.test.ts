@@ -225,8 +225,6 @@ describe("TUI overlay non-capturing", () => {
 			tui.setFocus(editor);
 			tui.start();
 			try {
-				// Simulate showExtensionCustom: factory creates timer synchronously,
-				// then .then() pushes controller as a microtask
 				let timerHandle: ReturnType<typeof tui.showOverlay>;
 				let doneFn: () => void;
 
@@ -236,24 +234,19 @@ describe("TUI overlay non-capturing", () => {
 						tui.hideOverlay();
 						resolve();
 					};
-					// Factory runs synchronously: creates timer sub-overlay
 					timerHandle = tui.showOverlay(timer, { nonCapturing: true });
-					// .then() runs as microtask — same as showExtensionCustom
 					Promise.resolve(controller).then((c) => {
 						tui.showOverlay(c);
 					});
 				});
 
-				// Wait for .then() microtask and renders to settle
 				await new Promise<void>((r) => setTimeout(r, 50));
 				await renderAndFlush(tui, terminal);
 
 				assert.strictEqual(controller.focused, true);
 				assert.strictEqual(editor.focused, false);
 
-				// Simulate Esc: cleanup + close (from inside handleInput)
 				doneFn!();
-				// Now await the promise (simulating showExtensionCustom resolving)
 				await overlayPromise;
 				await renderAndFlush(tui, terminal);
 

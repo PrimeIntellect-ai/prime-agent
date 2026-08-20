@@ -1,18 +1,3 @@
-/**
- * AgentSession - Core abstraction for agent lifecycle and session management.
- *
- * This class is shared between all run modes (interactive, print, rpc).
- * It encapsulates:
- * - Agent state access
- * - Event subscription with automatic session persistence
- * - Model and thinking level management
- * - Compaction (manual and auto)
- * - Bash execution
- * - Session switching and branching
- *
- * Modes use this class and add their own I/O layer on top.
- */
-
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -187,6 +172,8 @@ import {
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
+	RLM_CHILD_FAILURE_CUSTOM_TYPE,
+	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
@@ -224,6 +211,7 @@ import {
 	findRlmModelMatches,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
+	normalizeRequestedRlmSubagentThinkingLevel,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -269,6 +257,7 @@ import {
 } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { THINKING_LEVELS } from "./thinking-levels.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
@@ -291,31 +280,23 @@ export interface RlmChildAgentSnapshot {
 	id: string;
 	parentId?: string;
 	activeSessionId?: string;
-	/** Stable daemon-visible session name for addressing/displaying the child. */
 	sessionName?: string;
-	/** Exact provider/model selector used by the child. */
 	model?: string;
 	label: string;
 	status: RlmChildAgentStatus;
 	durationMs?: number;
 	answerPreview?: string;
-	/** Number of tool executions the subagent has started so far. */
 	toolUseCount?: number;
-	/** Context size (tokens) of the subagent's latest turn. */
 	tokenCount?: number;
-	/** Latest recap of what the subagent is doing, from the summarizer. */
 	recap?: string;
 	sessionDir: string;
 	activity?: RlmChildAgentActivity;
-	/** Child sent at least one explicit agent message since task admission. */
 	repliedSinceTask?: boolean;
-	/** Failure reason when status is "error". */
 	error?: string;
 }
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
 
-/** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| AgentEvent
 	| {
@@ -339,7 +320,6 @@ export type AgentSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
-			/** "warning" for benign skips (nothing to compact), "error" for real failures */
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
 	  }
@@ -378,20 +358,15 @@ export type AgentSessionEvent =
 			cancelled: boolean;
 			truncated: boolean;
 			fullOutputPath?: string;
-			/** Set when execution failed before producing a result (e.g. spawn failure) */
 			errorMessage?: string;
-			/** Set for transient (side-conversation) runs so other attached clients suppress them. */
 			transient?: boolean;
-			/** Echo of the caller-supplied run id, so clients correlate runs by identity. */
 			runId?: string;
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
 	| { type: "refine_failed"; error: string };
 
-/** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
-/** Payload of the bash_end event for a user-initiated bash command */
 type UserBashEndDetails = {
 	exitCode: number | undefined;
 	cancelled: boolean;
@@ -400,12 +375,7 @@ type UserBashEndDetails = {
 	errorMessage?: string;
 };
 
-/** Thrown when compaction is skipped for a benign reason (surfaced as a warning, not an error) */
 export class CompactionSkippedError extends Error {}
-
-// ============================================================================
-// Types
-// ============================================================================
 
 export interface AgentSessionConfig {
 	agent: Agent;
@@ -413,19 +383,12 @@ export interface AgentSessionConfig {
 	settingsManager: SettingsManager;
 	serviceTierPreference?: ServiceTier;
 	cwd: string;
-	/** Config dir backing credentials (auth.json); exported to the kernel for skills. */
 	agentDir?: string;
-	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
-	/** Resource loader for skills, prompts, themes, context files, system prompt */
 	resourceLoader: ResourceLoader;
-	/** SDK custom tools registered outside extensions */
 	customTools?: ToolDefinition[];
-	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Initial active built-in tool names. Default: [ipython] */
 	initialActiveToolNames?: string[];
-	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
 	/**
 	 * Whether the built-in long-running goals feature is available: the bundled
@@ -433,9 +396,7 @@ export interface AgentSessionConfig {
 	 * Default: true.
 	 */
 	includeGoals?: boolean;
-	/** Daemon-backed agent-to-agent messaging bridge. Omitted for local-only sessions. */
 	agentMessageController?: AgentSessionMessageController;
-	/** Daemon-backed read-only active-session observation bridge. Omitted for local-only sessions. */
 	agentObserveController?: AgentObserveController;
 	/**
 	 * Whether the bundled compact skill and its compact.* host handlers are
@@ -459,32 +420,16 @@ export interface AgentSessionConfig {
 	 * a definition-first registry even when callers provide plain AgentTool instances.
 	 */
 	baseToolsOverride?: Record<string, AgentTool>;
-	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
-	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Current RLM recursion depth. Root sessions default to RLM_DEPTH or 0. */
 	rlmDepth?: number;
-	/** Maximum RLM recursion depth. Defaults to RLM_MAX_DEPTH or 2. */
 	rlmMaxDepth?: number;
-	/** Directory exposed to the kernel as RLM_SESSION_DIR. */
 	rlmSessionDir?: string;
-	/** Node id for this session when it is itself an RLM child. */
 	rlmParentNodeId?: string;
-	/** Parent agent name/id shown in child communication doctrine. */
 	rlmParentAgent?: string;
-	/** Host responsible for creating RLM subagent runtimes. */
 	subagentRuntimeHost?: SubagentRuntimeHost;
-	/** Host-side autonomous continuation policy. */
 	autonomous?: AgentAutonomousConfig;
-	/**
-	 * Boot the IPython kernel in the background as soon as the session is created,
-	 * so the first ipython tool call doesn't pay the kernel cold start.
-	 *
-	 * Only applies to main agents (rlmDepth 0); subagent kernels stay lazy. Default: false.
-	 */
 	prewarmIpythonKernel?: boolean;
-	/** Test/extension hook for automatic refine review decisions. Defaults to the model-backed review gate. */
 	autoRefineReviewer?: AutoRefineReviewer;
 	/**
 	 * When true, auto-refine runs synchronously between turns at the
@@ -532,42 +477,26 @@ export type SerializedBackgroundPlanResult =
 	| { status: "invalidated"; branchVersion: number }
 	| {
 			status: "failure";
-			/** True when the background plan was for an explicit refine.run (skipReview). */
 			explicit: boolean;
-			/** Original options for the failed plan, to allow re-queue on explicit failure. */
 			options: { instructions?: string; rollbackId?: string; global?: boolean };
 			branchVersion: number;
 	  };
 
 export type AutoRefineReviewer = (request: AutoRefineReviewRequest, signal?: AbortSignal) => Promise<AutoRefineReview>;
 
-/** Options for AgentSession.prompt() */
 export interface PromptOptions {
-	/** Whether to expand file-based prompt templates (default: true) */
 	expandPromptTemplates?: boolean;
-	/** Image attachments */
 	images?: ImageContent[];
-	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
 	streamingBehavior?: "steer" | "followUp";
-	/** Coalesce follow-up queueing so only one pending follow-up exists for this key. */
 	followUpQueueKey?: string;
-	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
-	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean, queued?: boolean) => void;
-	/** Queue instead of starting immediately when the session is idle but already has queued work. */
 	queueIfBusy?: boolean;
-	/** Start queued work when no agent turn is currently running. */
 	resumeIfIdle?: boolean;
-	/** Host-generated prompt that must bypass extension/slash/template input interception. */
 	internalPrompt?: boolean;
-	/** Prevent host-driven prompts from causing autonomous continuation injection. */
 	suppressAutonomousContinuation?: boolean;
-	/** Skip extension input handlers for replaying already-accepted input. */
 	skipInputHandlers?: boolean;
-	/** Cancel this prompt while it is waiting for direct-turn admission. */
 	signal?: AbortSignal;
-	/** Internal host hook fired at the direct-turn ownership commit point. */
 	admissionCommitted?: () => void;
 	agentMessageId?: string;
 	content?: (TextContent | ImageContent)[];
@@ -668,13 +597,11 @@ type QueuedSessionAction = SessionAction<PreparedTurnPayload | PreparedCommandPa
 
 interface PreparedPromptPreparation {
 	result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>;
-	/** Base system prompt captured at emitBeforeAgentStart, for stale-base refresh at handoff. */
 	basePromptSnapshot: string;
 }
 
 class DeferredSessionInputError extends Error {}
 
-/** Wrap a preflight callback so only the first report wins. */
 function oncePreflight(
 	preflightResult: ((success: boolean, queued?: boolean) => void) | undefined,
 ): (success: boolean, queued?: boolean) => void {
@@ -874,10 +801,6 @@ interface AgentMessageDeferred {
 	reject: (error: Error) => void;
 }
 
-/**
- * Per-agent-message settlement record: `delivery` settles when the prompt reaches agent state,
- * `completion` when its turn (or command) finishes. Settled deferreds are removed immediately.
- */
 interface AgentMessageOutcome {
 	delivery?: AgentMessageDeferred;
 	completion?: AgentMessageDeferred;
@@ -893,12 +816,19 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
-/** Result from cycleModel() */
+/** One-shot settlement for a scheduled post-compaction continuation; a settled failure is never re-exposed to later waiters. */
+interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
+	settled: boolean;
+}
+
+function createPostCompactionContinuationSettlement(): PostCompactionContinuationSettlement {
+	return { ...createAgentMessageDeferred(), settled: false };
+}
+
 export interface ModelCycleResult {
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;
-	/** Whether cycling through scoped models (--models flag) or all available */
 	isScoped: boolean;
 }
 
@@ -938,19 +868,34 @@ interface RlmChildRun {
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
+	model: Model<Api>;
 	status: RlmChildAgentStatus;
 	error?: string;
 	abort: () => void;
 	publication: AgentMessageDeferred;
+	/** Resolves after terminal result publication and detached-run cleanup finish. */
+	settlement: AgentMessageDeferred;
 	/** Child session, once its runtime exists. Used to cancel nested child runs. */
 	session?: AgentSession;
-	/** True once the detached run task has finished its catch and cleanup paths. */
 	settled: boolean;
-	/** Selector snapshot for a delete admitted while runtime startup was still pending. */
+	/** Do not inject a late terminal notice after the parent session is aborted. */
+	suppressTerminalNotice?: boolean;
+	/** Excluded from future strong barriers after an authoritative cancellation cut. */
+	abandonedForQuiescence?: boolean;
+	/** Selector snapshot for an admitted explicit delete. */
 	detachedDeletion?: RlmSubagentRegistryEntry;
-	/** Re-emits the run's rlm_child_update snapshot with its current status. */
+	/** Shared physical runtime cleanup owned by the explicit-delete path. */
+	deletionCleanup?: Promise<void>;
+	deletionCleanupObserver?: Promise<boolean>;
+	/** Resolves when a deletion may release its selector reservation. */
+	deletionReservation: AgentMessageDeferred;
+	deletionCleanupFailed?: boolean;
+	deletionRunFinished?: boolean;
+	deletionNotice?: Promise<void>;
+	deletionNeedsCompletionNotice?: boolean;
+	completeDeletion?: () => Promise<void>;
+	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
-	/** Idempotent child-event forwarder cleanup, once the child runtime exists. */
 	unsubscribe?: () => void;
 }
 
@@ -958,14 +903,6 @@ interface RlmSubagentModelSelection {
 	model: Model<Api>;
 }
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-/** Standard thinking levels */
-const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
-/** Cap on the post-compaction kernel namespace probe so a wedged kernel can't stall recovery. */
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 
@@ -1077,10 +1014,6 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 	parentUsage.totalTokens = parentContextTokens;
 }
 
-// ============================================================================
-// AgentSession Class
-// ============================================================================
-
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1092,7 +1025,6 @@ export class AgentSession {
 		thinkingLevel?: ThinkingLevel;
 	}>;
 
-	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _lastSessionActionSnapshot: SessionActionSnapshot = {
@@ -1105,15 +1037,17 @@ export class AgentSession {
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
 	private readonly _actionStore = new ActionStore<QueuedSessionAction>();
 	private _sessionInputPump: Promise<void> = Promise.resolve();
-	// Coalesces wakes so overlapping submissions cannot start competing pumps.
 	private _sessionInputPumpRequested = false;
 	// Invalidates preparation when a branch pause starts and finishes before its next await resumes.
 	private _sessionInputPumpEpoch = 0;
 	private _sessionInputArrivalEpoch = 0;
 	// Persists abort/restart suspension after the initiating call returns.
 	private _sessionInputPumpSuspended = false;
+	private _sessionInputSuspendedForUpdateRestart = false;
 	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
 	private readonly _queuedWorkPauses = new Set<symbol>();
+	private readonly _sessionInputAdmissionPauses = new Set<symbol>();
+	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
 	private _sessionActionCommitOwner: symbol | undefined;
 	private _pendingSessionActionFenceWaiters = 0;
@@ -1121,7 +1055,6 @@ export class AgentSession {
 	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
 	// Checkpoint and handoff waiters share lifecycle-edge notifications to avoid polling.
 	private readonly _sessionInputCheckpointWaiters = new Set<() => void>();
-	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
 	private _goalState: GoalState = emptyGoalState();
@@ -1132,7 +1065,6 @@ export class AgentSession {
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
 
-	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _compactionOperation: Promise<void> | undefined = undefined;
@@ -1142,11 +1074,9 @@ export class AgentSession {
 	private _pendingRequestedCompaction: { customInstructions?: string } | undefined;
 	private _pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
 
-	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 	private _branchSummaryOperation: Promise<void> | undefined = undefined;
 
-	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
 	private _retryPromise: Promise<void> | undefined = undefined;
@@ -1157,13 +1087,11 @@ export class AgentSession {
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
 	private readonly _unpersistedCompactionOutcomes: CustomMessage[] = [];
 
-	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _userBashRunning = false;
 	private _userBashAbortRequested = false;
 	private _pendingBashMessages: BashExecutionMessage[] = [];
 
-	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _execEnvProvider?: () => Record<string, string | undefined> | undefined;
 	private _turnIndex = 0;
@@ -1216,6 +1144,9 @@ export class AgentSession {
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
+	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
+	private _abandonedRlmQuiescenceChildIds = new Set<string>();
+	private _rlmQuiescenceWaitAborts = new Set<AbortController>();
 	private _pendingRlmSubagentSessionNames = new Set<string>();
 	// Inline mode keeps finished child sessions so the inspector can still read them;
 	// the daemon does the same by leaving the child session resident in its registry.
@@ -1237,16 +1168,13 @@ export class AgentSession {
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
 
-	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 
-	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
-	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private _assistantTurnsSinceAutoRefine = 0;
@@ -1258,6 +1186,7 @@ export class AgentSession {
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
 	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
+	private _postCompactionContinuationSettlement: PostCompactionContinuationSettlement | undefined;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
@@ -1269,17 +1198,9 @@ export class AgentSession {
 	private _autoRefineReviewAbort?: AbortController;
 	private _refineAbortController?: AbortController;
 	private readonly _autoRefineReviewer?: AutoRefineReviewer;
-	/** When true, auto-refine runs synchronously between turns (serialized mode). */
 	private readonly _serializedRefine: boolean;
-	/** Settles (never rejects) after a planned refine waits for idle and finishes applying. */
 	private _refineInFlight?: Promise<void>;
-	/** Settles when the background planning LLM pass completes. Planning does not block turn entry points. */
 	private _refinePlanInFlight?: Promise<void>;
-	/**
-	 * Settles when a serialized-mode background planning pass completes.
-	 * Planning starts at assistant message_end (overlapping tool execution)
-	 * and is awaited at shouldStopAfterTurn before applying.
-	 */
 	private _serializedPlanInFlight?: Promise<SerializedBackgroundPlanResult | undefined>;
 	private _serializedPlanClaim?: Promise<void>;
 	private _serializedExplicitRefineOptions?: {
@@ -1353,8 +1274,6 @@ export class AgentSession {
 			this._goalAccountingStartedAt = Date.now();
 		}
 
-		// Always subscribe to agent events for internal handling
-		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentTurnHook();
@@ -1384,7 +1303,6 @@ export class AgentSession {
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
-	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
 	}
@@ -1484,11 +1402,6 @@ export class AgentSession {
 		this.agent.shouldStopAfterTurn = (context) => this._shouldStopAfterTurn(context);
 	}
 
-	// =========================================================================
-	// Event Subscription
-	// =========================================================================
-
-	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
 		for (const l of this._eventListeners) {
 			try {
@@ -2003,7 +1916,6 @@ export class AgentSession {
 		return true;
 	}
 
-	/** Append custom messages returned by before_agent_start extension handlers. */
 	private _appendBeforeAgentStartMessages(
 		messages: AgentMessage[],
 		result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>,
@@ -2242,7 +2154,6 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "plan") {
-				// Fix 4: Validate branchVersion before applying the plan.
 				if (bgResult.branchVersion !== this._autoRefineBranchVersion) {
 					if (!this._pendingRequestedRefine) {
 						this._lastAutoRefineReviewAt = Date.now();
@@ -2276,9 +2187,8 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "failure") {
-				// Fix 3: Background review or planning failed. Stamp cooldown
-				// without a synchronous retry (the discriminated contract says no duplicate boundary
-				// model call). A separately queued refine.run may still be serviced below.
+				// Background review or planning failure stamps cooldown without a synchronous retry.
+				// A separately queued refine.run may still be serviced below.
 				if (branchVersion === this._autoRefineBranchVersion) {
 					this._lastAutoRefineReviewAt = Date.now();
 				}
@@ -2377,7 +2287,6 @@ export class AgentSession {
 		await this._runSerializedAutoRefineReview("turn_interval", branchVersion);
 	}
 
-	/** Run automatic review and, when approved, refinement at a serialized turn boundary. */
 	private async _runSerializedAutoRefineReview(
 		reason: "compact" | "turn_interval",
 		branchVersion: number,
@@ -2494,7 +2403,7 @@ export class AgentSession {
 			return;
 		}
 
-		// Bug 4 fix: Also start background planning for a pending agent-callable
+		// Start background planning for a pending agent-callable
 		// refine.run request, so its plan is ready at the shouldStopAfterTurn
 		// boundary. The pending request is consumed (cleared) here so the
 		// boundary doesn't re-plan it. Explicit refine.run skips the review gate.
@@ -2776,9 +2685,16 @@ export class AgentSession {
 		const alreadyQueued = this._queuedGoalThresholdContinuation;
 		if (
 			alreadyQueued !== undefined &&
-			this._actionStore
-				.unfinishedActions()
-				.some((action) => action.payload.kind === "turn" && primaryDeliveryRecord(action).message === alreadyQueued)
+			this._actionStore.unfinishedActions().some((action) => {
+				if (action.payload.kind !== "turn" || primaryDeliveryRecord(action).message !== alreadyQueued) return false;
+				// A running continuation may already need a successor; only undelivered actions deduplicate.
+				return (
+					action.lifecycle.state === "queued" ||
+					action.lifecycle.state === "selected" ||
+					action.lifecycle.state === "preparing" ||
+					action.lifecycle.state === "committing"
+				);
+			})
 		) {
 			return true;
 		}
@@ -3295,7 +3211,6 @@ export class AgentSession {
 		return autonomousMessage ? [autonomousMessage] : [];
 	}
 
-	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	private _agentMessageOutcome(agentMessageId: string): AgentMessageOutcome {
@@ -3317,7 +3232,6 @@ export class AgentSession {
 		return outcome.delivery.promise;
 	}
 
-	/** Resolve (no error) or reject an existing leg of an agent message outcome. */
 	private _settleAgentMessage(
 		agentMessageId: string | undefined,
 		leg: "delivery" | "completion",
@@ -3336,7 +3250,6 @@ export class AgentSession {
 		else deferred.resolve();
 	}
 
-	/** Reject both currently registered legs of an agent message outcome. */
 	private _rejectAgentMessage(agentMessageId: string | undefined, error: Error): void {
 		if (agentMessageId === undefined) return;
 		this._settleAgentMessage(agentMessageId, "delivery", error);
@@ -3372,7 +3285,6 @@ export class AgentSession {
 			);
 	}
 
-	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = (event: AgentEvent): void => {
 		this._createRetryPromiseForAgentEnd(event);
 		if (event.type === "message_start" || event.type === "message_end") {
@@ -3529,7 +3441,6 @@ export class AgentSession {
 			this._overflowRecovery = "idle";
 		}
 
-		// Emit to extensions first
 		await this._emitExtensionEvent(event);
 		if (event.type === "message_start" || event.type === "message_end") {
 			const cleared = this._capturingCancelledAction(event.message);
@@ -3542,14 +3453,10 @@ export class AgentSession {
 
 		this._addLoginGuidanceToAuthError(event);
 
-		// Notify all listeners
 		this._emit(event);
 
-		// Handle session persistence
 		if (event.type === "message_end") {
-			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
 				this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
@@ -3561,12 +3468,9 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
 			}
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
-			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
 
@@ -3616,7 +3520,6 @@ export class AgentSession {
 			return;
 		}
 
-		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
 			const msg =
 				this._lastAssistantMessage ??
@@ -3627,7 +3530,6 @@ export class AgentSession {
 				return;
 			}
 
-			// Check for retryable errors first (overloaded, rate limit, server errors)
 			const concreteAuthFailure = this._isConcreteProviderAuthFailure(msg);
 			const retryConcreteAuthFailure =
 				concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
@@ -3670,7 +3572,6 @@ export class AgentSession {
 		);
 	}
 
-	/** Resolve the pending retry promise */
 	private _resolveRetry(): void {
 		if (this._retryResolve) {
 			this._retryResolve();
@@ -3680,7 +3581,6 @@ export class AgentSession {
 		}
 	}
 
-	/** Find the last assistant message in agent state (including aborted ones) */
 	private _findLastAssistantMessage(): AssistantMessage | undefined {
 		const messages = this.agent.state.messages;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -3708,7 +3608,6 @@ export class AgentSession {
 		Object.assign(targetRecord, replacement);
 	}
 
-	/** Emit extension events based on agent events */
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
@@ -3796,7 +3695,6 @@ export class AgentSession {
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this._eventListeners.push(listener);
 
-		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this._eventListeners.indexOf(listener);
 			if (index !== -1) {
@@ -3881,9 +3779,7 @@ export class AgentSession {
 			} else if (this._refinePlanInFlight) {
 				await this._refinePlanInFlight;
 			} else if (this._serializedPlanInFlight) {
-				// Fix 5: Await the background plan and apply a ready "plan"
-				// result before teardown so the refinement is persisted.
-				// Do NOT discard a ready plan.
+				// Await the background plan and apply a ready "plan" result before teardown.
 				await this._consumeSerializedBackgroundPlan(async (bgResult) => {
 					if (bgResult?.status === "plan" && bgResult.branchVersion === this._autoRefineBranchVersion) {
 						try {
@@ -3992,9 +3888,22 @@ export class AgentSession {
 	private async _disposeAsyncOnce(): Promise<void> {
 		// Flush kernels/traces for both still-running and retained children; the sync
 		// dispose() below only tears them down synchronously.
-		for (const run of this._activeRlmChildRuns.values()) {
-			if (run.session) {
-				await run.session.disposeAsync().catch(() => undefined);
+		for (const run of [...this._activeRlmChildRuns.values()]) {
+			const childSession = run.session;
+			if (!childSession) continue;
+			if (run.detachedDeletion) {
+				run.suppressTerminalNotice = true;
+				if (run.deletionCleanupObserver) {
+					await run.deletionCleanupObserver.catch(() => false);
+				} else if (run.deletionCleanup) {
+					await run.deletionCleanup.catch(() => childSession.disposeAsync().catch(() => undefined));
+				} else {
+					// Cleanup already failed and was exposed for retry before disposal.
+					await childSession.disposeAsync().catch(() => undefined);
+				}
+				if (!run.settled) await this._finishRlmRunDeletion(run);
+			} else {
+				await childSession.disposeAsync().catch(() => undefined);
 			}
 		}
 		for (const unsubscribe of this._rlmChildUnsubscribes.values()) {
@@ -4041,6 +3950,8 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
+		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
+		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
 		try {
 			// Invalidate scheduled timers and abort any in-flight review so a late
@@ -4101,21 +4012,14 @@ export class AgentSession {
 		this._disposeCallbacks.add(callback);
 	}
 
-	// =========================================================================
-	// Read-only State Access
-	// =========================================================================
-
-	/** Full agent state */
 	get state(): AgentState {
 		return this.agent.state;
 	}
 
-	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
 	}
 
-	/** Current thinking level */
 	get thinkingLevel(): ThinkingLevel {
 		return this.agent.state.thinkingLevel;
 	}
@@ -4124,32 +4028,22 @@ export class AgentSession {
 		return this.agent.state.serviceTier;
 	}
 
-	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming;
 	}
 
-	/** Current effective system prompt (includes any per-turn extension modifications) */
 	get systemPrompt(): string {
 		return this.agent.state.systemPrompt;
 	}
 
-	/** Current retry attempt (0 if not retrying) */
 	get retryAttempt(): number {
 		return this._retryAttempt;
 	}
 
-	/**
-	 * Get the names of currently active tools.
-	 * Returns the names of tools currently set on the agent.
-	 */
 	getActiveToolNames(): string[] {
 		return this.agent.state.tools.map((t) => t.name);
 	}
 
-	/**
-	 * Get all configured tools with name, description, parameter schema, and source metadata.
-	 */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
 			name: definition.name,
@@ -4163,12 +4057,6 @@ export class AgentSession {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
-	/**
-	 * Set active tools by name.
-	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
-	 * Also rebuilds the system prompt to reflect the new tool set.
-	 * Changes take effect on the next agent turn.
-	 */
 	setActiveToolsByName(toolNames: string[]): void {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
@@ -4186,12 +4074,10 @@ export class AgentSession {
 		}
 		this.agent.state.tools = tools;
 
-		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
-	/** Whether compaction or branch summarization is currently running */
 	get isCompacting(): boolean {
 		return (
 			this._autoCompactionAbortController !== undefined ||
@@ -4200,7 +4086,6 @@ export class AgentSession {
 		);
 	}
 
-	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
 	}
@@ -4214,10 +4099,6 @@ export class AgentSession {
 		return context;
 	}
 
-	/**
-	 * Merge disclosures whose session-file append failed into a rebuilt message
-	 * list at their timestamp position, where they appeared live.
-	 */
 	private _mergeUnpersistedCompactionOutcomes(messages: AgentMessage[]): void {
 		for (const outcome of this._unpersistedCompactionOutcomes) {
 			let insertAt = messages.length;
@@ -4228,37 +4109,30 @@ export class AgentSession {
 		}
 	}
 
-	/** Current steering mode */
 	get steeringMode(): "all" | "one-at-a-time" {
 		return this.agent.steeringMode;
 	}
 
-	/** Current follow-up mode */
 	get followUpMode(): "all" | "one-at-a-time" {
 		return this.agent.followUpMode;
 	}
 
-	/** Current session file path, or undefined if sessions are disabled */
 	get sessionFile(): string | undefined {
 		return this.sessionManager.getSessionFile();
 	}
 
-	/** Current session ID */
 	get sessionId(): string {
 		return this.sessionManager.getSessionId();
 	}
 
-	/** Current RLM spawn depth for this session. */
 	get rlmDepth(): number {
 		return this._rlmDepth;
 	}
 
-	/** Current absolute RLM spawn-depth cap. */
 	get rlmMaxDepth(): number {
 		return this._rlmMaxDepth;
 	}
 
-	/** Current session display name, if set */
 	get sessionName(): string | undefined {
 		return this.sessionManager.getSessionName();
 	}
@@ -4294,7 +4168,6 @@ export class AgentSession {
 		this._autonomousContinuationSuppressedMessages.add(message);
 	}
 
-	/** Scoped models for cycling (from --models flag) */
 	get scopedModels(): ReadonlyArray<{
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
@@ -4302,12 +4175,10 @@ export class AgentSession {
 		return this._scopedModels;
 	}
 
-	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
 	}
 
-	/** File-based prompt templates */
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
 		return this._resourceLoader.getPrompts().prompts;
 	}
@@ -4373,13 +4244,10 @@ export class AgentSession {
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
+			genericMcpServers: this._mcpManager?.getEnabledGenericServers(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
-
-	// =========================================================================
-	// Prompting
-	// =========================================================================
 
 	private _refreshExtensionSystemPrompt(extensionPrompt: string, baseSnapshot: string): string {
 		if (this._baseSystemPrompt === baseSnapshot) {
@@ -4517,7 +4385,6 @@ export class AgentSession {
 		return this._prompt(text, options);
 	}
 
-	/** Resolve once the session has accepted ownership, before queued or active execution completes. */
 	async promptUntilAccepted(text: string, options?: PromptOptions): Promise<void> {
 		return this._prompt(text, { ...options, returnAfterAccepted: true });
 	}
@@ -4530,12 +4397,32 @@ export class AgentSession {
 		const outcome = this._agentMessageOutcome(agentMessageId);
 		outcome.completion = createAgentMessageDeferred();
 		const completion = outcome.completion.promise;
+		const signal = options?.signal;
+		let cancelQueuedPrompt: (() => void) | undefined;
 		try {
 			await this.promptUntilAccepted(text, { ...options, agentMessageId });
+			if (signal) {
+				cancelQueuedPrompt = () => {
+					const error = new Error("Prompt was cancelled before it started.");
+					const cancelled = this._cancelSessionActions(
+						(action) => action.agentMessageId === agentMessageId && action.payload.kind === "turn",
+						error,
+					);
+					if (cancelled.length > 0) {
+						this._settleAgentMessage(agentMessageId, "completion", error);
+					}
+				};
+				signal.addEventListener("abort", cancelQueuedPrompt, { once: true });
+				if (signal.aborted) cancelQueuedPrompt();
+			}
 			await completion;
 		} catch (error) {
 			this._settleAgentMessage(agentMessageId, "completion", this._asError(error));
 			throw error;
+		} finally {
+			if (signal && cancelQueuedPrompt) {
+				signal.removeEventListener("abort", cancelQueuedPrompt);
+			}
 		}
 	}
 
@@ -4544,6 +4431,7 @@ export class AgentSession {
 			options?.customMessage && isAgentSessionMessage(options.customMessage) ? options.customMessage : undefined;
 		await this._prompt(text, {
 			...options,
+			resumeIfIdle: false,
 			expandPromptTemplates: false,
 			skipInputHandlers: true,
 			skipPrePromptWork: true,
@@ -4585,12 +4473,142 @@ export class AgentSession {
 		});
 	}
 
+	private _isRlmTerminalNotice(message: CustomMessage): boolean {
+		return (
+			message.customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE ||
+			message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE
+		);
+	}
+
+	private _assertRlmTerminalNotice(message: CustomMessage): void {
+		if (!this._isRlmTerminalNotice(message)) {
+			throw new Error("Deferred terminal admission only accepts RLM child terminal notices.");
+		}
+	}
+
+	private _isRlmTerminalNoticeAction(action: QueuedSessionAction): boolean {
+		if (action.payload.kind !== "turn") return false;
+		const message = primaryDeliveryRecord(action).message;
+		return message.role === "custom" && this._isRlmTerminalNotice(message);
+	}
+
+	private _hasDeferredRlmTerminalNotices(): boolean {
+		return this._pendingNextTurnMessages.some((message) => this._isRlmTerminalNotice(message));
+	}
+
+	private _enqueueRlmTerminalNoticeAction(message: CustomMessage): void {
+		this._assertRlmTerminalNotice(message);
+		const action = this._createPreparedTurnAction("followUp", message.content as string, undefined, {
+			message,
+			suppressAutonomousContinuation: true,
+			resumeIfIdle: false,
+			source: "internal",
+			executionPolicy: this._turnExecutionPolicy("injected"),
+			queueVisible: false,
+		});
+		this._durableRlmTerminalNoticeActionIds.add(action.id);
+		try {
+			const result = this._admitSessionInput(action, { wake: false });
+			if (!result.accepted) throw new Error("RLM child terminal notice was not admitted.");
+		} catch (error) {
+			this._durableRlmTerminalNoticeActionIds.delete(action.id);
+			throw error;
+		}
+	}
+
+	private _flushDeferredRlmTerminalNotices(): void {
+		if (
+			this._sessionInputAdmissionPauses.size > 0 ||
+			this._sessionInputPumpSuspended ||
+			this._queuedWorkPauses.size > 0 ||
+			this._disposed ||
+			this._disposing
+		) {
+			return;
+		}
+		while (true) {
+			const index = this._pendingNextTurnMessages.findIndex((message) => this._isRlmTerminalNotice(message));
+			if (index < 0) break;
+			const message = this._pendingNextTurnMessages[index];
+			try {
+				this._enqueueRlmTerminalNoticeAction(message);
+			} catch {
+				return;
+			}
+			this._pendingNextTurnMessages.splice(index, 1);
+		}
+		this._scheduleSessionInputPump();
+	}
+
+	private async _acquireRlmTerminalNoticeRetentionFence(): Promise<{ owner: symbol; release(): void } | undefined> {
+		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+		while (!this._disposed && !this._disposing && !disposeSignal.aborted) {
+			if (this._queuedWorkPauses.size > 0) {
+				let wake = () => {};
+				const pauseReleased = new Promise<void>((resolve) => {
+					wake = resolve;
+					this._sessionInputCheckpointWaiters.add(resolve);
+				});
+				try {
+					await waitForPromiseOrAbort(pauseReleased, disposeSignal, "Terminal notice retention cancelled");
+				} catch {
+					return undefined;
+				} finally {
+					this._sessionInputCheckpointWaiters.delete(wake);
+				}
+				continue;
+			}
+			let fence: { owner: symbol; release(): void };
+			try {
+				fence = await this._acquireSessionActionCommitFence(disposeSignal);
+			} catch {
+				return undefined;
+			}
+			if (this._queuedWorkPauses.size === 0 && !this._disposed && !this._disposing) return fence;
+			fence.release();
+		}
+		return undefined;
+	}
+
+	private async _deferRlmTerminalNotice(message: CustomMessage): Promise<void> {
+		this._assertRlmTerminalNotice(message);
+		const fence = await this._acquireRlmTerminalNoticeRetentionFence();
+		if (!fence) return;
+		try {
+			if (this._disposed || this._disposing) return;
+			this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+			this._flushDeferredRlmTerminalNotices();
+		} finally {
+			fence.release();
+		}
+	}
+
+	private _demoteRlmTerminalNoticeActions(): void {
+		const actions = this._actionStore
+			.clearableActions()
+			.filter((action) => this._durableRlmTerminalNoticeActionIds.has(action.id));
+		if (actions.length === 0) return;
+		for (const action of actions) {
+			if (!this._isRlmTerminalNoticeAction(action)) continue;
+			const message = primaryDeliveryRecord(action).message;
+			if (message.role === "custom") this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+		}
+		const ids = new Set(actions.map((action) => action.id));
+		this._cancelSessionActions(
+			(action) => ids.has(action.id),
+			new Error("RLM child terminal notice deferred across session input suspension."),
+			actions,
+		);
+		for (const id of ids) this._durableRlmTerminalNoticeActionIds.delete(id);
+	}
+
 	private async _promptInjectedMessage(
 		text: string,
 		message: CustomMessage,
 		options?: InternalPromptOptions & { executionPolicy?: TurnExecutionPolicy },
 	): Promise<void> {
-		if (!this.isStreaming && options?.resumeIfIdle) this._sessionInputPumpSuspended = false;
+		if (!this.isStreaming && options?.resumeIfIdle) this._resumeSessionInputAdmission();
+		const admissionEpoch = this._sessionInputPumpEpoch;
 		const admissionFence = await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
 			throwIfPromptAdmissionCancelled(options?.signal);
 			throw error;
@@ -4598,6 +4616,9 @@ export class AgentSession {
 		const reportPreflight = oncePreflight(options?.preflightResult);
 		try {
 			throwIfPromptAdmissionCancelled(options?.signal);
+			if (admissionEpoch !== this._sessionInputPumpEpoch) {
+				throw new Error("Injected session input was invalidated before admission");
+			}
 			options?.admissionCommitted?.();
 			const queueForStreaming = this.isStreaming;
 			const queueForBusy = options?.queueIfBusy === true && this._isBusyForSessionInput("preflight");
@@ -4658,10 +4679,12 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
-			this._sessionInputPumpSuspended = false;
+			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
 			this._assertSessionActionAdmissionAvailable();
 		}
+		const admissionEpoch = this._sessionInputPumpEpoch;
 		const commitFence = this.isStreaming
 			? undefined
 			: await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
@@ -4672,6 +4695,9 @@ export class AgentSession {
 		const run = async () => {
 			try {
 				throwIfPromptAdmissionCancelled(options?.signal);
+				if (!resumeSuspendedInput && admissionEpoch !== this._sessionInputPumpEpoch) {
+					throw new Error("Session input was invalidated before admission");
+				}
 				options?.admissionCommitted?.();
 				const isInternalPrompt = options?.internalPrompt === true;
 				const expandPromptTemplates = isInternalPrompt ? false : (options?.expandPromptTemplates ?? true);
@@ -4892,7 +4918,6 @@ export class AgentSession {
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;
 		} catch (err) {
-			// Emit error like extension commands do
 			this._extensionRunner.emitError({
 				extensionPath: skill.filePath,
 				event: "skill_expansion",
@@ -5050,7 +5075,16 @@ export class AgentSession {
 				...(recovered.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
 			};
 		});
-		for (const action of actions) this._admitSessionInput(action, { restore: true });
+		for (const action of actions) {
+			const durableTerminalNotice = this._isRlmTerminalNoticeAction(action);
+			if (durableTerminalNotice) this._durableRlmTerminalNoticeActionIds.add(action.id);
+			try {
+				this._admitSessionInput(action, { restore: true });
+			} catch (error) {
+				if (durableTerminalNotice) this._durableRlmTerminalNoticeActionIds.delete(action.id);
+				throw error;
+			}
+		}
 		return actions.length;
 	}
 
@@ -5348,7 +5382,10 @@ export class AgentSession {
 		if (this._disposed || this._disposing) {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
-		if (this.unfinishedActionCount > 0 && this._sessionInputPumpSuspended) {
+		if (this._sessionInputAdmissionPauses.size > 0) {
+			throw new Error("Cannot admit a session action while session input admission is paused.");
+		}
+		if (this._sessionInputPumpSuspended) {
 			throw new Error("Cannot admit a session action while queued session input is suspended.");
 		}
 	}
@@ -5368,6 +5405,9 @@ export class AgentSession {
 	} {
 		if (this._disposed || this._disposing) {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
+		}
+		if (this._sessionInputAdmissionPauses.size > 0) {
+			throw new Error("Cannot admit a session action while session input admission is paused.");
 		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
@@ -5402,7 +5442,9 @@ export class AgentSession {
 				action.payload.kind === "session_command" ||
 				action.wake === "immediate")
 		) {
-			if (action.payload.kind === "turn" && action.wake === "immediate") this._sessionInputPumpSuspended = false;
+			if (action.payload.kind === "turn" && action.wake === "immediate") {
+				this._resumeSessionInputAdmission();
+			}
 			this._scheduleSessionInputPump();
 		}
 		return { accepted: true, disposition, ticket: controller.ticket };
@@ -5624,6 +5666,7 @@ export class AgentSession {
 								action.lifecycle.state === "failed" ||
 								action.lifecycle.state === "cancelled")
 						) {
+							this._durableRlmTerminalNoticeActionIds.delete(action.id);
 							this._actionStore.releaseTerminal(action);
 						}
 					}
@@ -5944,9 +5987,6 @@ export class AgentSession {
 		this._emit({ type: "message_end", message });
 	}
 
-	/**
-	 * Throw an error if the text is an extension command.
-	 */
 	private _throwIfExtensionCommand(text: string): void {
 		const commandName = parseSlashCommand(text)?.name ?? "";
 		const command = this._extensionRunner.getCommand(commandName);
@@ -6001,6 +6041,7 @@ export class AgentSession {
 				});
 			}
 		} else if (options?.triggerTurn) {
+			if (!this._sessionInputSuspendedForUpdateRestart) this._resumeSessionInputAdmission();
 			const admissionFence = await this._acquireDirectTurnAdmissionFence();
 			try {
 				const normalized = normalizeMessageContent(message.content);
@@ -6042,7 +6083,6 @@ export class AgentSession {
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void> {
-		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
 
@@ -6062,7 +6102,6 @@ export class AgentSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
 		await this._prompt(text, {
 			expandPromptTemplates: false,
 			streamingBehavior: options?.deliverAs,
@@ -6072,11 +6111,6 @@ export class AgentSession {
 		});
 	}
 
-	/**
-	 * Clear all queued messages and return them.
-	 * Useful for restoring to editor when user aborts.
-	 * @returns Object with steering and followUp arrays
-	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
 		const clearable = this._actionStore
 			.clearableActions()
@@ -6262,6 +6296,7 @@ export class AgentSession {
 			this.isBashRunning ||
 			this._refineInFlight !== undefined ||
 			this._branchSummaryOperation !== undefined ||
+			this._postCompactionContinuationSettlement !== undefined ||
 			this.unfinishedActionCount > 0
 		);
 	}
@@ -6461,6 +6496,25 @@ export class AgentSession {
 		}
 	}
 
+	acquireSessionInputPause(): { release(): void } {
+		const token = Symbol("session-input-admission-pause");
+		this._sessionInputAdmissionPauses.add(token);
+		this._sessionInputPumpRequested = false;
+		this._sessionInputPumpEpoch++;
+		let released = false;
+		return {
+			release: () => {
+				if (released) return;
+				released = true;
+				this._sessionInputAdmissionPauses.delete(token);
+				this._sessionInputPumpEpoch++;
+				this._notifySessionInputCheckpointChange();
+				this._flushDeferredRlmTerminalNotices();
+				this._scheduleSessionInputPump();
+			},
+		};
+	}
+
 	acquireQueuedWorkPause(): { release(): void } {
 		const token = Symbol("queued-work-pause");
 		this._queuedWorkPauses.add(token);
@@ -6473,6 +6527,7 @@ export class AgentSession {
 				released = true;
 				this._queuedWorkPauses.delete(token);
 				this._notifySessionInputCheckpointChange();
+				this._flushDeferredRlmTerminalNotices();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6559,10 +6614,18 @@ export class AgentSession {
 		};
 	}
 
+	private _resumeSessionInputAdmission(): void {
+		if (!this._sessionInputPumpSuspended) return;
+		this._sessionInputPumpSuspended = false;
+		this._sessionInputSuspendedForUpdateRestart = false;
+		this._sessionInputPumpEpoch++;
+		this._notifySessionInputCheckpointChange();
+		this._flushDeferredRlmTerminalNotices();
+	}
+
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
-		this._sessionInputPumpSuspended = false;
-		this._notifySessionInputCheckpointChange();
+		this._resumeSessionInputAdmission();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
 	}
@@ -6601,6 +6664,16 @@ export class AgentSession {
 		}
 	}
 
+	/** Waits out any owned post-compaction continuation and rejects when one cannot start; {@link waitForIdle} never rejects. */
+	async waitForHeadlessIdle(): Promise<void> {
+		while (true) {
+			await this.waitForIdle();
+			const postCompactionContinuation = this._postCompactionContinuationSettlement?.promise;
+			if (!postCompactionContinuation) return;
+			await postCompactionContinuation;
+		}
+	}
+
 	getPendingNextTurnMessageSnapshots(): readonly CustomMessage[] {
 		const messages = this._pendingNextTurnMessages.map((message) => cloneCustomMessage(message));
 		for (const action of this._actionStore.unfinishedActions()) {
@@ -6627,6 +6700,7 @@ export class AgentSession {
 
 	restorePendingNextTurnMessages(messages: readonly CustomMessage[]): void {
 		this._pendingNextTurnMessages.push(...messages.map((message) => cloneCustomMessage(message)));
+		this._flushDeferredRlmTerminalNotices();
 	}
 
 	removeQueuedFollowUp(queueKey: string): boolean {
@@ -6647,11 +6721,20 @@ export class AgentSession {
 	}
 
 	requestAbort(): void {
+		for (const run of [...this._unsettledRlmChildRuns]) {
+			if (run.status === "cancelled") this._abandonRlmRunForQuiescence(run);
+		}
+		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
 		this._sessionInputPumpSuspended = true;
+		this._sessionInputSuspendedForUpdateRestart = false;
+		this._demoteRlmTerminalNoticeActions();
 		this._cancelSessionActions(
-			(action) => action.payload.kind === "turn" && !action.payload.queueVisible,
+			(action) =>
+				action.payload.kind === "turn" &&
+				!action.payload.queueVisible &&
+				!this._durableRlmTerminalNoticeActionIds.has(action.id),
 			new Error("Prompt aborted before delivery."),
 		);
 		this._cancelPostCompactionContinue();
@@ -6666,9 +6749,6 @@ export class AgentSession {
 		this.agent.abort();
 	}
 
-	/**
-	 * Abort current operation and wait for agent to become idle.
-	 */
 	async abort(): Promise<void> {
 		const compactionOperation = this._compactionOperation;
 		const branchSummaryOperation = this._branchSummaryOperation;
@@ -6693,8 +6773,10 @@ export class AgentSession {
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
 		this._sessionInputPumpSuspended = true;
+		this._sessionInputSuspendedForUpdateRestart = true;
 		this._cancelPostCompactionContinue();
 		this.abortRetry();
+		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");
 		this._goalAbortInProgress = this._goalState.status === "active";
 		this.agent.abort();
@@ -6708,10 +6790,6 @@ export class AgentSession {
 				});
 		}
 	}
-
-	// =========================================================================
-	// Model Management
-	// =========================================================================
 
 	private async _emitModelSelect(
 		nextModel: Model<any>,
@@ -6746,11 +6824,6 @@ export class AgentSession {
 		return promise;
 	}
 
-	/**
-	 * Set model directly.
-	 * Validates that the model is available, saves to session and settings.
-	 * @throws Error if the model is not available
-	 */
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
 		if (!this._modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
@@ -6766,7 +6839,6 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
-		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
@@ -6800,12 +6872,6 @@ export class AgentSession {
 		return undefined;
 	}
 
-	/**
-	 * Cycle to next/previous model.
-	 * Uses scoped models (from --models flag) if available, otherwise all available models.
-	 * @param direction - "forward" (default) or "backward"
-	 * @returns The new model info, or undefined if only one model available
-	 */
 	async cycleModel(
 		direction: "forward" | "backward" = "forward",
 		options: ModelSelectOptions = {},
@@ -6836,15 +6902,10 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 		const serviceTier = this._getServiceTierForModelSwitch();
 
-		// Apply model
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
-		// Apply thinking level.
-		// - Explicit scoped model thinking level overrides current session level
-		// - Undefined scoped model thinking level inherits the current session preference
-		// setThinkingLevel clamps to model capabilities.
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
@@ -6884,7 +6945,6 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
-		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
@@ -6903,20 +6963,10 @@ export class AgentSession {
 		};
 	}
 
-	// =========================================================================
-	// Thinking Level Management
-	// =========================================================================
-
-	/**
-	 * Set thinking level.
-	 * Clamps to model capabilities based on available thinking levels.
-	 * Saves to session and settings only if the level actually changes.
-	 */
 	setThinkingLevel(level: ThinkingLevel): void {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
-		// Only persist if actually changing
 		const previousLevel = this.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
 
@@ -6979,10 +7029,6 @@ export class AgentSession {
 		});
 	}
 
-	/**
-	 * Cycle to next thinking level.
-	 * @returns New level, or undefined if model doesn't support thinking
-	 */
 	cycleThinkingLevel(): ThinkingLevel | undefined {
 		if (!this.supportsThinking()) return undefined;
 
@@ -6995,18 +7041,11 @@ export class AgentSession {
 		return nextLevel;
 	}
 
-	/**
-	 * Get available thinking levels for current model.
-	 * The provider will clamp to what the specific model supports internally.
-	 */
 	getAvailableThinkingLevels(): ThinkingLevel[] {
 		if (!this.model) return THINKING_LEVELS;
 		return getSupportedThinkingLevels(this.model) as ThinkingLevel[];
 	}
 
-	/**
-	 * Check if current model supports thinking/reasoning.
-	 */
 	supportsThinking(): boolean {
 		return !!this.model?.reasoning;
 	}
@@ -7025,14 +7064,10 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
-	// Added to history (not a nextTurn message) so it also reaches the continue()-driven
-	// auto-compaction resume, which never injects nextTurn messages.
-	private async _notifyKernelStateAfterCompaction(): Promise<void> {
+	private async _syncKernelStateAfterCompaction(): Promise<void> {
 		const provisioner = this._ipythonKernelProvisioner;
-		// No kernel means no state to remind about; only stay silent in that case.
 		if (!provisioner?.hasRunningKernel) return;
-		// Bound the probe so a wedged kernel can't stall recovery, and abort it on timeout so
-		// the kernel's serialized execution queue isn't left occupied by a never-resolving cell.
+		const pruned = await provisioner.pruneOversizedVariables().catch(() => null);
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
 		if (typeof timer === "object" && "unref" in timer) timer.unref();
@@ -7042,8 +7077,6 @@ export class AgentSession {
 		} finally {
 			clearTimeout(timer);
 		}
-		// null is a listing failure/timeout; only claim state survived if the kernel is still up
-		// (it may have died in the window since the check above).
 		if (names === null && !provisioner.hasRunningKernel) return;
 		const detail =
 			names === null
@@ -7051,9 +7084,13 @@ export class AgentSession {
 				: names.length > 0
 					? ` These names are still defined: ${names.join(", ")}.`
 					: " You have not defined any names yet.";
+		const prunedDetail =
+			pruned && pruned.length > 0
+				? ` Variables above the per-variable snapshot limit were removed: ${pruned.join(", ")}.`
+				: "";
 		const content = [
 			"<ipython_state>",
-			`Your IPython kernel persisted through compaction; all variables, imports, and helpers you defined remain available.${detail}`,
+			`Your IPython kernel persisted through compaction; its remaining variables, imports, and helpers are still available.${prunedDetail}${detail}`,
 			"</ipython_state>",
 		].join("\n");
 		const message = {
@@ -7063,7 +7100,6 @@ export class AgentSession {
 			display: false,
 			timestamp: Date.now(),
 		} satisfies CustomMessage;
-		// Insert before a trailing assistant error so overflow-retry cleanup can still strip it.
 		const messages = this.agent.state.messages;
 		const last = messages[messages.length - 1];
 		const insertBeforeError = last?.role === "assistant" && (last as AssistantMessage).stopReason === "error";
@@ -7077,11 +7113,6 @@ export class AgentSession {
 		this._emit({ type: "message_end", message });
 	}
 
-	/**
-	 * Tell the model when a resumed session revived its IPython kernel state, so it
-	 * knows which variables are actually available instead of assuming the kernel is
-	 * the one it left. Delivered as context before the next turn.
-	 */
 	private _onIpythonStateRestored(result: RestoreResult): void {
 		const lines = ["<ipython_state_restored>"];
 		if (result.restored.length > 0) {
@@ -7110,37 +7141,16 @@ export class AgentSession {
 		).catch(() => {});
 	}
 
-	// =========================================================================
-	// Queue Mode Management
-	// =========================================================================
-
-	/**
-	 * Set steering message mode.
-	 * Saves to settings.
-	 */
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
 		this.agent.steeringMode = mode;
 		this.settingsManager.setSteeringMode(mode);
 	}
 
-	/**
-	 * Set follow-up message mode.
-	 * Saves to settings.
-	 */
 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
 		this.agent.followUpMode = mode;
 		this.settingsManager.setFollowUpMode(mode);
 	}
 
-	// =========================================================================
-	// Compaction
-	// =========================================================================
-
-	/**
-	 * Manually compact the session context.
-	 * Aborts current agent operation first.
-	 * @param customInstructions Optional instructions for the compaction summary
-	 */
 	async compact(customInstructions?: string, options: { skipAbort?: boolean } = {}): Promise<CompactionResult> {
 		if (options.skipAbort && this.isStreaming) {
 			throw new Error("Cannot compact without aborting while the agent is running.");
@@ -7293,7 +7303,6 @@ export class AgentSession {
 		this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
-		// Get the saved compaction entry for the extension event
 		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
 			| CompactionEntry
 			| undefined;
@@ -7304,7 +7313,7 @@ export class AgentSession {
 				fromExtension,
 			});
 		}
-		await this._notifyKernelStateAfterCompaction();
+		await this._syncKernelStateAfterCompaction();
 		await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
 
 		return { summary, firstKeptEntryId, tokensBefore, details };
@@ -7317,9 +7326,6 @@ export class AgentSession {
 		await Promise.allSettled(childIds.map((childId) => this.deleteRlmSubagent(childId)));
 	}
 
-	/**
-	 * Cancel in-progress compaction (manual or auto).
-	 */
 	abortCompaction(): void {
 		this._compactionAbortController?.abort();
 		this._autoCompactionAbortController?.abort();
@@ -7336,6 +7342,16 @@ export class AgentSession {
 		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
 	}
 
+	private _settlePostCompactionContinue(error?: Error): void {
+		if (!error && (this._postCompactionContinuationScheduled || this._postCompactionContinuationTimer)) return;
+		const settlement = this._postCompactionContinuationSettlement;
+		if (!settlement || settlement.settled) return;
+		settlement.settled = true;
+		this._postCompactionContinuationSettlement = undefined;
+		if (error) settlement.reject(error);
+		else settlement.resolve();
+	}
+
 	private _cancelPostCompactionContinue(): void {
 		if (this._postCompactionContinuationTimer) {
 			clearTimeout(this._postCompactionContinuationTimer);
@@ -7343,6 +7359,7 @@ export class AgentSession {
 		}
 		this._postCompactionContinuationScheduled = false;
 		this._scheduledPostCompactionContinuationMessages = [];
+		this._settlePostCompactionContinue();
 	}
 
 	private _discardPendingAutoRefine(options: { cancelPostCompactionContinue?: boolean } = {}): void {
@@ -7367,7 +7384,6 @@ export class AgentSession {
 		// _planRefine or _reviewAutoRefine call settles via signal abort
 		// rather than hanging forever.
 		this._refineAbortController?.abort();
-		// Await and clear serialized background plan if in flight.
 		if (this._serializedPlanInFlight) {
 			await this._consumeSerializedBackgroundPlan(async () => false);
 		}
@@ -7440,15 +7456,19 @@ export class AgentSession {
 		if (this._postCompactionContinuationScheduled) {
 			return;
 		}
+		if (!this._postCompactionContinuationSettlement || this._postCompactionContinuationSettlement.settled) {
+			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement();
+		}
 		this._postCompactionContinuationScheduled = true;
 		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
 		this._postCompactionContinuationTimer = setTimeout(() => {
 			this._postCompactionContinuationTimer = undefined;
-			void this._runScheduledPostCompactionContinue();
+			void this._runScheduledPostCompactionContinue()
+				.catch(() => undefined)
+				.finally(() => this._settlePostCompactionContinue());
 		}, 100);
 	}
 
-	/** Whether any snapshot of scheduled continuation messages is still session-owned. */
 	private _sessionOwnsScheduledContinuations(continuationMessages: AgentMessage[]): boolean {
 		return continuationMessages.some((message) => this._postCompactionContinuationMessages.includes(message));
 	}
@@ -7498,6 +7518,9 @@ export class AgentSession {
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("already processing")) {
 				this._schedulePostCompactionContinue();
+			} else if (!message.includes("continue from")) {
+				// "continue from" means the turn already completed; anything else must reject headless idle waiters.
+				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}
 	}
@@ -7777,7 +7800,6 @@ export class AgentSession {
 		const refineAbort = new AbortController();
 		this._refineAbortController = refineAbort;
 
-		// Background planning phase — does NOT block turn entry points
 		const planRun = this._planRefine(options, refineAbort.signal);
 		const planSettled = planRun.then(
 			() => undefined,
@@ -8026,9 +8048,6 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Cancel in-progress branch summarization.
-	 */
 	abortBranchSummary(): void {
 		this._branchSummaryAbortController?.abort();
 	}
@@ -8144,7 +8163,6 @@ export class AgentSession {
 			return await this._runAutoCompaction("overflow", true);
 		}
 
-		// Case 2: Model-requested (compact skill); runs even with auto-compaction off.
 		if (this._pendingRequestedCompaction !== undefined) {
 			return await this._runAutoCompaction("requested", false);
 		}
@@ -8174,7 +8192,6 @@ export class AgentSession {
 	 * Internal: Run automatic (threshold/overflow) or model-requested compaction
 	 * with events.
 	 */
-	/** Emit an unsuccessful compaction_end and durably record the outcome. */
 	private _endCompactionUnsuccessfully(
 		reason: CompactionOutcomeReason,
 		outcome: CompactionOutcome,
@@ -8367,14 +8384,10 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Toggle auto-compaction setting.
-	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
-	/** Whether auto-compaction is enabled */
 	get autoCompactionEnabled(): boolean {
 		return this.settingsManager.getCompactionEnabled();
 	}
@@ -8826,7 +8839,6 @@ export class AgentSession {
 		return skills;
 	}
 
-	/** Typed handlers for host requests arriving from the IPython kernel comm bridge. */
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
@@ -8942,7 +8954,6 @@ export class AgentSession {
 		// visible here so MCP skill gating sees the new credentials.
 		this._modelRegistry.authStorage.reload();
 		resetApiProviders();
-		// Re-read mcpServers and re-register user MCP providers from the reloaded settings.
 		this._mcpManager?.refresh();
 		await this._resourceLoader.reload();
 		this._buildRuntime({
@@ -9049,7 +9060,6 @@ export class AgentSession {
 		return this._rlmSessionDir;
 	}
 
-	/** Context size (tokens) of this session's latest assistant turn, for live subagent display. */
 	_contextTokensForCurrentMessages(): number | undefined {
 		const last = this._findLastAssistantMessage();
 		return last ? calculateContextTokens(last.usage) : undefined;
@@ -9082,6 +9092,7 @@ export class AgentSession {
 		spawnCode?: string;
 		sessionDir: string;
 		model: Model<any>;
+		thinkingLevel?: ThinkingLevel;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9091,7 +9102,8 @@ export class AgentSession {
 			spawnCode: options.spawnCode,
 			sessionDir: options.sessionDir,
 			model: options.model,
-			thinkingLevel: clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel,
+			thinkingLevel:
+				options.thinkingLevel ?? (clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel),
 			serviceTier:
 				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
 			scopedModels: [...this._scopedModels],
@@ -9183,6 +9195,14 @@ export class AgentSession {
 		return { session: child };
 	}
 
+	private _abandonRlmRunForQuiescence(run: RlmChildRun): void {
+		run.suppressTerminalNotice = true;
+		run.abandonedForQuiescence = true;
+		this._abandonedRlmQuiescenceChildIds.add(run.id);
+		this._unsettledRlmChildRuns.delete(run);
+		run.settlement.resolve();
+	}
+
 	private _cancelActiveRlmChildRuns(reason: string): void {
 		for (const run of this._activeRlmChildRuns.values()) {
 			this._cancelRlmChildRun(run, reason);
@@ -9194,6 +9214,7 @@ export class AgentSession {
 			return false;
 		}
 		run.status = "cancelled";
+		if (this._sessionInputPumpSuspended) this._abandonRlmRunForQuiescence(run);
 		run.error = reason;
 		run.publication.reject(new Error(reason));
 		run.abort();
@@ -9204,7 +9225,6 @@ export class AgentSession {
 		return true;
 	}
 
-	/** Status of a direct RLM child run, while the run is still tracked. */
 	getRlmChildRunStatus(childId: string): RlmChildAgentStatus | undefined {
 		return this._activeRlmChildRuns.get(childId)?.status;
 	}
@@ -9229,7 +9249,6 @@ export class AgentSession {
 		return run.session?.sessionId;
 	}
 
-	/** Current direct-child registry for the model-facing rlm.list_subagents API. */
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {
 		return this._buildRlmSubagentList(await this._agentMessageController?.listAgents());
 	}
@@ -9333,7 +9352,6 @@ export class AgentSession {
 		return matches[0]!;
 	}
 
-	/** Delete an inactive direct or nested child by its registry child id without affecting active runs. */
 	async deleteInactiveRlmSubagent(
 		childId: string,
 		isExternallyRunning: () => boolean = () => false,
@@ -9375,7 +9393,6 @@ export class AgentSession {
 		return result.outcome === "skipped_running" ? "running" : "deleted";
 	}
 
-	/** Delete a running, retained, or passive direct child selected from this parent session's registry. */
 	async deleteRlmSubagent(target: string): Promise<RlmDeleteSubagentResult> {
 		const inFlight = [...this._deletingRlmChildren.values()].filter(({ subagent }) =>
 			this._rlmSubagentMatchesTarget(subagent, target),
@@ -9455,8 +9472,19 @@ export class AgentSession {
 		try {
 			return await deletion;
 		} finally {
-			if (this._deletingRlmChildren.get(subagent.rlm_child_id)?.promise === deletion) {
-				this._deletingRlmChildren.delete(subagent.rlm_child_id);
+			const clearReservation = () => {
+				if (this._deletingRlmChildren.get(subagent.rlm_child_id)?.promise === deletion) {
+					this._deletingRlmChildren.delete(subagent.rlm_child_id);
+				}
+			};
+			const run = this._activeRlmChildRuns.get(subagent.rlm_child_id);
+			if (run?.detachedDeletion) {
+				// Keep every selector reserved until the run settles, or until a failed
+				// cleanup is exposed for an explicit retry. Repeated deletes before that
+				// boundary return the same accepted result.
+				void run.deletionReservation.promise.then(clearReservation, clearReservation);
+			} else {
+				clearReservation();
 			}
 		}
 	}
@@ -9468,12 +9496,92 @@ export class AgentSession {
 		return session?.disposeAsync() ?? Promise.resolve();
 	}
 
+	private _ensureRlmRunDeletionCleanup(run: RlmChildRun, session: AgentSession): Promise<void> {
+		if (run.deletionCleanup) return run.deletionCleanup;
+		const cleanup = Promise.resolve().then(() => this._deleteRlmSubagentSession(run.id, session));
+		run.deletionCleanup = cleanup;
+		// Deletion admission is intentionally nonblocking. The detached run owner
+		// joins this exact promise before settlement and records any failure.
+		void cleanup.catch(() => undefined);
+		return cleanup;
+	}
+
+	private async _recordRlmRunDeletionCleanupFailure(
+		run: RlmChildRun,
+		subagent: RlmSubagentRegistryEntry,
+		session: AgentSession,
+		error: unknown,
+	): Promise<void> {
+		if (this._disposed || this._disposing) {
+			run.suppressTerminalNotice = true;
+			await session.disposeAsync().catch(() => undefined);
+			if (!run.settled) await this._finishRlmRunDeletion(run);
+			return;
+		}
+		run.deletionCleanup = undefined;
+		run.deletionCleanupObserver = undefined;
+		run.deletionCleanupFailed = true;
+		run.session = session;
+		this._rlmChildCleanupFailures.set(run.id, subagent);
+		// Make retry admission available before waking the parent model with the
+		// retry-required notice.
+		run.deletionReservation.resolve();
+		await Promise.resolve();
+		await run.reportDeletionCleanupFailure?.(error);
+	}
+
+	private async _finishRlmRunDeletion(run: RlmChildRun): Promise<void> {
+		await run.completeDeletion?.();
+		if (this._activeRlmChildRuns.get(run.id) === run) {
+			this._removeRlmSubagentTracking(run.id, run);
+		}
+		run.settled = true;
+		run.settlement.resolve();
+		run.deletionReservation.resolve();
+		this._unsettledRlmChildRuns.delete(run);
+	}
+
+	private _observeRlmRunDeletionCleanup(
+		run: RlmChildRun,
+		subagent: RlmSubagentRegistryEntry,
+		session: AgentSession,
+		cleanup: Promise<void>,
+	): Promise<boolean> {
+		if (run.deletionCleanupObserver) return run.deletionCleanupObserver;
+		const observer = cleanup.then(
+			() => true,
+			async (error) => {
+				await this._recordRlmRunDeletionCleanupFailure(run, subagent, session, error);
+				return false;
+			},
+		);
+		run.deletionCleanupObserver = observer;
+		void observer.catch(() => undefined);
+		return observer;
+	}
+
+	private _continueFinishedRlmRunDeletion(
+		run: RlmChildRun,
+		subagent: RlmSubagentRegistryEntry,
+		session: AgentSession,
+	): void {
+		const cleanup = this._ensureRlmRunDeletionCleanup(run, session);
+		const observer = this._observeRlmRunDeletionCleanup(run, subagent, session, cleanup);
+		if (!run.deletionRunFinished) return;
+		void observer
+			.then(async (cleanupSucceeded) => {
+				if (cleanupSucceeded) await this._finishRlmRunDeletion(run);
+			})
+			.catch(() => undefined);
+	}
+
 	private _removeRlmSubagentTracking(childId: string, run?: RlmChildRun): void {
 		run?.unsubscribe?.();
 		this._rlmChildUnsubscribes.get(childId)?.();
 		this._rlmChildUnsubscribes.delete(childId);
 		this._rlmChildSessions.delete(childId);
 		this._rlmChildCleanupFailures.delete(childId);
+		this._abandonedRlmQuiescenceChildIds.delete(childId);
 		if (!run || this._activeRlmChildRuns.get(childId) === run) {
 			this._activeRlmChildRuns.delete(childId);
 		}
@@ -9504,7 +9612,20 @@ export class AgentSession {
 		const childId = subagent.rlm_child_id;
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run) {
-			if (!this._cancelRlmChildRun(run, "Deleted by parent orchestrator")) {
+			if (run.deletionCleanupFailed) {
+				// Reset retry coordination only after selector preflight reaches the
+				// resolved child. A failed preflight must leave the prior retry boundary
+				// intact so a later call can acquire it.
+				run.deletionCleanupFailed = false;
+				run.deletionReservation = createAgentMessageDeferred();
+			}
+			// The detached task remains the sole lifecycle owner. Mark deletion before
+			// cancellation so its catch/finally path cannot race a normal release or
+			// terminal notice against the physical delete.
+			run.detachedDeletion = subagent;
+			if (this._cancelRlmChildRun(run, "Deleted by parent orchestrator")) {
+				run.deletionNeedsCompletionNotice = true;
+			} else {
 				this._emitRlmSubagentRemoval(subagent);
 			}
 			const liveSession = run.session;
@@ -9513,33 +9634,16 @@ export class AgentSession {
 				this._removeRlmSubagentTracking(childId, run);
 				return { subagent };
 			}
-			if (liveSession) {
-				try {
-					await this._deleteRlmSubagentSession(childId, liveSession);
-				} catch (error) {
-					if (this._disposed || this._disposing) {
-						this._removeRlmSubagentTracking(childId, run);
-						void liveSession.disposeAsync().catch(() => undefined);
-						throw error;
-					}
-					this._rlmChildSessions.set(childId, liveSession);
-					this._rlmChildCleanupFailures.set(childId, subagent);
-					if (run.unsubscribe) this._rlmChildUnsubscribes.set(childId, run.unsubscribe);
-					this._activeRlmChildRuns.delete(childId);
-					run.abort = noopRlmChildAbort;
-					run.unsubscribe = undefined;
-					run.session = undefined;
-					throw error;
-				}
-				this._deletedRlmChildIds.add(childId);
-				this._removeRlmSubagentTracking(childId, run);
-				return { subagent };
+			if (liveSession && run.settled) {
+				run.deletionRunFinished = true;
+				run.settlement = createAgentMessageDeferred();
+				run.settled = false;
+				this._unsettledRlmChildRuns.add(run);
 			}
+			if (liveSession) this._continueFinishedRlmRunDeletion(run, subagent, liveSession);
 
-			// Startup can be blocked in a host before it has a session to close. Admit
-			// deletion immediately, but retain the cancelled run as a hidden tombstone
-			// until startup settles so selectors cannot be reused underneath it.
-			run.detachedDeletion = subagent;
+			// Return once deletion is accepted. The run stays hidden but unsettled until
+			// abort-insensitive model/tool work unwinds and the shared cleanup finishes.
 			this._deletedRlmChildIds.add(childId);
 			return { subagent };
 		}
@@ -9588,7 +9692,6 @@ export class AgentSession {
 		return true;
 	}
 
-	/** Stop retaining an idle daemon child without deleting its durable registry row. */
 	releaseRlmChildSession(childId: string, session: AgentSession): (() => void) | false {
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run?.session === session && run.status === "done") {
@@ -9602,6 +9705,54 @@ export class AgentSession {
 		this._rlmChildUnsubscribes.delete(childId);
 		this._rlmChildSessions.delete(childId);
 		return unsubscribe;
+	}
+
+	/** Live recursive child roster from lifecycle state, including nested work under retained parents. */
+	getRlmChildSnapshots(): RlmChildAgentSnapshot[] {
+		const snapshots: RlmChildAgentSnapshot[] = [];
+		const recorded = new Set<string>();
+		const traversed = new Set<string>();
+		for (const run of this._activeRlmChildRuns.values()) {
+			const hidden =
+				run.detachedDeletion || this._deletingRlmChildren.has(run.id) || this._deletedRlmChildIds.has(run.id);
+			const child = run.session;
+			if (!hidden) {
+				const model = child?.model ?? run.model;
+				snapshots.push({
+					id: run.id,
+					parentId: this._rlmParentNodeId,
+					sessionName: child?.sessionName ?? run.sessionName,
+					model: `${model.provider}/${model.id}`,
+					label: rlmChildLabel(run.prompt),
+					status: run.status,
+					sessionDir: run.sessionDir,
+				});
+				recorded.add(run.id);
+			}
+			if (child) {
+				traversed.add(run.id);
+				snapshots.push(...child.getRlmChildSnapshots());
+			}
+		}
+		for (const [childId, child] of this._rlmChildSessions) {
+			if (recorded.has(childId) || traversed.has(childId)) continue;
+			const hidden = this._deletingRlmChildren.has(childId) || this._deletedRlmChildIds.has(childId);
+			if (!hidden) {
+				snapshots.push({
+					id: childId,
+					parentId: this._rlmParentNodeId,
+					sessionName: child.sessionName,
+					model: child.model ? `${child.model.provider}/${child.model.id}` : undefined,
+					label: child.sessionName ?? "child agent",
+					// A failed delete retains the session solely for cleanup retry. Preserve
+					// its cancellation truth in snapshots rather than reviving it as done.
+					status: this._rlmChildCleanupFailures.has(childId) ? "cancelled" : "done",
+					sessionDir: child._rlmSessionDir ?? child.sessionManager.getSessionDir(),
+				});
+			}
+			snapshots.push(...child.getRlmChildSnapshots());
+		}
+		return snapshots;
 	}
 
 	/** True when any direct or nested subagent is still running or queued. */
@@ -9621,6 +9772,77 @@ export class AgentSession {
 			}
 		}
 		return false;
+	}
+
+	private _rlmChildSessionSnapshot(): AgentSession[] {
+		const sessions = new Set<AgentSession>();
+		for (const [childId, session] of this._rlmChildSessions) {
+			if (!this._abandonedRlmQuiescenceChildIds.has(childId)) sessions.add(session);
+		}
+		for (const run of this._activeRlmChildRuns.values()) {
+			if (run.session && !run.abandonedForQuiescence) sessions.add(run.session);
+		}
+		return [...sessions];
+	}
+
+	private _hasUnsettledRlmQuiescenceWork(): boolean {
+		if (this._hasDeferredRlmTerminalNotices()) return true;
+		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
+		return this._rlmChildSessionSnapshot().some(
+			(child) => child.isSessionActive || child._hasUnsettledRlmQuiescenceWork(),
+		);
+	}
+
+	/**
+	 * Wait for every admitted descendant run to publish its terminal parent
+	 * message and for the resulting parent turns to drain. Re-snapshotting after
+	 * each drain includes descendants spawned while earlier results were consumed.
+	 */
+	async waitForRlmQuiescence(externalSignal?: AbortSignal): Promise<void> {
+		const cancellation = new AbortController();
+		const cancelFromParent = () => cancellation.abort();
+		if (externalSignal?.aborted) cancellation.abort();
+		else externalSignal?.addEventListener("abort", cancelFromParent, { once: true });
+		this._rlmQuiescenceWaitAborts.add(cancellation);
+		let rejectCancelled = (_error: Error) => {};
+		const cancelled = new Promise<never>((_resolve, reject) => {
+			rejectCancelled = reject;
+		});
+		const onCancelled = () => rejectCancelled(new Error("RLM quiescence wait cancelled"));
+		cancellation.signal.addEventListener("abort", onCancelled, { once: true });
+		if (cancellation.signal.aborted) onCancelled();
+		const wait = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, cancelled]);
+		try {
+			while (true) {
+				await wait(this.waitForHeadlessIdle());
+				// Strong RLM quiescence also owns session-level work (bash, refine,
+				// branch mutation, and manual compaction) that interactive waitForIdle
+				// intentionally ignores. Yield a macrotask while such work is active so
+				// recursive parent/child barriers cannot form a microtask busy-loop.
+				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices()) {
+					await wait(new Promise<void>((resolve) => setTimeout(resolve, 0)));
+					continue;
+				}
+				const unsettledRuns = [...this._unsettledRlmChildRuns].filter((run) => !run.settled);
+				const childSessions = this._rlmChildSessionSnapshot();
+				if (unsettledRuns.length === 0 && !this._hasUnsettledRlmQuiescenceWork()) return;
+				await wait(
+					Promise.all([
+						...unsettledRuns.map((run) => run.settlement.promise),
+						...childSessions.map((child) => child.waitForRlmQuiescence(cancellation.signal)),
+					]),
+				);
+				// Always loop through the self-active/deferred checks again. Work may
+				// start at the child-settlement boundary.
+			}
+		} finally {
+			// A local descendant error must cancel sibling recursive waits owned by
+			// this barrier before their propagation listeners are removed.
+			cancellation.abort();
+			externalSignal?.removeEventListener("abort", cancelFromParent);
+			cancellation.signal.removeEventListener("abort", onCancelled);
+			this._rlmQuiescenceWaitAborts.delete(cancellation);
+		}
 	}
 
 	// Inline (non-daemon) mode only; daemon clients attach to the child session directly.
@@ -9647,12 +9869,17 @@ export class AgentSession {
 	/**
 	 * Cancel a single RLM child run by id, searching nested child sessions.
 	 *
-	 * @returns true when a running or queued run was cancelled; false when the
-	 * id is unknown or the run already finished.
+	 * @returns true when a live run was cancelled or its unsettled terminal notice
+	 * was suppressed; false when the id is unknown or the run already settled.
 	 */
 	cancelRlmChildRun(childId: string, reason = "Cancelled by user"): boolean {
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run) {
+			if (run.status !== "running" && run.status !== "queued" && !run.settled) {
+				if (this._sessionInputPumpSuspended) this._abandonRlmRunForQuiescence(run);
+				else run.suppressTerminalNotice = true;
+				return true;
+			}
 			return this._cancelRlmChildRun(run, reason);
 		}
 		for (const candidate of this._activeRlmChildRuns.values()) {
@@ -9660,7 +9887,6 @@ export class AgentSession {
 				return true;
 			}
 		}
-		// A finished, retained child can still have a running nested subagent.
 		for (const retained of this._rlmChildSessions.values()) {
 			if (retained.cancelRlmChildRun(childId, reason)) {
 				return true;
@@ -9755,13 +9981,14 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, ...unsupported } = kwargs;
+		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
 		}
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
+		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -9780,6 +10007,14 @@ export class AgentSession {
 			modelSelection = await this._resolveRlmSubagentModel(requestedModel);
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
+		}
+		if (requestedThinkingLevel !== undefined) {
+			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
+			if (!supported.includes(requestedThinkingLevel)) {
+				throw new Error(
+					`Requested thinking level "${requestedThinkingLevel}" is not supported by model "${modelSelection.model.provider}/${modelSelection.model.id}"; supported levels: ${supported.join(", ")}`,
+				);
+			}
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
 
@@ -9801,15 +10036,19 @@ export class AgentSession {
 			prompt,
 			sessionName,
 			sessionDir: childSessionDir,
+			model: modelSelection.model,
 			status: "queued",
 			settled: false,
 			abort: noopRlmChildAbort,
 			publication: createAgentMessageDeferred(),
+			settlement: createAgentMessageDeferred(),
+			deletionReservation: createAgentMessageDeferred(),
 		};
 		const throwIfCancelled = () => {
 			if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 		};
 		this._activeRlmChildRuns.set(run.id, run);
+		this._unsettledRlmChildRuns.add(run);
 		const emitChildUpdate = () => {
 			const childModel = childSession?.model ?? modelSelection.model;
 			this._emit({
@@ -9842,6 +10081,9 @@ export class AgentSession {
 			run.session = child;
 			run.abort = () => void child.abort();
 			run.publication.resolve();
+			// Cancellation may have been admitted while runtime construction was
+			// blocked and run.abort was still a no-op.
+			if (run.status === "cancelled") run.abort();
 		};
 		const subagentOptions: CreateRlmSubagentRuntimeOptions = {
 			...this._createRlmSubagentRuntimeOptions({
@@ -9851,29 +10093,44 @@ export class AgentSession {
 				spawnCode,
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
+				thinkingLevel: requestedThinkingLevel,
 			}),
 			onSessionPublished: publishChildSession,
 		};
 
 		const deliverTerminalMessageToParent = async (message: CustomMessage): Promise<void> => {
-			const childController = childSession?._agentMessageController;
-			if (childController) {
-				try {
-					await childController.sendAgentMessage({
-						target: this.sessionId,
-						message: message.content as string,
-					});
-					return;
-				} catch {
-					// An unattributed notice beats silence, so fall through to the injected path.
-				}
+			// Synthesized lifecycle notices always use the parent's private durable
+			// path. Explicit child replies continue through agent_message separately.
+			await this._deferRlmTerminalNotice(message);
+		};
+
+		run.completeDeletion = () => {
+			if (!run.deletionNeedsCompletionNotice || run.suppressTerminalNotice || this._disposed || this._disposing) {
+				return Promise.resolve();
 			}
-			await this._promptInjectedMessage(message.content as string, message, {
-				streamingBehavior: "followUp",
-				queueIfBusy: true,
-				returnAfterAccepted: true,
-				suppressAutonomousContinuation: true,
-			}).catch(() => undefined);
+			if (run.deletionNotice) return run.deletionNotice;
+			const notice = deliverTerminalMessageToParent(
+				createRlmChildTerminalNoticeMessage({
+					kind: "cancelled",
+					childId: run.id,
+					sessionName,
+					reason: run.error ?? "Deleted by parent orchestrator",
+				}),
+			);
+			run.deletionNotice = notice;
+			return notice;
+		};
+
+		run.reportDeletionCleanupFailure = (error) => {
+			if (run.suppressTerminalNotice || this._disposed || this._disposing) return Promise.resolve();
+			const cleanupError = error instanceof Error ? error.message : String(error);
+			return deliverTerminalMessageToParent(
+				createRlmChildFailureMessage({
+					childId: run.id,
+					sessionName,
+					error: `Deletion cleanup failed; retry rlm.delete_subagent("${run.id}") before completion: ${cleanupError}`,
+				}),
+			);
 		};
 
 		// Runtime startup and the task run are deliberately detached. The public
@@ -9979,12 +10236,17 @@ export class AgentSession {
 					source: "extension",
 					customMessage: spawnMessage,
 				});
+				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
 				run.status = "done";
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
 				emitChildUpdate();
-				if (!run.detachedDeletion && child._parentReplyCount === parentReplyCountBeforeRun) {
+				if (
+					!run.detachedDeletion &&
+					!run.suppressTerminalNotice &&
+					child._parentReplyCount === parentReplyCountBeforeRun
+				) {
 					const lastAssistantText = child.getLastAssistantText();
 					await deliverTerminalMessageToParent(
 						createRlmChildTerminalNoticeMessage({
@@ -9995,7 +10257,7 @@ export class AgentSession {
 						}),
 					);
 				}
-				if (!this.registerRlmChildSession(run.id, child)) {
+				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
 						await this._subagentRuntimeHost
 							.releaseRlmSubagentRuntime(childRuntime, subagentOptions, "error")
@@ -10014,7 +10276,7 @@ export class AgentSession {
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
 				emitChildUpdate();
-				if (!run.detachedDeletion) {
+				if (!run.detachedDeletion && !run.suppressTerminalNotice) {
 					if (run.status === "error") {
 						await deliverTerminalMessageToParent(
 							createRlmChildFailureMessage({
@@ -10064,32 +10326,42 @@ export class AgentSession {
 					}
 				}
 			} finally {
-				if (run.detachedDeletion && childRuntime) {
-					try {
-						await this._deleteRlmSubagentSession(run.id, childRuntime.session);
-					} catch {
-						if (!this._disposed && !this._disposing) {
-							this._rlmChildSessions.set(run.id, childRuntime.session);
-							this._rlmChildCleanupFailures.set(run.id, run.detachedDeletion);
+				if (run.detachedDeletion) {
+					run.deletionRunFinished = true;
+					if (!run.settled) {
+						let cleanupSucceeded = !run.deletionCleanupFailed;
+						if (childRuntime && cleanupSucceeded) {
+							const cleanup =
+								run.deletionCleanup ?? this._ensureRlmRunDeletionCleanup(run, childRuntime.session);
+							cleanupSucceeded = await this._observeRlmRunDeletionCleanup(
+								run,
+								run.detachedDeletion,
+								childRuntime.session,
+								cleanup,
+							);
+						}
+						if (cleanupSucceeded) await this._finishRlmRunDeletion(run);
+					}
+				} else {
+					if (this._activeRlmChildRuns.get(run.id) === run) {
+						if (this._rlmChildSessions.has(run.id)) {
+							this._activeRlmChildRuns.delete(run.id);
+							if (run.unsubscribe) this._rlmChildUnsubscribes.set(run.id, run.unsubscribe);
+							run.abort = noopRlmChildAbort;
+							run.unsubscribe = undefined;
+							run.session = undefined;
+						} else if (run.status !== "error") {
+							this._removeRlmSubagentTracking(run.id, run);
+						} else {
+							run.unsubscribe?.();
+							run.abort = noopRlmChildAbort;
+							run.unsubscribe = undefined;
 						}
 					}
+					run.settled = true;
+					run.settlement.resolve();
+					this._unsettledRlmChildRuns.delete(run);
 				}
-				if (this._activeRlmChildRuns.get(run.id) === run) {
-					if (this._rlmChildSessions.has(run.id)) {
-						this._activeRlmChildRuns.delete(run.id);
-						if (run.unsubscribe) this._rlmChildUnsubscribes.set(run.id, run.unsubscribe);
-						run.abort = noopRlmChildAbort;
-						run.unsubscribe = undefined;
-						run.session = undefined;
-					} else if (run.status !== "error" || run.detachedDeletion) {
-						this._removeRlmSubagentTracking(run.id, run);
-					} else {
-						run.unsubscribe?.();
-						run.abort = noopRlmChildAbort;
-						run.unsubscribe = undefined;
-					}
-				}
-				run.settled = true;
 			}
 		})().catch(() => undefined);
 
@@ -10109,18 +10381,9 @@ export class AgentSession {
 		return this._startRlmChildRun(prompt, kwargs, spawnCode);
 	}
 
-	// =========================================================================
-	// Auto-Retry
-	// =========================================================================
-
-	/**
-	 * Check if an error is retryable (overloaded, rate limit, server errors).
-	 * Context overflow errors are NOT retryable (handled by compaction instead).
-	 */
 	private _isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
-		// Context overflow is handled by compaction, not retry
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
 
@@ -10285,10 +10548,6 @@ export class AgentSession {
 		this._retryAuthFailureSources = [];
 	}
 
-	/**
-	 * Handle retryable errors with exponential backoff.
-	 * @returns true if retry was initiated, false if max retries exceeded or disabled
-	 */
 	private async _handleRetryableError(
 		message: AssistantMessage,
 		options?: {
@@ -10304,8 +10563,6 @@ export class AgentSession {
 			return false;
 		}
 
-		// Retry promise is created synchronously in _handleAgentEvent for agent_end.
-		// Keep a defensive fallback here in case a future refactor bypasses that path.
 		if (!this._retryPromise) {
 			this._retryPromise = new Promise((resolve) => {
 				this._retryResolve = resolve;
@@ -10316,7 +10573,6 @@ export class AgentSession {
 
 		if (this._retryAttempt > settings.maxRetries) {
 			this._markProviderAuthStaleForRetryFailure(message, options);
-			// Max retries exceeded, emit final failure and reset
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
@@ -10339,18 +10595,15 @@ export class AgentSession {
 			errorMessage: message.errorMessage || "Unknown error",
 		});
 
-		// Remove error message from agent state (keep in session for history)
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 			this.agent.state.messages = messages.slice(0, -1);
 		}
 
-		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
 		try {
 			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {
-			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this._retryAttempt;
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._retryAttempt = 0;
@@ -10367,19 +10620,13 @@ export class AgentSession {
 		}
 		this._retryAbortController = undefined;
 
-		// Retry via continue() - use setTimeout to break out of event handler chain
 		setTimeout(() => {
-			this.agent.continue().catch(() => {
-				// Retry failed - will be caught by next agent_end
-			});
+			this.agent.continue().catch(() => {});
 		}, 0);
 
 		return true;
 	}
 
-	/**
-	 * Cancel in-progress retry.
-	 */
 	abortRetry(): void {
 		if (this._retryAbortController) {
 			this._retryAbortController.abort();
@@ -10400,10 +10647,6 @@ export class AgentSession {
 		this._resolveRetry();
 	}
 
-	/**
-	 * Wait for any in-progress retry to complete.
-	 * Returns immediately if no retry is in progress.
-	 */
 	private async waitForRetry(): Promise<void> {
 		if (!this._retryPromise) {
 			return;
@@ -10413,12 +10656,10 @@ export class AgentSession {
 		await this.agent.waitForIdle();
 	}
 
-	/** Whether auto-retry is currently in progress */
 	get isRetrying(): boolean {
 		return this._retryPromise !== undefined;
 	}
 
-	/** Whether an accepted prompt is still running or waiting for retry completion. */
 	get hasAcceptedPromptInFlight(): boolean {
 		return this._actionStore
 			.unfinishedActions()
@@ -10430,21 +10671,13 @@ export class AgentSession {
 			);
 	}
 
-	/** Whether auto-retry is enabled */
 	get autoRetryEnabled(): boolean {
 		return this.settingsManager.getRetryEnabled();
 	}
 
-	/**
-	 * Toggle auto-retry setting.
-	 */
 	setAutoRetryEnabled(enabled: boolean): void {
 		this.settingsManager.setRetryEnabled(enabled);
 	}
-
-	// =========================================================================
-	// Bash Execution
-	// =========================================================================
 
 	/**
 	 * Execute a bash command.
@@ -10465,7 +10698,6 @@ export class AgentSession {
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
-		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
@@ -10626,10 +10858,6 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Record a bash execution result in session history.
-	 * Used by executeBash and by extensions that handle bash execution themselves.
-	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
@@ -10645,13 +10873,10 @@ export class AgentSession {
 
 		// If agent is streaming, defer adding to avoid breaking tool_use/tool_result ordering
 		if (this.isStreaming) {
-			// Queue for later - will be flushed on agent_end
 			this._pendingBashMessages.push(bashMessage);
 		} else {
-			// Add to agent state immediately
 			this.agent.state.messages.push(bashMessage);
 
-			// Save to session
 			this.sessionManager.appendMessage(bashMessage);
 		}
 	}
@@ -10668,7 +10893,6 @@ export class AgentSession {
 		this._bashAbortController?.abort();
 	}
 
-	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
 		return this._bashAbortController !== undefined || this._userBashRunning;
 	}
@@ -10686,26 +10910,18 @@ export class AgentSession {
 		if (this._pendingBashMessages.length === 0) return;
 
 		for (const bashMessage of this._pendingBashMessages) {
-			// Add to agent state
 			this.agent.state.messages.push(bashMessage);
 
-			// Save to session
 			this.sessionManager.appendMessage(bashMessage);
 		}
 
 		this._pendingBashMessages = [];
 	}
 
-	// =========================================================================
-	// Session Management
-	// =========================================================================
-
-	/** Current RLM max-depth value and the source that supplied it. */
 	getRlmMaxDepthStatus(): RlmMaxDepthStatus {
 		return { maxDepth: this._rlmMaxDepth, source: this._rlmMaxDepthSource };
 	}
 
-	/** Persist and immediately apply a per-chat RLM max-depth override. */
 	async setRlmMaxDepth(maxDepth: number, options: { global?: boolean } = {}): Promise<SetRlmMaxDepthResult> {
 		if (!isNonNegativeInteger(maxDepth)) {
 			throw new Error("RLM max depth must be a non-negative integer.");
@@ -10738,7 +10954,6 @@ export class AgentSession {
 		};
 	}
 
-	/** Set a display name for the current session. */
 	setSessionName(name: string): void {
 		this.sessionManager.appendSessionInfo(name);
 		this._emit({
@@ -10746,10 +10961,6 @@ export class AgentSession {
 			name: this.sessionManager.getSessionName(),
 		});
 	}
-
-	// =========================================================================
-	// Tree Navigation
-	// =========================================================================
 
 	/**
 	 * Navigate to a different node in the session tree.
@@ -10805,7 +11016,6 @@ export class AgentSession {
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
 	}> {
-		// Model required for summarization
 		if (options.summarize && !this.model) {
 			throw new Error("No model available for summarization");
 		}
@@ -10857,14 +11067,12 @@ export class AgentSession {
 		// about to persist harness/session entries for the current branch.
 		await this._invalidatePendingAutoRefineForBranchChange();
 
-		// Collect entries to summarize (from old leaf to common ancestor)
 		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
 			this.sessionManager,
 			oldLeafId,
 			targetId,
 		);
 
-		// Prepare event data - mutable so extensions can override
 		let customInstructions = options.customInstructions;
 		let replaceInstructions = options.replaceInstructions;
 		let label = options.label;
@@ -10880,7 +11088,6 @@ export class AgentSession {
 			label,
 		};
 
-		// Set up abort controller for summarization
 		this._branchSummaryAbortController = new AbortController();
 		let resolveBranchSummaryOperation: () => void = () => {};
 		const branchSummaryOperation = new Promise<void>((resolve) => {
@@ -10892,7 +11099,6 @@ export class AgentSession {
 			let extensionSummary: { summary: string; details?: unknown } | undefined;
 			let fromExtension = false;
 
-			// Emit session_before_tree event
 			if (this._extensionRunner.hasHandlers("session_before_tree")) {
 				const result = (await this._extensionRunner.emit({
 					type: "session_before_tree",
@@ -10909,7 +11115,6 @@ export class AgentSession {
 					fromExtension = true;
 				}
 
-				// Allow extensions to override instructions and label
 				if (result?.customInstructions !== undefined) {
 					customInstructions = result.customInstructions;
 				}
@@ -10921,7 +11126,6 @@ export class AgentSession {
 				}
 			}
 
-			// Run default summarizer if needed
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
@@ -10953,16 +11157,13 @@ export class AgentSession {
 				summaryDetails = extensionSummary.details;
 			}
 
-			// Determine the new leaf position based on target type
 			let newLeafId: string | null;
 			let editorText: string | undefined;
 
 			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				// User message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
 				editorText = this._extractUserMessageText(targetEntry.message.content);
 			} else if (targetEntry.type === "custom_message") {
-				// Custom message: leaf = parent (null if root), text goes to editor
 				newLeafId = targetEntry.parentId;
 				editorText =
 					typeof targetEntry.content === "string"
@@ -10972,15 +11173,11 @@ export class AgentSession {
 								.map((c) => c.text)
 								.join("");
 			} else {
-				// Non-user message: leaf = selected node
 				newLeafId = targetId;
 			}
 
-			// Switch leaf (with or without summary)
-			// Summary is attached at the navigation target position (newLeafId), not the old branch
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
-				// Create summary at target position (can be null for root)
 				const summaryId = this.sessionManager.branchWithSummary(
 					newLeafId,
 					summaryText,
@@ -10989,24 +11186,19 @@ export class AgentSession {
 				);
 				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
 
-				// Attach label to the summary entry
 				if (label) {
 					this.sessionManager.appendLabelChange(summaryId, label);
 				}
 			} else if (newLeafId === null) {
-				// No summary, navigating to root - reset leaf
 				this.sessionManager.resetLeaf();
 			} else {
-				// No summary, navigating to non-root
 				this.sessionManager.branch(newLeafId);
 			}
 
-			// Attach label to target entry when not summarizing (no summary entry to label)
 			if (label && !summaryText) {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 			this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
@@ -11015,7 +11207,6 @@ export class AgentSession {
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
-			// Emit session_tree event
 			await this._extensionRunner.emit({
 				type: "session_tree",
 				newLeafId: this.sessionManager.getLeafId(),
@@ -11023,8 +11214,6 @@ export class AgentSession {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
-
-			// Emit to custom tools
 
 			return { editorText, cancelled: false, summaryEntry };
 		} finally {
@@ -11036,9 +11225,6 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Get all user messages from session for fork selector.
-	 */
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
 		const entries = this.sessionManager.getEntries();
 		const result: Array<{ entryId: string; text: string }> = [];
@@ -11067,9 +11253,6 @@ export class AgentSession {
 		return "";
 	}
 
-	/**
-	 * Get session statistics.
-	 */
 	getSessionStats(): SessionStats {
 		const state = this.state;
 		const userMessages = state.messages.filter((m) => m.role === "user").length;
@@ -11161,7 +11344,6 @@ export class AgentSession {
 		};
 	}
 
-	/** RLM session dir holding sub-* child sessions, without creating directories. */
 	private _rlmSessionDirForReading(): string | undefined {
 		return this._rlmSessionDir ?? this.sessionManager.getSessionArtifactDir();
 	}
@@ -11223,7 +11405,6 @@ export class AgentSession {
 	async exportToHtml(outputPath?: string): Promise<string> {
 		const themeName = this.settingsManager.getTheme();
 
-		// Create tool renderer if we have an extension runner (for custom tool HTML rendering)
 		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
 			getToolDefinition: (name) => this.getToolDefinition(name),
 			theme,
@@ -11273,10 +11454,6 @@ export class AgentSession {
 		return filePath;
 	}
 
-	// =========================================================================
-	// Utilities
-	// =========================================================================
-
 	/**
 	 * Get text content of last assistant message.
 	 * Useful for /copy command.
@@ -11320,16 +11497,10 @@ export class AgentSession {
 		return context;
 	}
 
-	/**
-	 * Check if extensions have handlers for a specific event type.
-	 */
 	hasExtensionHandlers(eventType: string): boolean {
 		return this._extensionRunner.hasHandlers(eventType);
 	}
 
-	/**
-	 * Get the extension runner (for setting UI context and error handlers).
-	 */
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
 	}

@@ -21,7 +21,6 @@ export function buildBaseOptions(model: Model<Api>, options?: SimpleStreamOption
 }
 
 export function clampReasoning(effort: ThinkingLevel | undefined): Exclude<ThinkingLevel, "xhigh" | "max"> | undefined {
-	// Token-budget providers have no distinct xhigh/max budget tier; clamp both to high.
 	return effort === "xhigh" || effort === "max" ? "high" : effort;
 }
 

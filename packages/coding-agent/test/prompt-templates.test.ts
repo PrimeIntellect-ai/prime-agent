@@ -335,9 +335,13 @@ describe("parseCommandArgs", () => {
 		}
 	});
 
-	test("should handle quoted empty string", () => {
-		// Note: Empty quotes are skipped by current implementation
-		expect(parseCommandArgs('"" " "')).toEqual([" "]);
+	test("should preserve explicitly quoted empty strings", () => {
+		// An intentionally quoted "" is an argument (e.g. /mcp add ... -- cmd "").
+		expect(parseCommandArgs('"" " "')).toEqual(["", " "]);
+	});
+
+	test("keeps a quoted empty stdio argv element in slash-command parsing", () => {
+		expect(parseCommandArgs('add local -- command ""')).toEqual(["add", "local", "--", "command", ""]);
 	});
 
 	test("should handle arguments with special characters", () => {

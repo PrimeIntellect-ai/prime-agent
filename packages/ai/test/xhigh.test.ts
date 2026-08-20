@@ -17,7 +17,6 @@ function makeContext(): Context {
 
 describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 	describe("codex-max (supports xhigh)", () => {
-		// Note: codex models only support the responses API, not chat completions
 		it("should work with openai-responses", async () => {
 			const model = getModel("openai", "gpt-5.1-codex-max");
 			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
@@ -42,7 +41,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
 
 			for await (const _ of s) {
-				// drain events
 			}
 
 			const response = await s.result();
@@ -60,7 +58,6 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
 
 			for await (const _ of s) {
-				// drain events
 			}
 
 			const response = await s.result();

@@ -80,6 +80,7 @@ function spawnSupervisor(
 	socketPath: string,
 	cwd: string,
 	extraArgs: readonly string[] = [],
+	extraEnv: NodeJS.ProcessEnv = {},
 ): ChildProcess {
 	daemonSockets.add(socketPath);
 	const child = spawn(
@@ -89,6 +90,7 @@ function spawnSupervisor(
 			cwd,
 			env: {
 				...process.env,
+				...extraEnv,
 				[ENV_AGENT_DIR]: agentDir,
 				PI_OFFLINE: "1",
 				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
@@ -286,6 +288,54 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("accepts the canonical socket path when launched with duplicate slashes", async () => {
+		if (process.platform === "win32") return;
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const socketPath = join(root, "daemon.sock");
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, `${root}//daemon.sock`, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const response = await client.request({ type: "list" });
+
+		expect(response.success).toBe(true);
+		expect(requireSessionList(response.success ? response.data : undefined)).toHaveLength(0);
+		await client.request({ type: "shutdown", force: true });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("creates top-level sessions at depth zero when the supervisor inherits a child depth", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-supervisor-depth-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], { RLM_DEPTH: "1" });
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.sessionFile) throw new Error("Worker did not expose its session identity");
+		workerPids.add(summary.workerPid);
+
+		expect(summary).toMatchObject({ runtimeKind: "top-level", rlmDepth: 0 });
+		expect(await readSessionInfo(summary.sessionFile)).toMatchObject({ rlmDepth: 0, parentSessionPath: undefined });
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("lists, creates, and attaches passive children through their owning worker", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");
@@ -718,9 +768,9 @@ describe("daemon supervisor resident workers", () => {
 		const replacementClient = await connectEventually(socketPath);
 		const listed = await replacementClient.request({ type: "list" });
 		expect(listed.success).toBe(true);
-		expect(readSupervisorConfig(agentDir)).toMatchObject({
-			defaultSessionConfig: { sessionDir, noTools: true },
-		});
+		const persistedConfig = readSupervisorConfig(agentDir);
+		expect(persistedConfig).toMatchObject({ defaultSessionConfig: { sessionDir } });
+		expect(persistedConfig.defaultSessionConfig).not.toHaveProperty("noTools");
 		await replacementClient.request({ type: "shutdown" });
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
@@ -1407,30 +1457,48 @@ describe("daemon supervisor resident workers", () => {
 			workerPids.delete(pid);
 		}
 
-		let recovered: SessionSummary | undefined;
+		let failed: SessionSummary | undefined;
 		const recoveryDeadline = Date.now() + 20_000;
 		while (Date.now() < recoveryDeadline) {
 			const response = await client.request({ type: "list" });
 			if (response.success) {
-				recovered = requireSessionList(response.data).find(
+				failed = requireSessionList(response.data).find(
 					(summary) =>
 						(summary.activeSessionId ?? summary.id) === (createdSummary.activeSessionId ?? createdSummary.id),
 				);
-				if (recovered?.workerState === "ready" && recovered.workerPid !== createdSummary.workerPid) {
-					break;
-				}
+				if (failed?.workerState === "failed") break;
 			}
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
 		}
-		expect(recovered).toMatchObject({ workerState: "ready", activeSessionId: createdSummary.activeSessionId });
-		if (!recovered?.workerPid) {
-			throw new Error("Recovered worker did not expose its pid");
-		}
-		workerPids.add(recovered.workerPid);
-		expect(readFileSync(sessionFile, "utf8")).toContain("prime-agent.worker_recovery");
-		await expect(connection.getState()).resolves.toMatchObject({ sessionId: createdSummary.sessionId });
-
+		expect(failed).toMatchObject({ workerState: "failed", activeSessionId: createdSummary.activeSessionId });
 		await connection.dispose();
+
+		const reopened = await client.request({
+			type: "create",
+			sessionPath: sessionFile,
+			continueRecent: false,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+			launchEnv: { PRIME_AGENT_TEST_FRESH_CONTEXT: "1" },
+		});
+		if (!reopened.success) throw new Error(reopened.error);
+		const recovered = requireSummary(reopened.data);
+		if (!recovered.workerPid) throw new Error("Recovered worker did not expose its pid");
+		workerPids.add(recovered.workerPid);
+		const recoveredConnection = await DaemonAgentConnection.attach(
+			client,
+			recovered.activeSessionId ?? recovered.id,
+			{ recoverDaemon: async () => {} },
+		);
+		const recoveredSnapshot = await recoveredConnection.getInitialSnapshot();
+		expect(recoveredSnapshot.messages).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ role: "user" }),
+				expect.objectContaining({ role: "assistant" }),
+			]),
+		);
+		await expect(recoveredConnection.getState()).resolves.toMatchObject({ sessionId: createdSummary.sessionId });
+
+		await recoveredConnection.dispose();
 		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);

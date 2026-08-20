@@ -1,8 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.4] - 2026-08-19
 
-- Changed the default RLM maximum recursion depth for new sessions from 1 to 2.
+- Fixed model searches ranking stronger matches ahead of weaker signed-in matches while preferring signed-in providers for equivalent results ([#539](https://github.com/PrimeIntellect-ai/prime-agent/pull/539) by [@eliebak](https://github.com/eliebak)).
+- Fixed large IPython variables repeatedly slowing later turns by excluding them from persistent snapshots and removing them when context is compacted.
+- Fixed daemon socket paths being used verbatim in identity derivations: on supported platforms, `--daemon-socket` spellings differing only by duplicate or trailing slashes now normalize to one canonical path, so worker-descriptor namespaces, daemon log files, and persisted descriptors agree.
+- Added a `thinking` option to `rlm.run` for spawning subagents with an explicit reasoning level; invalid levels for the resolved child model fail spawn.
+- Changed opening the agents view (full or scoped) with a draft prompt to auto-stash the draft instead of refusing; the draft is restored into the editor when the session is reopened.
+- Fixed Shift+Enter no longer inserting a newline in terminals that send a literal `\n` (for example a Ghostty `shift+enter=text:\n` mapping): the byte decoded as `ctrl+j` and triggered the new edit-diff toggle instead of the editor newline.
+- Removed a system prompt paragraph referring to an async `bash()` kernel helper and managed jobs that do not exist in the runtime.
+- Changed RLM guidance to orchestrate independent workers in parallel, use available async shell helpers safely, end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive outcome-focused progress updates from root agents, and use simplified technical English for user-facing prose.
+- Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
+- Fixed active goals stalling after a mid-goal automatic compaction when the previous continuation prompt was already running: only undelivered continuations deduplicate, so a fresh continuation is queued instead of being suppressed.
+
+## [0.7.3] - 2026-08-17
+
+- Fixed assistant rendering when provider payloads contain null or sparse content blocks.
+- Added authenticated host-request contracts with per-call request IDs, generation fencing, cancellation signals, and currentness checks.
+- Fixed root daemon shutdown retaining cleanup ownership while kill events are in flight.
+- Changed RLM family discovery to use a daemon-owned append-only spawn ledger with per-child display metadata instead of reconstructing topology from session files.
+- Fixed long-running macOS supervisors losing ownership when system cleanup removed authority records from `$TMPDIR`.
+- Fixed deleted RLM children leaking kernel snapshots while retaining their readable transcript tombstones.
+- Changed Agents View subagent rows to show stable `name · model/effort · summary` metadata.
+- Changed the default Cerebras model to the available `gpt-oss-120b` route and aligned cross-provider handoff fixtures with the generated catalog.
 - Fixed the agent going silent after an automatic context compaction interrupted unfinished work: the tool loop now resumes when a threshold compaction fails or is skipped, and active goals keep continuing after a successful mid-goal threshold compaction.
 - Changed the agents view splash hint from "type to start" to "type to search sessions".
 - Added `app.edits.expand` (`ctrl+j`) to toggle edit diffs; diffs are now shown only by this toggle, and `ctrl+o` no longer affects them.

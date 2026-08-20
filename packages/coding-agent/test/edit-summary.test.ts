@@ -149,7 +149,6 @@ describe("formatFileChangeSummaryLine", () => {
 		const expanded = formatFileChangeSummaryLine(path, undefined, change, true, width);
 		const collapsed = formatFileChangeSummaryLine(path, undefined, change, false, width);
 		expect(stripAnsi(expanded)).toContain("…");
-		// "to expand" vs "to collapse" differ in width; the path must not re-truncate.
 		expect(pathPart(expanded)).toBe(pathPart(collapsed));
 	});
 });

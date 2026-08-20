@@ -175,6 +175,7 @@ import {
 	type DaemonSocketIdentity,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
+	normalizeSocketPath,
 	prepareDaemonSocketPath,
 	restrictDaemonSocketPath,
 } from "./daemon-socket.js";
@@ -275,6 +276,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",
 	"get_commands",
@@ -285,6 +287,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"mutate_queued_message",
 	"clear_queue",
 	"abort_and_clear_queue",
+	"acquire_session_input_pause",
+	"release_session_input_pause",
 	"cron_list",
 	"heartbeats_list",
 	"heartbeat_manage",
@@ -442,25 +446,20 @@ class RuntimeOpenCancelledError extends Error {}
 class BoundSessionUnavailableError extends Error {}
 
 export async function runDaemonMode(options: DaemonModeOptions): Promise<never> {
-	const socketPath = options.socketPath ?? defaultDaemonSocketPath();
+	const socketPath = normalizeSocketPath(options.socketPath ?? defaultDaemonSocketPath());
 	const daemon = new AgentDaemon(socketPath, options);
 	await daemon.start();
 	return new Promise(() => {});
-}
-
-export function isTerminalRemoteAgentMessageError(error: unknown): error is Error {
-	return (
-		error instanceof Error &&
-		(error.message.startsWith("Unknown active session:") ||
-			error.message.startsWith("Ambiguous") ||
-			error.message === AGENT_FAMILY_REACH_ERROR)
-	);
 }
 
 export class AgentDaemon {
 	private server?: Server;
 	private shuttingDown = false;
 	private readonly updateRestartQueuePauses = new Map<string, { release(): void }>();
+	private readonly sessionInputPauses = new Map<
+		string,
+		{ activeSessionId: string; owner: DaemonSocketClient; leaseKey: string; pause: { release(): void } }
+	>();
 	private readonly mutationDrain = new MutationDrainLatch();
 	private updateRestart?: {
 		id: symbol;
@@ -663,8 +662,13 @@ export class AgentDaemon {
 		this.startSupervisorMonitor();
 	}
 
+	private supervisorSocketPathFromEnv(): string | undefined {
+		const raw = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		return raw ? normalizeSocketPath(raw) : undefined;
+	}
+
 	private startSupervisorMonitor(): void {
-		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 		if (!this.options.worker || !supervisorSocketPath) {
 			return;
 		}
@@ -3341,12 +3345,17 @@ export class AgentDaemon {
 			socket.off("close", cleanup);
 			socket.off("error", cleanup);
 			this.clearClientCatchupRetry(client);
+			for (const [pauseId, entry] of this.sessionInputPauses) {
+				if (entry.owner !== client) continue;
+				entry.pause.release();
+				this.sessionInputPauses.delete(pauseId);
+			}
 			this.detachClient(client);
 			client.detachInput();
 			this.clients.delete(client);
 			const wasAuthenticated = client.authenticated === true;
 			this.revokeSupervisorClaim(client);
-			const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 			if (this.options.worker && wasAuthenticated && supervisorSocketPath) {
 				this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 100);
 			}
@@ -3944,8 +3953,18 @@ export class AgentDaemon {
 			case "detach": {
 				if (command.activeSessionId) {
 					const state = this.getSessionState(command.activeSessionId);
+					for (const [pauseId, entry] of this.sessionInputPauses) {
+						if (entry.owner !== client || entry.activeSessionId !== command.activeSessionId) continue;
+						entry.pause.release();
+						this.sessionInputPauses.delete(pauseId);
+					}
 					this.detachClientFromSession(client, state);
 				} else {
+					for (const [pauseId, entry] of this.sessionInputPauses) {
+						if (entry.owner !== client) continue;
+						entry.pause.release();
+						this.sessionInputPauses.delete(pauseId);
+					}
 					this.detachClient(client);
 				}
 				return success(command.id, "detach");
@@ -4040,6 +4059,7 @@ export class AgentDaemon {
 					});
 				}
 				if (admission.status === "owned") {
+					if (command.cancelOwned) admission.controller?.abort();
 					return success(command.id, command.type, {
 						status: "owned" as const,
 					});
@@ -4389,6 +4409,38 @@ export class AgentDaemon {
 				});
 			}
 
+			case "acquire_session_input_pause": {
+				const existing = [...this.sessionInputPauses].find(
+					([, entry]) =>
+						entry.owner === client &&
+						entry.activeSessionId === command.activeSessionId &&
+						entry.leaseKey === command.leaseKey,
+				);
+				if (existing) {
+					return success(command.id, "acquire_session_input_pause", { pauseId: existing[0] });
+				}
+				const state = this.getSessionState(command.activeSessionId);
+				const pauseId = randomUUID();
+				this.sessionInputPauses.set(pauseId, {
+					activeSessionId: command.activeSessionId,
+					owner: client,
+					leaseKey: command.leaseKey,
+					pause: state.runtime.session.acquireSessionInputPause(),
+				});
+				return success(command.id, "acquire_session_input_pause", { pauseId });
+			}
+
+			case "release_session_input_pause": {
+				const entry = this.sessionInputPauses.get(command.pauseId);
+				if (!entry) return success(command.id, "release_session_input_pause");
+				if (entry.owner !== client || entry.activeSessionId !== command.activeSessionId) {
+					throw new Error(`Session input pause is owned by another client: ${command.pauseId}`);
+				}
+				this.sessionInputPauses.delete(command.pauseId);
+				entry.pause.release();
+				return success(command.id, "release_session_input_pause");
+			}
+
 			case "wait_for_idle": {
 				const state = this.getSessionState(command.activeSessionId);
 				await state.runtime.session.waitForIdle();
@@ -4400,7 +4452,9 @@ export class AgentDaemon {
 				return success(
 					command.id,
 					"wait_for_headless_completion",
-					await waitForHeadlessCompletion(state.runtime.session),
+					await waitForHeadlessCompletion(state.runtime.session, {
+						waitForRlmQuiescence: command.waitForRlmQuiescence,
+					}),
 				);
 			}
 
@@ -4425,6 +4479,14 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_messages", {
 					messages: state.runtime.session.messages,
+				});
+			}
+
+			case "get_rlm_children": {
+				const state = this.getSessionState(command.activeSessionId);
+				return success(command.id, "get_rlm_children", {
+					children: state.runtime.session.getRlmChildSnapshots(),
+					eventSequence: state.lastEventSequence,
 				});
 			}
 
@@ -4935,7 +4997,7 @@ export class AgentDaemon {
 				sequence: state.lastEventSequence,
 			},
 			...(parent ? { parent } : {}),
-			...(children.length > 0 ? { children } : {}),
+			children,
 		};
 	}
 
@@ -5404,7 +5466,7 @@ export class AgentDaemon {
 	}
 
 	private async setStateSessionNameViaSupervisor(state: ActiveSessionState, name: string): Promise<void> {
-		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 		if (!this.options.worker || !supervisorSocketPath) {
 			return this.setStateSessionName(state, name);
 		}
@@ -5755,7 +5817,7 @@ export class AgentDaemon {
 		targetSelector: string,
 		message: string,
 	): Promise<AgentSessionMessageReceipt> {
-		const supervisorSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 		if (!supervisorSocketPath) {
 			throw new Error(`Unknown active session: ${targetSelector}`);
 		}
@@ -5874,6 +5936,7 @@ export class AgentDaemon {
 			type: "session_detached",
 			activeSessionId: state.activeSessionId,
 		});
+		// Discard an abandoned empty draft rather than retaining an empty session file.
 		// Abandoned new-chat: discard it so it doesn't linger in memory or leave an
 		// empty file. Replaces the old DeferredAgentConnection.
 		if (this.isDiscardableDraft(state)) {

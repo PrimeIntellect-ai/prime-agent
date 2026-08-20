@@ -35,9 +35,7 @@ export interface AgentSessionRuntimeConfig {
 	 * so it survives the appMode="daemon" context switch.
 	 */
 	serializedRefine?: boolean;
-	/** User-facing client mode that created this session. The daemon is transport, not an execution mode. */
 	executionMode?: AgentExecutionMode;
-	/** Opt-out-only policy carried across daemon process boundaries. */
 	telemetryDisabled?: true;
 	/**
 	 * Initial goal to seed when creating a new top-level session (rlmDepth 0).
@@ -45,6 +43,21 @@ export interface AgentSessionRuntimeConfig {
 	 * thread_goal_state entry (idempotent restart/rehydration).
 	 */
 	initialGoal?: { objective: string; tokenBudget?: number };
+}
+
+export type DurableAgentSessionRuntimeConfig = Pick<
+	AgentSessionRuntimeConfig,
+	"cwd" | "agentDir" | "sessionDir" | "telemetryDisabled"
+>;
+
+/** Only non-secret host settings needed to locate and govern durable daemon state. */
+export function durableAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): DurableAgentSessionRuntimeConfig {
+	return {
+		...(typeof config.cwd === "string" ? { cwd: config.cwd } : {}),
+		...(typeof config.agentDir === "string" ? { agentDir: config.agentDir } : {}),
+		...(typeof config.sessionDir === "string" ? { sessionDir: config.sessionDir } : {}),
+		...(config.telemetryDisabled === true ? { telemetryDisabled: true as const } : {}),
+	};
 }
 
 export function mergeAgentSessionRuntimeConfig(

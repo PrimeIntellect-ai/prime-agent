@@ -196,14 +196,89 @@ describe("compaction continuation", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
+	it("headless idle includes a successful post-compaction continuation", async () => {
+		const bigTool = {
+			name: "big",
+			label: "big",
+			description: "returns big text",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "x".repeat(40_000) }],
+				details: {},
+			}),
+		};
+		const harness = await createHarness({
+			tools: [bigTool],
+			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 6_000 }],
+			persistSession: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "auto compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("big", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("final answer after successful compaction"),
+		]);
+
+		await harness.session.prompt("run the tool then summarize");
+		await harness.session.waitForHeadlessIdle();
+
+		expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.session.getLastAssistantText()).toBe("final answer after successful compaction");
+	});
+
+	it("rejects headless idle waiters when a continuation cannot start", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
+
+		sessionInternals._schedulePostCompactionContinue();
+		const idle = harness.session.waitForHeadlessIdle();
+		const rejectedIdle = expect(idle).rejects.toThrow("continuation failed");
+		await vi.advanceTimersByTimeAsync(100);
+
+		await rejectedIdle;
+	});
+
+	it("does not expose a failed continuation to later headless idle waiters", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
+
+		sessionInternals._schedulePostCompactionContinue();
+		await vi.advanceTimersByTimeAsync(100);
+
+		await expect(harness.session.waitForHeadlessIdle()).resolves.toBeUndefined();
+	});
+
 	// BUG B (end-to-end): unlike the tests above, the threshold compaction here SUCCEEDS.
 	it("e2e: an active goal keeps continuing after a successful threshold compaction", async () => {
 		const sessionRef: { current?: AgentSession } = {};
 		const harness = await createHarness({
 			tools: [createFauxIpythonTool(sessionRef)],
-			// Small window; faux usage grows per turn, so a later goal-continuation turn crosses the threshold.
-			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 4_300 }],
+			// Let a running goal continuation cross the threshold while remaining well below overflow.
+			settings: { compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 10_000 }],
 			persistSession: true,
 			extensionFactories: [
 				(pi) => {
@@ -230,14 +305,17 @@ describe("compaction continuation", () => {
 		]);
 
 		await harness.session.prompt("/goal finish the task");
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		await harness.session.waitForIdle();
-		await new Promise((resolve) => setTimeout(resolve, 300));
-
-		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toContain("threshold");
-		expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
-		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.session.goalState.status).toBe("complete");
+		await vi.waitFor(
+			() => {
+				const compactionReasons = harness.eventsOfType("compaction_start").map((event) => event.reason);
+				expect(compactionReasons).toContain("threshold");
+				expect(compactionReasons).not.toContain("overflow");
+				expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
+				expect(harness.getPendingResponseCount()).toBe(0);
+				expect(harness.session.goalState.status).toBe("complete");
+			},
+			{ timeout: 5_000 },
+		);
 	});
 
 	// With both drivers active the goal continuation takes exclusive priority, matching _getContinuationMessages.
