@@ -6020,7 +6020,15 @@ export class AgentSession {
 					true,
 				);
 			} catch {
-				// Surfacing the command failure matters more than persisting its row.
+				// The result row is also the command-correlated UI settle edge.
+				const message = createSessionSlashCommandResultMessage(`Command failed: ${commandError.message}`, {
+					command: input.command,
+					success: false,
+					severity: "error",
+					error: commandError.message,
+				});
+				this._emit({ type: "message_start", message });
+				this._emit({ type: "message_end", message });
 			}
 			throw commandError;
 		}

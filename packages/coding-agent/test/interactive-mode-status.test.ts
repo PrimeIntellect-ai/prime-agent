@@ -5253,7 +5253,7 @@ test("syncWorkingLoader remounts a refine loader that a compaction cleared", () 
 	expect(statusContainer.children.length).toBe(1);
 });
 
-test("an agent refinement completing does not settle a queued user /refine loader", async () => {
+test("only the queued user /refine settlement stops its loader", async () => {
 	initTheme("dark");
 	const statusContainer = new Container();
 	const fakeThis = {
@@ -5263,6 +5263,7 @@ test("an agent refinement completing does not settle a queued user /refine loade
 		stopWorkingLoader: vi.fn(),
 		syncWorkingLoader: vi.fn(),
 		addMessageToChat: vi.fn(),
+		showError: vi.fn(),
 		isInitialized: true,
 		footer: { invalidate: vi.fn() },
 		updateConnectionStateFromEvent: vi.fn(),
@@ -5285,6 +5286,8 @@ test("an agent refinement completing does not settle a queued user /refine loade
 
 	// The waited-on agent/auto refinement settles first; the user /refine is still running.
 	await prototype.handleEvent.call(fakeThis, { type: "refine_complete", result: {} });
+	expect(statusContainer.children.length).toBe(1);
+	await prototype.handleEvent.call(fakeThis, { type: "refine_failed", error: "background failure" });
 	expect(statusContainer.children.length).toBe(1);
 
 	await prototype.handleEvent.call(fakeThis, {

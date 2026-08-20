@@ -2591,6 +2591,39 @@ describe("AgentSession queue characterization", () => {
 		expect(errorRow).toMatchObject({ content: "Command failed: planner unavailable" });
 	});
 
+	it("emits an unpersisted /refine result when error-row persistence fails", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one")]);
+		await harness.session.prompt("one");
+		vi.spyOn(harness.session, "refine").mockRejectedValue(new Error("planner unavailable"));
+
+		const append = harness.sessionManager.appendCustomMessageEntryWithRollback.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementation((...args) => {
+			if (args[0] === "session_slash_command_result") throw new Error("disk full");
+			return append(...args);
+		});
+		const resultMessages: string[] = [];
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_start" &&
+				event.message.role === "custom" &&
+				event.message.customType === "session_slash_command_result" &&
+				typeof event.message.content === "string"
+			) {
+				resultMessages.push(event.message.content);
+			}
+		});
+
+		await harness.session.prompt("/refine --local").catch(() => undefined);
+		expect(resultMessages).toEqual(["Command failed: planner unavailable"]);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom_message" && entry.customType === "session_slash_command_result"),
+		).toBe(false);
+	});
+
 	it("allows a /compact extension hook to navigate without deadlocking on the commit fence", async () => {
 		let targetId: string | undefined;
 		let navigateFromContext: ((target: string) => Promise<{ cancelled: boolean }>) | undefined;

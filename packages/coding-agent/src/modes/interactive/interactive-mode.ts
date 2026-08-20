@@ -5707,7 +5707,7 @@ export class InteractiveMode {
 				break;
 
 			case "refine_failed":
-				this.stopRefineLoader();
+				// This event has no request identity; the matching command result settles its loader.
 				this.showError(`Refinement failed: ${event.error}`);
 				break;
 
