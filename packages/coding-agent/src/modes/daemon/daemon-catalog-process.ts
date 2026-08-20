@@ -396,6 +396,7 @@ export class DaemonCatalogClient {
 			cwd: process.cwd(),
 			env: createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" }),
 			stdio: ["ignore", "ignore", "ignore", "ipc"],
+			windowsHide: process.platform === "win32",
 		});
 		this.child = child;
 		child.on("message", (value: unknown) => this.handleMessage(value));

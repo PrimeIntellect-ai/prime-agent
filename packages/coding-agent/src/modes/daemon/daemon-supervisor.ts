@@ -2131,6 +2131,7 @@ export class DaemonSupervisor {
 				[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
 			}),
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
+			windowsHide: process.platform === "win32",
 		});
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
@@ -4864,6 +4865,7 @@ export class DaemonSupervisor {
 				detached: true,
 				env: environment,
 				stdio: "ignore",
+				windowsHide: process.platform === "win32",
 			});
 			replacement.unref();
 		}

@@ -100,7 +100,11 @@ const TOOLS: Record<string, ToolConfig> = {
 // Check that a command both launches and reports a successful version.
 function commandWorks(cmd: string): boolean {
 	try {
-		const result = spawnSync(cmd, ["--version"], { stdio: "pipe", timeout: COMMAND_TIMEOUT_MS });
+		const result = spawnSync(cmd, ["--version"], {
+			stdio: "pipe",
+			timeout: COMMAND_TIMEOUT_MS,
+			windowsHide: process.platform === "win32",
+		});
 		return !result.error && result.status === 0;
 	} catch {
 		return false;
