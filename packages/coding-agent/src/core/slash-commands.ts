@@ -141,7 +141,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "mcp",
 		description: "Open MCP Connections or manage MCP integrations",
-		argumentHint: "[list|login <name>|logout <name>]",
+		argumentHint: "[add|list|get|remove|login|logout]",
 		takesArgument: true,
 	},
 	{

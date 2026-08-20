@@ -104,28 +104,23 @@ You, yourself, are often running into a tmux session, so be careful when killing
 
 ## Changelog
 
-Location: `packages/*/CHANGELOG.md` (each package has its own)
+Location: `packages/<pkg>/.changes/<slug>.md` (one fragment file per PR per touched package)
 
 ### Format
 
-A flat list of plain bullets under `## [Unreleased]`. No `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections — just one bullet per change, written as a short sentence starting with a past-tense verb (Added, Changed, Fixed, Removed). Keep each bullet to one line; describe the user-visible change, not the implementation.
+Do NOT edit `packages/*/CHANGELOG.md` directly. Instead, add a fragment file `packages/<pkg>/.changes/<slug>.md` (slug = kebab-case, branch- or ticket-derived, e.g. `eng-1234-fix-resize.md`) containing exactly the bullet line(s) for the change. Bullets are plain `- ...` lines with no `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections — one bullet per change, written as a short sentence starting with a past-tense verb (Added, Changed, Fixed, Removed). Keep each bullet to one line; describe the user-visible change, not the implementation. The release script folds fragments into the release section of CHANGELOG.md and deletes them.
 
-Example of a well-formed `[Unreleased]` section:
+Example fragment (`packages/coding-agent/.changes/eng-1234-effort-command.md`):
 
 ```markdown
-## [Unreleased]
-
 - Added `/effort` to set the reasoning level, with autocomplete for the levels the current model supports.
-- Changed `prime-agent` to open a new chat by default instead of resuming the previous session.
-- Fixed onboarding showing no models after entering a provider key.
-- Removed the interactive `!` / `!!` bash shortcuts; use IPython instead.
 ```
 
 ### Rules
 
-- Read the full `[Unreleased]` section first so you don't duplicate an existing bullet
-- New entries ALWAYS go under `## [Unreleased]`
-- NEVER modify already-released version sections (e.g., `## [0.2.1]`) — each is immutable once released
+- One fragment file per PR per touched package; a fragment may contain multiple bullets
+- NEVER modify already-released version sections in CHANGELOG.md (e.g., `## [0.2.1]`) — each is immutable once released
+- Purely internal changes may opt out via the `no-changelog` PR label
 
 ### Attribution
 
@@ -183,7 +178,7 @@ Create provider file exporting:
 ### 7. Documentation
 
 - `packages/ai/README.md`: Add to providers table, document options/auth, add env vars
-- `packages/ai/CHANGELOG.md`: Add entry under `## [Unreleased]`
+- `packages/ai/.changes/<slug>.md`: Add a changelog fragment (see Changelog above)
 
 ## Releasing
 
@@ -196,7 +191,7 @@ Create provider file exporting:
 
 ### Steps
 
-1. **Update CHANGELOGs**: Ensure all changes since last release are documented in the `[Unreleased]` section of each affected package's CHANGELOG.md
+1. **Check fragments**: Ensure all changes since last release have fragment files in `packages/<pkg>/.changes/`
 
 2. **Run release script**:
    ```bash
@@ -204,7 +199,7 @@ Create provider file exporting:
    npm run release:minor    # API breaking changes
    ```
 
-The script handles: version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+The script handles: version bump, folding `.changes/` fragments into the release section, commit, tag, and publish.
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 
@@ -239,7 +234,7 @@ git status
 
 # 2. Add ONLY your specific files
 git add packages/ai/src/providers/transform-messages.ts
-git add packages/ai/CHANGELOG.md
+git add packages/ai/.changes/eng-1234-fix-resize.md
 
 # 3. Commit
 git commit -m "fix(ai): description"

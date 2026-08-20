@@ -1,13 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-- Fixed the queued-message browse controls (Option+Up) rendering in the same style as typed prompt text inside the input box; the header is now dimmed like other hints so it cannot be mistaken for part of the prompt.
-- Fixed credentials configured as env var names resolving to the literal variable name when the variable is set but empty; an empty env var now reports a missing credential ([#1468](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1468)).
-- Fixed ACP rejecting an immediate follow-up prompt when injected work restarted the session; follow-ups now queue behind in-flight work, and cancellation drops queued follow-ups before they start.
-- Added correlated ACP terminal-quiescence metadata, resident session settlement, and fail-closed daemon input fencing; prevented recovery state from persisting runtime credentials or model configuration.
-- Fixed explicit RLM child deletion leaving hidden unsettled work after runtime teardown, including reporting cleanup failures and notifying the parent when deletion completes.
-
 ## [0.7.4] - 2026-08-19
 
 - Fixed model searches ranking stronger matches ahead of weaker signed-in matches while preferring signed-in providers for equivalent results ([#539](https://github.com/PrimeIntellect-ai/prime-agent/pull/539) by [@eliebak](https://github.com/eliebak)).

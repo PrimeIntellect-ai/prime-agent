@@ -23,6 +23,7 @@ import { emptyGoalState, type GoalState } from "../src/core/goals.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import { emptyUsage } from "../src/core/usage.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
@@ -965,9 +966,15 @@ describe("InteractiveMode submit handling", () => {
 describe("InteractiveMode MCP command", () => {
 	type McpCommandHarness = {
 		modelRegistry: { authStorage: { get(providerId: string): unknown } };
-		settingsManager: { getMcpServers(): Record<string, unknown> };
+		settingsManager: SettingsManager;
 		showConfigurationMenu(tab: "mcp-connections"): Promise<void>;
 		showStatus(message: string): void;
+		showError(message: string): void;
+		showWarning(message: string): void;
+		handleReloadCommand(): Promise<boolean>;
+		reloadAfterMcpChange(message: string, successMessage?: string): Promise<void>;
+		isAgentStreaming(): boolean;
+		isAgentCompacting(): boolean;
 		handleMcpCommand(args: string | undefined): Promise<void>;
 	};
 	const handleMcpCommand = (InteractiveMode.prototype as unknown as McpCommandHarness).handleMcpCommand;
@@ -985,15 +992,110 @@ describe("InteractiveMode MCP command", () => {
 	test("preserves the explicit /mcp list status output", async () => {
 		const fakeThis = {
 			modelRegistry: { authStorage: { get: vi.fn(() => undefined) } },
-			settingsManager: { getMcpServers: vi.fn(() => ({})) },
+			settingsManager: SettingsManager.inMemory({}),
 			showConfigurationMenu: vi.fn(async () => {}),
 			showStatus: vi.fn(),
+			showError: vi.fn(),
 		} as unknown as McpCommandHarness;
 
 		await handleMcpCommand.call(fakeThis, "list");
 
 		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
-		expect(fakeThis.showStatus).toHaveBeenCalledWith(expect.stringContaining("MCP integrations:"));
+		expect(fakeThis.showStatus).toHaveBeenCalledWith(expect.stringContaining("Built-in MCP integrations:"));
+	});
+
+	function createRenderedMcpHarness(manager: SettingsManager) {
+		const chatContainer = new Container();
+		const ui = { requestRender: vi.fn() };
+		const showStatus = (InteractiveMode.prototype as unknown as { showStatus(message: string): void }).showStatus;
+		return {
+			modelRegistry: { authStorage: { get: vi.fn(() => undefined), removeVerified: vi.fn() } },
+			settingsManager: manager,
+			chatContainer,
+			ui,
+			showStatus,
+			showError: InteractiveMode.prototype.showError,
+			showWarning: InteractiveMode.prototype.showWarning,
+			reloadAfterMcpChange: (
+				InteractiveMode.prototype as unknown as {
+					reloadAfterMcpChange(message: string, successMessage?: string): Promise<void>;
+				}
+			).reloadAfterMcpChange,
+			isAgentStreaming: vi.fn(() => false),
+			isAgentCompacting: vi.fn(() => false),
+		} as unknown as McpCommandHarness & { chatContainer: Container };
+	}
+
+	test("renders safe add and remove confirmations after resource reload", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = createRenderedMcpHarness(manager);
+		fakeThis.handleReloadCommand = vi.fn(async () => {
+			fakeThis.chatContainer.clear();
+			return true;
+		});
+
+		await handleMcpCommand.call(fakeThis, "add fetch -- uvx mcp-server-fetch --token secret");
+
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
+			'Added MCP server "fetch" (stdio). Available next turn through mcp.',
+		);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).not.toContain("uvx");
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).not.toContain("secret");
+
+		await handleMcpCommand.call(fakeThis, "remove fetch");
+
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
+			'Removed MCP server "fetch" (stdio). It is no longer available through mcp.',
+		);
+		expect(manager.getGlobalMcpServers()).toEqual({});
+	});
+
+	test("keeps persisted mutation honest when MCP reload fails", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = createRenderedMcpHarness(manager);
+		fakeThis.handleReloadCommand = vi.fn(async () => {
+			fakeThis.chatContainer.clear();
+			fakeThis.showError("Reload failed: broken resource");
+			return false;
+		});
+
+		await handleMcpCommand.call(fakeThis, "add fetch -- uvx mcp-server-fetch");
+
+		const rendered = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(rendered).toContain("Reload failed: broken resource");
+		expect(rendered).toContain("change remains saved");
+		expect(rendered).toContain("not active in this session");
+		expect(rendered).not.toContain("Available next turn through mcp");
+		expect(manager.getGlobalMcpServers()).toHaveProperty("fetch");
+	});
+
+	test("renders inspectable redacted list and get output", async () => {
+		const manager = SettingsManager.inMemory({
+			mcpServers: {
+				fetch: {
+					type: "stdio",
+					command: "secret-command",
+					args: ["secret-argument"],
+					env: { TOKEN: { env: "SECRET_TOKEN" } },
+				},
+			},
+		});
+		const fakeThis = createRenderedMcpHarness(manager);
+
+		await handleMcpCommand.call(fakeThis, "list");
+		const listOutput = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(listOutput).toContain("User-configured MCP servers:");
+		expect(listOutput).toContain("fetch: stdio");
+
+		fakeThis.chatContainer.clear();
+		await handleMcpCommand.call(fakeThis, "get fetch");
+		const getOutput = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(getOutput).toContain("fetch: stdio");
+		for (const output of [listOutput, getOutput]) {
+			expect(output).not.toContain("secret-command");
+			expect(output).not.toContain("secret-argument");
+			expect(output).not.toContain("SECRET_TOKEN");
+		}
 	});
 });
 
