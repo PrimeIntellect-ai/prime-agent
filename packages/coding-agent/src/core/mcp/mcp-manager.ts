@@ -125,7 +125,12 @@ export class McpManager {
 			return true;
 		}
 		const cred = this.authStorage.get(this.providerId(integration.server));
-		return cred !== undefined;
+		if (cred === undefined) return false;
+		// Builtin URLs are code-constant; only user-declared endpoints can be retargeted, so only their
+		// tokens must prove where they belong. Mismatched or unbound tokens require re-login.
+		if (!integration.userDeclared) return true;
+		const endpoint = (cred as { endpoint?: string }).endpoint;
+		return typeof endpoint === "string" && endpoint === integration.config.url;
 	}
 
 	/** `-<server>/SKILL.md` overrides for every built-in integration the user isn't logged into. */

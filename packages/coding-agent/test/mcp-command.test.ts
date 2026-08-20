@@ -89,37 +89,42 @@ describe("MCP management commands", () => {
 		expect(manager.getProjectSettings().mcpServers).toBeUndefined();
 	});
 
-	it("drops stored mcp:<name> credentials on remove and on --force replace", async () => {
+	it("drops stored mcp:<name> credentials on every add and on remove", async () => {
 		const manager = SettingsManager.inMemory({});
 		const dropped: string[] = [];
-		const creds = new Set(["mcp:remote"]);
 		const authStorage = {
-			has: (provider: string) => creds.has(provider),
-			logout: (provider: string) => {
-				creds.delete(provider);
-				dropped.push(provider);
-			},
+			removeVerified: (provider: string) => dropped.push(provider),
 		};
 		await runMcpManagementCommand(
 			["add", "remote", "--url", "https://one.example/mcp", "--oauth"],
 			manager,
 			authStorage,
 		);
-		// A brand-new add never touches credentials.
-		expect(dropped).toEqual([]);
-		// Replacing the entry may change the endpoint; the old token must not replay.
+		expect(dropped).toEqual(["mcp:remote"]);
 		await runMcpManagementCommand(
 			["add", "remote", "--url", "https://two.example/mcp", "--oauth", "--force"],
 			manager,
 			authStorage,
 		);
-		expect(dropped).toEqual(["mcp:remote"]);
-		creds.add("mcp:remote");
-		await runMcpManagementCommand(["remove", "remote"], manager, authStorage);
 		expect(dropped).toEqual(["mcp:remote", "mcp:remote"]);
+		await runMcpManagementCommand(["remove", "remote"], manager, authStorage);
+		expect(dropped).toEqual(["mcp:remote", "mcp:remote", "mcp:remote"]);
 		// Without an auth store the same flows still succeed.
 		await runMcpManagementCommand(["add", "remote", "--url", "https://three.example/mcp"], manager);
 		await runMcpManagementCommand(["remove", "remote"], manager);
+	});
+
+	it("aborts an add when the credential drop fails, leaving settings untouched", async () => {
+		const manager = SettingsManager.inMemory({});
+		const authStorage = {
+			removeVerified: () => {
+				throw new Error("auth.json write failed");
+			},
+		};
+		await expect(
+			runMcpManagementCommand(["add", "remote", "--url", "https://two.example/mcp"], manager, authStorage),
+		).rejects.toThrow('Could not remove stored credentials for "remote"');
+		expect(manager.getGlobalMcpServers()?.remote).toBeUndefined();
 	});
 
 	it("keeps the built-in integration login when removing a catalog-named shadow entry", async () => {
@@ -128,8 +133,7 @@ describe("MCP management commands", () => {
 		manager.setGlobalMcpServer("linear", { type: "http", url: "https://shadow.example/mcp" });
 		const dropped: string[] = [];
 		const authStorage = {
-			has: () => true,
-			logout: (provider: string) => dropped.push(provider),
+			removeVerified: (provider: string) => dropped.push(provider),
 		};
 		await runMcpManagementCommand(["remove", "linear"], manager, authStorage);
 		// mcp:linear stores the authored Linear login, not a generic-server token.
