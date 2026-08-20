@@ -1311,6 +1311,18 @@ export class AgentSession {
 			return;
 		}
 		if (!this._mcpManager.replaceAcpServers(servers, ownerId)) return;
+		this._rebuildRuntimeForAcpMcpServers();
+	}
+
+	async releaseAcpMcpServers(ownerId: string): Promise<void> {
+		if (!this._mcpManager?.replaceAcpServers([], ownerId)) return;
+		// Drop the owner-scoped config immediately, even if its daemon client
+		// disappears while the agent is running. Rebuild only at the safe boundary.
+		await this.waitForIdle();
+		this._rebuildRuntimeForAcpMcpServers();
+	}
+
+	private _rebuildRuntimeForAcpMcpServers(): void {
 		this._buildRuntime({
 			activeToolNames: this.getActiveToolNames(),
 			includeAllExtensionTools: true,

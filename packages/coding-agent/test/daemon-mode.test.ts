@@ -182,6 +182,63 @@ describe("daemon mode helpers", () => {
 		expect(secondClient.attachedActiveSessionIds.has("active")).toBe(false);
 	});
 
+	it("releases owner-scoped ACP MCP config when its daemon client detaches", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-acp-owner.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const owner = makeClient("owner", "active");
+		const other = makeClient("other", "active");
+		const replaceAcpMcpServers = vi.fn();
+		const releaseAcpMcpServers = vi.fn(async () => {});
+		const state = makeState("active");
+		state.clientEnv = {};
+		state.clients.add(owner);
+		state.clients.add(other);
+		state.extensionUiRequests = new Map();
+		state.runtime = {
+			...state.runtime,
+			session: { replaceAcpMcpServers, releaseAcpMcpServers },
+		} as never;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
+			detachClientFromSession(client: DaemonSocketClient, state: ActiveSessionState): void;
+			write: ReturnType<typeof vi.fn>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.write = vi.fn();
+
+		await internals.handleCommand(owner, {
+			type: "replace_acp_mcp_servers",
+			activeSessionId: state.activeSessionId,
+			ownerId: "owner-token",
+			servers: [{ name: "task", type: "http", url: "https://task.example/mcp", headers: {} }],
+		});
+		await expect(
+			internals.handleCommand(other, {
+				type: "replace_acp_mcp_servers",
+				activeSessionId: state.activeSessionId,
+				ownerId: "other-token",
+				servers: [{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+			}),
+		).rejects.toThrow("owned by another daemon client");
+
+		internals.detachClientFromSession(owner, state);
+		expect(releaseAcpMcpServers).toHaveBeenCalledWith("owner-token");
+
+		await internals.handleCommand(other, {
+			type: "replace_acp_mcp_servers",
+			activeSessionId: state.activeSessionId,
+			ownerId: "other-token",
+			servers: [{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+		});
+		expect(replaceAcpMcpServers).toHaveBeenLastCalledWith(
+			[{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+			"other-token",
+		);
+	});
+
 	it("cancels pending extension UI requests directly", () => {
 		const resolve = vi.fn();
 		const state = {
