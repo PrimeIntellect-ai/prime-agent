@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added a durable `[refinement]` transcript message after each refinement showing the applied harness edits (expandable to exact before/after diffs via the shared tool-output toggle), and a live loader while a user-issued /refine runs.
+- Fixed credentials configured as env var names resolving to the literal variable name when the variable is set but empty; an empty env var now reports a missing credential ([#1468](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1468)).
 - Fixed ACP rejecting an immediate follow-up prompt when injected work restarted the session; follow-ups now queue behind in-flight work, and cancellation drops queued follow-ups before they start.
 - Added correlated ACP terminal-quiescence metadata, resident session settlement, and fail-closed daemon input fencing; prevented recovery state from persisting runtime credentials or model configuration.
 - Fixed explicit RLM child deletion leaving hidden unsettled work after runtime teardown, including reporting cleanup failures and notifying the parent when deletion completes.
