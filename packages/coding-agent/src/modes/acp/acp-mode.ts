@@ -479,6 +479,10 @@ export async function runAcpModeWithConnection(
 		acpMcpServerNames = [];
 	};
 	const replaceAcpMcpServers = async (servers: readonly acp.McpServer[], cwd: string): Promise<void> => {
+		if (servers.length > 0 && acpMcpServerNames.length > 0) {
+			// Retry a prior best-effort close before admitting another session.
+			await clearAcpMcpServers();
+		}
 		if (servers.length === 0 && acpMcpServerNames.length === 0) return;
 		if (!supportsMcpServers || !connection.replaceAcpMcpServers) {
 			throw acp.RequestError.invalidParams({ reason: "MCP servers are unavailable in this ACP host" });
@@ -999,7 +1003,9 @@ export async function runAcpModeWithConnection(
 					closing.unsubscribe?.();
 					// Keep the backing session fenced until a replacement ACP session is admitted.
 					await closing.producer.close();
-					await clearAcpMcpServers();
+					// Host credentials are already gone before kernel release runs. Do not
+					// retain the ACP session slot if best-effort transport reaping fails.
+					await clearAcpMcpServers().catch(() => undefined);
 					closedInputPause = inputPause;
 					closedInputPauseKey = inputPauseKey;
 					if (closing.inputPause === inputPause) {

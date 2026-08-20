@@ -186,6 +186,9 @@ describe("createAgentSessionFromServices", () => {
 			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `task`, `zebra`.");
 			expect(session.systemPrompt).not.toContain("task-secret");
 			rebuildRuntime.mockClear();
+			const waitForIdle = vi.spyOn(session.agent, "waitForIdle");
+			await session.releaseAcpMcpServers("unknown-owner", ["task"]);
+			expect(waitForIdle).not.toHaveBeenCalled();
 			const originalProvisioner = Reflect.get(session, "_ipythonKernelProvisioner");
 			const execute = vi.fn(async (_code: string) => ({ status: "ok" }));
 			Reflect.set(session, "_ipythonKernelProvisioner", { manager: { isRunning: true, execute } });

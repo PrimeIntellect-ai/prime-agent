@@ -147,21 +147,21 @@ class McpRegistryTest(unittest.TestCase):
         self.assertTrue(first.closed)
         self.assertIs(second, opened[-1])
 
-    def test_missing_config_closes_cached_generation(self):
+    def test_config_failure_preserves_cached_generation(self):
         generation = self.generation({"type": "http", "url": "a"}, [])
         mcp._registry._generations["svc"] = generation
 
-        async def missing(_server):
-            raise KeyError("removed")
+        async def unavailable(_server):
+            raise RuntimeError("host request timed out")
 
         async def scenario():
-            with mock.patch.object(mcp, "_config", missing):
-                with self.assertRaises(KeyError):
+            with mock.patch.object(mcp, "_config", unavailable):
+                with self.assertRaises(RuntimeError):
                     await mcp._registry.get("svc")
 
         run(scenario())
-        self.assertTrue(generation.closed)
-        self.assertNotIn("svc", mcp._registry._generations)
+        self.assertFalse(generation.closed)
+        self.assertIs(mcp._registry._generations["svc"], generation)
 
     def test_reload_waits_for_in_flight_first_open(self):
         opening = asyncio.Event()

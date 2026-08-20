@@ -4527,6 +4527,9 @@ export class AgentDaemon {
 				if (!command.ownerId) throw new Error("ACP MCP owner id is required");
 				const state = this.getSessionState(command.activeSessionId);
 				if (!state.clients.has(client)) throw new Error("Daemon client is not attached to this session");
+				if (command.servers.length > 0 && state.runtime.session.isStreaming) {
+					throw new Error("Cannot replace ACP MCP servers while the agent is running");
+				}
 				const commandPause =
 					command.servers.length > 0 ? state.runtime.session.acquireSessionInputPause() : undefined;
 				try {

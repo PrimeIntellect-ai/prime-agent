@@ -358,14 +358,7 @@ class _Registry:
     async def _get_locked(self, server: str) -> _Generation:
         self._accepting_work()
         current = self._generations.get(server)
-        try:
-            config = await _config(server)
-        except BaseException:
-            if current:
-                await current.close()
-                if self._generations.get(server) is current:
-                    self._generations.pop(server, None)
-            raise
+        config = await _config(server)
         self._accepting_work()
         if current and current.config == config and not current.closed:
             return current

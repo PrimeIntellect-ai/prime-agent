@@ -16,10 +16,13 @@ function runtimeHostFor(session: unknown): AgentSessionRuntime {
 }
 
 describe("ACP MCP servers", () => {
-	it("advertises capability, installs session-scoped config, and clears it on close", async () => {
+	it("installs session MCP config and frees the session slot when kernel release fails", async () => {
 		const harness = await createHarness();
 		const replace = vi.spyOn(harness.session, "replaceAcpMcpServers").mockImplementation(() => undefined);
-		const release = vi.spyOn(harness.session, "releaseAcpMcpServers").mockResolvedValue(undefined);
+		const release = vi
+			.spyOn(harness.session, "releaseAcpMcpServers")
+			.mockRejectedValueOnce(new Error("kernel release failed"))
+			.mockResolvedValue(undefined);
 		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
 		const agentCwd = (await connection.getState()).cwd;
 		const toAgent = new TransformStream<Uint8Array, Uint8Array>();
@@ -77,6 +80,15 @@ describe("ACP MCP servers", () => {
 			);
 			await handle.agent.request("session/close", { sessionId: created.sessionId });
 			expect(release).toHaveBeenCalledWith(ownerId, ["TaskTools", "LocalTools"]);
+
+			// The failed release is retried before a new ACP session is admitted, but it
+			// must not leave the single-session slot occupied.
+			const replacement = await handle.agent.request("session/new", {
+				cwd: harness.tempDir,
+				mcpServers: [{ type: "http", name: "NextTools", url: "https://next.example/mcp", headers: [] }],
+			});
+			expect(release).toHaveBeenCalledWith(ownerId, ["TaskTools", "LocalTools"]);
+			await handle.agent.request("session/close", { sessionId: replacement.sessionId });
 		} finally {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);

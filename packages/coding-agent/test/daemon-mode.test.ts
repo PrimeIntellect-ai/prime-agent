@@ -199,6 +199,7 @@ describe("daemon mode helpers", () => {
 		state.runtime = {
 			...state.runtime,
 			session: {
+				isStreaming: false,
 				replaceAcpMcpServers,
 				releaseAcpMcpServers,
 				acquireSessionInputPause: () => ({ release: vi.fn() }),
@@ -232,6 +233,19 @@ describe("daemon mode helpers", () => {
 			ownerId: "owner-token",
 			servers: [{ name: "task", type: "http", url: "https://task.example/mcp", headers: {} }],
 		});
+		const releaseCount = releaseAcpMcpServers.mock.calls.length;
+		(state.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		await expect(
+			internals.handleCommand(owner, {
+				type: "replace_acp_mcp_servers",
+				activeSessionId: state.activeSessionId,
+				ownerId: "owner-token",
+				servers: [{ name: "next", type: "http", url: "https://next.example/mcp", headers: {} }],
+			}),
+		).rejects.toThrow("while the agent is running");
+		expect(releaseAcpMcpServers).toHaveBeenCalledTimes(releaseCount);
+		(state.runtime.session as unknown as { isStreaming: boolean }).isStreaming = false;
+
 		await expect(
 			internals.handleCommand(other, {
 				type: "replace_acp_mcp_servers",
