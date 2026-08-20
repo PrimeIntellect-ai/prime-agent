@@ -414,6 +414,40 @@ describe("daemon supervisor passive subagent topology", () => {
 		await expect(first).resolves.toMatchObject({ success: true });
 	});
 
+	it("forwards fork_export to the worker that owns the source session", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-fork-export-"));
+		tempDirs.push(directory);
+		const sourceSummary = summary({
+			id: "source-active",
+			activeSessionId: "source-active",
+			sessionId: "source-session",
+			rlmDepth: 0,
+		});
+		const sourceWorker = worker("source", [sourceSummary]);
+		sourceWorker.client.request.mockResolvedValue(
+			success(undefined, "fork_export", { cancelled: false, sessionPath: "/tmp/fork.jsonl", selectedText: "hi" }),
+		);
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		supervisor.workers.set("source", sourceWorker);
+		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>(["source-active"]) };
+
+		await expect(
+			supervisor.handleCommand(client, {
+				type: "fork_export",
+				activeSessionId: "source-active",
+				entryId: "entry-1",
+			}),
+		).resolves.toMatchObject({ success: true, data: { sessionPath: "/tmp/fork.jsonl" } });
+		expect(sourceWorker.client.request).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "fork_export", activeSessionId: "source-active", entryId: "entry-1" }),
+			expect.any(Number),
+		);
+	});
+
 	it("allows only a resident worker token to rename a client-owned session", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-worker-rename-"));
 		tempDirs.push(directory);

@@ -309,7 +309,11 @@ user sends another prompt ◄─────────────────
   ├─► session_start { reason: "new" | "resume", previousSessionFile? }
   └─► resources_discover { reason: "startup" }
 
-/fork or /clone
+/fork or /clone (daemon mode: the fork opens as a new session, the original keeps running)
+  ├─► session_before_fork (can cancel) — on the original session
+  └─► session_start { reason: "startup" } + resources_discover { reason: "startup" } — on the forked session
+
+/fork or /clone (in-process mode, in-place replacement)
   ├─► session_before_fork (can cancel)
   ├─► session_shutdown
   ├─► session_start { reason: "fork", previousSessionFile }
@@ -402,7 +406,8 @@ pi.on("session_before_fork", async (event, ctx) => {
 });
 ```
 
-After a successful fork or clone, Prime Agent emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
+In daemon mode, the forked branch opens as a separate new session and the original session keeps running untouched: the original only emits `session_before_fork`, and the forked session emits `session_start` with `reason: "startup"` when its extensions load.
+In in-process mode, a successful fork or clone replaces the session in place: Prime Agent emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_compact / session_compact

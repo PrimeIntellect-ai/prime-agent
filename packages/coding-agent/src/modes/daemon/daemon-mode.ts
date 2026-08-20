@@ -317,6 +317,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"new_session",
 	"switch_session",
 	"fork",
+	"fork_export",
 	"navigate_tree",
 	"import_jsonl",
 	"export_html",
@@ -4778,6 +4779,16 @@ export class AgentDaemon {
 				});
 				this.rebindCronJobsToState(state);
 				return success(command.id, "fork", result);
+			}
+
+			case "fork_export": {
+				const state = this.getSessionState(command.activeSessionId);
+				const result = await state.runtime.exportForkBranch(command.entryId, {
+					position: command.position,
+				});
+				// No rebindCronJobsToState: the source runtime survives the
+				// export, so its cron jobs and heartbeats stay bound to it.
+				return success(command.id, "fork_export", result);
 			}
 
 			case "navigate_tree": {

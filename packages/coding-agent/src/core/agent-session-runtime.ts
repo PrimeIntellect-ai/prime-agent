@@ -492,6 +492,31 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		return { cancelled: false };
 	}
 
+	private async resolveForkTarget(
+		entryId: string,
+		position: "before" | "at",
+	): Promise<{ cancelled: true } | { cancelled: false; targetLeafId: string | null; selectedText?: string }> {
+		const beforeResult = await this.emitBeforeFork(entryId, { position });
+		if (beforeResult.cancelled) {
+			return { cancelled: true };
+		}
+		const selectedEntry = this.session.sessionManager.getEntry(entryId);
+		if (!selectedEntry) {
+			throw new Error("Invalid entry ID for forking");
+		}
+		if (position === "at") {
+			return { cancelled: false, targetLeafId: selectedEntry.id };
+		}
+		if (selectedEntry.type !== "message" || selectedEntry.message.role !== "user") {
+			throw new Error("Invalid entry ID for forking");
+		}
+		return {
+			cancelled: false,
+			targetLeafId: selectedEntry.parentId,
+			selectedText: extractUserMessageText(selectedEntry.message.content),
+		};
+	}
+
 	async fork(
 		entryId: string,
 		options?: {
@@ -499,28 +524,11 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 		},
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
-		const position = options?.position ?? "before";
-		const beforeResult = await this.emitBeforeFork(entryId, { position });
-		if (beforeResult.cancelled) {
+		const forkTarget = await this.resolveForkTarget(entryId, options?.position ?? "before");
+		if (forkTarget.cancelled) {
 			return { cancelled: true };
 		}
-		let targetLeafId: string | null;
-		let selectedText: string | undefined;
-
-		const selectedEntry = this.session.sessionManager.getEntry(entryId);
-		if (!selectedEntry) {
-			throw new Error("Invalid entry ID for forking");
-		}
-
-		if (position === "at") {
-			targetLeafId = selectedEntry.id;
-		} else {
-			if (selectedEntry.type !== "message" || selectedEntry.message.role !== "user") {
-				throw new Error("Invalid entry ID for forking");
-			}
-			targetLeafId = selectedEntry.parentId;
-			selectedText = extractUserMessageText(selectedEntry.message.content);
-		}
+		const { targetLeafId, selectedText } = forkTarget;
 
 		const previousSessionFile = this.session.sessionFile;
 		if (this.session.sessionManager.isPersisted()) {
@@ -619,6 +627,55 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		);
 		await this.finishSessionReplacement(options?.withSession);
 		return { cancelled: false, selectedText };
+	}
+
+	/**
+	 * Export the branch selected for forking as a new session file without
+	 * touching this runtime. Returns `sessionPath: null` for non-persisted
+	 * sessions, where the caller should fall back to the in-place fork().
+	 */
+	async exportForkBranch(
+		entryId: string,
+		options?: { position?: "before" | "at" },
+	): Promise<{ cancelled: boolean; sessionPath: string | null; selectedText?: string }> {
+		// Non-persisted sessions fall back to the in-place fork(); it alone
+		// emits session_before_fork and resolves selectedText, so the hook
+		// fires exactly once on the fallback path.
+		if (!this.session.sessionManager.isPersisted()) {
+			return { cancelled: false, sessionPath: null };
+		}
+		const forkTarget = await this.resolveForkTarget(entryId, options?.position ?? "before");
+		if (forkTarget.cancelled) {
+			return { cancelled: true, sessionPath: null };
+		}
+		const { targetLeafId, selectedText } = forkTarget;
+		const currentSessionFile = this.session.sessionFile;
+		if (!currentSessionFile) {
+			throw new Error("Persisted session is missing a session file");
+		}
+		const sessionDir = this.session.sessionManager.getSessionDir();
+		if (!targetLeafId) {
+			const sourceHeader = this.session.sessionManager.getHeader();
+			const sessionManager = SessionManager.create(this.cwd, sessionDir);
+			const sessionPath = sessionManager.newSession({
+				parentSession: currentSessionFile,
+				rlmDepth: sourceHeader?.rlmDepth ?? this.session.rlmDepth,
+			});
+			sessionManager.flushNow();
+			return { cancelled: false, sessionPath: sessionPath ?? null, selectedText };
+		}
+		// The live manager defers writes until the first assistant message, so the
+		// on-disk file may lack the fork target. Flush it before reopening.
+		this.session.sessionManager.flushNow();
+		const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
+		const forkedSessionPath = sourceManager.createBranchedSession(targetLeafId);
+		if (!forkedSessionPath) {
+			throw new Error("Failed to create forked session");
+		}
+		// Force the file to disk even when the branch has no assistant message
+		// yet; createBranchedSession otherwise defers the write.
+		sourceManager.flushNow();
+		return { cancelled: false, sessionPath: forkedSessionPath, selectedText };
 	}
 
 	/**

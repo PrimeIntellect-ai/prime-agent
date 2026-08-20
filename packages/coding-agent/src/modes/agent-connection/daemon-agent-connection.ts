@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { unlink } from "node:fs/promises";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
 import { appendRotatingLog, getAgentLogPath, getDaemonLogPath } from "../../config.js";
@@ -91,6 +92,9 @@ import { AgentConnectionPromptAdmissionError } from "./types.js";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
+
+/** Error from a reattach whose daemon-side attach succeeded but whose snapshot transfer failed. */
+type ReattachSnapshotError = Error & { reattachedActiveSessionId?: string };
 type DaemonSnapshotBegin = Extract<DaemonOutbound, { type: "session_snapshot_begin" }>;
 
 interface DaemonSnapshotAssembly {
@@ -219,6 +223,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly sessionInputPauses = new Map<string, Promise<AgentConnectionSessionInputPause>>();
 	private sessionInputPauseGeneration = 0;
 	private ownedSessionPromotionTail = Promise.resolve();
+	private sessionTransitionTail = Promise.resolve();
 	private lastEventCursor: DaemonEventCursor | undefined;
 	private readonly retiredEventGenerations = new Set<string>();
 	private lastEventSequence: number | undefined;
@@ -1208,6 +1213,15 @@ export class DaemonAgentConnection implements AgentConnection {
 		sessionPath: string,
 		options?: AgentConnectionSwitchSessionOptions,
 	): Promise<{ cancelled: boolean }> {
+		// Serialized with fork(): a switch landing mid-fork would otherwise be
+		// overwritten when the fork's reattach resumes with its captured source id.
+		return this.withSessionTransition(() => this.performSwitchSession(sessionPath, options));
+	}
+
+	private async performSwitchSession(
+		sessionPath: string,
+		options?: AgentConnectionSwitchSessionOptions,
+	): Promise<{ cancelled: boolean }> {
 		const sourceActiveSessionId = this.activeSessionId;
 		try {
 			return await this.requestData<{ cancelled: boolean }>({
@@ -1301,6 +1315,10 @@ export class DaemonAgentConnection implements AgentConnection {
 				for (const generation of previousState.retiredEventGenerations) {
 					this.retiredEventGenerations.add(generation);
 				}
+			} else if (error instanceof Error) {
+				// The daemon accepted the reattach; only the snapshot transfer failed.
+				// Callers may recover by reattaching elsewhere before cleaning up.
+				(error as ReattachSnapshotError).reattachedActiveSessionId = this.activeSessionId;
 			}
 			throw error;
 		} finally {
@@ -1309,6 +1327,82 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async fork(
+		entryId: string,
+		options?: AgentConnectionForkOptions,
+	): Promise<{ cancelled: boolean; selectedText?: string }> {
+		return this.withSessionTransition(() => this.performFork(entryId, options));
+	}
+
+	private async performFork(
+		entryId: string,
+		options?: AgentConnectionForkOptions,
+	): Promise<{ cancelled: boolean; selectedText?: string }> {
+		if (!this.client.supportsServerCapability("fork_export")) {
+			return this.legacyFork(entryId, options);
+		}
+		const sourceActiveSessionId = this.activeSessionId;
+		const exported = await this.requestData<{
+			cancelled: boolean;
+			sessionPath: string | null;
+			selectedText?: string;
+		}>({
+			type: "fork_export",
+			activeSessionId: sourceActiveSessionId,
+			entryId,
+			position: options?.position,
+		});
+		if (exported.cancelled) {
+			return { cancelled: true };
+		}
+		// A non-persisted source has nothing durable to hand to a new worker.
+		if (exported.sessionPath === null) {
+			return this.legacyFork(entryId, options);
+		}
+		const sessionPath = exported.sessionPath;
+		let summary: SessionSummary;
+		try {
+			summary = await this.requestData<SessionSummary>({
+				type: "create",
+				sessionPath,
+				config: this.options.telemetryDisabled ? { telemetryDisabled: true } : undefined,
+				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
+				lifecycle: this.options.ownedSession ? "client_owned" : undefined,
+				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
+			});
+		} catch (error) {
+			// Remove the orphan export only when the daemon explicitly rejected
+			// the create; on timeout/transport errors the worker may already be
+			// live on that file.
+			if (error instanceof Error && this.definitiveRequestErrors.has(error)) {
+				await unlink(sessionPath).catch(() => undefined);
+			}
+			throw error;
+		}
+		const forkActiveSessionId = summary.activeSessionId ?? summary.id;
+		try {
+			await this.reattachSession(sourceActiveSessionId, forkActiveSessionId);
+		} catch (error) {
+			const attachedToFork =
+				error instanceof Error &&
+				(error as ReattachSnapshotError).reattachedActiveSessionId === forkActiveSessionId;
+			if (attachedToFork) {
+				// The daemon moved this client onto the fork but the snapshot failed.
+				// Return to the source before cleanup; if that also fails, keep the
+				// live fork attachment rather than killing the session under us.
+				try {
+					await this.reattachSession(forkActiveSessionId, sourceActiveSessionId);
+				} catch {
+					throw error;
+				}
+			}
+			// The fork worker is resident but unattached; stop it best-effort.
+			await this.requestOk({ type: "kill", activeSessionId: forkActiveSessionId }).catch(() => undefined);
+			throw error;
+		}
+		return { cancelled: false, selectedText: exported.selectedText };
+	}
+
+	private legacyFork(
 		entryId: string,
 		options?: AgentConnectionForkOptions,
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
@@ -1446,6 +1540,15 @@ export class DaemonAgentConnection implements AgentConnection {
 			if (!promoteOwnedSession) return;
 			await this.requestOk({ type: "promote_owned_session", activeSessionId: this.activeSessionId });
 		});
+	}
+
+	private withSessionTransition<T>(operation: () => Promise<T>): Promise<T> {
+		const run = this.sessionTransitionTail.then(operation);
+		this.sessionTransitionTail = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	private withOwnedSessionPromotion<T>(operation: (promoteOwnedSession: boolean) => Promise<T>): Promise<T> {

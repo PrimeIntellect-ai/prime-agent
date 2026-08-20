@@ -244,6 +244,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"new_session",
 	"switch_session",
 	"fork",
+	"fork_export",
 	"navigate_tree",
 	"import_jsonl",
 	"export_html",

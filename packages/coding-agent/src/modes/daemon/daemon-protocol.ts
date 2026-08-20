@@ -64,8 +64,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 18 adds the opt-in RLM quiescence barrier to headless completion.
 // Revision 19 adds daemon-held session input pauses.
 // Revision 20 lets cancellation target a prompt the session owns but has not started.
-export const DAEMON_SCHEMA_REVISION = 20;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-20-ed994cc39507";
+// Revision 21 adds the fork_export command and capability for non-destructive session forking.
+export const DAEMON_SCHEMA_REVISION = 21;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-21-4dac907084d0";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -109,7 +110,11 @@ export type DaemonServerCapability =
 	| "owned_session_recovery_context"
 	| "rlm_quiescence_barrier"
 	| "session_input_pause"
-	| "owned_prompt_cancellation";
+	| "owned_prompt_cancellation"
+	// The daemon can export a fork branch as a new session file without
+	// replacing the source session (non-destructive /fork). Clients must
+	// check before sending fork_export and fall back to legacy fork.
+	| "fork_export";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -153,6 +158,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"owned_session_recovery_context",
 	"rlm_quiescence_barrier",
 	"session_input_pause",
+	"fork_export",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -609,6 +615,13 @@ export type DaemonCommand =
 	| { id?: string; type: "fork"; activeSessionId: string; entryId: string; position?: "before" | "at" }
 	| {
 			id?: string;
+			type: "fork_export";
+			activeSessionId: string;
+			entryId: string;
+			position?: "before" | "at";
+	  }
+	| {
+			id?: string;
 			type: "navigate_tree";
 			activeSessionId: string;
 			targetId: string;
@@ -677,6 +690,10 @@ const CLIENT_OWNED_DAEMON_COMMAND = {
 const DELETE_RLM_SUBAGENT_COMMAND = {
 	minProtocol: 7,
 	capability: "delete_rlm_subagent",
+} as const;
+const FORK_EXPORT_COMMAND = {
+	minProtocol: 7,
+	capability: "fork_export",
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
 const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
@@ -782,6 +799,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	new_session: LEGACY_DAEMON_COMMAND,
 	switch_session: LEGACY_DAEMON_COMMAND,
 	fork: LEGACY_DAEMON_COMMAND,
+	fork_export: FORK_EXPORT_COMMAND,
 	navigate_tree: LEGACY_DAEMON_COMMAND,
 	import_jsonl: LEGACY_DAEMON_COMMAND,
 	export_html: LEGACY_DAEMON_COMMAND,

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
@@ -34,6 +34,18 @@ type RecordedSessionEvent =
 type RuntimeSubagentMapAccess = {
 	subagentRuntimes: Map<string, AgentSessionRuntime>;
 };
+
+function getMessageText(message: AgentSession["messages"][number]): string {
+	if (!("content" in message)) {
+		return "";
+	}
+	return typeof message.content === "string"
+		? message.content
+		: message.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.map((part) => part.text)
+				.join("");
+}
 
 describe("AgentSessionRuntime characterization", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -723,6 +735,149 @@ describe("AgentSessionRuntime characterization", () => {
 	it("throws when forking with an invalid entry id", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		await expect(runtime.fork("missing-entry")).rejects.toThrow("Invalid entry ID for forking");
+	});
+
+	it("exports a fork branch as a new session file without replacing the runtime", async () => {
+		const events: RecordedSessionEvent[] = [];
+		const { runtime, tempDir } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_before_fork", (event) => {
+				events.push(event);
+			});
+			pi.on("session_shutdown", (event) => {
+				events.push(event);
+			});
+			pi.on("session_start", (event) => {
+				events.push(event);
+			});
+		});
+		await runtime.session.prompt("Say one");
+		await runtime.session.prompt("Say two");
+		const userMessages = runtime.session.getUserMessagesForForking();
+		const sourceSession = runtime.session;
+		const sourceSessionManager = runtime.session.sessionManager;
+		const sourceSessionFile = runtime.session.sessionFile;
+		const sourceMessages = runtime.session.messages;
+
+		events.length = 0;
+		const result = await runtime.exportForkBranch(userMessages[1]!.entryId);
+
+		expect(result.cancelled).toBe(false);
+		expect(result.selectedText).toBe("Say two");
+		expect(result.sessionPath).toBeDefined();
+		expect(result.sessionPath).not.toBe(sourceSessionFile);
+		expect(runtime.session).toBe(sourceSession);
+		expect(runtime.session.sessionManager).toBe(sourceSessionManager);
+		expect(runtime.session.sessionFile).toBe(sourceSessionFile);
+		expect(runtime.session.messages).toBe(sourceMessages);
+		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessages[1]!.entryId, position: "before" }]);
+
+		const exported = SessionManager.open(result.sessionPath!, join(tempDir, "sessions"));
+		expect(exported.getHeader()?.parentSession).toBe(sourceSessionFile);
+		expect(
+			exported
+				.buildSessionContext()
+				.messages.map((message) => (message.role === "user" ? getMessageText(message) : message.role)),
+		).toEqual(["Say one", "assistant"]);
+	});
+
+	it("exports a fork branch whose target entry has not been flushed to disk yet", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		// A fresh persisted session defers user-message writes until the first
+		// assistant message, so the fork target exists only in the live manager.
+		runtime.session.sessionManager.appendMessage({ role: "user", content: "unflushed", timestamp: Date.now() });
+		const userMessages = runtime.session.getUserMessagesForForking();
+		expect(userMessages.length).toBeGreaterThan(0);
+
+		const result = await runtime.exportForkBranch(userMessages[0]!.entryId);
+
+		expect(result.cancelled).toBe(false);
+		expect(result.sessionPath).toBeDefined();
+		const exported = SessionManager.open(result.sessionPath!, join(tempDir, "sessions"));
+		expect(
+			exported
+				.buildSessionContext()
+				.messages.filter((message) => message.role === "user")
+				.map((message) => getMessageText(message)),
+		).toEqual([]);
+	});
+
+	it("honors session_before_fork cancellation without writing a branch file", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_before_fork", () => ({ cancel: true }));
+		});
+		await runtime.session.prompt("hello");
+		const entryId = runtime.session.getUserMessagesForForking()[0]!.entryId;
+		const sessionDir = join(tempDir, "sessions");
+		const before = readdirSync(sessionDir);
+
+		const result = await runtime.exportForkBranch(entryId);
+
+		expect(result).toEqual({ cancelled: true, sessionPath: null });
+		expect(readdirSync(sessionDir)).toEqual(before);
+	});
+
+	it("flushes an exported branch that has no assistant message yet", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		await runtime.session.prompt("hello");
+		const firstUser = runtime.session.getUserMessagesForForking()[0]!;
+
+		const result = await runtime.exportForkBranch(firstUser.entryId, { position: "at" });
+
+		expect(result.cancelled).toBe(false);
+		expect(result.sessionPath).toBeDefined();
+		expect(existsSync(result.sessionPath!)).toBe(true);
+		const exported = SessionManager.open(result.sessionPath!, join(tempDir, "sessions"));
+		expect(exported.buildSessionContext().messages.map((message) => message.role)).toEqual(["user"]);
+	});
+
+	it("exports a parent-linked fresh session when forking before the first prompt", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		await runtime.session.prompt("hello");
+		const sourceSessionFile = runtime.session.sessionFile;
+		const firstUser = runtime.session.getUserMessagesForForking()[0]!;
+
+		const result = await runtime.exportForkBranch(firstUser.entryId);
+
+		expect(result.cancelled).toBe(false);
+		expect(result.selectedText).toBe("hello");
+		expect(result.sessionPath).toBeDefined();
+		expect(result.sessionPath).not.toBe(sourceSessionFile);
+		const exported = SessionManager.open(result.sessionPath!, join(tempDir, "sessions"));
+		expect(exported.getHeader()?.parentSession).toBe(sourceSessionFile);
+		expect(exported.buildSessionContext().messages).toEqual([]);
+	});
+
+	it("returns a null session path when exporting a fork of an in-memory session", async () => {
+		const { runtime } = await createRuntimeForTest(() => {}, { inMemory: true });
+		await runtime.session.prompt("hello");
+		const firstUser = runtime.session.getUserMessagesForForking()[0]!;
+
+		const result = await runtime.exportForkBranch(firstUser.entryId);
+
+		expect(result).toEqual({ cancelled: false, sessionPath: null });
+		expect(runtime.session.sessionFile).toBeUndefined();
+	});
+
+	it("emits session_before_fork exactly once across the export fallback to an in-place fork", async () => {
+		const events: RecordedSessionEvent[] = [];
+		const { runtime } = await createRuntimeForTest(
+			(pi: ExtensionAPI) => {
+				pi.on("session_before_fork", (event) => {
+					events.push(event);
+				});
+			},
+			{ inMemory: true },
+		);
+		await runtime.session.prompt("hello");
+		const firstUser = runtime.session.getUserMessagesForForking()[0]!;
+
+		const exported = await runtime.exportForkBranch(firstUser.entryId);
+		expect(exported).toEqual({ cancelled: false, sessionPath: null });
+		expect(events).toEqual([]);
+
+		const forked = await runtime.fork(firstUser.entryId);
+		expect(forked).toEqual({ cancelled: false, selectedText: "hello" });
+		expect(events).toEqual([{ type: "session_before_fork", entryId: firstUser.entryId, position: "before" }]);
 	});
 
 	it("updates the runtime session cwd on cross-cwd session replacement", async () => {

@@ -119,6 +119,16 @@ describe("daemon protocol helpers", () => {
 		);
 	});
 
+	it("capability-gates non-destructive fork export while keeping legacy fork untouched", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.fork_export).toEqual({ minProtocol: 7, capability: "fork_export" });
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("fork_export");
+		expect(
+			getDaemonCommandCompatibilities({ type: "fork_export", activeSessionId: "active-1", entryId: "entry-1" }),
+		).toEqual([{ minProtocol: 7, capability: "fork_export" }]);
+		// Old clients against a new daemon keep the legacy in-place fork.
+		expect(DAEMON_COMMAND_COMPATIBILITY.fork).toEqual({ minProtocol: 7 });
+	});
+
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
 			minProtocol: 7,
