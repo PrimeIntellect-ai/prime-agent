@@ -1,4 +1,4 @@
-import { Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
 import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
@@ -60,6 +60,21 @@ function editCount(edits: AppliedRefinementEdit[]): string {
 		: `${applied}/${edits.length} edits applied`;
 }
 
+/** Width-aware collapsed line: truncates the summary so the line never wraps. */
+class CollapsedOutcomeLine implements Component {
+	constructor(
+		private readonly summary: string,
+		private readonly suffix: string,
+	) {}
+
+	render(width: number): string[] {
+		const room = Math.max(20, width - visibleWidth(this.suffix) - 1);
+		return [`${theme.fg("customMessageText", truncateToWidth(this.summary, room, "…"))} ${this.suffix}`];
+	}
+
+	invalidate(): void {}
+}
+
 /** Durable refinement outcome card: per-edit rows with before/after diffs when expanded. */
 export class RefinementOutcomeMessageComponent extends ExpandableCustomMessageBox {
 	constructor(private readonly message: RefinementOutcomeMessage) {
@@ -71,15 +86,15 @@ export class RefinementOutcomeMessageComponent extends ExpandableCustomMessageBo
 		this.clear();
 
 		const { summary, edits, scope } = this.message.details;
-		const headline = theme.fg("customMessageText", `${summary} · ${editCount(edits)}`);
 		this.addChild(new Text(customMessageLabel("refinement"), 0, 0));
 		this.addChild(new Spacer(1));
 		if (!this.expanded) {
-			this.addChild(new Text(`${headline} ${expandCollapseHint("app.tools.expand", false)}`, 0, 0));
+			const suffix = `${theme.fg("customMessageText", `· ${editCount(edits)}`)} ${expandCollapseHint("app.tools.expand", false)}`;
+			this.addChild(new CollapsedOutcomeLine(summary, suffix));
 			return;
 		}
 
-		this.addChild(new Text(headline, 0, 0));
+		this.addChild(new Text(theme.fg("customMessageText", `${summary} · ${editCount(edits)}`), 0, 0));
 		for (const edit of edits) {
 			this.addChild(new Text(`${theme.fg("dim", "  ╰─ ")}${editLabel(edit, scope)}`, 0, 0));
 			const diff = editDiff(edit);

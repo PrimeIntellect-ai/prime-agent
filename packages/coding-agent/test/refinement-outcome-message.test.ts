@@ -1,4 +1,4 @@
-import { setKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -78,6 +78,23 @@ describe("RefinementOutcomeMessageComponent", () => {
 		expect(expanded).toContain("Created local prompt `rhyme-response-guidance`");
 		expect(expanded).toContain('"content": "Make conversational responses rhyme."');
 		expect(expanded).toContain('"path": "prompts/rhyme-response-guidance.md"');
+	});
+
+	test("truncates the collapsed summary so the line never wraps", () => {
+		const long = result();
+		long.summary =
+			"Created local memory entries for the verifiers project context and running subagent tracking, plus a reusable subagent spec for parallel codebase exploration.";
+		const component = new RefinementOutcomeMessageComponent(createRefinementOutcomeMessage(long));
+
+		const lines = component.render(80).map((line) => stripAnsi(line));
+		const content = lines.filter((line) => line.trim().length > 0);
+		expect(content).toHaveLength(2);
+		expect(content[1]).toContain("…");
+		expect(content[1]).toContain("1 edit applied");
+		expect(content[1]).toContain("Ctrl+O to expand");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		}
 	});
 
 	test("renders exact before and after payloads for updates and deletes", () => {
