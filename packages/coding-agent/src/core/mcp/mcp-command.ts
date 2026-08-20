@@ -18,8 +18,8 @@ const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface McpCredentialStore {
-	has(provider: string): boolean;
-	logout(provider: string): void;
+	/** Disk-verified removal: throws when the credential may still exist on disk. */
+	removeVerified(provider: string): void;
 }
 
 export async function runMcpManagementCommand(
@@ -58,11 +58,14 @@ export async function runMcpManagementCommand(
 	if (action === "add") {
 		const { name, config, force } = parseMcpAddArgs(args.slice(1));
 		const replaced = settingsManager.getGlobalMcpServers()?.[name] !== undefined;
+		if (replaced && !force) {
+			throw new Error(`MCP server "${name}" already exists. Use --force to replace it.`);
+		}
+		// Any add may repoint a name an authored skill resolves by (e.g. slack); a stored token must never replay there.
+		// Verified drop first: every partial failure lands on re-login, never on old-token-with-new-URL.
+		dropServerCredentials(name, authStorage);
 		settingsManager.setGlobalMcpServer(name, config, force);
 		await flushGlobalSettings(settingsManager);
-		// A replaced entry may point at a different endpoint; a token issued for
-		// the old URL must never replay to the new one.
-		if (replaced) dropServerCredentials(name, authStorage);
 		return {
 			action,
 			message: `${replaced ? "Replaced" : "Added"} MCP server "${name}".`,
@@ -106,7 +109,7 @@ export function parseMcpAddArgs(args: readonly string[]): {
 			throw new Error(`Unknown MCP add option: ${option}`);
 		}
 		const value = optionArgs[++index];
-		if (!value) throw new Error(`${option} requires a value.`);
+		if (value === undefined || value === "") throw new Error(`${option} requires a value.`);
 		if (option === "--url") url = value;
 		else if (option === "--bearer-token-env-var") bearerTokenEnvVar = validateEnvName(value, option);
 		else if (option === "--cwd") cwd = value;
@@ -208,8 +211,12 @@ function dropServerCredentials(name: string, authStorage: McpCredentialStore | u
 	// integration (removing a shadowing settings entry must not disconnect it);
 	// the generic runtime never serves catalog names.
 	if (getCatalogEntry(name)) return;
-	const provider = `mcp:${name}`;
-	if (authStorage?.has(provider)) authStorage.logout(provider);
+	try {
+		authStorage?.removeVerified(`mcp:${name}`);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Could not remove stored credentials for "${name}": ${message}`);
+	}
 }
 
 function requireCount(args: readonly string[], count: number, usage: string): void {

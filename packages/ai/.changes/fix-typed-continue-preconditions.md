@@ -1,0 +1,1 @@
+- Changed AI package callers to classify `Agent.continue()` precondition failures using stable typed error codes.

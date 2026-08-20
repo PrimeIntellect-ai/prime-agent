@@ -122,6 +122,32 @@ describe("McpManager", () => {
 		expect(manager.listStatus().find((s) => s.server === "linear")?.enabled).toBe(false);
 	});
 
+	it("does not enable a server from a credential bound to a different endpoint or unbound", () => {
+		authStorage.set("mcp:unbound", {
+			type: "oauth",
+			access: "unbound-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		authStorage.set("mcp:remote", {
+			type: "oauth",
+			access: "old-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://old.test/mcp",
+		} as never);
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				remote: { type: "http", url: "https://new.test/mcp", oauth: true },
+				unbound: { type: "http", url: "https://srv.test/mcp", oauth: true },
+			}),
+		});
+		expect(manager.listStatus().find((s) => s.server === "remote")?.enabled).toBe(false);
+		expect(manager.listStatus().find((s) => s.server === "unbound")?.enabled).toBe(false);
+		expect(manager.getEnabledGenericServers()).toEqual([]);
+	});
+
 	it("honors a bearer-token env var for user-declared servers", () => {
 		process.env.MY_MCP_TOKEN = "secret";
 		try {

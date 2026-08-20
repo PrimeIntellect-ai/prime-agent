@@ -253,18 +253,13 @@ class McpIntegrationTest(unittest.TestCase):
         self._run_open_session_with_transport(transport)
         self.assertIsNotNone(captured["http_client"])
 
-    def test_resolve_config_prefers_host_override_and_headers(self):
+    def test_resolve_config_ignores_host_overrides(self):
+        # A same-named mcpServers entry must not repoint an authored integration:
+        # its credentials (auth.json or a bearer-token env var) would follow.
         async def host_with_override(req_type, payload):
-            return {"url": "https://override.test/mcp", "headers": {"X-Extra": "1"}}
-
-        async def host_empty(req_type, payload):
-            return {}
+            raise AssertionError("authored integrations must not consult mcp.config")
 
         with mock.patch.object(mcp_base, "host_request", host_with_override):
-            url, headers = _run(_Integration()._resolve_config())
-            self.assertEqual(url, "https://override.test/mcp")
-            self.assertEqual(headers, {"X-Extra": "1"})
-        with mock.patch.object(mcp_base, "host_request", host_empty):
             url, headers = _run(_Integration()._resolve_config())
             self.assertEqual(url, _Integration.url)
             self.assertEqual(headers, {})

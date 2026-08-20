@@ -65,6 +65,7 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(creds.access).toBe("access-1");
 		expect(creds.refresh).toBe("refresh-1");
 		expect(creds.expires).toBeGreaterThan(Date.now());
+		expect((creds as { endpoint?: string }).endpoint).toBe("https://srv.test/mcp");
 		const authParams = new URL(authUrl).searchParams;
 		expect(authParams.get("client_id")).toBe("client-xyz");
 		expect(authParams.get("code_challenge")).toBeTruthy();
@@ -130,10 +131,22 @@ describe.sequential("MCP OAuth provider", () => {
 			expires: Date.now() - 1000,
 			tokenEndpoint: META.token_endpoint,
 			clientId: "client-xyz",
+			endpoint: "https://old.test/mcp",
 		} as never);
 
 		expect(refreshed.access).toBe("access-2");
 		expect(refreshed.refresh).toBe("old-refresh");
+		expect((refreshed as { endpoint?: string }).endpoint).toBe("https://old.test/mcp");
+
+		const unbound = await provider.refreshToken({
+			access: "access-1",
+			refresh: "old-refresh",
+			expires: Date.now() - 1000,
+			tokenEndpoint: META.token_endpoint,
+			clientId: "client-xyz",
+		} as never);
+		// An unbound credential stays unbound, so consumers keep requiring re-login.
+		expect((unbound as { endpoint?: string }).endpoint).toBeUndefined();
 	});
 
 	it("fails clearly when DCR is unavailable and no clientId is set", async () => {

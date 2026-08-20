@@ -1,9 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-- Added `AgentContinueError` with stable codes (`busy`, `nothing-to-continue`) for `Agent.continue()` precondition failures, so callers classify without matching message text.
-
 ## [0.7.4] - 2026-08-19
 
 ## [0.7.3] - 2026-08-17
