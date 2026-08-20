@@ -274,7 +274,11 @@ class McpRegistryTest(unittest.TestCase):
         with mock.patch.object(mcp, "_read_auth", return_value=cred):
             with self.assertRaises(RuntimeError):
                 asyncio.run(mcp._headers("remote", config))
+            # Exact match only: even a trailing-slash difference is a changed entry.
             config["url"] = "https://old.example/mcp/"
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mcp._headers("remote", config))
+            config["url"] = "https://old.example/mcp"
             headers = asyncio.run(mcp._headers("remote", config))
         self.assertEqual(headers["Authorization"], "Bearer old-token")
 
