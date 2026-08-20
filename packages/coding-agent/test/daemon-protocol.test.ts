@@ -127,6 +127,15 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("delete_rlm_subagent");
 	});
 
+	it("capability- and schema-gates ACP MCP server replacement", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.replace_acp_mcp_servers).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 21,
+			capability: "acp_mcp_servers",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("acp_mcp_servers");
+	});
+
 	it("capability-gates the optional model catalog surface", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_model_catalog).toEqual({
 			minProtocol: 7,
@@ -142,15 +151,6 @@ describe("daemon protocol helpers", () => {
 			capability: "queue_message_mutation",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("queue_message_mutation");
-	});
-
-	it("capability- and schema-gates temporary skill replacement", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.replace_temporary_skills).toEqual({
-			minProtocol: 7,
-			minSchemaRevision: 17,
-			capability: "temporary_skills",
-		});
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("temporary_skills");
 	});
 
 	it("schema-gates the RLM max depth commands at their introducing revision", () => {

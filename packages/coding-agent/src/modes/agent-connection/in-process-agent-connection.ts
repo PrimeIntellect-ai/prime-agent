@@ -14,6 +14,7 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { ExtensionUIContext } from "../../core/extensions/types.js";
+import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
@@ -110,8 +111,12 @@ export class InProcessAgentConnection implements AgentConnection {
 		await this.bindCurrentSessionExtensions();
 	}
 
-	async replaceTemporarySkills(skillPaths: string[], source: string): Promise<void> {
-		this.runtimeHost.session.replaceTemporarySkills(skillPaths, source);
+	supportsAcpMcpServers(): boolean {
+		return true;
+	}
+
+	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[]): Promise<void> {
+		this.runtimeHost.session.replaceAcpMcpServers(servers);
 	}
 
 	subscribe(listener: AgentConnectionEventListener): () => void {

@@ -193,7 +193,7 @@ class FakeDaemonClient {
 						},
 					},
 				};
-			case "replace_temporary_skills":
+			case "replace_acp_mcp_servers":
 				return { type: "response", command: command.type, success: true };
 			case "get_model_catalog":
 				return {
@@ -1059,26 +1059,6 @@ describe("DaemonAgentConnection", () => {
 			(command): command is Extract<DaemonCommand, { type: "execute_bash" }> => command.type === "execute_bash",
 		);
 		expect(sent).toMatchObject({ command: "ls", excludeFromContext: true, transient: true, runId: "side-run-1" });
-	});
-
-	it("capability-gates temporary ACP skills on old daemons", async () => {
-		const oldDaemonClient = new FakeDaemonClient();
-		const oldConnection = new DaemonAgentConnection(asDaemonClient(oldDaemonClient), "active-original");
-		await expect(oldConnection.replaceTemporarySkills(["/tmp/task/SKILL.md"], "acp:mcp")).rejects.toThrow(
-			"does not support temporary_skills",
-		);
-		expect(oldDaemonClient.requests).toEqual([]);
-
-		const newDaemonClient = new FakeDaemonClient();
-		newDaemonClient.serverCapabilities.add("temporary_skills");
-		const newConnection = new DaemonAgentConnection(asDaemonClient(newDaemonClient), "active-original");
-		await newConnection.replaceTemporarySkills(["/tmp/task/SKILL.md"], "acp:mcp");
-		expect(newDaemonClient.requests.at(-1)).toMatchObject({
-			type: "replace_temporary_skills",
-			activeSessionId: "active-original",
-			skillPaths: ["/tmp/task/SKILL.md"],
-			source: "acp:mcp",
-		});
 	});
 
 	it("degrades an unavailable heartbeat catalog without sending an unsupported command", async () => {
@@ -2592,6 +2572,28 @@ describe("DaemonAgentConnection", () => {
 			type: "get_resource_snapshot",
 			activeSessionId: "active-1",
 		});
+	});
+
+	it("capability-gates ACP MCP server replacement", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "session-1");
+		expect(connection.supportsAcpMcpServers()).toBe(false);
+		await expect(
+			connection.replaceAcpMcpServers([
+				{
+					name: "task",
+					type: "http",
+					url: "https://task.example/mcp",
+					headers: { Authorization: "Bearer task" },
+				},
+			]),
+		).rejects.toBeInstanceOf(DaemonCapabilityUnavailableError);
+
+		fakeClient.serverCapabilities.add("acp_mcp_servers");
+		expect(connection.supportsAcpMcpServers()).toBe(true);
+		await connection.replaceAcpMcpServers([]);
+		expect(fakeClient.requests.at(-1)).toMatchObject({ type: "replace_acp_mcp_servers", servers: [] });
+		await connection.dispose();
 	});
 
 	it("loads the full model catalog through the daemon protocol", async () => {

@@ -30,19 +30,26 @@ Likewise `session/prompt` refuses a concurrent turn while one is running, and th
 
 ## MCP servers
 
-Prime Agent accepts both standard stdio servers and negotiated HTTP servers in
-`session/new.mcpServers`. It discovers their tools before creating the session and installs one
-session-scoped Python program per tool in the RLM kernel. A server named `task-tools` with a
-`lookup` tool is available as `task_tools_lookup`; its signature is derived from the tool's JSON
-Schema and it can be called directly:
+Prime Agent accepts standard stdio and HTTP servers in `session/new.mcpServers`. The servers are
+available through the pre-imported `mcp` Python program for that ACP session:
 
 ```python
-result = await task_tools_lookup(query="example")
+tools = await mcp.list_tools("task-tools")
+result = await mcp.call_tool("task-tools", "lookup", {"query": "example"})
 ```
 
-These programs use only the transport and credentials supplied by the ACP client. They neither
-read nor modify the user's persistent MCP connection settings, and they are replaced when the
-connection creates a new ACP session.
+HTTP requests use only the URL and headers supplied by the ACP client. They do not read
+`auth.json`, start or refresh Prime Agent OAuth, or modify persistent MCP settings. Stdio servers
+run with the agent's actual session cwd, the supplied command and arguments, a scrubbed base
+environment, and the exact environment values supplied by the ACP client.
+
+The configuration is removed when the ACP session closes or the client disconnects. A same-named
+persistent MCP server can therefore be shadowed for the ACP session without sending its stored
+OAuth credential to the client-supplied HTTP endpoint.
+
+ACP stdio is a trusted-code boundary, not a sandbox. The requested command runs as the Prime Agent
+user and can access any files that user can access, including credential stores. Only accept stdio
+servers from trusted ACP clients or run Prime Agent inside an appropriate sandbox.
 
 ## Streamed updates
 

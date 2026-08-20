@@ -35,7 +35,6 @@ export interface ResourceLoader {
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
 	extendResources(paths: ResourceExtensionPaths): void;
-	replaceSkillResources?(paths: Array<{ path: string; metadata: PathMetadata }>, source: string): void;
 	reload(): Promise<void>;
 }
 
@@ -332,23 +331,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 			);
 			this.updateThemesFromPaths(this.lastThemePaths);
 		}
-	}
-
-	replaceSkillResources(paths: Array<{ path: string; metadata: PathMetadata }>, source: string): void {
-		const skillPaths = this.normalizeExtensionPaths(paths);
-		this.lastSkillPaths = this.lastSkillPaths.filter((path) => {
-			if (this.extensionSkillSourceInfos.get(path)?.source !== source) return true;
-			this.extensionSkillSourceInfos.delete(path);
-			return false;
-		});
-		for (const entry of skillPaths) {
-			this.extensionSkillSourceInfos.set(entry.path, createSourceInfo(entry.path, entry.metadata));
-		}
-		this.lastSkillPaths = this.mergePaths(
-			this.lastSkillPaths,
-			skillPaths.map((entry) => entry.path),
-		);
-		this.updateSkillsFromPaths(this.lastSkillPaths);
 	}
 
 	async reload(): Promise<void> {

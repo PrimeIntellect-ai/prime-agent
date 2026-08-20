@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import tempfile
 import time
@@ -11,13 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from rlm import mcp_base
-from rlm.mcp_base import (
-    AcpMcpIntegration,
-    McpIntegration,
-    McpToolError,
-    NotEnabled,
-    make_acp_mcp_skill,
-)
+from rlm.mcp_base import McpIntegration, McpToolError, NotEnabled
 
 
 def _run(coro):
@@ -270,121 +263,6 @@ class McpIntegrationTest(unittest.TestCase):
             url, headers = _run(_Integration()._resolve_config())
             self.assertEqual(url, _Integration.url)
             self.assertEqual(headers, {})
-
-    def test_acp_http_server_uses_client_configuration_without_auth(self):
-        captured = {}
-        session = _FakeSession(
-            tools=[],
-            result=type("R", (), {"structuredContent": {"ok": True}})(),
-        )
-
-        async def fake_open(stack, url, headers):
-            captured.update(url=url, headers=headers)
-            return session
-
-        integration = AcpMcpIntegration(
-            "task-tools",
-            {
-                "type": "http",
-                "url": "https://tools.example/mcp",
-                "headers": {"Authorization": "Bearer task", "X-Test": "1"},
-            },
-        )
-        with mock.patch.object(mcp_base, "_open_http_session", fake_open):
-            result = _run(integration.call_tool("lookup", {"query": "ACP"}))
-
-        self.assertEqual(result, {"ok": True})
-        self.assertEqual(captured["url"], "https://tools.example/mcp")
-        self.assertEqual(
-            captured["headers"],
-            {"Authorization": "Bearer task", "X-Test": "1"},
-        )
-        self.assertEqual(session.calls, [("lookup", {"query": "ACP"})])
-
-    def test_acp_stdio_server_uses_client_command_arguments_and_environment(self):
-        captured = {}
-
-        class _Streams:
-            async def __aenter__(self):
-                return ("read", "write")
-
-            async def __aexit__(self, *args):
-                return False
-
-        def fake_stdio_client(params):
-            captured["params"] = params
-            return _Streams()
-
-        session = mock.MagicMock()
-        session.initialize = mock.AsyncMock()
-        session_cm = mock.MagicMock()
-        session_cm.__aenter__ = mock.AsyncMock(return_value=session)
-        session_cm.__aexit__ = mock.AsyncMock(return_value=False)
-
-        integration = AcpMcpIntegration(
-            "local-tools",
-            {
-                "type": "stdio",
-                "command": "uvx",
-                "args": ["local-mcp", "--stdio"],
-                "env": {"TASK_TOKEN": "task-secret"},
-            },
-        )
-
-        async def open_session():
-            async with AsyncExitStack() as stack:
-                return await integration._open_session(stack)
-
-        with mock.patch("mcp.client.stdio.stdio_client", fake_stdio_client), mock.patch(
-            "mcp.ClientSession", return_value=session_cm
-        ):
-            opened = _run(open_session())
-
-        self.assertIs(opened, session)
-        params = captured["params"]
-        self.assertEqual(params.command, "uvx")
-        self.assertEqual(params.args, ["local-mcp", "--stdio"])
-        self.assertEqual(params.env, {"TASK_TOKEN": "task-secret"})
-        session.initialize.assert_awaited_once()
-
-    def test_acp_server_rejects_unsupported_transport(self):
-        integration = AcpMcpIntegration("task-tools", {"type": "sse"})
-        with self.assertRaisesRegex(ValueError, "unsupported transport"):
-            _run(integration._open_session(AsyncExitStack()))
-
-    def test_acp_generated_skill_has_schema_signature_and_fixed_tool(self):
-        tool = {
-            "name": "lookup",
-            "description": "Look up a task.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer"},
-                    "not-valid": {"type": "boolean"},
-                },
-                "required": ["query"],
-            },
-        }
-        run = make_acp_mcp_skill(
-            "task-tools",
-            {"type": "http", "url": "https://tools.example/mcp", "headers": {}},
-            tool,
-        )
-        self.assertEqual(
-            str(inspect.signature(run)), "(*, query: str, limit: int = None)"
-        )
-        self.assertEqual(run.__doc__, "Look up a task.")
-
-        with mock.patch.object(
-            AcpMcpIntegration,
-            "call_tool",
-            mock.AsyncMock(return_value={"ok": True}),
-        ) as call_tool:
-            result = _run(run(query="ACP", limit=2))
-
-        self.assertEqual(result, {"ok": True})
-        call_tool.assert_awaited_once_with("lookup", {"query": "ACP", "limit": 2})
 
 
 if __name__ == "__main__":

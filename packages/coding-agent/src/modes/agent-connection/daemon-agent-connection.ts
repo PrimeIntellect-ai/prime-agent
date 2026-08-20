@@ -15,6 +15,7 @@ import type {
 	AgentHeartbeatManagementAction,
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
+import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
@@ -499,15 +500,18 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 	}
 
-	async replaceTemporarySkills(skillPaths: string[], source: string): Promise<void> {
-		if (!this.client.supportsServerCapability("temporary_skills")) {
-			throw new DaemonCapabilityUnavailableError("replace_temporary_skills", "temporary_skills");
+	supportsAcpMcpServers(): boolean {
+		return this.client.supportsServerCapability("acp_mcp_servers");
+	}
+
+	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[]): Promise<void> {
+		if (!this.supportsAcpMcpServers()) {
+			throw new DaemonCapabilityUnavailableError("replace_acp_mcp_servers", "acp_mcp_servers");
 		}
 		await this.requestOk({
-			type: "replace_temporary_skills",
+			type: "replace_acp_mcp_servers",
 			activeSessionId: this.activeSessionId,
-			skillPaths,
-			source,
+			servers: [...servers],
 		});
 	}
 

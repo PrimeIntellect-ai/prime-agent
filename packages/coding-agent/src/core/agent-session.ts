@@ -156,6 +156,7 @@ import {
 } from "./goals.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
+import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
 	type BashExecutionMessage,
@@ -1295,6 +1296,21 @@ export class AgentSession {
 			return;
 		}
 		this._rlmHeartbeatController = controller;
+		this._buildRuntime({
+			activeToolNames: this.getActiveToolNames(),
+			includeAllExtensionTools: true,
+		});
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
+	replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[]): void {
+		if (this.isStreaming) throw new Error("Cannot replace ACP MCP servers while the agent is running");
+		if (!this._mcpManager) {
+			if (servers.length > 0) throw new Error("MCP is unavailable in this session");
+			return;
+		}
+		if (!this._mcpManager.replaceAcpServers(servers)) return;
 		this._buildRuntime({
 			activeToolNames: this.getActiveToolNames(),
 			includeAllExtensionTools: true,
