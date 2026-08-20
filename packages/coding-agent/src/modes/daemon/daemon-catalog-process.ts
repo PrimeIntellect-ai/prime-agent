@@ -1,7 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
@@ -17,7 +15,6 @@ interface SessionInfoWire extends Omit<SessionInfo, "created" | "modified"> {
 type CatalogRequest =
 	| { type: "request"; id: string; command: "list"; cwd?: string; sessionDir?: string }
 	| { type: "request"; id: string; command: "resolve"; selector: string; cwd: string; sessionDir?: string }
-	| { type: "request"; id: string; command: "siblings"; sessionPath: string }
 	| { type: "request"; id: string; command: "rename"; sessionPath: string; name: string }
 	| { type: "request"; id: string; command: "delete"; sessionPath: string }
 	| { type: "request"; id: string; command: "archive"; sessionPath: string; sessionId: string }
@@ -59,60 +56,10 @@ function deserializeSessionInfo(session: SessionInfoWire): SessionInfo {
 	};
 }
 
-interface SavedRlmSubagentRegistryEntry {
-	type?: unknown;
-	childId?: unknown;
-	sessionFile?: unknown;
-	status?: unknown;
-}
-
-export async function listSavedSessionSiblings(sessionPath: string): Promise<SessionInfo[]> {
-	const target = await readSessionInfo(sessionPath);
-	if (!target) throw new Error(`Session not found: ${sessionPath}`);
-	if (!target.parentSessionPath) return [target];
-	const parentPath = resolve(dirname(target.path), target.parentSessionPath);
-	const parent = await readSessionInfo(parentPath);
-	if (!parent) return [target];
-	const registryPath = join(dirname(dirname(parent.path)), "session-artifacts", parent.id, "rlm-subagents.jsonl");
-	let contents: string;
-	try {
-		contents = await readFile(registryPath, "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [target];
-		throw error;
-	}
-	const latest = new Map<string, SavedRlmSubagentRegistryEntry>();
-	for (const line of contents.split(/\r?\n/)) {
-		if (!line.trim()) continue;
-		try {
-			const entry = JSON.parse(line) as SavedRlmSubagentRegistryEntry;
-			if (entry.type === "rlm_subagent" && typeof entry.childId === "string") latest.set(entry.childId, entry);
-		} catch {
-			// Ignore malformed registry history just like the owning worker does.
-		}
-	}
-	const siblingPaths = new Set<string>([resolve(target.path)]);
-	for (const entry of latest.values()) {
-		if (entry.status !== "deleted" && typeof entry.sessionFile === "string")
-			siblingPaths.add(resolve(entry.sessionFile));
-	}
-	const siblings = await Promise.all([...siblingPaths].map((path) => readSessionInfo(path)));
-	return siblings.filter(
-		(info): info is SessionInfo =>
-			info !== null &&
-			info.parentSessionPath !== undefined &&
-			resolve(dirname(info.path), info.parentSessionPath) === parentPath,
-	);
-}
-
-/** @internal Exported to pin catalog selector semantics without spawning a catalog process. */
 export function resolveCatalogSessionMatch(
 	sessions: readonly SessionInfo[],
 	selector: string,
 ): SessionInfo | undefined {
-	// Deliberate broadening for create/resume as well as a2a wake: exact names
-	// participate alongside id prefixes. Therefore a name that collides with an
-	// id prefix is now ambiguous instead of the id-prefix match winning.
 	const matches = sessions.filter((session) => session.id.startsWith(selector) || session.name === selector);
 	if (matches.length > 1) {
 		throw new Error(`Ambiguous session selector "${selector}"`);
@@ -142,7 +89,6 @@ function isCatalogRequest(value: unknown): value is CatalogRequest {
 		typeof candidate.id === "string" &&
 		(candidate.command === "list" ||
 			candidate.command === "resolve" ||
-			candidate.command === "siblings" ||
 			candidate.command === "rename" ||
 			candidate.command === "delete" ||
 			candidate.command === "archive" ||
@@ -223,14 +169,6 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				}
 				throw new Error(`No session found matching '${request.selector}'`);
 			}
-			case "siblings":
-				sendCatalogMessage({
-					type: "response",
-					id: request.id,
-					success: true,
-					data: { sessions: (await listSavedSessionSiblings(request.sessionPath)).map(serializeSessionInfo) },
-				});
-				return;
 			case "rename":
 				SessionManager.open(request.sessionPath).appendSessionInfo(request.name.trim());
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
@@ -325,16 +263,6 @@ export class DaemonCatalogClient {
 			{ type: "request", id: randomUUID(), command: "list", cwd, sessionDir },
 			callbacks,
 		);
-		return data.sessions.map(deserializeSessionInfo);
-	}
-
-	async siblings(sessionPath: string): Promise<SessionInfo[]> {
-		const data = await this.request<{ sessions: SessionInfoWire[] }>({
-			type: "request",
-			id: randomUUID(),
-			command: "siblings",
-			sessionPath,
-		});
 		return data.sessions.map(deserializeSessionInfo);
 	}
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Kernel boot fan-out benchmark for ENG-4387. Boots N IPython kernels concurrently
+ * Kernel boot fan-out benchmark. Boots N IPython kernels concurrently
  * and reports boot success rate, per-kernel latency, peak RSS, and wall time.
  *
  *   node scripts/boot-bench.mjs --mode forkserver --n 100

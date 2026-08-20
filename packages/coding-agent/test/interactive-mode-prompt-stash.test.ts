@@ -15,6 +15,7 @@ type PromptStash = {
 	expandedText?: string;
 	pasteSnapshot?: FakePasteSnapshot;
 	images?: readonly (readonly [number, ImageContent])[];
+	restoreOnOpen?: boolean;
 };
 
 type FakeEditor = {
@@ -109,6 +110,8 @@ type PromptStashMethods = {
 	hydratePromptStash: (this: SharedPromptStashHarness) => void;
 	resetCurrentSessionRenderState: (this: ResetHarness, options?: { clearPromptStash?: boolean }) => void;
 	restorePromptStashIfEditorEmpty: (this: PromptStashHarness, stash?: PromptStash) => boolean;
+	restorePromptStashOnOpen: (this: PromptStashHarness) => void;
+	stashDraftForAgentsView: (this: SharedPromptStashHarness) => void;
 	liveImageMarkerIds: (this: PromptStashLiveMarkerHarness) => Set<number>;
 	setupEditorSubmitHandler: (this: SubmitHarness) => void;
 };
@@ -320,6 +323,95 @@ describe("InteractiveMode prompt stash", () => {
 		expect(mode.nextImageMarkerId).toBe(4);
 		expect(state.stash).toBeUndefined();
 		expect(state.queuedStashes).toBeUndefined();
+	});
+
+	it("auto-stashes a draft for the agents view and restores it on reopen", () => {
+		const store = new ClientPromptStashStore();
+		const pasteSnapshot: FakePasteSnapshot = {
+			pastes: [[1, "line one\nline two"]],
+			pasteCounter: 1,
+		};
+		const mode = createSharedPromptStashHarness(store, "session-a", {
+			text: "draft [paste #1 +2 lines]",
+			expandedText: "draft line one\nline two",
+			pasteSnapshot,
+		});
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		expect(mode.promptStashState.stash).toMatchObject({
+			text: "draft [paste #1 +2 lines]",
+			restoreOnOpen: true,
+		});
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		interactiveModeMethods.hydratePromptStash.call(reopenedMode);
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("draft [paste #1 +2 lines]");
+		expect(reopenedMode.editor.restoredPasteSnapshot).toBe(pasteSnapshot);
+		expect(reopenedMode.promptStashState.stash).toBeUndefined();
+	});
+
+	it("lands the on-open restore notice in a fresh status block", () => {
+		const store = new ClientPromptStashStore();
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "draft" });
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		// init() may have just posted a status (e.g. a compaction notice); showStatus
+		// replaces the anchored last status, so the restore must drop the anchor first.
+		const priorStatus = { setText: vi.fn() };
+		(reopenedMode as { lastStatusText?: unknown }).lastStatusText = priorStatus;
+		(reopenedMode as { lastStatusSpacer?: unknown }).lastStatusSpacer = { spacer: true };
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("draft");
+		expect((reopenedMode as { lastStatusText?: unknown }).lastStatusText).toBeUndefined();
+		expect((reopenedMode as { lastStatusSpacer?: unknown }).lastStatusSpacer).toBeUndefined();
+		expect(priorStatus.setText).not.toHaveBeenCalled();
+	});
+
+	it("queues an existing manual stash behind the agents-view auto-stash", () => {
+		const store = new ClientPromptStashStore();
+		const state = store.forSession("session-a");
+		state.stash = { text: "manual draft" };
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "typed draft" });
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		expect(state.stash).toMatchObject({ text: "typed draft", restoreOnOpen: true });
+		expect(state.queuedStashes).toEqual([{ text: "manual draft" }]);
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("typed draft");
+		expect(state.stash).toEqual({ text: "manual draft" });
+		expect(state.queuedStashes).toBeUndefined();
+	});
+
+	it("skips the agents-view auto-stash for whitespace-only drafts", () => {
+		const store = new ClientPromptStashStore();
+		const state = store.forSession("session-a");
+		state.stash = { text: "manual draft" };
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "   \n\t" });
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		expect(state.stash).toEqual({ text: "manual draft" });
+		expect(state.queuedStashes).toBeUndefined();
+	});
+
+	it("does not auto-restore a manual stash on reopen", () => {
+		const store = new ClientPromptStashStore();
+		store.forSession("session-a").stash = { text: "manual draft" };
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("");
+		expect(store.forSession("session-a").stash).toEqual({ text: "manual draft" });
 	});
 
 	it("rebinds prompt stash state when the connected session changes", () => {

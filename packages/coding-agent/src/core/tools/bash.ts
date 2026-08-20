@@ -81,17 +81,14 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				if (child.pid) trackDetachedChildPid(child.pid);
 				let timedOut = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
-				// Set timeout if provided.
 				if (timeout !== undefined && timeout > 0) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
 						if (child.pid) killProcessTree(child.pid);
 					}, timeout * 1000);
 				}
-				// Stream stdout and stderr.
 				child.stdout?.on("data", onData);
 				child.stderr?.on("data", onData);
-				// Handle abort signal by killing the entire process tree.
 				const onAbort = () => {
 					if (child.pid) killProcessTree(child.pid);
 				};

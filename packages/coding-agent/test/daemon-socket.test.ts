@@ -9,8 +9,16 @@ import {
 	cleanupDaemonSocketPath,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
+	normalizeSocketPath,
 	prepareDaemonSocketPath,
 } from "../src/modes/daemon/daemon-socket.js";
+
+describe("normalizeSocketPath", () => {
+	it("normalizes equivalent Unix spellings", () => {
+		if (process.platform === "win32") return;
+		expect(normalizeSocketPath("/a//b.sock/")).toBe("/a/b.sock");
+	});
+});
 
 describe("defaultDaemonSocketPath", () => {
 	it("uses a fixed Windows named pipe path", () => {

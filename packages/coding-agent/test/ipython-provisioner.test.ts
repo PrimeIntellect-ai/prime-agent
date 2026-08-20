@@ -187,9 +187,10 @@ describe("IpythonKernelProvisioner", () => {
 		expect(countRuns()).toBe(1);
 	});
 
-	it("listNamespaceNames() returns null when no kernel is running", async () => {
+	it("namespace maintenance returns null when no kernel is running", async () => {
 		const provisioner = new IpythonKernelProvisioner(tempDir, {});
 		expect(await provisioner.listNamespaceNames()).toBeNull();
+		expect(await provisioner.pruneOversizedVariables()).toBeNull();
 	});
 
 	it("does not dispose a running kernel when an ensure caller is aborted", async () => {

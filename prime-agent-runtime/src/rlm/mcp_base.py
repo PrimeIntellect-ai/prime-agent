@@ -17,7 +17,6 @@ and re-reads. Interactive login runs host-side, never here.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import time
@@ -27,13 +26,7 @@ from typing import Any
 
 from . import host_request
 
-__all__ = [
-    "AcpMcpIntegration",
-    "McpIntegration",
-    "McpToolError",
-    "NotEnabled",
-    "make_acp_mcp_skill",
-]
+__all__ = ["McpIntegration", "McpToolError", "NotEnabled"]
 
 # Stored access tokens are treated as expired this many seconds early so a token
 # never dies mid-request. Mirrors the host's refresh buffer.
@@ -114,34 +107,6 @@ def _resolve_streamable_http():
     raise ImportError(
         "the installed `mcp` SDK exposes no streamable-HTTP client; upgrade `mcp`"
     )
-
-
-async def _open_http_session(
-    stack: AsyncExitStack, url: str, headers: dict[str, str]
-):
-    """Open and initialize one streamable-HTTP MCP session."""
-    from mcp import ClientSession  # noqa: PLC0415
-
-    transport = _resolve_streamable_http()
-    params = inspect.signature(transport).parameters
-    if "headers" in params:
-        cm = transport(url, headers=headers or None)
-    elif "http_client" in params:
-        import httpx  # noqa: PLC0415
-
-        client = await stack.enter_async_context(
-            httpx.AsyncClient(headers=headers or None)
-        )
-        cm = transport(url, http_client=client)
-    else:
-        raise RuntimeError(
-            f"unsupported mcp streamable-HTTP client signature: {tuple(params)}"
-        )
-
-    read, write, *_ = await stack.enter_async_context(cm)
-    session = await stack.enter_async_context(ClientSession(read, write))
-    await session.initialize()
-    return session
 
 
 class McpIntegration:
@@ -225,35 +190,59 @@ class McpIntegration:
     # -- connection ---------------------------------------------------------
 
     async def _resolve_config(self) -> tuple[str | None, dict[str, str]]:
-        """Host-resolved (url, extra_headers), honoring a user's mcpServers override.
-        Falls back to the class ``url`` and no extra headers on host error."""
-        try:
-            cfg = await host_request("mcp.config", {"server": self.server})
-        except RuntimeError:
-            cfg = {}
-        url = cfg.get("url") if isinstance(cfg, dict) else None
-        headers = cfg.get("headers") if isinstance(cfg, dict) else None
-        if not (isinstance(url, str) and url):
-            url = self.url
-        extra = headers if isinstance(headers, dict) else {}
-        return url, {str(k): str(v) for k, v in extra.items()}
+        """The integration's own (url, extra_headers). Never consults user
+        ``mcpServers`` entries: a same-named entry must not repoint an authored
+        integration, whose credentials (stored or env-sourced) would follow.
+        """
+        return self.url, {}
 
     async def _open_session(self, stack: AsyncExitStack):
         """Open an initialized MCP ClientSession bound to ``stack``.
 
         Override for non-HTTP transports (e.g. stdio). The default connects over
-        streamable HTTP with a Bearer token from auth.json. The URL comes from the
-        host (mcpServers override) when available, else ``self.url``.
+        streamable HTTP to the class ``url`` with a Bearer token from auth.json.
         """
+        import inspect  # noqa: PLC0415
+
+        from mcp import ClientSession  # noqa: PLC0415
+
         url, extra_headers = await self._resolve_config()
         if not url:
             raise ValueError(
                 f"{type(self).__name__} must set `url` or override `_open_session`"
             )
         token = await self._resolve_token()
+        transport = _resolve_streamable_http()
         # Extra configured headers first, Authorization last so it always wins.
         auth_header = {**extra_headers, "Authorization": f"Bearer {token}"}
-        return await _open_http_session(stack, url, auth_header)
+
+        # SDK signatures vary: some take headers=, others only http_client=.
+        params = inspect.signature(transport).parameters
+        if "headers" in params:
+            cm = transport(url, headers=auth_header)
+        elif "http_client" in params:
+            # This SDK shape requires its companion httpx2 client (the transport calls client.sse()).
+            import httpx2  # noqa: PLC0415
+
+            # SDK-factory timeouts; a default client's 5s read cap drops idle SSE streams.
+            # No redirects: a redirecting endpoint must not receive the bearer header.
+            client = await stack.enter_async_context(
+                httpx2.AsyncClient(
+                    headers=auth_header,
+                    timeout=httpx2.Timeout(30.0, read=300.0),
+                    follow_redirects=False,
+                )
+            )
+            cm = transport(url, http_client=client)
+        else:
+            raise RuntimeError(
+                f"unsupported mcp streamable-HTTP client signature: {tuple(params)}"
+            )
+
+        read, write, *_ = await stack.enter_async_context(cm)
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        return session
 
     # -- tools --------------------------------------------------------------
 
@@ -315,132 +304,6 @@ class McpIntegration:
         return _call
 
 
-class AcpMcpIntegration(McpIntegration):
-    """An MCP integration supplied ephemerally by an ACP client."""
-
-    def __init__(self, server: str, config: dict[str, Any]) -> None:
-        self.server = server
-        self._acp_config = dict(config)
-        super().__init__()
-
-    async def _open_session(self, stack: AsyncExitStack):
-        transport = self._acp_config.get("type")
-        if transport == "http":
-            url = self._acp_config.get("url")
-            headers = self._acp_config.get("headers", {})
-            if not isinstance(url, str) or not url:
-                raise ValueError(f"ACP MCP server {self.server!r} has no HTTP URL")
-            if not isinstance(headers, dict) or not all(
-                isinstance(key, str) and isinstance(value, str)
-                for key, value in headers.items()
-            ):
-                raise ValueError(
-                    f"ACP MCP server {self.server!r} has invalid HTTP headers"
-                )
-            return await _open_http_session(stack, url, headers)
-
-        if transport == "stdio":
-            from mcp import ClientSession, StdioServerParameters  # noqa: PLC0415
-            from mcp.client.stdio import stdio_client  # noqa: PLC0415
-
-            command = self._acp_config.get("command")
-            args = self._acp_config.get("args", [])
-            env = self._acp_config.get("env", {})
-            if not isinstance(command, str) or not command:
-                raise ValueError(
-                    f"ACP MCP server {self.server!r} has no stdio command"
-                )
-            if not isinstance(args, list) or not all(
-                isinstance(value, str) for value in args
-            ):
-                raise ValueError(
-                    f"ACP MCP server {self.server!r} has invalid stdio arguments"
-                )
-            if not isinstance(env, dict) or not all(
-                isinstance(key, str) and isinstance(value, str)
-                for key, value in env.items()
-            ):
-                raise ValueError(
-                    f"ACP MCP server {self.server!r} has invalid stdio environment"
-                )
-            streams = stdio_client(
-                StdioServerParameters(command=command, args=args, env=env)
-            )
-            read, write = await stack.enter_async_context(streams)
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            return session
-
-        raise ValueError(
-            f"ACP MCP server {self.server!r} uses unsupported transport {transport!r}"
-        )
-
-
-_JSON_TO_PYTHON = {
-    "string": str,
-    "integer": int,
-    "number": float,
-    "boolean": bool,
-    "array": list,
-    "object": dict,
-}
-
-
-def _mcp_tool_signature(schema: dict[str, Any]) -> inspect.Signature:
-    properties = schema.get("properties", {})
-    required = set(schema.get("required", []))
-    if not isinstance(properties, dict):
-        properties = {}
-    parameters = []
-    for name, raw_property in properties.items():
-        if not isinstance(name, str) or not name.isidentifier():
-            continue
-        property_schema = raw_property if isinstance(raw_property, dict) else {}
-        parameters.append(
-            inspect.Parameter(
-                name,
-                inspect.Parameter.KEYWORD_ONLY,
-                default=(inspect.Parameter.empty if name in required else None),
-                annotation=_JSON_TO_PYTHON.get(
-                    property_schema.get("type"), inspect.Parameter.empty
-                ),
-            )
-        )
-    parameters.sort(
-        key=lambda parameter: parameter.default is not inspect.Parameter.empty
-    )
-    return inspect.Signature(parameters)
-
-
-def make_acp_mcp_skill(
-    server: str,
-    config: dict[str, Any],
-    tool: dict[str, Any],
-):
-    """Create one callable Python program for an eagerly discovered MCP tool."""
-    tool_name = tool.get("name")
-    if not isinstance(tool_name, str) or not tool_name:
-        raise ValueError("ACP MCP tool metadata has no non-empty name")
-    description = tool.get("description")
-    schema = tool.get("inputSchema")
-    if not isinstance(schema, dict):
-        schema = {}
-    integration = AcpMcpIntegration(server, config)
-
-    async def run(**kwargs: Any) -> Any:
-        return await integration.call_tool(tool_name, kwargs)
-
-    run.__name__ = tool_name
-    run.__qualname__ = tool_name
-    run.__signature__ = _mcp_tool_signature(schema)  # type: ignore[attr-defined]
-    run.__doc__ = (
-        description
-        if isinstance(description, str) and description
-        else f"MCP tool {tool_name!r} from server {server!r}."
-    )
-    return run
-
-
 def _parse_result(result: Any) -> Any:
     """Normalize a CallToolResult into plain Python (structured output preferred).
 
@@ -452,10 +315,11 @@ def _parse_result(result: Any) -> Any:
         text = getattr(block, "text", None)
         if text is not None:
             texts.append(text)
-    if getattr(result, "isError", False):
+    is_error = getattr(result, "is_error", getattr(result, "isError", False))
+    if is_error:
         raise McpToolError("\n".join(texts) or "MCP tool returned an error")
 
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
     if structured is not None:  # falsy-but-valid payloads ({} / []) are real results
         return structured
     if texts:

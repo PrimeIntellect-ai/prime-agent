@@ -27,21 +27,6 @@ function baseMimeType(mimeType: string): string {
 	return mimeType.split(";")[0]?.trim().toLowerCase() ?? mimeType.toLowerCase();
 }
 
-export function extensionForImageMimeType(mimeType: string): string | null {
-	switch (baseMimeType(mimeType)) {
-		case "image/png":
-			return "png";
-		case "image/jpeg":
-			return "jpg";
-		case "image/webp":
-			return "webp";
-		case "image/gif":
-			return "gif";
-		default:
-			return null;
-	}
-}
-
 function selectPreferredImageMimeType(mimeTypes: string[]): string | null {
 	const normalized = mimeTypes
 		.map((t) => t.trim())

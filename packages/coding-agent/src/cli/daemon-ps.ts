@@ -11,7 +11,7 @@ import {
 	DAEMON_SCHEMA_ID,
 	type DaemonRuntimeIdentity,
 } from "../modes/daemon/daemon-protocol.js";
-import { defaultDaemonSocketDir, defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
+import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
 import { signalProcessGroupOrProcess } from "../utils/child-process.js";
@@ -78,14 +78,6 @@ export function evaluateShutdownQuietPeriod(now: number, quietSince: number | un
 
 // Linux comm names (and thus the process name ss reports) are capped at 15 chars.
 const MAX_COMM_LENGTH = 15;
-
-/** Normalize a socket path so process-scan and dir-sweep entries merge cleanly. */
-function normalizeSocketPath(socketPath: string): string {
-	if (process.platform === "win32") {
-		return socketPath;
-	}
-	return resolve(socketPath);
-}
 
 function processNameMatches(name: string, appName: string): boolean {
 	return name === appName || appName.slice(0, MAX_COMM_LENGTH) === name;
@@ -1029,7 +1021,7 @@ function isTrackedWorkerDescriptor(value: unknown): value is DaemonWorkerDescrip
 	}
 	const descriptor = value as Partial<DaemonWorkerDescriptor>;
 	return (
-		descriptor.version === 1 &&
+		(descriptor.version === 1 || descriptor.version === 2) &&
 		typeof descriptor.supervisorSocketPath === "string" &&
 		typeof descriptor.workerId === "string" &&
 		Number.isInteger(descriptor.pid) &&

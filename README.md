@@ -15,8 +15,7 @@ Prime Agent: A Self-Improving RLM Agent
 <p align="center">
   <a href="packages/coding-agent/docs/index.md">Documentation</a> &bull;
   <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a> &bull;
-  <a href="https://github.com/badlogic/pi-mono">pi-mono</a>
+  <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a>
 </p>
 
 <p align="center">
@@ -25,6 +24,12 @@ Prime Agent: A Self-Improving RLM Agent
   </a>
   <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml">
     <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml/badge.svg" alt="Build Binaries" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://trendshift.io/repositories/104249?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-104249" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/104249" alt="PrimeIntellect-ai%2Fprime-agent | Trendshift" width="250" height="55" />
   </a>
 </p>
 
@@ -70,7 +75,7 @@ Useful commands:
 ```bash
 prime-agent agents                   # Browse running, idle, and saved sessions
 prime-agent attach <agent>           # Reattach to a running session
-prime-agent --resume <path|id>       # Resume a saved session
+prime-agent --resume [path|id]       # Browse sessions or resume one directly
 prime-agent status                   # Inspect background service state
 prime-agent doctor [--fix]           # Inspect or repair background services
 prime-agent update [--force]         # Update Prime Agent
@@ -98,6 +103,12 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 - [Provider setup](packages/coding-agent/docs/providers.md) — subscription and API-key providers
 - [Architecture overview](packages/coding-agent/docs/architecture.md) — daemon, worker, kernel, and persistence boundaries
 - [Development](packages/coding-agent/docs/development.md) — build and run from source
+
+## Contributing
+
+Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
+
+Read the [contribution guidelines](CONTRIBUTING.md) for the full process. Report security vulnerabilities privately by following the [security policy](SECURITY.md).
 
 ## Acknowledgements
 

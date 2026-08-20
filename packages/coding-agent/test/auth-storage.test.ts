@@ -181,7 +181,6 @@ describe("AuthStorage", () => {
 		});
 
 		test("apiKey as literal value is used directly when not an env var", async () => {
-			// Make sure this isn't an env var
 			delete process.env.literal_api_key_value;
 
 			writeAuthJson({
@@ -797,7 +796,6 @@ describe("AuthStorage", () => {
 
 		describe("caching", () => {
 			test("command is only executed once per process", async () => {
-				// Use a command that writes to a file to count invocations
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
@@ -809,12 +807,10 @@ describe("AuthStorage", () => {
 
 				authStorage = AuthStorage.create(authJsonPath);
 
-				// Call multiple times
 				await authStorage.getApiKey("anthropic");
 				await authStorage.getApiKey("anthropic");
 				await authStorage.getApiKey("anthropic");
 
-				// Command should have only run once
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
 				expect(count).toBe(1);
 			});
@@ -829,14 +825,12 @@ describe("AuthStorage", () => {
 					anthropic: { type: "api_key", key: command },
 				});
 
-				// Create multiple AuthStorage instances
 				const storage1 = AuthStorage.create(authJsonPath);
 				await storage1.getApiKey("anthropic");
 
 				const storage2 = AuthStorage.create(authJsonPath);
 				await storage2.getApiKey("anthropic");
 
-				// Command should still have only run once
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
 				expect(count).toBe(1);
 			});
@@ -854,11 +848,9 @@ describe("AuthStorage", () => {
 				authStorage = AuthStorage.create(authJsonPath);
 				await authStorage.getApiKey("anthropic");
 
-				// Clear cache and call again
 				clearConfigValueCache();
 				await authStorage.getApiKey("anthropic");
 
-				// Command should have run twice
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
 				expect(count).toBe(2);
 			});
@@ -890,14 +882,12 @@ describe("AuthStorage", () => {
 
 				authStorage = AuthStorage.create(authJsonPath);
 
-				// Call multiple times - all should return undefined
 				const key1 = await authStorage.getApiKey("anthropic");
 				const key2 = await authStorage.getApiKey("anthropic");
 
 				expect(key1).toBeUndefined();
 				expect(key2).toBeUndefined();
 
-				// Command should have only run once despite failures
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
 				expect(count).toBe(1);
 			});
@@ -918,7 +908,6 @@ describe("AuthStorage", () => {
 					const key1 = await authStorage.getApiKey("anthropic");
 					expect(key1).toBe("first-value");
 
-					// Change env var
 					process.env[envVarName] = "second-value";
 
 					const key2 = await authStorage.getApiKey("anthropic");
@@ -992,7 +981,6 @@ describe("AuthStorage", () => {
 
 			authStorage = AuthStorage.create(authJsonPath);
 
-			// Simulate external edit while process is running
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "old-anthropic" },
 				openai: { type: "api_key", key: "openai-key" },
@@ -1015,7 +1003,6 @@ describe("AuthStorage", () => {
 
 			authStorage = AuthStorage.create(authJsonPath);
 
-			// Simulate external edit while process is running
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "anthropic-key" },
 				openai: { type: "api_key", key: "openai-key" },
@@ -1045,6 +1032,32 @@ describe("AuthStorage", () => {
 			expect(raw).toBe("{invalid-json");
 		});
 
+		test("removeVerified deletes from disk and memory", () => {
+			writeAuthJson({
+				"mcp:remote": { type: "api_key", key: "token" },
+				openai: { type: "api_key", key: "openai-key" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			authStorage.removeVerified("mcp:remote");
+
+			const updated = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, unknown>;
+			expect(updated["mcp:remote"]).toBeUndefined();
+			expect(authStorage.get("mcp:remote")).toBeUndefined();
+			expect((updated.openai as { key: string }).key).toBe("openai-key");
+		});
+
+		test("removeVerified throws while the credential may still exist on disk", () => {
+			writeAuthJson({
+				"mcp:remote": { type: "api_key", key: "token" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			writeFileSync(authJsonPath, "{invalid-json", "utf-8");
+
+			expect(() => authStorage.removeVerified("mcp:remote")).toThrow();
+		});
+
 		test("reload records parse errors and drainErrors clears buffer", () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "anthropic-key" },
@@ -1055,7 +1068,6 @@ describe("AuthStorage", () => {
 
 			authStorage.reload();
 
-			// Keeps previous in-memory data on reload failure
 			expect(authStorage.get("anthropic")).toEqual({ type: "api_key", key: "anthropic-key" });
 
 			const firstDrain = authStorage.drainErrors();

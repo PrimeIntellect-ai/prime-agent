@@ -549,6 +549,7 @@ describe("ENG-4531 agent message UI", () => {
 			executionStarted: true,
 			argsComplete: true,
 			expanded: true,
+			agentMessagesExpanded: true,
 			details: {
 				status: "ok",
 				result: receipt,
@@ -593,6 +594,7 @@ describe("ENG-4531 agent message UI", () => {
 			executionStarted: true,
 			argsComplete: true,
 			expanded: true,
+			agentMessagesExpanded: true,
 			details: {
 				status: "ok",
 				result: receipts,
@@ -623,6 +625,7 @@ describe("ENG-4531 agent message UI", () => {
 			executionStarted: true,
 			argsComplete: true,
 			expanded: true,
+			agentMessagesExpanded: true,
 			details: {
 				status: "ok",
 				result: "{'referenced_message': 'agentmsg_4531_ref', 'answer': 42}",
@@ -652,6 +655,7 @@ describe("ENG-4531 agent message UI", () => {
 			executionStarted: true,
 			argsComplete: true,
 			expanded: true,
+			agentMessagesExpanded: true,
 			details: {
 				status: "ok",
 				result: "'done'",
@@ -675,5 +679,42 @@ describe("ENG-4531 agent message UI", () => {
 		expect(rendered).toContain(" ◆ Agent message sent · to parent Worker");
 		expect(rendered).toContain(" ╰─ Ping.");
 		expect(rendered).toContain("done");
+	});
+
+	it("decouples sent-message expansion from tool-output expansion", () => {
+		const sentAgentMessage = {
+			id: "agentmsg_4531_decoupled",
+			message: "Decouple me.",
+			deliveryStatus: "delivered",
+			receiverRole: "parent",
+			target: {
+				activeSessionId: "worker-active",
+				sessionId: "worker-session",
+				sessionName: "Worker",
+			},
+		};
+		const baseState = {
+			code: 'await agent_message.send("Decouple me.", receiver_role="parent")',
+			executionStarted: true,
+			argsComplete: true,
+			details: { status: "ok", sentAgentMessages: [sentAgentMessage] },
+		};
+
+		const agentExpanded = stripAnsi(
+			new IPythonCellComponent({ ...baseState, expanded: false, agentMessagesExpanded: true })
+				.render(120)
+				.join("\n"),
+		);
+		expect(agentExpanded).toContain(" ◆ Agent message sent · to parent Worker");
+		expect(agentExpanded).toContain(" ╰─ Decouple me.");
+		expect(agentExpanded).not.toContain("· Decouple me.");
+
+		const toolExpanded = stripAnsi(
+			new IPythonCellComponent({ ...baseState, expanded: true, agentMessagesExpanded: false })
+				.render(120)
+				.join("\n"),
+		);
+		expect(toolExpanded).toContain(" ◆ Agent message sent · to parent Worker · Decouple me.");
+		expect(toolExpanded).not.toContain("╰─");
 	});
 });

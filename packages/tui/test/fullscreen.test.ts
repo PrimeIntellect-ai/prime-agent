@@ -82,8 +82,6 @@ function setup(transcriptLines: string[], cols = 40, rows = 10): Setup {
 	chat.lines = transcriptLines;
 	const dock = new TestComponent();
 	dock.lines = ["> prompt", "footer"];
-	// Children drive inline rendering (before enter / after exit); the same
-	// components are passed explicitly as fullscreen scroll/dock roots.
 	tui.addChild(chat);
 	tui.addChild(dock);
 	tui.start();
@@ -114,7 +112,6 @@ describe("TUI fullscreen mode", () => {
 		assert.strictEqual(terminal.getActiveBufferType(), "alternate");
 		assert.strictEqual(terminal.mouseTrackingActive, true, "probe succeeds → wheel tracking enabled");
 
-		// rows=10, dock=2 → window shows the last 8 of 20 transcript lines
 		const viewport = terminal.getViewport();
 		assert.strictEqual(viewport[0], "Line 12");
 		assert.strictEqual(viewport[7], "Line 19");
@@ -302,7 +299,6 @@ describe("TUI fullscreen mode", () => {
 
 		terminal.sendInput(PAGE_UP);
 		await terminal.waitForRender();
-		// window height 8 → page size 7; top was 22, now 15
 		assert.strictEqual(terminal.getViewport()[0], "Line 15");
 
 		terminal.sendInput(VIEWPORT_TOP);
@@ -723,7 +719,6 @@ describe("TUI fullscreen mode", () => {
 		tui.enterFullscreen({ scroll: [chat], dock });
 		await terminal.waitForRender();
 
-		// window shows lines 12-19; press on row 1 col 1, drag to row 2 col 6
 		terminal.sendInput("\x1b[<0;1;1M");
 		terminal.sendInput("\x1b[<32;6;2M");
 		await terminal.waitForRender();
@@ -906,7 +901,6 @@ describe("TUI fullscreen mode", () => {
 		tui.enterFullscreen({ scroll: [chat], dock });
 		await terminal.waitForRender();
 
-		// rows=10 and dock=2, so the user prompt is visible at screen row 9.
 		terminal.sendInput("\x1b[<0;3;9M");
 		terminal.sendInput("\x1b[<32;9;9M");
 		await terminal.waitForRender();
@@ -938,7 +932,6 @@ describe("TUI fullscreen mode", () => {
 
 	it("clicking an OSC 8 hyperlink opens it through the URL handler", async () => {
 		const transcript = lines(20);
-		// window height is 8 (rows=10, dock=2), following shows lines 12..19
 		transcript[12] = "see \x1b]8;;https://example.com/docs\x1b\\\x1b[36mdocs\x1b[39m\x1b]8;;\x1b\\ here";
 		const { terminal, tui, chat, dock } = setup(transcript);
 		const opened: string[] = [];
@@ -946,13 +939,11 @@ describe("TUI fullscreen mode", () => {
 		tui.enterFullscreen({ scroll: [chat], dock });
 		await terminal.waitForRender();
 
-		// "docs" occupies columns 5-8 on screen row 1
 		terminal.sendInput("\x1b[<0;6;1M");
 		terminal.sendInput("\x1b[<0;6;1m");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
 
-		// clicking outside the link opens nothing
 		terminal.sendInput("\x1b[<0;2;1M");
 		terminal.sendInput("\x1b[<0;2;1m");
 		await terminal.waitForRender();
@@ -971,7 +962,6 @@ describe("TUI fullscreen mode", () => {
 		await terminal.waitForRender();
 
 		terminal.sendInput("\x1b[<0;6;1M");
-		// The target can repaint between physical press and release while output streams.
 		transcript[12] = "updated without the URL";
 		tui.requestRender();
 		await terminal.waitForRender();
@@ -991,7 +981,6 @@ describe("TUI fullscreen mode", () => {
 		tui.enterFullscreen({ scroll: [chat], dock });
 		await terminal.waitForRender();
 
-		// The tab is painted as three spaces, so the link starts at column 4.
 		terminal.sendInput("\x1b[<0;4;1M");
 		terminal.sendInput("\x1b[<0;4;1m");
 		await terminal.waitForRender();
@@ -1126,7 +1115,6 @@ describe("TUI fullscreen mode", () => {
 		tui.enterFullscreen({ scroll: [chat], dock });
 		await terminal.waitForRender();
 
-		// rows=10, dock=2 → dock starts at screen row 9
 		terminal.sendInput("\x1b[<0;3;9M");
 		terminal.sendInput("\x1b[<0;3;9m");
 		await terminal.waitForRender();

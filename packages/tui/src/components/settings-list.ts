@@ -42,7 +42,6 @@ export class SettingsList implements Component {
 	private searchInput?: Input;
 	private searchEnabled: boolean;
 
-	// Submenu state
 	private submenuComponent: Component | null = null;
 	private submenuItemIndex: number | null = null;
 
@@ -66,7 +65,6 @@ export class SettingsList implements Component {
 		}
 	}
 
-	/** Update an item's currentValue */
 	updateValue(id: string, newValue: string): void {
 		const item = this.items.find((i) => i.id === id);
 		if (item) {
@@ -79,7 +77,6 @@ export class SettingsList implements Component {
 	}
 
 	render(width: number): string[] {
-		// If submenu is active, render it instead
 		if (this.submenuComponent) {
 			return this.submenuComponent.render(width);
 		}
@@ -110,17 +107,14 @@ export class SettingsList implements Component {
 			return lines;
 		}
 
-		// Calculate visible range with scrolling
 		const startIndex = Math.max(
 			0,
 			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), displayItems.length - this.maxVisible),
 		);
 		const endIndex = Math.min(startIndex + this.maxVisible, displayItems.length);
 
-		// Calculate max label width for alignment
 		const maxLabelWidth = Math.min(30, Math.max(...this.items.map((item) => visibleWidth(item.label))));
 
-		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = displayItems[i];
 			if (!item) continue;
@@ -129,11 +123,9 @@ export class SettingsList implements Component {
 			const prefix = isSelected ? this.theme.cursor : "  ";
 			const prefixWidth = visibleWidth(prefix);
 
-			// Pad label to align values
 			const labelPadded = item.label + " ".repeat(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
 			const labelText = this.theme.label(labelPadded, isSelected);
 
-			// Calculate space for value
 			const separator = "  ";
 			const usedWidth = prefixWidth + maxLabelWidth + visibleWidth(separator);
 			const valueMaxWidth = width - usedWidth - 2;
@@ -143,13 +135,11 @@ export class SettingsList implements Component {
 			lines.push(truncateToWidth(prefix + labelText + separator + valueText, width));
 		}
 
-		// Add scroll indicator if needed
 		if (startIndex > 0 || endIndex < displayItems.length) {
 			const scrollText = `  (${this.selectedIndex + 1}/${displayItems.length})`;
 			lines.push(this.theme.hint(truncateToWidth(scrollText, width - 2, "")));
 		}
 
-		// Add description for selected item
 		const selectedItem = displayItems[this.selectedIndex];
 		if (selectedItem?.description) {
 			lines.push("");
@@ -159,7 +149,6 @@ export class SettingsList implements Component {
 			}
 		}
 
-		// Add hint
 		this.addHintLine(lines, width);
 
 		return lines;
@@ -173,7 +162,6 @@ export class SettingsList implements Component {
 			return;
 		}
 
-		// Main list input handling
 		const kb = getKeybindings();
 		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
 		if (kb.matches(data, "tui.select.up")) {
@@ -201,7 +189,6 @@ export class SettingsList implements Component {
 		if (!item) return;
 
 		if (item.submenu) {
-			// Open submenu, passing current value so it can pre-select correctly
 			this.submenuItemIndex = this.selectedIndex;
 			this.submenuComponent = item.submenu(item.currentValue, (selectedValue?: string) => {
 				if (selectedValue !== undefined) {
@@ -211,7 +198,6 @@ export class SettingsList implements Component {
 				this.closeSubmenu();
 			});
 		} else if (item.values && item.values.length > 0) {
-			// Cycle through values
 			const currentIndex = item.values.indexOf(item.currentValue);
 			const nextIndex = (currentIndex + 1) % item.values.length;
 			const newValue = item.values[nextIndex];
@@ -222,7 +208,6 @@ export class SettingsList implements Component {
 
 	private closeSubmenu(): void {
 		this.submenuComponent = null;
-		// Restore selection to the item that opened the submenu
 		if (this.submenuItemIndex !== null) {
 			this.selectedIndex = this.submenuItemIndex;
 			this.submenuItemIndex = null;

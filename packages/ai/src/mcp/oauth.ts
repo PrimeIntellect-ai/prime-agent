@@ -1,6 +1,3 @@
-// Generic OAuth 2.1 (PKCE + dynamic client registration) for remote MCP servers.
-// One provider per server, registered as `mcp:<server>` so it reuses auth.json. Node-only (callback server).
-
 import type { Server } from "node:http";
 import { oauthErrorHtml, oauthSuccessHtml } from "../utils/oauth/oauth-page.js";
 import { generatePKCE } from "../utils/oauth/pkce.js";
@@ -17,7 +14,6 @@ const redirectUriFor = (port: number) => `http://localhost:${port}${CALLBACK_PAT
 const ALL_REDIRECT_URIS = CALLBACK_PORTS.map(redirectUriFor);
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
-/** Authorization-server metadata we rely on (RFC 8414 / OAuth 2.1 + DCR). */
 interface AuthServerMetadata {
 	issuer?: string;
 	authorization_endpoint: string;
@@ -29,20 +25,21 @@ interface AuthServerMetadata {
 export interface McpOAuthConfig {
 	/** MCP server name; provider id becomes `mcp:<server>`. */
 	server: string;
-	/** Human label for UI. */
+	/** Human-readable label shown in OAuth UI; defaults to `server`. */
 	label?: string;
 	/** The MCP endpoint URL — discovery is rooted at its origin. */
 	url: string;
 	/** Pre-registered client id (servers without DCR, e.g. Slack). */
 	clientId?: string;
-	/** Explicit scopes; falls back to the server's advertised scopes. */
+	/** Requested OAuth scopes; defaults to the server's advertised scopes. */
 	scopes?: string;
 }
 
-/** Extra fields we persist alongside the standard credential triple. */
 interface McpCredentials extends OAuthCredentials {
 	tokenEndpoint?: string;
 	clientId?: string;
+	/** MCP endpoint the token was issued for; consumers refuse to send it elsewhere. */
+	endpoint?: string;
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
@@ -87,7 +84,6 @@ async function discover(url: string): Promise<AuthServerMetadata> {
 	);
 }
 
-/** Dynamic client registration (RFC 7591). Returns the issued client_id. */
 async function registerClient(registrationEndpoint: string, label: string): Promise<string> {
 	const body = {
 		client_name: label,
@@ -232,6 +228,7 @@ function toCredentials(
 	token: { access_token: string; refresh_token?: string; expires_in?: number },
 	tokenEndpoint: string,
 	clientId: string,
+	endpoint: string | undefined,
 	previousRefresh?: string,
 ): McpCredentials {
 	return {
@@ -243,10 +240,10 @@ function toCredentials(
 			: Date.now() + 3600 * 1000 - TOKEN_EXPIRY_BUFFER_MS,
 		tokenEndpoint,
 		clientId,
+		endpoint,
 	};
 }
 
-/** Build a provider for one MCP server. Register it with registerOAuthProvider(). */
 export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInterface {
 	const label = config.label ?? config.server;
 
@@ -348,7 +345,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				client_id: clientId,
 				code_verifier: verifier,
 			});
-			return toCredentials(token, meta.token_endpoint, clientId);
+			return toCredentials(token, meta.token_endpoint, clientId, config.url);
 		} finally {
 			cb.server.close();
 		}
@@ -366,7 +363,8 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			refresh_token: creds.refresh,
 			...(clientId ? { client_id: clientId } : {}),
 		});
-		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.refresh);
+		// Never infer a binding: refreshing an unbound credential must not rebind it to the current URL.
+		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.endpoint, creds.refresh);
 	}
 
 	return {

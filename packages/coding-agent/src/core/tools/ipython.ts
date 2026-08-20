@@ -1,4 +1,3 @@
-// TODO: reconsider whether the persistent kernel is needed once RLM-1 weights land.
 import { existsSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
@@ -37,6 +36,8 @@ except Exception:
 try:
     import rlm as _prime_agent_rlm_module
     rlm = _prime_agent_rlm_module.rlm
+    import rlm.mcp as mcp
+    mcp.install_shutdown_hook()
 except Exception as _prime_agent_rlm_error:
     _PRIME_AGENT_RLM_IMPORT_ERROR = str(_prime_agent_rlm_error)
 
@@ -361,6 +362,13 @@ export class IpythonKernelProvisioner {
 	/** Whether a kernel has finished starting and is currently running. */
 	get hasRunningKernel(): boolean {
 		return this.startedManager?.isRunning ?? false;
+	}
+
+	/** Remove live variables above the snapshot's per-variable size limit. */
+	async pruneOversizedVariables(): Promise<string[] | null> {
+		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));
+		const result = await m?.pruneOversizedVariables();
+		return result ? (result.pruned ?? []) : null;
 	}
 
 	/** Live user-defined names in the kernel namespace, or null if listing failed / no kernel. */
