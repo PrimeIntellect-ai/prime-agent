@@ -231,8 +231,7 @@ class McpIntegration:
         elif "http_client" in params:
             import httpx  # noqa: PLC0415
 
-            # httpx's default 5s read timeout drops idle SSE streams; match the
-            # SDK factory's 30s ops / 300s reads.
+            # SDK-factory timeouts; httpx's default 5s read cap drops idle SSE streams.
             client = await stack.enter_async_context(
                 httpx.AsyncClient(
                     headers=auth_header,

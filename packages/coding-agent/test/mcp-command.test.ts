@@ -100,8 +100,6 @@ describe("MCP management commands", () => {
 				dropped.push(provider);
 			},
 		};
-		// A fresh add can repoint a name an authored skill resolves by (e.g. slack);
-		// a token stored under that name must not replay to the new endpoint.
 		await runMcpManagementCommand(
 			["add", "remote", "--url", "https://one.example/mcp", "--oauth"],
 			manager,

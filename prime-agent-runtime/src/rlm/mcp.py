@@ -21,8 +21,7 @@ __all__ = ["McpStartupError", "call_tool", "close", "list_tools", "reload"]
 
 _DEFAULT_STARTUP_TIMEOUT = 20.0
 _DEFAULT_CALL_TIMEOUT = 60.0
-# Must stay strictly below the host's KERNEL_SHUTDOWN_TIMEOUT_MS (5s) so graceful
-# MCP close finishes before the host's kill deadline.
+# Must stay strictly below the host's KERNEL_SHUTDOWN_TIMEOUT_MS (5s) kill deadline.
 _SHUTDOWN_TIMEOUT = 2.5
 _T = TypeVar("_T")
 _STDERR_BYTE_LIMIT = 8 * 1024
@@ -225,10 +224,7 @@ class _Generation:
         else:
             import httpx
 
-            # Match the SDK factory's timeouts (30s ops / 300s SSE reads); an
-            # httpx default client would cap reads at 5s and drop idle streams.
-            # Reads must also outlast the configured per-call timeout, which is
-            # enforced at the session layer and must not be undercut here.
+            # SDK-factory timeouts (30s ops / 300s SSE reads); reads must also outlast the session-enforced call timeout.
             timeout = httpx.Timeout(30.0, read=max(300.0, self.call_timeout + 30.0))
             client = await self.stack.enter_async_context(
                 httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True)

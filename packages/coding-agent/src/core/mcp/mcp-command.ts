@@ -60,8 +60,7 @@ export async function runMcpManagementCommand(
 		const replaced = settingsManager.getGlobalMcpServers()?.[name] !== undefined;
 		settingsManager.setGlobalMcpServer(name, config, force);
 		await flushGlobalSettings(settingsManager);
-		// Any add may repoint the name at a new endpoint (authored non-catalog
-		// skills like slack resolve their URL by name); a stored token must never replay there.
+		// Any add may repoint a name an authored skill resolves by (e.g. slack); a stored token must never replay there.
 		dropServerCredentials(name, authStorage);
 		return {
 			action,

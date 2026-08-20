@@ -1545,8 +1545,7 @@ export class KernelManager {
 				// A kernel that exits without delivering shutdown_reply must not stall the deadline.
 				const kernelExit = this.waitForKernelExit();
 				const gracefulReply = Promise.all([send, replyWait.promise]);
-				// The race can abandon this composite; a late send failure must not
-				// surface as an unhandled rejection.
+				// Abandoned by the race, a late send failure must not reject unhandled.
 				gracefulReply.catch(() => undefined);
 				await Promise.race([gracefulReply, kernelExit, shutdownDeadline]);
 				await Promise.race([kernelExit, shutdownDeadline]);
