@@ -2854,6 +2854,8 @@ export class InteractiveMode {
 		// bash_end will reach it once the reference is dropped.
 		this.activeBashComponent?.setComplete(undefined, true);
 		this.activeBashComponent = undefined;
+		// Likewise: the next session's view may never see this refine settle.
+		this.discardRefineLoader();
 		this.pendingBashComponents = [];
 		this.activityTracker.reset();
 		this.contextUsageTokenBaseline = 0;
@@ -3399,10 +3401,15 @@ export class InteractiveMode {
 
 	private stopRefineLoader(): void {
 		if (!this.refineLoader) return;
-		this.refineLoader.stop();
-		this.refineLoader = undefined;
+		this.discardRefineLoader();
 		this.statusContainer.clear();
 		this.syncWorkingLoader();
+	}
+
+	/** Stops the loader timer without container churn — for teardown and session switches. */
+	private discardRefineLoader(): void {
+		this.refineLoader?.stop();
+		this.refineLoader = undefined;
 	}
 
 	private syncWorkingLoader(): void {
@@ -5446,6 +5453,14 @@ export class InteractiveMode {
 					if (isSessionSlashCommandMessage(event.message) && event.message.details.command.name === "refine") {
 						this.startRefineLoader();
 					}
+					// The /refine result row is the user refine's settle edge; refine_complete
+					// alone can belong to an agent/auto refinement the queued /refine waited on.
+					if (
+						isSessionSlashCommandResultMessage(event.message) &&
+						event.message.details.command.name === "refine"
+					) {
+						this.stopRefineLoader();
+					}
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
@@ -5697,7 +5712,6 @@ export class InteractiveMode {
 				break;
 
 			case "refine_complete":
-				this.stopRefineLoader();
 				break;
 		}
 	}
@@ -9955,6 +9969,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 			this.ui.terminal.setProgress(false);
 		}
 		this.stopWorkingLoader();
+		this.discardRefineLoader();
 		this.endFeatureHintRun();
 		this.stopWorkingPulse();
 		this.stopGoalTrayTimer();
