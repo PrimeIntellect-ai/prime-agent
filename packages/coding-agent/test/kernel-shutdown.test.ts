@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
 
@@ -12,7 +13,11 @@ type ShutdownInternals = {
 	state: "running";
 	connection: { key: string };
 	control: { send: (frames: Buffer[]) => Promise<void>; close: () => void };
-	kernel: { kill: (signal?: NodeJS.Signals | number) => boolean };
+	kernel: EventEmitter & {
+		exitCode: number | null;
+		signalCode: NodeJS.Signals | null;
+		kill: (signal?: NodeJS.Signals | number) => boolean;
+	};
 	pendingControlReplies: Map<string, (message: TestMessage) => void>;
 };
 
@@ -31,6 +36,11 @@ function configuredManager(onSend: (internals: ShutdownInternals) => void | Prom
 } {
 	const manager = new KernelManager({ cwd: process.cwd() });
 	const internals = manager as unknown as ShutdownInternals;
+	const kernel = Object.assign(new EventEmitter(), {
+		exitCode: null,
+		signalCode: null,
+		kill: vi.fn(() => true),
+	});
 	Object.assign(internals, {
 		state: "running",
 		connection: { key: "test-key" },
@@ -38,12 +48,25 @@ function configuredManager(onSend: (internals: ShutdownInternals) => void | Prom
 			send: vi.fn(async () => onSend(internals)),
 			close: vi.fn(),
 		},
-		kernel: { kill: vi.fn(() => true) },
+		kernel,
 	});
 	return { manager, internals };
 }
 
 describe("KernelManager graceful shutdown", () => {
+	it("bounds a stuck control send with the aggregate shutdown deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const { manager, internals } = configuredManager(() => new Promise<void>(() => {}));
+			const shutdown = manager.shutdown();
+			await vi.advanceTimersByTimeAsync(5_000);
+			await shutdown;
+			expect(internals.kernel).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("does not finish shutdown before the control send settles", async () => {
 		let finishSend: (() => void) | undefined;
 		const sendBlocked = new Promise<void>((resolve) => {
@@ -54,6 +77,8 @@ describe("KernelManager graceful shutdown", () => {
 			if (!requestMessageId || !dispatch) throw new Error("missing shutdown reply listener");
 			dispatch(shutdownReply(requestMessageId));
 			await sendBlocked;
+			state.kernel.exitCode = 0;
+			state.kernel.emit("exit", 0, null);
 		});
 
 		let finished = false;
@@ -77,6 +102,10 @@ describe("KernelManager graceful shutdown", () => {
 			dispatch(shutdownReply(requestMessageId, "interrupt_reply"));
 			expect(state.pendingControlReplies.size).toBe(1);
 			dispatch(shutdownReply(requestMessageId));
+			queueMicrotask(() => {
+				state.kernel.exitCode = 0;
+				state.kernel.emit("exit", 0, null);
+			});
 		});
 
 		await manager.shutdown();

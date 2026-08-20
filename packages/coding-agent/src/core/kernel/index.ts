@@ -1479,6 +1479,20 @@ export class KernelManager {
 		this.startPromise = undefined;
 	}
 
+	private async waitForKernelExit(): Promise<void> {
+		const kernel = this.kernel;
+		if (kernel) {
+			if (kernel.exitCode !== null || kernel.signalCode !== null) return;
+			await new Promise<void>((resolve) => kernel.once("exit", () => resolve()));
+			return;
+		}
+		const pid = this.kernelPid;
+		if (pid === undefined) return;
+		while (this.kernelPid === pid && !this.forkedKernelDied()) {
+			await sleep(25);
+		}
+	}
+
 	private async waitForHostRequestsToSettle(tasks: Promise<void>[], timeoutMs: number): Promise<void> {
 		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 		const timeoutPromise = new Promise<"timeout">((resolve) => {
@@ -1514,19 +1528,29 @@ export class KernelManager {
 		liveKernels.delete(this);
 
 		let replyWait: { promise: Promise<void>; cancel: () => void } | undefined;
+		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		const shutdownDeadline = new Promise<never>((_resolve, reject) => {
+			shutdownTimer = globalThis.setTimeout(
+				() => reject(new Error(`Kernel did not shut down within ${KERNEL_SHUTDOWN_TIMEOUT_MS}ms`)),
+				KERNEL_SHUTDOWN_TIMEOUT_MS,
+			);
+			shutdownTimer.unref?.();
+		});
 		try {
 			if (this.control && this.connection) {
 				const msg = buildMessage("shutdown_request", { restart: false }, this.session, this.options.username);
 				replyWait = this.waitForControlReply(msg.header.msg_id, "shutdown_reply", KERNEL_SHUTDOWN_TIMEOUT_MS);
-				replyWait.promise.catch(() => undefined);
-				await this.control.send(encode(msg, this.connection.key));
-				await replyWait.promise;
+				const send = this.control.send(encode(msg, this.connection.key));
+				send.catch(() => undefined);
+				await Promise.race([Promise.all([send, replyWait.promise]), shutdownDeadline]);
+				await Promise.race([this.waitForKernelExit(), shutdownDeadline]);
 			}
 		} catch (error) {
 			this.appendKernelDiagnostic(
 				`graceful shutdown failed (killing instead): ${error instanceof Error ? error.message : String(error)}`,
 			);
 		} finally {
+			if (shutdownTimer) globalThis.clearTimeout(shutdownTimer);
 			replyWait?.cancel();
 			this.cleanupResources();
 		}
