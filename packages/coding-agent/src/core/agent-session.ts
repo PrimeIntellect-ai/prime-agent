@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
 	Agent,
 	type AgentContext,
+	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
 	type AgentState,
@@ -7515,11 +7516,11 @@ export class AgentSession {
 			await this.agent.continue();
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (message.includes("already processing")) {
+			const code = error instanceof AgentContinueError ? error.code : undefined;
+			if (code === "busy") {
 				this._schedulePostCompactionContinue();
-			} else if (!message.includes("continue from")) {
-				// "continue from" means the turn already completed; anything else must reject headless idle waiters.
+			} else if (code !== "nothing-to-continue") {
+				// "nothing-to-continue" means the turn already completed; anything else must reject headless idle waiters.
 				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}

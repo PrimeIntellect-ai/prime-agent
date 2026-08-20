@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Changed post-compaction continuation error classification to typed `AgentContinueError` codes instead of matching error message text.
 - Fixed headless completion reporting a clean finish when a post-compaction continuation failed to start: ACP and print-mode idle waiters now see the failure, while interactive idle behavior is unchanged.
 - Added a pre-imported generic MCP API and shell/TUI commands to manage persistent Streamable HTTP and stdio servers in user settings.
 - **Breaking**: removed the documented catalog-name override — an `mcpServers` entry named after a built-in integration (e.g. `linear`) no longer repoints the built-in at a custom `url`/`bearerTokenEnvVar`; it now disables the built-in skill and is not served by the generic runtime. Rename the entry (e.g. `linear-proxy`) to keep using a custom endpoint via the generic API. This closes a credential-replay surface where name-keyed tokens could be sent to an override URL.
