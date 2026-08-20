@@ -57,30 +57,7 @@ const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
 
-let inFlightEnsureKernelPython: { key: string; promise: Promise<EnsureKernelPythonResult> } | null = null;
-
-interface EnsureKernelPythonResult {
-	python: string;
-	provisioned: boolean;
-}
-
-// A venv whose version stamp is this fresh was just provisioned (possibly by a
-// sibling process holding the lock); its first kernel boot is still cold.
-const RECENT_PROVISION_WINDOW_MS = 120_000;
-
-async function versionStampAgeMs(venv: string): Promise<number | undefined> {
-	try {
-		const stamp = await stat(path.join(venv, BOOTSTRAP_VERSION_FILE));
-		return Date.now() - stamp.mtimeMs;
-	} catch {
-		return undefined;
-	}
-}
-
-async function recentlyProvisioned(venv: string): Promise<boolean> {
-	const age = await versionStampAgeMs(venv);
-	return age !== undefined && age >= 0 && age < RECENT_PROVISION_WINDOW_MS;
-}
+let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
 
 export type KernelPythonSkill = PythonSkillRuntimeInfo;
 export type KernelBootstrapProgressHandler = (message: string) => void;
@@ -88,8 +65,6 @@ export type KernelBootstrapProgressHandler = (message: string) => void;
 export interface EnsureKernelPythonOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	onProgress?: KernelBootstrapProgressHandler;
-	/** Called when the venv was (re)provisioned or resynced, so the first boot can expect a cold start. */
-	onProvisioned?: () => void;
 }
 
 interface BootstrapPythonSkill {
@@ -880,7 +855,7 @@ function formatBootstrapFailure(error: unknown): Error {
 async function ensureKernelPythonUncached(
 	options: EnsureKernelPythonOptions,
 	pythonSkills: readonly BootstrapPythonSkill[],
-): Promise<EnsureKernelPythonResult> {
+): Promise<string> {
 	const override = process.env.PRIME_AGENT_KERNEL_PYTHON;
 	if (override) {
 		const python = path.resolve(expandHome(override));
@@ -906,28 +881,21 @@ async function ensureKernelPythonUncached(
 				);
 			}
 		}
-		if (missing.length === 0) return { python, provisioned: false };
+		if (missing.length === 0) return python;
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
 	const venv = await resolveWritableKernelVenvDir();
 	const python = path.join(venv, "bin", "python");
 	const runtimeIdentity = await resolveRuntimeIdentity();
-	// A ready venv may still have been provisioned moments ago by a sibling
-	// process; treat its first boots as cold too.
-	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) {
-		return { python, provisioned: await recentlyProvisioned(venv) };
-	}
+	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 
 	const releaseLock = await acquireBootstrapLock(venv);
 	try {
-		// The lock holder we waited on may have just provisioned this venv.
-		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) {
-			return { python, provisioned: await recentlyProvisioned(venv) };
-		}
+		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
 			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
-			return { python, provisioned: true };
+			return python;
 		}
 
 		const hadVenv = existsSync(venv);
@@ -945,23 +913,17 @@ async function ensureKernelPythonUncached(
 	}
 
 	reportProgress(options, "✓ ready");
-	return { python, provisioned: true };
+	return python;
 }
 
-export async function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
+export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
 	const pythonSkills = normalizePythonSkills(options.pythonSkills);
 	const key = ensureKernelPythonKey(pythonSkills);
-	let shared = inFlightEnsureKernelPython?.key === key ? inFlightEnsureKernelPython.promise : undefined;
-	if (!shared) {
-		const promise = ensureKernelPythonUncached(options, pythonSkills).finally(() => {
-			if (inFlightEnsureKernelPython?.promise === promise) inFlightEnsureKernelPython = null;
-		});
-		inFlightEnsureKernelPython = { key, promise };
-		shared = promise;
-	}
-	// Every caller (including ones coalesced onto an in-flight bootstrap) learns
-	// about provisioning work, so each grants its kernel a cold-boot budget.
-	const result = await shared;
-	if (result.provisioned) options.onProvisioned?.();
-	return result.python;
+	if (inFlightEnsureKernelPython?.key === key) return inFlightEnsureKernelPython.promise;
+
+	const promise = ensureKernelPythonUncached(options, pythonSkills).finally(() => {
+		if (inFlightEnsureKernelPython?.promise === promise) inFlightEnsureKernelPython = null;
+	});
+	inFlightEnsureKernelPython = { key, promise };
+	return promise;
 }

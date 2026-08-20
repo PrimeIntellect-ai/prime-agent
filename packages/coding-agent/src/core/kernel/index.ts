@@ -24,10 +24,12 @@ import {
 
 const DELIM = Buffer.from("<IDS|MSG>");
 const PROTOCOL_VERSION = "5.3";
-const PORTS_RESOLVE_TIMEOUT_MS = 5000;
-const READY_TIMEOUT_MS = 5000;
-// First boot after a venv (re)provision is cold (pyc compilation, heavy imports); give both the port resolve and the ready probe a real budget.
-const COLD_READY_TIMEOUT_MS = 30_000;
+// Generous backstop for a kernel that is alive but wedged: crashes are detected
+// within one 25ms poll via the exit handler, warm boots return in under a second,
+// and a cold first boot after a venv (re)provision may legitimately need tens of
+// seconds of imports before it binds ports and answers the ready probe.
+const PORTS_RESOLVE_TIMEOUT_MS = 30_000;
+const READY_TIMEOUT_MS = 30_000;
 // Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
@@ -665,16 +667,12 @@ export class KernelManager {
 		liveKernels.add(this);
 
 		let python: string;
-		let coldBoot = false;
 		try {
 			python =
 				this.options.python ??
 				(await ensureKernelPython({
 					pythonSkills: this.options.pythonSkills,
 					onProgress: startOptions.onBootstrapProgress,
-					onProvisioned: () => {
-						coldBoot = true;
-					},
 				}));
 			this.options.python = python;
 		} catch (error) {
@@ -759,10 +757,7 @@ export class KernelManager {
 		const connectionPath = connection.path;
 		let conn: ConnectionInfo;
 		try {
-			conn = await this.waitForResolvedConnection(
-				connectionPath,
-				coldBoot ? COLD_READY_TIMEOUT_MS : PORTS_RESOLVE_TIMEOUT_MS,
-			);
+			conn = await this.waitForResolvedConnection(connectionPath);
 			this.connection = conn;
 		} catch (e) {
 			const canRetryStartup = (this.state as string) !== "shutdown";
@@ -785,7 +780,7 @@ export class KernelManager {
 		this.startIopubPump();
 
 		try {
-			await this.probeReady(coldBoot ? COLD_READY_TIMEOUT_MS : READY_TIMEOUT_MS);
+			await this.probeReady();
 		} catch (e) {
 			const canRetryStartup = (this.state as string) !== "shutdown";
 			await this.shutdown();
@@ -827,12 +822,9 @@ export class KernelManager {
 		}
 	}
 
-	private async waitForResolvedConnection(
-		connectionPath: string,
-		timeoutMs: number = PORTS_RESOLVE_TIMEOUT_MS,
-	): Promise<ConnectionInfo> {
+	private async waitForResolvedConnection(connectionPath: string): Promise<ConnectionInfo> {
 		const startedAt = Date.now();
-		while (Date.now() - startedAt < timeoutMs) {
+		while (Date.now() - startedAt < PORTS_RESOLVE_TIMEOUT_MS) {
 			if ((this.state as string) === "shutdown" || this.forkedKernelDied()) {
 				const tail = this.kernelStderr.slice(-1024);
 				throw new Error(`Kernel exited before resolving ports. stderr:\n${tail || "(empty)"}`);
@@ -848,11 +840,11 @@ export class KernelManager {
 
 		const tail = this.kernelStderr.slice(-1024);
 		throw new Error(
-			`Kernel did not resolve connection ports within ${timeoutMs}ms. stderr tail:\n${tail || "(empty)"}`,
+			`Kernel did not resolve connection ports within ${PORTS_RESOLVE_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,
 		);
 	}
 
-	private async probeReady(timeoutMs: number = READY_TIMEOUT_MS): Promise<void> {
+	private async probeReady(): Promise<void> {
 		const conn = this.connection!;
 		const shell = this.shell!;
 
@@ -861,13 +853,13 @@ export class KernelManager {
 		await this.translateSocketClosure(shell.send(encode(msg, conn.key)));
 
 		const startedAt = Date.now();
-		while (Date.now() - startedAt < timeoutMs) {
+		while (Date.now() - startedAt < READY_TIMEOUT_MS) {
 			if ((this.state as string) === "shutdown" || this.forkedKernelDied()) {
 				const tail = this.kernelStderr.slice(-1024);
 				throw new Error(`Kernel exited during startup. stderr:\n${tail || "(empty)"}`);
 			}
 
-			const remaining = timeoutMs - (Date.now() - startedAt);
+			const remaining = READY_TIMEOUT_MS - (Date.now() - startedAt);
 			const winner = await Promise.race([
 				this.translateSocketClosure(shell.receive()).then((frames) => ({ kind: "frames" as const, frames })),
 				sleep(remaining).then(() => ({ kind: "timeout" as const })),
@@ -884,7 +876,7 @@ export class KernelManager {
 		}
 		const tail = this.kernelStderr.slice(-1024);
 		throw new Error(
-			`Kernel did not respond to kernel_info_request within ${timeoutMs}ms. stderr tail:\n${tail || "(empty)"}`,
+			`Kernel did not respond to kernel_info_request within ${READY_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,
 		);
 	}
 
