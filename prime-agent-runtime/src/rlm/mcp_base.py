@@ -229,14 +229,17 @@ class McpIntegration:
         if "headers" in params:
             cm = transport(url, headers=auth_header)
         elif "http_client" in params:
-            import httpx  # noqa: PLC0415
+            # This SDK shape requires its companion httpx2 client (the transport
+            # calls client.sse() for server-initiated streams and reconnects).
+            import httpx2  # noqa: PLC0415
 
-            # SDK-factory timeouts; httpx's default 5s read cap drops idle SSE streams.
+            # SDK-factory timeouts; a default client's 5s read cap drops idle SSE streams.
+            # No redirects: a redirecting endpoint must not receive the bearer header.
             client = await stack.enter_async_context(
-                httpx.AsyncClient(
+                httpx2.AsyncClient(
                     headers=auth_header,
-                    timeout=httpx.Timeout(30.0, read=300.0),
-                    follow_redirects=True,
+                    timeout=httpx2.Timeout(30.0, read=300.0),
+                    follow_redirects=False,
                 )
             )
             cm = transport(url, http_client=client)

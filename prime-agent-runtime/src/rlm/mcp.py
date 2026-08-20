@@ -222,12 +222,18 @@ class _Generation:
         if "headers" in inspect.signature(transport).parameters:
             streams = await self.stack.enter_async_context(transport(url, headers=headers))
         else:
-            import httpx
+            # This SDK shape requires its companion httpx2 client (the transport
+            # calls client.sse() for server-initiated streams and reconnects).
+            import httpx2
 
             # SDK-factory timeouts (30s ops / 300s SSE reads); reads must also outlast the session-enforced call timeout.
-            timeout = httpx.Timeout(30.0, read=max(300.0, self.call_timeout + 30.0))
+            # No redirects: a redirecting endpoint must not receive configured secret headers.
             client = await self.stack.enter_async_context(
-                httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True)
+                httpx2.AsyncClient(
+                    headers=headers,
+                    timeout=httpx2.Timeout(30.0, read=max(300.0, self.call_timeout + 30.0)),
+                    follow_redirects=False,
+                )
             )
             streams = await self.stack.enter_async_context(transport(url, http_client=client))
         return streams[0], streams[1]
