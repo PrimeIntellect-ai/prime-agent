@@ -59,6 +59,13 @@ export interface PrimeAgentRefinementMeta {
 	error?: string;
 }
 
+export interface PrimeAgentQuiescenceMeta {
+	/** Subagents that have not reached a terminal state at the observation point. */
+	outstandingSubagents: number;
+	/** Autonomous continuation slots still available at the observation point. */
+	remainingAutonomousContinuations: number;
+}
+
 export interface PrimeAgentAgentMessageMeta {
 	toolCallId: string;
 	target?: string;
@@ -72,7 +79,35 @@ export interface PrimeAgentCwdMeta {
 	actual: string;
 }
 
+/**
+ * Producer-side ordering and causality for ACP updates.
+ *
+ * `promptTurnId` is allocated when ACP accepts a prompt, never inferred from
+ * whichever prompt happens to be running when an update is delivered. `0`
+ * means a session-scoped event with no prompt origin (for example a heartbeat
+ * change before the first prompt). `eventSequence` is connection-wide and
+ * strictly increases for every update Prime Agent publishes.
+ */
+export type PrimeAgentEventPhase = "event" | "responseBoundary" | "terminalQuiescence";
+
+/** The outcome carried by a correlated response boundary and terminal envelope. */
+export type PrimeAgentResponseOutcome = "result" | "error";
+
 export interface PrimeAgentSessionMeta {
+	/** Monotonically increasing ACP prompt turn which caused this update. */
+	promptTurnId?: number;
+	/** Strictly increasing producer sequence, across all ACP updates. */
+	eventSequence?: number;
+	/** Whether this is ordinary work, the prompt response boundary, or final quiescence. */
+	phase?: PrimeAgentEventPhase;
+	/**
+	 * The boundary/terminal outcome. This deliberately has only `result` and
+	 * `error`: ACP's transport stop reasons (including `end_turn`) are never a
+	 * causal completion signal.
+	 */
+	outcome?: PrimeAgentResponseOutcome;
+	/** Whether an accepted response boundary promises a later terminal-quiescence envelope. */
+	terminalQuiescenceExpected?: boolean;
 	/** Present when a client-requested cwd differs from the agent's real cwd. */
 	cwd?: PrimeAgentCwdMeta;
 	/** Set when the session's heartbeat or cron schedule changed. */
@@ -86,6 +121,8 @@ export interface PrimeAgentSessionMeta {
 	compaction?: { tokensBefore?: number; summary?: string };
 	subagents?: PrimeAgentSubagentMeta[];
 	autonomous?: PrimeAgentAutonomousMeta;
+	/** Observed subagent and autonomous-continuation counts at completion. */
+	quiescence?: PrimeAgentQuiescenceMeta;
 	ipython?: PrimeAgentIpythonMeta;
 }
 

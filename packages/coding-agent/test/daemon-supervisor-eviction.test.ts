@@ -309,7 +309,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		const supervisor = makeSupervisor();
 		const sourceSummary = makeSummary("source-active", now, { sessionId: "source-session" });
 		const source = makeWorker("source", [sourceSummary]);
-		source.descriptor.createCommand.config = { sessionDir: "/tmp/custom-sessions" };
+		Object.assign(source.descriptor, { sessionDir: "/tmp/custom-sessions" });
 		source.summaries = new Map([["source-active", sourceSummary]]);
 		const targetSummary = makeSummary("target-active", now, {
 			sessionId: "target-session",
