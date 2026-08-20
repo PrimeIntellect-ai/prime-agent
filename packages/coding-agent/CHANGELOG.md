@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed the queued-message browse controls (Option+Up) rendering in the same style as typed prompt text inside the input box; the header is now dimmed like other hints so it cannot be mistaken for part of the prompt.
+
 ## [0.7.4] - 2026-08-19
 
 - Fixed model searches ranking stronger matches ahead of weaker signed-in matches while preferring signed-in providers for equivalent results ([#539](https://github.com/PrimeIntellect-ai/prime-agent/pull/539) by [@eliebak](https://github.com/eliebak)).
