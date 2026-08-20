@@ -71,15 +71,14 @@ export class RefinementOutcomeMessageComponent extends ExpandableCustomMessageBo
 		this.clear();
 
 		const { summary, edits, scope } = this.message.details;
-		const label = customMessageLabel("refinement");
 		const headline = theme.fg("customMessageText", `${summary} · ${editCount(edits)}`);
+		this.addChild(new Text(customMessageLabel("refinement"), 0, 0));
+		this.addChild(new Spacer(1));
 		if (!this.expanded) {
-			this.addChild(new Text(`${label} ${headline} ${expandCollapseHint("app.tools.expand", false)}`, 0, 0));
+			this.addChild(new Text(`${headline} ${expandCollapseHint("app.tools.expand", false)}`, 0, 0));
 			return;
 		}
 
-		this.addChild(new Text(label, 0, 0));
-		this.addChild(new Spacer(1));
 		this.addChild(new Text(headline, 0, 0));
 		for (const edit of edits) {
 			this.addChild(new Text(`${theme.fg("dim", "  ╰─ ")}${editLabel(edit, scope)}`, 0, 0));

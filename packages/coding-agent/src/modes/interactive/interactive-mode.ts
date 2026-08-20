@@ -3411,8 +3411,8 @@ export class InteractiveMode {
 			this.startCompactionLoader("manual");
 			return;
 		}
-		// Compaction/retry own the status container while active; don't fight them.
-		if (this.autoCompactionLoader || this.retryLoader) {
+		// Compaction/retry/refine own the status container while active; don't fight them.
+		if (this.autoCompactionLoader || this.retryLoader || this.refineLoader) {
 			return;
 		}
 		if (this.shouldShowWorkingLoader()) {
