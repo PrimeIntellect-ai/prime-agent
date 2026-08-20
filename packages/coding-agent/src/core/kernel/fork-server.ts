@@ -34,9 +34,13 @@ function affectsInterpreterStartup(key: string): boolean {
 }
 
 export class ForkServerUnavailable extends Error {
-	constructor(message: string) {
+	/** True for a request timeout: the forkserver may just be stalled (e.g. mid-fork), not gone. */
+	readonly timedOut: boolean;
+
+	constructor(message: string, opts?: { timedOut?: boolean }) {
 		super(message);
 		this.name = "ForkServerUnavailable";
+		this.timedOut = opts?.timedOut ?? false;
 	}
 }
 
@@ -261,7 +265,11 @@ export class ForkServer {
 				// A spawn may still land after we give up; remember the id so its late
 				// pid reply gets the orphan killed instead of leaked.
 				if (opts?.abandonOnTimeout) this.abandoned.add(id);
-				reject(new ForkServerUnavailable(`forkserver request timed out after ${SPAWN_TIMEOUT_MS}ms`));
+				reject(
+					new ForkServerUnavailable(`forkserver request timed out after ${SPAWN_TIMEOUT_MS}ms`, {
+						timedOut: true,
+					}),
+				);
 			}, SPAWN_TIMEOUT_MS);
 			this.pending.set(id, { resolve, reject, timer });
 			this.conn?.write(`${JSON.stringify({ id, ...payload })}\n`);

@@ -600,6 +600,7 @@ export class KernelManager {
 	private forkedKernel?: ForkedKernelHandle;
 	/** Polls a forked kernel for death (no "exit" event on a non-child). */
 	private forkedLivenessTimer?: ReturnType<typeof globalThis.setInterval>;
+	private forkedLivenessProbeInFlight = false;
 	private shell?: Dealer;
 	private iopub?: Subscriber;
 	private control?: Dealer;
@@ -832,9 +833,14 @@ export class KernelManager {
 	}
 
 	private async checkForkedKernelDeath(): Promise<void> {
-		if (this.state !== "running") return;
+		if (this.state !== "running" || this.forkedLivenessProbeInFlight) return;
 		const probed = this.forkedKernel;
-		if (!(await this.forkedKernelDead(probed))) return;
+		this.forkedLivenessProbeInFlight = true;
+		try {
+			if (!(await this.forkedKernelDead(probed))) return;
+		} finally {
+			this.forkedLivenessProbeInFlight = false;
+		}
 		// Re-check after the await: teardown or a restart may have raced this poll.
 		if (this.state !== "running" || this.forkedKernel !== probed) return;
 		this.appendKernelDiagnostic("forked kernel exited unexpectedly");
@@ -853,7 +859,9 @@ export class KernelManager {
 			if (timeoutMs === undefined) return !(await alive);
 			alive.catch(() => {}); // absorb a rejection that lands after the race is lost
 			return !(await Promise.race([alive, sleep(timeoutMs, true, { ref: false })]));
-		} catch {
+		} catch (error) {
+			// A timeout is unknown liveness, not proven death (the forkserver may just be stalled in a slow fork).
+			if (error instanceof ForkServerUnavailable && error.timedOut) return false;
 			// Forkserver gone: its kernels' parent_handle watchdogs exit them too.
 			return true;
 		}
@@ -1526,14 +1534,14 @@ export class KernelManager {
 		this.controlPumpPromise = undefined;
 		if (this.kernel) {
 			const directPid = this.kernel.pid;
+			let signaled = false;
 			try {
-				this.kernel.kill(killSignal);
+				signaled = this.kernel.kill(killSignal);
 			} catch {
 				// The kernel has already exited.
 			}
-			// ChildProcess.kill is handle-based (Node nulls the handle on exit), so
-			// signaled-or-already-exited is confirmed either way: inactive is safe.
-			if (directPid !== undefined) recordOrphanProcessState(directPid, false);
+			// Same rule as the forked branch below: inactive only when the signal proved the pid still ours.
+			if (directPid !== undefined && signaled) recordOrphanProcessState(directPid, false);
 		} else if (this.forkedKernel) {
 			const forked = this.forkedKernel;
 			// The journal is raw-pid keyed, so inactive is written only on "signaled"

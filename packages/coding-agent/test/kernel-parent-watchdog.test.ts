@@ -80,13 +80,12 @@ describe("kernel parent watchdog", () => {
 
 		expect(readFileSync(envDump, "utf8")).toMatch(new RegExp(`^JPY_PARENT_PID=${process.pid}$`, "m"));
 
+		// Self-exited child: the handle-based kill signals nothing, so the record must stay active.
 		await vi.waitFor(() => {
 			const records = readJournalRecords(journalPath);
-			expect(records).toHaveLength(2);
-			expect(records[0]?.pid).toBe(records[1]?.pid);
-			expect(records.every((r) => r.ownerPid === process.pid)).toBe(true);
+			expect(records).toHaveLength(1);
+			expect(records[0]?.ownerPid).toBe(process.pid);
 			expect(records[0]?.active).toBe(true);
-			expect(records[1]?.active).toBe(false);
 		});
 	});
 
@@ -183,6 +182,26 @@ describe("kernel parent watchdog", () => {
 		}
 	});
 
+	it("leaves the direct-spawn journal record active when the kill signals nothing", async () => {
+		const journalPath = join(tempDir, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = journalPath;
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+		const internals = manager as unknown as {
+			kernel?: { pid?: number; kill(signal: string): boolean };
+			cleanupResources(): void;
+		};
+
+		try {
+			internals.kernel = { pid: 999999, kill: () => false };
+			internals.cleanupResources();
+
+			const records = existsSync(journalPath) ? readJournalRecords(journalPath) : [];
+			expect(records.some((r) => r.pid === 999999 && !r.active)).toBe(false);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
 	it("maps SIGKILL to the forkserver KILL signal", async () => {
 		forkEnabledMock.mockReturnValue(true);
 		const isAliveMock = vi.fn(async () => true);
@@ -242,6 +261,36 @@ describe("kernel parent watchdog", () => {
 			expect(killB).not.toHaveBeenCalled();
 			const records = existsSync(journalPath) ? readJournalRecords(journalPath) : [];
 			expect(records.some((r) => r.pid === handleB.pid && !r.active)).toBe(false);
+		} finally {
+			internals.forkedKernel = undefined;
+			internals.state = "idle";
+			await manager.dispose();
+		}
+	});
+
+	it("a timed-out liveness probe never tears down a possibly-healthy kernel", async () => {
+		const kill = vi.fn(async (): Promise<"signaled"> => "signaled");
+		const handle: ForkedKernelHandle = {
+			pid: 111111,
+			isAlive: async () => {
+				throw new ForkServerUnavailable("forkserver request timed out after 10000ms", { timedOut: true });
+			},
+			kill,
+		};
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+		const internals = manager as unknown as {
+			state: string;
+			forkedKernel?: ForkedKernelHandle;
+			checkForkedKernelDeath(): Promise<void>;
+		};
+
+		try {
+			internals.state = "running";
+			internals.forkedKernel = handle;
+			await internals.checkForkedKernelDeath();
+
+			expect(internals.state).toBe("running");
+			expect(kill).not.toHaveBeenCalled();
 		} finally {
 			internals.forkedKernel = undefined;
 			internals.state = "idle";
@@ -379,28 +428,26 @@ describe("kernel parent watchdog", () => {
 		}
 	});
 
-	it("a hung forkserver liveness probe cannot stretch startup past the ports-resolve budget", async () => {
-		forkEnabledMock.mockReturnValue(true);
-		const killMock = vi.fn(async (): Promise<"signaled"> => "signaled");
-		forkKernelMock.mockResolvedValue({
+	it("a hung liveness probe resolves alive once its budget expires", async () => {
+		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
+		const internals = manager as unknown as {
+			forkedKernelDead(probed: ForkedKernelHandle, timeoutMs?: number): Promise<boolean>;
+		};
+		const handle: ForkedKernelHandle = {
 			pid: 999999,
 			isAlive: () => new Promise<boolean>(() => {}),
-			kill: killMock,
-		});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const manager = new KernelManager({ python: "/nonexistent/python", cwd: tempDir });
-		const started = Date.now();
+			kill: async () => "signaled",
+		};
 
 		try {
-			await expect(manager.execute("x")).rejects.toThrow(/did not resolve connection ports/);
+			const started = Date.now();
+			// Unknown is not death, and the caller's budget bounds the wait.
+			await expect(internals.forkedKernelDead(handle, 250)).resolves.toBe(false);
+			expect(Date.now() - started).toBeLessThan(5_000);
 		} finally {
-			errorSpy.mockRestore();
 			await manager.dispose();
 		}
-
-		// PORTS_RESOLVE_TIMEOUT_MS (5s) plus generous slack for CI.
-		expect(Date.now() - started).toBeLessThan(9000);
-	}, 15_000);
+	});
 
 	it("fork request env does not carry JPY_PARENT_PID (forked children watch the forkserver)", async () => {
 		const python = writeFakePython(["#!/bin/sh", "exit 42", ""]);
