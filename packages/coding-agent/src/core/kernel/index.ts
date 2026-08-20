@@ -1544,7 +1544,11 @@ export class KernelManager {
 				send.catch(() => undefined);
 				// A kernel that exits without delivering shutdown_reply must not stall the deadline.
 				const kernelExit = this.waitForKernelExit();
-				await Promise.race([Promise.all([send, replyWait.promise]), kernelExit, shutdownDeadline]);
+				const gracefulReply = Promise.all([send, replyWait.promise]);
+				// The race can abandon this composite; a late send failure must not
+				// surface as an unhandled rejection.
+				gracefulReply.catch(() => undefined);
+				await Promise.race([gracefulReply, kernelExit, shutdownDeadline]);
 				await Promise.race([kernelExit, shutdownDeadline]);
 			}
 		} catch (error) {

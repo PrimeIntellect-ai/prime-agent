@@ -231,7 +231,15 @@ class McpIntegration:
         elif "http_client" in params:
             import httpx  # noqa: PLC0415
 
-            client = await stack.enter_async_context(httpx.AsyncClient(headers=auth_header))
+            # httpx's default 5s read timeout drops idle SSE streams; match the
+            # SDK factory's 30s ops / 300s reads.
+            client = await stack.enter_async_context(
+                httpx.AsyncClient(
+                    headers=auth_header,
+                    timeout=httpx.Timeout(30.0, read=300.0),
+                    follow_redirects=True,
+                )
+            )
             cm = transport(url, http_client=client)
         else:
             raise RuntimeError(

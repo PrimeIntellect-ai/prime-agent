@@ -225,8 +225,13 @@ class _Generation:
         else:
             import httpx
 
+            # Match the SDK factory's timeouts (30s ops / 300s SSE reads); an
+            # httpx default client would cap reads at 5s and drop idle streams.
+            # Reads must also outlast the configured per-call timeout, which is
+            # enforced at the session layer and must not be undercut here.
+            timeout = httpx.Timeout(30.0, read=max(300.0, self.call_timeout + 30.0))
             client = await self.stack.enter_async_context(
-                httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True)
+                httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True)
             )
             streams = await self.stack.enter_async_context(transport(url, http_client=client))
         return streams[0], streams[1]
