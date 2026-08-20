@@ -24,18 +24,19 @@ describe("SubagentSummaryLine", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("renders no subagent line without children and uses singular and plural labels", () => {
+	it("renders nothing without children and a bordered agents tile with counts otherwise", () => {
 		const line = new SubagentSummaryLine();
 		expect(line.render(120)).toEqual([]);
 
 		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
 		let rendered = line.render(120).map(stripAnsi);
-		expect(rendered).toHaveLength(1);
-		expect(rendered[0]).toContain("1 subagent: 1 running · 0 idle · 0 inactive");
+		expect(rendered).toHaveLength(3);
+		expect(rendered[0]).toContain("╭─ agents ─");
+		expect(rendered[1]).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
 
 		line.setSubagentCounts({ total: 2, running: 1, idle: 1, inactive: 0 });
 		rendered = line.render(120).map(stripAnsi);
-		expect(rendered[0]).toContain("2 subagents: 1 running · 1 idle · 0 inactive");
+		expect(rendered[1]).toContain("● 1 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
 	it("counts only direct children using running, idle, and inactive status projections", () => {
@@ -80,7 +81,7 @@ describe("SubagentSummaryLine", () => {
 		line.setSubagentCounts({ total: 1, running: 0, idle: 0, inactive: 1 });
 		line.setOpenable(false);
 
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("1 subagent: 0 running · 0 idle · 1 inactive");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
 		expect(line.isSelectable()).toBe(false);
 		line.handleInput("\r");
 		expect(onOpen).not.toHaveBeenCalled();
@@ -107,10 +108,10 @@ describe("SubagentSummaryLine", () => {
 		) => void;
 
 		update.call(mode, child("worker", "running"));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("1 running · 0 idle · 0 inactive");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
 
 		update.call(mode, child("worker", "done", { activeSessionId: "active-worker" }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("0 running · 1 idle · 0 inactive");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
 	it("counts a retained completed child as running while a follow-up turn is active", () => {
@@ -133,13 +134,13 @@ describe("SubagentSummaryLine", () => {
 		) => void;
 
 		update.call(mode, child("worker", "done", { activeSessionId: "resident-worker" }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("0 running · 1 idle · 0 inactive");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 1 idle   ○ 0 inactive");
 
 		update.call(mode, child("worker", "done", { activeSessionId: "resident-worker", activity: { kind: "waiting" } }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("1 running · 0 idle · 0 inactive");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
 
 		update.call(mode, child("worker", "done", { activeSessionId: "resident-worker" }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("0 running · 1 idle · 0 inactive");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
 	it("refreshes counts when startup seeding follows an early live child update", () => {
@@ -171,7 +172,7 @@ describe("SubagentSummaryLine", () => {
 		Reflect.set(mode, "rlmNodeId", "me");
 		seed.call(mode, [worker]);
 
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("1 subagent:");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("╭─ agents ─");
 	});
 
 	it("clears a resident session id when a terminal update reports an evicted child", () => {
@@ -198,7 +199,7 @@ describe("SubagentSummaryLine", () => {
 		update.call(mode, child("worker", "running"));
 		update.call(mode, child("worker", "done"));
 
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("0 running · 0 idle · 1 inactive");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
 	});
 
 	it("turns a selection into the scoped agents-view run result", async () => {
