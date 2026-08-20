@@ -36,6 +36,8 @@ except Exception:
 try:
     import rlm as _prime_agent_rlm_module
     rlm = _prime_agent_rlm_module.rlm
+    import rlm.mcp as mcp
+    mcp.install_shutdown_hook()
 except Exception as _prime_agent_rlm_error:
     _PRIME_AGENT_RLM_IMPORT_ERROR = str(_prime_agent_rlm_error)
 

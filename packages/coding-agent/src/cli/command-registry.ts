@@ -93,6 +93,32 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["--force  Skip confirmation and kill unresponsive processes", "--json   Print JSON"],
 	},
 	{
+		path: ["mcp"],
+		usage: "mcp <add|list|get|remove>",
+		summary: "Manage user MCP servers",
+	},
+	{
+		path: ["mcp", "add"],
+		usage: "mcp add <name> --url <url> [--bearer-token-env-var <env>|--oauth] [--force]",
+		summary: "Add an HTTP or stdio MCP server",
+		description: "For stdio, use: mcp add <name> [--cwd <dir>] [--env CHILD=SOURCE] -- <command> [args...]",
+	},
+	{
+		path: ["mcp", "list"],
+		usage: "mcp list",
+		summary: "List user MCP servers",
+	},
+	{
+		path: ["mcp", "get"],
+		usage: "mcp get <name>",
+		summary: "Show a user MCP server",
+	},
+	{
+		path: ["mcp", "remove"],
+		usage: "mcp remove <name>",
+		summary: "Remove a user MCP server",
+	},
+	{
 		path: ["package"],
 		usage: "package <install|remove|list|update>",
 		summary: "Manage capability packages",

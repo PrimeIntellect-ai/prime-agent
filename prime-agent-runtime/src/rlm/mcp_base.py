@@ -190,25 +190,17 @@ class McpIntegration:
     # -- connection ---------------------------------------------------------
 
     async def _resolve_config(self) -> tuple[str | None, dict[str, str]]:
-        """Host-resolved (url, extra_headers), honoring a user's mcpServers override.
-        Falls back to the class ``url`` and no extra headers on host error."""
-        try:
-            cfg = await host_request("mcp.config", {"server": self.server})
-        except RuntimeError:
-            cfg = {}
-        url = cfg.get("url") if isinstance(cfg, dict) else None
-        headers = cfg.get("headers") if isinstance(cfg, dict) else None
-        if not (isinstance(url, str) and url):
-            url = self.url
-        extra = headers if isinstance(headers, dict) else {}
-        return url, {str(k): str(v) for k, v in extra.items()}
+        """The integration's own (url, extra_headers). Never consults user
+        ``mcpServers`` entries: a same-named entry must not repoint an authored
+        integration, whose credentials (stored or env-sourced) would follow.
+        """
+        return self.url, {}
 
     async def _open_session(self, stack: AsyncExitStack):
         """Open an initialized MCP ClientSession bound to ``stack``.
 
         Override for non-HTTP transports (e.g. stdio). The default connects over
-        streamable HTTP with a Bearer token from auth.json. The URL comes from the
-        host (mcpServers override) when available, else ``self.url``.
+        streamable HTTP to the class ``url`` with a Bearer token from auth.json.
         """
         import inspect  # noqa: PLC0415
 
@@ -229,9 +221,18 @@ class McpIntegration:
         if "headers" in params:
             cm = transport(url, headers=auth_header)
         elif "http_client" in params:
-            import httpx  # noqa: PLC0415
+            # This SDK shape requires its companion httpx2 client (the transport calls client.sse()).
+            import httpx2  # noqa: PLC0415
 
-            client = await stack.enter_async_context(httpx.AsyncClient(headers=auth_header))
+            # SDK-factory timeouts; a default client's 5s read cap drops idle SSE streams.
+            # No redirects: a redirecting endpoint must not receive the bearer header.
+            client = await stack.enter_async_context(
+                httpx2.AsyncClient(
+                    headers=auth_header,
+                    timeout=httpx2.Timeout(30.0, read=300.0),
+                    follow_redirects=False,
+                )
+            )
             cm = transport(url, http_client=client)
         else:
             raise RuntimeError(
@@ -314,10 +315,11 @@ def _parse_result(result: Any) -> Any:
         text = getattr(block, "text", None)
         if text is not None:
             texts.append(text)
-    if getattr(result, "isError", False):
+    is_error = getattr(result, "is_error", getattr(result, "isError", False))
+    if is_error:
         raise McpToolError("\n".join(texts) or "MCP tool returned an error")
 
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
     if structured is not None:  # falsy-but-valid payloads ({} / []) are real results
         return structured
     if texts:

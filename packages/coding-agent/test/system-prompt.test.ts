@@ -207,6 +207,33 @@ describe("buildRlmPrompt", () => {
 });
 
 describe("buildSystemPrompt", () => {
+	test("adds generic MCP guidance to default and custom IPython prompts", () => {
+		for (const customPrompt of [undefined, "custom body"]) {
+			const prompt = buildSystemPrompt({
+				customPrompt,
+				selectedTools: ["ipython"],
+				contextFiles: [],
+				skills: [],
+				cwd: "/repo",
+				genericMcpServers: ["zebra", "filesystem"],
+			});
+
+			expect(prompt).toContain("Enabled user-configured generic MCP servers: `filesystem`, `zebra`.");
+			expect(prompt).toContain('await mcp.list_tools("filesystem")');
+			expect(prompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
+			expect(prompt).toContain("not as top-level native tool namespaces or installed Python skills");
+		}
+
+		const shellPrompt = buildSystemPrompt({
+			selectedTools: ["bash"],
+			contextFiles: [],
+			skills: [],
+			cwd: "/repo",
+			genericMcpServers: ["filesystem"],
+		});
+		expect(shellPrompt).not.toContain("Generic MCP Connections");
+	});
+
 	test("injects compact global harness context and refine guidance by default", () => {
 		const harnessState: HarnessState = {
 			schema: 1,
