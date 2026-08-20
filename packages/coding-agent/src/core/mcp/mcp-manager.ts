@@ -133,7 +133,7 @@ export class McpManager {
 		const cred = this.authStorage.get(this.providerId(integration.server));
 		if (cred === undefined) return false;
 		// Builtin URLs are code-constant; only user-declared endpoints can be retargeted, so only their
-		// tokens must prove where they belong. Mismatched or unbound (legacy) tokens require re-login.
+		// tokens must prove where they belong. Mismatched or unbound tokens require re-login.
 		if (!integration.userDeclared) return true;
 		const endpoint = (cred as { endpoint?: string }).endpoint;
 		return (

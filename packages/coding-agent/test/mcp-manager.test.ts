@@ -125,7 +125,7 @@ describe("McpManager", () => {
 	it("does not enable a server from a credential bound to a different endpoint or unbound", () => {
 		authStorage.set("mcp:unbound", {
 			type: "oauth",
-			access: "legacy-token",
+			access: "unbound-token",
 			refresh: "r",
 			expires: Date.now() + 3600_000,
 		});

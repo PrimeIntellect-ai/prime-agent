@@ -363,7 +363,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			refresh_token: creds.refresh,
 			...(clientId ? { client_id: clientId } : {}),
 		});
-		// Never infer a binding: refreshing an unbound legacy credential must not rebind it to the current URL.
+		// Never infer a binding: refreshing an unbound credential must not rebind it to the current URL.
 		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.endpoint, creds.refresh);
 	}
 

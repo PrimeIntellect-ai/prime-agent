@@ -280,7 +280,7 @@ class McpRegistryTest(unittest.TestCase):
 
     def test_unbound_credential_requires_relogin(self):
         config = {"oauth": True, "url": "https://srv.example/mcp"}
-        with mock.patch.object(mcp, "_read_auth", return_value={"access": "legacy-token"}):
+        with mock.patch.object(mcp, "_read_auth", return_value={"access": "unbound-token"}):
             with self.assertRaises(RuntimeError):
                 asyncio.run(mcp._headers("remote", config))
 

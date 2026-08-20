@@ -145,7 +145,7 @@ describe.sequential("MCP OAuth provider", () => {
 			tokenEndpoint: META.token_endpoint,
 			clientId: "client-xyz",
 		} as never);
-		// An unbound legacy credential stays unbound, so consumers keep requiring re-login.
+		// An unbound credential stays unbound, so consumers keep requiring re-login.
 		expect((unbound as { endpoint?: string }).endpoint).toBeUndefined();
 	});
 
