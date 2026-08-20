@@ -4,6 +4,10 @@
 
 - Fixed IPython kernels and forkserver processes outliving their owner after a hard crash: kernels now arm ipykernel's parent-death poller via JPY_PARENT_PID, the forkserver watches its parent pid, and both pids are registered in the orphan process journal for supervisor recovery.
 - Fixed a pid-reuse race for forked IPython kernels: signaling and liveness now go through the forkserver (the kernels' parent) instead of raw pid operations from Node, and the orphan journal's inactive record is only written on a confirmed kill outcome.
+- Fixed credentials configured as env var names resolving to the literal variable name when the variable is set but empty; an empty env var now reports a missing credential ([#1468](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1468)).
+- Fixed ACP rejecting an immediate follow-up prompt when injected work restarted the session; follow-ups now queue behind in-flight work, and cancellation drops queued follow-ups before they start.
+- Added correlated ACP terminal-quiescence metadata, resident session settlement, and fail-closed daemon input fencing; prevented recovery state from persisting runtime credentials or model configuration.
+- Fixed explicit RLM child deletion leaving hidden unsettled work after runtime teardown, including reporting cleanup failures and notifying the parent when deletion completes.
 
 ## [0.7.4] - 2026-08-19
 

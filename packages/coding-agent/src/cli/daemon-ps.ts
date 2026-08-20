@@ -1021,7 +1021,7 @@ function isTrackedWorkerDescriptor(value: unknown): value is DaemonWorkerDescrip
 	}
 	const descriptor = value as Partial<DaemonWorkerDescriptor>;
 	return (
-		descriptor.version === 1 &&
+		(descriptor.version === 1 || descriptor.version === 2) &&
 		typeof descriptor.supervisorSocketPath === "string" &&
 		typeof descriptor.workerId === "string" &&
 		Number.isInteger(descriptor.pid) &&
