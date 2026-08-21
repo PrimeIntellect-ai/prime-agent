@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed OpenAI-compatible providers hanging when rate limits requested retry delays above the configured maximum.
+- Changed a missing OpenAI Responses terminal status to map to the `unknown` stop reason instead of `stop`, so consumers can distinguish incomplete turns from completed ones.
 
 - Added built-in xAI Grok OAuth with device authorization, rotating token refresh, and Responses API routing for SuperGrok and X Premium+ subscriptions.
 - Added OpenRouter session grouping and sticky routing through each request's opaque Prime session identifier.

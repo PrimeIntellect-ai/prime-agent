@@ -904,7 +904,7 @@ The `assistantMessageEvent` field contains one of these delta types:
 | `toolcall_start` | Tool call started |
 | `toolcall_delta` | Tool call arguments chunk |
 | `toolcall_end` | Tool call ended (includes full `toolCall` object) |
-| `done` | Message complete (reason: `"stop"`, `"length"`, `"toolUse"`) |
+| `done` | Message complete (reason: `"stop"`, `"length"`, `"toolUse"`, `"unknown"`) |
 | `error` | Error occurred (reason: `"aborted"`, `"error"`) |
 
 Example streaming a text response:
@@ -1346,7 +1346,7 @@ The `content` field can be a string or an array of `TextContent`/`ImageContent` 
 }
 ```
 
-Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"error"`, `"aborted"`
+Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"unknown"`, `"error"`, `"aborted"`
 
 ### ToolResultMessage
 

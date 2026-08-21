@@ -99,3 +99,29 @@ describe("openai responses partialJson cleanup", () => {
 		expect("partialJson" in toolCallEnd.toolCall).toBe(false);
 	});
 });
+
+describe("openai responses finish reason", () => {
+	it("preserves a missing terminal status as unknown", async () => {
+		const model: Model<"openai-responses"> = {
+			id: "gpt-5-mini",
+			name: "GPT-5 Mini",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const output = createOutput(model);
+		const stream = new AssistantMessageEventStream();
+		async function* events(): AsyncIterable<ResponseStreamEvent> {
+			yield { type: "response.completed", response: {} } as ResponseStreamEvent;
+		}
+
+		await processResponsesStream(events(), output, stream, model);
+
+		expect(output.stopReason).toBe("unknown");
+	});
+});
