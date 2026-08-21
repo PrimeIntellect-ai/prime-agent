@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -105,6 +114,7 @@ import {
 } from "./daemon-socket.js";
 import {
 	acquireDaemonSupervisorOwnership,
+	findDaemonSupervisorOwnerForSocket,
 	isDaemonShutdownAdmissionActive,
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
@@ -529,6 +539,21 @@ function defaultWorkerDescriptorDir(agentDir: string, socketPath: string): strin
 	return join(agentDir, "daemon-workers", descriptorKey(socketPath));
 }
 
+/** Per-generation supervisor state dir under agentDir; exists from start() until shutdown. */
+function supervisorStateDir(agentDir: string, socketPath: string, supervisorGeneration: string): string {
+	return join(defaultWorkerDescriptorDir(agentDir, socketPath), "snapshot-cache", supervisorGeneration);
+}
+
+/**
+ * Whether the supervisor generation keeps its state under agentDir: start()
+ * creates snapshot-cache/<generation> in the descriptor dir and only shutdown
+ * removes it, so a match proves a relaunch under agentDir re-adopts the same
+ * workers.
+ */
+export function supervisorStateDirMatches(agentDir: string, socketPath: string, supervisorGeneration: string): boolean {
+	return existsSync(supervisorStateDir(agentDir, socketPath, supervisorGeneration));
+}
+
 export function idleEvictionSweepIntervalMs(idleEvictionMinutes: IdleEvictionMinutes): number {
 	if (idleEvictionMinutes === "off") return IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS;
 	return Math.max(
@@ -679,7 +704,19 @@ export class DaemonSupervisor {
 			if (!agentDir) {
 				throw new Error("Daemon supervisor config is missing agentDir");
 			}
-			this.socketLease = await acquireDaemonSocketPathLease(this.socketPath);
+			try {
+				this.socketLease = await acquireDaemonSocketPathLease(this.socketPath);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ELOCKED") {
+					throw error;
+				}
+				const owner = findDaemonSupervisorOwnerForSocket(this.socketPath);
+				throw new Error(
+					`Daemon socket ${this.socketPath} is locked by another supervisor` +
+						`${owner ? ` (pid ${owner.pid}, generation ${owner.generation})` : ""}; ` +
+						"a concurrent daemon launch won the socket",
+				);
+			}
 			await waitForDaemonStartupFence(this.socketPath);
 			this.ownership = await acquireDaemonSupervisorOwnership({
 				socketPath: this.socketPath,

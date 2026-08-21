@@ -47,4 +47,21 @@ describe("formatDaemonListTable", () => {
 		expect(table).toContain("orphan-file");
 		expect(table).toContain("2h");
 	});
+
+	it("appends a repair hint for ownership-lost daemons", () => {
+		const table = stripAnsi(
+			formatDaemonListTable([
+				{
+					socketPath: "/tmp/lost.sock",
+					pid: 42,
+					status: "ownership-lost",
+					isDefault: false,
+				},
+			]),
+		);
+		expect(table).toContain("ownership-lost");
+		expect(table).toContain(
+			'! /tmp/lost.sock: supervisor lost its ownership record — run "prime-agent doctor --fix"',
+		);
+	});
 });

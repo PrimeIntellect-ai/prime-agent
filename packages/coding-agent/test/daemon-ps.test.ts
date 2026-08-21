@@ -1,10 +1,15 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
 	type DaemonInfo,
+	detectDaemonOwnershipLost,
 	evaluateShutdownQuietPeriod,
 	isWorkerSocketPath,
 	mergeDiscoveredDaemonProcesses,
+	type ProbeResult,
 	parseLsofListeners,
 	parsePrimeAgentProcessIds,
 	parsePsEtimes,
@@ -12,11 +17,15 @@ import {
 	planReap,
 	planShutdownAll,
 	planShutdownConfirmation,
+	type RepairHooks,
+	repairOwnershipLostDaemon,
 	sortDaemons,
 	verifyHelloSupervisorPid,
 } from "../src/cli/daemon-ps.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
 import { defaultDaemonSocketDir } from "../src/modes/daemon/daemon-socket.js";
+import { supervisorStateDirMatches } from "../src/modes/daemon/daemon-supervisor.js";
+import { acquireDaemonSupervisorOwnership } from "../src/modes/daemon/daemon-supervisor-ownership.js";
 
 describe("worker socket classification", () => {
 	it.runIf(process.platform !== "win32")("recognizes only worker sockets in the default service directory", () => {
@@ -258,6 +267,290 @@ describe("planShutdownConfirmation", () => {
 		expect(planShutdownConfirmation(1, false, false, false)).toBe("tty-error");
 		expect(planShutdownConfirmation(1, true, true, true)).toBe("none");
 		expect(planShutdownConfirmation(0, false, false, true)).toBe("none");
+	});
+});
+
+describe("planReap ownership-lost", () => {
+	it("restarts an ownership-lost daemon even when it is the default", () => {
+		const plan = planReap(
+			[
+				makeDaemon({ socketPath: "/tmp/default.sock", status: "ownership-lost", isDefault: true, pid: 11 }),
+				makeDaemon({ socketPath: "/tmp/other.sock", status: "ownership-lost", pid: 12 }),
+			],
+			false,
+		);
+		expect(plan.map((action) => action.kind)).toEqual(["restart", "restart"]);
+	});
+});
+
+const cleanupDirs: string[] = [];
+
+afterEach(() => {
+	while (cleanupDirs.length > 0) {
+		const dir = cleanupDirs.pop();
+		if (dir) rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+async function acquireTestOwnership(generation: string): Promise<{
+	registryDir: string;
+	socketPath: string;
+	probe: ProbeResult;
+	ownerJsonPath: string;
+	ownerDir: string;
+}> {
+	const root = mkdtempSync(join(tmpdir(), "doctor-ownership-"));
+	cleanupDirs.push(root);
+	const registryDir = join(root, "registry");
+	const socketPath = join(root, "daemon.sock");
+	const ownership = await acquireDaemonSupervisorOwnership({
+		agentDir: join(root, "agent"),
+		appVersion: "test",
+		descriptorDir: join(root, "workers"),
+		generation,
+		registryDir,
+		socketPath,
+	});
+	const record = ownership.record;
+	const probe: ProbeResult = {
+		reachable: true,
+		supervisorGeneration: record.generation,
+		supervisorPid: record.pid,
+		...(record.processStartId ? { supervisorProcessStartId: record.processStartId } : {}),
+	};
+	const ownerDir = join(registryDir, `${generation}.owner`);
+	return { registryDir, socketPath, probe, ownerJsonPath: join(ownerDir, "owner.json"), ownerDir };
+}
+
+describe("detectDaemonOwnershipLost", () => {
+	it("flags a stale-version supervisor whose owner record was deleted", async () => {
+		// The incident case: the CLI was upgraded because the daemon wedged, so the
+		// wedged supervisor answers with a pre-upgrade version. Version mismatch
+		// must not mask ownership loss.
+		const paths = await acquireTestOwnership("stale-lost-owner");
+		rmSync(paths.ownerDir, { recursive: true, force: true });
+		const probe: ProbeResult = { ...paths.probe, version: "0.0.1-old" };
+		await expect(detectDaemonOwnershipLost(paths.socketPath, probe, paths.registryDir)).resolves.toBe(true);
+	});
+
+	it("does not flag a supervisor whose owner record is current", async () => {
+		const paths = await acquireTestOwnership("healthy-owner");
+		await expect(detectDaemonOwnershipLost(paths.socketPath, paths.probe, paths.registryDir)).resolves.toBe(false);
+	});
+
+	it("flags a live supervisor whose owner record was deleted", async () => {
+		const paths = await acquireTestOwnership("deleted-owner");
+		rmSync(paths.ownerDir, { recursive: true, force: true });
+		await expect(detectDaemonOwnershipLost(paths.socketPath, paths.probe, paths.registryDir)).resolves.toBe(true);
+	});
+
+	it("flags a live supervisor whose owner record was replaced", async () => {
+		const paths = await acquireTestOwnership("replaced-owner");
+		const record = JSON.parse(readFileSync(paths.ownerJsonPath, "utf8")) as { pid: number };
+		record.pid = record.pid + 1;
+		writeFileSync(paths.ownerJsonPath, `${JSON.stringify(record, null, 2)}\n`);
+		await expect(detectDaemonOwnershipLost(paths.socketPath, paths.probe, paths.registryDir)).resolves.toBe(true);
+	});
+
+	it("never flags a hello without a supervisor generation", async () => {
+		// A starting daemon has no generation in its hello yet and is skipped.
+		const paths = await acquireTestOwnership("young-owner");
+		rmSync(paths.ownerDir, { recursive: true, force: true });
+		const probe: ProbeResult = { ...paths.probe };
+		delete probe.supervisorGeneration;
+		await expect(detectDaemonOwnershipLost(paths.socketPath, probe, paths.registryDir)).resolves.toBe(false);
+	});
+
+	it("never flags a supervisor whose process identity no longer matches", async () => {
+		// Clean-shutdown race: a dead/replaced process identity means no flag.
+		const paths = await acquireTestOwnership("stopping-owner");
+		rmSync(paths.ownerDir, { recursive: true, force: true });
+		const probe: ProbeResult = { ...paths.probe, supervisorProcessStartId: "stale-start-id" };
+		await expect(detectDaemonOwnershipLost(paths.socketPath, probe, paths.registryDir)).resolves.toBe(false);
+	});
+});
+
+describe("supervisorStateDirMatches", () => {
+	it("matches only the generation whose snapshot-cache dir exists under the agent dir", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "doctor-agent-dir-"));
+		cleanupDirs.push(agentDir);
+		const socketPath = "/tmp/state-dir.sock";
+		// Created by DaemonSupervisor.start() before it ever listens.
+		// Mirrors defaultWorkerDescriptorDir's key rule; the positive assertion below
+		// fails if production's path derivation ever drifts from this.
+		const stateDir = join(
+			agentDir,
+			"daemon-workers",
+			createHash("sha256").update(socketPath).digest("hex").slice(0, 12),
+			"snapshot-cache",
+			"gen-a",
+		);
+		mkdirSync(stateDir, { recursive: true });
+		expect(supervisorStateDirMatches(agentDir, socketPath, "gen-a")).toBe(true);
+		expect(supervisorStateDirMatches(agentDir, socketPath, "gen-b")).toBe(false);
+		expect(supervisorStateDirMatches(agentDir, "/tmp/other.sock", "gen-a")).toBe(false);
+	});
+});
+
+describe("repairOwnershipLostDaemon", () => {
+	function makeLostDaemon(): DaemonInfo {
+		return makeDaemon({ socketPath: "/tmp/lost.sock", status: "ownership-lost", pid: process.pid });
+	}
+
+	function makeHooks(overrides: Partial<RepairHooks> = {}): { hooks: RepairHooks; calls: string[] } {
+		const calls: string[] = [];
+		const probe: ProbeResult = {
+			reachable: true,
+			supervisorGeneration: "lost-generation",
+			supervisorPid: process.pid,
+			...(getProcessStartId(process.pid) ? { supervisorProcessStartId: getProcessStartId(process.pid) } : {}),
+		};
+		const hooks: RepairHooks = {
+			probe: async (socketPath) => {
+				calls.push(`probe:${socketPath}`);
+				return probe;
+			},
+			detectLost: async () => {
+				calls.push("detectLost");
+				return true;
+			},
+			ownsSupervisorState: (socketPath, supervisorGeneration) => {
+				calls.push(`ownsState:${socketPath}:${supervisorGeneration}`);
+				return true;
+			},
+			acquireAdmission: async () => {
+				calls.push("acquireAdmission");
+				let released = false;
+				return {
+					assertOrRenew: async () => {
+						calls.push("assertAdmission");
+					},
+					release: async () => {
+						if (!released) {
+							released = true;
+							calls.push("releaseAdmission");
+						}
+					},
+				};
+			},
+			killDaemon: async (pid, expectedProcessStartId) => {
+				calls.push(`kill:${pid}:${expectedProcessStartId ?? "no-start-id"}`);
+				return true;
+			},
+			waitStartupFence: async (socketPath) => {
+				calls.push(`fence:${socketPath}`);
+			},
+			ensureDaemonRunning: async (socketPath) => {
+				calls.push(`ensure:${socketPath}`);
+			},
+			...overrides,
+		};
+		return { hooks, calls };
+	}
+
+	it("holds admission across kill, cleanup, and fence wait, releasing only right before the relaunch", async () => {
+		const { hooks, calls } = makeHooks();
+		const outcome = await repairOwnershipLostDaemon(makeLostDaemon(), hooks);
+		expect(outcome).toEqual({
+			reaped: `restarted background service after ownership loss (killed pid ${process.pid}, relaunched on same socket)`,
+		});
+		expect(calls).toEqual([
+			"probe:/tmp/lost.sock",
+			"detectLost",
+			"ownsState:/tmp/lost.sock:lost-generation",
+			"acquireAdmission",
+			"probe:/tmp/lost.sock",
+			"detectLost",
+			"assertAdmission",
+			// The start id from the fresh under-admission probe fences the kill
+			// against PID reuse.
+			`kill:${process.pid}:${getProcessStartId(process.pid) ?? "no-start-id"}`,
+			"fence:/tmp/lost.sock",
+			"assertAdmission",
+			"releaseAdmission",
+			"ensure:/tmp/lost.sock",
+		]);
+	});
+
+	it("skips without killing when the socket was taken over while waiting for admission", async () => {
+		const probes: ProbeResult[] = [
+			{
+				reachable: true,
+				supervisorGeneration: "lost-generation",
+				supervisorPid: process.pid,
+				...(getProcessStartId(process.pid) ? { supervisorProcessStartId: getProcessStartId(process.pid) } : {}),
+			},
+			{
+				reachable: true,
+				supervisorGeneration: "replacement-generation",
+				supervisorPid: process.pid,
+				...(getProcessStartId(process.pid) ? { supervisorProcessStartId: getProcessStartId(process.pid) } : {}),
+			},
+		];
+		const { hooks, calls } = makeHooks({
+			probe: async () => {
+				const next = probes.shift();
+				if (!next) throw new Error("unexpected probe");
+				return next;
+			},
+		});
+		const outcome = await repairOwnershipLostDaemon(makeLostDaemon(), hooks);
+		expect(outcome).toEqual({ skipped: "no longer ownership-lost; not restarting" });
+		expect(calls.some((call) => call.startsWith("kill") || call.startsWith("ensure"))).toBe(false);
+		expect(calls).toContain("releaseAdmission");
+	});
+
+	it("does not unlink or relaunch when the wedged supervisor survives SIGKILL", async () => {
+		const { hooks, calls } = makeHooks({
+			killDaemon: async () => false,
+		});
+		const outcome = await repairOwnershipLostDaemon(makeLostDaemon(), hooks);
+		expect("skipped" in outcome && outcome.skipped).toContain("did not exit after SIGKILL");
+		expect(calls.some((call) => call.startsWith("fence") || call.startsWith("ensure"))).toBe(false);
+		expect(calls).toContain("releaseAdmission");
+	});
+
+	it("declines to restart a daemon whose state lives under a different agent dir", async () => {
+		// Killing a foreign daemon would silently drop its workers on relaunch.
+		const { hooks, calls } = makeHooks({
+			ownsSupervisorState: () => false,
+		});
+		const outcome = await repairOwnershipLostDaemon(makeLostDaemon(), hooks);
+		expect("skipped" in outcome && outcome.skipped).toContain("different agent dir");
+		expect(calls.some((call) => call.startsWith("kill") || call.startsWith("ensure"))).toBe(false);
+	});
+
+	it("does not kill a daemon that recovered between discovery and repair", async () => {
+		const { hooks, calls } = makeHooks({
+			detectLost: async () => false,
+		});
+		const outcome = await repairOwnershipLostDaemon(makeLostDaemon(), hooks);
+		expect(outcome).toEqual({ skipped: "no longer ownership-lost; not restarting" });
+		expect(calls.some((call) => call.startsWith("kill") || call.startsWith("ensure"))).toBe(false);
+	});
+
+	it("reports a kill failure without attempting a relaunch", async () => {
+		const { hooks, calls } = makeHooks({
+			killDaemon: async () => {
+				throw new Error("kill refused");
+			},
+		});
+		const outcome = await repairOwnershipLostDaemon(makeLostDaemon(), hooks);
+		expect("skipped" in outcome && outcome.skipped).toContain("kill refused");
+		expect(calls.some((call) => call.startsWith("ensure"))).toBe(false);
+		expect(calls).toContain("releaseAdmission");
+	});
+
+	it("names the killed pid and the autostart fallback when the relaunch fails", async () => {
+		const { hooks } = makeHooks({
+			ensureDaemonRunning: async () => {
+				throw new Error("spawn failed");
+			},
+		});
+		const outcome = await repairOwnershipLostDaemon(makeLostDaemon(), hooks);
+		expect("skipped" in outcome && outcome.skipped).toContain(`killed wedged supervisor (pid ${process.pid})`);
+		expect("skipped" in outcome && outcome.skipped).toContain("spawn failed");
+		expect("skipped" in outcome && outcome.skipped).toContain("autostart");
 	});
 });
 

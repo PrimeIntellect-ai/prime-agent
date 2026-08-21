@@ -8,6 +8,7 @@ import {
 	acquireDaemonShutdownAdmission,
 	acquireDaemonSupervisorOwnership,
 	assertDaemonSupervisorOwnerCurrent,
+	findDaemonSupervisorOwnerForSocket,
 	persistDaemonStartupFenceFromOwner,
 } from "../src/modes/daemon/daemon-supervisor-ownership.js";
 
@@ -162,6 +163,7 @@ describe("daemon supervisor ownership registry", () => {
 		await expect(mismatched.assertCurrent()).rejects.toMatchObject({
 			code: "supervisor_generation_stale",
 			name: "DaemonSupervisorOwnershipLostError",
+			message: expect.stringContaining("owner record on disk was replaced by another owner") as string,
 		});
 		expect(readJson(mismatchedPath).token).toBe("successor-token");
 		await mismatched.release();
@@ -170,9 +172,27 @@ describe("daemon supervisor ownership registry", () => {
 		const reaped = await acquire(paths, "reaped-owner");
 		const reapedDir = ownerDir(paths, "reaped-owner");
 		rmSync(reapedDir, { recursive: true, force: true });
-		await expect(reaped.assertCurrent()).rejects.toMatchObject({ code: "supervisor_generation_stale" });
+		await expect(reaped.assertCurrent()).rejects.toMatchObject({
+			code: "supervisor_generation_stale",
+			message: expect.stringContaining("owner record is missing on disk") as string,
+		});
 		expect(existsSync(reapedDir)).toBe(false);
-		await reaped.release();
+		await expect(reaped.release()).resolves.toBeUndefined();
+		await expect(reaped.assertCurrent()).rejects.toMatchObject({
+			message: expect.stringContaining("ownership was already released") as string,
+		});
+	});
+
+	it("finds the owner record for a socket by purely local reads", async () => {
+		const paths = createPaths();
+		expect(findDaemonSupervisorOwnerForSocket(paths.socketPath, paths.registryDir)).toBeUndefined();
+		const ownership = await acquire(paths, "socket-owner");
+		expect(findDaemonSupervisorOwnerForSocket(paths.socketPath, paths.registryDir)).toMatchObject({
+			pid: process.pid,
+			generation: "socket-owner",
+		});
+		expect(findDaemonSupervisorOwnerForSocket(join(paths.root, "other.sock"), paths.registryDir)).toBeUndefined();
+		await ownership.release();
 	});
 
 	it("does not resurrect the shutdown admission when release overtakes an in-flight renew", async () => {
