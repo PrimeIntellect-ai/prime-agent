@@ -72,6 +72,36 @@ export const DAEMON_RUNTIME_ATTESTATION_FIELDS: readonly (keyof CanonicalDaemonR
 	"schemaRevision",
 ];
 
+/** Attestation fields that describe the wire contract; a difference here is genuinely incompatible. */
+export const DAEMON_RUNTIME_WIRE_FIELDS: readonly (keyof CanonicalDaemonRuntimeAttestation)[] = [
+	"protocolVersion",
+	"schemaId",
+	"schemaRevision",
+];
+
+/**
+ * Whether a runtime attestation mismatch breaks the wire contract or only the source identity.
+ *
+ * The attestation mixes two very different kinds of fact. Protocol version, schema id and schema
+ * revision describe what the two processes can say to each other; a difference there means the client
+ * may misparse and must not proceed. Build ids, the code-tree digest and the executable path describe
+ * only which source produced the daemon - a difference there means the daemon is older or newer code
+ * speaking the identical protocol.
+ *
+ * Treating both the same way has a real cost: committing during a live run moves the build id and locks
+ * the operator out of a perfectly healthy session, with the error advising `shutdown --force`, which
+ * stops every agent on the machine. That happened, and the advice was wrong for the situation.
+ *
+ * Args:
+ * mismatchedFields: Fields that differ, as reported by findDaemonRuntimeAttestationMismatches.
+ * Return: "wire" when any differing field changes the protocol contract, otherwise "source".
+ */
+export function classifyDaemonRuntimeMismatch(
+	mismatchedFields: readonly (keyof CanonicalDaemonRuntimeAttestation)[],
+): "wire" | "source" {
+	return mismatchedFields.some((field) => DAEMON_RUNTIME_WIRE_FIELDS.includes(field)) ? "wire" : "source";
+}
+
 function bundledBuildIdentity(): BundledDaemonRuntimeBuildIdentity | undefined {
 	const buildId = typeof __PI_BUILD_ID__ === "undefined" ? undefined : __PI_BUILD_ID__;
 	const sourceBuildId = typeof __PI_SOURCE_BUILD_ID__ === "undefined" ? undefined : __PI_SOURCE_BUILD_ID__;

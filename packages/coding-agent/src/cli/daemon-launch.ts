@@ -15,6 +15,7 @@ import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
 import {
 	type CanonicalDaemonRuntimeAttestation,
+	classifyDaemonRuntimeMismatch,
 	DAEMON_RUNTIME_ATTESTATION_FIELDS,
 	findDaemonRuntimeAttestationMismatches,
 	getCanonicalDaemonRuntimeAttestation,
@@ -234,12 +235,31 @@ export class StaleDaemonError extends Error {
 							: "missing attestation"
 					}`
 				: "";
+		// Source drift and a wire break are not the same problem and must not get the same advice.
+		// `shutdown --force` stops every agent on the machine, which is the wrong remedy when the
+		// daemon speaks an identical protocol and merely predates the working tree.
+		const sourceOnly =
+			reason === "runtime_mismatch" &&
+			(details.mismatchedRuntimeFields ?? []).length > 0 &&
+			classifyDaemonRuntimeMismatch(
+				details.mismatchedRuntimeFields as readonly (keyof CanonicalDaemonRuntimeAttestation)[],
+			) === "source";
+		const headline = sourceOnly
+			? "This Prime Agent daemon predates the current source."
+			: "An incompatible Prime Agent daemon is running.";
+		const remedy = sourceOnly
+			? `The protocol and schema match, so the daemon is running older or newer code, not an incompatible one.\n` +
+				`Sessions on it are unaffected and keep running. To adopt the current source, stop just this daemon's\n` +
+				`agents and start again; restarting is only needed to pick up code changes.\n\n` +
+				`Note: ${formatCurrentCliCommand(["shutdown", "--force"])} stops every agent on this machine, not only\n` +
+				`this socket's. If you only need to observe a running session, an --mode rpc client on the same socket\n` +
+				`is unaffected by this check.`
+			: `Run:\n${formatCurrentCliCommand(["shutdown", "--force"])}\n\nThen retry the original command.`;
 		super(
-			`An incompatible Prime Agent daemon is running.\n\n${daemonIdentity}\n` +
+			`${headline}\n\n${daemonIdentity}\n` +
 				runtimeDetails +
 				`Client: v${VERSION}, protocol ${DAEMON_PROTOCOL_VERSION}, schema ${DAEMON_SCHEMA_ID}, build ${client.buildId}, ` +
-				`executable ${client.launcherPath ?? client.entrypointPath ?? client.executablePath}\n\nRun:\n` +
-				`${formatCurrentCliCommand(["shutdown", "--force"])}\n\nThen retry the original command.`,
+				`executable ${client.launcherPath ?? client.entrypointPath ?? client.executablePath}\n\n${remedy}`,
 		);
 		this.name = "StaleDaemonError";
 		this.reason = reason;

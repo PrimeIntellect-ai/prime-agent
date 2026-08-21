@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
 	createFixtureHostReceipt,
 	createFixtureHostReceiptConsumerContext,
@@ -611,6 +611,60 @@ function recipeConsumptionWitness(
 	};
 }
 
+type IntentTddGitRepo = {
+	readonly root: string;
+	readonly integrationSha: string;
+	readonly baseSha: string;
+	readonly candidateSha: string;
+	readonly reviewedHeadSha: string;
+};
+
+// The intent-TDD gate validates evidence against the Git repository the process is standing in, so
+// this fixture builds the exact four-commit shape the gate requires in a throwaway repository
+// instead of reading whichever commits this checkout happens to sit on. Ignoring the ambient Git
+// config and passing an explicit identity keep it working where Git identity is unset or empty.
+let intentTddGitRepoCache: IntentTddGitRepo | null = null;
+
+function intentTddGitRepo(): IntentTddGitRepo {
+	if (intentTddGitRepoCache !== null) return intentTddGitRepoCache;
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "workflow-recipe-intent-tdd-")));
+	const git = (...args: readonly string[]): string =>
+		execFileSync("git", [...args], {
+			cwd: root,
+			encoding: "utf8",
+			input: "",
+			env: {
+				...process.env,
+				GIT_CONFIG_GLOBAL: "/dev/null",
+				GIT_CONFIG_SYSTEM: "/dev/null",
+				GIT_AUTHOR_NAME: "intent-tdd-fixture",
+				GIT_AUTHOR_EMAIL: "intent-tdd-fixture@invalid",
+				GIT_AUTHOR_DATE: "2020-01-01T00:00:00Z",
+				GIT_COMMITTER_NAME: "intent-tdd-fixture",
+				GIT_COMMITTER_EMAIL: "intent-tdd-fixture@invalid",
+				GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z",
+			},
+		}).trim();
+	git("init", "--quiet");
+	const emptyTree = git("mktree");
+	const commit = (message: string, parent: string | null): string =>
+		git("commit-tree", emptyTree, ...(parent === null ? [] : ["-p", parent]), "-m", message);
+	const integrationSha = commit("integration", null);
+	const baseSha = commit("base", integrationSha);
+	const candidateSha = commit("candidate", baseSha);
+	const reviewedHeadSha = commit("reviewed-head", candidateSha);
+	git("update-ref", "refs/heads/main", reviewedHeadSha);
+	git("symbolic-ref", "HEAD", "refs/heads/main");
+	intentTddGitRepoCache = { root, integrationSha, baseSha, candidateSha, reviewedHeadSha };
+	return intentTddGitRepoCache;
+}
+
+afterAll(() => {
+	if (intentTddGitRepoCache === null) return;
+	rmSync(intentTddGitRepoCache.root, { recursive: true, force: true });
+	intentTddGitRepoCache = null;
+});
+
 function implementationEvidence(
 	host: WorkflowRecipeHostResolutionPort,
 	worktreeDecision: "isolated" | "shared-safe" = "shared-safe",
@@ -624,9 +678,19 @@ function implementationEvidence(
 		["candidate_sha", "reviewed_head"],
 		["candidate_sha", "integration_sha", "reviewed_head", "no_base_merge", "worktree_decision"],
 	] as const;
-	const gitCommit = (ref: string): string => execFileSync("git", ["rev-parse", ref], { encoding: "utf8" }).trim();
-	const worktreeRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+	const repo = intentTddGitRepo();
+	// The gate resolves Git from process.cwd(), so the process itself has to stand in the throwaway
+	// repository while the recipe compiles. This needs Vitest's forks pool (the default); under
+	// `pool: "threads"` process.chdir throws and these tests fail loudly rather than silently.
+	const previousCwd = process.cwd();
+	process.chdir(repo.root);
+	onTestFinished(() => process.chdir(previousCwd));
+	const worktreeRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+		cwd: repo.root,
+		encoding: "utf8",
+	}).trim();
 	const worktreeStatus = execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+		cwd: repo.root,
 		encoding: "utf8",
 	}).trim();
 	const outOfScopePaths = [
@@ -638,25 +702,7 @@ function implementationEvidence(
 		),
 	].sort();
 	const worktreeStatusDigest = sha256Hex(worktreeStatus);
-	// The intent-TDD gate rejects a merge commit between base and candidate. Picking HEAD~1..~3
-	// blindly makes this fixture pass or fail depending on where the checkout happens to sit, so
-	// find the newest run of four consecutive merge-free first-parent commits instead.
-	const reviewedHeadSha = gitCommit("HEAD");
-	const [candidateSha, baseSha, integrationSha] = ((): readonly string[] => {
-		const firstParent = execFileSync("git", ["rev-list", "--first-parent", "-n", "80", "HEAD"], {
-			encoding: "utf8",
-		})
-			.trim()
-			.split("\n")
-			.filter(Boolean);
-		const isMerge = (sha: string): boolean =>
-			execFileSync("git", ["rev-list", "--merges", "-n", "1", `${sha}^!`], { encoding: "utf8" }).trim().length > 0;
-		for (let index = 0; index + 2 < firstParent.length; index++) {
-			const window = firstParent.slice(index, index + 3);
-			if (window.every((sha) => !isMerge(sha))) return window;
-		}
-		throw new Error("intent-TDD fixture needs three consecutive merge-free commits in the first-parent history");
-	})();
+	const { baseSha, candidateSha, integrationSha, reviewedHeadSha } = repo;
 	return WORKFLOW_RECIPE_INTENT_TDD_STAGE_IDS.map((stageId, index) => {
 		const stage = BUILTIN_SUPERPOWERS_PRIME_IMPLEMENTATION_RECIPE.stages.find(
 			(candidate) => candidate.id === stageId,
