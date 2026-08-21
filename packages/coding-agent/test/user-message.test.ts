@@ -1,5 +1,6 @@
 import { clearDefaultTerminalColors, setDefaultTerminalColors, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, test } from "vitest";
+import { styleArgumentTokens } from "../src/modes/interactive/components/prompt-highlight.js";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
@@ -83,6 +84,98 @@ describe("UserMessageComponent", () => {
 		expect(plainLines).toEqual(expectedLines);
 	});
 
+	test("highlights flags and @path references in slash command arguments", () => {
+		initTheme("dark");
+		const rendered = new UserMessageComponent("/new --name foo @src/foo.ts", undefined, (name) => name === "new")
+			.render(60)
+			.join("\n");
+
+		expect(rendered).toContain(theme.fg("accent", "/new"));
+		expect(rendered).toContain(theme.fg("mdLink", "--name"));
+		expect(rendered).toContain(theme.fg("success", "@src/foo.ts"));
+	});
+
+	test("highlights a bare -- separator only in recognized slash commands", () => {
+		initTheme("dark");
+		const recognized = (name: string) => name === "new";
+		const command = new UserMessageComponent("/new --name bla -- hello", undefined, recognized).render(60).join("\n");
+		const plain = new UserMessageComponent("this -- however -- is fine", undefined, recognized).render(60).join("\n");
+
+		expect(command).toContain(theme.fg("mdLink", "--"));
+		expect(plain).not.toContain(theme.fg("mdLink", "--"));
+	});
+
+	test("does not highlight --- or glued -- as a separator", () => {
+		initTheme("dark");
+		const recognized = (name: string) => name === "new";
+		const triple = new UserMessageComponent("/new a --- b", undefined, recognized).render(60).join("\n");
+		const glued = new UserMessageComponent("/new x-- y", undefined, recognized).render(60).join("\n");
+		const plain = new UserMessageComponent("a --- b").render(60).join("\n");
+
+		expect(triple).not.toContain(theme.fg("mdLink", "--"));
+		expect(glued).not.toContain(theme.fg("mdLink", "--"));
+		expect(plain).not.toContain(theme.fg("mdLink", "--"));
+	});
+
+	test("highlights @path references in plain user messages", () => {
+		initTheme("dark");
+		const rendered = new UserMessageComponent("check @src/foo.ts please").render(60).join("\n");
+
+		expect(rendered).toContain(theme.fg("success", "@src/foo.ts"));
+	});
+
+	test("highlights leading and newline-leading @path references in plain user messages", () => {
+		initTheme("dark");
+		const leading = new UserMessageComponent("@src/foo.ts please").render(60).join("\n");
+		const newline = new UserMessageComponent("hello\n@foo").render(60).join("\n");
+
+		expect(leading).toContain(theme.fg("success", "@src/foo.ts"));
+		expect(newline).toContain(theme.fg("success", "@foo"));
+	});
+
+	test("highlights every wrapped fragment of a long @path", () => {
+		initTheme("dark");
+		const rendered = new UserMessageComponent("check @src/very-long-file-name.ts please").render(16).join("\n");
+
+		expect(rendered).toContain(theme.fg("success", "@src/very-lo"));
+		expect(rendered).toContain(theme.fg("success", "ng-file-name"));
+		expect(rendered).toContain(theme.fg("success", ".ts"));
+	});
+
+	test("keeps quoted @paths highlighted across narrow wraps", () => {
+		initTheme("dark");
+		const rendered = new UserMessageComponent('open @"docs/some very long name.txt" now').render(16).join("\n");
+
+		expect(rendered).toContain(theme.fg("success", '@"docs/some '));
+		expect(rendered).toContain(theme.fg("success", "very long na"));
+		expect(rendered).toContain(theme.fg("success", 'me.txt"'));
+	});
+
+	test("keeps multi-line quoted @paths on separate lines", () => {
+		initTheme("dark");
+		const lines = new UserMessageComponent('@"a\nb"').render(60);
+		const plain = lines.map((line) => line.replace(/\x1b\[[0-9;]*m|\x1b\]133;[ABC]\x07/g, ""));
+		const content = plain.map((line) => line.trim()).filter((line) => line.length > 0);
+
+		expect(lines.every((line) => !line.includes("\n"))).toBe(true);
+		expect(content).toEqual(['@"a', 'b"']);
+		expect(lines.join("\n")).toContain(theme.fg("success", '@"a'));
+	});
+
+	test("does not highlight @ or -- without a whitespace boundary", () => {
+		initTheme("dark");
+		const email = new UserMessageComponent("email me@example.com").render(60).join("\n");
+		const dashes = new UserMessageComponent("a---b").render(60).join("\n");
+
+		expect(email).not.toContain(theme.fg("success", "@example.com"));
+		expect(dashes).not.toContain(theme.fg("mdLink", "--b"));
+	});
+
+	test("styleArgumentTokens highlights quoted @paths", () => {
+		initTheme("dark");
+		expect(styleArgumentTokens('open @"a b.txt" now')).toBe(`open ${theme.fg("success", '@"a b.txt"')} now`);
+	});
+
 	test("preserves mask-like argument text across narrow wraps", () => {
 		initTheme("dark");
 		const command = "/averyveryverylongcommand";
@@ -95,5 +188,15 @@ describe("UserMessageComponent", () => {
 
 		expect(plain.replace(/\s+/g, "")).toContain(`${command}界\uE000`);
 		expect(lines.every((line) => visibleWidth(line) === 8)).toBe(true);
+	});
+
+	test("renders a literal mask-range character before an @token uncorrupted", () => {
+		initTheme("dark");
+		const plain = new UserMessageComponent("\uE000 check @foo")
+			.render(60)
+			.map((line) => line.replace(/\x1b\[[0-9;]*m|\x1b\]133;[ABC]\x07/g, ""))
+			.join("\n");
+
+		expect(plain).toContain("\uE000 check @foo");
 	});
 });

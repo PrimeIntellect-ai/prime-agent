@@ -8,6 +8,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.js";
+import { ArgTokenHighlighter } from "./prompt-highlight.js";
 
 export interface CustomEditorOptions extends EditorOptions {
 	placeholder?: string;
@@ -25,6 +26,7 @@ export class CustomEditor extends Editor {
 	private placeholder: string | undefined;
 	private readonly placeholderColor: (text: string) => string;
 	private readonly isArgumentCommand: (name: string) => boolean;
+	private readonly argTokenHighlighter = new ArgTokenHighlighter();
 	public actionHandlers: Map<AppKeybinding, () => void> = new Map();
 
 	// Special handlers that can be dynamically replaced
@@ -65,6 +67,23 @@ export class CustomEditor extends Editor {
 	}
 
 	protected override styleDisplayText(
+		displayText: string,
+		layoutLineIndex: number,
+		lineText: string,
+		cursorCol: number | undefined,
+		sourceLine?: number,
+		sourceStart?: number,
+	): string {
+		if (sourceLine === undefined || sourceStart === undefined || this.getBashPromptInfo(this.getLines()[0] ?? "")) {
+			return this.styleCommandToken(displayText, layoutLineIndex, lineText, cursorCol);
+		}
+		// Arg tokens are styled first: their spans start after the command
+		// token, so the command offsets below stay valid.
+		const highlighted = this.argTokenHighlighter.highlightLine(displayText, lineText, sourceLine, sourceStart);
+		return this.styleCommandToken(highlighted, layoutLineIndex, lineText, cursorCol);
+	}
+
+	private styleCommandToken(
 		displayText: string,
 		layoutLineIndex: number,
 		lineText: string,
@@ -123,6 +142,9 @@ export class CustomEditor extends Editor {
 	}
 
 	override render(width: number): string[] {
+		const commandMatch = /^(\s*)\/(\S+)/.exec(this.getLines()[0] ?? "");
+		const isArgumentCommandLine = commandMatch !== null && this.isArgumentCommand(commandMatch[2]!);
+		this.argTokenHighlighter.reset(this.getLines(), isArgumentCommandLine);
 		let lines = super.render(width);
 		if (this.placeholder && this.getText().length === 0 && lines.length >= 2) {
 			lines = [lines[0]!, this.renderPlaceholderLine(width), ...lines.slice(2)];

@@ -1,0 +1,1 @@
+- Highlighted `@path` file references and `--flags` in the editor, queued message previews, and sent user messages, plus the bare `--` end-of-options separator in recognized slash commands.

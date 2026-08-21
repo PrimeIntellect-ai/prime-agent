@@ -1,6 +1,7 @@
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { parseSlashCommand } from "../../../core/slash-commands.js";
 import { theme } from "../theme/theme.js";
+import { styleArgumentTokens } from "./prompt-highlight.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -11,7 +12,10 @@ export function isLeadingSlashCommand(text: string, isRecognized: (name: string)
 	return command !== undefined && isRecognized(command.name);
 }
 
-export function styleSlashCommandText(text: string, styleRest: (rest: string) => string = (rest) => rest): string {
+export function styleSlashCommandText(
+	text: string,
+	styleRest: (rest: string) => string = (rest) => styleArgumentTokens(rest, undefined, true),
+): string {
 	const parsed = parseSlashCommand(text);
 	const commandEnd = parsed ? parsed.name.length + 1 : text.length;
 	return `${theme.fg("accent", text.slice(0, commandEnd))}${styleRest(text.slice(commandEnd))}`;
