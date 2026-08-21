@@ -815,6 +815,7 @@ describe("openai-completions tool_choice", () => {
 
 		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
 		expect(params.messages[1]?.reasoning_details).toEqual(details);
+		expect(params.messages[1]?.content).toBe("");
 	});
 
 	it("does not double-count reasoning tokens in completion usage", async () => {

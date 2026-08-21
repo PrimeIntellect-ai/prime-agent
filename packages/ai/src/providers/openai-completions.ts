@@ -963,6 +963,9 @@ export function convertMessages(
 			) {
 				(assistantMsg as { reasoning_content?: string }).reasoning_content = "";
 			}
+			if (replayReasoningDetails.length > 0 && assistantMsg.content === null && !assistantMsg.tool_calls) {
+				assistantMsg.content = "";
+			}
 			// Skip assistant messages that have no content and no tool calls.
 			// Some providers require "either content or tool_calls, but not none".
 			// Other providers also don't accept empty assistant messages.
