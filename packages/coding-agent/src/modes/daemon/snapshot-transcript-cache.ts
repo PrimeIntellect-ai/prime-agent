@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -23,6 +24,21 @@ export type SnapshotTranscriptChunkSource = (Iterable<Buffer> | AsyncIterable<Bu
 	markFailed?(error: Error): void;
 	dispose?(): void;
 };
+
+/**
+ * snapshotTranscriptId derives a snapshot transfer identity from the exact
+ * serialized message bytes. Re-serializing identical messages yields the same
+ * id, so exact retransmission is idempotent; any changed byte yields a
+ * distinct id even when generation, sequence, and message count are unchanged.
+ */
+export function snapshotTranscriptId(baseId: string, messages: readonly AgentMessage[]): string {
+	const hash = createHash("sha256");
+	for (const message of messages) {
+		hash.update(JSON.stringify(message));
+		hash.update("\n");
+	}
+	return `${baseId}-${hash.digest("hex")}`;
+}
 
 export function createSnapshotTranscriptChunks(options: {
 	activeSessionId: string;

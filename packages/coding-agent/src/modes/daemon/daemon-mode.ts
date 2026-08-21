@@ -227,6 +227,7 @@ import {
 	createSnapshotTranscriptChunks,
 	SNAPSHOT_TARGET_CHUNK_BYTES,
 	type SnapshotTranscriptChunkSource,
+	snapshotTranscriptId,
 } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
@@ -3981,7 +3982,10 @@ export class AgentDaemon {
 					});
 				}
 				if (streamsSnapshot) {
-					const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = snapshotTranscriptId(
+						`${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`,
+						result.snapshot.messages,
+					);
 					let transcript: SnapshotTranscriptChunkSource;
 					try {
 						transcript = createSnapshotTranscriptChunks({
@@ -6970,10 +6974,9 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
 	): void {
-		const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
 		// Mark before the registry read so later events queue behind this snapshot.
 		const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
-		void this.prepareReplacementSnapshot(client, state, message, snapshotId, snapshotSignal).catch((error) => {
+		void this.prepareReplacementSnapshot(client, state, message, snapshotSignal).catch((error) => {
 			finishClientSnapshotStreaming(client, state.activeSessionId);
 			this.log(`could not prepare replacement snapshot: ${String(error)}`);
 			if (!client.socket.destroyed && this.sessions.get(state.activeSessionId) === state) {
@@ -6991,7 +6994,6 @@ export class AgentDaemon {
 		client: DaemonSocketClient,
 		state: ActiveSessionState,
 		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
-		snapshotId: string,
 		snapshotSignal: AbortSignal,
 	): Promise<void> {
 		const result = await this.createAttachResult(client, state, {
@@ -7007,6 +7009,10 @@ export class AgentDaemon {
 			}
 			return;
 		}
+		const snapshotId = snapshotTranscriptId(
+			`${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`,
+			result.snapshot.messages,
+		);
 		const transcript = createSnapshotTranscriptChunks({
 			activeSessionId: state.activeSessionId,
 			snapshotId,
@@ -7168,7 +7174,10 @@ export class AgentDaemon {
 							),
 						});
 					}
-					const snapshotId = `${activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = snapshotTranscriptId(
+						`${activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`,
+						result.snapshot.messages,
+					);
 					const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
 					let transcript: SnapshotTranscriptChunkSource;
 					try {
