@@ -1082,6 +1082,37 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
+	it("keeps an unpersisted refinement outcome when the refinement audit append fails", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			harness.setResponses([fauxAssistantMessage(refinePlanJson("no-op"))]);
+			const auditAppendError = new Error("audit write failed");
+			vi.spyOn(harness.sessionManager, "appendCustomEntry").mockImplementationOnce(() => {
+				throw auditAppendError;
+			});
+			vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementationOnce(() => {
+				throw new Error("outcome write failed");
+			});
+
+			await expect(harness.session.refine({ instructions: "audit persistence failure" })).rejects.toThrow(
+				auditAppendError,
+			);
+
+			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(true);
+			// The outcome survives context rebuilds even when neither session entry could persist.
+			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
 	it("keeps an unpersisted refinement outcome across context rebuilds", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
