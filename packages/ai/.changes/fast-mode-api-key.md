@@ -1,0 +1,1 @@
+- Added Fast mode (service_tier `priority`) support for OpenAI API-key models GPT-5.4/GPT-5.5/GPT-5.6, and corrected the GPT-5.6 fast-pricing multiplier from 2.5x to 2x per OpenAI's pricing table ([#1595](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1595)).

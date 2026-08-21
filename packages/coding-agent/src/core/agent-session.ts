@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
 	Agent,
 	type AgentContext,
+	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
 	type AgentState,
@@ -1061,6 +1062,7 @@ export class AgentSession {
 
 	private _goalState: GoalState = emptyGoalState();
 	private _goalAccountingStartedAt: number | undefined = undefined;
+	private _goalContinuationAwaitsRlmWork = false;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
@@ -1745,6 +1747,7 @@ export class AgentSession {
 	}
 
 	private _clearQueuedGoalContexts(): void {
+		this._goalContinuationAwaitsRlmWork = false;
 		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter(
 			(message) => message.customType !== GOAL_CONTEXT_CUSTOM_TYPE,
 		);
@@ -1776,6 +1779,7 @@ export class AgentSession {
 			updatedAt: now,
 		};
 		this._goalAccountingStartedAt = now;
+		this._goalContinuationAwaitsRlmWork = false;
 		this._setGoalState(goal);
 		return this._goalState;
 	}
@@ -2033,6 +2037,41 @@ export class AgentSession {
 				contextTools.push(ipythonTool);
 				context.tools = contextTools;
 			}
+		}
+	}
+
+	private _maybeResumeGoalContinuationAfterRlmWork(): void {
+		if (!this._goalContinuationAwaitsRlmWork) return;
+		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (this._goalState.status !== "active" || !this._goalState.objective) {
+			this._goalContinuationAwaitsRlmWork = false;
+			return;
+		}
+		// Keep the deferral while admission is paused or the pump is suspended
+		// (post-abort); the pause release and resumeQueuedWork retry.
+		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
+		const goalBeforeResume = this._goalState;
+		try {
+			this._ensureGoalRuntimeActive();
+			this._setGoalState({
+				...this._goalState,
+				continuationsUsed: this._goalState.continuationsUsed + 1,
+				lastReason: undefined,
+				lastError: undefined,
+			});
+			const message = createGoalContextMessage(this._goalState, "continuation");
+			const normalized = normalizeMessageContent(message.content);
+			// No front: a settling child's terminal notice must be read first.
+			this._admitSessionInput(
+				this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+					message,
+					resumeIfIdle: true,
+				}),
+			);
+			this._goalContinuationAwaitsRlmWork = false;
+		} catch {
+			// Admission can race a new pause; roll back so the retry re-counts.
+			this._setGoalState(goalBeforeResume);
 		}
 	}
 
@@ -3216,6 +3255,13 @@ export class AgentSession {
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
 			return [];
 		}
+		// Delegating and ending the turn is correct behavior; hold the continuation
+		// until descendants settle instead of re-prompting a waiting parent.
+		if (this._hasUnsettledRlmQuiescenceWork()) {
+			this._goalContinuationAwaitsRlmWork = true;
+			return [];
+		}
+		this._goalContinuationAwaitsRlmWork = false;
 		try {
 			this._ensureGoalRuntimeActive(context.context);
 			const nextGoal = {
@@ -6596,6 +6642,7 @@ export class AgentSession {
 				this._sessionInputPumpEpoch++;
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
+				this._maybeResumeGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6712,6 +6759,7 @@ export class AgentSession {
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
 		this._resumeSessionInputAdmission();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
 	}
@@ -7601,11 +7649,11 @@ export class AgentSession {
 			await this.agent.continue();
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (message.includes("already processing")) {
+			const code = error instanceof AgentContinueError ? error.code : undefined;
+			if (code === "busy") {
 				this._schedulePostCompactionContinue();
-			} else if (!message.includes("continue from")) {
-				// "continue from" means the turn already completed; anything else must reject headless idle waiters.
+			} else if (code !== "nothing-to-continue") {
+				// "nothing-to-continue" means the turn already completed; anything else must reject headless idle waiters.
 				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}
@@ -9306,6 +9354,7 @@ export class AgentSession {
 		this._abandonedRlmQuiescenceChildIds.add(run.id);
 		this._unsettledRlmChildRuns.delete(run);
 		run.settlement.resolve();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
@@ -9644,6 +9693,7 @@ export class AgentSession {
 		run.settlement.resolve();
 		run.deletionReservation.resolve();
 		this._unsettledRlmChildRuns.delete(run);
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _observeRlmRunDeletionCleanup(
@@ -10466,6 +10516,7 @@ export class AgentSession {
 					run.settled = true;
 					run.settlement.resolve();
 					this._unsettledRlmChildRuns.delete(run);
+					this._maybeResumeGoalContinuationAfterRlmWork();
 				}
 			}
 		})().catch(() => undefined);

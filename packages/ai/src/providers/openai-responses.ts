@@ -265,6 +265,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	return params;
 }
 
+// Multipliers per https://developers.openai.com/api/docs/pricing (retrieved 2026-08-21)
 function getServiceTierCostMultiplier(
 	model: Pick<Model<"openai-responses">, "id">,
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
