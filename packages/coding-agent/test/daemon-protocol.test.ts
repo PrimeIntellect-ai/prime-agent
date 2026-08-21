@@ -125,7 +125,7 @@ describe("daemon protocol helpers", () => {
 	});
 
 	it("capability-gates mailbox commands for both compatibility directions", () => {
-		expect(DAEMON_SCHEMA_REVISION).toBe(19);
+		expect(DAEMON_SCHEMA_REVISION).toBe(22);
 		expect(DAEMON_COMMAND_COMPATIBILITY.agent_message_inbox).toEqual({
 			minProtocol: 7,
 			minSchemaRevision: 17,

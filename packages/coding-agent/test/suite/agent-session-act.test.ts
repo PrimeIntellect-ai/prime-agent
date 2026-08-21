@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type Usage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -868,11 +868,12 @@ describe("AgentSession Act lane", () => {
 		}
 	}, 30_000);
 
-	it("switches one retained transcript across default, role, and concrete Act selectors", async () => {
+	it("keeps a separate retained transcript for each resolved Act model", async () => {
 		const lunaUsage = usage(3, 1, 0.3);
 		const deepseekUsage = usage(5, 2, 0.5);
 		const directUsage = usage(7, 3, 0.7);
 		const returnedDefaultUsage = usage(2, 1, 0.2);
+		const sameModelUsage = usage(2, 1, 0.2);
 		const done = (code: string, assistantUsage: Usage) => {
 			const message = fauxAssistantMessage(fauxToolCall("shared_ipython", { code }), { stopReason: "toolUse" });
 			message.usage = assistantUsage;
@@ -886,6 +887,7 @@ describe("AgentSession Act lane", () => {
 				{ id: "deepseek-model", cost: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0 } },
 				{ id: "direct-model", cost: { input: 3, output: 3, cacheRead: 0, cacheWrite: 0 } },
 			],
+			persistSession: true,
 			settings: {
 				rlmActDefaultModel: "@luna",
 				modelRoles: {
@@ -901,7 +903,7 @@ describe("AgentSession Act lane", () => {
 			});
 			await harness.session.setServiceTier("scale");
 			let deepseekSawLuna = false;
-			let directSawBoth = false;
+			let directSawOtherModels = false;
 			harness.setResponses([
 				done("rlm.done('luna')", lunaUsage),
 				(context) => {
@@ -911,7 +913,7 @@ describe("AgentSession Act lane", () => {
 					return done("rlm.done('deepseek')", deepseekUsage);
 				},
 				(context) => {
-					directSawBoth = ["default task", "role task"].every((prompt) =>
+					directSawOtherModels = ["default task", "role task"].some((prompt) =>
 						context.messages.some(
 							(message) => message.role === "user" && JSON.stringify(message.content).includes(prompt),
 						),
@@ -919,6 +921,7 @@ describe("AgentSession Act lane", () => {
 					return done("rlm.done('direct')", directUsage);
 				},
 				done("rlm.done('default-again')", returnedDefaultUsage),
+				done("rlm.done('same-model')", sameModelUsage),
 			]);
 			const internals = harness.session as unknown as ActSessionInternals;
 
@@ -931,9 +934,10 @@ describe("AgentSession Act lane", () => {
 			await expect(
 				internals._runAct({ prompt: "role task", model: "@deepseek" }, undefined, new TestActChannel()),
 			).resolves.toEqual({ outcome: "done" });
-			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
-			expect(laneSession?.model?.id).toBe("deepseek-model");
-			expect(deepseekSawLuna).toBe(true);
+			const deepseekSession = internals._actLanes?.get(1)?.session;
+			expect(deepseekSession).not.toBe(laneSession);
+			expect(deepseekSession?.model?.id).toBe("deepseek-model");
+			expect(deepseekSawLuna).toBe(false);
 
 			await expect(
 				internals._runAct(
@@ -942,9 +946,17 @@ describe("AgentSession Act lane", () => {
 					new TestActChannel(),
 				),
 			).resolves.toEqual({ outcome: "done" });
-			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
-			expect(laneSession?.model?.id).toBe("direct-model");
-			expect(directSawBoth).toBe(true);
+			const directSession = internals._actLanes?.get(1)?.session;
+			expect(directSession).not.toBe(laneSession);
+			expect(directSession).not.toBe(deepseekSession);
+			expect(directSession?.model?.id).toBe("direct-model");
+			expect(directSawOtherModels).toBe(false);
+			expect(laneSession?.sessionFile).toBe(
+				join(harness.sessionManager.getSessionArtifactDir()!, "act", "session.jsonl"),
+			);
+			expect(deepseekSession?.sessionFile).toMatch(/act-model-[0-9a-f]{16}\/session\.jsonl$/);
+			expect(directSession?.sessionFile).toMatch(/act-model-[0-9a-f]{16}\/session\.jsonl$/);
+			expect(directSession?.sessionFile).not.toBe(deepseekSession?.sessionFile);
 
 			await expect(internals._runAct({ prompt: "default again" }, undefined, new TestActChannel())).resolves.toEqual(
 				{ outcome: "done" },
@@ -953,6 +965,14 @@ describe("AgentSession Act lane", () => {
 			expect(laneSession?.model?.id).toBe("luna-model");
 			expect(laneSession?.serviceTier).toBe("scale");
 			expect(harness.session.model?.id).toBe("sol-model");
+			await expect(
+				internals._runAct(
+					{ prompt: "same concrete model", model: `${provider}/luna-model` },
+					undefined,
+					new TestActChannel(),
+				),
+			).resolves.toEqual({ outcome: "done" });
+			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
 
 			harness.appendResponses([fauxAssistantMessage("ordinary child completed")]);
 			const child = await harness.session.runRlmChild("ordinary child after model switches");
@@ -964,15 +984,18 @@ describe("AgentSession Act lane", () => {
 			expect(harness.session.getRlmChildSession(child.rlm_child_id)).not.toBe(laneSession);
 			expect(harness.session.getRlmChildSession(child.rlm_child_id)?.model?.id).toBe("sol-model");
 
-			const laneModels = laneSession?.sessionManager
-				.getBranch()
-				.filter((entry) => entry.type === "model_change")
-				.map((entry) => entry.modelId);
-			expect(laneModels).toEqual(["luna-model", "deepseek-model", "direct-model", "luna-model"]);
+			const sessionModels = [laneSession, deepseekSession, directSession].map((session) =>
+				session?.sessionManager
+					.getBranch()
+					.filter((entry) => entry.type === "model_change")
+					.map((entry) => entry.modelId),
+			);
+			expect(sessionModels).toEqual([["luna-model"], ["deepseek-model"], ["direct-model"]]);
 			const eventsByAct = [...new Set(actEvents.map((event) => event.actId))].map((actId) =>
 				actEvents.filter((event) => event.actId === actId),
 			);
 			expect(eventsByAct.map((events) => events.map((event) => event.event))).toEqual([
+				["start", "cell_start", "cell_terminal", "terminal"],
 				["start", "cell_start", "cell_terminal", "terminal"],
 				["start", "cell_start", "cell_terminal", "terminal"],
 				["start", "cell_start", "cell_terminal", "terminal"],
@@ -983,11 +1006,13 @@ describe("AgentSession Act lane", () => {
 				"cell-1",
 				"cell-1",
 				"cell-1",
+				"cell-1",
 			]);
 			expect(actEvents.filter((event) => event.event === "start").map((event) => event.model.id)).toEqual([
 				"luna-model",
 				"deepseek-model",
 				"direct-model",
+				"luna-model",
 				"luna-model",
 			]);
 			const terminals = harness.sessionManager.getBranch().filter((entry) => entry.type === "act_terminal");
@@ -995,6 +1020,7 @@ describe("AgentSession Act lane", () => {
 				"luna-model",
 				"deepseek-model",
 				"direct-model",
+				"luna-model",
 				"luna-model",
 			]);
 			expect(terminals.every((entry) => entry.usage.totalTokens > 0)).toBe(true);
@@ -1012,6 +1038,84 @@ describe("AgentSession Act lane", () => {
 			});
 		} finally {
 			harness.cleanup();
+		}
+	});
+
+	it("restores each resolved Act model from its own persisted transcript", async () => {
+		const isolatedProvider = "faux-act-model-isolation";
+		const settings = {
+			rlmActDefaultModel: "@luna",
+			modelRoles: {
+				luna: `${isolatedProvider}/luna-model`,
+				deepseek: `${isolatedProvider}/deepseek-model`,
+			},
+		};
+		const first = await createHarness({
+			provider: isolatedProvider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+			settings,
+			persistSession: true,
+			preserveTempDir: true,
+		});
+		const sessionFile = first.session.sessionFile;
+		if (!sessionFile) throw new Error("persistent harness has no session file");
+		const tempDir = first.tempDir;
+		try {
+			first.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done('luna')" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done('deepseek')" }), {
+					stopReason: "toolUse",
+				}),
+			]);
+			const internals = first.session as unknown as ActSessionInternals;
+			await internals._runAct({ prompt: "luna private fact" }, undefined, new TestActChannel());
+			await internals._runAct(
+				{ prompt: "deepseek private fact", model: "@deepseek" },
+				undefined,
+				new TestActChannel(),
+			);
+		} finally {
+			first.cleanup();
+		}
+
+		let resumed: Awaited<ReturnType<typeof createHarness>> | undefined;
+		try {
+			resumed = await createHarness({
+				provider: isolatedProvider,
+				models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+				settings,
+				tempDir,
+				sessionFile,
+			});
+			let deepseekContextIsolated = false;
+			let lunaContextIsolated = false;
+			resumed.setResponses([
+				(context) => {
+					const prompts = JSON.stringify(context.messages);
+					deepseekContextIsolated =
+						prompts.includes("deepseek private fact") && !prompts.includes("luna private fact");
+					return fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done('deepseek again')" }), {
+						stopReason: "toolUse",
+					});
+				},
+				(context) => {
+					const prompts = JSON.stringify(context.messages);
+					lunaContextIsolated =
+						prompts.includes("luna private fact") && !prompts.includes("deepseek private fact");
+					return fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done('luna again')" }), {
+						stopReason: "toolUse",
+					});
+				},
+			]);
+			const internals = resumed.session as unknown as ActSessionInternals;
+			await internals._runAct({ prompt: "deepseek resumed", model: "@deepseek" }, undefined, new TestActChannel());
+			await internals._runAct({ prompt: "luna resumed" }, undefined, new TestActChannel());
+			expect(deepseekContextIsolated).toBe(true);
+			expect(lunaContextIsolated).toBe(true);
+		} finally {
+			resumed?.cleanup();
 		}
 	});
 
@@ -1125,6 +1229,7 @@ describe("AgentSession Act lane", () => {
 			const persistedPartial = fauxAssistantMessage("persisted provider work before crash");
 			persistedPartial.usage = interruptedUsage;
 			laneSession.sessionManager.appendMessage(persistedPartial);
+			unlinkSync(join(first.sessionManager.getSessionArtifactDir()!, "act", "model-key"));
 		} finally {
 			first.cleanup();
 		}
@@ -1496,7 +1601,7 @@ describe("AgentSession Act lane", () => {
 		}
 	});
 
-	it("disposes a private session created after root disposal", async () => {
+	it("does not create a private session after root disposal wins model resolution", async () => {
 		const harness = await createHarness({
 			provider,
 			models: [{ id: "sol-model" }, { id: "luna-model" }],
@@ -1525,7 +1630,7 @@ describe("AgentSession Act lane", () => {
 			releaseResolution?.();
 			await expect(run).resolves.toEqual({ outcome: "cancelled" });
 			expect(disposedSessions).toContain(harness.session);
-			expect(disposedSessions.filter((session) => session !== harness.session)).toHaveLength(1);
+			expect(disposedSessions.filter((session) => session !== harness.session)).toHaveLength(0);
 			expect(internals._actLanes?.get(1)?.session).toBeUndefined();
 		} finally {
 			disposeSpy.mockRestore();
@@ -1555,12 +1660,17 @@ describe("AgentSession Act lane", () => {
 			const lane = internals._actLanes?.get(1);
 			if (!lane?.session) throw new Error("missing retained lane");
 			const root = harness.session as unknown as {
-				_selectActLaneModel(session: AgentSession, model: string | undefined): Promise<void>;
+				_resolveActModel(model: string): Promise<unknown>;
 			};
-			root._selectActLaneModel = () =>
-				new Promise((resolve) => {
-					releaseSelection = resolve;
-				});
+			const resolveActModel = root._resolveActModel.bind(root);
+			root._resolveActModel = async (model) => {
+				if (model === "@deepseek") {
+					await new Promise<void>((resolve) => {
+						releaseSelection = resolve;
+					});
+				}
+				return resolveActModel(model);
+			};
 			const run = internals._runAct(
 				{ prompt: "switch while disposing", model: "@deepseek" },
 				undefined,
@@ -1645,6 +1755,7 @@ describe("AgentSession Act lane", () => {
 
 			nestedChannel.complete({ type: "done" });
 			await expect(nested).resolves.toEqual({ outcome: "done" });
+			const deepseekSession = internals._actLanes?.get(2)?.session;
 			const overrideChannel = new BlockingActChannel("root-ipython");
 			const override = internals._runAct(
 				{ prompt: "depth two override", model: "@review" },
@@ -1662,9 +1773,11 @@ describe("AgentSession Act lane", () => {
 			expect(depthOneSession?.sessionFile).toBe(
 				join(harness.sessionManager.getSessionArtifactDir()!, "act", "session.jsonl"),
 			);
-			expect(depthTwoSession?.sessionFile).toBe(
+			expect(deepseekSession?.sessionFile).toBe(
 				join(harness.sessionManager.getSessionArtifactDir()!, "act-depth-2", "session.jsonl"),
 			);
+			expect(depthTwoSession).not.toBe(deepseekSession);
+			expect(depthTwoSession?.sessionFile).toMatch(/act-depth-2-model-[0-9a-f]{16}\/session\.jsonl$/);
 			expect(internals._actLanes?.get(2)?.model?.id).toBe("review-model");
 			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
 			outerChannel.complete({ type: "done" });
@@ -1677,8 +1790,17 @@ describe("AgentSession Act lane", () => {
 				actId: string;
 				depth?: number;
 				parentActId?: string;
+				sessionKey?: string;
 			}>;
 			const outerActId = facts[0]?.actId;
+			expect(facts.map((entry) => entry.sessionKey)).toEqual([
+				`${provider}/luna-model`,
+				`${provider}/deepseek-model`,
+				`${provider}/deepseek-model`,
+				`${provider}/review-model`,
+				`${provider}/review-model`,
+				`${provider}/luna-model`,
+			]);
 			expect(facts.map(({ type, depth, parentActId }) => ({ type, depth, parentActId }))).toEqual([
 				{ type: "act_start", depth: 1, parentActId: undefined },
 				{ type: "act_start", depth: 2, parentActId: outerActId },
