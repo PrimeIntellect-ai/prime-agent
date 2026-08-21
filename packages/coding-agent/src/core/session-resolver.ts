@@ -51,13 +51,15 @@ export async function resolveSessionPath(selector: string, cwd: string, sessionD
 		return { type: "path", path: selector };
 	}
 
-	const localSessions = await SessionManager.list(cwd, sessionDir);
+	// Resolution scans unfiltered so event-only sessions reopen by exact ID or
+	// unique prefix; catalogs hide them, resolution must not.
+	const localSessions = await SessionManager.listResolvable(cwd, sessionDir);
 	const localExactMatch = resolveExactMatch(selector, localSessions);
 	if (localExactMatch) {
 		return { type: "local", path: localExactMatch.path };
 	}
 
-	const allSessions = await SessionManager.listAll(undefined, sessionDir);
+	const allSessions = await SessionManager.listResolvable(undefined, sessionDir);
 	const globalExactMatch = resolveExactMatch(selector, allSessions);
 	if (globalExactMatch) {
 		return { type: "global", path: globalExactMatch.path, cwd: globalExactMatch.cwd };
