@@ -1,0 +1,1 @@
+- Fixed daemon snapshot transfers serving stale transcript bytes when a replacement worker reused the previous worker's event sequence numbers; snapshot ids now derive from the serialized message content.
