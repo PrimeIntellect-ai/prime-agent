@@ -1,0 +1,1 @@
+- Fixed the working-status elapsed timer (e.g. "Waiting · 5s") restarting at 0s after leaving and re-entering a session or re-attaching to it; the timer is now anchored to the in-flight turn's user message and keeps counting.

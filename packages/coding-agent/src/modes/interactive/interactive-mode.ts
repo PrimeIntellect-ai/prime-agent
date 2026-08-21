@@ -60,7 +60,11 @@ import {
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
 	VERSION,
 } from "../../config.js";
-import { AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL, isAgentSessionMessage } from "../../core/agent-messages.js";
+import {
+	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
+	isAgentSessionMessage,
+	startsAgentRun,
+} from "../../core/agent-messages.js";
 import {
 	type AgentTracePreviewResult,
 	type AgentTraceUploadAllResult,
@@ -98,7 +102,6 @@ import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CustomMessage,
 	createHeartbeatPromptMessage,
-	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	isCompactionOutcomeMessage,
 	isRefinementOutcomeMessage,
@@ -895,6 +898,8 @@ export class InteractiveMode {
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private workingStartedAt: number | undefined = undefined;
+	// Start of the in-flight run; survives loader teardown so the elapsed display doesn't reset on re-entry.
+	private turnStartedAt: number | undefined = undefined;
 	private workingTimer: NodeJS.Timeout | undefined = undefined;
 	private readonly featureHintDeck = new FeatureHintDeck();
 	private currentFeatureHint: string | undefined;
@@ -2901,6 +2906,7 @@ export class InteractiveMode {
 	private async renderResyncedSession(snapshot: AgentConnectionSnapshot): Promise<void> {
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
 		this.applyConnectionStateSnapshot(snapshot.state);
+		this.restoreTurnStartFromMessages(this.getSessionContextFromConnectionSnapshot(snapshot).messages);
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.rlmNodeId = snapshot.parent?.childId;
@@ -3189,9 +3195,27 @@ export class InteractiveMode {
 		this.workingTimer.unref?.();
 	}
 
+	// Recover the in-flight run's start from a restored transcript so the elapsed timer survives re-attach.
+	private restoreTurnStartFromMessages(messages: readonly AgentMessage[]): void {
+		this.turnStartedAt = undefined;
+		if (!this.isAgentStreaming()) return;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i]!;
+			if (startsAgentRun(message)) {
+				this.turnStartedAt = message.timestamp;
+			} else if (message.role === "assistant" && message.stopReason !== "toolUse") {
+				break;
+			}
+		}
+		if (this.turnStartedAt !== undefined && this.workingStartedAt !== undefined) {
+			this.workingStartedAt = this.turnStartedAt;
+			this.updateWorkingLoaderMessage();
+		}
+	}
+
 	private startWorkingLoader(): void {
 		this.stopWorkingLoader();
-		this.workingStartedAt = Date.now();
+		this.workingStartedAt = this.turnStartedAt ?? Date.now();
 		this.loadingAnimation = this.createWorkingLoader();
 		this.statusContainer.addChild(this.loadingAnimation);
 		this.startWorkingTimer();
@@ -3310,11 +3334,7 @@ export class InteractiveMode {
 			this.featureHintRunPending = false;
 			return;
 		}
-		const startsNewRun =
-			message.role === "user" ||
-			isAgentSessionMessage(message) ||
-			(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE);
-		if (!startsNewRun) return;
+		if (!startsAgentRun(message)) return;
 
 		this.endFeatureHintRun();
 		if (this.shouldShowWorkingLoader()) {
@@ -5451,6 +5471,14 @@ export class InteractiveMode {
 			}
 
 			case "message_start":
+				// The run's first starter anchors the elapsed display; mid-turn steering must not restart it.
+				if (this.turnStartedAt === undefined && startsAgentRun(event.message)) {
+					this.turnStartedAt = event.message.timestamp;
+					if (this.workingStartedAt !== undefined) {
+						this.workingStartedAt = event.message.timestamp;
+						this.updateWorkingLoaderMessage();
+					}
+				}
 				if (event.message.role === "custom") {
 					if (isSessionSlashCommandMessage(event.message) && event.message.details.command.name === "refine") {
 						this.startRefineLoader();
@@ -5587,6 +5615,7 @@ export class InteractiveMode {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
+				this.turnStartedAt = undefined;
 				// Drops the loader; background subagents are shown by the tree, not the loader.
 				this.syncWorkingLoader();
 				if (this.streamingComponent) {
@@ -6552,6 +6581,7 @@ export class InteractiveMode {
 		this.seedSubagentSummary(snapshot.children);
 		this.setSessionHasMessages(context.messages.length > 0);
 		this.applyConnectionStateSnapshot(state);
+		this.restoreTurnStartFromMessages(context.messages);
 		await this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
