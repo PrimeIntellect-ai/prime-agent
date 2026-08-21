@@ -1,1 +1,0 @@
-- Fixed generated model pricing and context-window metadata for updated provider catalogs.
