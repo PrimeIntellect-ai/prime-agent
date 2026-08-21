@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -70,12 +71,15 @@ function fakeAcpConnection(
 		onAcquireSessionInputPause?: () => void | Promise<void>;
 		onReleaseSessionInputPause?: () => void | Promise<void>;
 		onCancelRlmChild?: (childId: string) => void | Promise<void>;
+		onSwitchSession?: (sessionPath: string) => void | Promise<void>;
+		state?: Record<string, unknown>;
 	} = {},
 ): any {
 	let listener: ((event: any) => void) | undefined;
 	const messages: any[] = [];
 	const inputPauses = new Map<string, { release(): Promise<void> }>();
 	const snapshot = { state: { cwd: process.cwd() }, messages, children: [] };
+	let switchedTo: string | undefined;
 	return {
 		subscribe(callback: (event: any) => void) {
 			listener = callback;
@@ -84,7 +88,13 @@ function fakeAcpConnection(
 				options.onUnsubscribe?.();
 			};
 		},
-		getState: async () => snapshot.state,
+		switchSession: async (sessionPath: string) => {
+			switchedTo = sessionPath;
+			options.onSwitchSession?.(sessionPath);
+			return { cancelled: false };
+		},
+		getSwitchedTo: () => switchedTo,
+		getState: async () => ({ ...snapshot.state, ...options.state }),
 		getMessages: async () => messages,
 		getInitialSnapshot: async () => {
 			if (options.initialSnapshot) {
@@ -212,6 +222,7 @@ describe("ACP mode end to end", () => {
 		});
 		expect(init.protocolVersion).toBe(acp.PROTOCOL_VERSION);
 		expect(init.agentInfo?.name).toBe("prime-agent");
+		expect(init.agentCapabilities?.loadSession).toBe(true);
 		expect(init._meta).toHaveProperty(PRIME_AGENT_META_NAMESPACE);
 
 		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
@@ -232,6 +243,66 @@ describe("ACP mode end to end", () => {
 		harness.cleanup();
 	}, 30_000);
 
+	it("advertises session/load and restores a mapped session file", async () => {
+		const harness = await createHarness();
+		harness.setResponses([fauxAssistantMessage("restored")]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const sessionFile = `${harness.tempDir}/test-session.jsonl`;
+		await writeFile(sessionFile, "", "utf8");
+
+		// Point the registry at the harness temp dir so the mapping round-trips
+		// without touching the real agent directory.
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = harness.tempDir;
+		try {
+			// First ACP connection creates a session; state carries the prime-agent
+			// session file so session/new can persist the ACP id -> file mapping.
+			(connection as any).getState = async () => ({
+				cwd: harness.tempDir,
+				sessionFile,
+				sessionId: "test-session",
+			});
+
+			const { client } = connectAcpClient(connection);
+			await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+			const created = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+			expect(typeof created.sessionId).toBe("string");
+
+			// A second, fresh ACP connection resumes the same thread id. Its
+			// connection records switchSession() so we can assert the collector
+			// asked to restore the saved transcript file instead of starting blank.
+			const restoredConnection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+			let switchedTo: string | undefined;
+			(restoredConnection as any).getState = async () => ({
+				cwd: harness.tempDir,
+				sessionFile: `${harness.tempDir}/fresh-session.jsonl`,
+				sessionId: "fresh-session",
+			});
+			(restoredConnection as any).switchSession = async (sessionPath: string) => {
+				switchedTo = sessionPath;
+				return { cancelled: false };
+			};
+
+			const restored = connectAcpClient(restoredConnection);
+			await restored.client.request("initialize", {
+				protocolVersion: acp.PROTOCOL_VERSION,
+				clientCapabilities: {},
+			});
+			await expect(
+				restored.client.request("session/load", {
+					sessionId: created.sessionId,
+					cwd: harness.tempDir,
+					mcpServers: [],
+				}),
+			).resolves.toEqual({});
+			expect(switchedTo).toBe(sessionFile);
+			await restored.close();
+			harness.cleanup();
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			else process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+		}
+	});
 	it("queues a follow-up prompt behind injected work instead of rejecting it", async () => {
 		const harness = await createHarness();
 		let releaseInjected!: () => void;
