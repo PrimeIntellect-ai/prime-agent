@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
 import type { SessionBeforeRefineEvent } from "../../src/core/extensions/index.js";
-import { loadHarnessState } from "../../src/core/refinement/index.js";
+import { loadHarnessState, type RefinementProposal } from "../../src/core/refinement/index.js";
 import { createHarness, type Harness } from "./harness.js";
 
 describe("AgentSession session_before_refine extension hook", () => {
@@ -87,6 +87,44 @@ describe("AgentSession session_before_refine extension hook", () => {
 
 		expect(result.appliedEdits[0]?.applied).toBe(false);
 		expect(result.appliedEdits[0]?.error).toContain("requires id");
+	});
+
+	it("normalizes malformed runtime extension proposals before applying them", async () => {
+		const proposals: Array<{ proposal: unknown; expectedEdits: number }> = [
+			{ proposal: { summary: "missing edits" }, expectedEdits: 0 },
+			{ proposal: { edits: "not an array" }, expectedEdits: 0 },
+			{
+				proposal: {
+					edits: [null, "not an edit", { action: "update", kind: "memory", title: "x", content: "y" }],
+				},
+				expectedEdits: 1,
+			},
+		];
+
+		for (const { proposal, expectedEdits } of proposals) {
+			const harness = await createHarness({
+				persistSession: true,
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_before_refine", async () => ({
+							proposal: proposal as RefinementProposal,
+						}));
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([]);
+			await harness.session.prompt("hello").catch(() => {});
+
+			const result = await harness.session.refine();
+
+			expect(result.appliedEdits).toHaveLength(expectedEdits);
+			if (expectedEdits > 0) {
+				expect(result.appliedEdits[0]?.applied).toBe(false);
+				expect(result.appliedEdits[0]?.error).toContain("requires id");
+			}
+			expect(harness.eventsOfType("refine_failed")).toHaveLength(0);
+		}
 	});
 
 	it("skips the refinement round when an extension returns skip", async () => {

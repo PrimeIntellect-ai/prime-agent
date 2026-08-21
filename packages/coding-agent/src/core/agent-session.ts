@@ -199,6 +199,7 @@ import {
 	loadHarnessState,
 	mergeHarnessStates,
 	mergeRefinementHistory,
+	normalizeRefinementProposal,
 	planRefinement,
 	REFINE_SKILL_NAME,
 	type RefinementPlan,
@@ -8077,8 +8078,12 @@ export class AgentSession {
 			if (result?.skip) {
 				throw new RefineSkippedError("Refinement skipped by extension");
 			}
-			if (result?.proposal) {
-				return { proposal: result.proposal, id: generateRefinementId(), baselineState };
+			if (result?.proposal !== undefined) {
+				return {
+					proposal: normalizeRefinementProposal(result.proposal),
+					id: generateRefinementId(),
+					baselineState,
+				};
 			}
 		}
 		const plan = await planRefinement(

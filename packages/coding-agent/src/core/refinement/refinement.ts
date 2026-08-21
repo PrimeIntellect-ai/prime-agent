@@ -630,12 +630,13 @@ function extractJsonObject(text: string): unknown {
 	throw new Error("Refiner did not return a JSON object");
 }
 
-function parseProposal(text: string): RefinementProposal {
-	const value = extractJsonObject(text);
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error("Refiner JSON must be an object");
-	}
-	const record = value as Record<string, unknown>;
+/**
+ * Normalizes an untrusted refinement proposal while preserving invalid edit
+ * fields for apply-time validation.
+ */
+export function normalizeRefinementProposal(value: unknown): RefinementProposal {
+	const record =
+		typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 	const edits = Array.isArray(record.edits) ? record.edits : [];
 	return {
 		summary: typeof record.summary === "string" ? record.summary : "Refined continual harness state",
@@ -659,6 +660,14 @@ function parseProposal(text: string): RefinementProposal {
 				reason: typeof edit.reason === "string" ? edit.reason : undefined,
 			})),
 	};
+}
+
+function parseProposal(text: string): RefinementProposal {
+	const value = extractJsonObject(text);
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error("Refiner JSON must be an object");
+	}
+	return normalizeRefinementProposal(value);
 }
 
 function validateEdit(edit: RefinementEdit, computedId?: string): string | undefined {
