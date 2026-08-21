@@ -366,7 +366,7 @@ function buildRequestBody(
 	return body;
 }
 
-// Fast pricing: gpt-5.5 2.5x, gpt-5.4/gpt-5.6* 2x — https://developers.openai.com/api/docs/pricing (retrieved 2026-08-21)
+// Multipliers per https://developers.openai.com/api/docs/pricing (retrieved 2026-08-21)
 function getServiceTierCostMultiplier(
 	model: Pick<Model<"openai-codex-responses">, "id">,
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
