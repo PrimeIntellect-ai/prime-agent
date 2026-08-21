@@ -1,0 +1,1 @@
+- Changed saved-session catalogs (list, listAll, daemon catalog responses) to hide sessions whose only entries are lifecycle, state, or tool results; such sessions stay openable and resolvable by exact ID or unique prefix through `--resume` and session resolution.

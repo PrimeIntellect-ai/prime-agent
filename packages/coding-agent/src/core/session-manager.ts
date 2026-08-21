@@ -298,6 +298,10 @@ export interface SessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
+	// User/assistant message entries. toolResult and lifecycle entries do not
+	// count. Absent in fixtures and protocol objects that predate the scan;
+	// zero means the session never had a conversation turn.
+	conversationMessageCount?: number;
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentStatus;
@@ -1017,6 +1021,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 	try {
 		let header: SessionHeader | undefined;
 		let messageCount = 0;
+		let conversationMessageCount = 0;
 		let firstMessage = "";
 		let allMessagesText = "";
 		let name: string | undefined;
@@ -1035,6 +1040,9 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 				if (looksLikeMessageEntry(line)) {
 					messageCount++;
 					const summary = extractOversizedMessageSummary(line);
+					if (summary.role === "user" || summary.role === "assistant") {
+						conversationMessageCount++;
+					}
 					if (typeof summary.timestamp === "number" && (summary.role === "user" || summary.role === "assistant")) {
 						lastActivityTime = Math.max(lastActivityTime ?? 0, summary.timestamp);
 					}
@@ -1085,6 +1093,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			const message = (entry as SessionMessageEntry).message;
 			if (!isMessageWithContent(message)) continue;
 			if (message.role !== "user" && message.role !== "assistant") continue;
+			conversationMessageCount++;
 
 			const textContent = extractTextContent(message);
 			if (!textContent) continue;
@@ -1112,6 +1121,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			created: new Date(header.timestamp),
 			modified,
 			messageCount,
+			conversationMessageCount,
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText,
 			agentStatus,
@@ -1127,6 +1137,15 @@ export type SessionListItem = (session: SessionInfo) => void;
 export interface SessionListCallbacks {
 	onProgress?: SessionListProgress;
 	onSession?: SessionListItem;
+}
+
+// Sessions whose only entries are lifecycle, state, or toolResult rows are
+// internal event logs. They are hidden from catalog listings but stay
+// resolvable by ID and openable through readSessionInfo/listResolvable.
+// conversationMessageCount is undefined in fixtures that predate the scan;
+// only an exact zero hides a session.
+function isVisibleInCatalog(session: SessionInfo): boolean {
+	return session.conversationMessageCount !== 0;
 }
 
 async function listSessionsFromDir(
@@ -2216,25 +2235,51 @@ export class SessionManager {
 	static async list(cwd: string, sessionDir?: string, callbacks?: SessionListCallbacks): Promise<SessionInfo[]> {
 		const dir = sessionDir ?? getDefaultSessionDir(cwd);
 		const matchesCwd = (session: SessionInfo) => sessionInfoMatchesCwd(session, cwd);
+		const visibleInCwd = (session: SessionInfo) => isVisibleInCatalog(session) && matchesCwd(session);
 		const sessions = (
 			await listSessionsFromDir(dir, {
 				onProgress: callbacks?.onProgress,
 				onSession: callbacks?.onSession
 					? (session) => {
-							if (matchesCwd(session)) {
+							if (visibleInCwd(session)) {
 								callbacks.onSession?.(session);
 							}
 						}
 					: undefined,
 			})
-		).filter(matchesCwd);
+		).filter(visibleInCwd);
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}
 
 	static async listAll(callbacks?: SessionListCallbacks, sessionDir?: string): Promise<SessionInfo[]> {
 		const sessionsDir = sessionDir ?? getSessionsDir();
-		const sessions = await listSessionsFromDir(sessionsDir, callbacks);
+		const sessions: SessionInfo[] = [];
+		await listSessionsFromDir(sessionsDir, {
+			onProgress: callbacks?.onProgress,
+			onSession: (session) => {
+				if (!isVisibleInCatalog(session)) return;
+				sessions.push(session);
+				callbacks?.onSession?.(session);
+			},
+		});
+		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+		return sessions;
+	}
+
+	/**
+	 * Full directory scan without the conversational-visibility filter.
+	 * Selector resolution uses this so event-only sessions still open by exact
+	 * ID or unique prefix even though catalogs hide them.
+	 */
+	static async listResolvable(cwd: string | undefined, sessionDir?: string): Promise<SessionInfo[]> {
+		const dir = cwd === undefined ? (sessionDir ?? getSessionsDir()) : (sessionDir ?? getDefaultSessionDir(cwd));
+		const sessions = await listSessionsFromDir(dir);
+		if (cwd !== undefined) {
+			const visible = sessions.filter((session) => sessionInfoMatchesCwd(session, cwd));
+			visible.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+			return visible;
+		}
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}

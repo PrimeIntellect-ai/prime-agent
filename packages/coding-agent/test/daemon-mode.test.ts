@@ -8603,6 +8603,9 @@ describe("daemon mode helpers", () => {
 		try {
 			const sessionDir = join(tempDir, "sessions");
 			const session = SessionManager.create(tempDir, sessionDir);
+			// A conversation turn keeps the session visible in the saved-session
+			// catalog, which now hides lifecycle-only sessions.
+			session.appendMessage({ role: "user", content: "run the task", timestamp: 0 });
 			session.appendSessionState({ status: "active" });
 			session.appendAgentStatus({
 				summary: "Finished the task",

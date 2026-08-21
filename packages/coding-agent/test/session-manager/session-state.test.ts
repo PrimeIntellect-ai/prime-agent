@@ -2,7 +2,12 @@ import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadEntriesFromFile, SessionManager, type SessionStateEntry } from "../../src/core/session-manager.js";
+import {
+	loadEntriesFromFile,
+	readSessionInfo,
+	SessionManager,
+	type SessionStateEntry,
+} from "../../src/core/session-manager.js";
 import { inactiveLifecycleForSession } from "../../src/modes/daemon/daemon-session-list.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 
@@ -54,12 +59,17 @@ describe("SessionManager session state", () => {
 			expect(sessionFile).toBeDefined();
 			expect(existsSync(sessionFile!)).toBe(true);
 
-			const sessions = await SessionManager.list(cwd, sessionDir);
-			expect(sessions).toHaveLength(1);
-			expect(sessions[0]).toMatchObject({
+			// Lifecycle-only sessions stay out of listings but remain on disk with
+			// their flushed metadata intact.
+			const listed = await SessionManager.list(cwd, sessionDir);
+			expect(listed).toHaveLength(0);
+
+			const info = await readSessionInfo(sessionFile!);
+			expect(info).toMatchObject({
 				id: session.getSessionId(),
 				name: "empty",
 				messageCount: 0,
+				conversationMessageCount: 0,
 				state: { status: "archived" },
 			});
 		} finally {
@@ -79,9 +89,12 @@ describe("SessionManager session state", () => {
 
 			SessionManager.open(sessionFile!, sessionDir).appendSessionInfo("Renamed draft");
 
-			await expect(SessionManager.list(cwd, sessionDir)).resolves.toEqual([
-				expect.objectContaining({ id: session.getSessionId(), name: "Renamed draft" }),
-			]);
+			// The rename persists even though a rename-only session is hidden from
+			// catalog listings.
+			await expect(SessionManager.list(cwd, sessionDir)).resolves.toEqual([]);
+
+			const info = await readSessionInfo(sessionFile!);
+			expect(info).toMatchObject({ id: session.getSessionId(), name: "Renamed draft" });
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
