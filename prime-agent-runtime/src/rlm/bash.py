@@ -87,10 +87,8 @@ class BashHandle:
         self._done = threading.Event()
         self._result: BashResult | None = None
         self._started = time.monotonic()
-        # On POSIX, start_new_session gives the child its own process group so
-        # kill() and the shutdown hook can signal the whole pipeline at once.
-        # On Windows there is no process-group signalling; kill() falls back to
-        # Popen.kill() on the shell process.
+        # POSIX: own process group so kill() signals the whole pipeline; Windows
+        # has no group signalling, so kill() falls back to Popen.kill().
         self._proc = subprocess.Popen(
             [_shell(), "-c", _with_prefix(command)],
             cwd=os.getcwd(),
@@ -123,7 +121,6 @@ class BashHandle:
         if self._done.is_set():
             return
         if not _IS_POSIX:
-            # Windows has no process-group signal; TerminateProcess the shell.
             try:
                 self._proc.kill()
             except OSError:
