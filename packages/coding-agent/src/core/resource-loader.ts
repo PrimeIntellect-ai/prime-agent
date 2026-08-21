@@ -19,6 +19,7 @@ import { SettingsManager } from "./settings-manager.js";
 import type { Skill } from "./skills.js";
 import { loadSkills } from "./skills.js";
 import { createSourceInfo, type SourceInfo } from "./source-info.js";
+import type { SystemPromptSource } from "./system-prompt.js";
 
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
@@ -33,6 +34,7 @@ export interface ResourceLoader {
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
 	getSystemPrompt(): string | undefined;
+	getSystemPromptSource?(): SystemPromptSource;
 	getAppendSystemPrompt(): string[];
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(): Promise<void>;
@@ -202,6 +204,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private themeDiagnostics: ResourceDiagnostic[];
 	private agentsFiles: Array<{ path: string; content: string }>;
 	private systemPrompt?: string;
+	private resolvedSystemPromptSource: SystemPromptSource = { provenance: "built_in" };
 	private appendSystemPrompt: string[];
 	private lastSkillPaths: string[];
 	private extensionSkillSourceInfos: Map<string, SourceInfo>;
@@ -287,6 +290,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getSystemPrompt(): string | undefined {
 		return this.systemPrompt;
+	}
+
+	getSystemPromptSource(): SystemPromptSource {
+		return this.resolvedSystemPromptSource;
 	}
 
 	getAppendSystemPrompt(): string[] {
@@ -478,11 +485,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 		this.agentsFiles = resolvedAgentsFiles.agentsFiles;
 
-		const baseSystemPrompt = resolvePromptInput(
-			this.systemPromptSource ?? this.discoverSystemPromptFile(),
-			"system prompt",
-		);
+		const configuredSystemPrompt = this.systemPromptSource;
+		const baseSystemPrompt =
+			configuredSystemPrompt === undefined
+				? resolvePromptInput(this.discoverSystemPromptFile(), "system prompt")
+				: configuredSystemPrompt === ""
+					? ""
+					: resolvePromptInput(configuredSystemPrompt, "system prompt");
 		this.systemPrompt = this.systemPromptOverride ? this.systemPromptOverride(baseSystemPrompt) : baseSystemPrompt;
+		this.resolvedSystemPromptSource =
+			this.systemPrompt === undefined
+				? { provenance: "built_in" }
+				: { provenance: "custom", content: this.systemPrompt };
 
 		const appendSources =
 			this.appendSystemPromptSource ??

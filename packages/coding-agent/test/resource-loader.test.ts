@@ -595,6 +595,16 @@ Explicit override.`,
 
 			expect(loader.getSystemPrompt()).toBe("Custom system prompt");
 		});
+
+		it("distinguishes an absent system prompt from a caller-present empty prompt", async () => {
+			const absent = new DefaultResourceLoader({ cwd, agentDir });
+			await absent.reload();
+			expect(absent.getSystemPromptSource()).toEqual({ provenance: "built_in" });
+
+			const presentEmpty = new DefaultResourceLoader({ cwd, agentDir, systemPrompt: "" });
+			await presentEmpty.reload();
+			expect(presentEmpty.getSystemPromptSource()).toEqual({ provenance: "custom", content: "" });
+		});
 	});
 
 	describe("extension conflict detection", () => {
