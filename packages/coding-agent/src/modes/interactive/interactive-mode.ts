@@ -888,9 +888,7 @@ export class InteractiveMode {
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private workingStartedAt: number | undefined = undefined;
-	// Wall-clock start of the in-flight turn (newest user message). Unlike
-	// workingStartedAt it survives loader teardown, so the elapsed display
-	// doesn't reset when leaving/re-entering or re-attaching to the session.
+	// Start of the in-flight run; survives loader teardown so the elapsed display doesn't reset on re-entry.
 	private turnStartedAt: number | undefined = undefined;
 	private workingTimer: NodeJS.Timeout | undefined = undefined;
 	private readonly featureHintDeck = new FeatureHintDeck();
@@ -2895,6 +2893,7 @@ export class InteractiveMode {
 	private async renderResyncedSession(snapshot: AgentConnectionSnapshot): Promise<void> {
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
 		this.applyConnectionStateSnapshot(snapshot.state);
+		this.restoreTurnStartFromMessages(this.getSessionContextFromConnectionSnapshot(snapshot).messages);
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.rlmNodeId = snapshot.parent?.childId;
@@ -3183,25 +3182,29 @@ export class InteractiveMode {
 		this.workingTimer.unref?.();
 	}
 
-	/**
-	 * Recover the in-flight turn's start (newest user message) from a restored
-	 * transcript so the elapsed timer continues instead of restarting at 0s
-	 * after a re-attach or a return from the agents view.
-	 */
+	private static startsAgentRun(message: AgentMessage): boolean {
+		return (
+			message.role === "user" ||
+			isAgentSessionMessage(message) ||
+			(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE)
+		);
+	}
+
+	// Recover the in-flight run's start from a restored transcript so the elapsed timer survives re-attach.
 	private restoreTurnStartFromMessages(messages: readonly AgentMessage[]): void {
-		if (!this.isAgentStreaming()) {
-			this.turnStartedAt = undefined;
-			return;
-		}
+		this.turnStartedAt = undefined;
+		if (!this.isAgentStreaming()) return;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i]!;
-			if (message.role !== "user") continue;
-			this.turnStartedAt = message.timestamp;
-			if (this.workingStartedAt !== undefined) {
-				this.workingStartedAt = message.timestamp;
-				this.updateWorkingLoaderMessage();
+			if (InteractiveMode.startsAgentRun(message)) {
+				this.turnStartedAt = message.timestamp;
+			} else if (message.role === "assistant" && message.stopReason !== "toolUse") {
+				break;
 			}
-			return;
+		}
+		if (this.turnStartedAt !== undefined && this.workingStartedAt !== undefined) {
+			this.workingStartedAt = this.turnStartedAt;
+			this.updateWorkingLoaderMessage();
 		}
 	}
 
@@ -5430,19 +5433,18 @@ export class InteractiveMode {
 			}
 
 			case "message_start":
+				// The run's first starter anchors the elapsed display; mid-turn steering must not restart it.
+				if (this.turnStartedAt === undefined && InteractiveMode.startsAgentRun(event.message)) {
+					this.turnStartedAt = event.message.timestamp;
+					if (this.workingStartedAt !== undefined) {
+						this.workingStartedAt = event.message.timestamp;
+						this.updateWorkingLoaderMessage();
+					}
+				}
 				if (event.message.role === "custom") {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
-					// First user message of the turn anchors the elapsed display;
-					// steering messages mid-turn must not restart it.
-					if (this.turnStartedAt === undefined) {
-						this.turnStartedAt = event.message.timestamp;
-						if (this.workingStartedAt !== undefined) {
-							this.workingStartedAt = event.message.timestamp;
-							this.updateWorkingLoaderMessage();
-						}
-					}
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {

@@ -1566,6 +1566,7 @@ describe("InteractiveMode connection events", () => {
 			streamingComponent: {},
 			streamingMessage: {},
 			applyConnectionStateSnapshot: vi.fn(),
+			restoreTurnStartFromMessages: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
@@ -1615,6 +1616,7 @@ describe("InteractiveMode connection events", () => {
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
+			restoreTurnStartFromMessages: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
