@@ -682,6 +682,115 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 	return fakeThis;
 }
 
+describe("InteractiveMode working timer", () => {
+	type InitialTimerHarness = {
+		turnStartedAt: number | undefined;
+		workingStartedAt: number | undefined;
+		agentConnection: { getInitialSnapshot(): Promise<AgentConnectionSnapshot> };
+		isAgentStreaming(): boolean;
+		updateWorkingLoaderMessage: ReturnType<typeof vi.fn>;
+		renderInitialMessages(): Promise<void>;
+		stopWorkingLoader: ReturnType<typeof vi.fn>;
+		createWorkingLoader: ReturnType<typeof vi.fn>;
+		statusContainer: { addChild: ReturnType<typeof vi.fn> };
+		startWorkingTimer: ReturnType<typeof vi.fn>;
+		startFeatureHintPresentation: ReturnType<typeof vi.fn>;
+	};
+
+	function createInitialTimerHarness(snapshot: AgentConnectionSnapshot, turnStartedAt = 1): InitialTimerHarness {
+		let streaming = false;
+		return Object.assign(Object.create(InteractiveMode.prototype), {
+			turnStartedAt,
+			workingStartedAt: turnStartedAt,
+			agentConnection: { getInitialSnapshot: vi.fn(async () => snapshot) },
+			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
+				messages: snapshot.messages,
+				thinkingLevel: "medium",
+				serviceTier: "default",
+				model: null,
+			})),
+			seedSubagentSummary: vi.fn(),
+			setSessionHasMessages: vi.fn(),
+			applyConnectionStateSnapshot: vi.fn((state: AgentConnectionState) => {
+				streaming = state.isStreaming;
+			}),
+			isAgentStreaming: () => streaming,
+			updateWorkingLoaderMessage: vi.fn(),
+			renderSessionContext: vi.fn(async () => {}),
+			restoreStreamingMessageFromSnapshot: vi.fn(async () => {}),
+			showStatus: vi.fn(),
+			stopWorkingLoader: vi.fn(),
+			createWorkingLoader: vi.fn(() => ({})),
+			statusContainer: { addChild: vi.fn() },
+			startWorkingTimer: vi.fn(),
+			startFeatureHintPresentation: vi.fn(),
+		});
+	}
+
+	function customStarter(customType: "agent_message" | "heartbeat_prompt", timestamp: number): AgentMessage {
+		return {
+			role: "custom",
+			customType,
+			content: "Continue.",
+			display: true,
+			details: customType === "agent_message" ? { id: `agentmsg_${timestamp}`, message: "Continue." } : {},
+			timestamp,
+		};
+	}
+
+	test("restores the first active-run starter instead of a steering message", async () => {
+		const harness = createInitialTimerHarness({
+			state: createConnectionState({ isStreaming: true }),
+			messages: [
+				userMessage("Start the task.", 100),
+				{ ...toolCallMessage("tool-1", "ipython"), timestamp: 200 },
+				userMessage("Also check this.", 300),
+			],
+		});
+
+		await harness.renderInitialMessages();
+
+		expect(harness.turnStartedAt).toBe(100);
+		expect(harness.workingStartedAt).toBe(100);
+		expect(harness.updateWorkingLoaderMessage).toHaveBeenCalledOnce();
+	});
+
+	test.each([
+		["agent-session", customStarter("agent_message", 100)],
+		["heartbeat", customStarter("heartbeat_prompt", 200)],
+	])("restores a %s run starter", async (_kind, starter) => {
+		const harness = createInitialTimerHarness({
+			state: createConnectionState({ isStreaming: true }),
+			messages: [starter],
+		});
+
+		await harness.renderInitialMessages();
+
+		expect(harness.turnStartedAt).toBe(starter.timestamp);
+		expect(harness.workingStartedAt).toBe(starter.timestamp);
+	});
+
+	test.each([
+		["a non-streaming snapshot", false, [userMessage("Old prompt.", 200)]],
+		["a streaming snapshot without a starter", true, [{ ...toolCallMessage("tool-1", "ipython"), timestamp: 200 }]],
+	])("clears a stale anchor for %s and falls back to the loader start", async (_name, isStreaming, messages) => {
+		const harness = createInitialTimerHarness({ state: createConnectionState({ isStreaming }), messages }, 100);
+
+		await harness.renderInitialMessages();
+		const now = vi.spyOn(Date, "now").mockReturnValue(500);
+		try {
+			(
+				InteractiveMode.prototype as unknown as { startWorkingLoader(this: InitialTimerHarness): void }
+			).startWorkingLoader.call(harness);
+		} finally {
+			now.mockRestore();
+		}
+
+		expect(harness.turnStartedAt).toBeUndefined();
+		expect(harness.workingStartedAt).toBe(500);
+	});
+});
+
 describe("InteractiveMode submit handling", () => {
 	test.each(["normal Enter", "installed custom editor"])("captures exact rich state for %s", async () => {
 		const image = { type: "image", data: "base64", mimeType: "image/png" };
@@ -1368,6 +1477,7 @@ describe("InteractiveMode connection events", () => {
 			applyConnectionStateSnapshot: vi.fn(),
 			renderSessionContext: renderSessionContextMock,
 			restoreStreamingMessageFromSnapshot,
+			restoreTurnStartFromMessages: vi.fn(),
 			showStatus: vi.fn(),
 		} as unknown as InteractiveMode;
 
@@ -1545,7 +1655,7 @@ describe("InteractiveMode connection events", () => {
 		} as AgentConnectionSnapshot["streamingMessage"];
 		const snapshot: AgentConnectionSnapshot = {
 			state: createConnectionState({ isCompacting: true, isBashRunning: true, isStreaming: true }),
-			messages: [],
+			messages: [userMessage("Still working", 100)],
 			streamingMessage,
 		};
 		const startAssistantStreamingMessage = vi.fn();
@@ -1556,18 +1666,22 @@ describe("InteractiveMode connection events", () => {
 		});
 		const refreshCommandCatalogForCurrentSession = vi.fn(async () => {});
 		const fakeThis = {
+			turnStartedAt: 1,
+			workingStartedAt: 1,
 			sideQuestionEvent: sideQuestion,
 			activeConnectionExtensionUiRequests: extensionRequests,
 			activeBashComponent,
 			refreshCommandCatalogForCurrentSession,
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
+			isAgentStreaming: () => true,
 			streamingComponent: {},
 			streamingMessage: {},
 			applyConnectionStateSnapshot: vi.fn(),
+			updateWorkingLoaderMessage: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
-				messages: [],
+				messages: snapshot.messages,
 				thinkingLevel: "medium",
 				model: null,
 			})),
@@ -1581,6 +1695,7 @@ describe("InteractiveMode connection events", () => {
 			syncWorkingLoader: vi.fn(),
 			getGoalState: () => emptyGoalState(),
 		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
 		await (
 			InteractiveMode.prototype as unknown as {
@@ -1597,6 +1712,11 @@ describe("InteractiveMode connection events", () => {
 			(fakeThis as unknown as { renderSessionContext: ReturnType<typeof vi.fn> }).renderSessionContext,
 		).toHaveBeenCalledWith(expect.anything(), { clearChat: true, updateFooter: true });
 		expect(startAssistantStreamingMessage).toHaveBeenCalledWith(streamingMessage);
+		expect((fakeThis as unknown as { turnStartedAt: number | undefined }).turnStartedAt).toBe(100);
+		expect((fakeThis as unknown as { workingStartedAt: number | undefined }).workingStartedAt).toBe(100);
+		expect(
+			(fakeThis as unknown as { updateWorkingLoaderMessage: ReturnType<typeof vi.fn> }).updateWorkingLoaderMessage,
+		).toHaveBeenCalledOnce();
 		expect(refreshCommandCatalogForCurrentSession).not.toHaveBeenCalled();
 	});
 
@@ -1614,6 +1734,7 @@ describe("InteractiveMode connection events", () => {
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
+			restoreTurnStartFromMessages: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
