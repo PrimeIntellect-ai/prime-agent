@@ -1,0 +1,1 @@
+- Fixed OpenAI-compatible Chat Completions replay dropping opaque `reasoning_details` between turns.
