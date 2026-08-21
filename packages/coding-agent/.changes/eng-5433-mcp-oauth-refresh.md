@@ -1,1 +1,0 @@
-- Refreshed MCP providers immediately after server changes so OAuth connections can be started without restarting Prime Agent.

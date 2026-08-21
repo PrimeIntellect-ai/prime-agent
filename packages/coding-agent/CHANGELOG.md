@@ -30,6 +30,7 @@
 - Added a `session_before_refine` extension hook: extensions can replace `/refine` and auto-refine planning with their own proposal (for example using a cheaper model — see `examples/extensions/custom-refinement.ts`) or skip a refinement round; rollbacks bypass the hook and extension edits go through the normal apply-time validation. Also documents `refine_complete`.
 - Added a durable `[refinement]` transcript message after each refinement showing the applied harness edits (expandable to exact before/after diffs via the shared tool-output toggle), and a live loader while a user-issued /refine runs.
 - Fixed the Agents View heartbeat refresh failing entirely ("Cannot list heartbeats while session worker is failed") when any resident worker was terminally failed: failed workers are now excluded from the global catalog while recovering and disconnected workers still fail closed.
+- Refreshed MCP providers immediately after server changes so OAuth connections can be started without restarting Prime Agent.
 
 ## [0.7.4] - 2026-08-19
 
