@@ -1077,7 +1077,7 @@ describe("InteractiveMode MCP command", () => {
 	type McpCommandHarness = {
 		modelRegistry: { authStorage: { get(providerId: string): unknown } };
 		settingsManager: SettingsManager;
-		uiServices: { refreshMcpProviders(): void };
+		uiServices: { refreshMcpProviders?(): void };
 		showConfigurationMenu(tab: "mcp-connections"): Promise<void>;
 		showStatus(message: string): void;
 		showError(message: string): void;
@@ -1213,6 +1213,19 @@ describe("InteractiveMode MCP command", () => {
 
 		expect(events).toEqual(["refresh", "reload"]);
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain("Run /mcp login remote to connect.");
+	});
+
+	test("keeps OAuth guidance accurate for legacy UI service hosts", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = createRenderedMcpHarness(manager);
+		fakeThis.uiServices = {};
+		fakeThis.handleReloadCommand = vi.fn(async () => true);
+
+		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
+
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
+			"Restart Prime Agent, then run /mcp login remote to connect.",
+		);
 	});
 
 	test("renders inspectable redacted list and get output", async () => {

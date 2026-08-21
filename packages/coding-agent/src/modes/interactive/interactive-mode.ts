@@ -8666,12 +8666,13 @@ export class InteractiveMode {
 			const result = await runMcpManagementCommand(argv, this.settingsManager, this.modelRegistry.authStorage);
 			if (result.changed && result.serverChange) {
 				const { name, transport, verb, usesOAuth } = result.serverChange;
+				const hasMcpProviderRefresh = this.uiServices.refreshMcpProviders !== undefined;
 				this.uiServices.refreshMcpProviders?.();
 				const successMessage =
 					verb === "removed"
 						? `Removed MCP server "${name}" (${transport}). It is no longer available through mcp.`
 						: usesOAuth
-							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). Run /mcp login ${name} to connect.`
+							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). ${hasMcpProviderRefresh ? "Run" : "Restart Prime Agent, then run"} /mcp login ${name} to connect.`
 							: `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). Available next turn through mcp.`;
 				await this.reloadAfterMcpChange(usesOAuth ? successMessage : result.message, successMessage);
 			} else if (result.action === "list") {
