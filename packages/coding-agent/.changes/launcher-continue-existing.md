@@ -1,1 +1,2 @@
 - Changed the bare source launcher to reopen the most recent session instead of creating a sibling session.
+- Fixed source-launcher signals and exit status so supervised callers can stop the agent process.
