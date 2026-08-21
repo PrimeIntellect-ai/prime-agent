@@ -55,6 +55,7 @@ import {
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { daemonTestSocketPath } from "./helpers/daemon-test-socket.js";
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -1597,8 +1598,8 @@ describe("daemon mode helpers", () => {
 	});
 
 	it("does not retry supervisor agent-message rejections", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-"));
-		const socketPath = join(tempDir, "d.sock");
+		const tempDir = mkdtempSync(join(tmpdir(), "pa-reject-test-"));
+		const socketPath = daemonTestSocketPath("reject-test");
 		let connectionCount = 0;
 		const server: Server = createServer((socket) => {
 			connectionCount++;
@@ -1639,8 +1640,8 @@ describe("daemon mode helpers", () => {
 		try {
 			await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
-			const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
-				defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			const daemon = new AgentDaemon(daemonTestSocketPath("worker-test"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
 				createRuntime: async () => {
 					throw new Error("unexpected runtime creation");
 				},
@@ -1673,7 +1674,7 @@ describe("daemon mode helpers", () => {
 
 	it("routes worker-local session renames through the supervisor", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-worker-rename-"));
-		const socketPath = join(tempDir, "s");
+		const socketPath = daemonTestSocketPath("worker-rename");
 		let receivedCommand: Record<string, unknown> | undefined;
 		let releaseResponse: () => void = () => {};
 		const responseGate = new Promise<void>((resolve) => {
@@ -1716,7 +1717,7 @@ describe("daemon mode helpers", () => {
 				server.listen(socketPath, resolve);
 			});
 			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
-			const daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
+			const daemon = new AgentDaemon(daemonTestSocketPath("worker-sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
 				createRuntime: vi.fn(),
 				worker: { authenticationToken: "token" },
@@ -1754,7 +1755,7 @@ describe("daemon mode helpers", () => {
 
 	it("does not retry permanent ambiguity errors from the supervisor", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-ambiguous-"));
-		const socketPath = join(tempDir, "s");
+		const socketPath = daemonTestSocketPath("ambiguous");
 		let requestCount = 0;
 		const server = createServer((socket) => {
 			socket.write(
@@ -1785,7 +1786,7 @@ describe("daemon mode helpers", () => {
 				server.listen(socketPath, resolve);
 			});
 			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
-			const daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
+			const daemon = new AgentDaemon(daemonTestSocketPath("worker-sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
 				createRuntime: vi.fn(),
 			});
