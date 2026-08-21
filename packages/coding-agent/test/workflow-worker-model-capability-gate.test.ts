@@ -47,14 +47,25 @@ it("rejects an omitted worker model before host or durable preflight activity", 
 	expect(inspectCalls).toBe(0);
 });
 
-it("rejects a non-Luna worker selector before host inspection", async () => {
+it("rejects an off-allowlist worker selector before host inspection", async () => {
 	const fixture = createFixture({ authenticated: false, safeReason: "catalog_unavailable" });
 	const gate = createWorkerModelCapabilityGate({
 		...fixture.options,
-		policy: { ...fixture.options.policy, model: "gpt-5.6-sol" },
+		policy: { ...fixture.options.policy, model: "gpt-4o-mini" },
 	});
 
 	await expect(gate.preflight(fixture.context)).rejects.toThrow("worker_model_policy_selector_denied");
+});
+
+it("admits a second tier selector so compute tiering has more than one model", async () => {
+	// Tiering routes deep tasks to sol. The set stays closed; sol is on it, gpt-4o-mini is not.
+	const fixture = createFixture({ authenticated: false, safeReason: "catalog_unavailable" });
+	const gate = createWorkerModelCapabilityGate({
+		...fixture.options,
+		policy: { ...fixture.options.policy, model: "gpt-5.6-sol", reasoning: "high" },
+	});
+
+	await expect(gate.preflight(fixture.context)).resolves.toMatchObject({ status: "blocked" });
 });
 
 it("keeps unavailable Luna preflight read-only and never invokes a substitute worker", async () => {

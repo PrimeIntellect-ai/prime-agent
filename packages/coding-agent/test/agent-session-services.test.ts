@@ -331,6 +331,8 @@ describe("createAgentSessionFromServices", () => {
 			"openai-codex/gpt-5.6-luna",
 			expect.objectContaining({ deadlineAt }),
 			expect.any(Function),
+			undefined,
+			undefined,
 		);
 	});
 
@@ -374,6 +376,8 @@ describe("createAgentSessionFromServices", () => {
 			"openai-codex/gpt-5.6-luna",
 			expect.objectContaining({ capsuleDigest: "capsule-digest" }),
 			expect.any(Function),
+			undefined,
+			undefined,
 		);
 
 		await expect(launcher({ ...request, taskCapsule: undefined, prompt: "missing capsule" })).rejects.toThrow(

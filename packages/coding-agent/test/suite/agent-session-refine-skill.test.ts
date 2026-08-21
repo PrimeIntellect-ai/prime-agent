@@ -215,12 +215,12 @@ describe("AgentSession refine skill host requests", () => {
 		await expect(internals._runSerializedRefine({ instructions: "must not plan" })).rejects.toMatchObject({
 			code: "nonauthoritative_refinement_rejected",
 		});
-		await expect(internals._runSerializedRefineCheckpoint()).rejects.toMatchObject({
-			code: "nonauthoritative_refinement_rejected",
-		});
-		await expect(internals._maybeAutoRefine("turn_interval")).rejects.toMatchObject({
-			code: "nonauthoritative_refinement_rejected",
-		});
+		// The automatic paths skip instead of rejecting. An explicit /refine is a user asking for
+		// something the workflow owns, so refusing it is the answer; automatic refinement is a
+		// background courtesy, and throwing from it replaced the assistant's actual response for the
+		// turn. What matters either way is that nothing is planned or promoted, asserted below.
+		await expect(internals._runSerializedRefineCheckpoint()).resolves.toBeUndefined();
+		await expect(internals._maybeAutoRefine("turn_interval")).resolves.toBeUndefined();
 		expect(internals._consumePendingRequestedRefine()).toBe(false);
 		expect(planRefine).not.toHaveBeenCalled();
 		expect(runSerializedRefine).toHaveBeenCalledTimes(1);

@@ -206,12 +206,27 @@ export function createPersistedWorkerModelCapabilityAdmission(
 			  }
 			| undefined;
 		let currentAvailability: WorkerModelCapabilityAvailability | undefined;
+		// The policy is what the admission receipt attests, and childBindingFromAdmission derives the
+		// child binding from it. Hardcoding the default here made every non-default tier attest a
+		// model the child did not run: a sol worker launched under a receipt naming luna. The gate's
+		// closed allowlist is what keeps this from becoming "any selector the caller likes".
 		const policy = {
-			provider: WORKER_MODEL_PROVIDER,
-			model: WORKER_MODEL_ID,
-			reasoning: WORKER_MODEL_REASONING,
+			provider: launch.provider,
+			model: launch.model,
+			reasoning: launch.reasoning,
 			allowFallback: false as const,
-			policyRevision: WORKER_MODEL_POLICY_REVISION,
+			policyRevision:
+				launch.provider === WORKER_MODEL_PROVIDER &&
+				launch.model === WORKER_MODEL_ID &&
+				launch.reasoning === WORKER_MODEL_REASONING
+					? WORKER_MODEL_POLICY_REVISION
+					: digestObject({
+							provider: launch.provider,
+							model: launch.model,
+							reasoning: launch.reasoning,
+							allowFallback: false,
+							version: 1,
+						}),
 		};
 		const gate = createWorkerModelCapabilityGate({
 			runtimeStore: input.runtimeStore,

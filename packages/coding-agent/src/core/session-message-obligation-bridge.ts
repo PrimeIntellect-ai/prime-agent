@@ -473,6 +473,13 @@ class DurableSessionMessageObligationBridge implements SessionMessageObligationB
 		const input = {
 			deliveryId,
 			ownerId: this.ownerId,
+			// The claim that proves this owner delivered the context. Omitting it sent the store down its
+			// lease-expiry fallback, which requires the 30s wake lease to still be live - and a model turn
+			// routinely outlives that, so settlement was lost on every long turn. A live ledger read
+			// accepted 24, context_delivered 24, processed 12. Passing the recorded claim is also stricter
+			// than the fallback: the store verifies it equals the durable proof rather than trusting a
+			// timing window.
+			...(historicalSettlement === undefined ? {} : { claimId: historicalSettlement.claimId }),
 			...(ownerContinuitySettlement === undefined ? {} : { ownerContinuitySettlement }),
 			...(durableReason === undefined ? {} : { reason: durableReason }),
 		};

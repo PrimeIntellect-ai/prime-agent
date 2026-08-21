@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
 	createStreamLivenessWatchdog,
+	DEFAULT_STREAM_LIVENESS_POLICY,
 	STREAM_LIVENESS_COUNTER_MAX,
 	type StreamLivenessPolicy,
 	type StreamLivenessScheduler,
@@ -738,5 +739,101 @@ describe("provider stream liveness watchdog", () => {
 				policyResolver: () => policy(),
 			}),
 		).toThrow(/synchronous/i);
+	});
+});
+
+describe("default stream liveness policy headers bound", () => {
+	// Observed 2026-08 with provider "openai-codex", model gpt-5.6-sol at thinking level "high":
+	// headers at 319ms, one ~89KB response.created at 1045ms, then no wire traffic while the model
+	// reasoned. The old 30s bound killed every substantial turn at elapsedMs 30319 / idleMs 29274.
+	const replayIncidentHeaders = (runtime: FakeRuntime, outcomes: unknown[]) => {
+		const watchdog = makeWatchdog(runtime, {
+			policy: DEFAULT_STREAM_LIVENESS_POLICY,
+			identity: { provider: "openai-codex", model: "gpt-5.6-sol", transport: "sse" },
+			onTerminal: (outcome) => outcomes.push(outcome),
+		});
+		runtime.advance(319);
+		watchdog.observe({ type: "headers" });
+		runtime.advance(726);
+		watchdog.observe({ type: "provider_event", eventId: "response.created", receivedBytes: 88_950 });
+		return watchdog;
+	};
+
+	test("survives a reasoning model that emits no content block for the first 30 seconds", () => {
+		const runtime = new FakeRuntime();
+		const outcomes: unknown[] = [];
+		const watchdog = replayIncidentHeaders(runtime, outcomes);
+
+		runtime.advance(29_955);
+		expect(outcomes).toEqual([]);
+		expect(watchdog.snapshot()).toMatchObject({ phase: "headers", receivedBytes: 88_950, blocks: 0 });
+
+		runtime.advance(44_000);
+		watchdog.observe({ type: "thinking_delta", delta: "first summary part" });
+		expect(outcomes).toEqual([]);
+		expect(watchdog.snapshot()).toMatchObject({ phase: "streaming" });
+	});
+
+	test("still stalls a dead stream at the finite headers bound", () => {
+		const runtime = new FakeRuntime();
+		const outcomes: unknown[] = [];
+		const watchdog = makeWatchdog(runtime, {
+			policy: DEFAULT_STREAM_LIVENESS_POLICY,
+			onTerminal: (outcome) => outcomes.push(outcome),
+		});
+
+		runtime.advance(319);
+		watchdog.observe({ type: "headers" });
+		runtime.advance(299_999);
+		expect(outcomes).toEqual([]);
+		runtime.advance(1);
+
+		expect(outcomes).toHaveLength(1);
+		expect(outcomes[0]).toMatchObject({
+			type: "provider_stream_stalled",
+			abortIntent: { requested: true },
+			diagnostic: {
+				phase: "headers",
+				reason: "no_meaningful_content_progress",
+				elapsedMs: 300_319,
+				idleMs: 300_000,
+				receivedBytes: 0,
+				blocks: 0,
+			},
+		});
+		expect(watchdog.snapshot().terminal).toBe(true);
+	});
+
+	test("never extends the headers deadline on byte-carrying provider events", () => {
+		const runtime = new FakeRuntime();
+		const outcomes: unknown[] = [];
+		const watchdog = makeWatchdog(runtime, {
+			policy: DEFAULT_STREAM_LIVENESS_POLICY,
+			onTerminal: (outcome) => outcomes.push(outcome),
+		});
+
+		watchdog.observe({ type: "headers", receivedBytes: 1_024 });
+		for (let tick = 1; tick <= 10; tick++) {
+			runtime.advance(20_000);
+			watchdog.observe({ type: "provider_event", eventId: `keepalive-${tick}`, receivedBytes: 40 });
+			expect(watchdog.snapshot().deadlineAt).toBe(DEFAULT_STREAM_LIVENESS_POLICY.headersTimeoutMs);
+		}
+
+		runtime.advance(99_999);
+		expect(outcomes).toEqual([]);
+		runtime.advance(1);
+		expect(outcomes).toHaveLength(1);
+		expect(outcomes[0]).toMatchObject({ diagnostic: { phase: "headers", elapsedMs: 300_000 } });
+	});
+
+	test("keeps the headers budget no larger than the streaming budget", () => {
+		expect(DEFAULT_STREAM_LIVENESS_POLICY.headersTimeoutMs).toBe(300_000);
+		expect(DEFAULT_STREAM_LIVENESS_POLICY.headersTimeoutMs).toBeLessThanOrEqual(
+			DEFAULT_STREAM_LIVENESS_POLICY.streamingIdleTimeoutMs + DEFAULT_STREAM_LIVENESS_POLICY.maxProgressExtensionMs,
+		);
+		for (const value of Object.values(DEFAULT_STREAM_LIVENESS_POLICY)) {
+			expect(Number.isFinite(value)).toBe(true);
+			expect(value).toBeGreaterThan(0);
+		}
 	});
 });

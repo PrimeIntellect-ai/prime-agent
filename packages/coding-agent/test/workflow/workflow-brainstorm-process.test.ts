@@ -57,7 +57,10 @@ describe("workflow brainstorming process boundary", () => {
 		await waitForExit(draft);
 		expect(readResult(rootDir)).toMatchObject({
 			mode: "draft",
-			activeTools: ["workflow_propose"],
+			// Brainstorming holds a read-only IPython alongside the propose tool so it can inspect the
+			// workspace before asking the user anything. It was propose-only when this was written, and a
+			// planner that cannot read the repo asks questions the repo already answers.
+			activeTools: ["workflow_propose", "ipython"],
 			workflowStatus: "idle",
 			approvalCredentialPresent: false,
 		});

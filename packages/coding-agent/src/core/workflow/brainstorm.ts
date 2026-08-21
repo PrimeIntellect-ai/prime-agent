@@ -13,7 +13,12 @@ import {
 	type WorkflowAuthorityCapability,
 } from "./contracts.js";
 import { WORKFLOW_COMPUTE_CLASSES, type WorkflowComputeClass } from "./default-task-runtime.js";
-import { WORKFLOW_REQUIRED_TASK_ROLES, WORKFLOW_TASK_ROLES, type WorkflowTaskRole } from "./recipes.js";
+import {
+	WORKFLOW_REQUIRED_TASK_ROLES,
+	WORKFLOW_TASK_ROLES,
+	type WorkflowTaskRole,
+	workflowComputeClassForRole,
+} from "./recipes.js";
 import type {
 	WorkflowGoalAuthoritySourceRequest,
 	WorkflowGoalBudgets,
@@ -235,11 +240,20 @@ function normalizeTaskGraphSourceTask(value: unknown): WorkflowTaskGraphSourceTa
 		throw new Error("workflow_task_graph_source_task_id_invalid");
 	const rawRole = value.role;
 	const role = WORKFLOW_TASK_ROLES.find((candidate) => candidate === rawRole);
-	if (rawRole !== undefined && role === undefined) throw new Error("workflow_task_graph_source_task_role_invalid");
+	if (rawRole !== undefined && role === undefined)
+		throw new Error(
+			`workflow_task_graph_source_task_role_invalid: role must be one of ${WORKFLOW_TASK_ROLES.join(", ")}.`,
+		);
 	const rawComputeClass = value.computeClass;
-	const computeClass = WORKFLOW_COMPUTE_CLASSES.find((candidate) => candidate === rawComputeClass);
-	if (rawComputeClass !== undefined && computeClass === undefined)
-		throw new Error("workflow_task_graph_source_task_compute_class_invalid");
+	const declaredComputeClass = WORKFLOW_COMPUTE_CLASSES.find((candidate) => candidate === rawComputeClass);
+	if (rawComputeClass !== undefined && declaredComputeClass === undefined)
+		throw new Error(
+			'workflow_task_graph_source_task_compute_class_invalid: computeClass must be "cheap", "standard", or ' +
+				'"deep", or omitted (which means "standard").',
+		);
+	// The role floor wins over the plan's guess, so under-tiering the task everything downstream
+	// depends on is not something a planner can do by omission.
+	const computeClass = workflowComputeClassForRole(role, declaredComputeClass);
 	const requirementIds = canonicalStrings(value.requirementIds, "requirements", false, 256);
 	const completionCriteria = canonicalStrings(value.completionCriteria, "completion", false, 8_192);
 	const dependencyTaskIds = canonicalStrings(value.dependencyTaskIds, "dependencies", true, 128);
@@ -344,6 +358,15 @@ function normalizeTaskGraphSourceTask(value: unknown): WorkflowTaskGraphSourceTa
  * value: Untrusted graph source supplied by the brainstorming model or persisted source artifact.
  * Return: Canonical graph source with a verified graph digest.
  */
+/** Segment-wise overlap: either path being a prefix of the other means they collide. */
+function canonicalPathsOverlap(left: string, right: string): boolean {
+	const leftParts = left.split("/").filter((part) => part.length > 0);
+	const rightParts = right.split("/").filter((part) => part.length > 0);
+	const shorter = leftParts.length <= rightParts.length ? leftParts : rightParts;
+	const longer = leftParts.length <= rightParts.length ? rightParts : leftParts;
+	return shorter.every((part, index) => part === longer[index]);
+}
+
 export function normalizeWorkflowTaskGraphSource(
 	value: unknown,
 	binding?: WorkflowTaskGraphSourceBinding,
@@ -393,12 +416,22 @@ export function normalizeWorkflowTaskGraphSource(
 		if (task.dependencyTaskIds.some((dependencyTaskId) => !taskIds.has(dependencyTaskId)))
 			throw new Error("workflow_task_graph_source_missing_dependency");
 	}
+	// These are planner hygiene, so they apply to a planner-authored graph only. The built-in recipe
+	// is host-authored: its shape is fixed, it carries verify and red-team stages by construction, and
+	// its canonical order puts red-team before attack - so enforcing the rules below on it would make
+	// the built-in graph permanently unadmittable while proving nothing about a plan.
+	const plannerAuthored = recipeCapability !== "builtin_adaptive_prime";
 	// The planner chooses the shape; it does not get to omit the checks. Without this a graph of
 	// pure implementation nodes silently bypasses verification and adversarial review entirely.
 	const declaredRoles = new Set(tasks.map((task) => task.role ?? "implementation"));
-	for (const required of WORKFLOW_REQUIRED_TASK_ROLES) {
-		if (!declaredRoles.has(required)) throw new Error(`workflow_task_graph_source_missing_role_${required}`);
-	}
+	if (plannerAuthored)
+		for (const required of WORKFLOW_REQUIRED_TASK_ROLES) {
+			if (!declaredRoles.has(required))
+				throw new Error(
+					`workflow_task_graph_source_missing_role_${required}: add a task with "role": "${required}". ` +
+						"Every graph needs one verification task and one red-team task; the red-team task must be last.",
+				);
+		}
 	// A red-team task must review finished work, not an empty tree. Each task runs in a fresh
 	// worker context, so a red-team task that nothing depends on and that depends on real work is
 	// exactly a fresh-context review of the completed artifact — which is the one check that
@@ -408,7 +441,12 @@ export function normalizeWorkflowTaskGraphSource(
 	const terminalRedTeam = tasks.filter(
 		(task) => task.role === "red-team" && !dependedUpon.has(task.taskId) && task.dependencyTaskIds.length > 0,
 	);
-	if (terminalRedTeam.length === 0) throw new Error("workflow_task_graph_source_red_team_not_terminal");
+	if (plannerAuthored && terminalRedTeam.length === 0)
+		throw new Error(
+			'workflow_task_graph_source_red_team_not_terminal: the task with "role": "red-team" must depend on ' +
+				"real work and have nothing depending on it, so it reviews the finished artifact.",
+		);
+
 	const byId = new Map(tasks.map((task) => [task.taskId, task]));
 	const visiting = new Set<string>();
 	const visited = new Set<string>();
@@ -421,6 +459,42 @@ export function normalizeWorkflowTaskGraphSource(
 		visited.add(taskId);
 	};
 	for (const task of tasks) visit(task.taskId);
+
+	// A checking task must not own what it checks. The graph validator refuses overlapping ownership
+	// only between tasks with no dependency relationship, so a verifier - which depends on its
+	// producer by construction - is explicitly permitted to reserve the producer's paths today. That
+	// leaves "independent" a label rather than a property: the checker could rewrite the artifact and
+	// then attest it. The walk is transitive, because a verifier two hops downstream is no more
+	// independent than one attached directly.
+	const ancestorsOf = (taskId: string): ReadonlySet<string> => {
+		const seen = new Set<string>();
+		const pending = [...(byId.get(taskId)?.dependencyTaskIds ?? [])];
+		while (pending.length > 0) {
+			const next = pending.pop();
+			if (next === undefined || seen.has(next)) continue;
+			seen.add(next);
+			pending.push(...(byId.get(next)?.dependencyTaskIds ?? []));
+		}
+		return seen;
+	};
+	for (const task of tasks) {
+		if (task.role !== "verification" && task.role !== "red-team") continue;
+		const owned = task.ownedPaths ?? [];
+		if (owned.length === 0) continue;
+		for (const ancestorId of ancestorsOf(task.taskId)) {
+			const ancestorOwned = byId.get(ancestorId)?.ownedPaths ?? [];
+			const collides = owned.some((ownPath) =>
+				ancestorOwned.some((otherPath) => canonicalPathsOverlap(ownPath, otherPath)),
+			);
+			if (collides)
+				throw new Error(
+					`workflow_task_graph_source_checker_owns_checked_paths_${task.taskId}_${ancestorId}: ` +
+						`task "${task.taskId}" checks "${ancestorId}" and must not own paths that "${ancestorId}" owns. ` +
+						"Give it only its own artifact path, or no ownedPaths at all.",
+				);
+		}
+	}
+
 	const withoutDigest: Omit<WorkflowTaskGraphSource, "graphDigest"> = {
 		schemaVersion: 1 as const,
 		graphRevision,
@@ -578,13 +652,14 @@ export function workflowBrainstormPrompt(state: WorkflowBrainstormState): string
 		"When objective, causal metrics, protected invariants, non-goals, budgets, boundaries, and gates are complete, call workflow_propose exactly once.",
 		"Derive a finite taskGraphSource with prompt-specific task IDs, objectives, requirementIds, completionCriteria, dependencies, neutral boundaries, inputs, outputs, evidence policy, budget, recovery, and authority; do not reuse a fixed workflow stage list.",
 		"taskGraphSource is mandatory; never omit it or rely on a host-generated fallback graph.",
-		'Set computeClass per task to the cheapest tier that can do it: "cheap" for reading, searching, and summarizing; "standard" for ordinary implementation and verification; "deep" only for adjudication, synthesis, and adversarial review. Omit it when unsure.',
+		'Set computeClass per task to the cheapest tier that can do it: "cheap" for reading, searching, and summarizing; "standard" for ordinary implementation and verification; "deep" for adjudication, synthesis, adversarial review, and planning or design whose conclusions later tasks depend on. Omitting it means "standard". Roles that decide things are raised to "deep" whatever you write here, so do not spend effort under-tiering them.',
+		'ownedPaths is optional and constrained: a declared path must sit under a workspace root, which is "src" by default, so a task owning code at the repository root is rejected when the graph is validated. Declare ownedPaths when a task writes code, and put that code under src/. A checking task (role "verification" or "red-team") must not own any path that a task it depends on owns, directly or transitively - it may own only its own artifact, or nothing.',
 		"Divide fanned-out work by charter rather than repeating it: sibling tasks with no dependency between them must have distinct objectives, not the same objective run twice.",
 		'Set role per task from exactly this list: recon, lens, verify, verification, synthesize, red-team, attack, architect, judge, unify, edge-test, implementation, integration, planning, design, review. The graph is REJECTED unless at least one task has role "verification" and at least one has role "red-team" — a check task depends on the work it checks and must not own the same paths. Give checking tasks authority ["read_workspace"] only, and give every task at least one outputRef (an evidence artifact path is fine for a checking task).',
 		"Leave taskGraphSource.graphDigest unset; the host binds it to the full prompt and approved contract before sealing.",
 		"Omit authoritativeSource entirely. The host derives it from this session; supplying your own URI is rejected as workflow_task_graph_source_requires_session_source.",
 		"Cross-reference rule, the most common cause of rejection: every task's requirementIds must all appear in acceptanceChecks; every task's completionCriteria must all appear in protectedInvariants; and every task's boundaryIds must equal protectedInvariants exactly. Reuse those exact identifiers, do not invent parallel ones and do not put prose in completionCriteria.",
-		'Worked example whose identifiers line up. acceptanceChecks ["check-test-passes"], protectedInvariants ["inv-test-file-unmodified"], and taskGraphSource {"schemaVersion":1,"graphRevision":1,"tasks":[{"taskId":"fix-add","objective":"Change add() in calc.py to return a + b","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":[],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["calc.py"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":20000,"wallTimeLimitSeconds":300,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"standard","role":"implementation"},{"taskId":"verify-add","objective":"Run test_calc.py and confirm it passes","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":["fix-add"],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["artifacts/verify-add.json"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":8000,"wallTimeLimitSeconds":120,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"standard","role":"verification"},{"taskId":"attack-add","objective":"Attempt to break add() with edge-case inputs and report defects","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":["verify-add"],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["artifacts/attack-add.json"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":8000,"wallTimeLimitSeconds":120,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"deep","role":"red-team"}]}',
+		'Worked example whose identifiers line up. acceptanceChecks ["check-test-passes"], protectedInvariants ["inv-test-file-unmodified"], and taskGraphSource {"schemaVersion":1,"graphRevision":1,"tasks":[{"taskId":"fix-add","objective":"Change add() in src/calc.py to return a + b","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":[],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["src/calc.py"],"ownedPaths":["src"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":20000,"wallTimeLimitSeconds":300,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"standard","role":"implementation"},{"taskId":"verify-add","objective":"Run test_calc.py and confirm it passes","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":["fix-add"],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["artifacts/verify-add.json"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":8000,"wallTimeLimitSeconds":120,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"standard","role":"verification"},{"taskId":"attack-add","objective":"Attempt to break add() with edge-case inputs and report defects","requirementIds":["check-test-passes"],"completionCriteria":["inv-test-file-unmodified"],"dependencyTaskIds":["verify-add"],"boundaryIds":["inv-test-file-unmodified"],"inputRefs":[],"outputRefs":["artifacts/attack-add.json"],"evidencePolicy":{"kind":"command","maxBytes":4096,"maxItems":4,"independent":true},"budget":{"tokenLimit":8000,"wallTimeLimitSeconds":120,"spendLimitMicrounits":0},"recovery":"retry","authority":["read_workspace"],"computeClass":"deep","role":"red-team"}]}',
 		"Keep the proposal compact. acceptanceChecks and protectedInvariants are stable identifiers; bind detailed semantics through the immutable task source and objective.",
 		"boundaryIds must exactly equal protectedInvariants, gateIds must exactly equal acceptanceChecks, and metric requirementId/guardIds must reference those exact identifiers.",
 		"Do not claim approval and do not perform task work; the host will separately request trusted user approval.",

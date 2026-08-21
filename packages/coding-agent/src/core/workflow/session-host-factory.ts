@@ -251,6 +251,8 @@ export interface PersistedSessionWorkflowHostInput {
 	/** Host-owned adapter factory; it must bind every adapter to the opened store and current lease. */
 	readonly primeWorkflowAdaptersFactory?: PrimeWorkflowAuthenticatedAdapterFactory;
 	/** Canonical host ResourceLoader used by the default Prime composition. */
+	/** Roots a workflow task may own paths under; absent keeps the built-in default. */
+	readonly primeWorkflowWorkspacePaths?: readonly string[];
 	readonly primeWorkflowResourceLoader?: WorkflowResourceLoaderPort;
 	/** Authenticated evaluator that supplies durable readiness, decisions, and canonical validators. */
 	readonly completionReadinessAuthorityFactory?: PersistedWorkflowCompletionReadinessAuthorityFactory;
@@ -647,6 +649,14 @@ export async function createPersistedSessionWorkflowHost(
 							deferredOwnerValidators,
 						);
 						const recoveredState = recoveredStore.snapshot();
+						// Relaxing this does not make an empty journal reopenable. A new owner needs a rebound
+						// lease; the lease demands an epoch successor (assertEpochSuccessor); an epoch successor
+						// needs a generation rotation; and a rotation appends coordinator_epoch_fenced, which the
+						// reducer rejects as a first event because a journal must open with workflow_started. So a
+						// workflow bootstrapped without a committed event cannot be reopened by any later process,
+						// and the fix is to stop bootstrapping durable authority before workflow_started rather
+						// than to accept a null snapshot here - which, for a non-genesis sourceHead, would be a
+						// truncated journal opening silently as a fresh one.
 						if (recoveredState === null) throw new Error("workflow_epoch_recovery_empty");
 						const nextKey = await keyProvider.rotateGeneration({
 							workflowId: input.workflowId,
@@ -1450,6 +1460,9 @@ export async function createPersistedSessionWorkflowHost(
 			authority: primeHostAuthority,
 			adaptiveAuthority,
 			resourceLoader: input.primeWorkflowResourceLoader,
+			...(input.primeWorkflowWorkspacePaths === undefined
+				? {}
+				: { workspacePaths: input.primeWorkflowWorkspacePaths }),
 			readStatus: () => {
 				if (phaseHost === undefined) throw new Error("workflow_phase_host_not_initialized");
 				return phaseHost.status();

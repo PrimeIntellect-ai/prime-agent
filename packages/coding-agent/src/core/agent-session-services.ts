@@ -46,8 +46,6 @@ import {
 import type { WorkflowResourceLoaderPort } from "./workflow/skill-snapshots.js";
 import type { WorkflowPrimeStageEvidenceAdapter } from "./workflow/task-runtime-authority.js";
 import {
-	WORKER_MODEL_ID,
-	WORKER_MODEL_PROVIDER,
 	WORKER_MODEL_SELECTOR,
 	type WorkerModelCapabilityLaunchAuthorizer,
 } from "./workflow/worker-model-capability-gate.js";
@@ -234,6 +232,8 @@ export interface AgentSessionWorkflowHostFactoryInput {
 	workerModelCapabilityAdmission?: WorkerModelCapabilityLaunchAuthorizer;
 	workerModelCapabilityAvailability?: WorkerModelCapabilityAvailabilityResolver;
 	primeWorkflowResourceLoader?: WorkflowResourceLoaderPort;
+	/** Roots a workflow task may own paths under; absent keeps the built-in default. */
+	primeWorkflowWorkspacePaths?: readonly string[];
 	approvalSecretDelivery?: (input: {
 		readonly request: WorkflowApprovalRequest;
 		readonly proof: DurableApprovalSecretProof;
@@ -283,7 +283,7 @@ type PrimeWorkflowWorkerSession = Pick<
  * Args:
  * computeClass: Tier the planner declared, or undefined for the session default.
  * models: Configured selector per tier; a missing tier falls back to the default selector.
- * fallback: Selector used when no tier is declared or configured.
+ * fallback: Selector used when the resolved tier has no configured model.
  * Return: Model selector to launch the worker with.
  */
 export function resolveWorkerModelForComputeClass(
@@ -291,8 +291,12 @@ export function resolveWorkerModelForComputeClass(
 	models: Partial<Record<WorkflowComputeClass, string>> | undefined,
 	fallback: string,
 ): string {
-	if (computeClass === undefined) return fallback;
-	return models?.[computeClass] ?? fallback;
+	// An undeclared tier means "standard", the same answer builtinStages() already gives a stage with
+	// no entry in BUILTIN_STAGE_COMPUTE. Returning the fallback selector instead let an omitted
+	// computeClass skip the operator's tier map entirely, which made the map advisory: a planner that
+	// omitted the field - which the plan guidance invites when it is unsure - silently got whichever
+	// model the default constant named, whatever the operator had configured.
+	return models?.[computeClass ?? "standard"] ?? fallback;
 }
 
 export function createDefaultPrimeWorkflowWorkerLauncher(input: {
@@ -346,6 +350,7 @@ export function createDefaultPrimeWorkflowWorkerLauncher(input: {
 			},
 			reportMeaningfulProgress,
 			request.allowedToolNames,
+			request.ownedPaths,
 		);
 		return {
 			workerId: handle.rlm_child_id,
@@ -387,12 +392,16 @@ export function createDefaultPrimeWorkflowWorkerLauncher(input: {
 function createDefaultWorkerModelCapabilityAvailability(
 	modelRegistry: ModelRegistry,
 ): WorkerModelCapabilityAvailabilityResolver {
-	return async (_input) => {
-		const catalogModel = modelRegistry.find(WORKER_MODEL_PROVIDER, WORKER_MODEL_ID);
+	return async (input) => {
+		// Probe the model this launch actually wants. Probing the default instead reported luna's
+		// readiness for a sol worker, so a tier could be declared ready on another model's evidence.
+		const provider = input.policy.provider;
+		const modelId = input.policy.model;
+		const catalogModel = modelRegistry.find(provider, modelId);
 		let executableModel: ReturnType<ModelRegistry["find"]>;
 		try {
 			executableModel = (await modelRegistry.getExecutableModels()).find(
-				(model) => model.provider === WORKER_MODEL_PROVIDER && model.id === WORKER_MODEL_ID,
+				(model) => model.provider === provider && model.id === modelId,
 			);
 		} catch {
 			return {
@@ -421,8 +430,8 @@ function createDefaultWorkerModelCapabilityAvailability(
 			executableModel === undefined
 				? undefined
 				: await modelRegistry.getApiKeyAndHeaders(executableModel).catch(() => undefined);
-		const authToken = modelRegistry.getCurrentProviderAuthSourceToken(WORKER_MODEL_PROVIDER);
-		const authStatus = modelRegistry.getProviderAuthStatus(WORKER_MODEL_PROVIDER);
+		const authToken = modelRegistry.getCurrentProviderAuthSourceToken(provider);
+		const authStatus = modelRegistry.getProviderAuthStatus(provider);
 		const authenticated =
 			executableModel !== undefined &&
 			auth?.ok === true &&
@@ -764,6 +773,7 @@ export async function createAgentSessionFromServices(
 								workerModelCapabilityAdmission: options.services.workerModelCapabilityAdmission,
 								workerModelCapabilityAvailability: options.services.workerModelCapabilityAvailability,
 								primeWorkflowResourceLoader: options.services.resourceLoader,
+								primeWorkflowWorkspacePaths: options.services.settingsManager.getWorkflowWorkspacePaths(),
 								approvalSecretDelivery,
 								executionEvidenceSourceDelivery,
 								beforeTaskLaunch,
@@ -786,6 +796,7 @@ export async function createAgentSessionFromServices(
 								workerModelCapabilityAdmission: options.services.workerModelCapabilityAdmission,
 								workerModelCapabilityAvailability: options.services.workerModelCapabilityAvailability,
 								primeWorkflowResourceLoader: options.services.resourceLoader,
+								primeWorkflowWorkspacePaths: options.services.settingsManager.getWorkflowWorkspacePaths(),
 								approvalSecretDelivery,
 								executionEvidenceSourceDelivery,
 								beforeTaskLaunch,

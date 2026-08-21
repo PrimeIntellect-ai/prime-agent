@@ -171,7 +171,12 @@ export function createStreamLivenessHost(options: StreamLivenessHostOptions): St
 /** Policy used when an embedding host has not supplied a provider-specific resolver. */
 export const DEFAULT_STREAM_LIVENESS_POLICY: StreamLivenessPolicy = Object.freeze({
 	connectingTimeoutMs: 30_000,
-	headersTimeoutMs: 30_000,
+	// Bounds time to the FIRST content block, not idle time between blocks, and no observation in
+	// the headers phase can extend it. A reasoning model can think for minutes before its first
+	// summary part: 30_000 killed every long gpt-5.6-sol turn at exactly 30s with bytes received
+	// and zero blocks. Sized for time-to-first-token, still absolute, and still <= the streaming
+	// budget (streamingIdleTimeoutMs + maxProgressExtensionMs) so silence never outlives progress.
+	headersTimeoutMs: 300_000,
 	streamingIdleTimeoutMs: 60_000,
 	finalizingTimeoutMs: 30_000,
 	progressExtensionMs: 10_000,

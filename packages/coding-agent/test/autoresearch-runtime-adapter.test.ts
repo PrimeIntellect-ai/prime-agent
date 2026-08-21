@@ -675,7 +675,9 @@ async function productionHostPorts(
 	return { hostPorts, authority, resolver, executionCalls, measurementCalls, publish };
 }
 
-it("replays and retries one native event through separate persisted runtime hosts", async () => {
+// Spawns two separate persisted runtime hosts and replays between them; same starvation profile as
+// the persisted-admission test above - timed out at 30003ms under a 20-file parallel run, passes alone.
+it("replays and retries one native event through separate persisted runtime hosts", { timeout: 180_000 }, async () => {
 	const artifactRoot = await mkdtemp(join(tmpdir(), "autoresearch-runtime-adapter-"));
 	const workflowId = "autoresearch-runtime-workflow";
 	let first: PersistedSessionWorkflowHost | undefined;

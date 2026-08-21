@@ -13,6 +13,7 @@ import {
 	WORKER_MODEL_PROVIDER,
 	WORKER_MODEL_REASONING,
 	WORKER_MODEL_SELECTOR,
+	workerModelReasoningFor,
 } from "../src/core/workflow/worker-model-capability-gate.js";
 
 function createGoalProjection(): { read(): GoalState; compareAndSwap(expected: GoalState, next: GoalState): boolean } {
@@ -27,7 +28,11 @@ function createGoalProjection(): { read(): GoalState; compareAndSwap(expected: G
 	};
 }
 
-it("composes persisted exact-Luna admission from authenticated host availability", async () => {
+// Builds a real persisted host, a faux provider and a discovery server, and takes 15-25s alone. The
+// 30s default is not a bound on this test's correctness, only on the machine's spare capacity: under a
+// parallel run it times out at 30004ms and then reads as a defect, which is exactly how I misdiagnosed
+// it. Give it room rather than excluding it from the default run.
+it("composes persisted allowlisted admission from authenticated host availability", { timeout: 180_000 }, async () => {
 	const artifactRoot = await mkdtemp(join(tmpdir(), "workflow-persisted-worker-admission-"));
 	const workflowId = "workflow-persisted-worker-admission";
 	const rootSessionId = "session-persisted-worker-admission";
@@ -118,6 +123,69 @@ it("composes persisted exact-Luna admission from authenticated host availability
 			status: "accepted",
 			admissionDigest: admission.intent.admissionDigest,
 		});
+
+		// Compute tiering sends deep tasks to a second selector. What the receipt attests has to be
+		// the model the child will actually run: attesting the default while spawning sol would make
+		// the whole admission chain decorative for every non-default tier.
+		const deepAdmission = await host.admitWorkerModel!({
+			workflowId,
+			taskId: "architect",
+			attemptId: "attempt-architect-1",
+			executionKey: "execution-architect-1",
+			epochRef,
+			prompt: "plan the pipeline",
+			sessionName: "architect-worker",
+			selector: `${WORKER_MODEL_PROVIDER}/gpt-5.6-sol`,
+			provider: WORKER_MODEL_PROVIDER,
+			model: "gpt-5.6-sol",
+			// The deep tier runs at its own level; requesting max here is refused, not silently coerced.
+			reasoning: workerModelReasoningFor("gpt-5.6-sol")!,
+			allowFallback: false,
+		});
+		expect(deepAdmission.intent).toMatchObject({
+			policy: { model: "gpt-5.6-sol" },
+			childModel: { provider: WORKER_MODEL_PROVIDER, model: "gpt-5.6-sol", allowFallback: false },
+		});
+		await expect(deepAdmission.handshake(deepAdmission.intent.childModel)).resolves.toMatchObject({
+			status: "accepted",
+		});
+
+		// The set stays closed: a selector the host never vetted is refused, not admitted.
+		await expect(
+			host.admitWorkerModel!({
+				workflowId,
+				taskId: "architect",
+				attemptId: "attempt-architect-2",
+				executionKey: "execution-architect-2",
+				epochRef,
+				prompt: "plan the pipeline",
+				sessionName: "architect-worker-2",
+				selector: "openrouter/some/other-model",
+				provider: WORKER_MODEL_PROVIDER,
+				model: "some-other-model",
+				reasoning: WORKER_MODEL_REASONING,
+				allowFallback: false,
+			}),
+		).rejects.toThrow("worker_model_policy_selector_denied");
+
+		// An admitted model at a level the host never vetted is refused too: the tier is the pair,
+		// not just the model id.
+		await expect(
+			host.admitWorkerModel!({
+				workflowId,
+				taskId: "architect",
+				attemptId: "attempt-architect-3",
+				executionKey: "execution-architect-3",
+				epochRef,
+				prompt: "plan the pipeline",
+				sessionName: "architect-worker-3",
+				selector: `${WORKER_MODEL_PROVIDER}/gpt-5.6-sol`,
+				provider: WORKER_MODEL_PROVIDER,
+				model: "gpt-5.6-sol",
+				reasoning: "low",
+				allowFallback: false,
+			}),
+		).rejects.toThrow("worker_model_policy_reasoning_denied");
 	} finally {
 		await host.dispose?.();
 		await rm(artifactRoot, { recursive: true, force: true });

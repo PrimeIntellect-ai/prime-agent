@@ -558,6 +558,8 @@ export interface DefaultPrimeWorkflowProviderInput {
 	readonly authority: PrimeWorkflowHostAuthority;
 	readonly adaptiveAuthority: PrimeAdaptiveRuntimeHostAuthority;
 	/** Optional caller loader is ignored for built-in admission; canonical vendored resources are host-owned. */
+	/** Roots a task may own paths under; absent keeps DEFAULT_WORKSPACE_PATHS. */
+	readonly workspacePaths?: readonly string[];
 	readonly resourceLoader?: WorkflowResourceLoaderPort;
 	readonly readStatus: () => WorkflowShellStatus;
 	readonly executionEvidence: WorkflowExecutionEvidenceRuntime;
@@ -748,6 +750,7 @@ async function composeDefaultPrimeWorkflow(
 		// The persisted recipe is the immutable admission; subsequent authenticated events may advance the head.
 		snapshots = persisted;
 		taskGraph = createDefaultTaskGraph({
+			...(input.workspacePaths === undefined ? {} : { workspacePaths: input.workspacePaths }),
 			acceptanceCheckIds: status.acceptanceCheckIds,
 			protectedInvariantIds: status.protectedInvariantIds,
 			requiredSkillSnapshotDigests: snapshots.skills.map((skill) => skill.snapshotDigest),
@@ -810,6 +813,7 @@ async function composeDefaultPrimeWorkflow(
 			);
 		}
 		const compiledRecipe = await createDefaultRecipe({
+			...(input.workspacePaths === undefined ? {} : { workspacePaths: input.workspacePaths }),
 			...input,
 			headDigest: replay.head.eventDigest,
 			decisionRef,
@@ -1670,11 +1674,6 @@ async function createDefaultAutoResearchRunner(
 		};
 		return { ...withoutDigest, proofDigest: digestObject(withoutDigest) };
 	};
-	const visibleFixtureManifestDigest = recipe.registration.fixtures
-		.filter((fixture) => fixture.partition === "train" || fixture.partition === "eval")
-		.map((fixture) => fixture.manifestDigest)
-		.sort()
-		.join("|");
 	const visibleInputDigests = recipe.registration.fixtures
 		.filter((fixture) => fixture.partition === "train" || fixture.partition === "eval")
 		.map((fixture) => fixture.inputDigest)
@@ -2074,7 +2073,6 @@ async function createDefaultAutoResearchRunner(
 		measureObservation: async (observation: AutoResearchRawObservation): Promise<AutoResearchHostMeasurement> => {
 			if (observation.rawResultRefs.length === 0) throw new Error("default_prime_autoresearch_result_missing");
 			const goal = activeGoalBinding();
-			let totalBytes = 0;
 			for (const ref of observation.rawResultRefs) {
 				const resolved = await input.artifactResolver.resolve(ref);
 				if (!resolved.exists || resolved.envelope.payloadKind !== "evidence")
@@ -2093,35 +2091,51 @@ async function createDefaultAutoResearchRunner(
 					parsed.candidateUncoveredAdversarialStageCount !== 0
 				)
 					throw new Error("default_prime_autoresearch_result_invalid");
-				totalBytes += resolved.bytes.byteLength;
 			}
-			const resourceUsage = defaultPrimeAutoResearchResourceVector(totalBytes);
+			// This host executes nothing: `effect-broker.ts` implements command execution but nothing in
+			// production constructs it, and the registration commits to its evaluator by bare digest with
+			// no retrievable command text. So there is no measurement to report. Reporting one anyway -
+			// metricValue 0 against baseline 1, cost and latency derived from artifact byte length - is
+			// what this did before, and a constant that reads as evidence is worse than an absence.
+			//
+			// "crashed" is that absence, stated in the engine's own vocabulary: it refuses to reuse a
+			// crashed observation for promotion, so a candidate cannot be accepted on the strength of a
+			// number nobody computed. Throwing instead would abort the whole workflow, since the default
+			// Prime composition drives this path in a normal run - autoresearch failing closed must not
+			// take the run with it.
 			const measurementWithoutDigest = {
 				source: "host" as const,
 				rawResultRefsDigest: digestObject(observation.rawResultRefs),
 				phase: "promotion" as const,
-				status: "complete" as const,
+				status: "crashed" as const,
 				commandInputBinding: recipe.registration.commandInputBinding,
 				metricDirection: recipe.registration.metric.direction,
 				metricTarget: recipe.registration.metric.target,
 				metricTolerance: recipe.registration.metric.tolerance,
+				// The engine requires a positive sample count; the refusal is carried by `status`, not by
+				// pretending zero samples were taken.
 				sampleCount: observation.rawResultRefs.length,
 				metricValue: 0,
-				baselineMetricValue: 1,
+				baselineMetricValue: 0,
 				variance: 0,
-				fixtureManifestDigest: visibleFixtureManifestDigest,
-				trainInputDigest: recipe.registration.fixtures.find((fixture) => fixture.partition === "train")!
-					.inputDigest,
-				evalInputDigest: recipe.registration.fixtures.find((fixture) => fixture.partition === "eval")!.inputDigest,
+				fixtureManifestDigest: recipe.registration.fixtures
+					.filter((fixture) => fixture.partition === "train" || fixture.partition === "eval")
+					.map((fixture) => fixture.manifestDigest)
+					.sort()
+					.join("|"),
+				trainInputDigest:
+					recipe.registration.fixtures.find((fixture) => fixture.partition === "train")?.inputDigest ?? "",
+				evalInputDigest:
+					recipe.registration.fixtures.find((fixture) => fixture.partition === "eval")?.inputDigest ?? "",
 				heldOutInputDigest: null,
 				evaluatorDigest: recipe.registration.evaluator.evaluatorDigest,
 				parserDigest: recipe.registration.evaluator.parserDigest,
 				guardDigest: recipe.registration.guard?.guardDigest ?? null,
 				seedDigest: recipe.registration.seed.seedDigest,
 				proxySignals: [],
-				costMicrounits: totalBytes,
-				latencyMilliseconds: totalBytes,
-				resourceUsage,
+				costMicrounits: 0,
+				latencyMilliseconds: 0,
+				resourceUsage: defaultPrimeAutoResearchResourceVector(1),
 				hiddenMetricValue: 0,
 				adversarialMetricValue: 0,
 				candidateClaimedCompletion: false as const,
@@ -2727,6 +2741,7 @@ async function consumeReceipt(
 }
 
 async function createDefaultRecipe(input: {
+	readonly workspacePaths?: readonly string[];
 	readonly workflowId: string;
 	readonly rootSessionId: string;
 	readonly epochRef: WorkflowEpochRef;
@@ -2747,7 +2762,7 @@ async function createDefaultRecipe(input: {
 		effectBoundaryKind: "host_effect_boundary" as const,
 		descriptorDigest: digestObject({ kind: "default-prime-descriptor", workflowId: input.workflowId }),
 		effectBoundaryDigest: digestObject({ kind: "default-prime-effect-boundary", workflowId: input.workflowId }),
-		workspacePaths: DEFAULT_WORKSPACE_PATHS,
+		workspacePaths: input.workspacePaths ?? DEFAULT_WORKSPACE_PATHS,
 		generatedOutputPaths: DEFAULT_GENERATED_OUTPUT_PATHS,
 	};
 	const contextBase = {
@@ -2934,7 +2949,7 @@ async function createDefaultRecipe(input: {
 	const graphContext = {
 		knownSkillSnapshotDigests: input.requiredSkillSnapshotDigests,
 		allowedAuthority: [...new Set<WorkflowAuthorityCapability>(tasks.flatMap((task) => task.authority))],
-		workspacePaths: DEFAULT_WORKSPACE_PATHS,
+		workspacePaths: input.workspacePaths ?? DEFAULT_WORKSPACE_PATHS,
 		generatedOutputPaths: DEFAULT_GENERATED_OUTPUT_PATHS,
 		namedContracts: [...new Set(tasks.flatMap((task) => task.ownedContracts))],
 	};
@@ -3131,6 +3146,7 @@ function defaultTasks(input: {
 }
 
 function createDefaultTaskGraph(input: {
+	readonly workspacePaths?: readonly string[];
 	readonly acceptanceCheckIds: readonly string[];
 	readonly protectedInvariantIds: readonly string[];
 	readonly requiredSkillSnapshotDigests: readonly string[];
@@ -3140,7 +3156,7 @@ function createDefaultTaskGraph(input: {
 	return validateWorkflowTaskGraph(tasks, {
 		knownSkillSnapshotDigests: input.requiredSkillSnapshotDigests,
 		allowedAuthority: [...new Set<WorkflowAuthorityCapability>(tasks.flatMap((task) => task.authority))],
-		workspacePaths: DEFAULT_WORKSPACE_PATHS,
+		workspacePaths: input.workspacePaths ?? DEFAULT_WORKSPACE_PATHS,
 		generatedOutputPaths: DEFAULT_GENERATED_OUTPUT_PATHS,
 		namedContracts: [...new Set(tasks.flatMap((task) => task.ownedContracts))],
 	});

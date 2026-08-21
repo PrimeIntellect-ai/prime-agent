@@ -23,8 +23,17 @@ describe("compute class routing", () => {
 		}
 	});
 
-	it("uses the session default when a task declares no tier", () => {
-		expect(resolveWorkerModelForComputeClass(undefined, TIERS, DEFAULT_SELECTOR)).toBe(DEFAULT_SELECTOR);
+	it("resolves an undeclared tier through the map at standard, not past it", () => {
+		// Plan guidance invites omitting computeClass when unsure. If omission skipped the map, the
+		// operator's configuration would be advisory: the task would run on whatever the default
+		// constant named, whatever had been configured for standard.
+		expect(resolveWorkerModelForComputeClass(undefined, TIERS, DEFAULT_SELECTOR)).toBe(TIERS.standard);
+	});
+
+	it("uses the session default for an undeclared tier only when standard is unconfigured", () => {
+		expect(resolveWorkerModelForComputeClass(undefined, { deep: TIERS.deep }, DEFAULT_SELECTOR)).toBe(
+			DEFAULT_SELECTOR,
+		);
 	});
 
 	it("falls back rather than failing when a tier has no configured model", () => {
@@ -94,8 +103,9 @@ describe("compute class tier configuration", () => {
 			TIERS.deep,
 			expect.anything(),
 			expect.any(Function),
-			// Sixth argument is the capability-derived tool allowlist; undefined when the task
-			// declares no authority, which is the case for this fixture.
+			// Sixth argument is the capability-derived tool allowlist and seventh the declared
+			// ownedPaths; both undefined when the task declares neither, as this fixture does.
+			undefined,
 			undefined,
 		);
 	});

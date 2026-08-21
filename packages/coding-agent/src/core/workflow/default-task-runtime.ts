@@ -268,6 +268,8 @@ export type DefaultPrimeWorkerLauncher = (
 		computeClass?: WorkflowComputeClass;
 		/** Tools the worker may use, derived from the task's declared authority. Undefined inherits the session default. */
 		allowedToolNames?: readonly string[];
+		/** Path prefixes the task declared it owns; enables the host-side scope check. */
+		ownedPaths?: readonly string[];
 		reportHeartbeat(input: { readonly observedAt: string; readonly progressDigest: string }): Promise<void>;
 	}>,
 ) => Promise<DefaultPrimeWorkerLaunch>;

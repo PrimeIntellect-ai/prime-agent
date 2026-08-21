@@ -321,7 +321,17 @@ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapp
 import { addAssistantUsage, emptyUsage } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
 import type { PrimeAdaptiveRuntimeState } from "./workflow/adaptive-runtime.js";
-import { changedPaths, computePathDiff, formatDiffPush, sharesDiffs } from "./workflow/agent-collaboration.js";
+import {
+	changedPaths,
+	computePathDiff,
+	formatDiffPush,
+	pathsInsideProtected,
+	pathsOutsideOwned,
+	sharesDiffs,
+	touchedPaths,
+	trackedUnder,
+	worktreesWithChanges,
+} from "./workflow/agent-collaboration.js";
 import {
 	createWorkflowBrainstormState,
 	createWorkflowProposalTool,
@@ -373,8 +383,6 @@ import type {
 } from "./workflow/skill-snapshots.js";
 import {
 	parseWorkerModelCapabilityAdmission,
-	WORKER_MODEL_ID,
-	WORKER_MODEL_PROVIDER,
 	WORKER_MODEL_REASONING,
 	WORKER_MODEL_SELECTOR,
 	type WorkerModelCapabilityBlocker,
@@ -382,6 +390,7 @@ import {
 	type WorkerModelCapabilityLaunchAuthorizer,
 	type WorkerModelCapabilityLaunchInput,
 	type WorkerModelChildModelBinding,
+	workerModelReasoningFor,
 } from "./workflow/worker-model-capability-gate.js";
 
 export type { GoalState, GoalStatus } from "./goals.js";
@@ -1508,6 +1517,11 @@ function workerModelId(selector: string): string {
 	return separator < 0 ? "" : selector.slice(separator + 1);
 }
 
+/** Reasoning level for a worker selector; the gate denies any id this does not cover. */
+function workerModelReasoning(selector: string): string {
+	return workerModelReasoningFor(workerModelId(selector)) ?? WORKER_MODEL_REASONING;
+}
+
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
 
@@ -1731,6 +1745,9 @@ export class AgentSession {
 	private readonly _steeredAgentMessageFingerprints = new Set<string>();
 	/** Sibling sessions that receive this worker's diffs, and how this worker identifies itself. */
 	private _collaborationPeers?: { readonly author: string; readonly reviewers: readonly string[] };
+	private _ownedPaths?: readonly string[];
+	private _reportedScopeViolations = new Set<string>();
+	private _immutablePathsAudited = false;
 	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
@@ -5202,6 +5219,7 @@ export class AgentSession {
 			// A successful mutation is the trigger for sharing work in progress. The host computes
 			// and delivers the diff, so neither the author nor the reviewer spends a model turn.
 			if (!event.isError && this._collaborationPeers !== undefined) void this._pushChangedDiffs();
+			if (!event.isError) void this._reportScopeViolations();
 			return;
 		}
 		if (event.type !== "turn_end" || event.message.role !== "assistant") return;
@@ -6727,11 +6745,105 @@ export class AgentSession {
 		return delivered;
 	}
 
+	/**
+	 * Declare the paths this worker owns, enabling the mechanical scope check.
+	 *
+	 * Args:
+	 * paths: Canonical path prefixes from the task graph; [] for a role that may write nothing, and
+	 * undefined for a worker with no declared boundary.
+	 * Return: No value.
+	 */
+	setOwnedPaths(paths: readonly string[] | undefined): void {
+		// undefined and [] mean different things. undefined is "nothing declared, unconstrained";
+		// [] is "this task may write nothing", which is how a read-only role is enforced against what
+		// it actually wrote rather than against what it declared.
+		this._ownedPaths = paths === undefined ? undefined : [...paths];
+		this._reportedScopeViolations.clear();
+	}
+
+	/**
+	 * Record, once per path, that this worker wrote outside its declared ownership.
+	 *
+	 * This is the deterministic half of anti-cheating: weakening a control or editing the
+	 * evaluator that judges you shows up as a write to a path the task never claimed, and the
+	 * host can see that without asking a model to judge intent. Reporting is unconditional: it must
+	 * not depend on a collaboration setting, because a run with sharing turned off is exactly the run
+	 * with no other witness.
+	 *
+	 * ponytail: attribution is tree-wide. Sibling workers share one working tree, so a violation
+	 * names what the tree shows, not provably this worker's write. Per-worker worktrees would make
+	 * it exact; until then a concurrent sibling can make this report the wrong author.
+	 *
+	 * Return: No value.
+	 */
+	private async _reportScopeViolations(): Promise<void> {
+		const owned = this._ownedPaths;
+		const immutable = this.settingsManager.getWorkflowImmutablePaths();
+		// The immutable set applies to every task, including one that declared no ownership, so this
+		// cannot return early on `owned` alone.
+		if (owned === undefined && immutable === undefined) return;
+		const cwd = this.sessionManager.getCwd?.() ?? process.cwd();
+		const written = await touchedPaths(cwd).catch(() => []);
+		const taskId = this._workflowTaskBinding?.taskId ?? "unbound";
+		if (immutable !== undefined && !this._immutablePathsAudited) {
+			this._immutablePathsAudited = true;
+			await this._auditImmutablePaths(cwd, immutable);
+		}
+		// Every check above asks git about `cwd`. If the agent is editing a linked worktree instead,
+		// all of them go quiet, and quiet is indistinguishable from idle. Say so rather than imply
+		// nothing is happening.
+		const elsewhere = await worktreesWithChanges(cwd).catch(() => []);
+		for (const path of elsewhere) {
+			if (this._reportedScopeViolations.has(`worktree:${path}`)) continue;
+			this._reportedScopeViolations.add(`worktree:${path}`);
+			console.warn(
+				`workflow_work_outside_observed_tree task=${taskId} worktree=${path} observed=${cwd} ` +
+					"(scope and immutable-path checks do not see changes there)",
+			);
+		}
+		const report = (code: string, paths: readonly string[], declaredLabel: string, declared: readonly string[]) => {
+			const fresh = paths.filter((path) => !this._reportedScopeViolations.has(`${code}:${path}`));
+			if (fresh.length === 0) return;
+			for (const path of fresh) this._reportedScopeViolations.add(`${code}:${path}`);
+			console.warn(`${code} task=${taskId} paths=${fresh.join(",")} ${declaredLabel}=${declared.join(",")}`);
+		};
+		if (immutable !== undefined)
+			report("workflow_immutable_path_written", pathsInsideProtected(written, immutable), "immutable", immutable);
+		if (owned !== undefined)
+			report("workflow_task_scope_violation", pathsOutsideOwned(written, owned), "owned", owned);
+	}
+
 	/** Push a diff for every path changed in the working tree; duplicates are dropped downstream. */
 	private async _pushChangedDiffs(): Promise<void> {
 		const cwd = this.sessionManager.getCwd?.() ?? process.cwd();
 		const paths = await changedPaths(cwd).catch(() => []);
 		for (const path of paths) await this.pushDiffToReviewers(path).catch(() => {});
+	}
+
+	/**
+	 * Say once, at the first check, which declared immutable prefixes match nothing in the repo.
+	 *
+	 * A mistyped prefix protects nothing and, without this, says nothing either - the run looks
+	 * guarded while the file it was meant to guard is wide open. Absence is not always a mistake: a
+	 * prefix can legitimately mean "this must never be created". So this reports rather than refuses,
+	 * and says which case it cannot distinguish.
+	 *
+	 * Args:
+	 * cwd: Repository directory to resolve prefixes against.
+	 * immutable: Declared prefixes.
+	 * Return: No value.
+	 */
+	private async _auditImmutablePaths(cwd: string, immutable: readonly string[]): Promise<void> {
+		const unmatched: string[] = [];
+		for (const prefix of immutable) {
+			const tracked = await trackedUnder(cwd, prefix).catch(() => 0);
+			if (tracked === 0) unmatched.push(prefix);
+		}
+		if (unmatched.length === 0) return;
+		console.warn(
+			`workflow_immutable_path_matches_nothing paths=${unmatched.join(",")} ` +
+				"(a typo protects nothing; a path that does not exist yet is protected against creation)",
+		);
 	}
 
 	/** Send one collaboration message to a sibling; returns whether it was accepted. */
@@ -10056,7 +10168,14 @@ export class AgentSession {
 	}
 
 	private async _maybeAutoRefine(reason: AutoRefineReason): Promise<void> {
-		this._assertRefinementAuthority();
+		// Same reason as _runSerializedRefineCheckpoint: automatic refinement is a background
+		// courtesy, and throwing from it replaced the assistant's actual response for the turn. When a
+		// workflow owns the goal, drop the pending request and skip. An explicit /refine still refuses
+		// loudly, because there a user asked for something the workflow owns.
+		if (this._workflowOwnsGoalState()) {
+			this._discardPendingAutoRefine();
+			return;
+		}
 		if (this._disposed || this._disposing) {
 			this._discardPendingAutoRefine();
 			return;
@@ -12589,6 +12708,7 @@ export class AgentSession {
 		workflowTaskDeadlineAt?: string,
 		workflowTaskBinding?: WorkflowTaskBindingData,
 		allowedToolNames?: readonly string[],
+		ownedPaths?: readonly string[],
 	): Promise<RlmSpawnHandle> {
 		const workflowTaskDeadlineAtMs =
 			workflowTaskDeadlineAt === undefined ? undefined : Date.parse(workflowTaskDeadlineAt);
@@ -12710,6 +12830,7 @@ export class AgentSession {
 			// child inherits the parent's full tool set and any "read-only" or "diffs only"
 			// role is advisory prose the worker may ignore.
 			if (allowedToolNames !== undefined) child.setActiveToolsByName([...allowedToolNames]);
+			child.setOwnedPaths(ownedPaths);
 			child._releaseDeferredIpythonPrewarm();
 			if (workflowTaskDeadlineDelayMs !== undefined && workflowDeadlineTimer === undefined) {
 				child._workflowTaskDeadlineMonotonicAtMs = performance.now() + workflowTaskDeadlineDelayMs;
@@ -13113,6 +13234,7 @@ export class AgentSession {
 		launchContext?: AgentSessionWorkflowWorkerLaunchContext,
 		onMeaningfulProgress?: (progressDigest: string) => void,
 		allowedToolNames?: readonly string[],
+		ownedPaths?: readonly string[],
 	): Promise<RlmSpawnHandle> {
 		if (launchContext === undefined)
 			throw new Error("CONTRACT_CHANGE: workflow worker launch context is required for model admission");
@@ -13129,7 +13251,7 @@ export class AgentSession {
 			selector: model,
 			provider: workerModelProvider(model),
 			model: workerModelId(model),
-			reasoning: WORKER_MODEL_REASONING,
+			reasoning: workerModelReasoning(model),
 			allowFallback: false,
 		});
 		const parsedIntent = parseWorkerModelCapabilityAdmission(admission.intent);
@@ -13143,9 +13265,12 @@ export class AgentSession {
 			parsedIntent.executionKey !== launchContext.executionKey ||
 			parsedIntent.epochRef.storeEpoch !== launchContext.epochRef.storeEpoch ||
 			parsedIntent.epochRef.coordinatorEpoch !== launchContext.epochRef.coordinatorEpoch ||
-			expectedBinding.provider !== WORKER_MODEL_PROVIDER ||
-			expectedBinding.model !== WORKER_MODEL_ID ||
-			expectedBinding.reasoning !== WORKER_MODEL_REASONING ||
+			// Compare against the selector this launch asked for, not the default: the property that
+			// matters is that no substitution happened between request and admission. Pinning to the
+			// default constant here would pass a receipt naming luna while the child ran sol.
+			expectedBinding.provider !== workerModelProvider(model) ||
+			expectedBinding.model !== workerModelId(model) ||
+			expectedBinding.reasoning !== workerModelReasoning(model) ||
 			expectedBinding.allowFallback !== false
 		)
 			throw new Error("CONTRACT_CHANGE: worker admission is not bound to the scheduler task attempt");
@@ -13174,11 +13299,14 @@ export class AgentSession {
 			{ name: sessionName, model },
 			undefined,
 			false,
-			"max",
+			// Spawn at the level the admission attested. A hardcoded "max" here meant the receipt and
+			// the running child could disagree about effort for any tier but the default.
+			workerModelReasoning(model) as ThinkingLevel,
 			onMeaningfulProgress,
 			launchContext.deadlineAt,
 			workflowTaskBinding,
 			allowedToolNames,
+			ownedPaths,
 		);
 		if (handle.model !== model) {
 			this.cancelRlmChildRun(handle.rlm_child_id, "worker model handshake mismatch");

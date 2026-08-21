@@ -109,6 +109,41 @@ export function resolveDaemonRuntimeBuildIdentity(
 	};
 }
 
+/** What a stale daemon looks like: the source moved after it started, so it cannot see later fixes. */
+export interface DaemonSourceDrift {
+	readonly recorded: string;
+	readonly current: string;
+}
+
+/**
+ * Whether this daemon is running source that has since changed on disk.
+ *
+ * A daemon pins whatever the launcher handed it at startup and never looks again. That is correct for
+ * determinism and wrong for operators: a fix can sit in the tree, tested and committed, while every
+ * session keeps failing on the bug it fixes, with nothing anywhere saying a restart would help. That
+ * happened for an hour on a real overnight run - two landed fixes were invisible to a daemon started
+ * before them. This recomputes the launcher's own identity expression (`git describe --tags --always
+ * --dirty`, prime-agent.sh:6) against the launcher's directory and reports a difference.
+ *
+ * Args:
+ * environment: Process environment carrying the recorded build id and launcher path.
+ * describeSource: Injectable reader returning the current identity, or undefined when unavailable.
+ * Return: The drift when both values are known and differ; undefined when equal or undeterminable.
+ */
+export function detectDaemonSourceDrift(
+	environment: NodeJS.ProcessEnv,
+	describeSource: (sourceDir: string) => string | undefined,
+): DaemonSourceDrift | undefined {
+	const recorded = environment[PRIME_AGENT_SOURCE_BUILD_ID_ENV] ?? environment[PRIME_AGENT_BUILD_ID_ENV];
+	const launcherPath = environment[PRIME_AGENT_LAUNCHER_PATH_ENV];
+	// A bundled or released runtime has no launcher directory to interrogate, and silence is the honest
+	// answer there rather than a guess that the daemon is fine.
+	if (!recorded || !launcherPath) return undefined;
+	const current = describeSource(dirname(resolve(launcherPath)));
+	if (!current || current === recorded) return undefined;
+	return { recorded, current };
+}
+
 function walkUp(startPath: string): string[] {
 	const paths: string[] = [];
 	let current = resolve(startPath);

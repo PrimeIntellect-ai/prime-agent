@@ -36,6 +36,7 @@ import { leaseRefOf } from "./dispatch.js";
 import type { WorkflowEffectBroker } from "./effect-broker.js";
 import type { WorkflowLeaseManager } from "./leases.js";
 import type { WorkflowExternalBlockerInput } from "./phase-host.js";
+import { WORKFLOW_WRITE_AUTHORITY_CAPABILITIES } from "./recipes.js";
 import type { WorkflowReconciliationOutcome, WorkflowRecoveryRequest } from "./recovery.js";
 import type { WorkflowRuntimeRecoveryCoordinator } from "./runtime-recovery.js";
 import type { WorkflowScheduler, WorkflowSchedulerEvent, WorkflowSchedulerState } from "./scheduler.js";
@@ -648,6 +649,33 @@ function assertClassification(value: WorkflowTaskRuntimeEvidenceClassification):
 }
 
 /** Compose the default task lifecycle directly over the canonical workflow runtime store. */
+/**
+ * The effect broker this host does not wire.
+ *
+ * `effect-broker.ts` implements real command execution, but nothing in production constructs it -
+ * only tests do - so the live authority has always passed an empty object cast to the broker type.
+ * Cast-to-type means the first call fails as "x is not a function", at whatever point in a long run
+ * happens to reach it. This answers `readiness` truthfully instead, so a caller that asks can route
+ * around it, and names the missing wiring when something tries to execute anyway.
+ *
+ * Consequence worth stating plainly: with no host executor, anything the host would need to measure
+ * for itself has to be produced by a worker, which is the party a measurement is meant to check.
+ *
+ * ponytail: `dispatcher` and `leases` are stubbed the same way and left alone - prime runs its own
+ * scheduler and never calls them, and hand-writing 13 throwing members would add noise, not safety.
+ */
+export function unwiredEffectBroker(): WorkflowEffectBroker {
+	const unwired = (): never => {
+		throw new Error("workflow_effect_broker_not_wired: this host constructs no effect executors");
+	};
+	return Object.freeze({
+		classify: unwired,
+		execute: unwired,
+		reconcile: unwired,
+		readiness: () => ({ canExecute: false, blockingReasons: ["workflow_effect_broker_not_wired"] as const }),
+	}) as WorkflowEffectBroker;
+}
+
 export function createDefaultTaskRuntimeAuthority(
 	input: DefaultTaskRuntimeAuthorityInput,
 ): WorkflowTaskRuntimeAuthority {
@@ -701,8 +729,39 @@ export function createDefaultTaskRuntimeAuthority(
 		const launchesByAttempt = new Map(baseState.launches.map((launch) => [launch.attemptId, launch]));
 		const dispatchByAttempt = new Map<string, DefaultTaskRuntimeDispatchEvent>();
 		const terminalTaskIds = new Set(baseState.terminalTaskIds);
+		// A persisted dispatch is adopted on recovery, so its bindings have to be re-derived here rather
+		// than trusted. Without this any journalled workflow_dispatch_intent for a known task became an
+		// active attempt: a dispatch from a foreign store epoch, from a coordinator epoch that has not
+		// happened yet, or carrying a forged execution key or decision digest would all be picked up and
+		// treated as in flight. The store epoch is the durable anchor and must match exactly; the
+		// coordinator epoch rotates on every resume, so an earlier one is ordinary recovery while a later
+		// one cannot exist yet.
+		const dispatchBindingVerifies = (dispatch: DefaultTaskRuntimeDispatchEvent): boolean => {
+			if (dispatch.epochRef.storeEpoch !== input.epochRef.storeEpoch) return false;
+			if (dispatch.epochRef.coordinatorEpoch > input.epochRef.coordinatorEpoch) return false;
+			const canonicalExecutionKey = digestObject({
+				kind: "default-prime-task-attempt",
+				workflowId: input.workflowId,
+				taskId: dispatch.taskId,
+				attemptId: dispatch.attemptId,
+				epochRef: dispatch.epochRef,
+			});
+			if (dispatch.executionKey !== canonicalExecutionKey) return false;
+			if (
+				dispatch.decisionRef.decisionScope.kind !== "workflow" ||
+				dispatch.decisionRef.decisionScope.workflowId !== input.workflowId ||
+				dispatch.decisionRef.storeEpoch !== input.epochRef.storeEpoch
+			)
+				return false;
+			// A digest can only be checked against one this authority can reproduce, which is its own.
+			// A dispatch from an earlier coordinator epoch carries that epoch's decision and is ordinary
+			// recovery, so it keeps the structural checks above and no more.
+			if (dispatch.epochRef.coordinatorEpoch !== input.epochRef.coordinatorEpoch) return true;
+			return dispatch.decisionRef.decisionDigest === input.decisionRef.decisionDigest;
+		};
 		for (const event of replay.events) {
 			if (event.payload.kind === "workflow_dispatch_intent" && taskIds.has(event.payload.taskId)) {
+				if (!dispatchBindingVerifies(event.payload)) continue;
 				dispatchByAttempt.set(event.payload.attemptId, event.payload);
 				if (!launchesByAttempt.has(event.payload.attemptId))
 					launchesByAttempt.set(event.payload.attemptId, {
@@ -3108,6 +3167,22 @@ export function createDefaultTaskRuntimeAuthority(
 					const allowedToolNames = workflowToolsForCapabilities(request.task.authority);
 					return allowedToolNames === undefined ? {} : { allowedToolNames };
 				})(),
+				// The scheduler already refuses overlapping declarations; passing them down is what
+				// lets the host compare a declaration to what the worker actually wrote. A read-only
+				// role is handed an explicitly empty list rather than nothing, because "may write
+				// nothing" has to be enforceable: its tools can write even though its role says it
+				// does not, so the declaration alone proves nothing.
+				...(() => {
+					if (request.task.ownedPaths.length > 0) return { ownedPaths: request.task.ownedPaths };
+					// No write authority means no path may change. Anchoring on authority rather than a
+					// role label matters because the tool table hands `ipython` to a plain
+					// `read_workspace` task, and IPython can write a file - so the grant says read-only
+					// while the tools say otherwise, and only the writes settle it.
+					const mayWrite = request.task.authority.some((capability) =>
+						(WORKFLOW_WRITE_AUTHORITY_CAPABILITIES as readonly string[]).includes(capability),
+					);
+					return mayWrite ? {} : { ownedPaths: [] as readonly string[] };
+				})(),
 				reportHeartbeat: (heartbeat) =>
 					reportTaskHeartbeat(request.task.taskId, request.attemptId, request.executionKey, heartbeat),
 			});
@@ -3293,7 +3368,7 @@ export function createDefaultTaskRuntimeAuthority(
 		scheduler,
 		dispatcher: Object.freeze({}) as WorkflowDispatcher,
 		leases: Object.freeze({}) as WorkflowLeaseManager,
-		effects: Object.freeze({}) as WorkflowEffectBroker,
+		effects: unwiredEffectBroker(),
 		recovery,
 		failureOutbox: durable.outbox,
 		prime: {

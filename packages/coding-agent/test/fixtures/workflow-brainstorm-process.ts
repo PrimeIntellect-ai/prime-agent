@@ -37,6 +37,9 @@ const COMPLETE_PROPOSAL = {
 	],
 	nonGoalIds: ["raw-worker-launch"],
 	budgets: { tokenLimit: 100000, wallTimeLimitSeconds: 7200, spendLimitMicrounits: 0 },
+	// Roles are declared because a planner-authored graph is rejected without one "verification" task
+	// and one terminal "red-team" task (WORKFLOW_REQUIRED_TASK_ROLES, enforced in
+	// normalizeTaskGraphSource). Neither task declares ownedPaths, so no checker owns what it checks.
 	taskGraphSource: {
 		schemaVersion: 1,
 		graphRevision: 1,
@@ -54,6 +57,22 @@ const COMPLETE_PROPOSAL = {
 				budget: { tokenLimit: 100000, wallTimeLimitSeconds: 7200, spendLimitMicrounits: 0 },
 				recovery: "replan",
 				authority: ["read_workspace"],
+				role: "verification",
+			},
+			{
+				taskId: "attack-fresh-process",
+				objective: "Red-team the verified fresh-process contract",
+				requirementIds: ["fresh-process-preflight"],
+				completionCriteria: ["zero-pre-authority-effects"],
+				dependencyTaskIds: ["verify-fresh-process"],
+				boundaryIds: ["zero-pre-authority-effects"],
+				inputRefs: [],
+				outputRefs: ["fresh-process-red-team"],
+				evidencePolicy: { kind: "process_restart", maxBytes: 4096, maxItems: 8, independent: true },
+				budget: { tokenLimit: 100000, wallTimeLimitSeconds: 7200, spendLimitMicrounits: 0 },
+				recovery: "replan",
+				authority: ["read_workspace"],
+				role: "red-team",
 			},
 		],
 	},
@@ -144,6 +163,11 @@ async function propose(): Promise<void> {
 	await session.waitForIdle();
 	await session.promptAndWait("/workflow status");
 	const delivery = await readWorkflowCliApprovalDelivery(sessionManager.getSessionArtifactDir()!);
+	// Fail here rather than exiting 0 with a null approvalRequestId: every consumer of this fixture
+	// asserts on the post-propose approval state, so a rejected proposal has to surface as this
+	// process failing, not as a downstream error 100 lines away.
+	if (delivery === undefined)
+		throw new Error(`workflow propose did not reach approval: ${getMessageText(session.messages.at(-1))}`);
 	const sourceDirectory = join(sessionManager.getSessionArtifactDir()!, "workflow-goal-sources");
 	writeResult({
 		mode,

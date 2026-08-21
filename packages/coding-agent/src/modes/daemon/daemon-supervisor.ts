@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -78,7 +78,7 @@ import {
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "./daemon-protocol.js";
-import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
+import { detectDaemonSourceDrift, getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
 	classifySessionRosterStatus,
@@ -737,6 +737,30 @@ export class DaemonSupervisor {
 			this.server?.once("listening", onListening);
 			this.server?.listen(this.socketPath);
 		});
+	}
+
+	private sourceDriftReported = false;
+
+	/** Log source drift at most once per daemon lifetime; it cannot change without a restart. */
+	private reportSourceDriftOnce(): void {
+		if (this.sourceDriftReported) return;
+		this.sourceDriftReported = true;
+		const drift = detectDaemonSourceDrift(process.env, (sourceDir) => {
+			try {
+				return execFileSync("git", ["describe", "--tags", "--always", "--dirty"], {
+					cwd: sourceDir,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				}).trim();
+			} catch {
+				return undefined;
+			}
+		});
+		if (drift === undefined) return;
+		this.log(
+			`Daemon source has moved since startup: running ${drift.recorded}, tree is now ${drift.current}. ` +
+				"Sessions on this daemon will not pick up changes made after it started; restart to adopt them.",
+		);
 	}
 
 	private log(message: string): void {
@@ -2198,6 +2222,10 @@ export class DaemonSupervisor {
 			}),
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
 		});
+		// Once per worker start, say whether this daemon is running source that has since moved. A pinned
+		// daemon silently withholds every later fix, and the operator has no way to know a restart is the
+		// remedy - that cost a real run an hour.
+		this.reportSourceDriftOnce();
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
 					maxLineLength: 64 * 1024,

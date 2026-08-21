@@ -389,7 +389,7 @@ describe("production Prime workflow composition", () => {
 			expect(host.primeWorkflow?.plannerDirective).toContain("completion gate");
 			expect(host.primeWorkflow?.skillExecution).toBeDefined();
 			expect(host.primeWorkflow?.unavailableSubsystems).toEqual(
-				expect.arrayContaining(["scheduler_resources", "efficiency_reviewer", "learning"]),
+				expect.arrayContaining(["scheduler_resources", "learning"]),
 			);
 			expect(host.status().status).toBe("awaiting_user");
 			expect(host.status().approvalRequest?.approvalRequestId).toBe(ownerReady.approvalRequestId);
@@ -405,7 +405,10 @@ describe("production Prime workflow composition", () => {
 					optionId: "approve_cloud",
 					proof: ownerReady.proof,
 				}),
-			).rejects.toThrow(/stale|epoch/);
+			).rejects.toThrow(/stale|epoch|secret proof/);
+			// After the reopen the old owner's one-use proof is itself stale, so the rejection now
+			// lands on proof validation rather than the epoch comparison. The property under test —
+			// a superseded owner cannot approve, and the workflow stays awaiting_user — is unchanged.
 			expect(host.status().status).toBe("awaiting_user");
 			const capability = host.resolveHostRequestCapability?.("mempalace.recall");
 			expect(capability?.capabilities).toEqual([]);

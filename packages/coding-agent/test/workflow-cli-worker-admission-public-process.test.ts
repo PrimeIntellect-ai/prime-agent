@@ -55,7 +55,7 @@ if (typeof root !== "string" || root.length === 0) throw new Error("worker_admis
 const discoveryServer = createServer((request, response) => {
   if (request.url?.startsWith("/codex/models")) {
     response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ models: [{ slug: WORKER_MODEL_ID }] }));
+    response.end(JSON.stringify({ models: [{ slug: WORKER_MODEL_ID }, { slug: "gpt-5.6-sol" }] }));
     return;
   }
   response.statusCode = 404;
@@ -69,7 +69,13 @@ const address = discoveryServer.address();
 if (address === null || typeof address === "string") throw new Error("worker_discovery_server_address_missing");
 const faux = registerFauxProvider({
   provider: WORKER_MODEL_PROVIDER,
-  models: [{ id: WORKER_MODEL_ID, name: "Faux Luna", reasoning: true }],
+  // Both admitted tiers, because admission enforces worker_model_not_in_catalog: a selector absent
+  // from the catalog is refused before anything else, so a one-model fixture cannot reach the deep
+  // tier at all.
+  models: [
+    { id: WORKER_MODEL_ID, name: "Faux Luna", reasoning: true },
+    { id: "gpt-5.6-sol", name: "Faux Sol", reasoning: true },
+  ],
 });
 const authStorage = AuthStorage.inMemory();
 const workerCredential = "header." + Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "faux-account" } })).toString("base64url") + ".signature";
@@ -168,9 +174,13 @@ const sessionInternals = created.session as unknown as {
   _startRlmChildRun: (...args: unknown[]) => Promise<{ rlm_child_id: string; name: string; session_dir: string; model: string }>;
 };
 const originalStart = sessionInternals._startRlmChildRun;
+const launchArgs = [];
 sessionInternals._startRlmChildRun = async (...args) => {
-  sessionLaunchBinding = args[7];
-  return { rlm_child_id: "session-launch-child", name: "session-launch-worker", session_dir: root, model: WORKER_MODEL_SELECTOR };
+  // Keep the first launch's binding: a later launch must not overwrite what this asserts.
+  sessionLaunchBinding = sessionLaunchBinding ?? args[7];
+  launchArgs.push({ selector: args[1]?.model, thinkingLevel: args[4], ownedPaths: args[9] });
+  // Echo the requested selector: runWorkflowRlmChild rejects a handle whose model differs.
+  return { rlm_child_id: "session-launch-child", name: "session-launch-worker", session_dir: root, model: args[1]?.model };
 };
 await created.session.runWorkflowRlmChild("session launch", "session-launch-worker", WORKER_MODEL_SELECTOR, {
   workflowId: sessionManager.getSessionId(),
@@ -181,6 +191,18 @@ await created.session.runWorkflowRlmChild("session launch", "session-launch-work
   deadlineAt: new Date(Date.now() + 60_000).toISOString(),
   capsuleDigest: "session-capsule-digest",
 });
+// The deep tier is the launch my changes actually alter: a non-default selector has to pass the
+// admission binding comparison and spawn at its own reasoning level, and nothing exercised that end
+// to end before.
+await created.session.runWorkflowRlmChild("deep launch", "deep-worker", WORKER_MODEL_PROVIDER + "/gpt-5.6-sol", {
+  workflowId: sessionManager.getSessionId(),
+  taskId: "task-deep-launch",
+  attemptId: "attempt-deep-launch",
+  executionKey: "execution-deep-launch",
+  epochRef,
+  deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+  capsuleDigest: "deep-capsule-digest",
+}, undefined, undefined, ["src/model"]);
 sessionInternals._startRlmChildRun = originalStart;
 await host.execute({ kind: "pause", reason: "force stale handshake" });
 const staleHandshake = await admission.handshake(admission.intent.childModel);
@@ -231,6 +253,7 @@ console.log(JSON.stringify({
   rawDenied,
   launcherContext: launcherCalls[0]?.[3],
   missingCapsule,
+  launchArgs,
 }));
 `;
 }
@@ -270,7 +293,7 @@ function runChild(root: string): Promise<{ code: number | null; stdout: string; 
 	});
 }
 
-it("composes persisted exact-Luna admission through the CLI service process boundary", async () => {
+it("composes persisted allowlisted admission through the CLI service process boundary", async () => {
 	const root = mkdtempSync(join(tmpdir(), "workflow-cli-worker-admission-"));
 	temporaryRoots.push(root);
 	const result = await runChild(root);
@@ -298,7 +321,16 @@ it("composes persisted exact-Luna admission through the CLI service process boun
 		rawDenied: string;
 		launcherContext: { capsuleDigest?: string };
 		missingCapsule: string;
+		launchArgs: Array<{ selector?: string; thinkingLevel?: string; ownedPaths?: readonly string[] }>;
 	};
+	// Two launches went through the real admission path: the default selector and the deep tier. The
+	// deep one is what these changes altered - the binding comparison now checks the requested
+	// selector rather than the default constant, and the spawn takes that model's own reasoning level
+	// instead of a hardcoded "max". Nothing exercised a non-default selector end to end before.
+	expect(evidence.launchArgs).toEqual([
+		{ selector: "openai-codex/gpt-5.6-luna", thinkingLevel: "max", ownedPaths: undefined },
+		{ selector: "openai-codex/gpt-5.6-sol", thinkingLevel: "high", ownedPaths: ["src/model"] },
+	]);
 	expect(evidence).toMatchObject({
 		activeStatus: "active",
 		handshake: { status: "accepted" },

@@ -15,7 +15,47 @@ export const WORKER_MODEL_CAPABILITY = "workflow_worker_model_dispatch" as const
 export const WORKER_MODEL_PROVIDER = "openai-codex" as const;
 export const WORKER_MODEL_ID = "gpt-5.6-luna" as const;
 export const WORKER_MODEL_SELECTOR = `${WORKER_MODEL_PROVIDER}/${WORKER_MODEL_ID}` as const;
-export const WORKER_MODEL_REASONING = "max" as const;
+
+/**
+ * Every model the host will admit as a worker.
+ *
+ * Compute tiering needs more than one selector, but the set stays closed: an arbitrary selector
+ * reaching the gate is denied rather than admitted, so no caller can substitute a model the host
+ * never vetted. WORKER_MODEL_ID remains the default when a task declares no compute class.
+ */
+export const WORKER_MODEL_IDS = Object.freeze(["gpt-5.6-luna", "gpt-5.6-sol"] as const);
+
+/**
+ * Reasoning level each admitted model runs at.
+ *
+ * One table rather than one constant, because the tiers are chosen for different reasons: the cheap
+ * tier does the bulk of ordinary work and runs at max, while the deep tier is picked for tasks where
+ * the model itself is the upgrade and pays for that in latency rather than in effort. The gate
+ * rejects a policy whose reasoning disagrees with this table, so a caller cannot run an admitted
+ * model at a level the host never vetted.
+ */
+export const WORKER_MODEL_REASONING_BY_ID = Object.freeze({
+	"gpt-5.6-luna": "max",
+	// A model's thinkingLevelMap needs explicit entries only for xhigh and max; every other level
+	// passes through, so sol supports off/low/medium/high/xhigh/max and "high" is not clamped.
+	// workflow-worker-reasoning-tier asserts that against the catalog, because reading the map alone
+	// suggests the opposite.
+	"gpt-5.6-sol": "high",
+} as const satisfies Record<(typeof WORKER_MODEL_IDS)[number], string>);
+
+/** Reasoning level of the default worker model. */
+export const WORKER_MODEL_REASONING = WORKER_MODEL_REASONING_BY_ID[WORKER_MODEL_ID];
+
+/**
+ * Reasoning level for an admitted worker model id.
+ *
+ * Args:
+ * modelId: Model id from a launch request.
+ * Return: The declared level, or undefined when the id is not admitted.
+ */
+export function workerModelReasoningFor(modelId: string): string | undefined {
+	return (WORKER_MODEL_REASONING_BY_ID as Readonly<Record<string, string>>)[modelId];
+}
 
 /** Authenticated auxiliary record used by the gate; it is not a session ledger. */
 export const WORKER_MODEL_CAPABILITY_AUXILIARY_NAME = "worker-model-capability-gate.json" as const;
@@ -425,7 +465,10 @@ function normalizePolicy(input: WorkerModelPolicyInput): WorkerModelPolicy {
 	const provider = safeString(input.provider, "worker_model_policy_provider", 256);
 	if (input.model === undefined) throw new Error("worker_model_policy_model_required");
 	const model = safeString(input.model, "worker_model_policy_model", 512);
+	const admittedReasoning = workerModelReasoningFor(model);
+	if (admittedReasoning === undefined) throw new Error("worker_model_policy_selector_denied");
 	const reasoning = safeString(input.reasoning, "worker_model_policy_reasoning", 128);
+	if (reasoning !== admittedReasoning) throw new Error("worker_model_policy_reasoning_denied");
 	if (input.allowFallback !== false) throw new Error("worker_model_policy_fallback_forbidden");
 	const policyRevision = safeString(input.policyRevision, "worker_model_policy_revision", 256);
 	return { provider, model, reasoning, allowFallback: false, policyRevision };

@@ -1055,8 +1055,63 @@ export const WORKFLOW_TASK_ROLES = Object.freeze([
 ] as const);
 export type WorkflowTaskRole = (typeof WORKFLOW_TASK_ROLES)[number];
 
+/** Roles that exist to look, not to write; stage validation refuses them a mutating capability. */
+export const WORKFLOW_READ_ONLY_TASK_ROLES = Object.freeze(["planning", "design", "recon", "review"] as const);
+
+/**
+ * Capabilities that grant a task permission to change files.
+ *
+ * A task holding none of these may write nothing, and the host enforces that against its actual
+ * writes rather than its declaration - because the tool table hands `ipython` to a plain
+ * `read_workspace` task and IPython can write a file. The capability grant and the tool grant
+ * disagree, so the declaration alone never proved the property.
+ */
+export const WORKFLOW_WRITE_AUTHORITY_CAPABILITIES = Object.freeze([
+	"write_owned_paths",
+	"invoke_host_effect",
+	"write_canonical_knowledge",
+] as const);
+
 /** Roles that must appear somewhere in an accepted graph, so checks cannot be omitted. */
 export const WORKFLOW_REQUIRED_TASK_ROLES = Object.freeze(["verification", "red-team"] as const);
+
+/**
+ * Roles whose output *is* reasoning, so the tier floor does not depend on the plan guessing right.
+ *
+ * A planner asked to pick the cheapest workable tier will under-tier the task whose quality decides
+ * every task downstream. Roles listed here are raised to their floor; a plan may still ask for more
+ * than the floor, never less. Roles absent from the map keep whatever the plan declared - notably
+ * "architect", which is a builtin stage whose tier BUILTIN_STAGE_COMPUTE already assigns; listing it
+ * here too would give one name two answers.
+ */
+const WORKFLOW_ROLE_COMPUTE_FLOOR: Readonly<Partial<Record<WorkflowTaskRole, WorkflowRecipeComputeClass>>> =
+	Object.freeze({
+		planning: "deep",
+		design: "deep",
+		judge: "deep",
+		synthesize: "deep",
+		unify: "deep",
+		"red-team": "deep",
+	});
+
+/**
+ * Raise a declared compute class to its role's floor.
+ *
+ * Args:
+ * role: Task role from the plan, or undefined when the plan named none.
+ * declared: Compute class the plan asked for, or undefined when it omitted one.
+ * Return: The higher of the declared class and the role floor; undefined only when neither applies.
+ */
+export function workflowComputeClassForRole(
+	role: WorkflowTaskRole | undefined,
+	declared: WorkflowRecipeComputeClass | undefined,
+): WorkflowRecipeComputeClass | undefined {
+	const floor = role === undefined ? undefined : WORKFLOW_ROLE_COMPUTE_FLOOR[role];
+	if (floor === undefined) return declared;
+	if (declared === undefined) return floor;
+	const rank = (value: WorkflowRecipeComputeClass): number => WORKFLOW_RECIPE_COMPUTE_CLASSES.indexOf(value);
+	return rank(declared) >= rank(floor) ? declared : floor;
+}
 
 const WORKFLOW_RECIPE_REGISTRY_MANIFEST_PREIMAGE = Object.freeze({
 	registryId: WORKFLOW_RECIPE_REGISTRY_ID,
@@ -4213,7 +4268,7 @@ function validateStages(
 				fail("unknown_capability", `stage ${stage.id} references ${capabilityId}.`);
 		}
 		if (
-			["planning", "design", "recon", "review"].includes(stage.role) &&
+			(WORKFLOW_READ_ONLY_TASK_ROLES as readonly string[]).includes(stage.role) &&
 			(stage.capabilityIds ?? []).some((capabilityId) =>
 				["write_owned_paths", "edit", "invoke_host_effect", "shell", "ipython", "recursive_spawn"].includes(
 					capabilityId,
@@ -4224,7 +4279,7 @@ function validateStages(
 		const boundTask = graph.byId.get(stage.taskId);
 		if (
 			boundTask !== undefined &&
-			["planning", "design", "recon", "review"].includes(stage.role) &&
+			(WORKFLOW_READ_ONLY_TASK_ROLES as readonly string[]).includes(stage.role) &&
 			boundTask.authority.some((capability) => !["read_workspace", "read_external_evidence"].includes(capability))
 		)
 			fail("capability_status_invalid", `${stage.role} task authority must remain read-only.`);
