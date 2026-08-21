@@ -13,6 +13,8 @@ import {
 } from "../src/cli/daemon-launch.js";
 import { ENV_AGENT_DIR, getDaemonLogPath, VERSION } from "../src/config.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
+// 2026-08-21 Nox: Windows can't bind Unix-style Temp socket paths — use the named-pipe helper.
+import { daemonTestSocketPath } from "./helpers/daemon-test-socket.js";
 
 interface FakeDaemonOptions {
 	/** Sessions returned for a `list` command. */
@@ -40,7 +42,8 @@ function send(socket: Socket, message: unknown): void {
 
 async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDaemon> {
 	const dir = mkdtempSync(join(tmpdir(), "pa-launch-"));
-	const socketPath = join(dir, "d.sock");
+	// 2026-08-21 Nox: named pipe on Windows — Temp Unix paths never emit "listening" (30s test hang).
+	const socketPath = daemonTestSocketPath("launch");
 	const server: Server = createServer((socket) => {
 		socket.on("error", () => undefined);
 		send(socket, {
@@ -109,7 +112,8 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 
 async function startCrashingDaemon(): Promise<FakeDaemon> {
 	const dir = mkdtempSync(join(tmpdir(), "pa-launch-crash-"));
-	const socketPath = join(dir, "d.sock");
+	// 2026-08-21 Nox: named pipe on Windows — Temp Unix paths never bind in the spawned child.
+	const socketPath = daemonTestSocketPath("launch-crash");
 	const child = spawn(
 		process.execPath,
 		[
@@ -342,7 +346,8 @@ describe("ensureInteractiveDaemonRunning", () => {
 	it("succeeds when the spawned child loses the race to an already-serving daemon", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pa-launch-startup-race-"));
 		const entrypoint = join(dir, "loser.mjs");
-		const socketPath = join(dir, "d.sock");
+		// 2026-08-21 Nox: named pipe on Windows — Temp Unix path would hang server.listen.
+		const socketPath = daemonTestSocketPath("startup-race");
 		const originalAgentDir = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = join(dir, "agent");
 		writeFileSync(entrypoint, "process.exit(7);");

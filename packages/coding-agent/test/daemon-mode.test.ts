@@ -593,80 +593,84 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("canonicalizes symlinked paths in the family catalog and name reservations", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-family-catalog-paths-"));
-		try {
-			const realDir = join(tempDir, "real");
-			const aliasDir = join(tempDir, "alias");
-			mkdirSync(realDir);
-			symlinkSync(realDir, aliasDir, "dir");
-			const parentPath = join(realDir, "parent.jsonl");
-			writeFileSync(parentPath, "");
-			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
-				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: tempDir },
-				createRuntime: vi.fn(),
-			});
-			const parent = makeState("parent");
-			parent.runtime = {
-				...parent.runtime,
-				cwd: tempDir,
-				metadata: { kind: "top-level", createdAt: 1 },
-				session: {
-					sessionId: "session-parent",
-					sessionName: "parent",
-					sessionFile: parentPath,
-					sessionManager: { getSessionArtifactDir: () => undefined },
-					rlmDepth: 0,
-					isStreaming: false,
-					isSessionActive: false,
-					unfinishedActionCount: 0,
-					hasRunningRlmChildren: () => false,
-				},
-			} as never;
-			const child = {
-				activeSessionId: "child-active",
-				sessionId: "session-child",
-				sessionName: "child",
-				runtimeKind: "subagent",
-				cwd: tempDir,
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				parentSessionPath: join(aliasDir, "parent.jsonl"),
-				rlmDepth: 1,
-				status: "idle",
-			};
-			const internals = daemon as unknown as {
-				sessions: Map<string, ActiveSessionState>;
-				remoteAgentPeers: Map<string, typeof child>;
-				createAgentFamilyRoster(state: ActiveSessionState): Promise<{ entries: Array<{ id: string }> }>;
-			};
-			internals.sessions.set(parent.activeSessionId, parent);
-			internals.remoteAgentPeers.set(child.activeSessionId, child);
-			const listAll = vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
+	// 2026-08-21 Nox: creating dir symlinks on Windows requires elevation (EPERM otherwise) — POSIX-only test.
+	it.skipIf(process.platform === "win32")(
+		"canonicalizes symlinked paths in the family catalog and name reservations",
+		async () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-family-catalog-paths-"));
 			try {
-				expect(await internals.createAgentFamilyRoster(parent)).toMatchObject({
-					entries: [expect.objectContaining({ id: "session-child" })],
+				const realDir = join(tempDir, "real");
+				const aliasDir = join(tempDir, "alias");
+				mkdirSync(realDir);
+				symlinkSync(realDir, aliasDir, "dir");
+				const parentPath = join(realDir, "parent.jsonl");
+				writeFileSync(parentPath, "");
+				const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+					defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: tempDir },
+					createRuntime: vi.fn(),
 				});
-				expect(
-					sessionNameReservationKey({
-						name: "worker",
-						depth: 1,
-						parentSessionPath: parentPath,
-					}),
-				).toBe(
-					sessionNameReservationKey({
-						name: "worker",
-						depth: 1,
-						parentSessionPath: join(aliasDir, "parent.jsonl"),
-					}),
-				);
+				const parent = makeState("parent");
+				parent.runtime = {
+					...parent.runtime,
+					cwd: tempDir,
+					metadata: { kind: "top-level", createdAt: 1 },
+					session: {
+						sessionId: "session-parent",
+						sessionName: "parent",
+						sessionFile: parentPath,
+						sessionManager: { getSessionArtifactDir: () => undefined },
+						rlmDepth: 0,
+						isStreaming: false,
+						isSessionActive: false,
+						unfinishedActionCount: 0,
+						hasRunningRlmChildren: () => false,
+					},
+				} as never;
+				const child = {
+					activeSessionId: "child-active",
+					sessionId: "session-child",
+					sessionName: "child",
+					runtimeKind: "subagent",
+					cwd: tempDir,
+					isStreaming: false,
+					unfinishedActionCount: 0,
+					parentSessionPath: join(aliasDir, "parent.jsonl"),
+					rlmDepth: 1,
+					status: "idle",
+				};
+				const internals = daemon as unknown as {
+					sessions: Map<string, ActiveSessionState>;
+					remoteAgentPeers: Map<string, typeof child>;
+					createAgentFamilyRoster(state: ActiveSessionState): Promise<{ entries: Array<{ id: string }> }>;
+				};
+				internals.sessions.set(parent.activeSessionId, parent);
+				internals.remoteAgentPeers.set(child.activeSessionId, child);
+				const listAll = vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
+				try {
+					expect(await internals.createAgentFamilyRoster(parent)).toMatchObject({
+						entries: [expect.objectContaining({ id: "session-child" })],
+					});
+					expect(
+						sessionNameReservationKey({
+							name: "worker",
+							depth: 1,
+							parentSessionPath: parentPath,
+						}),
+					).toBe(
+						sessionNameReservationKey({
+							name: "worker",
+							depth: 1,
+							parentSessionPath: join(aliasDir, "parent.jsonl"),
+						}),
+					);
+				} finally {
+					listAll.mockRestore();
+				}
 			} finally {
-				listAll.mockRestore();
+				rmSync(tempDir, { recursive: true, force: true });
 			}
-		} finally {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 
 	it("lists and sends agent messages to completed retained subagents", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
@@ -2586,7 +2590,8 @@ describe("daemon mode helpers", () => {
 		expect((await internals.createAgentObserveListResult(targetState)).current.status).toBe("compacting");
 	});
 
-	it("canonicalizes symlinked family paths before comparison", () => {
+	// 2026-08-21 Nox: creating dir symlinks on Windows requires elevation (EPERM otherwise) — POSIX-only test.
+	it.skipIf(process.platform === "win32")("canonicalizes symlinked family paths before comparison", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-family-paths-"));
 		try {
 			const realDir = join(tempDir, "real");
@@ -7531,41 +7536,49 @@ describe("daemon mode helpers", () => {
 	});
 
 	// chmod-based read-only dirs don't block root, so skip when running as uid 0.
-	it.skipIf(process.getuid?.() === 0)("does not fail a deletion when the artifact dir cannot be removed", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-artifact-rm-failure-"));
-		let lockedRoot: string | undefined;
-		try {
-			const fixture = makePersistedRlmDaemonFixture(tempDir);
-			const nestedArtifactsRoot = resolve(fixture.childArtifactDir, "..");
-			const internals = fixture.daemon as unknown as {
-				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
-			};
-			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
-			chmodSync(nestedArtifactsRoot, 0o555);
-			lockedRoot = nestedArtifactsRoot;
+	// 2026-08-21 Nox: Windows ignores POSIX mode bits (chmod 0o555 doesn't block rmSync), so
+	// this perms-based fixture only behaves on POSIX non-root — skip it there like root.
+	it.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+		"does not fail a deletion when the artifact dir cannot be removed",
+		async () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-artifact-rm-failure-"));
+			let lockedRoot: string | undefined;
+			try {
+				const fixture = makePersistedRlmDaemonFixture(tempDir);
+				const nestedArtifactsRoot = resolve(fixture.childArtifactDir, "..");
+				const internals = fixture.daemon as unknown as {
+					createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+					createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				};
+				const parentState = await internals.createRuntime({
+					type: "create",
+					sessionPath: fixture.parentSessionFile,
+				});
+				chmodSync(nestedArtifactsRoot, 0o555);
+				lockedRoot = nestedArtifactsRoot;
 
-			// Cache cleanup is best-effort: the rm failure must not surface.
-			await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
+				// Cache cleanup is best-effort: the rm failure must not surface.
+				await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
 
-			expect(existsSync(fixture.childArtifactDir)).toBe(true);
-			// Both tombstones are still durable.
-			const display = JSON.parse(readFileSync(join(fixture.childSessionDir, "rlm-subagent.json"), "utf8")) as {
-				status: string;
-			};
-			expect(display).toMatchObject({ status: "deleted" });
-			const ledgerFile = readdirSync(join(tempDir, "rlm-ledger")).find((name) => name.endsWith(".jsonl"));
-			if (!ledgerFile) throw new Error("Missing RLM ledger file");
-			const ledgerOps = readFileSync(join(tempDir, "rlm-ledger", ledgerFile), "utf8")
-				.trim()
-				.split(/\r?\n/)
-				.map((line) => JSON.parse(line) as { op: string; childId?: string });
-			expect(ledgerOps.some((record) => record.op === "delete" && record.childId === fixture.childId)).toBe(true);
-		} finally {
-			if (lockedRoot) chmodSync(lockedRoot, 0o755);
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
+				expect(existsSync(fixture.childArtifactDir)).toBe(true);
+				// Both tombstones are still durable.
+				const display = JSON.parse(readFileSync(join(fixture.childSessionDir, "rlm-subagent.json"), "utf8")) as {
+					status: string;
+				};
+				expect(display).toMatchObject({ status: "deleted" });
+				const ledgerFile = readdirSync(join(tempDir, "rlm-ledger")).find((name) => name.endsWith(".jsonl"));
+				if (!ledgerFile) throw new Error("Missing RLM ledger file");
+				const ledgerOps = readFileSync(join(tempDir, "rlm-ledger", ledgerFile), "utf8")
+					.trim()
+					.split(/\r?\n/)
+					.map((line) => JSON.parse(line) as { op: string; childId?: string });
+				expect(ledgerOps.some((record) => record.op === "delete" && record.childId === fixture.childId)).toBe(true);
+			} finally {
+				if (lockedRoot) chmodSync(lockedRoot, 0o755);
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("still sweeps and resolves when scheduled-job cancellation throws", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-artifact-cancel-throw-"));
