@@ -4,6 +4,7 @@ import {
 	EventStream,
 	type Message,
 	type Model,
+	type StopReason,
 	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -109,6 +110,44 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 }
 
 describe("agentLoop with AgentMessage", () => {
+	it("continues after an unknown provider finish reason", async () => {
+		const context: AgentContext = {
+			systemPrompt: "You are helpful.",
+			messages: [],
+			tools: [],
+		};
+		const responses = [
+			createAssistantMessage([{ type: "thinking", thinking: "partial" }], "unknown"),
+			createAssistantMessage([{ type: "text", text: "complete" }], "stop"),
+		];
+		let callCount = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			const message = responses[callCount++];
+			if (!message) throw new Error("unexpected provider call");
+			queueMicrotask(() =>
+				stream.push({
+					type: "done",
+					reason: message.stopReason as Extract<StopReason, "stop" | "length" | "toolUse" | "unknown">,
+					message,
+				}),
+			);
+			return stream;
+		};
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Finish the answer")],
+			context,
+			{ model: createModel(), convertToLlm: identityConverter },
+			vi.fn(),
+			undefined,
+			streamFn,
+		);
+
+		expect(callCount).toBe(2);
+		expect(messages.filter((message) => message.role === "assistant")).toEqual(responses);
+	});
+
 	it("should preserve a terminal response when abort fires after done", async () => {
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",

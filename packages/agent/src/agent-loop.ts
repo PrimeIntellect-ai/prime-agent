@@ -349,7 +349,10 @@ async function runLoop(
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
-			hasMoreToolCalls = false;
+			// Some providers report an incomplete reasoning turn as "unknown".
+			// Continue the same turn so the model can finish, just as it does after
+			// tool use, instead of silently ending the agent loop mid-response.
+			hasMoreToolCalls = message.stopReason === "unknown";
 			if (toolCalls.length > 0) {
 				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
 				toolResults.push(...executedToolBatch.messages);

@@ -84,7 +84,7 @@ interface AssistantMessage {
   provider: string;
   model: string;
   usage: Usage;
-  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted";
+  stopReason: "stop" | "length" | "toolUse" | "unknown" | "error" | "aborted";
   errorMessage?: string;
   timestamp: number;
 }

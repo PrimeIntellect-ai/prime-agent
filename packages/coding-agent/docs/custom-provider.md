@@ -404,7 +404,7 @@ function streamMyProvider(
       // Push done event
       stream.push({
         type: "done",
-        reason: output.stopReason as "stop" | "length" | "toolUse",
+        reason: output.stopReason as "stop" | "length" | "toolUse" | "unknown",
         message: output
       });
       stream.end();

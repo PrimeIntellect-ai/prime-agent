@@ -211,7 +211,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 					stream.push({
 						type: "done",
-						reason: output.stopReason as "stop" | "length" | "toolUse",
+						reason: output.stopReason as "stop" | "length" | "toolUse" | "unknown",
 						message: output,
 					});
 					stream.end();
@@ -307,7 +307,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error("Request was aborted");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
+			stream.push({
+				type: "done",
+				reason: output.stopReason as "stop" | "length" | "toolUse" | "unknown",
+				message: output,
+			});
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {

@@ -530,7 +530,7 @@ export async function processResponsesStream<TApi extends Api>(
 }
 
 function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): StopReason {
-	if (!status) return "stop";
+	if (!status) return "unknown";
 	switch (status) {
 		case "completed":
 			return "stop";

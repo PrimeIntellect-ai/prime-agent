@@ -36,7 +36,7 @@ export type ProxyAssistantMessageEvent =
 	| { type: "toolcall_end"; contentIndex: number }
 	| {
 			type: "done";
-			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
+			reason: Extract<StopReason, "stop" | "length" | "toolUse" | "unknown">;
 			usage: AssistantMessage["usage"];
 	  }
 	| {

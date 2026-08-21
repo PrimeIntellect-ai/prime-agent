@@ -1,0 +1,1 @@
+- Changed a missing OpenAI Responses terminal status to map to the `unknown` stop reason instead of `stop`, so consumers can distinguish incomplete turns from completed ones.

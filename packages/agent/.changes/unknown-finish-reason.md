@@ -1,0 +1,1 @@
+- Fixed the agent loop ending mid-response when a provider reports an incomplete reasoning turn: a missing terminal finish reason now maps to the public `unknown` stop reason and continues the turn like tool use.
