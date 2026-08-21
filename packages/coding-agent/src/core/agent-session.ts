@@ -1298,6 +1298,11 @@ export class AgentSession {
 		});
 	}
 
+	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
+	refreshMcpProviders(): void {
+		this._mcpManager?.refresh();
+	}
+
 	/**
 	 * Set the RLM heartbeat controller after construction. Used by
 	 * print/headless mode to attach an in-process heartbeat scheduler

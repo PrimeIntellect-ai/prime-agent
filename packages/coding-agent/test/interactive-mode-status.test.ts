@@ -1077,6 +1077,7 @@ describe("InteractiveMode MCP command", () => {
 	type McpCommandHarness = {
 		modelRegistry: { authStorage: { get(providerId: string): unknown } };
 		settingsManager: SettingsManager;
+		uiServices: { refreshMcpProviders?(): void };
 		showConfigurationMenu(tab: "mcp-connections"): Promise<void>;
 		showStatus(message: string): void;
 		showError(message: string): void;
@@ -1121,6 +1122,7 @@ describe("InteractiveMode MCP command", () => {
 		return {
 			modelRegistry: { authStorage: { get: vi.fn(() => undefined), removeVerified: vi.fn() } },
 			settingsManager: manager,
+			uiServices: { refreshMcpProviders: vi.fn() },
 			chatContainer,
 			ui,
 			showStatus,
@@ -1146,6 +1148,7 @@ describe("InteractiveMode MCP command", () => {
 
 		await handleMcpCommand.call(fakeThis, "add fetch -- uvx mcp-server-fetch --token secret");
 
+		expect(fakeThis.uiServices.refreshMcpProviders).toHaveBeenCalledOnce();
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
 			'Added MCP server "fetch" (stdio). Available next turn through mcp.',
 		);
@@ -1177,6 +1180,52 @@ describe("InteractiveMode MCP command", () => {
 		expect(rendered).toContain("not active in this session");
 		expect(rendered).not.toContain("Available next turn through mcp");
 		expect(manager.getGlobalMcpServers()).toHaveProperty("fetch");
+	});
+
+	test("refreshes MCP providers before deferring a changed command while busy", async () => {
+		const manager = SettingsManager.inMemory({});
+		const events: string[] = [];
+		const fakeThis = createRenderedMcpHarness(manager);
+		fakeThis.uiServices.refreshMcpProviders = vi.fn(() => events.push("refresh"));
+		fakeThis.handleReloadCommand = vi.fn(async () => true);
+		fakeThis.isAgentStreaming = vi.fn(() => true);
+		fakeThis.showStatus = vi.fn((message: string) => events.push(message));
+
+		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
+
+		expect(events[0]).toBe("refresh");
+		expect(fakeThis.handleReloadCommand).not.toHaveBeenCalled();
+		expect(events.join("\n")).toContain("Run /mcp login remote to connect.");
+		expect(events.join("\n")).toContain("Run /reload after the current turn to activate it.");
+	});
+
+	test("guides OAuth server additions to explicit login after refresh", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = createRenderedMcpHarness(manager);
+		const events: string[] = [];
+		fakeThis.uiServices.refreshMcpProviders = vi.fn(() => events.push("refresh"));
+		fakeThis.handleReloadCommand = vi.fn(async () => {
+			events.push("reload");
+			return true;
+		});
+
+		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
+
+		expect(events).toEqual(["refresh", "reload"]);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain("Run /mcp login remote to connect.");
+	});
+
+	test("keeps OAuth guidance accurate for legacy UI service hosts", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = createRenderedMcpHarness(manager);
+		fakeThis.uiServices = {};
+		fakeThis.handleReloadCommand = vi.fn(async () => true);
+
+		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
+
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
+			"Restart Prime Agent, then run /mcp login remote to connect.",
+		);
 	});
 
 	test("renders inspectable redacted list and get output", async () => {
