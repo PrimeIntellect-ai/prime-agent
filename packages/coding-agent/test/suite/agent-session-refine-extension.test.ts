@@ -135,6 +135,42 @@ describe("AgentSession session_before_refine extension hook", () => {
 		expect(handlerCalls).toBe(1);
 	});
 
+	it("consumes a non-serialized auto-refine round when an extension skips it", async () => {
+		let handlerCalls = 0;
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
+			autoRefineReviewer: async () => ({ shouldRefine: true, rationale: "durable lesson" }),
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_refine", async () => {
+						handlerCalls += 1;
+						return { skip: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as {
+			_maybeAutoRefine(reason: "turn_interval"): Promise<void>;
+			_assistantTurnsSinceAutoRefine: number;
+			_turnIntervalAutoRefinePending: boolean;
+			_pendingAutoRefineReview?: unknown;
+		};
+		internals._assistantTurnsSinceAutoRefine = 1;
+
+		await internals._maybeAutoRefine("turn_interval");
+
+		expect(handlerCalls).toBe(1);
+		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
+		expect(internals._turnIntervalAutoRefinePending).toBe(false);
+		expect(internals._pendingAutoRefineReview).toBeUndefined();
+		expect(harness.eventsOfType("refine_failed")).toHaveLength(0);
+
+		await internals._maybeAutoRefine("turn_interval");
+		expect(handlerCalls).toBe(1);
+	});
+
 	it("marks serialized auto-refine as trigger auto and treats extension skip as a non-failure", async () => {
 		const events: SessionBeforeRefineEvent[] = [];
 		const harness = await createHarness({

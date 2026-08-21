@@ -7824,11 +7824,18 @@ export class AgentSession {
 			if (reason === "compact") {
 				this._compactAutoRefinePending = false;
 			}
-		} catch {
+		} catch (error) {
 			// Auto-refine is opportunistic; manual /refine remains available.
 			// Stamp the cooldown so a persistently failing refine doesn't retry
 			// (via a retained pending review) on every agent end.
 			this._lastAutoRefineReviewAt = Date.now();
+			if (error instanceof RefineSkippedError) {
+				// A skipped round is consumed like a reviewer decline, not retained for retry.
+				this._pendingAutoRefineReview = undefined;
+				this._turnIntervalAutoRefinePending = false;
+				this._assistantTurnsSinceAutoRefine = 0;
+				if (reason === "compact") this._compactAutoRefinePending = false;
+			}
 		} finally {
 			this._autoRefineInProgress = false;
 			this._scheduleDeferredAutoRefineIfIdle();
