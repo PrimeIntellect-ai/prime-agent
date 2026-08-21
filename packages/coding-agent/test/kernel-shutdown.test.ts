@@ -103,7 +103,8 @@ describe("KernelManager graceful shutdown", () => {
 		try {
 			const shutdown = manager.shutdown();
 			await vi.advanceTimersByTimeAsync(100);
-			await shutdown;
+			// True = this call performed the cleanup: startup-failure recovery relies on it to resurrect to idle.
+			await expect(shutdown).resolves.toBe(true);
 			expect(internals.kernel).toBeUndefined();
 		} finally {
 			vi.useRealTimers();

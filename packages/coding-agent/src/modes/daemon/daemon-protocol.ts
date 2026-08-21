@@ -17,6 +17,7 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { InputSource } from "../../core/extensions/types.js";
+import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { CustomMessage } from "../../core/messages.js";
 import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
@@ -64,8 +65,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 18 adds the opt-in RLM quiescence barrier to headless completion.
 // Revision 19 adds daemon-held session input pauses.
 // Revision 20 lets cancellation target a prompt the session owns but has not started.
-export const DAEMON_SCHEMA_REVISION = 20;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-20-ed994cc39507";
+// Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
+// Revision 22 scopes ACP MCP replacement and cleanup to a connection owner.
+export const DAEMON_SCHEMA_REVISION = 22;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-22-4d515169dc6b";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -109,7 +112,8 @@ export type DaemonServerCapability =
 	| "owned_session_recovery_context"
 	| "rlm_quiescence_barrier"
 	| "session_input_pause"
-	| "owned_prompt_cancellation";
+	| "owned_prompt_cancellation"
+	| "acp_mcp_servers";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -153,6 +157,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"owned_session_recovery_context",
 	"rlm_quiescence_barrier",
 	"session_input_pause",
+	"acp_mcp_servers",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -534,6 +539,13 @@ export type DaemonCommand =
 	| { id?: string; type: "get_context_tree"; activeSessionId: string }
 	| { id?: string; type: "get_commands"; activeSessionId: string }
 	| { id?: string; type: "get_resource_snapshot"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "replace_acp_mcp_servers";
+			activeSessionId: string;
+			ownerId: string;
+			servers: AcpMcpServerConfig[];
+	  }
 	| { id?: string; type: "get_model_catalog"; activeSessionId: string }
 	| { id?: string; type: "get_available_models"; activeSessionId: string }
 	| { id?: string; type: "get_queue"; activeSessionId: string }
@@ -745,6 +757,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_context_tree: LEGACY_DAEMON_COMMAND,
 	get_commands: LEGACY_DAEMON_COMMAND,
 	get_resource_snapshot: LEGACY_DAEMON_COMMAND,
+	replace_acp_mcp_servers: { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" },
 	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,

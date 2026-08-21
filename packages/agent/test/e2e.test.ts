@@ -268,7 +268,10 @@ describe("Agent.continue() with faux provider", () => {
 				},
 			});
 
-			await expect(agent.continue()).rejects.toThrow("No messages to continue from");
+			await expect(agent.continue()).rejects.toMatchObject({
+				code: "nothing-to-continue",
+				message: "No messages to continue from",
+			});
 		});
 
 		it("throws when last message is assistant", async () => {
@@ -300,7 +303,10 @@ describe("Agent.continue() with faux provider", () => {
 			};
 			agent.state.messages = [assistantMessage];
 
-			await expect(agent.continue()).rejects.toThrow("Cannot continue from message role: assistant");
+			await expect(agent.continue()).rejects.toMatchObject({
+				code: "nothing-to-continue",
+				message: "Cannot continue from message role: assistant",
+			});
 		});
 	});
 

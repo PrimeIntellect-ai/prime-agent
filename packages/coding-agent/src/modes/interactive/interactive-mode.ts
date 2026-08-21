@@ -7114,7 +7114,10 @@ export class InteractiveMode {
 		const earlier = this.getAppKeyDisplay("app.message.moveEarlier");
 		const later = this.getAppKeyDisplay("app.message.moveLater");
 		const queue = this.getAppKeyDisplay("app.message.followUp");
-		return `${lane} ${selected.index + 1} · ${older}/${newer} browse · ${earlier}/${later} reorder · enter steers · ${queue} queues · empty deletes`;
+		return theme.fg(
+			"dim",
+			`${lane} ${selected.index + 1} · ${older}/${newer} browse · ${earlier}/${later} reorder · enter steers · ${queue} queues · empty deletes`,
+		);
 	}
 
 	private updateEditorBorderColor(): void {
@@ -7851,7 +7854,8 @@ export class InteractiveMode {
 	}
 
 	private handleFastCommand(): void {
-		const unavailableMessage = "Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT authentication";
+		const unavailableMessage =
+			"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
 		if (!this.currentModelSupportsFastMode()) {
 			this.showStatus(unavailableMessage);
 			return;

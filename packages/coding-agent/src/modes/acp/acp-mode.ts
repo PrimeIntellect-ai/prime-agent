@@ -18,6 +18,7 @@ import type {
 } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
+import { resolveAcpMcpServers } from "./acp-mcp.js";
 import { PRIME_AGENT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
 import { type AcpStopReason, acpStopReason } from "./acp-stop-reason.js";
 
@@ -466,6 +467,39 @@ export async function runAcpModeWithConnection(
 	if (options.ownStdout !== false && !options.stream) {
 		takeOverStdout();
 	}
+	const supportsMcpServers =
+		connection.supportsAcpMcpServers?.() === true &&
+		connection.replaceAcpMcpServers !== undefined &&
+		connection.releaseAcpMcpServers !== undefined;
+	const acpMcpOwnerId = randomUUID();
+	let acpMcpServerNames: string[] = [];
+	const clearAcpMcpServers = async (serverNames = acpMcpServerNames): Promise<void> => {
+		if (!supportsMcpServers || !connection.releaseAcpMcpServers) return;
+		await connection.releaseAcpMcpServers(acpMcpOwnerId, serverNames);
+		acpMcpServerNames = [];
+	};
+	const replaceAcpMcpServers = async (servers: readonly acp.McpServer[], cwd: string): Promise<void> => {
+		if (acpMcpServerNames.length > 0) {
+			// Retry a prior best-effort close before admitting another session,
+			// including one that does not declare replacement MCP servers.
+			await clearAcpMcpServers();
+		}
+		if (servers.length === 0 && acpMcpServerNames.length === 0) return;
+		if (!supportsMcpServers || !connection.replaceAcpMcpServers) {
+			throw acp.RequestError.invalidParams({ reason: "MCP servers are unavailable in this ACP host" });
+		}
+		const resolved = resolveAcpMcpServers(servers, cwd);
+		const serverNames = resolved.map((server) => server.name);
+		try {
+			await connection.replaceAcpMcpServers(resolved, acpMcpOwnerId);
+		} catch (error) {
+			// The daemon may have applied the configuration before its acknowledgement
+			// was lost. Always attempt owner-scoped cleanup before rejecting admission.
+			await clearAcpMcpServers(serverNames).catch(() => undefined);
+			throw error;
+		}
+		acpMcpServerNames = serverNames;
+	};
 
 	// One ACP connection drives one AgentConnection, whose newSession() replaces
 	// the live session rather than creating a parallel one. Tracking a single
@@ -648,6 +682,7 @@ export async function runAcpModeWithConnection(
 			agentCapabilities: {
 				loadSession: false,
 				promptCapabilities: { image: true, embeddedContext: true },
+				...(supportsMcpServers ? { mcpCapabilities: { http: true } } : {}),
 				// Advertise close so a client knows it can release the session (and
 				// the single-session slot) instead of dropping the connection.
 				sessionCapabilities: { close: {} },
@@ -669,6 +704,11 @@ export async function runAcpModeWithConnection(
 			}
 			sessionNewInFlight = true;
 			try {
+				const params = ctx.params as acp.NewSessionRequest;
+				const mcpServers = params.mcpServers ?? [];
+				if (mcpServers.length > 0 && !supportsMcpServers) {
+					throw acp.RequestError.invalidParams({ reason: "MCP servers are unavailable in this ACP host" });
+				}
 				if (!bound) {
 					// Only latch after a successful bind: a rejected bind must not leave
 					// extensions permanently unavailable for the rest of the process.
@@ -679,16 +719,23 @@ export async function runAcpModeWithConnection(
 				// with, so a client-supplied cwd cannot be adopted after the fact.
 				// Report the real cwd back in `_meta` rather than failing the request or
 				// letting the client assume a directory the agent is not using.
-				const requestedCwd = (ctx.params as { cwd?: unknown } | undefined)?.cwd;
+				const requestedCwd = params.cwd;
+				const actualCwd = await connection
+					.getState()
+					.then((state) => state.cwd)
+					.catch(() => undefined);
+				if (!actualCwd && mcpServers.some((server) => "command" in server)) {
+					throw acp.RequestError.invalidParams({ reason: "Could not resolve the ACP session cwd for stdio MCP" });
+				}
+				await replaceAcpMcpServers(mcpServers, actualCwd ?? "");
 				let cwdMismatch: { requested: string; actual: string } | undefined;
-				if (typeof requestedCwd === "string" && requestedCwd.length > 0) {
-					const actual = await connection
-						.getState()
-						.then((state) => state.cwd)
-						.catch(() => undefined);
-					if (actual && !sameCwd(requestedCwd, actual)) {
-						cwdMismatch = { requested: requestedCwd, actual };
-					}
+				if (
+					typeof requestedCwd === "string" &&
+					requestedCwd.length > 0 &&
+					actualCwd &&
+					!sameCwd(requestedCwd, actualCwd)
+				) {
+					cwdMismatch = { requested: requestedCwd, actual: actualCwd };
 				}
 				const sessionId = randomUUID();
 				// Install the listener before fetching the snapshot. Child updates can arrive
@@ -764,6 +811,7 @@ export async function runAcpModeWithConnection(
 				} catch (error) {
 					producer.failSessionNewAdmission();
 					unsubscribe();
+					await clearAcpMcpServers().catch(() => undefined);
 					throw error;
 				}
 				// Claim the single-session slot only once the subscription and snapshot are
@@ -956,6 +1004,9 @@ export async function runAcpModeWithConnection(
 					closing.unsubscribe?.();
 					// Keep the backing session fenced until a replacement ACP session is admitted.
 					await closing.producer.close();
+					// Host credentials are already gone before kernel release runs. Do not
+					// retain the ACP session slot if best-effort transport reaping fails.
+					await clearAcpMcpServers().catch(() => undefined);
 					closedInputPause = inputPause;
 					closedInputPauseKey = inputPauseKey;
 					if (closing.inputPause === inputPause) {
@@ -1037,6 +1088,7 @@ export async function runAcpModeWithConnection(
 	await closedInputPause?.release().catch(() => undefined);
 	closedInputPause = undefined;
 	closedInputPauseKey = undefined;
+	await clearAcpMcpServers().catch(() => undefined);
 	await connection.dispose().catch(() => undefined);
 	// Only the real stdio entrypoint owns the process; a caller-supplied transport
 	// (tests, embedding) must never have its host exited from under it.

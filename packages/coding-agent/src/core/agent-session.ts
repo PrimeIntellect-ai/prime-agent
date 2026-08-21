@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
 	Agent,
 	type AgentContext,
+	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
 	type AgentState,
@@ -158,6 +159,7 @@ import {
 } from "./goals.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
+import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
 	type BashExecutionMessage,
@@ -1066,6 +1068,7 @@ export class AgentSession {
 
 	private _goalState: GoalState = emptyGoalState();
 	private _goalAccountingStartedAt: number | undefined = undefined;
+	private _goalContinuationAwaitsRlmWork = false;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
@@ -1302,6 +1305,67 @@ export class AgentSession {
 			return;
 		}
 		this._rlmHeartbeatController = controller;
+		this._buildRuntime({
+			activeToolNames: this.getActiveToolNames(),
+			includeAllExtensionTools: true,
+		});
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
+	replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): void {
+		if (this.isStreaming) throw new Error("Cannot replace ACP MCP servers while the agent is running");
+		if (!this._mcpManager) {
+			if (servers.length > 0) throw new Error("MCP is unavailable in this session");
+			return;
+		}
+		if (!this._mcpManager.replaceAcpServers(servers, ownerId)) return;
+		this._rebuildRuntimeForAcpMcpServers();
+	}
+
+	async releaseAcpMcpServers(ownerId: string, serverNames: readonly string[]): Promise<void> {
+		if (!this._mcpManager?.canReleaseAcpServers(ownerId)) return;
+		if (this._mcpManager.replaceAcpServers([], ownerId)) {
+			// Host MCP handlers read this manager dynamically, so credentials disappear
+			// before the kernel-side transport is closed.
+			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+			this.agent.state.systemPrompt = this._baseSystemPrompt;
+		}
+		const names = [...new Set(serverNames)];
+		if (names.length === 0) return;
+
+		const inputPause = this.acquireSessionInputPause();
+		try {
+			// Do not rebuild or kill the notebook. Wait for the current turn, then ask
+			// the kernel-owned MCP registry to close only these cached transports.
+			await this.agent.waitForIdle();
+			await this._agentEventQueue;
+			const manager = this._ipythonKernelProvisioner?.manager;
+			if (!manager?.isRunning) return;
+			const code = [
+				"import importlib as _prime_importlib",
+				'_prime_mcp = _prime_importlib.import_module("rlm.mcp")',
+				`_prime_mcp_names = ${JSON.stringify(names)}`,
+				"_prime_mcp_errors = []",
+				"for _prime_mcp_name in _prime_mcp_names:",
+				"    try:",
+				"        await _prime_mcp.reload(_prime_mcp_name)",
+				"    except BaseException as _prime_mcp_error:",
+				"        _prime_mcp_errors.append(_prime_mcp_error)",
+				"if _prime_mcp_errors:",
+				"    raise _prime_mcp_errors[0]",
+				"del _prime_mcp, _prime_importlib, _prime_mcp_names, _prime_mcp_errors, _prime_mcp_name",
+			].join("\n");
+			const result = await manager.execute(code);
+			if (result.status !== "ok") {
+				throw new Error(`Failed to close ACP MCP kernel transports: ${result.stderr || "kernel error"}`);
+			}
+		} finally {
+			inputPause.release();
+		}
+	}
+
+	private _rebuildRuntimeForAcpMcpServers(): void {
 		this._buildRuntime({
 			activeToolNames: this.getActiveToolNames(),
 			includeAllExtensionTools: true,
@@ -1689,6 +1753,7 @@ export class AgentSession {
 	}
 
 	private _clearQueuedGoalContexts(): void {
+		this._goalContinuationAwaitsRlmWork = false;
 		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter(
 			(message) => message.customType !== GOAL_CONTEXT_CUSTOM_TYPE,
 		);
@@ -1720,6 +1785,7 @@ export class AgentSession {
 			updatedAt: now,
 		};
 		this._goalAccountingStartedAt = now;
+		this._goalContinuationAwaitsRlmWork = false;
 		this._setGoalState(goal);
 		return this._goalState;
 	}
@@ -1977,6 +2043,41 @@ export class AgentSession {
 				contextTools.push(ipythonTool);
 				context.tools = contextTools;
 			}
+		}
+	}
+
+	private _maybeResumeGoalContinuationAfterRlmWork(): void {
+		if (!this._goalContinuationAwaitsRlmWork) return;
+		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (this._goalState.status !== "active" || !this._goalState.objective) {
+			this._goalContinuationAwaitsRlmWork = false;
+			return;
+		}
+		// Keep the deferral while admission is paused or the pump is suspended
+		// (post-abort); the pause release and resumeQueuedWork retry.
+		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
+		const goalBeforeResume = this._goalState;
+		try {
+			this._ensureGoalRuntimeActive();
+			this._setGoalState({
+				...this._goalState,
+				continuationsUsed: this._goalState.continuationsUsed + 1,
+				lastReason: undefined,
+				lastError: undefined,
+			});
+			const message = createGoalContextMessage(this._goalState, "continuation");
+			const normalized = normalizeMessageContent(message.content);
+			// No front: a settling child's terminal notice must be read first.
+			this._admitSessionInput(
+				this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+					message,
+					resumeIfIdle: true,
+				}),
+			);
+			this._goalContinuationAwaitsRlmWork = false;
+		} catch {
+			// Admission can race a new pause; roll back so the retry re-counts.
+			this._setGoalState(goalBeforeResume);
 		}
 	}
 
@@ -3172,6 +3273,13 @@ export class AgentSession {
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
 			return [];
 		}
+		// Delegating and ending the turn is correct behavior; hold the continuation
+		// until descendants settle instead of re-prompting a waiting parent.
+		if (this._hasUnsettledRlmQuiescenceWork()) {
+			this._goalContinuationAwaitsRlmWork = true;
+			return [];
+		}
+		this._goalContinuationAwaitsRlmWork = false;
 		try {
 			this._ensureGoalRuntimeActive(context.context);
 			const nextGoal = {
@@ -6529,6 +6637,7 @@ export class AgentSession {
 				this._sessionInputPumpEpoch++;
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
+				this._maybeResumeGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6645,6 +6754,7 @@ export class AgentSession {
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
 		this._resumeSessionInputAdmission();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
 	}
@@ -7534,11 +7644,11 @@ export class AgentSession {
 			await this.agent.continue();
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (message.includes("already processing")) {
+			const code = error instanceof AgentContinueError ? error.code : undefined;
+			if (code === "busy") {
 				this._schedulePostCompactionContinue();
-			} else if (!message.includes("continue from")) {
-				// "continue from" means the turn already completed; anything else must reject headless idle waiters.
+			} else if (code !== "nothing-to-continue") {
+				// "nothing-to-continue" means the turn already completed; anything else must reject headless idle waiters.
 				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}
@@ -9242,6 +9352,7 @@ export class AgentSession {
 		this._abandonedRlmQuiescenceChildIds.add(run.id);
 		this._unsettledRlmChildRuns.delete(run);
 		run.settlement.resolve();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
@@ -9580,6 +9691,7 @@ export class AgentSession {
 		run.settlement.resolve();
 		run.deletionReservation.resolve();
 		this._unsettledRlmChildRuns.delete(run);
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _observeRlmRunDeletionCleanup(
@@ -10402,6 +10514,7 @@ export class AgentSession {
 					run.settled = true;
 					run.settlement.resolve();
 					this._unsettledRlmChildRuns.delete(run);
+					this._maybeResumeGoalContinuationAfterRlmWork();
 				}
 			}
 		})().catch(() => undefined);

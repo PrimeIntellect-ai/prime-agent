@@ -15,6 +15,7 @@ import type {
 	AgentHeartbeatManagementAction,
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
+import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
@@ -497,6 +498,26 @@ export class DaemonAgentConnection implements AgentConnection {
 			type: "get_resource_snapshot",
 			activeSessionId: this.activeSessionId,
 		});
+	}
+
+	supportsAcpMcpServers(): boolean {
+		return this.client.supportsServerCapability("acp_mcp_servers");
+	}
+
+	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void> {
+		if (!this.supportsAcpMcpServers()) {
+			throw new DaemonCapabilityUnavailableError("replace_acp_mcp_servers", "acp_mcp_servers");
+		}
+		await this.requestOk({
+			type: "replace_acp_mcp_servers",
+			activeSessionId: this.activeSessionId,
+			ownerId,
+			servers: [...servers],
+		});
+	}
+
+	async releaseAcpMcpServers(ownerId: string, _serverNames: readonly string[]): Promise<void> {
+		await this.replaceAcpMcpServers([], ownerId);
 	}
 
 	async getAvailableModels(): Promise<AgentConnectionModel[]> {

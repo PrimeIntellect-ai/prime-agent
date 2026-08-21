@@ -357,9 +357,9 @@ class _Registry:
 
     async def _get_locked(self, server: str) -> _Generation:
         self._accepting_work()
+        current = self._generations.get(server)
         config = await _config(server)
         self._accepting_work()
-        current = self._generations.get(server)
         if current and current.config == config and not current.closed:
             return current
         if current:
@@ -508,7 +508,8 @@ async def _config(server: str) -> dict[str, Any]:
         raise RuntimeError(f"MCP server '{server}' is disabled")
     if config.get("type") == "http":
         config = dict(config)
-        config["_authIdentity"] = await _auth_identity(server, config)
+        if config.get("credentialSource") != "acp":
+            config["_authIdentity"] = await _auth_identity(server, config)
     return config
 
 
@@ -552,6 +553,8 @@ async def _headers(server: str, config: dict[str, Any]) -> dict[str, str]:
     if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
         raise ValueError("MCP HTTP headers must contain strings")
     headers = dict(raw)
+    if config.get("credentialSource") == "acp":
+        return headers
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
     if config.get("oauth") is True and not token:
@@ -569,6 +572,11 @@ def _stdio_env(config: dict[str, Any]) -> dict[str, str]:
     raw = config.get("env", {})
     if not isinstance(raw, dict):
         raise ValueError("MCP stdio env must be an object")
+    if config.get("credentialSource") == "acp":
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in raw.items()):
+            raise ValueError("ACP MCP stdio env must contain string values")
+        env.update(raw)
+        return env
     for key, reference in raw.items():
         if not isinstance(key, str) or not isinstance(reference, dict) or set(reference) != {"env"}:
             raise ValueError("MCP stdio env values must use {\"env\": \"NAME\"} references")
