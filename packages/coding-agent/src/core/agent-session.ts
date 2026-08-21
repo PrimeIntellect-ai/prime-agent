@@ -3930,6 +3930,9 @@ export class AgentSession {
 					) {
 						this._pendingRequestedRefine = bgResult.options;
 					}
+					if (bgResult?.status === "skip" && bgResult.explicit) {
+						this._emitRefineFailed(new RefineSkippedError("Refinement skipped by extension"));
+					}
 					// For "skip" or "failure", stamp cooldown and reset counter
 					// so the interval check below does not trigger a duplicate
 					// terminal retry.

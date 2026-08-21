@@ -205,7 +205,7 @@ describe("AgentSession session_before_refine extension hook", () => {
 		expect(harness.eventsOfType("refine_failed")).toHaveLength(0);
 	});
 
-	it("surfaces an extension skip of an explicit serialized refine.run as refine_failed", async () => {
+	it("emits refine_failed when disposal drains an extension-skipped explicit serialized refine.run", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
@@ -219,9 +219,14 @@ describe("AgentSession session_before_refine extension hook", () => {
 		harness.setResponses([]);
 		await harness.session.prompt("hello").catch(() => {});
 
-		const internals = harness.session as unknown as {
-			_runSerializedRefine(options: { instructions?: string }): Promise<void>;
-		};
-		await expect(internals._runSerializedRefine({ instructions: "x" })).rejects.toThrow(RefineSkippedError);
+		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = true;
+		harness.session.handleRefineHostRequest("refine.run", { instructions: "x" });
+		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = false;
+
+		await harness.session.disposeAsync();
+
+		const failures = harness.eventsOfType("refine_failed");
+		expect(failures).toHaveLength(1);
+		expect(failures[0]?.error).toBe("Refinement skipped by extension");
 	});
 });
