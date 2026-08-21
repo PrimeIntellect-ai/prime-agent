@@ -26,7 +26,7 @@ const PLANE_META = {
 };
 const ORIGIN_URL = "https://srv.test/mcp";
 const ORIGIN_META = {
-	issuer: "https://srv.test",
+	issuer: "https://srv.test/tenant",
 	authorization_endpoint: "https://srv.test/authorize",
 	token_endpoint: "https://srv.test/token",
 	registration_endpoint: "https://srv.test/register",
@@ -166,7 +166,7 @@ describe.sequential("MCP OAuth provider", () => {
 		).rejects.toThrow("issuer does not exactly match");
 	});
 
-	it("uses origin-level authorization-server metadata only when protected-resource metadata is absent", async () => {
+	it("accepts a same-origin pathful issuer from origin-level metadata when protected-resource metadata is absent", async () => {
 		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
 			const missing = absentPrm(input);
 			if (missing) return missing;

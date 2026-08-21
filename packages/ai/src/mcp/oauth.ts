@@ -109,12 +109,8 @@ function authorizationServerMetadata(value: unknown, issuer: string, requireExac
 		}
 	} else {
 		const advertisedIssuer = validatedHttpsUrl(metadata.issuer, "Authorization server metadata issuer");
-		if (
-			advertisedIssuer.origin !== new URL(issuer).origin ||
-			advertisedIssuer.pathname !== "/" ||
-			advertisedIssuer.search
-		) {
-			throw new Error(`Origin authorization server metadata issuer must identify ${new URL(issuer).origin}`);
+		if (advertisedIssuer.origin !== new URL(issuer).origin || advertisedIssuer.search) {
+			throw new Error(`Origin authorization server metadata issuer must stay on ${new URL(issuer).origin}`);
 		}
 	}
 	if (typeof metadata.authorization_endpoint !== "string" || typeof metadata.token_endpoint !== "string") {
