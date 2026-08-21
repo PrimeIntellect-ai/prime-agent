@@ -2611,8 +2611,15 @@ it("ignores an old completion envelope delivered to retry:1 before accepting its
 	});
 	expect(fixture.events.filter((event) => event.payload.kind === "workflow_child_outcome_committed")).toHaveLength(2);
 	const audit = await authority.readAudit();
-	expect(audit.launchEvidenceRefs).toHaveLength(1);
-	expect(audit.launchEvidenceRefs[0]?.digest).not.toBe(audit.workerResults[0]?.resultEvidenceRef.digest);
+	// Two attempts launched, so two launch-evidence refs. An earlier version of this assertion
+	// expected one, on the assumption that a failed attempt's launch evidence is dropped; it is not,
+	// and it should not be - the audit has to retain evidence for the attempt that errored, or the
+	// retry's success would be the only trace of a task that ran twice.
+	expect(audit.launchEvidenceRefs).toHaveLength(2);
+	const launchDigests = new Set(audit.launchEvidenceRefs.map((ref) => ref.digest));
+	expect(launchDigests.size).toBe(2);
+	// Launch evidence and result evidence are separate artifacts; the audit must not conflate them.
+	for (const result of audit.workerResults) expect(launchDigests.has(result.resultEvidenceRef.digest)).toBe(false);
 	expect(audit.workerResults).toEqual(
 		expect.arrayContaining([
 			expect.objectContaining({ attemptId: firstRequest.attemptId, status: "error" }),
