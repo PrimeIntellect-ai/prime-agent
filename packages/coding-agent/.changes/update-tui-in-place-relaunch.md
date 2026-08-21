@@ -1,0 +1,1 @@
+- Fixed `/update` keeping the old TUI process alive until the relaunched TUI quit by replacing the process in place where the runtime supports it.

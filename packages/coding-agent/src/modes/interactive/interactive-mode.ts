@@ -48,6 +48,7 @@ import {
 	launchDaemonUpdateRestartCoordinator,
 	resolveDaemonUpdateRestartSocketPath,
 } from "../../cli/daemon-update-restart.js";
+import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -762,6 +763,29 @@ export function buildUpdateRelaunchArgs(args: readonly string[], sessionFile: st
 		relaunchArgs.push("--resume", sessionFile);
 	}
 	return relaunchArgs;
+}
+
+type UpdateRelaunchExecve = (file: string, args: string[], environment: Record<string, string>) => never;
+
+interface UpdateRelaunchExecOptions {
+	platform: string;
+	cwd: string;
+	environment: NodeJS.ProcessEnv;
+	chdir: (directory: string) => void;
+	execve?: UpdateRelaunchExecve;
+}
+
+export function tryExecUpdateRelaunch(launch: CliSubprocessLaunchSpec, options: UpdateRelaunchExecOptions): boolean {
+	// Process replacement preserves the shell job and foreground terminal without retaining the old TUI.
+	if (!options.execve || options.platform === "win32" || options.platform === "os400") {
+		return false;
+	}
+	const environment = Object.fromEntries(
+		Object.entries(options.environment).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+	);
+	options.chdir(options.cwd);
+	options.execve(launch.command, [launch.command, ...launch.args], environment);
+	return true;
 }
 
 export function buildUpdateChildArgs(args: readonly string[], daemonSocketPath: string): string[] {
@@ -8786,7 +8810,26 @@ export class InteractiveMode {
 					);
 				}
 			}
-			const relaunchResult = spawnSync(process.execPath, [...process.execArgv, entrypoint, ...relaunchArgs], {
+			const relaunch = createCliSubprocessLaunchSpec(relaunchArgs);
+			const updateProcess = process as NodeJS.Process & { execve?: UpdateRelaunchExecve };
+			try {
+				if (
+					tryExecUpdateRelaunch(relaunch, {
+						platform: process.platform,
+						cwd: updateCwd,
+						environment: process.env,
+						chdir: (directory) => process.chdir(directory),
+						execve: updateProcess.execve,
+					})
+				) {
+					return;
+				}
+			} catch (error: unknown) {
+				console.error(
+					`Could not replace the current ${APP_NAME} process (${error instanceof Error ? error.message : String(error)}). Falling back to a child relaunch.`,
+				);
+			}
+			const relaunchResult = spawnSync(relaunch.command, relaunch.args, {
 				stdio: "inherit",
 				cwd: updateCwd,
 				env: process.env,
