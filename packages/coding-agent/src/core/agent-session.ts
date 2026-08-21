@@ -54,6 +54,7 @@ import {
 	isAgentSessionMessage,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
+	startsAgentRun,
 } from "./agent-messages.js";
 import {
 	AGENT_OBSERVE_SKILL_NAME,
@@ -3499,7 +3500,7 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "message_start" && this._isPromptTurnStartMessage(event.message)) {
+		if (event.type === "message_start" && startsAgentRun(event.message)) {
 			this._overflowRecovery = "idle";
 		}
 
@@ -3624,14 +3625,6 @@ export class AgentSession {
 				}
 			}
 		}
-	}
-
-	private _isPromptTurnStartMessage(message: AgentMessage): boolean {
-		return (
-			message.role === "user" ||
-			isAgentSessionMessage(message) ||
-			(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE)
-		);
 	}
 
 	private _resolveRetry(): void {

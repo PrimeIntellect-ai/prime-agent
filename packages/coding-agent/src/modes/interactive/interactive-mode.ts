@@ -60,7 +60,11 @@ import {
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
 	VERSION,
 } from "../../config.js";
-import { AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL, isAgentSessionMessage } from "../../core/agent-messages.js";
+import {
+	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
+	isAgentSessionMessage,
+	startsAgentRun,
+} from "../../core/agent-messages.js";
 import {
 	type AgentTracePreviewResult,
 	type AgentTraceUploadAllResult,
@@ -97,7 +101,6 @@ import {
 	bashOutputToText,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	createHeartbeatPromptMessage,
-	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	isCompactionOutcomeMessage,
 	isSessionSlashCommandMessage,
@@ -3182,21 +3185,13 @@ export class InteractiveMode {
 		this.workingTimer.unref?.();
 	}
 
-	private static startsAgentRun(message: AgentMessage): boolean {
-		return (
-			message.role === "user" ||
-			isAgentSessionMessage(message) ||
-			(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE)
-		);
-	}
-
 	// Recover the in-flight run's start from a restored transcript so the elapsed timer survives re-attach.
 	private restoreTurnStartFromMessages(messages: readonly AgentMessage[]): void {
 		this.turnStartedAt = undefined;
 		if (!this.isAgentStreaming()) return;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i]!;
-			if (InteractiveMode.startsAgentRun(message)) {
+			if (startsAgentRun(message)) {
 				this.turnStartedAt = message.timestamp;
 			} else if (message.role === "assistant" && message.stopReason !== "toolUse") {
 				break;
@@ -3329,11 +3324,7 @@ export class InteractiveMode {
 			this.featureHintRunPending = false;
 			return;
 		}
-		const startsNewRun =
-			message.role === "user" ||
-			isAgentSessionMessage(message) ||
-			(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE);
-		if (!startsNewRun) return;
+		if (!startsAgentRun(message)) return;
 
 		this.endFeatureHintRun();
 		if (this.shouldShowWorkingLoader()) {
@@ -5434,7 +5425,7 @@ export class InteractiveMode {
 
 			case "message_start":
 				// The run's first starter anchors the elapsed display; mid-turn steering must not restart it.
-				if (this.turnStartedAt === undefined && InteractiveMode.startsAgentRun(event.message)) {
+				if (this.turnStartedAt === undefined && startsAgentRun(event.message)) {
 					this.turnStartedAt = event.message.timestamp;
 					if (this.workingStartedAt !== undefined) {
 						this.workingStartedAt = event.message.timestamp;
