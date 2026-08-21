@@ -286,6 +286,7 @@ interface ResidentWorker {
 	launchEnv?: Record<string, string>;
 	transientCreateCommand?: DaemonCreateCommand;
 	stopFinalization?: Promise<void>;
+	staleReclaimAdmitted?: boolean;
 	ownerCleanupTimer?: ReturnType<typeof setTimeout>;
 	promotedOwnerClientId?: string;
 	updateRestartPrepareClient?: DaemonWorkerClient;
@@ -2322,34 +2323,35 @@ export class DaemonSupervisor {
 	/**
 	 * A stopping worker whose process already died can strand its registration
 	 * (for example when the stop timed out and its finalization was interrupted
-	 * by a supervisor restart). Such a registration would block reopening the
-	 * saved transcript forever, so complete the interrupted stop and let the
-	 * caller launch a fresh worker for the saved session.
+	 * by a supervisor restart), and so can a client-owned worker marked failed
+	 * after its owner vanished without cleaning up. Such registrations block
+	 * reopening the saved transcript forever, so complete the interrupted stop
+	 * or deregister the dead failed worker and let the caller launch a fresh
+	 * worker for the saved session. A dead failed worker admits exactly one
+	 * reclaim at a time so concurrent creates never recover it twice.
 	 */
 	private async reclaimStaleWorkerRegistration(worker: ResidentWorker, freshCreate = false): Promise<boolean> {
 		if (worker.client !== undefined || worker.recovery !== undefined) {
 			return false;
 		}
 		if (worker.descriptor.stopRequestedAt === undefined) {
-			if (worker.descriptor.lifecycle !== "failed" || worker.descriptor.ownerClientId) {
+			// Concurrent fresh creates can both observe one dead failed worker.
+			// Admit exactly one reclaim synchronously; a concurrent caller
+			// returns false without recovering, so uncertain worker operations
+			// never run twice.
+			if (worker.staleReclaimAdmitted) {
 				return false;
 			}
-			const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
-			if (identity === "current") {
-				if (!freshCreate || !worker.descriptor.processStartId) return false;
-				await this.stopWorker(worker, true, true);
-				return true;
+			worker.staleReclaimAdmitted = true;
+			try {
+				return await this.reclaimDeadFailedWorkerRegistration(worker, freshCreate);
+			} finally {
+				if (this.workers.get(worker.descriptor.workerId) === worker) {
+					// The registration survived, so clear the marker and let a
+					// later caller retry the reclaim.
+					worker.staleReclaimAdmitted = false;
+				}
 			}
-			if (identity !== "gone" && identity !== "replaced") {
-				return false;
-			}
-			worker.intentionalStop = true;
-			await this.recoverUncertainWorkerOperations(worker, false);
-			this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
-			this.workers.delete(worker.descriptor.workerId);
-			this.deleteWorkerDescriptor(worker);
-			await this.syncAgentPeers().catch(() => undefined);
-			return true;
 		}
 		// Fail fast before waiting on anything: only a confirmed-dead process is
 		// reclaimable. A live, unknown, or still-stopping worker is left alone
@@ -2374,6 +2376,54 @@ export class DaemonSupervisor {
 			);
 		}
 		this.log(`Reclaimed stale registration for stopped worker ${worker.descriptor.workerId}`);
+		return true;
+	}
+
+	/**
+	 * Reclaim one dead failed worker's registration. An owner that is still
+	 * connected keeps authority over its failed worker, and only a fresh create
+	 * may reclaim a client-owned registration after its owner is gone; an
+	 * arbitrary attach must not deregister or seize it. A client-owned worker's
+	 * live process is never signalled here because its runtime context belongs
+	 * to the owner's own recovery path.
+	 */
+	private async reclaimDeadFailedWorkerRegistration(
+		worker: ResidentWorker,
+		freshCreate: boolean,
+	): Promise<boolean> {
+		if (worker.descriptor.lifecycle !== "failed") {
+			return false;
+		}
+		const ownerConnected =
+			worker.descriptor.ownerClientId !== undefined &&
+			[...this.clients].some((client) => this.protocolClientId(client) === worker.descriptor.ownerClientId);
+		if (ownerConnected) {
+			return false;
+		}
+		// Only a fresh create may reclaim a client-owned registration whose
+		// owner is gone; an arbitrary attach must not deregister or seize it.
+		if (worker.descriptor.ownerClientId !== undefined && !freshCreate) {
+			return false;
+		}
+		const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+		if (identity === "current") {
+			// A client-owned live process is never signalled here because its
+			// runtime context belongs to the owner's own recovery path.
+			if (!freshCreate || !worker.descriptor.processStartId || worker.descriptor.ownerClientId) {
+				return false;
+			}
+			await this.stopWorker(worker, true, true);
+			return true;
+		}
+		if (identity !== "gone" && identity !== "replaced") {
+			return false;
+		}
+		worker.intentionalStop = true;
+		await this.recoverUncertainWorkerOperations(worker, false);
+		this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
+		this.workers.delete(worker.descriptor.workerId);
+		this.deleteWorkerDescriptor(worker);
+		await this.syncAgentPeers().catch(() => undefined);
 		return true;
 	}
 

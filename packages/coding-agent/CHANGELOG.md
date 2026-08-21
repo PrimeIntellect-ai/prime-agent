@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed daemon worker registrations stranded by a failed worker whose process died or whose owner vanished: a fresh create now reclaims such a registration exactly once so the saved session can reopen, while a connected owner or a non-create attach keeps authority over it.
 - Added an RPC-only foreground harness mode with literal prompts, bounded RLM and Act policy, service-tier state, and autonomous-entry isolation.
 
 - Added 30-second elapsed-time hints to provider system context without adding transcript or UI messages.

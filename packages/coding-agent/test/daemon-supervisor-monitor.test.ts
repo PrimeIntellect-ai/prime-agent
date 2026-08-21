@@ -1722,6 +1722,197 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(stopWorker).toHaveBeenCalledWith(worker, true, true);
 	});
 
+	it("reclaims one dead stale client-owned failed worker on fresh create", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-client-owned",
+				pid: 42,
+				lifecycle: "failed" as const,
+				ownerClientId: "client-gone",
+			},
+			intentionalStop: false,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const recoverUncertainWorkerOperations = vi.fn(async () => {});
+		const deleteWorkerDescriptor = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			sessionInputPauses: new Map(),
+			clients: new Set(),
+			processIdentity: vi.fn(() => "gone"),
+			recoverUncertainWorkerOperations,
+			deleteWorkerDescriptor,
+			syncAgentPeers: vi.fn(async () => {}),
+		}) as {
+			reclaimStaleWorkerRegistration(target: typeof worker, freshCreate?: boolean): Promise<boolean>;
+		};
+
+		await expect(supervisor.reclaimStaleWorkerRegistration(worker, true)).resolves.toBe(true);
+		expect(recoverUncertainWorkerOperations).toHaveBeenCalledTimes(1);
+		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker, false);
+		expect(deleteWorkerDescriptor).toHaveBeenCalledWith(worker);
+		expect(workers.has(worker.descriptor.workerId)).toBe(false);
+	});
+
+	it("admits one reclaim when concurrent fresh creates race on one dead failed worker", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-client-owned-race",
+				pid: 42,
+				lifecycle: "failed" as const,
+				ownerClientId: "client-gone",
+			},
+			intentionalStop: false,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const recoverUncertainWorkerOperations = vi.fn(async () => {});
+		const deleteWorkerDescriptor = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			sessionInputPauses: new Map(),
+			clients: new Set(),
+			processIdentity: vi.fn(() => "gone"),
+			recoverUncertainWorkerOperations,
+			deleteWorkerDescriptor,
+			syncAgentPeers: vi.fn(async () => {}),
+		}) as {
+			reclaimStaleWorkerRegistration(target: typeof worker, freshCreate?: boolean): Promise<boolean>;
+		};
+
+		const [first, second] = await Promise.all([
+			supervisor.reclaimStaleWorkerRegistration(worker, true),
+			supervisor.reclaimStaleWorkerRegistration(worker, true),
+		]);
+		expect([first, second].filter(Boolean)).toHaveLength(1);
+		expect(recoverUncertainWorkerOperations).toHaveBeenCalledTimes(1);
+		expect(deleteWorkerDescriptor).toHaveBeenCalledTimes(1);
+		expect(workers.has(worker.descriptor.workerId)).toBe(false);
+	});
+
+	it("allows a later retry after a failed reclaim leaves the registration in place", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-client-owned-retry",
+				pid: 42,
+				lifecycle: "failed" as const,
+				ownerClientId: "client-gone",
+			},
+			intentionalStop: false,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		let failRecovery = true;
+		const recoverUncertainWorkerOperations = vi.fn(async () => {
+			if (failRecovery) throw new Error("recovery unavailable");
+		});
+		const deleteWorkerDescriptor = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			sessionInputPauses: new Map(),
+			clients: new Set(),
+			processIdentity: vi.fn(() => "gone"),
+			recoverUncertainWorkerOperations,
+			deleteWorkerDescriptor,
+			syncAgentPeers: vi.fn(async () => {}),
+		}) as {
+			reclaimStaleWorkerRegistration(target: typeof worker, freshCreate?: boolean): Promise<boolean>;
+		};
+
+		await expect(supervisor.reclaimStaleWorkerRegistration(worker, true)).rejects.toThrow("recovery unavailable");
+		expect(workers.has(worker.descriptor.workerId)).toBe(true);
+
+		failRecovery = false;
+		await expect(supervisor.reclaimStaleWorkerRegistration(worker, true)).resolves.toBe(true);
+		expect(recoverUncertainWorkerOperations).toHaveBeenCalledTimes(2);
+		expect(deleteWorkerDescriptor).toHaveBeenCalledWith(worker);
+		expect(workers.has(worker.descriptor.workerId)).toBe(false);
+	});
+
+	it("does not reclaim a client-owned failed worker on non-fresh attach", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-client-owned-attach",
+				pid: 42,
+				lifecycle: "failed" as const,
+				ownerClientId: "client-gone",
+			},
+			intentionalStop: false,
+		};
+		const workers = new Map([[worker.descriptor.workerId, worker]]);
+		const recoverUncertainWorkerOperations = vi.fn(async () => {});
+		const deleteWorkerDescriptor = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers,
+			sessionInputPauses: new Map(),
+			clients: new Set(),
+			processIdentity: vi.fn(() => "gone"),
+			recoverUncertainWorkerOperations,
+			deleteWorkerDescriptor,
+			syncAgentPeers: vi.fn(async () => {}),
+		}) as {
+			reclaimStaleWorkerRegistration(target: typeof worker): Promise<boolean>;
+		};
+
+		await expect(supervisor.reclaimStaleWorkerRegistration(worker)).resolves.toBe(false);
+		expect(recoverUncertainWorkerOperations).not.toHaveBeenCalled();
+		expect(deleteWorkerDescriptor).not.toHaveBeenCalled();
+		expect(workers.has(worker.descriptor.workerId)).toBe(true);
+	});
+
+	it("does not reclaim a client-owned failed worker while its owner is connected", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-client-owned-live",
+				pid: 42,
+				lifecycle: "failed" as const,
+				ownerClientId: "client-live",
+			},
+			intentionalStop: false,
+		};
+		const recoverUncertainWorkerOperations = vi.fn(async () => {});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			clients: new Set([{ id: "client-live" }]),
+			protocolClientIds: new WeakMap(),
+			processIdentity: vi.fn(() => "gone"),
+			recoverUncertainWorkerOperations,
+		}) as {
+			reclaimStaleWorkerRegistration(target: typeof worker, freshCreate?: boolean): Promise<boolean>;
+		};
+
+		await expect(supervisor.reclaimStaleWorkerRegistration(worker, true)).resolves.toBe(false);
+		expect(recoverUncertainWorkerOperations).not.toHaveBeenCalled();
+	});
+
+	it("does not reclaim a client-owned failed worker with a current or unknown process identity", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-client-owned-live",
+				pid: 42,
+				processStartId: "verified-start",
+				lifecycle: "failed" as const,
+				ownerClientId: "client-gone",
+			},
+			intentionalStop: false,
+		};
+		const stopWorker = vi.fn(async () => {});
+		let identity = "current";
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			clients: new Set(),
+			processIdentity: vi.fn(() => identity),
+			stopWorker,
+		}) as {
+			processIdentity(pid: number, startId?: string): string;
+			reclaimStaleWorkerRegistration(target: typeof worker, freshCreate?: boolean): Promise<boolean>;
+		};
+
+		await expect(supervisor.reclaimStaleWorkerRegistration(worker, true)).resolves.toBe(false);
+		expect(stopWorker).not.toHaveBeenCalled();
+		identity = "unknown";
+		await expect(supervisor.reclaimStaleWorkerRegistration(worker, true)).resolves.toBe(false);
+		expect(stopWorker).not.toHaveBeenCalled();
+	});
+
 	it("does not relaunch a live worker whose process identity is unknown", async () => {
 		vi.useFakeTimers();
 		type RecoveryWorker = {
