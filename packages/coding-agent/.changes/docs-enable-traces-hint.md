@@ -1,0 +1,1 @@
+- Added a feature hint for enabling automatic trace sharing.

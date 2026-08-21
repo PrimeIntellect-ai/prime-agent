@@ -94,6 +94,7 @@ describe("feature hint deck", () => {
 		expect(textById.get("refine")).toContain("/refine");
 		expect(textById.get("persistent-ipython")).toContain("IPython");
 		expect(textById.get("context-usage")).toContain("/context");
+		expect(textById.get("traces")).toBe("Help improve Prime Agent by sharing traces with /traces on.");
 		expect(textById.get("session-fork")).toContain("/fork");
 		expect(textById.get("compaction")).toContain("/compact");
 		expect(textById.get("auto-compaction")).toContain("automatically compacts");

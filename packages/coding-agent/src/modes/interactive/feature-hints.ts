@@ -83,6 +83,10 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 		getText: () => "Use /context to check token usage, cost, and remaining context.",
 	},
 	{
+		id: "traces",
+		getText: () => "Help improve Prime Agent by sharing traces with /traces on.",
+	},
+	{
 		id: "session-fork",
 		getText: () => "Use /fork to start a new session from an earlier prompt.",
 	},
