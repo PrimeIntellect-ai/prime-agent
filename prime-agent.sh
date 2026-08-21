@@ -21,6 +21,12 @@ for arg in "$@"; do
   fi
 done
 
+# A bare source launcher reopens the most recent session instead of creating a
+# sibling session beside work that may already be active.
+if [[ "${#ARGS[@]}" -eq 0 ]]; then
+  ARGS=(--continue)
+fi
+
 if [[ "$NO_ENV" == "true" ]]; then
   # Unset API keys (see packages/ai/src/env-api-keys.ts)
   unset ANTHROPIC_API_KEY

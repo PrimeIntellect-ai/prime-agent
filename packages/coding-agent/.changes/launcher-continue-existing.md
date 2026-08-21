@@ -1,0 +1,1 @@
+- Changed the bare source launcher to reopen the most recent session instead of creating a sibling session.
