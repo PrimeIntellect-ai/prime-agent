@@ -1,0 +1,1 @@
+- Changed ACP prompt requests to resolve only after all causally admitted subagent and parent work has settled.
