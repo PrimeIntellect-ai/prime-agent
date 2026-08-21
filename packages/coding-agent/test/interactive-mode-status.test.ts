@@ -5301,7 +5301,7 @@ test("only the queued user /refine settlement stops its loader", async () => {
 	expect(statusContainer.children.length).toBe(0);
 });
 
-test("session teardown discards a running refine loader without remounting anything", () => {
+test("session teardown removes a running refine loader without remounting anything", () => {
 	initTheme("dark");
 	const statusContainer = new Container();
 	const fakeThis = {
@@ -5323,6 +5323,7 @@ test("session teardown discards a running refine loader without remounting anyth
 
 	prototype.discardRefineLoader.call(fakeThis);
 	expect(stopSpy).toHaveBeenCalled();
+	expect(statusContainer.children).toHaveLength(0);
 	expect((fakeThis as unknown as { refineLoader?: unknown }).refineLoader).toBeUndefined();
 	expect((fakeThis as unknown as { syncWorkingLoader: () => void }).syncWorkingLoader).not.toHaveBeenCalled();
 });

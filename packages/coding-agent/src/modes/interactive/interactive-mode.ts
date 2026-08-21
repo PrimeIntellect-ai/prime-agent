@@ -3406,9 +3406,11 @@ export class InteractiveMode {
 		this.syncWorkingLoader();
 	}
 
-	/** Stops the loader timer without container churn — for teardown and session switches. */
+	/** Stops and removes the loader without remounting old-session state. */
 	private discardRefineLoader(): void {
-		this.refineLoader?.stop();
+		if (!this.refineLoader) return;
+		this.refineLoader.stop();
+		this.statusContainer.removeChild(this.refineLoader);
 		this.refineLoader = undefined;
 	}
 
