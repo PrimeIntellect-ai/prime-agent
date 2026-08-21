@@ -105,6 +105,8 @@ interface AcpPendingTerminal {
 	boundary: TurnBoundary;
 	outcome: "result" | "error";
 	abort: AbortController;
+	status?: AgentAutonomousStatus;
+	turnFailure?: string;
 	failure?: string;
 	task?: Promise<void>;
 }
@@ -641,6 +643,8 @@ export async function runAcpModeWithConnection(
 				if (pending.abort.signal.aborted || session !== entry || entry.pendingTerminal !== pending) return;
 				const terminalQuiescence = quiescenceMeta(status, liveChildren);
 				if (terminalQuiescence.outstandingSubagents !== 0) continue;
+				pending.status = status;
+				pending.turnFailure = finalFailure;
 
 				entry.producer.sealTerminal(pending.promptTurnId);
 				const autonomous = autonomousMeta(status);
@@ -907,6 +911,7 @@ export async function runAcpModeWithConnection(
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
 				const outcome = failure ? "error" : "result";
+				let terminalStatus = status;
 				const observedQuiescence = quiescenceMeta(status, liveChildren);
 				// The roster is telemetry at the response cut, not proof of terminality:
 				// a child can publish a terminal status before its result reaches the parent.
@@ -937,12 +942,20 @@ export async function runAcpModeWithConnection(
 					const pending: AcpPendingTerminal = { promptTurnId, boundary: priorMessages, outcome, abort };
 					entry.pendingTerminal = pending;
 					finalizePendingTerminal(entry, pending);
+					await pending.task;
+					if (pending.failure) {
+						throw new Error(`ACP lifecycle reconciliation failed: ${pending.failure}`);
+					}
+					if (pending.turnFailure) {
+						throw new Error(`prime-agent turn failed: ${pending.turnFailure}`);
+					}
+					terminalStatus = pending.status ?? status;
 				}
 				if (failure) throw new Error(`prime-agent turn failed: ${failure}`);
 				return {
 					stopReason: acpStopReason({
 						cancelled: abort.signal.aborted && !entry.producer.isResponseCommitted(promptTurnId),
-						autonomous: status,
+						autonomous: terminalStatus,
 					}),
 				};
 			} catch (error) {
