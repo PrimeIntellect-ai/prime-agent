@@ -1,0 +1,1 @@
+- Fixed stranded daemon worker registrations blocking session reopen: a fresh create now reclaims a dead failed worker registration exactly once after its owner is gone, while a connected owner or a non-create attach keeps authority over it.
