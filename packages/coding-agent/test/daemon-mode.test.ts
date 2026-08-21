@@ -1015,6 +1015,12 @@ describe("daemon mode helpers", () => {
 			expect(parentState.runtime.session.sessionFile).toBeUndefined();
 			expect(child.session.sessionManager.getHeader()).toMatchObject({ rlmDepth: 1 });
 			expect(child.session.sessionManager.getHeader()?.parentSession).toBeUndefined();
+			const host = (
+				internals as typeof internals & {
+					createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost;
+				}
+			).createSubagentRuntimeHost(parentState);
+			expect(host.completeRlmSubagentRuntime?.("child-1", child.session)).toBe(true);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

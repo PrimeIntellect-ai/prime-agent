@@ -200,6 +200,8 @@ Goal state records token usage, elapsed time, continuation count, and an optiona
 
 Autonomous mode is a bounded host policy for runs where no human input is expected. Prime Agent adds follow-up continuations until configured quality gates pass or a continuation, turn, token, or wall-clock limit is reached.
 
+These budgets and gates are execution controls, not a security sandbox, and the wall-clock budget is not a hard deadline for code already running. Follow the [security and sandboxing guide](security.md) before unattended work on untrusted inputs.
+
 Enable it in an interactive session:
 
 ```text

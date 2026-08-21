@@ -311,13 +311,14 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
-		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
-		if (options.parentSession.sessionFile) {
-			sessionManager.newSession({
-				parentSession: options.parentSession.sessionFile,
-				rlmDepth: options.rlmDepth,
-			});
-		}
+		const childCwd = options.parentSession.sessionManager.getCwd();
+		const sessionManager = options.parentSession.sessionManager.allowsPersistence()
+			? SessionManager.create(childCwd, options.sessionDir)
+			: SessionManager.inMemory(childCwd, options.sessionDir);
+		sessionManager.newSession({
+			parentSession: options.parentSession.sessionFile,
+			rlmDepth: options.rlmDepth,
+		});
 		const runtime = await this.scopedBuild(() =>
 			createAgentSessionRuntime(this.createRuntime, {
 				cwd: sessionManager.getCwd(),
@@ -523,7 +524,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		if (this.session.sessionManager.isPersisted()) {
+		if (this.session.sessionManager.allowsPersistence()) {
 			const currentSessionFile = this.session.sessionFile;
 			if (!currentSessionFile) {
 				throw new Error("Persisted session is missing a session file");

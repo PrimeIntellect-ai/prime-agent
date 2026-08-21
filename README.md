@@ -95,6 +95,7 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 ## Documentation
 
 - [Quickstart](packages/coding-agent/docs/quickstart.md) — install, authenticate, and run a first session
+- [Security and sandboxing](packages/coding-agent/docs/security.md) — trust model, enforced controls, external isolation, persisted state, and unattended-run checklist
 - [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
 - [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
 - [RLM programming model](packages/coding-agent/docs/rlm.md) — persistent IPython, subagents, skills, and the trust model

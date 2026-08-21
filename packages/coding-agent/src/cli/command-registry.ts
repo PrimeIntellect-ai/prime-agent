@@ -215,7 +215,7 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 			["-r, --resume [path|id]", "Open the agents view, or resume a saved session"],
 			["--fork <path|id>", "Fork a saved session into a new session"],
 			["--session-dir <dir>", "Use a custom session directory"],
-			["--no-session", "Do not save the session"],
+			["--no-session", "Do not persist the session transcript or artifacts (not a sandbox)"],
 			["--goal <objective>", "Seed a persistent goal for a new root session"],
 			["--goal-token-budget <n>", "Set a positive token budget for --goal"],
 		],
