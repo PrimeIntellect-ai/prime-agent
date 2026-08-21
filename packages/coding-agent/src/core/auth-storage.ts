@@ -58,6 +58,7 @@ export type AuthStatus = {
 	source?:
 		| "stored"
 		| "runtime"
+		| "runtime_chain"
 		| "environment"
 		| "prime_cli"
 		| "fallback"
@@ -70,7 +71,13 @@ export type AuthStatus = {
 export type AuthStorageOptions = {
 	primeCliConfigPath?: string;
 	usePrimeCliConfig?: boolean;
+	runtimeApiKeyChainState?: RuntimeApiKeyChainState;
 };
+
+export interface RuntimeApiKeyChainCredential {
+	key: string;
+	label?: string;
+}
 
 type LockResult<T> = {
 	result: T;
@@ -85,6 +92,64 @@ export type AuthSourceToken = {
 	identityFingerprint: string;
 	valueFingerprint: string;
 };
+
+/** Daemon-wide Codex-home rotation state shared without sharing per-session auth storage. */
+export class RuntimeApiKeyChainState {
+	private credentials = new Map<string, RuntimeApiKeyChainCredential[]>();
+	private staleSources = new Map<string, AuthSourceToken[]>();
+
+	setRuntimeApiKeyChain(provider: string, credentials: readonly RuntimeApiKeyChainCredential[]): void {
+		const normalized = credentials.map((credential) => {
+			const key = credential.key.trim();
+			if (!key) throw new Error("runtime API key chain entries must contain a non-empty key");
+			const label = credential.label?.trim();
+			return { key, ...(label ? { label } : {}) };
+		});
+		this.staleSources.delete(provider);
+		if (normalized.length === 0) {
+			this.credentials.delete(provider);
+			return;
+		}
+		this.credentials.set(provider, normalized);
+	}
+
+	removeRuntimeApiKeyChain(provider: string): void {
+		this.staleSources.delete(provider);
+		this.credentials.delete(provider);
+	}
+
+	getCredentials(provider: string): readonly RuntimeApiKeyChainCredential[] {
+		return this.credentials.get(provider) ?? [];
+	}
+
+	has(provider: string): boolean {
+		return this.credentials.has(provider);
+	}
+
+	getStaleSources(provider: string): readonly AuthSourceToken[] {
+		return this.staleSources.get(provider) ?? [];
+	}
+
+	clearStaleSources(provider: string): void {
+		this.staleSources.delete(provider);
+	}
+
+	markStale(token: AuthSourceToken): boolean {
+		const stale = this.staleSources.get(token.provider) ?? [];
+		if (
+			stale.some(
+				(existing) =>
+					existing.identityFingerprint === token.identityFingerprint &&
+					existing.valueFingerprint === token.valueFingerprint,
+			)
+		) {
+			return false;
+		}
+		stale.push(token);
+		this.staleSources.set(token.provider, stale);
+		return true;
+	}
+}
 
 type AuthSourceCandidate = {
 	source: ActiveAuthStatusSource;
@@ -247,6 +312,7 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 export class AuthStorage {
 	private data: AuthStorageData = {};
 	private runtimeOverrides: Map<string, string> = new Map();
+	private runtimeApiKeyChainState: RuntimeApiKeyChainState;
 	private staleAuthSources: Map<string, AuthSourceToken[]> = new Map();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
@@ -256,6 +322,7 @@ export class AuthStorage {
 		private storage: AuthStorageBackend,
 		private options: AuthStorageOptions = {},
 	) {
+		this.runtimeApiKeyChainState = options.runtimeApiKeyChainState ?? new RuntimeApiKeyChainState();
 		this.reload();
 	}
 
@@ -289,6 +356,15 @@ export class AuthStorage {
 	removeRuntimeApiKey(provider: string): void {
 		this.clearStaleAuthSource(provider, "runtime");
 		this.runtimeOverrides.delete(provider);
+	}
+
+	/** Replace an ordered process-local credential chain without persisting its secrets. */
+	setRuntimeApiKeyChain(provider: string, credentials: readonly RuntimeApiKeyChainCredential[]): void {
+		this.runtimeApiKeyChainState.setRuntimeApiKeyChain(provider, credentials);
+	}
+
+	removeRuntimeApiKeyChain(provider: string): void {
+		this.runtimeApiKeyChainState.removeRuntimeApiKeyChain(provider);
 	}
 
 	/**
@@ -373,6 +449,33 @@ export class AuthStorage {
 				valueMaterial: apiKey,
 			}),
 		};
+	}
+
+	private getRuntimeAuthChainCandidates(provider: string): AuthSourceCandidate[] {
+		return this.runtimeApiKeyChainState.getCredentials(provider).map((credential, index) =>
+			this.createAuthSourceCandidate({
+				configured: false,
+				source: "runtime_chain",
+				label: credential.label ?? `credential ${index + 1}`,
+				identityMaterial: `${provider}:${index}:${credential.label ?? ""}`,
+				valueMaterial: credential.key,
+			}),
+		);
+	}
+
+	private getAvailableRuntimeAuthChainCredential(
+		provider: string,
+	): { credential: RuntimeApiKeyChainCredential; candidate: AuthSourceCandidate } | undefined {
+		const credentials = this.runtimeApiKeyChainState.getCredentials(provider);
+		const candidates = this.getRuntimeAuthChainCandidates(provider);
+		for (let index = 0; index < candidates.length; index++) {
+			const candidate = candidates[index];
+			const credential = credentials[index];
+			if (candidate && credential && !this.isAuthSourceStale(provider, candidate)) {
+				return { credential, candidate };
+			}
+		}
+		return undefined;
 	}
 
 	private getPrimeCliAuthCandidate(provider: string): AuthSourceCandidate | undefined {
@@ -481,6 +584,12 @@ export class AuthStorage {
 	}
 
 	private getAuthSourceCandidates(provider: string, options?: { includeFallback?: boolean }): AuthSourceCandidate[] {
+		const runtimeChainCandidates = this.getRuntimeAuthChainCandidates(provider);
+		if (runtimeChainCandidates.length > 0) {
+			return [this.getRuntimeAuthCandidate(provider), ...runtimeChainCandidates].filter(
+				(candidate): candidate is AuthSourceCandidate => candidate !== undefined,
+			);
+		}
 		const fallbackCandidate =
 			options?.includeFallback === false ? undefined : this.getFallbackAuthCandidate(provider);
 		const candidates =
@@ -511,7 +620,10 @@ export class AuthStorage {
 	}
 
 	private getMatchingStaleAuthSources(provider: string, candidate: AuthSourceCandidate): AuthSourceToken[] {
-		const stale = this.staleAuthSources.get(provider);
+		const stale =
+			candidate.source === "runtime_chain"
+				? this.runtimeApiKeyChainState.getStaleSources(provider)
+				: this.staleAuthSources.get(provider);
 		if (!stale) {
 			return [];
 		}
@@ -587,6 +699,9 @@ export class AuthStorage {
 		if (token.provider.length === 0) {
 			return false;
 		}
+		if (token.source === "runtime_chain") {
+			return this.runtimeApiKeyChainState.markStale(token);
+		}
 		const stale = this.staleAuthSources.get(token.provider) ?? [];
 		if (
 			!stale.some(
@@ -603,6 +718,10 @@ export class AuthStorage {
 	}
 
 	private clearStaleAuthSource(provider: string, source: ActiveAuthStatusSource): void {
+		if (source === "runtime_chain") {
+			this.runtimeApiKeyChainState.clearStaleSources(provider);
+			return;
+		}
 		const stale = this.staleAuthSources.get(provider);
 		if (!stale) {
 			return;
@@ -846,6 +965,17 @@ export class AuthStorage {
 				apiKey: runtimeKey,
 				sourceToken: this.getAuthSourceTokenForCandidate(providerId, runtimeCandidate),
 			};
+		}
+
+		const runtimeChain = this.getAvailableRuntimeAuthChainCredential(providerId);
+		if (runtimeChain) {
+			return {
+				apiKey: runtimeChain.credential.key,
+				sourceToken: this.getAuthSourceTokenForCandidate(providerId, runtimeChain.candidate),
+			};
+		}
+		if (this.runtimeApiKeyChainState.has(providerId)) {
+			return {};
 		}
 
 		const envCandidate = this.getEnvironmentAuthCandidate(providerId);

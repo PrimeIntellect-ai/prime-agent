@@ -26,6 +26,17 @@ Use `/logout` to clear credentials. Tokens are stored in `~/.prime/agent/auth.js
 - Requires ChatGPT Plus or Pro subscription
 - Officially endorsed by OpenAI: [Codex for OSS](https://developers.openai.com/community/codex-for-oss)
 
+Set the global Prime Agent configuration to load an ordered list of Codex CLI homes without copying their credentials into its own `auth.json`:
+
+```yaml
+codexHomes:
+  - ~/.codex
+  - ~/.codex-live
+  - ~/.codex-aperture
+```
+
+The daemon reads each home's `auth.json` and uses the first valid credential. When OpenAI reports that account's ChatGPT usage is exhausted, every session in the daemon advances to the next valid home. Explicit `--api-key` credentials remain higher priority. Chain state and tokens remain process-local and reset when the daemon restarts.
+
 ### Claude Pro/Max
 
 Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.

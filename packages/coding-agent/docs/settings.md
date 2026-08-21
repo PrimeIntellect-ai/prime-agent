@@ -22,6 +22,7 @@ Use exactly one settings file per scope. Prime Agent preserves the selected form
 | `rlmAllowedServiceTiers` | array | `[defaultServiceTier]` | Service tiers allowed as explicit `rlm(..., service_tier=...)` overrides; use JSON `null` for Python `None` |
 | `rlmActMaxDepth` | positive integer | `1` | Maximum synchronous Act depth; Sol is depth 0 |
 | `rlmActDefaultModel` | string or string array | - | Default native selector for Act depth 1, or ordered defaults indexed by Act depth |
+| `codexHomes` | string array | `[]` | Global-only ordered Codex CLI homes whose `auth.json` credentials rotate daemon-wide when usage is exhausted |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 

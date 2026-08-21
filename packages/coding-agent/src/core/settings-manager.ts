@@ -160,6 +160,8 @@ export interface Settings {
 	rlmActMaxDepth?: number;
 	/** Native model selector for Act depth 1, or ordered selectors indexed by Act depth. */
 	rlmActDefaultModel?: string | string[];
+	/** Ordered Codex CLI homes whose auth.json credentials rotate daemon-wide on exhaustion. */
+	codexHomes?: string[];
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 1
 	modelRoles?: Record<string, ModelRoleSelector>;
 	claudeCode?: ClaudeCodeSettings;
@@ -424,8 +426,23 @@ export class SettingsManager {
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
+		this.recordCodexHomesProjectOverride();
 		this.refreshMergedSettings();
 		this.stopWatching = this.storage.watch?.(() => this.scheduleReload());
+	}
+
+	private recordCodexHomesProjectOverride(): void {
+		if (
+			this.projectSettings.codexHomes !== undefined &&
+			!this.errors.some(
+				(entry) => entry.scope === "project" && entry.error.message.startsWith("codexHomes is global-only"),
+			)
+		) {
+			this.errors.push({
+				scope: "project",
+				error: new Error("codexHomes is global-only because its rotation state is shared by the daemon"),
+			});
+		}
 	}
 
 	private scheduleReload(): void {
@@ -610,6 +627,7 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
+		this.recordCodexHomesProjectOverride();
 		this.refreshMergedSettings();
 	}
 
@@ -732,6 +750,7 @@ export class SettingsManager {
 
 	private saveProjectSettings(settings: Settings): void {
 		this.projectSettings = structuredClone(settings);
+		this.recordCodexHomesProjectOverride();
 		this.refreshMergedSettings();
 
 		if (this.projectSettingsLoadError) {
@@ -914,6 +933,19 @@ export class SettingsManager {
 			return model.trim();
 		});
 		return models[depth - 1];
+	}
+
+	getCodexHomes(): string[] {
+		const configured = this.globalSettings.codexHomes ?? [];
+		if (!Array.isArray(configured)) {
+			throw new Error("codexHomes must be an array of directory paths");
+		}
+		return configured.map((home) => {
+			if (typeof home !== "string" || !home.trim()) {
+				throw new Error("codexHomes entries must be non-empty strings");
+			}
+			return home.trim();
+		});
 	}
 
 	getRlmMaxDepth(): number | undefined {
