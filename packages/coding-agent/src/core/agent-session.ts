@@ -5988,8 +5988,16 @@ export class AgentSession {
 					});
 					break;
 				case "refine": {
-					const options = parseRefineCommandOptions(input.command.args);
-					const result = await this.refine(options, { skipAbort: true });
+					let result: RefinementResult;
+					try {
+						const options = parseRefineCommandOptions(input.command.args);
+						result = await this.refine(options, { skipAbort: true });
+					} catch (error) {
+						// Only a failure of the refinement itself is a refine failure; a later
+						// result-row persist error must not report a completed refinement as failed.
+						this._emitRefineFailed(this._asError(error));
+						throw error;
+					}
 					const applied = result.appliedEdits.filter((edit) => edit.applied).length;
 					resultText = `Refined continual harness state: ${applied} edit${applied === 1 ? "" : "s"} applied.`;
 					displayResult = false;
@@ -6011,7 +6019,6 @@ export class AgentSession {
 		} catch (error) {
 			if (error instanceof CompactionSkippedError) return;
 			const commandError = error instanceof Error ? error : new Error(String(error));
-			if (input.command.name === "refine") this._emitRefineFailed(commandError);
 			try {
 				this._appendDurableSessionCommandMessage(
 					`Command failed: ${commandError.message}`,

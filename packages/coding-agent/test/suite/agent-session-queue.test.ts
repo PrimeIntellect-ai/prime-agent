@@ -2624,6 +2624,37 @@ describe("AgentSession queue characterization", () => {
 		).toBe(false);
 	});
 
+	it("does not emit refine_failed when only the result-row persist fails after a successful refine", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage(refinePlanJson("no-op"))]);
+			await harness.session.prompt("one");
+			const append = harness.sessionManager.appendCustomMessageEntryWithRollback.bind(harness.sessionManager);
+			vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementation((...args) => {
+				if (args[0] === "session_slash_command_result") throw new Error("disk full");
+				return append(...args);
+			});
+			const failures: string[] = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "refine_failed") failures.push(event.error);
+			});
+
+			await harness.session.prompt("/refine --local").catch(() => undefined);
+
+			expect(failures).toEqual([]);
+			expect(harness.session.messages.find(isRefinementOutcomeMessage)?.details.summary).toBe("no-op");
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
 	it("allows a /compact extension hook to navigate without deadlocking on the commit fence", async () => {
 		let targetId: string | undefined;
 		let navigateFromContext: ((target: string) => Promise<{ cancelled: boolean }>) | undefined;
