@@ -12,17 +12,24 @@ from typing import Any
 from .bash import BashHandle, BashResult, bash
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
-try:
-    from ipykernel.comm import Comm
-except Exception:  # pragma: no cover - depends on ipykernel version
-    Comm = None  # type: ignore[assignment]
-
-try:
-    from IPython import get_ipython
-except Exception:  # pragma: no cover - only available in kernels
-    get_ipython = None  # type: ignore[assignment]
-
 HOST_COMM_TARGET = "host.request"
+
+
+def _import_comm() -> Any:
+    """ipykernel is imported per call: it is absent outside Jupyter kernels."""
+    try:
+        from ipykernel.comm import Comm
+    except Exception:  # pragma: no cover - depends on ipykernel version
+        return None
+    return Comm
+
+
+def _import_get_ipython() -> Any:
+    try:
+        from IPython import get_ipython
+    except Exception:  # pragma: no cover - only available in kernels
+        return None
+    return get_ipython
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,7 @@ class RLMSubagent:
 
 def _install_control_comm_handlers() -> None:
     """Let comm replies arrive on the control channel during an execute_request."""
+    get_ipython = _import_get_ipython()
     if get_ipython is None:
         return
     shell = get_ipython()
@@ -94,6 +102,7 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
         raise TypeError("request_type must be a non-empty str")
     if payload is not None and not isinstance(payload, dict):
         raise TypeError(f"payload must be a dict or None, got {type(payload).__name__}")
+    Comm = _import_comm()
     if Comm is None:
         raise RuntimeError("Jupyter comm support is unavailable in this kernel")
     _install_control_comm_handlers()

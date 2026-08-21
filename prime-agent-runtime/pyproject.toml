@@ -10,6 +10,9 @@ dependencies = [
   "tyro",
 ]
 
+[dependency-groups]
+dev = ["dill"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
