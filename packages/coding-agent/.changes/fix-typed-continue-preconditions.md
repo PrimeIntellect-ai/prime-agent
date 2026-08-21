@@ -1,1 +1,0 @@
-- Changed post-compaction continuation error classification to typed `AgentContinueError` codes instead of matching error message text.
