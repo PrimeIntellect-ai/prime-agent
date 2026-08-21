@@ -888,6 +888,10 @@ export class InteractiveMode {
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private workingStartedAt: number | undefined = undefined;
+	// Wall-clock start of the in-flight turn (newest user message). Unlike
+	// workingStartedAt it survives loader teardown, so the elapsed display
+	// doesn't reset when leaving/re-entering or re-attaching to the session.
+	private turnStartedAt: number | undefined = undefined;
 	private workingTimer: NodeJS.Timeout | undefined = undefined;
 	private readonly featureHintDeck = new FeatureHintDeck();
 	private currentFeatureHint: string | undefined;
@@ -3179,9 +3183,31 @@ export class InteractiveMode {
 		this.workingTimer.unref?.();
 	}
 
+	/**
+	 * Recover the in-flight turn's start (newest user message) from a restored
+	 * transcript so the elapsed timer continues instead of restarting at 0s
+	 * after a re-attach or a return from the agents view.
+	 */
+	private restoreTurnStartFromMessages(messages: readonly AgentMessage[]): void {
+		if (!this.isAgentStreaming()) {
+			this.turnStartedAt = undefined;
+			return;
+		}
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i]!;
+			if (message.role !== "user") continue;
+			this.turnStartedAt = message.timestamp;
+			if (this.workingStartedAt !== undefined) {
+				this.workingStartedAt = message.timestamp;
+				this.updateWorkingLoaderMessage();
+			}
+			return;
+		}
+	}
+
 	private startWorkingLoader(): void {
 		this.stopWorkingLoader();
-		this.workingStartedAt = Date.now();
+		this.workingStartedAt = this.turnStartedAt ?? Date.now();
 		this.loadingAnimation = this.createWorkingLoader();
 		this.statusContainer.addChild(this.loadingAnimation);
 		this.startWorkingTimer();
@@ -5408,6 +5434,15 @@ export class InteractiveMode {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
+					// First user message of the turn anchors the elapsed display;
+					// steering messages mid-turn must not restart it.
+					if (this.turnStartedAt === undefined) {
+						this.turnStartedAt = event.message.timestamp;
+						if (this.workingStartedAt !== undefined) {
+							this.workingStartedAt = event.message.timestamp;
+							this.updateWorkingLoaderMessage();
+						}
+					}
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
@@ -5529,6 +5564,7 @@ export class InteractiveMode {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
+				this.turnStartedAt = undefined;
 				// Drops the loader; background subagents are shown by the tree, not the loader.
 				this.syncWorkingLoader();
 				if (this.streamingComponent) {
@@ -6488,6 +6524,7 @@ export class InteractiveMode {
 		this.seedSubagentSummary(snapshot.children);
 		this.setSessionHasMessages(context.messages.length > 0);
 		this.applyConnectionStateSnapshot(state);
+		this.restoreTurnStartFromMessages(context.messages);
 		await this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
