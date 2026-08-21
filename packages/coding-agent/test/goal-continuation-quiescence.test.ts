@@ -65,7 +65,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		expect(mode._goalState.continuationsUsed).toBe(1);
 	});
 
-	it("resumes a deferred continuation exactly once, unqueued and idle-waking", () => {
+	it("resumes a deferred continuation exactly once, unqueued, idle-waking, and counted", () => {
 		const mode = harness({ _goalContinuationAwaitsRlmWork: true });
 		maybeResume.call(mode);
 		maybeResume.call(mode);
@@ -73,6 +73,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		const [action, options] = mode._admitSessionInput.mock.calls[0]!;
 		expect((action as { options: { resumeIfIdle: boolean } }).options.resumeIfIdle).toBe(true);
 		expect(options).toBeUndefined();
+		expect(mode._goalState.continuationsUsed).toBe(1);
 	});
 
 	it("keeps the deferral while admission is paused and retries after release", () => {
@@ -97,7 +98,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
 	});
 
-	it("keeps the deferral when admission throws", () => {
+	it("keeps the deferral and rolls back the count when admission throws", () => {
 		const mode = harness({
 			_goalContinuationAwaitsRlmWork: true,
 			_admitSessionInput: vi.fn(() => {
@@ -106,6 +107,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		});
 		maybeResume.call(mode);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
+		expect(mode._goalState.continuationsUsed).toBe(0);
 	});
 
 	it("stays deferred while work remains and drops the deferral for inactive goals", () => {

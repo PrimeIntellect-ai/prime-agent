@@ -2048,8 +2048,15 @@ export class AgentSession {
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
+		const goalBeforeResume = this._goalState;
 		try {
 			this._ensureGoalRuntimeActive();
+			this._setGoalState({
+				...this._goalState,
+				continuationsUsed: this._goalState.continuationsUsed + 1,
+				lastReason: undefined,
+				lastError: undefined,
+			});
 			const message = createGoalContextMessage(this._goalState, "continuation");
 			const normalized = normalizeMessageContent(message.content);
 			// No front: a settling child's terminal notice must be read first.
@@ -2061,7 +2068,8 @@ export class AgentSession {
 			);
 			this._goalContinuationAwaitsRlmWork = false;
 		} catch {
-			// Admission can race a new pause; the deferral stays set for the retry.
+			// Admission can race a new pause; roll back so the retry re-counts.
+			this._setGoalState(goalBeforeResume);
 		}
 	}
 
