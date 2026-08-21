@@ -2039,12 +2039,26 @@ export class AgentSession {
 	private _maybeResumeGoalContinuationAfterRlmWork(): void {
 		if (!this._goalContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
-		this._goalContinuationAwaitsRlmWork = false;
-		if (this._goalState.status !== "active" || !this._goalState.objective) return;
+		if (this._goalState.status !== "active" || !this._goalState.objective) {
+			this._goalContinuationAwaitsRlmWork = false;
+			return;
+		}
+		// Keep the deferral while admission is paused; the pause release retries.
+		if (this._sessionInputAdmissionPauses.size > 0) return;
 		try {
-			this._runOrQueueGoalContext("continuation");
+			this._ensureGoalRuntimeActive();
+			const message = createGoalContextMessage(this._goalState, "continuation");
+			const normalized = normalizeMessageContent(message.content);
+			// No front: a settling child's terminal notice must be read first.
+			this._admitSessionInput(
+				this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+					message,
+					resumeIfIdle: true,
+				}),
+			);
+			this._goalContinuationAwaitsRlmWork = false;
 		} catch {
-			// Continuation resume must not throw into the settlement path.
+			// Admission can race a new pause; the deferral stays set for the retry.
 		}
 	}
 
@@ -6592,6 +6606,7 @@ export class AgentSession {
 				this._sessionInputPumpEpoch++;
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
+				this._maybeResumeGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
 			},
 		};
