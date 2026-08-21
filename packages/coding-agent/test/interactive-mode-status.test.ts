@@ -1368,6 +1368,7 @@ describe("InteractiveMode connection events", () => {
 			applyConnectionStateSnapshot: vi.fn(),
 			renderSessionContext: renderSessionContextMock,
 			restoreStreamingMessageFromSnapshot,
+			restoreTurnStartFromMessages: vi.fn(),
 			showStatus: vi.fn(),
 		} as unknown as InteractiveMode;
 
