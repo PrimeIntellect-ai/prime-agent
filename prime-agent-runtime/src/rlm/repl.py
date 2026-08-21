@@ -23,6 +23,8 @@ import types
 import uuid
 from typing import Any
 
+from .bash import _kill_live_handles
+
 PROTOCOL_VERSION = 1
 
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
@@ -152,22 +154,16 @@ def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
     if task is None or task.done():
         return
     _active["interrupted"] = True
-    # The handler runs in the main thread, which is also the loop thread, so
-    # asyncio.current_task tells us whose bytecode the signal interrupted.
+    # Handler runs in the main (loop) thread: current_task is whose step the signal interrupted.
     running = asyncio.current_task(_loop) if _loop is not None else None
     if running is task:
-        # The active request's own step is executing (sync bytecode, or a
-        # blocking syscall woken by EINTR): raise straight into it.
+        # The active request's own step (sync bytecode or an EINTR-woken syscall): raise into it.
         raise KeyboardInterrupt
-    # The loop is idle in select(), or another task is mid-step; raising here
-    # would land in the wrong context, so cancel the active task instead.
-    # Same thread, so a direct cancel is safe.
+    # Loop idle in select() or another task mid-step: cancel the active task (same thread, safe).
     task.cancel()
     if running is not None and running is not _serve_task:
-        # A background task's step occupies the only thread and may block in
-        # synchronous code forever, which would keep the cancel from ever
-        # being processed: raise into it to unwind its step. The background
-        # task dies with this KeyboardInterrupt; its exception is consumed.
+        # A background task blocked in sync code occupies the only thread and would keep the
+        # cancel from ever running: raise into it to unwind its step; it dies with the KI.
         running.add_done_callback(_consume_task_exception)
         raise KeyboardInterrupt
 
@@ -194,8 +190,7 @@ def _request_interrupt(target: str | None) -> None:
             return
         else:
             return
-    # SIGINT must land on the main thread: a sync-blocking syscall there gets
-    # EINTR and the Python-level handler runs where the cell executes.
+    # SIGINT must land on the main thread, where cells execute.
     signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
     if _loop is not None:
         # Wake the selector so a cancel scheduled by the handler runs promptly.
@@ -231,11 +226,7 @@ def _cell_stack(stack: traceback.StackSummary) -> traceback.StackSummary | None:
 
 
 def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
-    # The traceback shows only cell and library frames: frames before the
-    # first cell frame are the runtime's exec machinery and frames from this
-    # file (e.g. the SIGINT handler's raise) are runtime-internal; both are
-    # stripped. When no cell frame exists, format the exception only, which
-    # for syntax errors keeps filename, source, and caret.
+    # No cell frame (e.g. SyntaxError): exception-only keeps filename, source, and caret.
     te = traceback.TracebackException.from_exception(exc)
     stack = _cell_stack(te.stack)
     if stack is None:
@@ -295,8 +286,7 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
         _active["rid"] = rid
         _active["task"] = task
         if _consume_pending_interrupt(rid):
-            # An interrupt arrived before this request became active: cancel
-            # the task before its first step and report KeyboardInterrupt.
+            # Interrupt parked before activation: cancel before the first step.
             _active["interrupted"] = True
             task.cancel()
     try:
@@ -526,10 +516,7 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
         rtype = req.get("type")
         if rtype == "shutdown":
             rid = req.get("id")
-            # Kill live bash children before replying so shutdown is prompt even
-            # when executor threads are still parked on their handles.
-            from .bash import _kill_live_handles
-
+            # Kill live bash children now; atexit would wait on parked executor threads.
             _kill_live_handles()
             if isinstance(rid, str):
                 _send({"event": "done", "id": rid, "status": "ok"})

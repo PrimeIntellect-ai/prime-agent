@@ -113,8 +113,7 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(self.ready_event["protocol"], 1)
         major, minor = sys.version_info[:2]
         self.assertTrue(self.ready_event["python"].startswith(f"{major}.{minor}."))
-        # Target is <150 ms; the bound leaves headroom for loaded CI machines
-        # while still catching an order-of-magnitude regression.
+        # Loose bound for loaded CI machines; still catches an order-of-magnitude regression.
         print(f"\n[startup] spawn -> ready: {self.ready_ms:.0f} ms")
         self.assertLess(self.ready_ms, 500)
 
@@ -217,9 +216,8 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "6")
 
     def test_interrupt_await_with_loop_hogging_background_task(self):
-        # A background task blocked in synchronous code occupies the only
-        # thread; the interrupt kills it with KeyboardInterrupt so the
-        # foreground cancel can take effect.
+        # A sync-blocked background task hogs the only thread; the interrupt kills it
+        # so the foreground cancel can take effect.
         code = "\n".join(
             [
                 "import asyncio, time",
