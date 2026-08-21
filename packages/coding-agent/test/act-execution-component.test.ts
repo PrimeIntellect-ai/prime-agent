@@ -148,6 +148,44 @@ describe("ActExecutionComponent", () => {
 		expect(render(act)).not.toContain("Additional Act progress omitted");
 	});
 
+	it("labels nested start and return boundaries with explicit depth", () => {
+		const nestedStart = event({
+			depth: 2,
+			parentActId: "act-parent",
+			sequence: 1,
+			event: "start",
+			prompt: "inspect one nested owner",
+			promptTruncated: false,
+			model: { provider: "test", id: "deepseek", name: "DeepSeek" },
+			thinkingLevel: "high",
+			directingModel: { provider: "test", id: "luna", name: "Luna" },
+			directingThinkingLevel: "medium",
+			cancellationCapability: "posix-managed",
+		});
+		const act = new ActExecutionComponent(nestedStart);
+		act.update(
+			event({
+				depth: 2,
+				parentActId: "act-parent",
+				sequence: 2,
+				event: "terminal",
+				status: "done",
+				prompt: "inspect one nested owner",
+				promptTruncated: false,
+				model: { provider: "test", id: "deepseek", name: "DeepSeek" },
+				thinkingLevel: "high",
+				directingModel: { provider: "test", id: "luna", name: "Luna" },
+				directingThinkingLevel: "medium",
+				cancellationCapability: "posix-managed",
+				usage,
+				errorTruncated: false,
+			}),
+		);
+		const output = render(act);
+		expect(output).toContain("act 2  DeepSeek • high");
+		expect(output).toContain("return 2  Luna • medium");
+	});
+
 	it("frames cancellation without replacing shared event rendering", () => {
 		const act = new ActExecutionComponent(start());
 		act.update(terminal(2, "cancelled"));

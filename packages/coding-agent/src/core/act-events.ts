@@ -14,8 +14,14 @@ export interface ActEventModel {
 interface ActEventBase {
 	type: "act_event";
 	actId: string;
+	depth?: number;
+	parentActId?: string;
 	outerToolCallId: string;
 	sequence: number;
+}
+
+export function actEventDepth(event: { depth?: number }): number {
+	return Number.isSafeInteger(event.depth) && (event.depth ?? 0) > 0 ? (event.depth as number) : 1;
 }
 
 export interface ActStartEvent extends ActEventBase {

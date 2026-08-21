@@ -1,7 +1,7 @@
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { type Component, Text, truncateToWidth, VersionedRenderCache, visibleWidth } from "@earendil-works/pi-tui";
 import type { ActCancellationCapability } from "../../../core/act-cancellation.js";
-import type { ActEventModel, ActProjectionEvent } from "../../../core/act-events.js";
+import { type ActEventModel, type ActProjectionEvent, actEventDepth } from "../../../core/act-events.js";
 import { theme } from "../theme/theme.js";
 import { AssistantMessageComponent } from "./assistant-message.js";
 import { IPythonCellComponent } from "./ipython-cell.js";
@@ -19,10 +19,15 @@ interface ActCell {
 	error?: string;
 }
 
-type ActEntry = { kind: "assistant"; stream: "thinking" | "text"; text: string } | { kind: "cell"; cellId: string };
+type ActEntry =
+	| { kind: "assistant"; stream: "thinking" | "text"; text: string }
+	| { kind: "cell"; cellId: string }
+	| { kind: "act"; actId: string };
 
 export interface ActExecutionState {
 	actId: string;
+	depth: number;
+	parentActId?: string;
 	outerToolCallId: string;
 	sequence: number;
 	prompt: string;
@@ -42,6 +47,8 @@ export function createActExecutionState(event: ActProjectionEvent): ActExecution
 	return reduceActExecutionState(
 		{
 			actId: event.actId,
+			depth: actEventDepth(event),
+			parentActId: event.parentActId,
 			outerToolCallId: event.outerToolCallId,
 			sequence: 0,
 			prompt: "",
@@ -58,6 +65,8 @@ export function reduceActExecutionState(state: ActExecutionState, event: ActProj
 		state.status !== "running" ||
 		event.actId !== state.actId ||
 		event.outerToolCallId !== state.outerToolCallId ||
+		actEventDepth(event) !== state.depth ||
+		event.parentActId !== state.parentActId ||
 		event.sequence <= state.sequence
 	) {
 		return state;
@@ -173,6 +182,7 @@ export class ActExecutionComponent implements Component {
 	private state: ActExecutionState;
 	private stateVersion = 0;
 	private expanded = false;
+	private readonly nestedActs = new Map<string, ActExecutionComponent>();
 
 	constructor(event: ActProjectionEvent) {
 		this.state = createActExecutionState(event);
@@ -196,6 +206,14 @@ export class ActExecutionComponent implements Component {
 		this.renderCache.invalidate();
 	}
 
+	appendNested(component: ActExecutionComponent): void {
+		if (this.nestedActs.has(component.actId)) return;
+		this.nestedActs.set(component.actId, component);
+		this.state = { ...this.state, entries: [...this.state.entries, { kind: "act", actId: component.actId }] };
+		this.stateVersion += 1;
+		this.renderCache.invalidate();
+	}
+
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
 		this.stateVersion += 1;
@@ -210,9 +228,10 @@ export class ActExecutionComponent implements Component {
 		const safeWidth = Math.max(1, width);
 		const cached = this.renderCache.get(safeWidth, this.stateVersion);
 		if (cached) return cached;
+		const depthLabel = this.state.depth > 1 ? ` ${this.state.depth}` : "";
 		const lines = [
 			"",
-			separator(`act  ${actorLabel(this.state.model, this.state.thinkingLevel)}`, safeWidth, "accent"),
+			separator(`act${depthLabel}  ${actorLabel(this.state.model, this.state.thinkingLevel)}`, safeWidth, "accent"),
 			"",
 		];
 		if (this.state.prompt)
@@ -228,6 +247,11 @@ ${this.state.prompt}`,
 				).render(safeWidth),
 			);
 		for (const entry of this.state.entries) {
+			if (entry.kind === "act") {
+				const nested = this.nestedActs.get(entry.actId);
+				if (nested) lines.push(...nested.render(safeWidth));
+				continue;
+			}
 			if (entry.kind === "assistant") {
 				lines.push(
 					...new AssistantMessageComponent(
@@ -270,14 +294,15 @@ ${this.state.prompt}`,
 			);
 		if (this.state.status !== "running") {
 			const actor = actorLabel(this.state.directingModel, this.state.directingThinkingLevel);
+			const returnLabel = `return${depthLabel}`;
 			const label =
 				this.state.status === "done"
-					? `return  ${actor}${usageLabel(this.state.usage)}`
+					? `${returnLabel}  ${actor}${usageLabel(this.state.usage)}`
 					: this.state.status === "cancelled"
-						? `Act cancelled · return  ${actor}`
+						? `Act cancelled · ${returnLabel}  ${actor}`
 						: this.state.status === "error"
-							? `Act failed · return  ${actor}`
-							: `return  ${actor}`;
+							? `Act failed · ${returnLabel}  ${actor}`
+							: `${returnLabel}  ${actor}`;
 			const color =
 				this.state.status === "error" ? "error" : this.state.status === "cancelled" ? "warning" : "muted";
 			lines.push("", separator(label, safeWidth, color), "");

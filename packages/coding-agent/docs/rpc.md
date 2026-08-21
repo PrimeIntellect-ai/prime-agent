@@ -943,10 +943,10 @@ Use `toolCallId` to correlate events. The `partialResult` in `tool_execution_upd
 A nested Act is an additive event stream correlated to its outer IPython tool call:
 
 ```json
-{"type":"act_event","actId":"act-1","outerToolCallId":"call-ipython","sequence":1,"event":"start","prompt":"inspect state","promptTruncated":false,"model":{"provider":"prime","id":"model"},"cancellationCapability":"posix-managed"}
+{"type":"act_event","actId":"act-2","depth":2,"parentActId":"act-1","outerToolCallId":"call-ipython","sequence":1,"event":"start","prompt":"inspect state","promptTruncated":false,"model":{"provider":"prime","id":"model"},"cancellationCapability":"posix-managed"}
 ```
 
-Sequences are monotonic within one Act. Progress contains only assistant thinking/text deltas and `shared_ipython` cell start/terminal facts. One self-contained terminal repeats the bounded prompt, resolved model, and exact cancellation capability and adds `done`, `error`, or `cancelled` status plus usage. Main-session events are emitted directly. An observed session wraps the unchanged event in `observed_session_event`. The union never contains the Python object returned by `rlm.done()` or private lane message identities.
+Every new event carries explicit `depth`; nested events carry the immediate `parentActId`, and readers normalize missing historical depth to 1. Sequences are monotonic within one Act. Progress contains only assistant thinking/text deltas and `shared_ipython` cell start/terminal facts. One self-contained terminal repeats the bounded prompt, resolved model, and exact cancellation capability and adds `done`, `error`, or `cancelled` status plus usage. Main-session events are emitted directly. An observed session wraps the unchanged event in `observed_session_event`. The union never contains the Python object returned by `rlm.done()` or private lane message identities.
 
 ### session_action_update
 

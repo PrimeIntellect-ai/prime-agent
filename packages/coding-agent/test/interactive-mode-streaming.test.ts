@@ -32,7 +32,7 @@ type HandleEventThis = {
 	toolOutputExpanded: boolean;
 	footer: { invalidate(): void };
 	subagentSummaryLine: { invalidate(): void };
-	activeActTray?: { actId: string; model: string; thinkingLevel?: string; returning: boolean };
+	activeActTrays: Map<number, { actId: string; depth: number; model: string; thinkingLevel?: string }>;
 	ui: TUI;
 	chatContainer: Container;
 	recapContainer: Container;
@@ -44,7 +44,7 @@ type HandleEventThis = {
 	pendingTools: Map<string, ToolExecutionComponent>;
 	ipythonToolComponents: Map<string, ToolExecutionComponent>;
 	lateIpythonSentAgentMessages: Map<string, never[]>;
-	lateActTerminals: Map<string, Extract<AgentConnectionSessionEvent, { type: "act_event" }>>;
+	lateActEvents: Map<string, Extract<AgentConnectionSessionEvent, { type: "act_event" }>[]>;
 	agentRunFileChanges: Map<string, FileChangeSummary>;
 	updateConnectionStateFromEvent(event: AgentConnectionSessionEvent): void;
 	getMarkdownThemeWithSettings(): MarkdownTheme;
@@ -99,7 +99,8 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
 		ipythonToolComponents: new Map<string, ToolExecutionComponent>(),
 		lateIpythonSentAgentMessages: new Map<string, never[]>(),
-		lateActTerminals: new Map<string, Extract<AgentConnectionSessionEvent, { type: "act_event" }>>(),
+		lateActEvents: new Map<string, Extract<AgentConnectionSessionEvent, { type: "act_event" }>[]>(),
+		activeActTrays: new Map(),
 		agentRunFileChanges: new Map<string, FileChangeSummary>(),
 		updateConnectionStateFromEvent: vi.fn(),
 		getMarkdownThemeWithSettings: () => getMarkdownTheme(),
@@ -199,14 +200,49 @@ describe("InteractiveMode streaming events", () => {
 			directingThinkingLevel: "low",
 			cancellationCapability: "posix-managed",
 		});
-		expect(fakeThis.activeActTray).toEqual({
-			actId: "act-live",
-			model: "Luna",
-			thinkingLevel: "medium",
-		});
+		expect([...fakeThis.activeActTrays.values()]).toEqual([
+			{ actId: "act-live", depth: 1, model: "Luna", thinkingLevel: "medium" },
+		]);
 		const getActTrayLabel = (
 			InteractiveMode.prototype as unknown as { getActTrayLabel(this: HandleEventThis): string | undefined }
 		).getActTrayLabel;
+		expect(stripAnsi(getActTrayLabel.call(fakeThis) ?? "")).toContain("act: Luna • medium");
+		await handleEvent.call(fakeThis, {
+			type: "act_event",
+			actId: "act-nested",
+			depth: 2,
+			parentActId: "act-live",
+			outerToolCallId: "outer-act",
+			sequence: 1,
+			event: "start",
+			prompt: "inspect nested",
+			promptTruncated: false,
+			model: { provider: "test", id: "nested-model", name: "DeepSeek" },
+			thinkingLevel: "high",
+			directingModel: { provider: "test", id: "live-model", name: "Luna" },
+			directingThinkingLevel: "medium",
+			cancellationCapability: "posix-managed",
+		});
+		expect(stripAnsi(getActTrayLabel.call(fakeThis) ?? "")).toContain("act 2: DeepSeek • high");
+		await handleEvent.call(fakeThis, {
+			type: "act_event",
+			actId: "act-nested",
+			depth: 2,
+			parentActId: "act-live",
+			outerToolCallId: "outer-act",
+			sequence: 2,
+			event: "terminal",
+			status: "done",
+			prompt: "inspect nested",
+			promptTruncated: false,
+			model: { provider: "test", id: "nested-model", name: "DeepSeek" },
+			thinkingLevel: "high",
+			directingModel: { provider: "test", id: "live-model", name: "Luna" },
+			directingThinkingLevel: "medium",
+			cancellationCapability: "posix-managed",
+			usage: EMPTY_USAGE,
+			errorTruncated: false,
+		});
 		expect(stripAnsi(getActTrayLabel.call(fakeThis) ?? "")).toContain("act: Luna • medium");
 		await handleEvent.call(fakeThis, {
 			type: "act_event",
@@ -226,18 +262,48 @@ describe("InteractiveMode streaming events", () => {
 			errorTruncated: false,
 		});
 
-		expect(fakeThis.activeActTray).toBeUndefined();
+		expect(fakeThis.activeActTrays.size).toBe(0);
 		expect(renderChat(root)).toContain("act  Luna • medium");
+		expect(renderChat(root)).toContain("act 2  DeepSeek • high");
+		expect(renderChat(root)).toContain("return 2  Luna • medium");
 		expect(renderChat(root)).toContain("return  Sol • low");
+		const rendered = renderChat(root);
+		expect(rendered.indexOf("act  Luna")).toBeLessThan(rendered.indexOf("act 2  DeepSeek"));
+		expect(rendered.indexOf("return 2  Luna")).toBeLessThan(rendered.indexOf("return  Sol"));
 		expect(renderChat(other)).not.toContain("Act");
 		expect(fakeThis.ui.requestRender).toHaveBeenCalled();
 	});
 
-	test("retains one self-contained late terminal until its root IPython component appears", async () => {
+	test("replays ordered Act start and progress events when the root component appears late", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-		await handleEvent.call(fakeThis, actTerminalEvent("outer-late"));
-		expect(fakeThis.lateActTerminals.size).toBe(1);
+		const startEvent = {
+			type: "act_event" as const,
+			actId: "late-act",
+			outerToolCallId: "outer-late",
+			sequence: 1,
+			event: "start" as const,
+			prompt: "late prompt",
+			promptTruncated: false,
+			model: { provider: "test", id: "late-model", name: "Late" },
+			thinkingLevel: "medium",
+			directingModel: { provider: "test", id: "root-model", name: "Sol" },
+			directingThinkingLevel: "low",
+			cancellationCapability: "cooperative-only" as const,
+		};
+		await handleEvent.call(fakeThis, startEvent);
+		await handleEvent.call(fakeThis, {
+			type: "act_event",
+			actId: "late-act",
+			outerToolCallId: "outer-late",
+			sequence: 2,
+			event: "assistant_delta",
+			stream: "thinking",
+			text: "working",
+			textTruncated: false,
+		});
+		expect(fakeThis.lateActEvents.get("outer-late")).toHaveLength(2);
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("act  Late");
 
 		const root = new ToolExecutionComponent(
 			"ipython",
@@ -255,7 +321,56 @@ describe("InteractiveMode streaming events", () => {
 		).registerIpythonToolComponent;
 		register.call(fakeThis, "ipython", "outer-late", root);
 
-		expect(fakeThis.lateActTerminals.size).toBe(0);
+		expect(fakeThis.lateActEvents.has("outer-late")).toBe(false);
+		const rendered = renderChat(root);
+		expect(rendered).toContain("act  Late • medium");
+		expect(rendered).toContain("working");
+		expect(rendered).not.toContain("return  Sol");
+	});
+
+	test("bounds retained Act events across unattached tool calls", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		for (let index = 0; index < 129; index++) {
+			await handleEvent.call(fakeThis, {
+				type: "act_event",
+				actId: `act-${index}`,
+				outerToolCallId: `outer-${index}`,
+				sequence: 1,
+				event: "assistant_delta",
+				stream: "thinking",
+				text: "working",
+				textTruncated: false,
+			});
+		}
+		expect(fakeThis.lateActEvents.size).toBe(128);
+		expect(fakeThis.lateActEvents.has("outer-0")).toBe(false);
+		expect(fakeThis.lateActEvents.has("outer-1")).toBe(true);
+	});
+
+	test("cleans up a retained terminal when its root IPython component appears", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		await handleEvent.call(fakeThis, actTerminalEvent("outer-late"));
+		expect(fakeThis.lateActEvents.get("outer-late")).toHaveLength(1);
+
+		const root = new ToolExecutionComponent(
+			"ipython",
+			"outer-late",
+			{ code: "await act" },
+			{},
+			undefined,
+			fakeThis.ui,
+			"/tmp",
+		);
+		const register = (
+			InteractiveMode.prototype as unknown as {
+				registerIpythonToolComponent(name: string, id: string, component: ToolExecutionComponent): void;
+			}
+		).registerIpythonToolComponent;
+		register.call(fakeThis, "ipython", "outer-late", root);
+
+		expect(fakeThis.lateActEvents.has("outer-late")).toBe(false);
 		expect(renderChat(root)).toContain("act  Late • medium");
 		expect(renderChat(root)).toContain("return  Sol • low");
 	});

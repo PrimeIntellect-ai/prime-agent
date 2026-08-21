@@ -91,7 +91,7 @@ The public local socket is JSONL-framed. The current protocol provides:
 
 Protocol version and schema revision are independent. A compatible addition can be capability-gated or require a schema revision; an incompatible wire change requires a protocol bump.
 
-An attached client receives nested Act events only when it advertises `rlm_act_stream`. A new daemon suppresses only those additive events for an older client; the ordinary outer IPython events remain available. A new client attached to an older daemon sees no server capability and uses the same fallback. Act events are live progress, not snapshot or replay state.
+An attached client receives nested Act events only when it advertises `rlm_act_stream`. Supported delivery preserves additive `depth` and `parentActId` fields without a protocol or schema bump. A new daemon suppresses only those additive events for an older client; the ordinary outer IPython events remain available. A new client attached to an older daemon sees no server capability and uses the same fallback. Act events are live progress, not snapshot or replay state.
 
 Protocol v1 is retained only for the one-release update handoff that prepares and stops an older daemon. A busy older daemon that cannot produce a recovery manifest is left running.
 

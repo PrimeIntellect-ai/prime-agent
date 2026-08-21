@@ -1,6 +1,6 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
-import type { ActProjectionEvent, ActStartEvent } from "../../core/act-events.js";
+import { type ActProjectionEvent, type ActStartEvent, actEventDepth } from "../../core/act-events.js";
 import type { AgentConnectionSessionEvent } from "../agent-connection/types.js";
 import type { PrimeAgentIpythonMeta, PrimeAgentSessionMeta } from "./acp-meta.js";
 import { primeAgentMeta } from "./acp-meta.js";
@@ -211,6 +211,8 @@ function actMeta(
 	return primeAgentMeta({
 		act: {
 			actId: event.actId,
+			depth: actEventDepth(event),
+			...(event.parentActId ? { parentActId: event.parentActId } : {}),
 			outerToolCallId: event.outerToolCallId,
 			sequence: event.sequence,
 			event: event.event,

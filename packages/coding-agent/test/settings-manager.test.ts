@@ -673,6 +673,56 @@ modelRoles:
 		});
 	});
 
+	describe("RLM Act depth settings", () => {
+		it("defaults the maximum to one and accepts a positive integer", () => {
+			expect(SettingsManager.inMemory().getRlmActMaxDepth()).toBe(1);
+			expect(SettingsManager.inMemory({ rlmActMaxDepth: 2 }).getRlmActMaxDepth()).toBe(2);
+		});
+
+		it.each([0, -1, 1.5])("rejects invalid maximum %s", (rlmActMaxDepth) => {
+			const manager = SettingsManager.inMemory({ rlmActMaxDepth });
+			expect(() => manager.getRlmActMaxDepth()).toThrow("rlmActMaxDepth must be a positive integer");
+		});
+
+		it("keeps a scalar default at Act depth one only", () => {
+			const manager = SettingsManager.inMemory({ rlmActDefaultModel: "  @luna  " });
+			expect(manager.getRlmActDefaultModel(1)).toBe("@luna");
+			expect(manager.getRlmActDefaultModel(2)).toBeUndefined();
+		});
+
+		it("normalizes ordered array defaults by Act depth", () => {
+			const manager = SettingsManager.inMemory({
+				rlmActDefaultModel: ["  @luna  ", "  @deepseek  "],
+			});
+			expect(manager.getRlmActDefaultModel(1)).toBe("@luna");
+			expect(manager.getRlmActDefaultModel(2)).toBe("@deepseek");
+			expect(manager.getRlmActDefaultModel(3)).toBeUndefined();
+			expect(SettingsManager.inMemory({ rlmActDefaultModel: [] }).getRlmActDefaultModel(1)).toBeUndefined();
+		});
+
+		it("rejects invalid array entries", () => {
+			const empty = SettingsManager.inMemory({ rlmActDefaultModel: ["@luna", "  "] });
+			expect(() => empty.getRlmActDefaultModel(2)).toThrow("rlmActDefaultModel entries must be non-empty strings");
+			const nonString = SettingsManager.inMemory({
+				rlmActDefaultModel: ["@luna", 42] as unknown as string[],
+			});
+			expect(() => nonString.getRlmActDefaultModel(2)).toThrow(
+				"rlmActDefaultModel entries must be non-empty strings",
+			);
+		});
+
+		it("loads ordered Act defaults from YAML", () => {
+			writeFileSync(
+				join(agentDir, "settings.yml"),
+				'rlmActMaxDepth: 2\nrlmActDefaultModel:\n  - "@luna"\n  - "@deepseek"\n',
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getRlmActMaxDepth()).toBe(2);
+			expect(manager.getRlmActDefaultModel(1)).toBe("@luna");
+			expect(manager.getRlmActDefaultModel(2)).toBe("@deepseek");
+		});
+	});
+
 	describe("idle worker eviction", () => {
 		it("defaults to 90 minutes and treats none as off", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

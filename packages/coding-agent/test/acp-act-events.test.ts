@@ -21,7 +21,13 @@ const usage = {
 };
 
 function actEvents(): ActProjectionEvent[] {
-	const base = { type: "act_event" as const, actId: "act-sdk", outerToolCallId: "outer-sdk" };
+	const base = {
+		type: "act_event" as const,
+		actId: "act-sdk",
+		depth: 2,
+		parentActId: "act-parent",
+		outerToolCallId: "outer-sdk",
+	};
 	return [
 		{
 			...base,
@@ -129,6 +135,8 @@ describe("ACP Act projection", () => {
 			[PRIME_AGENT_META_NAMESPACE]: {
 				act: {
 					actId: "act-sdk",
+					depth: 2,
+					parentActId: "act-parent",
 					outerToolCallId: "outer-sdk",
 					sequence: 3,
 					model: { provider: "test", id: "model-sdk" },

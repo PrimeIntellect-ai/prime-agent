@@ -18,6 +18,6 @@ For most users, [Git for Windows](https://git-scm.com/download/win) is sufficien
 
 ## Act Cancellation
 
-Native Windows reports `rlm.ACT_CANCELLATION_CAPABILITY` as `"cooperative-only"`. Cancelling `rlm.act()` stops provider work and cooperative awaited Python, but it does not promise to stop synchronous Python or blocking shell work before that work returns. WSL uses the POSIX managed-kernel path and reports `"posix-managed"`.
+Native Windows reports `rlm.ACT_CANCELLATION_CAPABILITY` as `"cooperative-only"`. Cancelling a nested `rlm.act()` chain settles active depths deepest-to-outer and stops provider work plus cooperative awaited Python, but it does not promise to stop synchronous Python or blocking shell work before that work returns. WSL uses the POSIX managed-kernel path and reports `"posix-managed"`.
 
 On every platform, detached, daemonized, remote, already-completed, and otherwise unmanaged effects remain outside the prompt-stop guarantee. Cancellation does not roll back completed effects. See [RLM](rlm.md#3-act-transfers-one-serial-task-into-the-root-world) for the complete contract.

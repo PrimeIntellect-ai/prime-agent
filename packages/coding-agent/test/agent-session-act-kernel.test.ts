@@ -142,6 +142,69 @@ print(returned is root_object, lane_saw_root is root_object, inner_models[0].sel
 			harness.cleanup();
 		}
 	}, 60_000);
+	it("returns nested exact objects to the calling Act cell before returning upward", async () => {
+		const provider = "faux-act-nested-kernel";
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+			settings: {
+				rlmActMaxDepth: 2,
+				rlmActDefaultModel: ["@luna", "@deepseek"],
+				modelRoles: { luna: `${provider}/luna-model`, deepseek: `${provider}/deepseek-model` },
+			},
+		});
+		try {
+			const actEvents: ActProjectionEvent[] = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "act_event") actEvents.push(event);
+			});
+			harness.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("shared_ipython", {
+						code: `luna_saw_root = nested_root_object
+nested_exact = await rlm.act("return the exact root object")
+luna_nested_identity = nested_exact is nested_root_object
+nested_none = await rlm.act("return None")
+luna_continued_after_nested = True
+rlm.done({"source": nested_exact, "none": nested_none})`,
+					}),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(
+					fauxToolCall("shared_ipython", {
+						code: "deepseek_saw_root = nested_root_object\nrlm.done(nested_root_object)",
+					}),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(None)" }), {
+					stopReason: "toolUse",
+				}),
+			]);
+			const ipython = harness.session.agent.state.tools.find((tool) => tool.name === "ipython");
+			if (!ipython) throw new Error("root session has no IPython tool");
+			const result = await ipython.execute("act-nested-identity", {
+				code: `nested_root_object = object()
+nested_outer_result = await rlm.act("delegate one nested exact-object check")
+print(nested_outer_result["source"] is nested_root_object, nested_outer_result["none"] is None, luna_saw_root is nested_root_object, deepseek_saw_root is nested_root_object, luna_nested_identity, luna_continued_after_nested)`,
+			});
+			expect(result.content.find((content) => content.type === "text")?.text).toContain(
+				"True True True True True True",
+			);
+			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
+			const starts = actEvents.filter((event) => event.event === "start");
+			const terminals = actEvents.filter((event) => event.event === "terminal");
+			expect(starts.map((event) => event.depth)).toEqual([1, 2, 2]);
+			expect(terminals.map((event) => event.depth)).toEqual([2, 2, 1]);
+			expect(starts.slice(1).every((event) => event.parentActId === starts[0]?.actId)).toBe(true);
+			expect(terminals.slice(0, 2).every((event) => event.parentActId === starts[0]?.actId)).toBe(true);
+			expect(starts[0]?.parentActId).toBeUndefined();
+			expect(terminals[2]?.parentActId).toBeUndefined();
+			expect(containsObjectKey(actEvents, "value")).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	}, 60_000);
+
 	it("projects a recoverable real-kernel cell error before exact completion", async () => {
 		const provider = "faux-act-kernel-progress";
 		const harness = await createHarness({
@@ -229,12 +292,12 @@ rlm.done(foreground_count)`,
 				code: `act_result = await rlm.act("wait for release")`,
 			});
 			const internals = harness.session as unknown as {
-				_actLane?: { running: boolean };
+				_actLanes?: Map<number, { running: boolean }>;
 				_ipythonKernelProvisioner?: {
 					manager?: { execute(code: string): Promise<{ status: string }> };
 				};
 			};
-			await vi.waitFor(() => expect(internals._actLane?.running).toBe(true), { timeout: 10_000 });
+			await vi.waitFor(() => expect(internals._actLanes?.get(1)?.running).toBe(true), { timeout: 10_000 });
 			const manager = internals._ipythonKernelProvisioner?.manager;
 			if (!manager) throw new Error("root kernel did not start");
 			let queuedSettlements = 0;
@@ -661,11 +724,14 @@ print("recovered", recovered)`,
 			if (!ipython) throw new Error("root session has no IPython tool");
 			await ipython.execute("root-cancel-setup", { code: "integrated_cancel_marker = object()" });
 			const internals = harness.session as unknown as {
-				_actLane?: {
-					active?: { cellActive: boolean };
-					running: boolean;
-					session?: { agent: { hasQueuedMessages(): boolean } };
-				};
+				_actLanes?: Map<
+					number,
+					{
+						active?: { cellActive: boolean };
+						running: boolean;
+						session?: { agent: { hasQueuedMessages(): boolean } };
+					}
+				>;
 				_rootForeground: { busy: boolean };
 			};
 			const cases = [
@@ -734,10 +800,10 @@ except rlm.ActCancelledError:
 				const cancelledAt = Date.now();
 				await harness.session.abort();
 				expect(Date.now() - cancelledAt).toBeLessThan(2_000);
-				expect(internals._actLane?.running).toBe(false);
+				expect(internals._actLanes?.get(1)?.running).toBe(false);
 				expect(internals._rootForeground.busy).toBe(false);
 				if (steeringError) await expect(steeringError).resolves.toBeUndefined();
-				expect(internals._actLane?.session?.agent.hasQueuedMessages()).toBe(false);
+				expect(internals._actLanes?.get(1)?.session?.agent.hasQueuedMessages()).toBe(false);
 				const result = await running;
 				expect(result.content.find((content) => content.type === "text")?.text).toContain(
 					`${cancellation.label}-act-cancelled`,
@@ -798,10 +864,12 @@ except rlm.ActCancelledError:
     print("host-act-cancelled")`,
 			});
 			const internals = harness.session as unknown as {
-				_actLane?: { active?: { cellActive: boolean }; dispose(): void };
+				_actLanes?: Map<number, { active?: { cellActive: boolean }; dispose(): void }>;
 			};
-			await vi.waitFor(() => expect(internals._actLane?.active?.cellActive).toBe(true), { timeout: 10_000 });
-			internals._actLane?.dispose();
+			await vi.waitFor(() => expect(internals._actLanes?.get(1)?.active?.cellActive).toBe(true), {
+				timeout: 10_000,
+			});
+			internals._actLanes?.get(1)?.dispose();
 			const cancelled = await running;
 			const cancelledText = cancelled.content.find((content) => content.type === "text")?.text ?? "";
 			expect(cancelledText).toContain("host-act-cancelled");
@@ -887,8 +955,12 @@ except rlm.ActCancelledError:
 				},
 				controller.signal,
 			);
-			const internals = harness.session as unknown as { _actLane?: { active?: { cellActive: boolean } } };
-			await vi.waitFor(() => expect(internals._actLane?.active?.cellActive).toBe(true), { timeout: 10_000 });
+			const internals = harness.session as unknown as {
+				_actLanes?: Map<number, { active?: { cellActive: boolean } }>;
+			};
+			await vi.waitFor(() => expect(internals._actLanes?.get(1)?.active?.cellActive).toBe(true), {
+				timeout: 10_000,
+			});
 			const cancelledAt = Date.now();
 			controller.abort();
 			const cancelled = await running;

@@ -82,7 +82,7 @@ An initial or replacement snapshot combines:
 
 Connection events cover session events, replacement and resynchronization snapshots, extension UI requests, connection status, and terminal closure. The adapter updates its cache before notifying the UI.
 
-Nested Act progress is one additive session event union. In-process connections forward it directly. Daemon connections negotiate `rlm_act_stream` per attachment and preserve the event's Act-local sequence and exact outer-tool correlation without changing the daemon cursor sequence. The event is intentionally absent from snapshots and replay; a reconnect or unsupported peer retains the ordinary outer IPython event as the bounded fallback.
+Nested Act progress is one additive session event union. Every new event carries explicit `depth` and optional `parentActId`; missing historical depth normalizes to 1. In-process connections forward it directly. Daemon connections negotiate `rlm_act_stream` per attachment and preserve depth, parent, Act-local sequence, and exact outer-tool correlation without changing the daemon cursor sequence. The event is intentionally absent from snapshots and replay; a reconnect or unsupported peer retains the ordinary outer IPython event as the bounded fallback.
 
 Some connection types still reuse internal `AgentMessage`, `AgentEvent`, and model types. Those are local TypeScript contracts, not promises of a stable public network schema.
 

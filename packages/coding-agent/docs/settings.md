@@ -20,7 +20,8 @@ Use exactly one settings file per scope. Prime Agent preserves the selected form
 | `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `defaultServiceTier` | string | `"default"` | Default provider service tier: `"auto"`, `"default"`, `"flex"`, `"scale"`, or `"priority"` |
 | `rlmAllowedServiceTiers` | array | `[defaultServiceTier]` | Service tiers allowed as explicit `rlm(..., service_tier=...)` overrides; use JSON `null` for Python `None` |
-| `rlmActDefaultModel` | string | - | Named-role or concrete native model selector used when `rlm.act(...)` omits `model`; omission fails when unset |
+| `rlmActMaxDepth` | positive integer | `1` | Maximum synchronous Act depth; Sol is depth 0 |
+| `rlmActDefaultModel` | string or string array | - | Default native selector for Act depth 1, or ordered defaults indexed by Act depth |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
@@ -65,7 +66,7 @@ claudeCode:
 
 Append `:<effort>` to a model string to bind the role's exact provider effort, even when the model catalog marks that effort unsupported, as in `github-copilot/grok-4.5:high`. Call `await rlm("task", model="@luna")` or use the result's `concrete_selector` from `await rlm.find_models("luna")`. Project roles merge over global roles by name.
 
-Act has no implicit model. Configure a default selector when callers should be able to omit `model`:
+Act defaults to one synchronous depth, so the root Sol actor may call one retained Act actor. Configure a scalar depth-1 default when that call should omit `model`:
 
 ```yaml
 rlmActDefaultModel: "@luna"
@@ -73,7 +74,19 @@ modelRoles:
   luna: openai-codex/gpt-5.6-luna:high
 ```
 
-Without `rlmActDefaultModel`, every call must pass `model` explicitly. The setting accepts the same named-role and concrete native selectors as the `model` argument.
+A scalar applies only at Act depth 1. To permit and default a second depth, configure both settings:
+
+```yaml
+rlmActMaxDepth: 2
+rlmActDefaultModel:
+  - "@luna"     # Sol -> Luna, Act depth 1
+  - "@deepseek" # Luna -> DeepSeek, Act depth 2
+modelRoles:
+  luna: openai-codex/gpt-5.6-luna:high
+  deepseek: openrouter/deepseek/deepseek-v4-flash-0731:max
+```
+
+Array index zero supplies depth 1, index one supplies depth 2, and so on. A missing entry requires an explicit `model=` at that depth. An explicit selector overrides the configured entry. Prime Agent rejects calls beyond `rlmActMaxDepth` and calls without a selector before provider or shared-cell work. Each admitted depth retains a private transcript per resolved model while every selector and depth shares the root IPython namespace. Reusing a selector that resolves to the same model resumes its transcript; changing the resolved model never carries one model's conversation into another model's session.
 
 A native child retains its admitted role order for its resident lifetime. A retryable provider failure that occurs before the response produces text, thinking, or tool calls advances immediately to the next available and authenticated candidate. The new candidate uses its configured effort and a fresh same-model retry budget without changing global model or thinking defaults. Prime Agent checks candidate availability and authentication again at the switch. Exact selectors and `claude-code/<model>` children do not use role fallback.
 

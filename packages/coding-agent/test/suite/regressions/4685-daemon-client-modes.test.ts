@@ -394,7 +394,15 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			"terminal",
 		]);
 		expect(events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
-		expect(events.every((event) => event.type === "act_event" && event.actId === "main-act")).toBe(true);
+		expect(
+			events.every(
+				(event) =>
+					event.type === "act_event" &&
+					event.actId === "main-act" &&
+					event.depth === 2 &&
+					event.parentActId === "parent-act",
+			),
+		).toBe(true);
 		expect(events.at(-1)).toMatchObject({ event: "terminal", status: "done", usage: { totalTokens: 8 } });
 		expect(JSON.stringify(events)).not.toContain('"value"');
 	});

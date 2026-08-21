@@ -78,6 +78,8 @@ export interface PrimeAgentAgentMessageMeta {
 
 export interface PrimeAgentActMeta {
 	actId: string;
+	depth: number;
+	parentActId?: string;
 	outerToolCallId: string;
 	sequence: number;
 	event: ActProjectionEvent["event"];

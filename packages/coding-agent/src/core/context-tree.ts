@@ -26,7 +26,9 @@ export interface ContextTreeNode {
 	label: string;
 	status: "active" | RlmChildAgentStatus;
 	model?: { provider: string; id: string };
-	/** Current host guarantee, present only for the retained Act node. */
+	/** Act depth, present only for retained Act nodes. */
+	depth?: number;
+	/** Current host guarantee, present only for retained Act nodes. */
 	cancellationCapability?: ActCancellationCapability;
 	ownUsage: Usage;
 	totalUsage: Usage;

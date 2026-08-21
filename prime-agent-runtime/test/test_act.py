@@ -176,6 +176,30 @@ class ActCellRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(shell.custom_exceptions, previous_exceptions)
         self.assertIs(shell.CustomTB, previous_tb)
 
+    async def test_nested_done_returns_exact_identity_and_restores_the_calling_cell(self) -> None:
+        shell = self.new_shell()
+        nested_source = object()
+        shell.user_ns["nested_source"] = nested_source
+
+        async def nested_act() -> object:
+            return await _run_cells(cells("done(nested_source)"), shell)
+
+        shell.user_ns["nested_act"] = nested_act
+        outer_source = object()
+        shell.user_ns["outer_source"] = outer_source
+        returned = await _run_cells(
+            cells(
+                "nested_result = await nested_act()\nnested_identity = nested_result is nested_source\ncontinued_after_nested = True",
+                "done(outer_source)",
+            ),
+            shell,
+        )
+
+        self.assertIs(shell.user_ns["nested_result"], nested_source)
+        self.assertIs(shell.user_ns["nested_identity"], True)
+        self.assertIs(shell.user_ns["continued_after_nested"], True)
+        self.assertIs(returned, outer_source)
+
     async def test_reports_live_streams_and_result_before_the_next_cell(self) -> None:
         shell = self.new_shell()
         results: list[object] = []

@@ -95,6 +95,7 @@ export class ToolExecutionComponent extends Container {
 	private argsComplete = false;
 	private pendingSentAgentMessages: KernelSentAgentMessage[] = [];
 	private readonly actComponents = new Map<string, ActExecutionComponent>();
+	private readonly actParents = new Map<string, string>();
 	private actComponentsTruncated = false;
 	private result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -287,8 +288,20 @@ export class ToolExecutionComponent extends Container {
 			component = new ActExecutionComponent(event);
 			component.setExpanded(this.expanded);
 			this.actComponents.set(event.actId, component);
+			if (event.parentActId) {
+				const parent = this.actComponents.get(event.parentActId);
+				if (parent) {
+					this.actParents.set(event.actId, event.parentActId);
+					parent.appendNested(component);
+				}
+			}
 		} else {
 			component.update(event);
+			let parentId = this.actParents.get(event.actId);
+			while (parentId) {
+				this.actComponents.get(parentId)?.invalidate();
+				parentId = this.actParents.get(parentId);
+			}
 		}
 		this.updateDisplay();
 		return true;
@@ -399,7 +412,7 @@ export class ToolExecutionComponent extends Container {
 				}
 				this.selfRenderContainer.addChild(this.ipythonCellComponent);
 				for (const component of this.actComponents.values()) {
-					this.selfRenderContainer.addChild(component);
+					if (!this.actParents.has(component.actId)) this.selfRenderContainer.addChild(component);
 				}
 				if (this.actComponentsTruncated) {
 					this.selfRenderContainer.addChild(

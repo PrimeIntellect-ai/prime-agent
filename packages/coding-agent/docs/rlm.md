@@ -41,6 +41,8 @@ config_files = list(Path(".").rglob("*.toml"))
 large_files = [path for path in config_files if path.stat().st_size > 10_000]
 ```
 
+Use provider turns for judgment rather than for each already-known operation. Once the source scope and sequence are known, combine adjacent deterministic reads, searches, transformations, and focused checks in one cell, retain complete results in named variables, and display compact evidence. When the location is unknown, run one bounded discovery step and inspect it before batching confirmed reads. Fewer turns never replace source verification.
+
 Run a project's normal commands through its own environment from an IPython cell:
 
 ```bash
@@ -73,7 +75,7 @@ test_review = await rlm("Review the test coverage", name="test-reviewer")
 integration_audit = await rlm("Run the slow integration audit", name="integration-audit")
 ```
 
-Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. Children reply when an answer is needed:
+Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. Children reply when an answer is needed by executing the call in IPython; writing the call as assistant text does not deliver it:
 
 ```python
 await agent_message.send(message, receiver_role="parent")
@@ -136,17 +138,30 @@ await rlm.act("Now verify only; do not edit. Work from /repo/wt/review and retur
 
 A delta restates any changed or ambiguous directory, authority, safety, or result-shape constraint. The directing model inspects every returned result.
 
+One bounded Act action may use several mechanical cells to answer one inspectable question. When a predictable inspection chain would otherwise require repeated directing-model turns, choose the cheapest suitable route from the live routing policy and give it a bounded source scope: named paths, symbols, live variables, or an explicit search root and exclusions. Exact-source routes receive exact inputs; broader discovery routes receive a bounded search area. Require compact source-backed evidence and retain every branching, design, and acceptance decision in the directing model.
+
+```python
+inspection_route = "<selector chosen from the live routing policy>"
+source_paths = ["src/parser.ts", "test/parser.test.ts"]
+caller_census = await rlm.act(
+    "Using source_paths, trace the parser definition and callers, leave the structured census in caller_census, and return compact source-backed evidence.",
+    model=inspection_route,
+)
+```
+
+The Act peer confirms that scope before inspection. It combines already-known operations, keeps complete intermediate objects in named variables, emits bounded counts or decisive excerpts, verifies every reported path and symbol, and returns uncertainty instead of inventing evidence.
+
 Use the live IPython namespace as the handoff between both models. The directing model can bind clients, datasets, parsed structures, helpers, and intermediate results to clear names before calling Act. Act reuses those objects and can leave useful state in named variables for the directing model to inspect or continue after return. This preserves exact Python identity and avoids describing or reconstructing live state in prompt text.
 
-`model` accepts the same named-role and concrete native selectors as ordinary RLM model selection. Omission selects `rlmActDefaultModel`; without it callers pass `model` explicitly. Invalid or unavailable selectors fail before provider or shared-cell work.
+`model` accepts the same named-role and concrete native selectors as ordinary RLM model selection. `rlmActMaxDepth` defaults to `1`, with Sol at depth 0. A scalar `rlmActDefaultModel` supplies only depth 1; an array supplies defaults in depth order. A missing entry requires an explicit selector, and an explicit selector overrides that depth's default. Invalid, unavailable, missing, and over-depth admissions fail before provider or shared-cell work.
 
-Act retains one private model session and gives it a serialized `shared_ipython` tool. Accepted model changes append to that session's transcript. Cells run in the root IPython namespace. The private session has no family identity, registry entry, or separate kernel. Restart restores completed transcript and namespace state but never replays interrupted work.
+Act retains a private model session for each admitted depth and resolved model, and gives the active session a serialized `shared_ipython` tool. Repeating a selector that resolves to the same model reuses its transcript; changing to another resolved model selects a different retained transcript, so Luna never inherits DeepSeek's conversation or vice versa. Every cell still runs in the root IPython namespace. These private sessions have no family identity, registry entry, or separate kernel. Restart restores completed transcripts and namespace state but never replays interrupted work. The first retained model at depth 1 keeps the shipped `act/session.jsonl` path; other resolved models use stable model-qualified sibling paths, and deeper depths follow the same rule below `act-depth-N`.
 
-The actor finishes with `rlm.done(value)` in a shared cell. The identical Python object returns to the suspended root call without TypeScript serialization. Assign the result to avoid accidental display. A normal text response without `done` is an `ActError`; only one Act may be active.
+An actor finishes with `rlm.done(value)` in a shared cell. The identical Python object returns to its suspended caller without TypeScript serialization. When another configured depth remains, that caller may inspect the value and shared state, continue, and then return a separate exact object upward. Assign each result to avoid accidental display. A normal text response without `done` is an `ActError`; one synchronous nested chain may be active.
 
-Act is a foreground transfer. Root prompts, cells, compaction, and continuations wait until its lease ends; ordinary RLM children remain independent. Text submitted during Act appears immediately in the normal queued-steering section, remains hidden from Act, and does not interrupt it. After natural completion or failure, queued messages enter the ordinary directing-model steering lifecycle in submission order. Escape explicitly interrupts the interactive Act. Ctrl-C retains the documented hard-cancellation contract: provider and cooperative awaited Python stop on every host, with correlated synchronous-cell and managed-process-group termination on POSIX. Completed effects are not rolled back.
+Act is a foreground transfer. Root prompts, cells, compaction, and continuations wait until depth 1 ends; an inner return resumes its calling Act without releasing Sol. Ordinary RLM children remain independent. Text submitted during the chain appears immediately in the normal queued-steering section, remains hidden from every Act depth, and does not interrupt it. After the outermost natural completion or failure, queued messages enter the ordinary directing-model steering lifecycle in submission order. Escape and Ctrl-C cancel the active chain deepest-to-outer. Provider and cooperative awaited Python stop on every host, with correlated synchronous-cell and managed-process-group termination on POSIX. Completed effects are not rolled back.
 
-Supported interactive clients frame Act with actor separators but feed its thinking, text, IPython, shell, and tool activity through the same parent transcript renderers. JSON, RPC, ACP, and print preserve their typed projections. Older peers retain the outer IPython fallback. No projection receives the value passed to `rlm.done()`.
+Supported interactive clients frame each Act depth with actor separators, render nested boundaries in chain order, and feed thinking, text, IPython, shell, and tool activity through the same parent transcript renderers. The footer names the deepest active actor. Events, JSON, RPC, ACP, and print carry `depth` plus optional `parentActId`; missing historical depth normalizes to 1. Unsupported peers retain the outer IPython fallback. No projection receives the value passed to `rlm.done()`.
 
 ### 4. Skills add programmatic capability
 

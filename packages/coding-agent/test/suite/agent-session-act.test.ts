@@ -1,3 +1,4 @@
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type Usage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -62,15 +63,17 @@ class TestActChannel implements HostRequestChannel {
 }
 
 class BlockingActChannel implements HostRequestChannel {
-	readonly outerToolCallId = "test-root-ipython";
+	readonly outerToolCallId: string;
 	readonly controller = new AbortController();
 	readonly signal = this.controller.signal;
 	readonly cellSent: Promise<void>;
+	cellsSent = 0;
 	private resolveCellSent: () => void = () => {};
 	private readonly response: Promise<Record<string, unknown>>;
 	private resolveResponse: (response: Record<string, unknown>) => void = () => {};
 
-	constructor() {
+	constructor(outerToolCallId = "test-root-ipython") {
+		this.outerToolCallId = outerToolCallId;
 		this.cellSent = new Promise((resolve) => {
 			this.resolveCellSent = resolve;
 		});
@@ -81,6 +84,7 @@ class BlockingActChannel implements HostRequestChannel {
 
 	async send(event: Record<string, unknown>): Promise<void> {
 		if (event.type !== "cell") throw new Error("invalid cell event");
+		this.cellsSent++;
 		this.resolveCellSent();
 	}
 
@@ -159,6 +163,50 @@ class AbortableActChannel implements HostRequestChannel {
 	}
 }
 
+class GatedCancelActChannel implements HostRequestChannel {
+	readonly outerToolCallId: string;
+	readonly controller = new AbortController();
+	readonly signal = this.controller.signal;
+	readonly cellSent: Promise<void>;
+	readonly abortObserved: Promise<void>;
+	private resolveCellSent: () => void = () => {};
+	private resolveAbortObserved: () => void = () => {};
+	private rejectAbort: ((error: Error) => void) | undefined;
+	private released = false;
+
+	constructor(outerToolCallId: string) {
+		this.outerToolCallId = outerToolCallId;
+		this.cellSent = new Promise((resolve) => {
+			this.resolveCellSent = resolve;
+		});
+		this.abortObserved = new Promise((resolve) => {
+			this.resolveAbortObserved = resolve;
+		});
+	}
+
+	async send(event: Record<string, unknown>): Promise<void> {
+		if (event.type !== "cell") throw new Error("invalid cell event");
+		this.resolveCellSent();
+	}
+
+	receive(signal?: AbortSignal): Promise<Record<string, unknown>> {
+		return new Promise((_resolve, reject) => {
+			const abort = () => {
+				this.resolveAbortObserved();
+				this.rejectAbort = reject;
+				if (this.released) reject(new Error("receive aborted"));
+			};
+			signal?.addEventListener("abort", abort, { once: true });
+			if (signal?.aborted) abort();
+		});
+	}
+
+	release(): void {
+		this.released = true;
+		this.rejectAbort?.(new Error("receive aborted"));
+	}
+}
+
 class ClosingActChannel implements HostRequestChannel {
 	readonly outerToolCallId = "test-root-ipython";
 	readonly controller = new AbortController();
@@ -201,10 +249,16 @@ type ActSessionInternals = {
 		signal: AbortSignal | undefined,
 		channel: HostRequestChannel,
 	): Promise<Record<string, unknown>>;
-	_actLane?: {
-		session?: AgentSession;
-		running: boolean;
-	};
+	_activeActStack?: Array<{ actId: string; depth: number }>;
+	_actLanes?: Map<
+		number,
+		{
+			session?: AgentSession;
+			running: boolean;
+			model?: { provider: string; id: string };
+			usage: Usage;
+		}
+	>;
 	_actTeardownPromise?: Promise<void>;
 	_ipythonKernelProvisioner?: { dispose(): Promise<void> };
 	_rootForeground: RootForegroundLease;
@@ -311,9 +365,60 @@ describe("AgentSession Act lane", () => {
 			await harness.session.steer("second queued message");
 			const queued = harness.session.getSessionActionRecoverySnapshot().actions;
 			expect(queued.map((action) => action.payload.text)).toEqual(["first queued message", "second queued message"]);
-			expect(internals._actLane?.running).toBe(true);
+			expect(internals._actLanes?.get(1)?.running).toBe(true);
 			channel.complete({ type: "done" });
 			await expect(act).resolves.toEqual({ outcome: "done" });
+			(harness.session.agent.state as { isStreaming: boolean }).isStreaming = false;
+			internals._sessionInputPumpSuspended = false;
+			internals._scheduleSessionInputPump();
+			await vi.waitFor(() => expect(harness.session.queuedActionCount).toBe(0));
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("holds ordered user steering until the outermost nested Act returns", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+			settings: {
+				rlmActMaxDepth: 2,
+				rlmActDefaultModel: ["@luna", "@deepseek"],
+				modelRoles: { luna: `${provider}/luna-model`, deepseek: `${provider}/deepseek-model` },
+			},
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "await rlm.act('nested')" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(2)" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("queued steering applied"),
+			]);
+			const internals = harness.session as unknown as ActSessionInternals;
+			const outerChannel = new BlockingActChannel();
+			const nestedChannel = new BlockingActChannel();
+			const outer = internals._rootForeground.run("root-cell", () =>
+				internals._runAct({ prompt: "depth one" }, undefined, outerChannel),
+			);
+			await outerChannel.cellSent;
+			const nested = internals._runAct({ prompt: "depth two" }, undefined, nestedChannel);
+			await nestedChannel.cellSent;
+			(harness.session.agent.state as { isStreaming: boolean }).isStreaming = true;
+			await harness.session.steer("first nested steering");
+			await harness.session.steer("second nested steering");
+			expect(
+				harness.session.getSessionActionRecoverySnapshot().actions.map((action) => action.payload.text),
+			).toEqual(["first nested steering", "second nested steering"]);
+
+			nestedChannel.complete({ type: "done" });
+			await expect(nested).resolves.toEqual({ outcome: "done" });
+			expect(internals._activeActStack?.map((frame) => frame.depth)).toEqual([1]);
+			expect(harness.session.queuedActionCount).toBe(2);
+			outerChannel.complete({ type: "done" });
+			await expect(outer).resolves.toEqual({ outcome: "done" });
 			(harness.session.agent.state as { isStreaming: boolean }).isStreaming = false;
 			internals._sessionInputPumpSuspended = false;
 			internals._scheduleSessionInputPump();
@@ -458,7 +563,7 @@ describe("AgentSession Act lane", () => {
 			await expect(internals._runAct({ prompt: "first task" }, undefined, firstChannel)).resolves.toEqual({
 				outcome: "done",
 			});
-			const laneSession = internals._actLane?.session;
+			const laneSession = internals._actLanes?.get(1)?.session;
 			expect(laneSession?.model?.id).toBe("luna-model");
 			expect(laneSession?.serviceTier).toBe("scale");
 			expect(laneSession?.getActiveToolNames()).toEqual(["shared_ipython"]);
@@ -471,7 +576,7 @@ describe("AgentSession Act lane", () => {
 			await expect(internals._runAct({ prompt: "second task" }, undefined, secondChannel)).resolves.toEqual({
 				outcome: "done",
 			});
-			expect(internals._actLane?.session).toBe(laneSession);
+			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
 			expect(secondActSawFirst).toBe(true);
 			expect(firstChannel.cells).toEqual(["first_value = 42", "rlm.done(first_value)"]);
 			expect(secondChannel.cells).toEqual(["rlm.done(first_value + 1)"]);
@@ -535,7 +640,7 @@ describe("AgentSession Act lane", () => {
 			const channel = new SequencedActChannel();
 			const run = internals._runAct({ prompt: "project two cells" }, undefined, channel);
 			await vi.waitFor(() => expect(channel.cells).toHaveLength(1));
-			const laneSession = internals._actLane?.session;
+			const laneSession = internals._actLanes?.get(1)?.session;
 			if (!laneSession) throw new Error("missing retained lane session");
 			const privateEventCount = events.length;
 			const emitPrivate = laneSession as unknown as { _emit(event: never): void };
@@ -820,13 +925,13 @@ describe("AgentSession Act lane", () => {
 			await expect(internals._runAct({ prompt: "default task" }, undefined, new TestActChannel())).resolves.toEqual({
 				outcome: "done",
 			});
-			const laneSession = internals._actLane?.session;
+			const laneSession = internals._actLanes?.get(1)?.session;
 			expect(laneSession?.model?.id).toBe("luna-model");
 
 			await expect(
 				internals._runAct({ prompt: "role task", model: "@deepseek" }, undefined, new TestActChannel()),
 			).resolves.toEqual({ outcome: "done" });
-			expect(internals._actLane?.session).toBe(laneSession);
+			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
 			expect(laneSession?.model?.id).toBe("deepseek-model");
 			expect(deepseekSawLuna).toBe(true);
 
@@ -837,14 +942,14 @@ describe("AgentSession Act lane", () => {
 					new TestActChannel(),
 				),
 			).resolves.toEqual({ outcome: "done" });
-			expect(internals._actLane?.session).toBe(laneSession);
+			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
 			expect(laneSession?.model?.id).toBe("direct-model");
 			expect(directSawBoth).toBe(true);
 
 			await expect(internals._runAct({ prompt: "default again" }, undefined, new TestActChannel())).resolves.toEqual(
 				{ outcome: "done" },
 			);
-			expect(internals._actLane?.session).toBe(laneSession);
+			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
 			expect(laneSession?.model?.id).toBe("luna-model");
 			expect(laneSession?.serviceTier).toBe("scale");
 			expect(harness.session.model?.id).toBe("sol-model");
@@ -939,7 +1044,7 @@ describe("AgentSession Act lane", () => {
 				"rlm.act model must be a string",
 			);
 			expect(invalidChannel.cells).toEqual([]);
-			expect(internals._actLane).toBeUndefined();
+			expect(internals._actLanes?.get(1)).toBeUndefined();
 
 			const unavailableChannel = new TestActChannel();
 			await expect(
@@ -950,14 +1055,14 @@ describe("AgentSession Act lane", () => {
 				),
 			).rejects.toThrow("unavailable, unauthenticated, or expired");
 			expect(unavailableChannel.cells).toEqual([]);
-			expect(internals._actLane?.session).toBeUndefined();
+			expect(internals._actLanes?.get(1)?.session).toBeUndefined();
 
 			const nonNativeChannel = new TestActChannel();
 			await expect(
 				internals._runAct({ prompt: "non-native", model: "@claude" }, undefined, nonNativeChannel),
 			).rejects.toThrow('Act model selector "@claude" must resolve to a native model');
 			expect(nonNativeChannel.cells).toEqual([]);
-			expect(internals._actLane?.session).toBeUndefined();
+			expect(internals._actLanes?.get(1)?.session).toBeUndefined();
 			expect(harness.getPendingResponseCount()).toBe(0);
 			expect(actEvents).toEqual([]);
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type.startsWith("act_"))).toEqual([]);
@@ -1012,7 +1117,7 @@ describe("AgentSession Act lane", () => {
 
 			const orphanId = "synthetic-orphan";
 			first.sessionManager.appendActStart(orphanId, completed.usage);
-			const laneSession = firstInternals._actLane?.session;
+			const laneSession = firstInternals._actLanes?.get(1)?.session;
 			if (!laneSession) throw new Error("missing retained lane session");
 			expect(laneSession.sessionFile).toBe(
 				join(first.sessionManager.getSessionArtifactDir()!, "act", "session.jsonl"),
@@ -1023,6 +1128,16 @@ describe("AgentSession Act lane", () => {
 		} finally {
 			first.cleanup();
 		}
+
+		const historicalLines = readFileSync(sessionFile, "utf8")
+			.trimEnd()
+			.split("\n")
+			.map((line) => {
+				const entry = JSON.parse(line) as { type?: string; actId?: string; depth?: number };
+				if (entry.type === "act_start" && entry.actId === "synthetic-orphan") delete entry.depth;
+				return JSON.stringify(entry);
+			});
+		writeFileSync(sessionFile, `${historicalLines.join("\n")}\n`);
 
 		let resumed: Awaited<ReturnType<typeof createHarness>> | undefined;
 		try {
@@ -1116,7 +1231,88 @@ describe("AgentSession Act lane", () => {
 		}
 	});
 
-	it("rejects a concurrent Act and completes the admitted one once", async () => {
+	it("recovers an unmatched depth-two start from its own retained transcript once", async () => {
+		const restartProvider = "faux-act-depth-restart";
+		const settings = {
+			rlmActMaxDepth: 2,
+			rlmActDefaultModel: ["@luna", "@deepseek"],
+			modelRoles: { luna: `${restartProvider}/luna-model`, deepseek: `${restartProvider}/deepseek-model` },
+		};
+		const interruptedUsage = usage(9, 2, 0.9);
+		const first = await createHarness({
+			provider: restartProvider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+			settings,
+			persistSession: true,
+			preserveTempDir: true,
+		});
+		const sessionFile = first.session.sessionFile;
+		if (!sessionFile) throw new Error("persistent harness has no session file");
+		const tempDir = first.tempDir;
+		try {
+			first.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "nested = await rlm.act('nested')" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(2)" }), {
+					stopReason: "toolUse",
+				}),
+			]);
+			const internals = first.session as unknown as ActSessionInternals;
+			const outerChannel = new BlockingActChannel("root-ipython");
+			const outer = internals._rootForeground.run("root-cell", () =>
+				internals._runAct({ prompt: "outer" }, undefined, outerChannel),
+			);
+			await outerChannel.cellSent;
+			const nestedChannel = new BlockingActChannel("root-ipython");
+			const nested = internals._runAct({ prompt: "nested" }, undefined, nestedChannel);
+			await nestedChannel.cellSent;
+			nestedChannel.complete({ type: "done" });
+			await nested;
+			const outerActId = first.sessionManager.getBranch().find((entry) => entry.type === "act_start")?.actId;
+			if (!outerActId) throw new Error("missing outer Act start");
+			const lane = internals._actLanes?.get(2);
+			if (!lane?.session) throw new Error("missing depth-two lane");
+			first.sessionManager.appendActStart("depth-two-orphan", lane.usage, {
+				depth: 2,
+				parentActId: outerActId,
+			});
+			const partial = fauxAssistantMessage("depth two provider work before crash");
+			partial.usage = interruptedUsage;
+			lane.session.sessionManager.appendMessage(partial);
+			outerChannel.complete({ type: "done" });
+			await outer;
+		} finally {
+			first.cleanup();
+		}
+
+		const resumed = await createHarness({
+			provider: restartProvider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+			settings,
+			tempDir,
+			sessionFile,
+		});
+		try {
+			const recovered = resumed.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "act_terminal" && entry.actId === "depth-two-orphan");
+			expect(recovered).toHaveLength(1);
+			expect(recovered[0]).toMatchObject({
+				depth: 2,
+				parentActId: expect.any(String),
+				status: "interrupted",
+				usage: interruptedUsage,
+				model: { id: "deepseek-model" },
+			});
+			const depthOne = resumed.session.getContextTree().children.find((node) => node.id === "act");
+			expect(depthOne?.children[0]).toMatchObject({ id: "act-depth-2", depth: 2, status: "cancelled" });
+		} finally {
+			resumed.cleanup();
+		}
+	});
+
+	it("rejects a second Act at the default maximum and completes the admitted one once", async () => {
 		const harness = await createHarness({
 			provider,
 			models: [{ id: "sol-model" }, { id: "luna-model" }],
@@ -1133,7 +1329,7 @@ describe("AgentSession Act lane", () => {
 			const first = internals._runAct({ prompt: "first" }, undefined, channel);
 			await channel.cellSent;
 			await expect(internals._runAct({ prompt: "second" }, undefined, new TestActChannel())).rejects.toThrow(
-				"Another Act is already active",
+				"rlm.act depth 2 exceeds rlmActMaxDepth 1",
 			);
 			channel.complete({ type: "done" });
 			await expect(first).resolves.toEqual({ outcome: "done" });
@@ -1161,7 +1357,7 @@ describe("AgentSession Act lane", () => {
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "act_terminal")).toEqual([
 				expect.objectContaining({ status: "error", error: "provider boom" }),
 			]);
-			const laneSession = internals._actLane?.session;
+			const laneSession = internals._actLanes?.get(1)?.session;
 			harness.appendResponses([
 				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done('recovered')" }), {
 					stopReason: "toolUse",
@@ -1170,7 +1366,7 @@ describe("AgentSession Act lane", () => {
 			await expect(internals._runAct({ prompt: "recover" }, undefined, new TestActChannel())).resolves.toEqual({
 				outcome: "done",
 			});
-			expect(internals._actLane?.session).toBe(laneSession);
+			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
 			expect(
 				harness.sessionManager
 					.getBranch()
@@ -1208,7 +1404,7 @@ describe("AgentSession Act lane", () => {
 					.reverse()
 					.find((entry) => entry.type === "act_terminal"),
 			).toMatchObject({ status: "cancelled" });
-			const laneSession = internals._actLane?.session;
+			const laneSession = internals._actLanes?.get(1)?.session;
 			harness.appendResponses([
 				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done('later')" }), {
 					stopReason: "toolUse",
@@ -1217,7 +1413,7 @@ describe("AgentSession Act lane", () => {
 			await expect(internals._runAct({ prompt: "later" }, undefined, new TestActChannel())).resolves.toEqual({
 				outcome: "done",
 			});
-			expect(internals._actLane?.session).toBe(laneSession);
+			expect(internals._actLanes?.get(1)?.session).toBe(laneSession);
 			expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "act_terminal")).toHaveLength(2);
 		} finally {
 			harness.cleanup();
@@ -1330,7 +1526,7 @@ describe("AgentSession Act lane", () => {
 			await expect(run).resolves.toEqual({ outcome: "cancelled" });
 			expect(disposedSessions).toContain(harness.session);
 			expect(disposedSessions.filter((session) => session !== harness.session)).toHaveLength(1);
-			expect(internals._actLane?.session).toBeUndefined();
+			expect(internals._actLanes?.get(1)?.session).toBeUndefined();
 		} finally {
 			disposeSpy.mockRestore();
 			harness.cleanup();
@@ -1356,7 +1552,7 @@ describe("AgentSession Act lane", () => {
 			const internals = harness.session as unknown as ActSessionInternals;
 			await internals._runAct({ prompt: "create lane" }, undefined, new TestActChannel());
 			let releaseSelection: (() => void) | undefined;
-			const lane = internals._actLane;
+			const lane = internals._actLanes?.get(1);
 			if (!lane?.session) throw new Error("missing retained lane");
 			const root = harness.session as unknown as {
 				_selectActLaneModel(session: AgentSession, model: string | undefined): Promise<void>;
@@ -1374,8 +1570,256 @@ describe("AgentSession Act lane", () => {
 			harness.session.dispose();
 			releaseSelection?.();
 			await expect(run).resolves.toEqual({ outcome: "cancelled" });
-			expect(internals._actLane?.session).toBeUndefined();
+			expect(internals._actLanes?.get(1)?.session).toBeUndefined();
 		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("admits one retained lane per Act depth and rejects depth three before side effects", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }, { id: "review-model" }],
+			persistSession: true,
+			settings: {
+				rlmActMaxDepth: 2,
+				rlmActDefaultModel: ["@luna", "@deepseek"],
+				modelRoles: {
+					luna: `${provider}/luna-model`,
+					deepseek: `${provider}/deepseek-model`,
+					review: `${provider}/review-model`,
+				},
+			},
+		});
+		try {
+			const actEvents: Array<{
+				actId: string;
+				event: string;
+				depth?: number;
+				parentActId?: string;
+				directingModel?: { id: string };
+			}> = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "act_event") actEvents.push(event);
+			});
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "nested = await rlm.act('inspect')" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done({'depth': 2})" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done({'override': true})" }), {
+					stopReason: "toolUse",
+				}),
+			]);
+			const internals = harness.session as unknown as ActSessionInternals;
+			const resolver = vi.spyOn(
+				harness.session as unknown as { _resolveRlmSubagentModel(model: string): Promise<unknown> },
+				"_resolveRlmSubagentModel",
+			);
+			const outerChannel = new BlockingActChannel("root-ipython");
+			const outer = internals._rootForeground.run("root-cell", () =>
+				internals._runAct({ prompt: "depth one" }, undefined, outerChannel),
+			);
+			await outerChannel.cellSent;
+
+			const nestedChannel = new BlockingActChannel("root-ipython");
+			const nested = internals._runAct({ prompt: "depth two" }, undefined, nestedChannel);
+			const nestedAdmission = await Promise.race([
+				nestedChannel.cellSent.then(() => "cell" as const),
+				nested.then(
+					() => "terminal" as const,
+					(error) => `error:${error instanceof Error ? error.message : String(error)}` as const,
+				),
+			]);
+			expect(nestedAdmission).toBe("cell");
+
+			const resolverCalls = resolver.mock.calls.length;
+			const overDepthChannel = new BlockingActChannel("root-ipython");
+			await expect(
+				internals._runAct({ prompt: "depth three", model: "@review" }, undefined, overDepthChannel),
+			).rejects.toThrow("rlm.act depth 3 exceeds rlmActMaxDepth 2");
+			expect(resolver).toHaveBeenCalledTimes(resolverCalls);
+			expect(overDepthChannel.cellsSent).toBe(0);
+
+			nestedChannel.complete({ type: "done" });
+			await expect(nested).resolves.toEqual({ outcome: "done" });
+			const overrideChannel = new BlockingActChannel("root-ipython");
+			const override = internals._runAct(
+				{ prompt: "depth two override", model: "@review" },
+				undefined,
+				overrideChannel,
+			);
+			await overrideChannel.cellSent;
+			overrideChannel.complete({ type: "done" });
+			await expect(override).resolves.toEqual({ outcome: "done" });
+
+			expect([...(internals._actLanes?.keys() ?? [])]).toEqual([1, 2]);
+			const depthOneSession = internals._actLanes?.get(1)?.session;
+			const depthTwoSession = internals._actLanes?.get(2)?.session;
+			expect(depthOneSession).not.toBe(depthTwoSession);
+			expect(depthOneSession?.sessionFile).toBe(
+				join(harness.sessionManager.getSessionArtifactDir()!, "act", "session.jsonl"),
+			);
+			expect(depthTwoSession?.sessionFile).toBe(
+				join(harness.sessionManager.getSessionArtifactDir()!, "act-depth-2", "session.jsonl"),
+			);
+			expect(internals._actLanes?.get(2)?.model?.id).toBe("review-model");
+			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
+			outerChannel.complete({ type: "done" });
+			await expect(outer).resolves.toEqual({ outcome: "done" });
+
+			const facts = harness.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "act_start" || entry.type === "act_terminal") as Array<{
+				type: "act_start" | "act_terminal";
+				actId: string;
+				depth?: number;
+				parentActId?: string;
+			}>;
+			const outerActId = facts[0]?.actId;
+			expect(facts.map(({ type, depth, parentActId }) => ({ type, depth, parentActId }))).toEqual([
+				{ type: "act_start", depth: 1, parentActId: undefined },
+				{ type: "act_start", depth: 2, parentActId: outerActId },
+				{ type: "act_terminal", depth: 2, parentActId: outerActId },
+				{ type: "act_start", depth: 2, parentActId: outerActId },
+				{ type: "act_terminal", depth: 2, parentActId: outerActId },
+				{ type: "act_terminal", depth: 1, parentActId: undefined },
+			]);
+			for (const event of actEvents) {
+				const fact = facts.find((entry) => entry.actId === event.actId);
+				expect(event.depth).toBe(fact?.depth);
+				expect(event.parentActId).toBe(fact?.parentActId);
+				if (event.event === "start" || event.event === "terminal") {
+					expect(event.directingModel?.id).toBe(event.depth === 1 ? "sol-model" : "luna-model");
+				}
+			}
+			const actNode = harness.session.getContextTree().children.find((node) => node.id === "act");
+			expect(actNode).toMatchObject({ depth: 1, model: { id: "luna-model" } });
+			expect(actNode?.children).toHaveLength(1);
+			expect(actNode?.children[0]).toMatchObject({
+				id: "act-depth-2",
+				depth: 2,
+				model: { id: "review-model" },
+			});
+			const terminals = harness.sessionManager.getBranch().filter((entry) => entry.type === "act_terminal");
+			expect(terminals.map((entry) => [entry.depth, entry.model?.id])).toEqual([
+				[2, "deepseek-model"],
+				[2, "review-model"],
+				[1, "luna-model"],
+			]);
+			const tokensAtDepth = (depth: number) =>
+				terminals
+					.filter((entry) => (entry.depth ?? 1) === depth)
+					.reduce((total, entry) => total + entry.usage.totalTokens, 0);
+			expect(actNode?.totalUsage.totalTokens).toBe(tokensAtDepth(1));
+			expect(actNode?.children[0]?.totalUsage.totalTokens).toBe(tokensAtDepth(2));
+			const tree = harness.session.getContextTree();
+			expect(tree.totalUsage.totalTokens - tree.ownUsage.totalTokens).toBe(tokensAtDepth(1) + tokensAtDepth(2));
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("requires an explicit depth-two model when the configured default is scalar", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+			settings: {
+				rlmActMaxDepth: 2,
+				rlmActDefaultModel: "@luna",
+				modelRoles: { luna: `${provider}/luna-model`, deepseek: `${provider}/deepseek-model` },
+			},
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "await rlm.act('nested')" }), {
+					stopReason: "toolUse",
+				}),
+			]);
+			const internals = harness.session as unknown as ActSessionInternals;
+			const resolver = vi.spyOn(
+				harness.session as unknown as { _resolveRlmSubagentModel(model: string): Promise<unknown> },
+				"_resolveRlmSubagentModel",
+			);
+			const outerChannel = new BlockingActChannel();
+			const outer = internals._rootForeground.run("root-cell", () =>
+				internals._runAct({ prompt: "depth one" }, undefined, outerChannel),
+			);
+			await outerChannel.cellSent;
+			const resolverCalls = resolver.mock.calls.length;
+			const nestedChannel = new BlockingActChannel();
+			await expect(internals._runAct({ prompt: "depth two" }, undefined, nestedChannel)).rejects.toThrow(
+				"rlm.act requires an explicit model at Act depth 2 because rlmActDefaultModel has no entry",
+			);
+			expect(resolver).toHaveBeenCalledTimes(resolverCalls);
+			expect(nestedChannel.cellsSent).toBe(0);
+			outerChannel.complete({ type: "done" });
+			await expect(outer).resolves.toEqual({ outcome: "done" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("cancels a nested chain observably deepest to outermost", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [{ id: "sol-model" }, { id: "luna-model" }, { id: "deepseek-model" }],
+			settings: {
+				rlmActMaxDepth: 2,
+				rlmActDefaultModel: ["@luna", "@deepseek"],
+				modelRoles: { luna: `${provider}/luna-model`, deepseek: `${provider}/deepseek-model` },
+			},
+		});
+		const outerChannel = new GatedCancelActChannel("root-ipython");
+		const nestedChannel = new GatedCancelActChannel("root-ipython");
+		let outer: Promise<Record<string, unknown>> | undefined;
+		let nested: Promise<Record<string, unknown>> | undefined;
+		let cancellation: Promise<void> | undefined;
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "await rlm.act('nested')" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "await nested_gate" }), {
+					stopReason: "toolUse",
+				}),
+			]);
+			const internals = harness.session as unknown as ActSessionInternals;
+			outer = internals._rootForeground.run("root-cell", () =>
+				internals._runAct({ prompt: "depth one" }, undefined, outerChannel),
+			);
+			await outerChannel.cellSent;
+			nested = internals._runAct({ prompt: "depth two" }, undefined, nestedChannel);
+			await nestedChannel.cellSent;
+
+			let outerAbortObserved = false;
+			void outerChannel.abortObserved.then(() => {
+				outerAbortObserved = true;
+			});
+			cancellation = harness.session.abort();
+			await nestedChannel.abortObserved;
+			await Promise.resolve();
+			expect(outerAbortObserved).toBe(false);
+
+			nestedChannel.release();
+			await expect(nested).resolves.toEqual({ outcome: "cancelled" });
+			await outerChannel.abortObserved;
+			outerChannel.release();
+			await expect(outer).resolves.toEqual({ outcome: "cancelled" });
+			await cancellation;
+			const terminals = harness.sessionManager.getBranch().filter((entry) => entry.type === "act_terminal");
+			expect(terminals.map((entry) => entry.model?.id)).toEqual(["deepseek-model", "luna-model"]);
+			expect(internals._rootForeground.busy).toBe(false);
+		} finally {
+			nestedChannel.release();
+			outerChannel.release();
+			await Promise.allSettled([
+				...(nested ? [nested] : []),
+				...(outer ? [outer] : []),
+				...(cancellation ? [cancellation] : []),
+			]);
 			harness.cleanup();
 		}
 	});
@@ -1405,7 +1849,7 @@ describe("AgentSession Act lane", () => {
 			await expect(internals._runAct({ prompt: "task" }, undefined, new TestActChannel())).rejects.toThrow(
 				"rlm.act requires an explicit model when rlmActDefaultModel is not configured",
 			);
-			expect(internals._actLane).toBeUndefined();
+			expect(internals._actLanes?.get(1)).toBeUndefined();
 
 			harness.setResponses([
 				fauxAssistantMessage(fauxToolCall("shared_ipython", { code: "rlm.done(1)" }), { stopReason: "toolUse" }),

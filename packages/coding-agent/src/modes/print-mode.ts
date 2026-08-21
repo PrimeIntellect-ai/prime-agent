@@ -7,7 +7,7 @@
  */
 
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { ActStartEvent, ActTerminalEvent } from "../core/act-events.js";
+import { type ActStartEvent, type ActTerminalEvent, actEventDepth } from "../core/act-events.js";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import { type AgentAutonomousStatus, type AutonomousLimitReason, autonomousLimitReason } from "../core/autonomous.js";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
@@ -72,6 +72,8 @@ class TextPrintActTracker {
 		return {
 			type: "act_terminal",
 			actId: terminal.actId,
+			depth: actEventDepth(terminal),
+			...(terminal.parentActId ? { parentActId: terminal.parentActId } : {}),
 			outerToolCallId: terminal.outerToolCallId,
 			sequence: terminal.sequence,
 			status: terminal.status,

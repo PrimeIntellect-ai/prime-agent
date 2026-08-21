@@ -636,6 +636,8 @@ function actStartEvent(): ActStartEvent {
 	return {
 		type: "act_event",
 		actId: "act-1",
+		depth: 2,
+		parentActId: "act-parent",
 		outerToolCallId: "outer-tool-1",
 		sequence: 1,
 		event: "start",

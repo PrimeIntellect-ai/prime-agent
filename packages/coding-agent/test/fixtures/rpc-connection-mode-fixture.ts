@@ -19,13 +19,17 @@ const actUsage = {
 	cost: { input: 0.003, output: 0.005, cacheRead: 0, cacheWrite: 0, total: 0.008 },
 };
 
-function actEvents(actId: string, status: "done" | "error" | "cancelled"): AgentConnectionSessionEvent[] {
+function actEvents(
+	actId: string,
+	status: "done" | "error" | "cancelled",
+	options?: { depth?: number; parentActId?: string },
+): AgentConnectionSessionEvent[] {
 	const outerToolCallId = `outer-${actId}`;
+	const correlation = { actId, outerToolCallId, ...options };
 	return [
 		{
 			type: "act_event",
-			actId,
-			outerToolCallId,
+			...correlation,
 			sequence: 1,
 			event: "start",
 			prompt: `prompt ${actId}`,
@@ -35,8 +39,7 @@ function actEvents(actId: string, status: "done" | "error" | "cancelled"): Agent
 		},
 		{
 			type: "act_event",
-			actId,
-			outerToolCallId,
+			...correlation,
 			sequence: 2,
 			event: "assistant_delta",
 			stream: "text",
@@ -45,8 +48,7 @@ function actEvents(actId: string, status: "done" | "error" | "cancelled"): Agent
 		},
 		{
 			type: "act_event",
-			actId,
-			outerToolCallId,
+			...correlation,
 			sequence: 3,
 			event: "cell_start",
 			cellId: "cell-1",
@@ -55,8 +57,7 @@ function actEvents(actId: string, status: "done" | "error" | "cancelled"): Agent
 		},
 		{
 			type: "act_event",
-			actId,
-			outerToolCallId,
+			...correlation,
 			sequence: 4,
 			event: "cell_terminal",
 			cellId: "cell-1",
@@ -71,8 +72,7 @@ function actEvents(actId: string, status: "done" | "error" | "cancelled"): Agent
 		},
 		{
 			type: "act_event",
-			actId,
-			outerToolCallId,
+			...correlation,
 			sequence: 5,
 			event: "terminal",
 			status,
@@ -109,7 +109,7 @@ const connection = {
 	},
 	async prompt(message: string) {
 		if (message === "act-stream") {
-			for (const event of actEvents("main-act", "done")) {
+			for (const event of actEvents("main-act", "done", { depth: 2, parentActId: "parent-act" })) {
 				await listener({ type: "session_event", event });
 			}
 			return;
