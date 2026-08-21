@@ -3,6 +3,18 @@ import { describe, expect, it, vi } from "vitest";
 import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
 
 describe("MutationDrainLatch", () => {
+	it("reports drain state synchronously with an optional remaining allowance", () => {
+		const latch = new MutationDrainLatch();
+		expect(latch.isDrained()).toBe(true);
+
+		latch.begin();
+		expect(latch.isDrained()).toBe(false);
+		expect(latch.isDrained(1)).toBe(true);
+
+		latch.end();
+		expect(latch.isDrained()).toBe(true);
+	});
+
 	it("rejects an already-aborted wait even when no mutations are active", async () => {
 		const latch = new MutationDrainLatch();
 		const controller = new AbortController();

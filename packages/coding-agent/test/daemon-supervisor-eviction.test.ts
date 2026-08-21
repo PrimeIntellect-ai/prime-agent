@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor, idleEvictionSweepIntervalMs } from "../src/modes/daemon/daemon-supervisor.js";
+import type { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
 
 interface WorkerFixture {
 	descriptor: {
@@ -31,6 +32,7 @@ interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
 	clients: Set<{ id: string; attachedActiveSessionIds: Set<string> }>;
 	idleEvictionFence?: Promise<void>;
+	mutationDrain: MutationDrainLatch;
 	catalog: { resolve: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
 	createOrReuseWorker: ReturnType<typeof vi.fn>;
 	stopWorker: ReturnType<typeof vi.fn>;
@@ -191,6 +193,74 @@ describe("daemon supervisor whole-tree eviction", () => {
 		expect(supervisor.idleEvictionFence).toBeUndefined();
 		releasePassivation();
 		await sweep;
+	});
+
+	it("returns promptly without stopping or warning while a daemon mutation is in flight", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const idle = makeWorker("idle", [makeSummary("idle-root", now)]);
+		supervisor.workers.set("idle", idle);
+		supervisor.mutationDrain.begin();
+
+		await supervisor.runIdleEvictionSweep(now);
+
+		expect(supervisor.stopWorker).not.toHaveBeenCalled();
+		expect(supervisor.log).not.toHaveBeenCalled();
+		expect(supervisor.idleEvictionFence).toBeUndefined();
+	});
+
+	it("evicts on the next sweep after an in-flight mutation ends", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const idle = makeWorker("idle", [makeSummary("idle-root", now)]);
+		supervisor.workers.set("idle", idle);
+		supervisor.mutationDrain.begin();
+
+		await supervisor.runIdleEvictionSweep(now);
+		expect(supervisor.stopWorker).not.toHaveBeenCalled();
+
+		supervisor.mutationDrain.end();
+		await supervisor.runIdleEvictionSweep(now);
+
+		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
+		expect(supervisor.stopWorker).toHaveBeenCalledWith(idle, true);
+	});
+
+	it("holds a mutation arriving after the fence until eviction releases it", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const idle = makeWorker("idle", [makeSummary("idle-root", now)]);
+		let releaseStop!: () => void;
+		supervisor.stopWorker = vi.fn(
+			(worker: WorkerFixture) =>
+				new Promise<void>((resolve) => {
+					releaseStop = () => {
+						supervisor.workers.delete(worker.descriptor.workerId);
+						resolve();
+					};
+				}),
+		);
+		supervisor.workers.set("idle", idle);
+
+		const sweep = supervisor.runIdleEvictionSweep(now);
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledOnce());
+		expect(supervisor.idleEvictionFence).toBeDefined();
+
+		// Mirrors the supervisor command gate: read the fence, await it, then
+		// admit the mutation.
+		let admitted = false;
+		const arrive = (async () => {
+			const fence = supervisor.idleEvictionFence;
+			if (fence) await fence;
+			supervisor.mutationDrain.begin();
+			admitted = true;
+		})();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(admitted).toBe(false);
+
+		releaseStop();
+		await Promise.all([sweep, arrive]);
+		expect(admitted).toBe(true);
 	});
 
 	it("uses canonical busy state so a stale parent with a running child is not evicted", async () => {

@@ -1,0 +1,1 @@
+- Fixed daemon idle eviction stalling for the drain timeout and logging a timeout warning whenever any mutation was in flight: an in-flight mutation now skips that sweep (the scheduler retries once it ends), and mutations arriving during eviction still wait on the eviction fence before admission.

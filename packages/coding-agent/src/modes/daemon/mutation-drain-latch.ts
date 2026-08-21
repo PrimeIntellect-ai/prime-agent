@@ -13,6 +13,11 @@ export class MutationDrainLatch {
 		this.waiters.clear();
 	}
 
+	/** True when no more than `remaining` mutating commands are still in flight. */
+	isDrained(remaining = 0): boolean {
+		return this.active <= remaining;
+	}
+
 	async waitForDrain(remaining: number, signal: AbortSignal, abortMessage: string): Promise<void> {
 		if (signal.aborted) throw new Error(abortMessage);
 		while (this.active > remaining) {
