@@ -78,4 +78,9 @@ if [[ ! -x "$TSX_BIN" ]]; then
   exit 1
 fi
 
-"$TSX_BIN" "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
+# tsx resolves tsconfig `paths` (workspace packages -> src) by walking up
+# from the process cwd, not from the imported file, so it misses this
+# repo's tsconfig.json when invoked from another directory. Pin it
+# explicitly so the process cwd (and therefore --cwd defaulting) is
+# unaffected.
+"$TSX_BIN" --tsconfig "$SCRIPT_DIR/tsconfig.json" "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
