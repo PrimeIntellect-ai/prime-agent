@@ -1216,6 +1216,43 @@ function shouldUseFineGrainedToolStreamingBeta(model: Model<"anthropic-messages"
 	return !!context.tools?.length && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
 }
 
+const CATCH_ALL_PROPERTY_PATTERN = "^.*$";
+
+function isSchemaObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeAnthropicToolSchema(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(normalizeAnthropicToolSchema);
+	}
+	if (!isSchemaObject(value)) {
+		return value;
+	}
+
+	const normalized: Record<string, unknown> = {};
+	for (const [key, nestedValue] of Object.entries(value)) {
+		normalized[key] = normalizeAnthropicToolSchema(nestedValue);
+	}
+
+	const patternProperties = normalized.patternProperties;
+	const properties = normalized.properties;
+	const hasNamedProperties = isSchemaObject(properties) && Object.keys(properties).length > 0;
+	if (
+		isSchemaObject(patternProperties) &&
+		Object.keys(patternProperties).length === 1 &&
+		Object.hasOwn(patternProperties, CATCH_ALL_PROPERTY_PATTERN) &&
+		!hasNamedProperties
+	) {
+		const catchAllSchema = patternProperties[CATCH_ALL_PROPERTY_PATTERN];
+		delete normalized.patternProperties;
+		normalized.additionalProperties =
+			isSchemaObject(catchAllSchema) && Object.keys(catchAllSchema).length === 0 ? true : catchAllSchema;
+	}
+
+	return normalized;
+}
+
 function convertTools(
 	tools: Tool[],
 	isOAuthToken: boolean,
@@ -1225,7 +1262,11 @@ function convertTools(
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const schema = tool.parameters as { properties?: unknown; required?: string[] };
+		const normalizedSchema = normalizeAnthropicToolSchema(tool.parameters);
+		const schema = isSchemaObject(normalizedSchema) ? normalizedSchema : {};
+		const required = Array.isArray(schema.required)
+			? schema.required.filter((value): value is string => typeof value === "string")
+			: [];
 
 		return {
 			name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name,
@@ -1234,7 +1275,11 @@ function convertTools(
 			input_schema: {
 				type: "object",
 				properties: schema.properties ?? {},
-				required: schema.required ?? [],
+				required,
+				...(Object.hasOwn(schema, "additionalProperties")
+					? { additionalProperties: schema.additionalProperties }
+					: {}),
+				...(Object.hasOwn(schema, "patternProperties") ? { patternProperties: schema.patternProperties } : {}),
 			},
 			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};
