@@ -7,6 +7,7 @@ type Harness = {
 	_disposed: boolean;
 	_disposing: boolean;
 	_sessionInputAdmissionPauses: Set<symbol>;
+	_sessionInputPumpSuspended: boolean;
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
 	_stopGoalContinuationForTerminalMessage: () => boolean;
 	_ensureGoalRuntimeActive: () => void;
@@ -30,6 +31,7 @@ function harness(overrides: Partial<Harness> = {}): Harness {
 		_disposed: false,
 		_disposing: false,
 		_sessionInputAdmissionPauses: new Set(),
+		_sessionInputPumpSuspended: false,
 		_hasUnsettledRlmQuiescenceWork: () => false,
 		_stopGoalContinuationForTerminalMessage: () => false,
 		_ensureGoalRuntimeActive: () => {},
@@ -86,6 +88,13 @@ describe("goal continuation vs unsettled subagent work", () => {
 		maybeResume.call(paused);
 		expect(paused._admitSessionInput).toHaveBeenCalledTimes(1);
 		expect(paused._goalContinuationAwaitsRlmWork).toBe(false);
+	});
+
+	it("keeps the deferral while the pump is suspended after an abort", () => {
+		const mode = harness({ _goalContinuationAwaitsRlmWork: true, _sessionInputPumpSuspended: true });
+		maybeResume.call(mode);
+		expect(mode._admitSessionInput).not.toHaveBeenCalled();
+		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
 	});
 
 	it("keeps the deferral when admission throws", () => {
