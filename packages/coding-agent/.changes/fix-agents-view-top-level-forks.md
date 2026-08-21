@@ -1,0 +1,1 @@
+- Fixed top-level forked sessions being nested as subagents in Agents View.

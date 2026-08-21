@@ -964,6 +964,38 @@ describe("agents view state", () => {
 		});
 	});
 
+	test("keeps saved top-level forks separate while preserving legacy subagent fallback", () => {
+		const parentPath = "/tmp/sessions/parent.jsonl";
+		const { rlmDepth: _legacyDepth, ...legacyChild } = makeSessionInfo({
+			path: "/tmp/sessions/legacy-child.jsonl",
+			id: "legacy-child",
+			parentSessionPath: parentPath,
+		});
+		const records = reconcileUnifiedSessions(
+			[],
+			[
+				makeSessionInfo({ path: parentPath, id: "parent" }),
+				makeSessionInfo({
+					path: "/tmp/sessions/top-level-fork.jsonl",
+					id: "top-level-fork",
+					parentSessionPath: parentPath,
+					rlmDepth: 0,
+				}),
+				legacyChild,
+			],
+		);
+		const rows = buildAgentsViewRows(records);
+
+		expect(rows.find((row) => row.summary.sessionId === "top-level-fork")).toMatchObject({
+			kind: "agent",
+			depth: 0,
+			summary: { runtimeKind: "top-level" },
+		});
+		expect(rows.find((row) => row.kind === "subagent-summary")).toMatchObject({
+			title: "1 subagent",
+		});
+	});
+
 	test("retains the ancestor chain when search matches only a nested subagent", () => {
 		const summaries = [
 			makeSummary({ id: "root", activeSessionId: "root", sessionId: "root-session", sessionName: "Root" }),

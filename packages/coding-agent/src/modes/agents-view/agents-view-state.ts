@@ -252,7 +252,7 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 		lifecycle: "archived",
 		activity: "idle",
 		isSessionActive: false,
-		runtimeKind: saved.parentSessionPath ? "subagent" : "top-level",
+		runtimeKind: (saved.rlmDepth ?? (saved.parentSessionPath ? 1 : 0)) > 0 ? "subagent" : "top-level",
 		rlmDepth: saved.rlmDepth,
 		sessionId: saved.id,
 		sessionFile: canonicalSessionPath(saved.path),
