@@ -165,6 +165,55 @@
           "path": "rlm-runtime.md"
         }
       ]
+    },
+    {
+      "title": "Design (in-flight)",
+      "items": [
+        {
+          "title": "Retained Tools (SARK Prime)",
+          "path": "retained-tools.md"
+        },
+        {
+          "title": "SARK Concepts & Gap Analysis",
+          "path": "retained-tools/sark-concepts.md"
+        },
+        {
+          "title": "Build Plan",
+          "path": "retained-tools/build-plan.md"
+        },
+        {
+          "title": "Phase A — Tool Index & Usage Tracking",
+          "path": "retained-tools/phase-a-index.md"
+        },
+        {
+          "title": "Phase B — Explicit Retention & Versioning",
+          "path": "retained-tools/phase-b-retention.md"
+        },
+        {
+          "title": "Phase C — Reliability Gates",
+          "path": "retained-tools/phase-c-gates.md"
+        },
+        {
+          "title": "Phase D — Semantic Retrieval",
+          "path": "retained-tools/phase-d-retrieval.md"
+        },
+        {
+          "title": "Phase E — Refine-Driven Retention",
+          "path": "retained-tools/phase-e-refine-retention.md"
+        },
+        {
+          "title": "Phase F — Auto-Detection Gate",
+          "path": "retained-tools/phase-f-autodetection.md"
+        },
+        {
+          "title": "Phase G — API-Learning Analog (deferred)",
+          "path": "retained-tools/phase-g-api-learning.md"
+        },
+        {
+          "title": "Risks, Open Decisions & Validation",
+          "path": "retained-tools/risks-and-decisions.md"
+        }
+      ]
     }
   ],
   "redirects": [

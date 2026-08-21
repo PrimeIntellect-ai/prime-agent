@@ -1,5 +1,21 @@
 # Development Rules
 
+## Feature Effort: SARK Prime (Retained Tools)
+
+In-flight feature: "retained tools" for Prime Agent — solve a task and retain the solution as a reusable, tracked, semantically-selectable skill — inspired by the SARK framework. Design completed 2026-08-20; decomposed into issues [#1–#26](https://github.com/badvision/prime-agent/issues) on this fork (labels `sark:retained-tools`, `sark:phase-A`…`sark:phase-G`, `sark:critical-path`, `sark:deferred`). Nothing is implemented yet.
+
+- **Before implementing any `sark:` issue**, read `packages/coding-agent/docs/retained-tools.md` (hub), then the matching `packages/coding-agent/docs/retained-tools/phase-*.md` doc. The GitHub issue is the live spec ("Done when" checklists); the docs are the reference copy.
+- **Build order:** A → B → (C ∥ D) → E → F (issues in number order; every issue depends only on earlier numbers). Critical path: #1→#2→#5→#6→#7→#8→#20→#21→#24. #25/#26 (phase G) are deferred placeholders — re-plan before starting.
+- **Load-bearing invariants (do not bend without updating the design docs):**
+  - A retained tool is an *ordinary skill directory* plus additive `metadata.prime-agent.retained` frontmatter — never a new artifact type.
+  - Three layers, one canonical source: skill dir (canonical) → per-scope `tools/index.json` (derived, rebuildable; counters are the only index-only state) → harness `skill` entries reference by id only.
+  - Reliability gates (flag <90% / disable <50% at 10+ uses) run on *explicit* success signals only; session success never counts as tool success; `disabled` never auto-re-enables.
+  - Skill prompt injection stays byte-identical to today below the retrieval budget; hybrid top-k only above it.
+  - Python materialization never auto-applies (explicit confirmation + scratch-venv smoke); the auto-detection gate only proposes, never applies.
+  - Skill-loader leniency on unknown frontmatter is deliberate — do not "fix" it.
+  - "Tests pass" is not acceptance: done criteria include a fresh-session end-user invocation of the retained tool.
+- **Open decisions:** Q4 (embedding vendor: local ONNX vs hosted vs BM25) blocks #15's full form — BM25 is the designed-in contingency. ADRs to record: layering (#1), embedding vendor (#15), auto-retention trust policy (#23). Details: `packages/coding-agent/docs/retained-tools/risks-and-decisions.md`.
+
 ## Conversational Style
 
 - No fluff or cheerful filler text
@@ -46,6 +62,7 @@
 - A 7-day minimum release age applies to all dependency updates: `.npmrc` sets `min-release-age=7` and `.github/dependabot.yml` uses a matching `cooldown`. Never bypass it for routine updates.
 - Enforcement requires npm >= 11.10; older npm silently ignores the setting, so use a current npm when updating dependencies.
 - For an urgent security patch younger than 7 days, override explicitly: `npm install --min-release-age=0 <pkg>`.
+- Dependency updates are an architect-level change requiring mandatory STOP protocol analysis, not allowed by arbitrary TDD Engineer decisions.
 
 ## GitHub Workflow
 
