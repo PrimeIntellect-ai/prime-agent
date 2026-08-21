@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .bash import BashHandle, BashResult, bash
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 try:
@@ -320,6 +321,8 @@ class _CallableModule(types.ModuleType):
 sys.modules[__name__].__class__ = _CallableModule
 
 __all__ = [
+    "BashHandle",
+    "BashResult",
     "HarnessEntry",
     "HarnessScope",
     "HarnessState",
@@ -330,6 +333,7 @@ __all__ = [
     "RLMSpawnHandle",
     "RLMSubagent",
     "RefinementEvent",
+    "bash",
     "delete_subagent",
     "find_models",
     "get_harness_state",

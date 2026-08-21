@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
-import { recordOrphanProcessState } from "../orphan-process-journal.js";
+import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { type ForkedKernelHandle, ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
@@ -708,7 +708,7 @@ export class KernelManager {
 					cwd: this.options.cwd,
 					// Applied fresh in the child (the template's env snapshot may be stale).
 					// No JPY_PARENT_PID: forked children watch the forkserver by getppid().
-					env: { ...process.env, ...this.options.env },
+					env: { ...process.env, ...this.options.env, PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid) },
 				});
 				if (this.startStale(generation)) {
 					// Nobody owns this kernel; the protocol kill is id-keyed and safe.
@@ -742,7 +742,12 @@ export class KernelManager {
 			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
 				cwd: this.options.cwd,
 				// ipykernel's parent poller exits the kernel if this pid dies (covers SIGKILL of the owner).
-				env: { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) },
+				env: {
+					...process.env,
+					...this.options.env,
+					JPY_PARENT_PID: String(process.pid),
+					PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
+				},
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			this.kernel = kernel;
@@ -1542,6 +1547,9 @@ export class KernelManager {
 			}
 			// Same rule as the forked branch below: inactive only when the signal proved the pid still ours.
 			if (directPid !== undefined && signaled) recordOrphanProcessState(directPid, false);
+			// A killed/crashed kernel cannot run its own shutdown hook, so the host
+			// reaps the bash() process groups it journaled under this kernel pid.
+			if (directPid !== undefined) reapKernelOrphanProcesses(directPid);
 		} else if (this.forkedKernel) {
 			const forked = this.forkedKernel;
 			// The journal is raw-pid keyed, so inactive is written only on "signaled"
@@ -1555,6 +1563,8 @@ export class KernelManager {
 					if (outcome === "signaled") recordOrphanProcessState(forked.pid, false);
 				})
 				.catch(() => this.appendKernelDiagnostic("forkserver kill unconfirmed; leaving orphan record active"));
+			// Same reaping as the direct branch: bash() children journaled under this kernel pid.
+			reapKernelOrphanProcesses(forked.pid);
 		}
 		this.kernel = undefined;
 		this.forkedKernel = undefined;

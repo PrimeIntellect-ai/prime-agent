@@ -23,6 +23,13 @@ describe("IPython RLM bootstrap", () => {
 		expect(buildRlmBootstrapCode()).toContain('_prime_agent_os.environ["NO_COLOR"] = "1"');
 	});
 
+	it("binds bash from the runtime with a missing-runtime stub fallback", () => {
+		const code = buildRlmBootstrapCode();
+		expect(code).toContain("bash = _prime_agent_rlm_module.bash");
+		expect(code).toContain("def bash(command):");
+		expect(code).toContain("rlm._raise_missing()");
+	});
+
 	it("guards Python skill imports so a broken skill does not abort bootstrap", () => {
 		const code = buildRlmBootstrapCode([
 			{

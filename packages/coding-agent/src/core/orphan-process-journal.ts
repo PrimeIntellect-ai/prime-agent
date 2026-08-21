@@ -7,6 +7,8 @@ interface OrphanProcessRecord {
 	version: 1;
 	pid: number;
 	ownerPid: number;
+	/** Set on records written by a kernel (e.g. bash() children) so the host can reap per kernel. */
+	kernelPid?: number;
 	processStartId?: string;
 	active: boolean;
 	recordedAt: string;
@@ -14,6 +16,7 @@ interface OrphanProcessRecord {
 
 export interface ActiveOrphanProcess {
 	pid: number;
+	kernelPid?: number;
 	processStartId: string;
 }
 
@@ -80,7 +83,11 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 			(record): record is OrphanProcessRecord & { processStartId: string } =>
 				record.active && typeof record.processStartId === "string",
 		)
-		.map((record) => ({ pid: record.pid, processStartId: record.processStartId }));
+		.map((record) => ({
+			pid: record.pid,
+			...(Number.isInteger(record.kernelPid) ? { kernelPid: record.kernelPid } : {}),
+			processStartId: record.processStartId,
+		}));
 }
 
 export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boolean {
@@ -89,4 +96,42 @@ export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boo
 
 export function clearOrphanProcessJournal(path: string): void {
 	rmSync(path, { force: true });
+}
+
+// Kills still-active bash() children journaled by the given kernel pid; sibling kernels' records are untouched.
+export function reapKernelOrphanProcesses(kernelPid: number): void {
+	const path = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
+	if (!path || !Number.isInteger(kernelPid) || kernelPid <= 0) {
+		return;
+	}
+	let orphans: ActiveOrphanProcess[];
+	try {
+		orphans = readActiveOrphanProcesses(path, process.pid);
+	} catch {
+		return;
+	}
+	for (const orphan of orphans) {
+		if (orphan.kernelPid !== kernelPid || orphan.pid === kernelPid) {
+			continue;
+		}
+		if (!isOrphanProcessIdentityCurrent(orphan)) {
+			continue;
+		}
+		let signaled = false;
+		try {
+			process.kill(process.platform === "win32" ? orphan.pid : -orphan.pid, "SIGKILL");
+			signaled = true;
+		} catch {
+			try {
+				process.kill(orphan.pid, "SIGKILL");
+				signaled = true;
+			} catch {
+				// The bash child may already have exited.
+			}
+		}
+		// Inactive only after a delivered signal; a stale record is neutralized by the startId check.
+		if (signaled) {
+			recordOrphanProcessState(orphan.pid, false);
+		}
+	}
 }
