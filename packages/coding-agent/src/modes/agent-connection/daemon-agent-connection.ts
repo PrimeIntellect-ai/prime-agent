@@ -634,6 +634,23 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 	}
 
+	async resumeQueuedWork(): Promise<boolean> {
+		try {
+			await this.requestData({
+				type: "resume_queue",
+				activeSessionId: this.activeSessionId,
+			});
+			return true;
+		} catch (error) {
+			// The daemon reports an empty/unsuspended queue as a command failure;
+			// that is a normal no-op here, while real errors keep propagating.
+			if (error instanceof Error && error.message === "No queued work to resume") {
+				return false;
+			}
+			throw error;
+		}
+	}
+
 	async acquireSessionInputPause(leaseKey: string): Promise<AgentConnectionSessionInputPause> {
 		if (this.terminalCloseEmitted) throw new Error("Daemon connection is closed; cannot acquire an input pause.");
 		const activeSessionId = this.activeSessionId;
