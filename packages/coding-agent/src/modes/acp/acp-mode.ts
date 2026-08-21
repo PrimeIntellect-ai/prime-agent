@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -641,12 +642,168 @@ export async function runAcpModeWithConnection(
 			});
 	};
 
+	// --- ACP session restore ------------------------------------------------
+	//
+	// BB stores the `sessionId` returned by session/new as the thread's provider
+	// thread id. When the thread is reopened, BB asks session/load with that id.
+	// prime-agent persists the mapping (ACP id -> its own JSONL session file)
+	// next to its agent dir, so a fresh process can switch back onto the saved
+	// transcript instead of starting with blank history.
+	const acpSessionLinkDir = (sessionFile: string): string => {
+		const agentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR ?? dirname(dirname(sessionFile));
+		return join(agentDir, "acp-sessions");
+	};
+
+	const persistAcpSessionLink = async (acpSessionId: string): Promise<void> => {
+		try {
+			const state = await connection.getState();
+			const sessionFile = state.sessionFile;
+			if (!sessionFile) return;
+			const dir = acpSessionLinkDir(sessionFile);
+			await mkdir(dir, { recursive: true, mode: 0o700 });
+			const target = join(dir, `${acpSessionId}.json`);
+			const temporary = `${target}.${process.pid}.tmp`;
+			await writeFile(
+				temporary,
+				JSON.stringify({ version: 1, acpSessionId, sessionFile, savedAt: new Date().toISOString() }),
+				"utf8",
+			);
+			await rename(temporary, target);
+		} catch {
+			// Losing a mapping only degrades a later resume; never fail session/new over it.
+		}
+	};
+
+	const resolveAcpSessionFile = async (acpSessionId: string): Promise<string | undefined> => {
+		try {
+			const state = await connection.getState();
+			const sessionFile = state.sessionFile;
+			if (!sessionFile) return undefined;
+			const raw = await readFile(join(acpSessionLinkDir(sessionFile), `${acpSessionId}.json`), "utf8");
+			const parsed = JSON.parse(raw) as { sessionFile?: unknown };
+			if (typeof parsed.sessionFile !== "string" || parsed.sessionFile.length === 0) return undefined;
+			try {
+				statSync(parsed.sessionFile);
+			} catch {
+				return undefined;
+			}
+			return parsed.sessionFile;
+		} catch {
+			return undefined;
+		}
+	};
+
+	const admitAcpSession = async (
+		sessionId: string,
+		ctx: any,
+	): Promise<{ cwdMismatch: { requested: string; actual: string } | undefined }> => {
+		// prime-agent's cwd is fixed at startup by the session it was launched
+		// with, so a client-supplied cwd cannot be adopted after the fact.
+		// Report the real cwd back in `_meta` rather than failing the request or
+		// letting the client assume a directory the agent is not using.
+		const requestedCwd = (ctx.params as { cwd?: unknown } | undefined)?.cwd;
+		let cwdMismatch: { requested: string; actual: string } | undefined;
+		if (typeof requestedCwd === "string" && requestedCwd.length > 0) {
+			const actual = await connection
+				.getState()
+				.then((state) => state.cwd)
+				.catch(() => undefined);
+			if (actual && !sameCwd(requestedCwd, actual)) {
+				cwdMismatch = { requested: requestedCwd, actual };
+			}
+		}
+		// Install the listener before fetching the snapshot. Child updates can arrive
+		// while the snapshot request is in flight; the connection remains the
+		// authoritative source used when quiescence is emitted below.
+		const producer = new AcpUpdateProducer(sessionId, ctx.client);
+		let inputPauseRelease: AcpInputPauseRelease | undefined;
+		if (closedInputPause) {
+			let resolve!: () => void;
+			let reject!: (error: unknown) => void;
+			const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+				resolve = resolvePromise;
+				reject = rejectPromise;
+			});
+			void promise.catch(() => undefined);
+			inputPauseRelease = { promise, resolve, reject };
+		}
+		const entry: AcpSessionEntry = {
+			id: sessionId,
+			abort: undefined,
+			cancelling: false,
+			cancelTask: undefined,
+			stopFailure: undefined,
+			inputPause: closedInputPause,
+			inputPauseKey: closedInputPauseKey,
+			inputPauseRelease,
+			pendingTerminal: undefined,
+			promptTask: undefined,
+			resolvePromptTask: undefined,
+			unsubscribe: undefined,
+			producer,
+		};
+		// Subscribe for the session lifetime, not per prompt turn: prime-agent
+		// subagents are fire-and-forget and keep reporting after the spawning turn
+		// ends, so a turn-scoped subscription would drop their updates. One
+		// mapping state per session keeps streaming bash output correlated with
+		// the run that produced it.
+		const mappingState: AcpEventMappingState = {};
+		const observedChildren = new Map<string, unknown>();
+		const unsubscribe = connection.subscribe((event) => {
+			if (event.type === "heartbeats_changed") {
+				void producer.publish(
+					{ sessionUpdate: "session_info_update", _meta: primeAgentMeta({ heartbeatsChanged: true }) },
+					0,
+					"event",
+				);
+				return;
+			}
+			if (event.type !== "session_event") return;
+			if (event.event.type === "rlm_child_update") {
+				observedChildren.set(event.event.child.id, event.event.child);
+			}
+			const turnId = producer.turnForEvent(event.event);
+			for (const update of acpUpdatesForSessionEvent(event.event, mappingState)) {
+				void producer.publish(update, turnId, "event");
+			}
+		});
+		try {
+			const initialSnapshot = await connection.getInitialSnapshot();
+			for (const child of initialSnapshot.children ?? []) {
+				if (observedChildren.has(child.id)) continue;
+				observedChildren.set(child.id, child);
+				const event = { type: "rlm_child_update", child } as const;
+				const turnId = producer.turnForEvent(event);
+				for (const update of acpUpdatesForSessionEvent(event, mappingState)) {
+					void producer.publish(update, turnId, "event");
+				}
+			}
+		} catch (error) {
+			producer.failSessionNewAdmission();
+			unsubscribe();
+			throw error;
+		}
+		// Claim the single-session slot only once the subscription and snapshot are
+		// ready, so a failed setup cannot leave it occupied and unusable.
+		entry.unsubscribe = unsubscribe;
+		session = entry;
+		// The stream wrapper commits this gate after this exact response has
+		// written. Buffered subscription updates retain producer order.
+		pendingSessionNewResponse = {
+			requestId: ctx.requestId,
+			producer: entry.producer,
+			entry,
+			inputPause: closedInputPause,
+		};
+		return { cwdMismatch };
+	};
+
 	const handle = acp
 		.agent({ name: "prime-agent" })
 		.onRequest("initialize", async () => ({
 			protocolVersion: acp.PROTOCOL_VERSION,
 			agentCapabilities: {
-				loadSession: false,
+				loadSession: true,
 				promptCapabilities: { image: true, embeddedContext: true },
 				// Advertise close so a client knows it can release the session (and
 				// the single-session slot) instead of dropping the connection.
@@ -675,114 +832,62 @@ export async function runAcpModeWithConnection(
 					await options.bindHeadlessExtensions?.();
 					bound = true;
 				}
-				// prime-agent's cwd is fixed at startup by the session it was launched
-				// with, so a client-supplied cwd cannot be adopted after the fact.
-				// Report the real cwd back in `_meta` rather than failing the request or
-				// letting the client assume a directory the agent is not using.
-				const requestedCwd = (ctx.params as { cwd?: unknown } | undefined)?.cwd;
-				let cwdMismatch: { requested: string; actual: string } | undefined;
-				if (typeof requestedCwd === "string" && requestedCwd.length > 0) {
-					const actual = await connection
-						.getState()
-						.then((state) => state.cwd)
-						.catch(() => undefined);
-					if (actual && !sameCwd(requestedCwd, actual)) {
-						cwdMismatch = { requested: requestedCwd, actual };
-					}
-				}
 				const sessionId = randomUUID();
-				// Install the listener before fetching the snapshot. Child updates can arrive
-				// while the snapshot request is in flight; the connection remains the
-				// authoritative source used when quiescence is emitted below.
-				const producer = new AcpUpdateProducer(sessionId, ctx.client);
-				let inputPauseRelease: AcpInputPauseRelease | undefined;
-				if (closedInputPause) {
-					let resolve!: () => void;
-					let reject!: (error: unknown) => void;
-					const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-						resolve = resolvePromise;
-						reject = rejectPromise;
-					});
-					void promise.catch(() => undefined);
-					inputPauseRelease = { promise, resolve, reject };
-				}
-				const entry: AcpSessionEntry = {
-					id: sessionId,
-					abort: undefined,
-					cancelling: false,
-					cancelTask: undefined,
-					stopFailure: undefined,
-					inputPause: closedInputPause,
-					inputPauseKey: closedInputPauseKey,
-					inputPauseRelease,
-					pendingTerminal: undefined,
-					promptTask: undefined,
-					resolvePromptTask: undefined,
-					unsubscribe: undefined,
-					producer,
-				};
-				// Subscribe for the session lifetime, not per prompt turn: prime-agent
-				// subagents are fire-and-forget and keep reporting after the spawning turn
-				// ends, so a turn-scoped subscription would drop their updates. One
-				// mapping state per session keeps streaming bash output correlated with
-				// the run that produced it.
-				const mappingState: AcpEventMappingState = {};
-				const observedChildren = new Map<string, unknown>();
-				const unsubscribe = connection.subscribe((event) => {
-					// Heartbeats are connection-scoped, including if one races a prompt.
-					// They therefore intentionally use origin turn 0.
-					if (event.type === "heartbeats_changed") {
-						void producer.publish(
-							{ sessionUpdate: "session_info_update", _meta: primeAgentMeta({ heartbeatsChanged: true }) },
-							0,
-							"event",
-						);
-						return;
-					}
-					if (event.type !== "session_event") return;
-					if (event.event.type === "rlm_child_update") {
-						observedChildren.set(event.event.child.id, event.event.child);
-					}
-					const turnId = producer.turnForEvent(event.event);
-					for (const update of acpUpdatesForSessionEvent(event.event, mappingState)) {
-						void producer.publish(update, turnId, "event");
-					}
-				});
-				try {
-					// Reconcile after subscribing so updates cannot be lost while the snapshot
-					// request is in flight. Do not turn a failed read into an empty roster.
-					const initialSnapshot = await connection.getInitialSnapshot();
-					for (const child of initialSnapshot.children ?? []) {
-						if (observedChildren.has(child.id)) continue;
-						observedChildren.set(child.id, child);
-						const event = { type: "rlm_child_update", child } as const;
-						const turnId = producer.turnForEvent(event);
-						for (const update of acpUpdatesForSessionEvent(event, mappingState)) {
-							void producer.publish(update, turnId, "event");
-						}
-					}
-				} catch (error) {
-					producer.failSessionNewAdmission();
-					unsubscribe();
-					throw error;
-				}
-				// Claim the single-session slot only once the subscription and snapshot are
-				// ready, so a failed setup cannot leave it occupied and unusable.
-				entry.unsubscribe = unsubscribe;
-				session = entry;
-				const response = {
+				const { cwdMismatch } = await admitAcpSession(sessionId, ctx);
+				// Remember the ACP session id -> prime-agent session file mapping so a
+				// later BB thread resume can `session/load` it from a fresh process.
+				await persistAcpSessionLink(sessionId);
+				return {
 					sessionId,
 					...(cwdMismatch ? { _meta: primeAgentMeta({ cwd: cwdMismatch }) } : {}),
 				};
-				// The stream wrapper commits this gate after this exact response has
-				// written. Buffered subscription updates retain producer order.
-				pendingSessionNewResponse = {
-					requestId: ctx.requestId,
-					producer: entry.producer,
-					entry,
-					inputPause: closedInputPause,
+			} finally {
+				sessionNewInFlight = false;
+			}
+		})
+		.onRequest("session/load", async (ctx: any) => {
+			// BB resumes a thread by asking for its previously-advertised ACP session
+			// id. prime-agent persists each session's JSONL on disk, so a fresh
+			// process can reload the thread history instead of starting blank.
+			const params = ctx.params as { sessionId?: unknown; cwd?: unknown } | undefined;
+			if (typeof params?.sessionId !== "string" || params.sessionId.length === 0) {
+				throw new Error("ACP session/load requires a session id.");
+			}
+			if (session || sessionNewInFlight || sessionCloseInFlight) {
+				throw new Error(
+					"prime-agent ACP mode hosts one session per connection; " +
+						"start another prime-agent process for a second session",
+				);
+			}
+			sessionNewInFlight = true;
+			try {
+				if (!bound) {
+					await options.bindHeadlessExtensions?.();
+					bound = true;
+				}
+				const sessionFile = await resolveAcpSessionFile(params.sessionId);
+				if (!sessionFile) {
+					// No persisted mapping: refuse to pretend history was restored. BB
+					// falls back to a fresh session/new and reports the restore failure.
+					throw new Error(`prime-agent has no session "${params.sessionId}" to load.`);
+				}
+				const actual = await connection
+					.getState()
+					.then((state) => state.sessionFile)
+					.catch(() => undefined);
+				const requestedCwd = typeof params.cwd === "string" && params.cwd.length > 0 ? params.cwd : undefined;
+				if (actual !== sessionFile) {
+					const switched = await connection.switchSession(sessionFile, {
+						...(requestedCwd ? { cwdOverride: requestedCwd } : {}),
+					});
+					if (switched.cancelled) {
+						throw new Error(`ACP session/load was cancelled for "${params.sessionId}".`);
+					}
+				}
+				const { cwdMismatch } = await admitAcpSession(params.sessionId, ctx);
+				return {
+					...(cwdMismatch ? { _meta: primeAgentMeta({ cwd: cwdMismatch }) } : {}),
 				};
-				return response;
 			} finally {
 				sessionNewInFlight = false;
 			}
