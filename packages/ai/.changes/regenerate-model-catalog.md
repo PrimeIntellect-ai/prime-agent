@@ -1,0 +1,1 @@
+- Refreshed the generated model catalog from live provider catalogs: added GLM 5.3 (OpenRouter, Prime Inference), DeepSeek V4 Flash Vision Exp, and Inkling free routes; followed the Vercel AI Gateway `xai/` to `spacexai/` grok rename; picked up repricing for gpt-5.6-sol, Gemini 3.6 Flash, and others.
