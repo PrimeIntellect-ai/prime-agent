@@ -1,0 +1,1 @@
+- Fixed directory-first ordering of path completions when the completion value is quoted (e.g. paths containing spaces or `@"..."` prefixes).
