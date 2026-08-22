@@ -842,7 +842,8 @@ export class ProviderAuthFlows {
 									manualCodeReject = undefined;
 								}
 							});
-					} else if (providerId === "github-copilot") {
+					} else if (providerId === "github-copilot" || providerId === "xai-oauth") {
+						// Device-code providers poll after onAuth
 						dialog.showWaiting("Waiting for browser authentication...");
 					}
 				},

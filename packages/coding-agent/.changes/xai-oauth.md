@@ -1,0 +1,3 @@
+- Added `/login` for xAI Grok OAuth (SuperGrok or X Premium+), using the OpenAI-compatible `https://api.x.ai/v1` endpoint.
+- Added `grok-4.6` as the default xAI Grok OAuth model.
+- Fixed xAI Grok rejecting every tool call when one MCP tool used an exclusive-required `anyOf` at the schema root.

@@ -12,6 +12,7 @@ import type {
 } from "openai/resources/chat/completions.js";
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
 import { getEnvApiKey, getPrimeTeamId } from "../env-api-keys.js";
+import { getLogger } from "../log.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
 	AssistantMessage,
@@ -35,6 +36,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { prepareCompletionsToolParameters } from "../utils/xai-tool-schema.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -548,7 +550,7 @@ function buildParams(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertTools(context.tools, compat);
+		params.tools = convertTools(context.tools, compat, model.provider);
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
@@ -563,6 +565,10 @@ function buildParams(
 
 	if (options?.toolChoice) {
 		params.tool_choice = options.toolChoice;
+	}
+
+	if (shouldDropToolChoice(params.tools, params.tool_choice)) {
+		delete params.tool_choice;
 	}
 
 	if (compat.thinkingFormat === "zai" && model.reasoning) {
@@ -990,20 +996,55 @@ export function convertMessages(
 	return params;
 }
 
+const log = getLogger("openai-completions");
+
+function isXaiCompletionsProvider(provider: string): boolean {
+	return provider === "xai" || provider === "xai-oauth";
+}
+
+function shouldDropToolChoice(
+	tools: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming["tools"],
+	toolChoice: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming["tool_choice"],
+): boolean {
+	if (toolChoice === undefined) return false;
+	const empty = !Array.isArray(tools) || tools.length === 0;
+	if (empty && (toolChoice === "none" || toolChoice === "required" || typeof toolChoice === "object")) {
+		return true;
+	}
+	if (typeof toolChoice === "object" && toolChoice !== null && "function" in toolChoice) {
+		const name = toolChoice.function?.name;
+		if (typeof name !== "string" || !Array.isArray(tools)) return false;
+		return !tools.some((tool) => tool.type === "function" && "function" in tool && tool.function?.name === name);
+	}
+	return false;
+}
+
 function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompletionsCompat,
+	provider: string,
 ): OpenAI.Chat.Completions.ChatCompletionTool[] {
-	return tools.map((tool) => ({
-		type: "function",
-		function: {
-			name: tool.name,
-			description: tool.description,
-			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
-			// Only include strict if provider supports it. Some reject unknown fields.
-			...(compat.supportsStrictMode !== false && { strict: false }),
-		},
-	}));
+	const rejectXaiRootObjectUnion = isXaiCompletionsProvider(provider);
+	const wireTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
+	for (const tool of tools) {
+		const prepared = prepareCompletionsToolParameters(tool.parameters, { rejectXaiRootObjectUnion });
+		if ("drop" in prepared) {
+			log.warn(
+				`Tool "${tool.name}" omitted from the openai-completions request: leftover xAI object-root union. Other tools are unaffected.`,
+			);
+			continue;
+		}
+		wireTools.push({
+			type: "function",
+			function: {
+				name: tool.name,
+				description: tool.description,
+				parameters: prepared.parameters,
+				...(compat.supportsStrictMode !== false && { strict: false }),
+			},
+		});
+	}
+	return wireTools;
 }
 
 function parseChunkUsage(
@@ -1088,6 +1129,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		provider === "cerebras" ||
 		baseUrl.includes("cerebras.ai") ||
 		provider === "xai" ||
+		provider === "xai-oauth" ||
 		baseUrl.includes("api.x.ai") ||
 		baseUrl.includes("chutes.ai") ||
 		baseUrl.includes("deepseek.com") ||
@@ -1101,7 +1143,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 
 	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isPrimeInference;
 
-	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
+	const isGrok = provider === "xai" || provider === "xai-oauth" || baseUrl.includes("api.x.ai");
 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
 	const isAnthropicModel = model.id.startsWith("anthropic/");
 	const cacheControlFormat =

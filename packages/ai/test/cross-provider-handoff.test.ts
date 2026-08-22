@@ -50,6 +50,7 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 		label: "bedrock-claude-sonnet-4-5",
 	},
 	{ provider: "xai", model: "grok-code-fast-1", label: "xai-grok-code-fast-1" },
+	{ provider: "xai-oauth", model: "grok-code-fast-1", label: "xai-oauth-grok-code-fast-1" },
 	{ provider: "cerebras", model: "gpt-oss-120b", label: "cerebras-gpt-oss-120b" },
 	{ provider: "cloudflare-workers-ai", model: "@cf/moonshotai/kimi-k2.6", label: "cloudflare-kimi-k2.6" },
 	{

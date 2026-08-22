@@ -11,8 +11,13 @@ import { getKimiCodingTestModel } from "./kimi-test-model.js";
 import { resolveApiKey } from "./oauth.js";
 import { getZaiTestModel } from "./zai-test-model.js";
 
-const oauthTokens = await Promise.all([resolveApiKey("github-copilot"), resolveApiKey("openai-codex")]);
-const [githubCopilotToken, openaiCodexToken] = oauthTokens;
+// Resolve OAuth tokens at module level (async, runs before tests)
+const oauthTokens = await Promise.all([
+	resolveApiKey("github-copilot"),
+	resolveApiKey("openai-codex"),
+	resolveApiKey("xai-oauth"),
+]);
+const [githubCopilotToken, openaiCodexToken, xaiOauthToken] = oauthTokens;
 
 const LOREM_IPSUM = `Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. `;
 
@@ -203,6 +208,22 @@ describe("Context overflow error handling", () => {
 		}, 120000);
 	});
 
+	// =============================================================================
+	// xAI
+	// Expected pattern: "maximum prompt length is X but the request contains Y"
+	// =============================================================================
+
+	describe.skipIf(!xaiOauthToken)("xAI Grok OAuth", () => {
+		it("grok-4.3 - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("xai-oauth", "grok-4.3");
+			const result = await testContextOverflow(model, xaiOauthToken!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toMatch(/maximum prompt length is \d+/i);
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
 	describe.skipIf(!process.env.XAI_API_KEY)("xAI", () => {
 		it("grok-4.3 - should detect overflow via isContextOverflow", async () => {
 			const model = getModel("xai", "grok-4.3");

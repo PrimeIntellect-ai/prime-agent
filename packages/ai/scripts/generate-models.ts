@@ -2112,6 +2112,25 @@ async function generateModels() {
 	allModels.push(...codexModels);
 
 	// Add missing Grok models
+	if (!allModels.some((m) => m.provider === "xai" && m.id === "grok-4.6")) {
+		allModels.push({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "openai-completions",
+			baseUrl: "https://api.x.ai/v1",
+			provider: "xai",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 6,
+				cacheRead: 0.5,
+				cacheWrite: 0,
+			},
+			contextWindow: 500000,
+			maxTokens: 500000,
+		});
+	}
 	if (!allModels.some(m => m.provider === "xai" && m.id === "grok-code-fast-1")) {
 		allModels.push({
 			id: "grok-code-fast-1",
@@ -2129,6 +2148,19 @@ async function generateModels() {
 			},
 			contextWindow: 32768,
 			maxTokens: 8192,
+		});
+	}
+
+	// SuperGrok / X Premium+ OAuth uses the same OpenAI-compatible xAI endpoint.
+	const xaiOauthHeaders = { "X-XAI-Token-Auth": "xai-grok-cli" };
+	for (const model of allModels.filter((m) => m.provider === "xai")) {
+		if (allModels.some((existing) => existing.provider === "xai-oauth" && existing.id === model.id)) {
+			continue;
+		}
+		allModels.push({
+			...model,
+			provider: "xai-oauth",
+			headers: { ...model.headers, ...xaiOauthHeaders },
 		});
 	}
 

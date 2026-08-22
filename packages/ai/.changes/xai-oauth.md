@@ -1,0 +1,3 @@
+- Added `xai-oauth` SuperGrok / X Premium+ device-code login, using the OpenAI-compatible `https://api.x.ai/v1` endpoint.
+- Added `grok-4.6` to the `xai` and `xai-oauth` catalogs.
+- Fixed xAI 400ing the whole turn on MCP schemas whose tool root is an object plus a typeless exclusive-required `anyOf`. Flatten only that root fragment; leftover object-root unions quarantine that one tool on `xai` and `xai-oauth`.

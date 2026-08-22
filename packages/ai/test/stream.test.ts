@@ -26,8 +26,9 @@ const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
 	resolveApiKey("openai-codex"),
+	resolveApiKey("xai-oauth"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken, xaiOauthToken] = oauthTokens;
 const primeInferenceApiKey = getEnvApiKey("prime-inference");
 
 const calculatorSchema = Type.Object({
@@ -546,6 +547,22 @@ describe("Generate E2E Tests", () => {
 
 		it("should handle image input", { retry: 3 }, async () => {
 			await handleImage(llm, azureOptions);
+		});
+	});
+
+	describe.skipIf(!xaiOauthToken)("xAI Grok OAuth Provider (grok-code-fast-1 via OpenAI Completions)", () => {
+		const llm = getModel("xai-oauth", "grok-code-fast-1");
+
+		it("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm, { apiKey: xaiOauthToken });
+		});
+
+		it("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm, { apiKey: xaiOauthToken });
+		});
+
+		it("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm, { apiKey: xaiOauthToken });
 		});
 	});
 

@@ -19,8 +19,9 @@ const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
 	resolveApiKey("openai-codex"),
+	resolveApiKey("xai-oauth"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken, xaiOauthToken] = oauthTokens;
 
 async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const toolCallId = llm.provider === "mistral" ? "testtool1" : "test_1";
@@ -423,6 +424,22 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 				await testUnpairedHighSurrogate(llm, { apiKey: githubCopilotToken });
 			},
 		);
+	});
+
+	describe.skipIf(!xaiOauthToken)("xAI Grok OAuth Provider Unicode Handling", () => {
+		const llm = getModel("xai-oauth", "grok-4.3");
+
+		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testEmojiInToolResults(llm, { apiKey: xaiOauthToken });
+		});
+
+		it("should handle real-world LinkedIn comment data with emoji", { retry: 3, timeout: 30000 }, async () => {
+			await testRealWorldLinkedInData(llm, { apiKey: xaiOauthToken });
+		});
+
+		it("should handle unpaired high surrogate (0xD83D) in tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testUnpairedHighSurrogate(llm, { apiKey: xaiOauthToken });
+		});
 	});
 
 	describe.skipIf(!process.env.XAI_API_KEY)("xAI Provider Unicode Handling", () => {

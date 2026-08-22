@@ -16,8 +16,9 @@ const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
 	resolveApiKey("openai-codex"),
+	resolveApiKey("xai-oauth"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken, xaiOauthToken] = oauthTokens;
 
 const LONG_SYSTEM_PROMPT = `You are a helpful assistant. Be concise in your responses.
 
@@ -202,6 +203,24 @@ describe("totalTokens field", () => {
 		});
 	});
 
+	// =========================================================================
+	// xAI
+	// =========================================================================
+
+	describe.skipIf(!xaiOauthToken)("xAI Grok OAuth", () => {
+		it("grok-4.3 - should return totalTokens equal to sum of components", { retry: 3, timeout: 60000 }, async () => {
+			const llm = getModel("xai-oauth", "grok-4.3");
+
+			console.log(`\nxAI Grok OAuth / ${llm.id}:`);
+			const { first, second } = await testTotalTokensWithCache(llm, { apiKey: xaiOauthToken });
+
+			logUsage("First request", first);
+			logUsage("Second request", second);
+
+			assertTotalTokensEqualsComponents(first);
+			assertTotalTokensEqualsComponents(second);
+		});
+	});
 	describe.skipIf(!process.env.XAI_API_KEY)("xAI", () => {
 		it("grok-4.3 - should return totalTokens equal to sum of components", { retry: 3, timeout: 60000 }, async () => {
 			const llm = getModel("xai", "grok-4.3");

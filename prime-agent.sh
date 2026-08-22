@@ -31,6 +31,7 @@ if [[ "$NO_ENV" == "true" ]]; then
   unset GROQ_API_KEY
   unset CEREBRAS_API_KEY
   unset XAI_API_KEY
+  unset XAI_OAUTH_TOKEN
   unset OPENROUTER_API_KEY
   unset ZAI_API_KEY
   unset MISTRAL_API_KEY

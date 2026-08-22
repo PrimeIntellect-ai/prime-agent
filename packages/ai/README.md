@@ -75,7 +75,8 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Cerebras**
 - **Cloudflare AI Gateway**
 - **Cloudflare Workers AI**
-- **xAI**
+- **xAI** (API key)
+- **xAI Grok OAuth** (SuperGrok or X Premium+, requires OAuth, uses the OpenAI-compatible `https://api.x.ai/v1` endpoint)
 - **OpenRouter**
 - **Vercel AI Gateway**
 - **MiniMax**
@@ -1059,6 +1060,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Cloudflare AI Gateway | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` |
 | xAI | `XAI_API_KEY` |
+| xAI Grok OAuth | `XAI_OAUTH_TOKEN` |
 | Fireworks | `FIREWORKS_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Vercel AI Gateway | `AI_GATEWAY_API_KEY` |
@@ -1101,6 +1103,7 @@ Several providers require OAuth authentication instead of static API keys:
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
+- **xAI Grok OAuth** (SuperGrok or X Premium+; device-code login, OpenAI-compatible `https://api.x.ai/v1`)
 
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
 

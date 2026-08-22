@@ -16,8 +16,9 @@ const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
 	resolveApiKey("openai-codex"),
+	resolveApiKey("xai-oauth"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken, xaiOauthToken] = oauthTokens;
 
 async function testEmptyMessage<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const emptyMessage: UserMessage = {
@@ -235,6 +236,26 @@ describe("AI Providers Empty Message Tests", () => {
 
 		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
 			await testEmptyAssistantMessage(llm);
+		});
+	});
+
+	describe.skipIf(!xaiOauthToken)("xAI Grok OAuth Provider Empty Messages", () => {
+		const llm = getModel("xai-oauth", "grok-4.3");
+
+		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
+			await testEmptyMessage(llm, { apiKey: xaiOauthToken });
+		});
+
+		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
+			await testEmptyStringMessage(llm, { apiKey: xaiOauthToken });
+		});
+
+		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
+			await testWhitespaceOnlyMessage(llm, { apiKey: xaiOauthToken });
+		});
+
+		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
+			await testEmptyAssistantMessage(llm, { apiKey: xaiOauthToken });
 		});
 	});
 
