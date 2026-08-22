@@ -102,6 +102,31 @@ describe("IpythonKernelProvisioner", () => {
 		expect(countRuns()).toBe(2);
 	});
 
+	it("reprovisions a stopped kernel and coalesces concurrent callers", async () => {
+		const { python, countRuns } = writeFakePython();
+		const kernelManagerRef: { current?: KernelManager } = {};
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, kernelManagerRef });
+		const stoppedManager = { isRunning: false } as KernelManager;
+		Object.assign(
+			provisioner as unknown as {
+				managerPromise: Promise<KernelManager>;
+				startedManager: KernelManager;
+			},
+			{
+				managerPromise: Promise.resolve(stoppedManager),
+				startedManager: stoppedManager,
+			},
+		);
+		kernelManagerRef.current = stoppedManager;
+
+		const [a, b] = await Promise.allSettled([provisioner.ensure(), provisioner.ensure()]);
+
+		expect(a.status).toBe("rejected");
+		expect(b.status).toBe("rejected");
+		expect(countRuns()).toBe(1);
+		expect(kernelManagerRef.current).toBeUndefined();
+	});
+
 	it("prewarm() swallows the failure and the next ensure() starts fresh", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });

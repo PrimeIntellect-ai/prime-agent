@@ -1,0 +1,1 @@
+- Fixed sessions permanently losing Python after an unexpected IPython kernel exit by reprovisioning on the next call.
