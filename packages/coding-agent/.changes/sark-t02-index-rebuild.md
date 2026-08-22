@@ -1,0 +1,1 @@
+- Rebuild the per-scope retained-tool indexes from the skill directories on every skill load: content fields are upserted from disk, usage counters merge by (name, path), stale entries are removed, and a deleted or corrupted index self-heals (SARK T02, [#2](https://github.com/badvision/prime-agent/issues/2)).

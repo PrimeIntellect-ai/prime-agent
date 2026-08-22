@@ -15,6 +15,7 @@ import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResul
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.js";
 import type { PromptTemplate } from "./prompt-templates.js";
 import { loadPromptTemplates } from "./prompt-templates.js";
+import { refreshToolIndexes } from "./retained-tools/rebuild.js";
 import { SettingsManager } from "./settings-manager.js";
 import type { Skill } from "./skills.js";
 import { loadSkills } from "./skills.js";
@@ -440,6 +441,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		this.lastSkillPaths = skillPaths;
 		this.updateSkillsFromPaths(skillPaths, metadataByPath);
+		// Keep the derived per-scope tool indexes in sync (SARK T02). Failure
+		// degrades locally: skill load must never break on index I/O errors.
+		this.refreshToolIndexes();
 		// Surface resolution-time skill warnings (e.g. missing bundled skills dir).
 		this.skillDiagnostics.push(...resolvedPaths.diagnostics);
 		for (const p of this.additionalSkillPaths) {
@@ -502,6 +506,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 			path: this.resolveResourcePath(entry.path),
 			metadata: entry.metadata,
 		}));
+	}
+
+	private refreshToolIndexes(): void {
+		try {
+			refreshToolIndexes({ cwd: this.cwd, agentDir: this.agentDir });
+		} catch (error) {
+			console.error(
+				chalk.yellow(
+					`Warning: tool index refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+				),
+			);
+		}
 	}
 
 	private updateSkillsFromPaths(skillPaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
