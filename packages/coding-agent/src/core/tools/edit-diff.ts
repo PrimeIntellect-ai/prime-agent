@@ -126,9 +126,8 @@ export function stripBom(content: string): { bom: string; text: string } {
 }
 
 function countOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeForFuzzyMatch(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	return fuzzyContent.split(fuzzyOldText).length - 1;
+	if (oldText.length === 0) return 0;
+	return content.split(oldText).length - 1;
 }
 
 function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
@@ -206,7 +205,13 @@ export function applyEditsToNormalizedContent(
 			throw getNotFoundError(path, i, normalizedEdits.length);
 		}
 
-		const occurrences = countOccurrences(baseContent, edit.oldText);
+		// Count occurrences in the same space the match was found in, so an exact
+		// match is not rejected because fuzzy normalization collapses extra hits
+		// (e.g. smart quotes elsewhere in the file).
+		const occurrences = countOccurrences(
+			matchResult.usedFuzzyMatch ? normalizeForFuzzyMatch(baseContent) : baseContent,
+			matchResult.usedFuzzyMatch ? normalizeForFuzzyMatch(edit.oldText) : edit.oldText,
+		);
 		if (occurrences > 1) {
 			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
 		}

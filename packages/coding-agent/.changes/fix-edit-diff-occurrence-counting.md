@@ -1,0 +1,1 @@
+- Fixed the edit tool rejecting a unique exact match when fuzzy normalization (e.g. smart quotes elsewhere in the file) would collapse it into multiple occurrences.
