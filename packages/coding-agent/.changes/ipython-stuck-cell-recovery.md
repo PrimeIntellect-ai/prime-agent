@@ -1,0 +1,1 @@
+- Fixed stuck IPython cells by automatically escalating through kernel recovery.

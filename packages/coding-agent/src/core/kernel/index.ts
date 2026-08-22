@@ -11,6 +11,12 @@ import { recordOrphanProcessState } from "../orphan-process-journal.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { type ForkedKernelHandle, ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
+	ASYNC_EXC_MAIN_CODE,
+	CANCEL_MAIN_TASK_CODE,
+	DIAGNOSE_MAIN_STACK_CODE,
+	type KernelRecoveryResult,
+} from "./recovery.js";
+import {
 	buildListNamesCode,
 	buildRestoreCode,
 	buildSnapshotCode,
@@ -22,6 +28,8 @@ import {
 	type RestoreResult,
 	type SnapshotResult,
 } from "./state-snapshot.js";
+
+export type { KernelRecoveryOutcome, KernelRecoveryResult, KernelRecoveryWeapon } from "./recovery.js";
 
 const DELIM = Buffer.from("<IDS|MSG>");
 const PROTOCOL_VERSION = "5.3";
@@ -46,6 +54,14 @@ const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
 const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
+// Recovery-lane timings (see recovery.ts for the verified design).
+const CONTROL_RPC_TIMEOUT_MS = 5000;
+// How long a fired weapon gets to make the stuck cell reply before escalating.
+const RECOVERY_WEAPON_SETTLE_MS = 4000;
+// Budget for one subshell-lane cell (weapon injection or user inspection).
+const SUBSHELL_EXEC_TIMEOUT_MS = 10_000;
+// Retained-output cap for lane cells, mirroring DEFAULT_MAX_OUTPUT_CHARS.
+const SUBSHELL_MAX_OUTPUT_CHARS = 65536;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
@@ -394,6 +410,9 @@ interface ActiveExecution {
 	opts: ExecuteOptions;
 	stdout: string;
 	stderr: string;
+	/** Total stream chars observed, uncapped — retained stdout/stderr are
+	 *  truncated at maxChars, so stuckness detection must not use them. */
+	totalStreamChars: number;
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
 	result?: string;
@@ -405,6 +424,19 @@ interface ActiveExecution {
 	settled: boolean;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
+}
+
+/** A cell running on the recovery subshell lane (JEP-91). Output is routed by
+ *  parent msg_id off the shared IOPub pump; the reply is routed off the shell
+ *  channel by the control pump's shell sibling (see runIopubPump fall-through
+ *  and handleSubshellMessage). */
+interface SubshellExecution {
+	requestMsgId: string;
+	stdout: string;
+	stderr: string;
+	status: "ok" | "error";
+	resolve: (result: { status: "ok" | "error" | "timeout"; output: string }) => void;
+	settled: boolean;
 }
 
 interface Deferred<T> {
@@ -620,6 +652,13 @@ export class KernelManager {
 	// attribute their spawning program.
 	private lastCellCode?: string;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	/** JEP-91 recovery subshell id, once created (kernel-lifetime; cleared on cleanup). */
+	private recoverySubshellId?: string;
+	/** In-flight recovery-lane executions, routed by request msg_id. */
+	private readonly subshellExecutions = new Map<string, SubshellExecution>();
+	/** In-flight control-channel RPCs, routed by request msg_id. */
+	private readonly controlRpcs = new Map<string, (msg: JupyterMessage) => void>();
+	private controlPumpPromise?: Promise<void>;
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
 	private startGeneration = 0;
@@ -1045,6 +1084,7 @@ export class KernelManager {
 			opts,
 			stdout: "",
 			stderr: "",
+			totalStreamChars: 0,
 			stdoutTruncated: false,
 			stderrTruncated: false,
 			diffs: [],
@@ -1208,6 +1248,10 @@ export class KernelManager {
 	private handleExecutionMessage(incoming: JupyterMessage): void {
 		const execution = this.activeExecution;
 		const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+		if (parentMessageId && this.subshellExecutions.has(parentMessageId)) {
+			this.handleSubshellMessage(parentMessageId, incoming);
+			return;
+		}
 		if (!execution || parentMessageId !== execution.requestMsgId) {
 			if (incoming.header.msg_type === "display_data" || incoming.header.msg_type === "update_display_data") {
 				const content = incoming.content as { data?: Record<string, unknown> };
@@ -1225,6 +1269,7 @@ export class KernelManager {
 		}
 		if (t === "stream") {
 			const c = incoming.content as { name: "stdout" | "stderr"; text: string };
+			execution.totalStreamChars += c.text.length;
 			if (c.name === "stdout") {
 				if (execution.stdout.length < execution.maxChars) {
 					execution.stdout += c.text;
@@ -1514,10 +1559,270 @@ export class KernelManager {
 		await this.control.send(encode(msg, this.connection.key));
 	}
 
+	// ---- stuck-cell recovery (JEP-91 subshell lane; see recovery.ts) --------
+
+	private handleSubshellMessage(parentMessageId: string, incoming: JupyterMessage): void {
+		const execution = this.subshellExecutions.get(parentMessageId);
+		if (!execution) return;
+		const t = incoming.header.msg_type;
+		if (t === "stream") {
+			const c = incoming.content as { name: "stdout" | "stderr"; text: string };
+			// Cap retained lane output like the main execution path does; a verbose
+			// lane cell must not grow host memory without bound.
+			if (c.name === "stdout") {
+				if (execution.stdout.length < SUBSHELL_MAX_OUTPUT_CHARS) {
+					execution.stdout = (execution.stdout + c.text).slice(0, SUBSHELL_MAX_OUTPUT_CHARS);
+				}
+			} else if (execution.stderr.length < SUBSHELL_MAX_OUTPUT_CHARS) {
+				execution.stderr = (execution.stderr + c.text).slice(0, SUBSHELL_MAX_OUTPUT_CHARS);
+			}
+		} else if (t === "error") {
+			execution.status = "error";
+		} else if (t === "status") {
+			const c = incoming.content as { execution_state: string };
+			if (c.execution_state === "idle" && !execution.settled) {
+				execution.settled = true;
+				this.subshellExecutions.delete(parentMessageId);
+				execution.resolve({
+					status: execution.status,
+					output: execution.stdout + (execution.stderr ? `\n${execution.stderr}` : ""),
+				});
+			}
+		}
+	}
+
+	/** Drain the control socket into per-request handlers. Started lazily by the
+	 *  first controlRpc; interrupt/shutdown fire-and-forget sends are unaffected
+	 *  (their replies are dispatched here and dropped without a handler). */
+	private startControlPump(): void {
+		if (this.controlPumpPromise) return;
+		const control = this.control;
+		if (!control) return;
+		this.controlPumpPromise = (async () => {
+			try {
+				for await (const frames of control) {
+					const incoming = decode(frames as Buffer[]);
+					if (!incoming) continue;
+					const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+					if (!parentMessageId) continue;
+					const handler = this.controlRpcs.get(parentMessageId);
+					if (handler) {
+						this.controlRpcs.delete(parentMessageId);
+						handler(incoming);
+					}
+				}
+			} catch (error) {
+				if ((this.state as string) !== "shutdown") {
+					this.appendKernelDiagnostic(`control pump failed: ${errorMessage(error)}`);
+				}
+			} finally {
+				if (this.control === control) {
+					this.controlPumpPromise = undefined;
+				}
+			}
+		})();
+	}
+
+	/** Send one control-channel request and await its reply, bounded by a timeout. */
+	private async controlRpc(
+		msgType: string,
+		content: Record<string, unknown>,
+		timeoutMs = CONTROL_RPC_TIMEOUT_MS,
+	): Promise<JupyterMessage | null> {
+		const control = this.control;
+		const conn = this.connection;
+		if (!control || !conn) return null;
+		this.startControlPump();
+		const msg = buildMessage(msgType, content, this.session, this.options.username);
+		const requestMsgId = msg.header.msg_id;
+		const reply = new Promise<JupyterMessage | null>((resolve) => {
+			this.controlRpcs.set(requestMsgId, resolve);
+		});
+		try {
+			await control.send(encode(msg, conn.key));
+		} catch {
+			this.controlRpcs.delete(requestMsgId);
+			return null;
+		}
+		const winner = await Promise.race([reply, sleep(timeoutMs).then(() => "timeout" as const)]);
+		if (winner === "timeout") {
+			this.controlRpcs.delete(requestMsgId);
+			return null;
+		}
+		return winner;
+	}
+
+	/** Does the kernel process answer on the control channel at all? A `false`
+	 *  here (while a cell is stuck) means the GIL is held or the process is
+	 *  gone: restart is the only option. */
+	async probeControlAlive(timeoutMs = CONTROL_RPC_TIMEOUT_MS): Promise<boolean> {
+		const reply = await this.controlRpc("kernel_info_request", {}, timeoutMs);
+		return reply !== null;
+	}
+
+	/** Identity and output volume of the in-flight execution, for stuckness
+	 *  tracking across backgrounded polls (no output growth => stuck).
+	 *  Uses the uncapped stream counter: retained stdout/stderr are truncated
+	 *  at maxChars, which would freeze the count for verbose healthy cells. */
+	get activeExecutionInfo(): { requestMsgId: string; outputChars: number } | undefined {
+		const execution = this.activeExecution;
+		if (!execution) return undefined;
+		return {
+			requestMsgId: execution.requestMsgId,
+			outputChars: execution.totalStreamChars,
+		};
+	}
+
+	/** Create (once) the JEP-91 recovery subshell. Returns its id, or undefined
+	 *  if the kernel predates subshells or the control channel is unresponsive. */
+	private async ensureRecoverySubshell(): Promise<string | undefined> {
+		if (this.recoverySubshellId) return this.recoverySubshellId;
+		const reply = await this.controlRpc("create_subshell_request", {});
+		if (!reply) return undefined;
+		const content = reply.content as { status?: string; subshell_id?: string };
+		if (content.status === "ok" && typeof content.subshell_id === "string") {
+			this.recoverySubshellId = content.subshell_id;
+			this.appendKernelDiagnostic(`recovery subshell created: ${this.recoverySubshellId}`);
+		}
+		return this.recoverySubshellId;
+	}
+
+	/**
+	 * Run one cell on the recovery subshell lane while the main shell is busy.
+	 * Executes concurrently with the stuck cell over the same namespace.
+	 * Returns "timeout" if the lane produced no reply in time (subshell thread
+	 * starved => kernel effectively wedged).
+	 */
+	async executeInRecoverySubshell(
+		code: string,
+		timeoutMs = SUBSHELL_EXEC_TIMEOUT_MS,
+	): Promise<{ status: "ok" | "error" | "timeout" | "no-subshell"; output: string }> {
+		const shell = this.shell;
+		const conn = this.connection;
+		if (!shell || !conn) return { status: "no-subshell", output: "" };
+		const subshellId = await this.ensureRecoverySubshell();
+		if (!subshellId) return { status: "no-subshell", output: "" };
+
+		const msg = buildMessage(
+			"execute_request",
+			{
+				code,
+				silent: false,
+				store_history: false,
+				user_expressions: {},
+				allow_stdin: false,
+				stop_on_error: false,
+			},
+			this.session,
+			this.options.username,
+		);
+		(msg.header as Record<string, unknown>).subshell_id = subshellId;
+		const requestMsgId = msg.header.msg_id;
+
+		const done = new Promise<{ status: "ok" | "error" | "timeout"; output: string }>((resolve) => {
+			this.subshellExecutions.set(requestMsgId, {
+				requestMsgId,
+				stdout: "",
+				stderr: "",
+				status: "ok",
+				resolve,
+				settled: false,
+			});
+		});
+		try {
+			await shell.send(encode(msg, conn.key));
+		} catch {
+			this.subshellExecutions.delete(requestMsgId);
+			return { status: "no-subshell", output: "" };
+		}
+		const winner = await Promise.race([done, sleep(timeoutMs).then(() => "timeout" as const)]);
+		if (winner === "timeout") {
+			const pending = this.subshellExecutions.get(requestMsgId);
+			this.subshellExecutions.delete(requestMsgId);
+			return { status: "timeout", output: pending ? pending.stdout + pending.stderr : "" };
+		}
+		return winner;
+	}
+
+	/**
+	 * Escalation ladder for an execution that exceeded its timeout. Fires
+	 * weapons cheap-to-strong, each verified by "did the stuck cell settle":
+	 *   1. interrupt_request (SIGINT)            -> sync hangs
+	 *   2. cross-thread task.cancel via subshell -> stuck top-level awaits
+	 *   3. PyThreadState_SetAsyncExc, gated on the main thread being inside
+	 *      user cell code                        -> sync-blocking-inside-async
+	 * Destructive by design: only call when stuckness is established (or the
+	 * caller explicitly requested it), not merely because a cell is slow.
+	 */
+	async recoverStuckExecution(settleMs = RECOVERY_WEAPON_SETTLE_MS): Promise<KernelRecoveryResult> {
+		const execution = this.activeExecution;
+		if (!execution) return { outcome: "no-active-execution" };
+
+		if (!(await this.probeControlAlive())) {
+			this.appendKernelDiagnostic("recovery: control channel unresponsive; kernel needs restart");
+			return { outcome: "kernel-unresponsive" };
+		}
+		const subshellId = await this.ensureRecoverySubshell();
+		if (!subshellId) {
+			this.appendKernelDiagnostic("recovery: no subshell support; kernel effectively wedged");
+			return { outcome: "kernel-wedged" };
+		}
+
+		const settled = () => this.waitForActiveExecutionToClear(undefined, settleMs);
+		// The stuck cell may settle during any await above/between weapons; the
+		// serialized queue can then start an unrelated cell, and a weapon fired
+		// now would hit valid work. Re-check identity before every weapon.
+		const stuckCellGone = () => this.activeExecution !== execution;
+
+		if (stuckCellGone()) {
+			return { outcome: "recovered", weapon: undefined };
+		}
+		this.appendKernelDiagnostic(`recovery: firing interrupt at ${execution.requestMsgId}`);
+		await this.interrupt().catch(() => undefined);
+		if ((await settled()) || stuckCellGone()) {
+			return { outcome: "recovered", weapon: "interrupt" };
+		}
+
+		if (stuckCellGone()) {
+			return { outcome: "recovered", weapon: undefined };
+		}
+		this.appendKernelDiagnostic(`recovery: firing task-cancel at ${execution.requestMsgId}`);
+		await this.executeInRecoverySubshell(CANCEL_MAIN_TASK_CODE);
+		if ((await settled()) || stuckCellGone()) {
+			return { outcome: "recovered", weapon: "task-cancel" };
+		}
+
+		const diagnosis = await this.executeInRecoverySubshell(DIAGNOSE_MAIN_STACK_CODE);
+		if (stuckCellGone()) {
+			return { outcome: "recovered", weapon: undefined };
+		}
+		if (diagnosis.status === "ok" && diagnosis.output.includes("_rec_in_user=True")) {
+			this.appendKernelDiagnostic(`recovery: firing async-exc at ${execution.requestMsgId}`);
+			await this.executeInRecoverySubshell(ASYNC_EXC_MAIN_CODE);
+			if ((await settled()) || stuckCellGone()) {
+				return { outcome: "recovered", weapon: "async-exc" };
+			}
+		}
+
+		const lane = await this.executeInRecoverySubshell("pass");
+		this.appendKernelDiagnostic(`recovery: weapons exhausted for ${execution.requestMsgId}; lane=${lane.status}`);
+		return { outcome: lane.status === "ok" ? "recovery-lane-only" : "kernel-wedged" };
+	}
+
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
 		this.startGeneration++; // any teardown invalidates in-flight starts
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
+		this.recoverySubshellId = undefined;
+		for (const [requestMsgId, execution] of this.subshellExecutions) {
+			if (!execution.settled) {
+				execution.settled = true;
+				execution.resolve({ status: "error", output: "Kernel has been shut down" });
+			}
+			this.subshellExecutions.delete(requestMsgId);
+		}
+		this.controlRpcs.clear();
+		this.controlPumpPromise = undefined;
 		if (this.forkedLivenessTimer) {
 			globalThis.clearInterval(this.forkedLivenessTimer);
 			this.forkedLivenessTimer = undefined;
