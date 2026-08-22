@@ -38,3 +38,22 @@ Sandboxing/permission scoping; automatic MCP endpoint discovery and registration
 - If hybrid retrieval underperforms keyword fallback on the regression suite, ship BM25-only and re-open embeddings.
 - If honest-signal counters show <5 explicit signals per month in real use, drop auto-disable (keep flag-only) and re-baseline thresholds on SARK's data.
 - If `/retain` materialization proves fiddly, degrade phase B to "retention = refined harness skill *spec* + a one-command install via skill-creator" — spec-first, artifact-second.
+
+## Recorded ADRs
+
+### ADR-1 — Layering: canonical skill dir / derived index / referencing harness spec
+
+**Context.** Retained tools sit on top of three existing surfaces: the skill directories on disk, the per-scope `tools/index.json` registry this phase introduces (phase A), and the continual-harness `skill` entries in `harness_state.json`. Unlayered state across those surfaces is the two-sources-of-truth risk (risk 5 above); any new state the feature introduces must answer: canonical, derived, or reference?
+
+**Decision.** Three layers, one canonical source:
+
+1. **Artifact layer (canonical):** the skill directory on disk; same locations and precedence as today (`packages/coding-agent/docs/skills.md` "Locations"). A retained tool IS a skill; not a new artifact type.
+2. **Registry/index layer (derived):** the JSON index per scope. Rebuildable from disk at any time; **usage counters are the only state that lives only in the index**.
+3. **Spec layer (reference, not copy):** continual-harness `skill` entries (`harness_state.json`) may reference a retained tool by `id` for routing hints; they never duplicate tool content.
+
+**Consequences.**
+
+- The index can be deleted or corrupted at any time and rebuilt from disk; only the usage counters need a merge to survive (phase A, #2).
+- Harness `skill` entries stay thin (`id`-only references) and cannot drift from tool content; drift is detected on the artifact layer via `description_hash` at load.
+- Version snapshots (#6) and rollback (#9) operate on the canonical layer and the derived index; reliability status transitions (phase C) operate on the derived index. The spec layer never stores tool content.
+- Any future state added by this feature must be classified as canonical, derived, or reference before it ships.
