@@ -311,7 +311,7 @@ async function consumeChatStream(
 			calculateCost(model, output.usage);
 		}
 
-		const choice = chunk.choices[0];
+		const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
 		if (!choice) continue;
 
 		if (choice.finishReason) {

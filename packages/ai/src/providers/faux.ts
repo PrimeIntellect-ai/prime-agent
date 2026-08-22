@@ -218,10 +218,10 @@ function withUsageEstimate(
 			const cachedChars = commonPrefixLength(previousPrompt, promptText);
 			cacheRead = estimateTokens(previousPrompt.slice(0, cachedChars));
 			cacheWrite = estimateTokens(promptText.slice(cachedChars));
-			input = Math.max(0, promptTokens - cacheRead);
 		} else {
 			cacheWrite = promptTokens;
 		}
+		input = Math.max(0, promptTokens - cacheRead - cacheWrite);
 		promptCache.set(sessionId, promptText);
 	}
 

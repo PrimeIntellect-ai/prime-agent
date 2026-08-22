@@ -1,0 +1,3 @@
+- Fixed Mistral streams crashing on chunks without choices (e.g. usage-only chunks).
+- Fixed Codex retrying non-retryable HTTP errors such as 401/403 due to the error being caught by the retry loop.
+- Fixed faux provider double-counting cache-write tokens in totalTokens.
