@@ -101,7 +101,7 @@ class BashHandle:
         self._callback_lock = threading.Lock()
         self._started = time.monotonic()
         # POSIX: own process group so kill() signals the whole pipeline; Windows
-        # has no group signalling, so kill() falls back to Popen.kill().
+        # has no group signalling, so kill() tree-kills via taskkill instead.
         self._status_read = -1
         self._wake_read = -1
         self._wake_write = -1
@@ -142,7 +142,9 @@ class BashHandle:
 
     @property
     def running(self) -> bool:
-        return not self._done.is_set()
+        # Group liveness, matching kill()'s guard and the journal; poll()/await
+        # keep foreground result semantics after `cmd &` returns early.
+        return not self._reaped
 
     def output(self) -> str:
         return self._buffer.text()
@@ -159,10 +161,11 @@ class BashHandle:
         if self._reaped:
             return
         if not _IS_POSIX:
-            try:
-                self._proc.kill()
-            except OSError:
-                pass
+            if not _taskkill_tree(self.pid):
+                try:
+                    self._proc.kill()
+                except OSError:
+                    pass
             return
         _signal_group(self.pid, sig)
         if sig == signal.SIGTERM:
@@ -235,6 +238,8 @@ class BashHandle:
         # Group liveness, not leader death, gates the inactive record: members
         # that outlive the leader would leak behind a stale journal anchor.
         if not _IS_POSIX:
+            # After the shell exits on Windows there is no group anchor, so
+            # `&`-orphans cannot be reaped without job objects (out of scope).
             return
         try:
             os.killpg(self.pid, 0)
@@ -377,6 +382,19 @@ def _signal_group(pid: int, sig: int) -> None:
         pass
 
 
+def _taskkill_tree(pid: int) -> bool:
+    # Windows has no process groups to signal; taskkill /T kills the whole tree.
+    try:
+        return (
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _process_start_id(pid: int) -> str | None:
     if os.name == "nt":
         # Mirrors getWindowsProcessStartId in session-lease.ts byte-for-byte so
@@ -452,7 +470,7 @@ def _kill_live_handles() -> None:
     for handle in handles:
         if _IS_POSIX:
             _signal_group(handle.pid, signal.SIGKILL)
-        else:
+        elif not _taskkill_tree(handle.pid):
             try:
                 handle._proc.kill()
             except OSError:
