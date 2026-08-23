@@ -11,6 +11,7 @@ export interface McpManagementResult {
 		name: string;
 		transport: McpServerConfig["type"];
 		verb: "added" | "replaced" | "removed";
+		usesOAuth: boolean;
 	};
 }
 
@@ -52,7 +53,12 @@ export async function runMcpManagementCommand(
 			action,
 			message: `Removed MCP server "${name}".`,
 			changed: true,
-			serverChange: { name, transport: config.type, verb: "removed" },
+			serverChange: {
+				name,
+				transport: config.type,
+				verb: "removed",
+				usesOAuth: config.type === "http" && config.oauth === true,
+			},
 		};
 	}
 	if (action === "add") {
@@ -70,7 +76,12 @@ export async function runMcpManagementCommand(
 			action,
 			message: `${replaced ? "Replaced" : "Added"} MCP server "${name}".`,
 			changed: true,
-			serverChange: { name, transport: config.type, verb: replaced ? "replaced" : "added" },
+			serverChange: {
+				name,
+				transport: config.type,
+				verb: replaced ? "replaced" : "added",
+				usesOAuth: config.type === "http" && config.oauth === true,
+			},
 		};
 	}
 	throw new Error("Usage: mcp <add|list|get|remove>.");
