@@ -1,1 +1,0 @@
-- Added session-scoped ACP MCP servers through the kernel MCP program API ([#1378](https://github.com/PrimeIntellect-ai/prime-agent/pull/1378) by [@hallerite](https://github.com/hallerite)).

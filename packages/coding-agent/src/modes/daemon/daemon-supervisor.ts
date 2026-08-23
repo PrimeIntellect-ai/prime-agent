@@ -1859,7 +1859,9 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter((worker) => this.isLiveWorker(worker));
+				const workers = [...this.workers.values()].filter(
+					(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
+				);
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
 					await Promise.all(

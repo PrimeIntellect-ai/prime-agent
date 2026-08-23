@@ -319,6 +319,10 @@ user sends another prompt ◄─────────────────
   ├─► session_before_compact (can cancel or customize)
   └─► session_compact
 
+/refine or auto-refine
+  ├─► session_before_refine (can skip or replace planning; rollbacks bypass it)
+  └─► refine_complete
+
 /tree navigation
   ├─► session_before_tree (can cancel or customize)
   └─► session_tree
@@ -429,6 +433,36 @@ pi.on("session_before_compact", async (event, ctx) => {
 pi.on("session_compact", async (event, ctx) => {
   // event.compactionEntry - the saved compaction
   // event.fromExtension - whether extension provided it
+});
+```
+
+#### session_before_refine / refine_complete
+
+Fired around continual-harness refinement (`/refine` and auto-refine). `session_before_refine` runs before the planning LLM call and can skip the round or replace the planner; rollback refinements bypass it. Proposal edits from extensions go through the same apply-time validation as built-in plans.
+
+```typescript
+pi.on("session_before_refine", async (event, ctx) => {
+  const { trigger, instructions, scope, planningState, history, conversationText } = event.preparation;
+  // trigger - "manual" (/refine) or "auto" (auto-refine)
+  // scope - "global" or "local" harness target
+
+  // Skip this refinement round:
+  return { skip: true };
+
+  // OR replace the built-in planner (e.g. with a cheaper model — see
+  // examples/extensions/custom-refinement.ts):
+  return {
+    proposal: {
+      summary: "...",
+      rationale: "...",
+      expectedOutcome: "...",
+      edits: [{ action: "create", kind: "memory", title: "...", content: "..." }],
+    },
+  };
+});
+
+pi.on("refine_complete", async (event, ctx) => {
+  // event.id, summary, appliedEdits, scope
 });
 ```
 
@@ -2544,6 +2578,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `file-trigger.ts` | File watcher triggers messages | `sendMessage` |
 | **Compaction & Sessions** |||
 | `custom-compaction.ts` | Custom compaction summary | `on("session_before_compact")` |
+| `custom-refinement.ts` | Custom /refine planning (cheaper model) | `on("session_before_refine")` |
 | `trigger-compact.ts` | Trigger compaction manually | `compact()` |
 | `git-checkpoint.ts` | Git stash on turns | `on("turn_start")`, `on("session_before_fork")`, `exec` |
 | `auto-commit-on-exit.ts` | Commit on shutdown | `on("session_shutdown")`, `exec` |

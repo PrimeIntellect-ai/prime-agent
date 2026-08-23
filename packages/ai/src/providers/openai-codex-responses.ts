@@ -366,6 +366,7 @@ function buildRequestBody(
 	return body;
 }
 
+// Multipliers per https://developers.openai.com/api/docs/pricing (retrieved 2026-08-21)
 function getServiceTierCostMultiplier(
 	model: Pick<Model<"openai-codex-responses">, "id">,
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -374,7 +375,7 @@ function getServiceTierCostMultiplier(
 		case "flex":
 			return 0.5;
 		case "priority":
-			return model.id.startsWith("gpt-5.5") || model.id.startsWith("gpt-5.6") ? 2.5 : 2;
+			return model.id.startsWith("gpt-5.5") ? 2.5 : 2;
 		default:
 			return 1;
 	}
