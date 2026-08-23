@@ -203,6 +203,7 @@ import {
 } from "./refinement/index.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import { formatToolsCatalogTable, loadToolsCatalog } from "./retained-tools/catalog.js";
 import type { ToolScope } from "./retained-tools/index.js";
 import {
 	ExplicitOutcomeTracker,
@@ -1989,6 +1990,15 @@ export class AgentSession {
 		}
 		this._emitAutonomousStatus();
 		return true;
+	}
+
+	private _handleToolsSlashCommand(args: string): string {
+		// Phase A is read-only; keep the parser strict so later subcommands can extend it.
+		const rest = args.trim().toLowerCase();
+		if (rest !== "" && rest !== "list") {
+			throw new Error("Usage: /tools [list]");
+		}
+		return formatToolsCatalogTable(loadToolsCatalog({ cwd: this._cwd, agentDir: this._agentDir }));
 	}
 
 	private _appendBeforeAgentStartMessages(
@@ -6016,6 +6026,10 @@ export class AgentSession {
 				case "autonomous":
 					await this._handleAutonomousSlashCommand(input.text);
 					break;
+				case "tools": {
+					resultText = this._handleToolsSlashCommand(input.command.args);
+					break;
+				}
 			}
 			if (resultText) {
 				this._appendDurableSessionCommandMessage(resultText, input.command, true, false);

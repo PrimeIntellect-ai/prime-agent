@@ -1,0 +1,1 @@
+- Added the read-only /tools list slash command: a catalog of retained tools with name, scope, path, status, used/explicit_ok/explicit_fail, and last_used, where project entries shadow same-named global ones (SARK T04, [#4](https://github.com/badvision/prime-agent/issues/4)).

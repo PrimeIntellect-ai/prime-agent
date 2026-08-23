@@ -10,7 +10,7 @@ export interface SlashCommandInfo {
 	sourceInfo: SourceInfo;
 }
 
-export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
+export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous", "tools"] as const;
 
 export type SessionSlashCommandName = (typeof SESSION_SLASH_COMMAND_NAMES)[number];
 
@@ -169,6 +169,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		name: "autonomous",
 		description: "Set or view autonomous mode",
 		argumentHint: "[status|on|off]",
+		takesArgument: true,
+	},
+	{
+		name: "tools",
+		description: "List retained tools with usage statistics (read-only)",
+		argumentHint: "[list]",
 		takesArgument: true,
 	},
 	{

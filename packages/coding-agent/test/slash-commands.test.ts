@@ -240,6 +240,27 @@ describe("session slash commands", () => {
 		}
 	});
 
+	test("registers /tools as a session-executed argument command", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "tools")).toMatchObject({
+			description: "List retained tools with usage statistics (read-only)",
+			execution: "session",
+			argumentHint: "[list]",
+			takesArgument: true,
+		});
+		expect(builtinSlashCommandTakesArgument("tools")).toBe(true);
+	});
+
+	test("parses /tools with list, no args, and unknown subcommands", () => {
+		expect(parseSessionSlashCommand("/tools list")).toEqual({ name: "tools", args: "list", text: "/tools list" });
+		expect(parseSessionSlashCommand("/tools")).toEqual({ name: "tools", args: "", text: "/tools" });
+		// Subcommand validity is enforced by the session handler, not the parser.
+		expect(parseSessionSlashCommand("/tools rollback")).toEqual({
+			name: "tools",
+			args: "rollback",
+			text: "/tools rollback",
+		});
+	});
+
 	test("classifies only exact leading session-owned commands", () => {
 		expect(parseSessionSlashCommand("/compact focus on tests")).toEqual({
 			name: "compact",
