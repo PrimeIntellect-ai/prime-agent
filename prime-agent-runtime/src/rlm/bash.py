@@ -6,13 +6,14 @@ import asyncio
 import atexit
 import json
 import os
+import selectors
 import shutil
 import signal
 import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -56,16 +57,22 @@ class _BoundedBuffer:
                 return
             self._tail.append(chunk)
             self._tail_size += len(chunk)
-            while self._tail_size > _TAIL_CAP and len(self._tail) > 1:
-                dropped = self._tail.popleft()
-                self._tail_size -= len(dropped)
-                self._dropped += len(dropped)
-            if self._tail_size > _TAIL_CAP:
-                only = self._tail.popleft()
+            # Trim the oldest chunk instead of dropping it whole so exactly _TAIL_CAP bytes stay.
+            while self._tail_size > _TAIL_CAP:
                 excess = self._tail_size - _TAIL_CAP
-                self._tail.append(only[excess:])
-                self._tail_size -= excess
-                self._dropped += excess
+                oldest = self._tail[0]
+                if len(oldest) <= excess:
+                    self._tail.popleft()
+                    self._tail_size -= len(oldest)
+                    self._dropped += len(oldest)
+                else:
+                    self._tail[0] = oldest[excess:]
+                    self._tail_size -= excess
+                    self._dropped += excess
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._head) + self._tail_size
 
     def text(self) -> str:
         with self._lock:
@@ -85,24 +92,53 @@ class BashHandle:
         self.command = command
         self._buffer = _BoundedBuffer()
         self._done = threading.Event()
+        self._eof = threading.Event()
+        self._status: int | None = None
+        self._status_known = threading.Event()
+        self._reaped = False
         self._result: BashResult | None = None
+        self._callbacks: list[Callable[[], None]] = []
+        self._callback_lock = threading.Lock()
         self._started = time.monotonic()
         # POSIX: own process group so kill() signals the whole pipeline; Windows
         # has no group signalling, so kill() falls back to Popen.kill().
-        self._proc = subprocess.Popen(
-            [_shell(), "-c", _with_prefix(command)],
-            cwd=os.getcwd(),
-            env=_child_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            **({"start_new_session": True} if _IS_POSIX else {}),
-        )
+        self._status_read = -1
+        self._wake_read = -1
+        self._wake_write = -1
+        status_write = -1
+        if _IS_POSIX:
+            self._status_read, status_write = os.pipe()
+            self._wake_read, self._wake_write = os.pipe()
+            script = _status_script(_with_prefix(command), status_write)
+            spawn_kwargs: dict[str, Any] = {"start_new_session": True, "pass_fds": (status_write,)}
+        else:
+            script = _with_prefix(command)
+            spawn_kwargs = {}
+        try:
+            self._proc = subprocess.Popen(
+                [_shell(), "-c", script],
+                cwd=os.getcwd(),
+                env=_child_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                **spawn_kwargs,
+            )
+        except BaseException:
+            for fd in (self._status_read, self._wake_read, self._wake_write):
+                if fd >= 0:
+                    os.close(fd)
+            raise
+        finally:
+            if status_write >= 0:
+                os.close(status_write)
         self.pid: int = self._proc.pid
         with _live_lock:
             _live_handles.add(self)
         _record_journal(self.pid, active=True)
         threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._report, daemon=True).start()
+        threading.Thread(target=self._watch, daemon=True).start()
 
     @property
     def running(self) -> bool:
@@ -118,7 +154,9 @@ class BashHandle:
         return self._result if self._done.is_set() else None
 
     def kill(self, sig: int = signal.SIGTERM, grace: float = 5.0) -> None:
-        if self._done.is_set():
+        # Guard on group death, not _done: kill() must still reach a lingering
+        # background group after the foreground result was already delivered.
+        if self._reaped:
             return
         if not _IS_POSIX:
             try:
@@ -133,7 +171,7 @@ class BashHandle:
             timer.start()
 
     def _force_kill(self) -> None:
-        if not self._done.is_set():
+        if not self._reaped:
             _signal_group(self.pid, signal.SIGKILL)
 
     def _pump(self) -> None:
@@ -145,21 +183,144 @@ class BashHandle:
         except (OSError, ValueError):
             pass
         stdout.close()
+        self._eof.set()
+
+    def _report(self) -> None:
+        # Finalize at foreground completion (status pipe), not pipe EOF, so
+        # `cmd &` does not hang the await; the shell then `wait`s for its
+        # background jobs, keeping the journaled group identity alive.
+        status: int | None = None
+        try:
+            status = self._read_status()
+            # Reserve the delivered status before draining so a shell death during
+            # the drain window cannot override it with wait()'s signal exit code.
+            with self._callback_lock:
+                self._status = status
+        finally:
+            # _watch blocks on this event without a timeout, so every exit path
+            # (parsed status, EOF, garbage, exception) must set it.
+            self._status_known.set()
+        if status is not None:
+            self._drain_grace()
+            self._finalize(status)
+
+    def _watch(self) -> None:
+        # Observe shell death independently of the status pipe: an early
+        # `exit`/`exec`/`set -e`/fatal signal skips `printf`, and background
+        # children can hold the pipe open past the shell's lifetime.
         exit_code = self._proc.wait()
-        self._result = BashResult(
-            exit_code=exit_code,
-            output=self._buffer.text(),
-            duration=time.monotonic() - self._started,
-        )
+        if self._wake_write >= 0:
+            # Unblock _read_status: background children can hold the status pipe
+            # open past the shell's lifetime via bash's saved-fd duplicate.
+            try:
+                os.write(self._wake_write, b"x")
+            except OSError:
+                pass
+            os.close(self._wake_write)
+        # _report always sets _status_known (try/finally), so wait indefinitely:
+        # a slow reporter can never lose a delivered status to wait()'s code.
+        self._status_known.wait()
+        with self._callback_lock:
+            delivered = self._status
+        if delivered is None and not self._done.is_set():
+            self._drain_grace()
+            self._finalize(exit_code)
+        self._reap_group()
+        self._reaped = True
         _record_journal(self.pid, active=False)
         with _live_lock:
             _live_handles.discard(self)
-        self._done.set()
+
+    def _reap_group(self) -> None:
+        # Group liveness, not leader death, gates the inactive record: members
+        # that outlive the leader would leak behind a stale journal anchor.
+        if not _IS_POSIX:
+            return
+        try:
+            os.killpg(self.pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        _signal_group(self.pid, signal.SIGKILL)
+
+    def _read_status(self) -> int | None:
+        if self._status_read < 0:
+            return None
+        try:
+            # DefaultSelector (kqueue/epoll) instead of select(): select() rejects
+            # fds >= FD_SETSIZE (1024) even when the process fd limit is higher.
+            with selectors.DefaultSelector() as sel:
+                sel.register(self._status_read, selectors.EVENT_READ)
+                sel.register(self._wake_read, selectors.EVENT_READ)
+                line = b""
+                while b"\n" not in line:
+                    ready = {key.fd for key, _ in sel.select()}
+                    # Prefer status bytes: any status write happens before shell exit,
+                    # so it is already readable whenever the wake fd fires.
+                    if self._status_read not in ready:
+                        break  # shell died without writing a status
+                    chunk = os.read(self._status_read, 64)
+                    if not chunk:
+                        break  # EOF without a full status line
+                    line += chunk
+            return int(line)
+        except (OSError, ValueError):
+            return None
+        finally:
+            os.close(self._status_read)
+            os.close(self._wake_read)
+
+    def _drain_grace(self) -> None:
+        # Bounded wait so the result includes foreground output still in the pipe:
+        # EOF arrives immediately without background jobs, otherwise stop once the
+        # buffer is quiescent for one tick.
+        deadline = time.monotonic() + 0.5
+        size = self._buffer.size()
+        while time.monotonic() < deadline:
+            if self._eof.wait(0.05):
+                return
+            current = self._buffer.size()
+            if current == size:
+                return
+            size = current
+
+    def _finalize(self, exit_code: int) -> None:
+        with self._callback_lock:
+            if self._done.is_set():
+                return
+            self._result = BashResult(
+                exit_code=exit_code,
+                output=self._buffer.text(),
+                duration=time.monotonic() - self._started,
+            )
+            self._done.set()
+            callbacks = self._callbacks
+            self._callbacks = []
+        for callback in callbacks:
+            callback()
+
+    def _add_done_callback(self, callback: Callable[[], None]) -> None:
+        with self._callback_lock:
+            if not self._done.is_set():
+                self._callbacks.append(callback)
+                return
+        callback()
 
     async def _wait(self) -> BashResult:
-        # _pump completes on its own thread; the executor bridge just parks this
-        # coroutine on the event without blocking the event loop.
-        await asyncio.get_running_loop().run_in_executor(None, self._done.wait)
+        # Asyncio-native wakeup: no executor thread is parked for the command's
+        # duration, so many concurrent awaits cannot exhaust the default pool.
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+
+        def _wake() -> None:
+            try:
+                loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(None))
+            except RuntimeError:
+                pass  # awaiting loop already closed
+
+        self._add_done_callback(_wake)
+        await fut
         assert self._result is not None
         return self._result
 
@@ -189,6 +350,22 @@ def _with_prefix(command: str) -> str:
     return f"{prefix}\n{command}" if prefix else command
 
 
+def _status_script(command: str, status_fd: int) -> str:
+    # The brace group runs the command with the status fd closed so `&` children
+    # do not inherit it; the trailing `wait` keeps the shell alive as group
+    # leader until its own jobs exit (double-forked daemons stay out of scope).
+    return (
+        "{\n"
+        f"{command}\n"
+        f"}} {status_fd}>&-\n"
+        "__prime_status=$?\n"
+        f"printf '%s\\n' \"$__prime_status\" >&{status_fd}\n"
+        f"exec {status_fd}>&-\n"
+        "wait\n"
+        'exit "$__prime_status"\n'
+    )
+
+
 def _child_env() -> dict[str, str]:
     return {**os.environ, "NO_COLOR": "1", "TERM": "dumb", "CLICOLOR": "0", "FORCE_COLOR": "0"}
 
@@ -201,6 +378,26 @@ def _signal_group(pid: int, sig: int) -> None:
 
 
 def _process_start_id(pid: int) -> str | None:
+    if os.name == "nt":
+        # Mirrors getWindowsProcessStartId in session-lease.ts byte-for-byte so
+        # the host's identity comparison matches the journaled string.
+        try:
+            out = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    f"([System.Diagnostics.Process]::GetProcessById({pid})).StartTime.ToUniversalTime().Ticks",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            return f"win:{out}" if out.isdigit() else None
+        except (OSError, subprocess.SubprocessError):
+            return None
     try:
         with open(f"/proc/{pid}/stat", "r") as f:
             stat = f.read()
