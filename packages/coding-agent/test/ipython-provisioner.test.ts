@@ -325,6 +325,73 @@ describe("IpythonKernelProvisioner", () => {
 		expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
 	});
 
+	it("re-provisions when the memoized kernel has died (lazy guard in ensure)", async () => {
+		const { python, countRuns } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
+
+		// A prior startKernel settled the memo to a manager whose kernel has since
+		// died on its own: startedManager is set but no longer running.
+		const deadManager = { isRunning: false, dispose: vi.fn(async () => {}) } as unknown as KernelManager;
+		Object.assign(
+			provisioner as unknown as {
+				managerPromise: Promise<KernelManager>;
+				startedManager: KernelManager;
+			},
+			{
+				managerPromise: Promise.resolve(deadManager),
+				startedManager: deadManager,
+			},
+		);
+
+		// ensure() must not hand back the dead manager; it drops it and starts a
+		// fresh kernel (which fails here because python is the stub, proving a new
+		// spawn was attempted rather than the dead handle being reused).
+		await expect(provisioner.ensure()).rejects.toThrow(/Kernel exited before resolving ports/);
+		expect(countRuns()).toBe(1);
+		expect(deadManager.dispose).not.toHaveBeenCalled();
+	});
+
+	it("clears its handle when a kernel reports an unexpected exit (eager callback)", async () => {
+		const provisioner = new IpythonKernelProvisioner(tempDir, {});
+		const manager = { isRunning: false } as unknown as KernelManager;
+		const internals = provisioner as unknown as {
+			managerPromise: Promise<KernelManager>;
+			startedManager: KernelManager;
+			handleManagerDeath: (dead: KernelManager) => void;
+		};
+		Object.assign(internals, {
+			managerPromise: Promise.resolve(manager),
+			startedManager: manager,
+		});
+
+		internals.handleManagerDeath(manager);
+
+		expect(provisioner.manager).toBeUndefined();
+		expect(internals.managerPromise).toBeUndefined();
+	});
+
+	it("keeps its handle if a newer manager replaced the dead one before the callback fires", async () => {
+		const provisioner = new IpythonKernelProvisioner(tempDir, {});
+		const staleManager = { isRunning: false } as unknown as KernelManager;
+		const freshManager = { isRunning: true } as unknown as KernelManager;
+		const freshPromise = Promise.resolve(freshManager);
+		const internals = provisioner as unknown as {
+			managerPromise: Promise<KernelManager>;
+			startedManager: KernelManager;
+			handleManagerDeath: (dead: KernelManager) => void;
+		};
+		Object.assign(internals, {
+			managerPromise: freshPromise,
+			startedManager: freshManager,
+		});
+
+		// A late death notice for the stale manager must not evict the fresh one.
+		internals.handleManagerDeath(staleManager);
+
+		expect(provisioner.manager).toBe(freshManager);
+		expect(internals.managerPromise).toBe(freshPromise);
+	});
+
 	it("does not delete the on-disk snapshot (the kernel survives compaction)", async () => {
 		const snapshotDir = join(tempDir, "artifacts");
 		const provisioner = new IpythonKernelProvisioner(tempDir, { snapshotDir });

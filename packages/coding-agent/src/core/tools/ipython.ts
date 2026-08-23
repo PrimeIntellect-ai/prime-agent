@@ -414,9 +414,45 @@ export class IpythonKernelProvisioner {
 		}
 	}
 
+	/**
+	 * Forget a manager whose kernel died unexpectedly, so the next {@link ensure}
+	 * starts a fresh one. Only clears state still pointing at this exact manager,
+	 * so a concurrent dispose()/kill() or a newer start already in flight wins.
+	 */
+	private handleManagerDeath(dead: KernelManager): void {
+		// onUnexpectedExit only fires after the kernel reached "running", by which
+		// point startup has settled the memo to this manager — so if we still own
+		// it, clearing both handles synchronously is race-free. If a newer start
+		// already replaced startedManager, leave the memo alone.
+		if (this.startedManager === dead) {
+			this.startedManager = undefined;
+			this.managerPromise = undefined;
+			// Drop the stale restore notice so it can't outlive the dead kernel; a
+			// fresh startKernel() re-populates it from the snapshot it actually revives.
+			this._lastRestore = undefined;
+		}
+		if (this.options?.kernelManagerRef?.current === dead) {
+			this.options.kernelManagerRef.current = undefined;
+		}
+	}
+
 	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelManager> {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
+		}
+		// A kernel that died between calls (its onUnexpectedExit may not have fired
+		// yet) must not be handed back — drop the dead handle so the memo check
+		// below re-provisions. A set startedManager means startup already settled
+		// the memo to that same manager, so clearing both here is race-free: no
+		// newer start can be in flight while managerPromise is still populated.
+		if (this.startedManager && !this.startedManager.isRunning) {
+			const dead = this.startedManager;
+			this.startedManager = undefined;
+			this.managerPromise = undefined;
+			this._lastRestore = undefined;
+			if (this.options?.kernelManagerRef?.current === dead) {
+				this.options.kernelManagerRef.current = undefined;
+			}
 		}
 		let cleanupProgressListener: (() => void) | undefined;
 		if (onProgress && !this.startedManager) {
@@ -483,7 +519,7 @@ export class IpythonKernelProvisioner {
 				);
 			}
 			const snapshotDir = this.options?.snapshotDir;
-			const m = new KernelManager({
+			const m: KernelManager = new KernelManager({
 				python: this.options?.python,
 				cwd: this.cwd,
 				env: this.options?.env,
@@ -494,6 +530,10 @@ export class IpythonKernelProvisioner {
 				snapshot: snapshotDir
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
 					: undefined,
+				// Drop our handle to this manager the moment its kernel dies on its own,
+				// so the next ensure() provisions a fresh kernel instead of handing back
+				// a dead one that rejects every execute() with "Kernel has been shut down".
+				onUnexpectedExit: () => this.handleManagerDeath(m),
 			});
 			let pendingRestore: RestoreResult | undefined;
 			try {

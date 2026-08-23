@@ -1,0 +1,1 @@
+- Fixed sessions permanently losing Python after an unexpected IPython kernel exit: the kernel manager now reports unexpected deaths so the provisioner drops the dead handle and provisions a fresh kernel on the next call.

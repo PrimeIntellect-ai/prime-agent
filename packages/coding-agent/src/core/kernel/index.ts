@@ -173,6 +173,13 @@ export interface KernelManagerOptions {
 	snapshot?: KernelSnapshotConfig;
 	/** Default: "prime-agent". */
 	username?: string;
+	/**
+	 * Fired at most once when the kernel process dies unexpectedly (spawn error,
+	 * unexpected exit, or a forked kernel disappearing) — never for a shutdown /
+	 * kill / dispose the caller initiated. Lets an owner (e.g. the provisioner)
+	 * drop its handle to this now-dead manager and re-provision on the next use.
+	 */
+	onUnexpectedExit?: () => void;
 }
 
 export interface KernelStartOptions {
@@ -588,9 +595,11 @@ function installSignalHandlersOnce(): void {
 export class KernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
+		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot" | "onUnexpectedExit"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
+	/** Guards {@link options.onUnexpectedExit} so it fires at most once per manager. */
+	private notifiedUnexpectedExit = false;
 	private readonly session = uuid();
 	private readonly commTargets = new Map<string, string>();
 	private readonly handledHostRequestCommIds = new Set<string>();
@@ -637,8 +646,24 @@ export class KernelManager {
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
+			onUnexpectedExit: options.onUnexpectedExit,
 			username: options.username ?? "prime-agent",
 		};
+	}
+
+	/**
+	 * Notify the owner that the kernel died on its own. Fires at most once, and
+	 * only for deaths we didn't initiate — callers that transition to "shutdown"
+	 * deliberately (shutdown/kill/dispose) never trigger this.
+	 */
+	private notifyUnexpectedExit(): void {
+		if (this.notifiedUnexpectedExit) return;
+		this.notifiedUnexpectedExit = true;
+		try {
+			this.options.onUnexpectedExit?.();
+		} catch {
+			// A misbehaving listener must never mask the kernel teardown.
+		}
 	}
 
 	get ownerSessionId(): string | undefined {
@@ -755,20 +780,24 @@ export class KernelManager {
 
 			kernel.on("error", (err) => {
 				if (this.kernel !== kernel) return;
+				const wasExpected = (this.state as string) === "shutdown";
 				this.appendKernelDiagnostic(`spawn error: ${err.message}`);
 				this.state = "shutdown";
 				liveKernels.delete(this);
 				this.cleanupResources();
+				if (!wasExpected) this.notifyUnexpectedExit();
 			});
 
 			kernel.on("exit", (code, signal) => {
 				if (this.kernel !== kernel) return;
-				if (this.state !== "shutdown") {
+				const wasExpected = (this.state as string) === "shutdown";
+				if (!wasExpected) {
 					this.appendKernelDiagnostic(`unexpected exit code=${code} signal=${signal}`);
 				}
 				this.state = "shutdown";
 				liveKernels.delete(this);
 				this.cleanupResources();
+				if (!wasExpected) this.notifyUnexpectedExit();
 			});
 		}
 
@@ -847,6 +876,9 @@ export class KernelManager {
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		this.cleanupResources();
+		// Reaching here means the kernel was still "running" — this death is always
+		// unexpected (a deliberate teardown would have moved us out of "running").
+		this.notifyUnexpectedExit();
 	}
 
 	// Liveness from the forkserver's reap table; a pid-0 probe would race reuse.
