@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.8.0] - 2026-08-21
+
+- Added endpoint binding to MCP OAuth credentials: tokens record the URL they were issued for, and refreshes carry the original binding forward without ever inferring one for unbound legacy credentials.
+- Added Fast mode (service_tier `priority`) support for OpenAI API-key models GPT-5.4/GPT-5.5/GPT-5.6, and corrected the GPT-5.6 fast-pricing multiplier from 2.5x to 2x per OpenAI's pricing table ([#1595](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1595)).
+- Fixed path-scoped protected-resource discovery and resource-bound refresh for MCP OAuth servers.
+
 ## [0.7.4] - 2026-08-19
 
 ## [0.7.3] - 2026-08-17

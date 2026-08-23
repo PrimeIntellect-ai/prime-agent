@@ -83,13 +83,42 @@ export class SubagentSummaryLine implements Component, Focusable {
 	render(width: number): string[] {
 		const lines = this.renderInfoLine(width);
 		if (this.counts.total === 0) return lines;
-		const summary = `${this.counts.total} subagent${this.counts.total === 1 ? "" : "s"}: ${this.counts.running} running · ${this.counts.idle} idle · ${this.counts.inactive} inactive`;
+		if (width < 2) return lines;
+		const safeWidth = width;
+		const inner = safeWidth - 2;
+		const label = theme.fg("accent", "[1magents[22m");
+		const top = truncateToWidth(
+			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 9))}╮`)}`,
+			safeWidth,
+			"…",
+		);
+		const counts =
+			theme.fg("success", `● ${this.counts.running} running`) +
+			"   " +
+			theme.fg("warning", `◐ ${this.counts.idle} idle`) +
+			"   " +
+			theme.fg("dim", `○ ${this.counts.inactive} inactive`);
 		const openHint = this.openable
-			? `  ${keyText("tui.select.confirm")} or ${keyText("app.agents.open")} to open`
+			? this.focused
+				? `${keyText("tui.select.confirm")}/${keyText("app.agents.open")} open`
+				: `${keyText("tui.editor.cursorDown", { primaryOnly: true })} select`
 			: "";
-		const text = `${this.focused ? "▸" : " "} ${summary}${openHint}`;
-		const line = truncateToWidth(text, width, "…");
-		lines.push(this.focused ? theme.bg("selectedBg", line.padEnd(width)) : theme.fg("dim", line));
+		const gap = Math.max(1, inner - 2 - visibleWidth(counts) - visibleWidth(openHint));
+		const body = truncateToWidth(` ${counts}${" ".repeat(gap)}${theme.fg("dim", openHint)} `, inner, "…");
+		const pad = " ".repeat(Math.max(0, inner - visibleWidth(body)));
+		// Truncation may inject full ANSI resets; wrap each segment so the
+		// selection background survives past them (custom-editor precedent).
+		const content = this.focused
+			? `${body}${pad}`
+					.split("\x1b[0m")
+					.map((segment) => theme.bg("selectedBg", segment))
+					.join("\x1b[0m")
+			: `${body}${pad}`;
+		lines.push(
+			top,
+			`${theme.fg("border", "│")}${content}${theme.fg("border", "│")}`,
+			theme.fg("border", `╰${"─".repeat(inner)}╯`),
+		);
 		return lines;
 	}
 

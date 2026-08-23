@@ -5,6 +5,7 @@ import type { AgentAutonomousStatus } from "../src/core/autonomous.js";
 import {
 	createCompactionOutcomeMessage,
 	createCustomMessage,
+	createRefinementOutcomeMessage,
 	createSessionSlashCommandResultMessage,
 } from "../src/core/messages.js";
 import type { SessionShutdownEvent } from "../src/index.js";
@@ -319,6 +320,27 @@ describe("runPrintMode", () => {
 		expect(exitCode).toBe(0);
 		expect(output.write).toHaveBeenCalledWith("done\n");
 		expect(errorSpy).toHaveBeenCalledWith("Auto-compaction skipped: nothing to compact");
+	});
+
+	it("prints assistant output past a trailing refinement outcome", async () => {
+		const outcome = createRefinementOutcomeMessage({
+			id: "refine-1",
+			summary: "Added a local memory.",
+			rationale: "",
+			expectedOutcome: "",
+			appliedEdits: [],
+			harnessStatePath: "/tmp/harness/state.json",
+			scope: "local",
+		});
+		const runtimeHost = createRuntimeHost([createAssistantMessage({ text: "done" }), outcome]);
+		output.write.mockClear();
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(output.write).toHaveBeenCalledWith("done\n");
 	});
 
 	it("reports an outcome-only failure and exits non-zero", async () => {

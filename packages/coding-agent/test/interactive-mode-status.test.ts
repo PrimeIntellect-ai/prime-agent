@@ -21,6 +21,7 @@ import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
 import { emptyGoalState, type GoalState } from "../src/core/goals.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { createSessionSlashCommandMessage, createSessionSlashCommandResultMessage } from "../src/core/messages.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -682,6 +683,115 @@ function createSubmitHandlerHarness(overrides: Partial<SubmitHandlerHarness> = {
 	return fakeThis;
 }
 
+describe("InteractiveMode working timer", () => {
+	type InitialTimerHarness = {
+		turnStartedAt: number | undefined;
+		workingStartedAt: number | undefined;
+		agentConnection: { getInitialSnapshot(): Promise<AgentConnectionSnapshot> };
+		isAgentStreaming(): boolean;
+		updateWorkingLoaderMessage: ReturnType<typeof vi.fn>;
+		renderInitialMessages(): Promise<void>;
+		stopWorkingLoader: ReturnType<typeof vi.fn>;
+		createWorkingLoader: ReturnType<typeof vi.fn>;
+		statusContainer: { addChild: ReturnType<typeof vi.fn> };
+		startWorkingTimer: ReturnType<typeof vi.fn>;
+		startFeatureHintPresentation: ReturnType<typeof vi.fn>;
+	};
+
+	function createInitialTimerHarness(snapshot: AgentConnectionSnapshot, turnStartedAt = 1): InitialTimerHarness {
+		let streaming = false;
+		return Object.assign(Object.create(InteractiveMode.prototype), {
+			turnStartedAt,
+			workingStartedAt: turnStartedAt,
+			agentConnection: { getInitialSnapshot: vi.fn(async () => snapshot) },
+			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
+				messages: snapshot.messages,
+				thinkingLevel: "medium",
+				serviceTier: "default",
+				model: null,
+			})),
+			seedSubagentSummary: vi.fn(),
+			setSessionHasMessages: vi.fn(),
+			applyConnectionStateSnapshot: vi.fn((state: AgentConnectionState) => {
+				streaming = state.isStreaming;
+			}),
+			isAgentStreaming: () => streaming,
+			updateWorkingLoaderMessage: vi.fn(),
+			renderSessionContext: vi.fn(async () => {}),
+			restoreStreamingMessageFromSnapshot: vi.fn(async () => {}),
+			showStatus: vi.fn(),
+			stopWorkingLoader: vi.fn(),
+			createWorkingLoader: vi.fn(() => ({})),
+			statusContainer: { addChild: vi.fn() },
+			startWorkingTimer: vi.fn(),
+			startFeatureHintPresentation: vi.fn(),
+		});
+	}
+
+	function customStarter(customType: "agent_message" | "heartbeat_prompt", timestamp: number): AgentMessage {
+		return {
+			role: "custom",
+			customType,
+			content: "Continue.",
+			display: true,
+			details: customType === "agent_message" ? { id: `agentmsg_${timestamp}`, message: "Continue." } : {},
+			timestamp,
+		};
+	}
+
+	test("restores the first active-run starter instead of a steering message", async () => {
+		const harness = createInitialTimerHarness({
+			state: createConnectionState({ isStreaming: true }),
+			messages: [
+				userMessage("Start the task.", 100),
+				{ ...toolCallMessage("tool-1", "ipython"), timestamp: 200 },
+				userMessage("Also check this.", 300),
+			],
+		});
+
+		await harness.renderInitialMessages();
+
+		expect(harness.turnStartedAt).toBe(100);
+		expect(harness.workingStartedAt).toBe(100);
+		expect(harness.updateWorkingLoaderMessage).toHaveBeenCalledOnce();
+	});
+
+	test.each([
+		["agent-session", customStarter("agent_message", 100)],
+		["heartbeat", customStarter("heartbeat_prompt", 200)],
+	])("restores a %s run starter", async (_kind, starter) => {
+		const harness = createInitialTimerHarness({
+			state: createConnectionState({ isStreaming: true }),
+			messages: [starter],
+		});
+
+		await harness.renderInitialMessages();
+
+		expect(harness.turnStartedAt).toBe(starter.timestamp);
+		expect(harness.workingStartedAt).toBe(starter.timestamp);
+	});
+
+	test.each([
+		["a non-streaming snapshot", false, [userMessage("Old prompt.", 200)]],
+		["a streaming snapshot without a starter", true, [{ ...toolCallMessage("tool-1", "ipython"), timestamp: 200 }]],
+	])("clears a stale anchor for %s and falls back to the loader start", async (_name, isStreaming, messages) => {
+		const harness = createInitialTimerHarness({ state: createConnectionState({ isStreaming }), messages }, 100);
+
+		await harness.renderInitialMessages();
+		const now = vi.spyOn(Date, "now").mockReturnValue(500);
+		try {
+			(
+				InteractiveMode.prototype as unknown as { startWorkingLoader(this: InitialTimerHarness): void }
+			).startWorkingLoader.call(harness);
+		} finally {
+			now.mockRestore();
+		}
+
+		expect(harness.turnStartedAt).toBeUndefined();
+		expect(harness.workingStartedAt).toBe(500);
+	});
+});
+
 describe("InteractiveMode submit handling", () => {
 	test.each(["normal Enter", "installed custom editor"])("captures exact rich state for %s", async () => {
 		const image = { type: "image", data: "base64", mimeType: "image/png" };
@@ -967,6 +1077,7 @@ describe("InteractiveMode MCP command", () => {
 	type McpCommandHarness = {
 		modelRegistry: { authStorage: { get(providerId: string): unknown } };
 		settingsManager: SettingsManager;
+		uiServices: { refreshMcpProviders?(): void };
 		showConfigurationMenu(tab: "mcp-connections"): Promise<void>;
 		showStatus(message: string): void;
 		showError(message: string): void;
@@ -1011,6 +1122,7 @@ describe("InteractiveMode MCP command", () => {
 		return {
 			modelRegistry: { authStorage: { get: vi.fn(() => undefined), removeVerified: vi.fn() } },
 			settingsManager: manager,
+			uiServices: { refreshMcpProviders: vi.fn() },
 			chatContainer,
 			ui,
 			showStatus,
@@ -1036,6 +1148,7 @@ describe("InteractiveMode MCP command", () => {
 
 		await handleMcpCommand.call(fakeThis, "add fetch -- uvx mcp-server-fetch --token secret");
 
+		expect(fakeThis.uiServices.refreshMcpProviders).toHaveBeenCalledOnce();
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
 			'Added MCP server "fetch" (stdio). Available next turn through mcp.',
 		);
@@ -1067,6 +1180,52 @@ describe("InteractiveMode MCP command", () => {
 		expect(rendered).toContain("not active in this session");
 		expect(rendered).not.toContain("Available next turn through mcp");
 		expect(manager.getGlobalMcpServers()).toHaveProperty("fetch");
+	});
+
+	test("refreshes MCP providers before deferring a changed command while busy", async () => {
+		const manager = SettingsManager.inMemory({});
+		const events: string[] = [];
+		const fakeThis = createRenderedMcpHarness(manager);
+		fakeThis.uiServices.refreshMcpProviders = vi.fn(() => events.push("refresh"));
+		fakeThis.handleReloadCommand = vi.fn(async () => true);
+		fakeThis.isAgentStreaming = vi.fn(() => true);
+		fakeThis.showStatus = vi.fn((message: string) => events.push(message));
+
+		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
+
+		expect(events[0]).toBe("refresh");
+		expect(fakeThis.handleReloadCommand).not.toHaveBeenCalled();
+		expect(events.join("\n")).toContain("Run /mcp login remote to connect.");
+		expect(events.join("\n")).toContain("Run /reload after the current turn to activate it.");
+	});
+
+	test("guides OAuth server additions to explicit login after refresh", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = createRenderedMcpHarness(manager);
+		const events: string[] = [];
+		fakeThis.uiServices.refreshMcpProviders = vi.fn(() => events.push("refresh"));
+		fakeThis.handleReloadCommand = vi.fn(async () => {
+			events.push("reload");
+			return true;
+		});
+
+		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
+
+		expect(events).toEqual(["refresh", "reload"]);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain("Run /mcp login remote to connect.");
+	});
+
+	test("keeps OAuth guidance accurate for legacy UI service hosts", async () => {
+		const manager = SettingsManager.inMemory({});
+		const fakeThis = createRenderedMcpHarness(manager);
+		fakeThis.uiServices = {};
+		fakeThis.handleReloadCommand = vi.fn(async () => true);
+
+		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
+
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
+			"Restart Prime Agent, then run /mcp login remote to connect.",
+		);
 	});
 
 	test("renders inspectable redacted list and get output", async () => {
@@ -1249,6 +1408,7 @@ describe("InteractiveMode pending bash components", () => {
 			pendingBashComponents: [component],
 			activityTracker: { reset: vi.fn() },
 			agentRunFileChanges: new Map(),
+			discardRefineLoader: vi.fn(),
 			recapContainer: new Container(),
 			renderRecap: vi.fn(),
 			ipythonToolComponents: new Map(),
@@ -1368,6 +1528,7 @@ describe("InteractiveMode connection events", () => {
 			applyConnectionStateSnapshot: vi.fn(),
 			renderSessionContext: renderSessionContextMock,
 			restoreStreamingMessageFromSnapshot,
+			restoreTurnStartFromMessages: vi.fn(),
 			showStatus: vi.fn(),
 		} as unknown as InteractiveMode;
 
@@ -1545,7 +1706,7 @@ describe("InteractiveMode connection events", () => {
 		} as AgentConnectionSnapshot["streamingMessage"];
 		const snapshot: AgentConnectionSnapshot = {
 			state: createConnectionState({ isCompacting: true, isBashRunning: true, isStreaming: true }),
-			messages: [],
+			messages: [userMessage("Still working", 100)],
 			streamingMessage,
 		};
 		const startAssistantStreamingMessage = vi.fn();
@@ -1556,18 +1717,22 @@ describe("InteractiveMode connection events", () => {
 		});
 		const refreshCommandCatalogForCurrentSession = vi.fn(async () => {});
 		const fakeThis = {
+			turnStartedAt: 1,
+			workingStartedAt: 1,
 			sideQuestionEvent: sideQuestion,
 			activeConnectionExtensionUiRequests: extensionRequests,
 			activeBashComponent,
 			refreshCommandCatalogForCurrentSession,
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
+			isAgentStreaming: () => true,
 			streamingComponent: {},
 			streamingMessage: {},
 			applyConnectionStateSnapshot: vi.fn(),
+			updateWorkingLoaderMessage: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
-				messages: [],
+				messages: snapshot.messages,
 				thinkingLevel: "medium",
 				model: null,
 			})),
@@ -1581,6 +1746,7 @@ describe("InteractiveMode connection events", () => {
 			syncWorkingLoader: vi.fn(),
 			getGoalState: () => emptyGoalState(),
 		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
 		await (
 			InteractiveMode.prototype as unknown as {
@@ -1597,6 +1763,11 @@ describe("InteractiveMode connection events", () => {
 			(fakeThis as unknown as { renderSessionContext: ReturnType<typeof vi.fn> }).renderSessionContext,
 		).toHaveBeenCalledWith(expect.anything(), { clearChat: true, updateFooter: true });
 		expect(startAssistantStreamingMessage).toHaveBeenCalledWith(streamingMessage);
+		expect((fakeThis as unknown as { turnStartedAt: number | undefined }).turnStartedAt).toBe(100);
+		expect((fakeThis as unknown as { workingStartedAt: number | undefined }).workingStartedAt).toBe(100);
+		expect(
+			(fakeThis as unknown as { updateWorkingLoaderMessage: ReturnType<typeof vi.fn> }).updateWorkingLoaderMessage,
+		).toHaveBeenCalledOnce();
 		expect(refreshCommandCatalogForCurrentSession).not.toHaveBeenCalled();
 	});
 
@@ -1614,6 +1785,7 @@ describe("InteractiveMode connection events", () => {
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
+			restoreTurnStartFromMessages: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
@@ -5199,4 +5371,129 @@ describe("InteractiveMode.showLoadedResources", () => {
 `);
 		expect(output).not.toContain("[Skill conflicts]");
 	});
+});
+
+test("shows a refine loader from the /refine command message until its result row settles it", () => {
+	initTheme("dark");
+	const statusContainer = new Container();
+	const fakeThis = {
+		ui: { requestRender: vi.fn() } as unknown as TUI,
+		statusContainer,
+		refineLoader: undefined,
+		stopWorkingLoader: vi.fn(),
+		syncWorkingLoader: vi.fn(),
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		startRefineLoader(this: InteractiveMode): void;
+		stopRefineLoader(this: InteractiveMode): void;
+	};
+
+	prototype.startRefineLoader.call(fakeThis);
+	expect(statusContainer.children.length).toBe(1);
+
+	prototype.stopRefineLoader.call(fakeThis);
+	expect(statusContainer.children.length).toBe(0);
+	expect((fakeThis as unknown as { syncWorkingLoader: () => void }).syncWorkingLoader).toHaveBeenCalled();
+});
+
+test("syncWorkingLoader remounts a refine loader that a compaction cleared", () => {
+	initTheme("dark");
+	const statusContainer = new Container();
+	const fakeThis = {
+		ui: { requestRender: vi.fn() } as unknown as TUI,
+		statusContainer,
+		refineLoader: undefined,
+		autoCompactionLoader: undefined,
+		retryLoader: undefined,
+		stopWorkingLoader: vi.fn(),
+		isAgentCompacting: () => false,
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		startRefineLoader(this: InteractiveMode): void;
+		syncWorkingLoader(this: InteractiveMode): void;
+	};
+
+	prototype.startRefineLoader.call(fakeThis);
+	statusContainer.clear();
+	expect(statusContainer.children.length).toBe(0);
+
+	prototype.syncWorkingLoader.call(fakeThis);
+	expect(statusContainer.children.length).toBe(1);
+});
+
+test("only the queued user /refine settlement stops its loader", async () => {
+	initTheme("dark");
+	const statusContainer = new Container();
+	const fakeThis = {
+		ui: { requestRender: vi.fn() } as unknown as TUI,
+		statusContainer,
+		refineLoader: undefined,
+		stopWorkingLoader: vi.fn(),
+		syncWorkingLoader: vi.fn(),
+		addMessageToChat: vi.fn(),
+		showError: vi.fn(),
+		isInitialized: true,
+		footer: { invalidate: vi.fn() },
+		updateConnectionStateFromEvent: vi.fn(),
+		prepareFeatureHintRun: vi.fn(),
+		activityTracker: { handleEvent: vi.fn(), reset: vi.fn() },
+		updateWorkingLoaderMessage: vi.fn(),
+		renderRecap: vi.fn(),
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		handleEvent(this: InteractiveMode, event: unknown): Promise<void>;
+	};
+	const command = { name: "refine", args: "", text: "/refine" } as const;
+
+	await prototype.handleEvent.call(fakeThis, {
+		type: "message_start",
+		message: createSessionSlashCommandMessage(command),
+	});
+	expect(statusContainer.children.length).toBe(1);
+
+	// The waited-on agent/auto refinement settles first; the user /refine is still running.
+	await prototype.handleEvent.call(fakeThis, { type: "refine_complete", result: {} });
+	expect(statusContainer.children.length).toBe(1);
+	await prototype.handleEvent.call(fakeThis, { type: "refine_failed", error: "background failure" });
+	expect(statusContainer.children.length).toBe(1);
+
+	await prototype.handleEvent.call(fakeThis, {
+		type: "message_start",
+		message: createSessionSlashCommandResultMessage(
+			"Refined continual harness state: 0 edits applied.",
+			{ command, success: true, severity: "info" },
+			false,
+		),
+	});
+	expect(statusContainer.children.length).toBe(0);
+});
+
+test("session teardown removes a running refine loader without remounting anything", () => {
+	initTheme("dark");
+	const statusContainer = new Container();
+	const fakeThis = {
+		ui: { requestRender: vi.fn() } as unknown as TUI,
+		statusContainer,
+		refineLoader: undefined,
+		stopWorkingLoader: vi.fn(),
+		syncWorkingLoader: vi.fn(),
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		startRefineLoader(this: InteractiveMode): void;
+		discardRefineLoader(this: InteractiveMode): void;
+	};
+
+	prototype.startRefineLoader.call(fakeThis);
+	const loader = (fakeThis as unknown as { refineLoader?: { stop(): void } }).refineLoader;
+	const stopSpy = vi.spyOn(loader!, "stop");
+
+	prototype.discardRefineLoader.call(fakeThis);
+	expect(stopSpy).toHaveBeenCalled();
+	expect(statusContainer.children).toHaveLength(0);
+	expect((fakeThis as unknown as { refineLoader?: unknown }).refineLoader).toBeUndefined();
+	expect((fakeThis as unknown as { syncWorkingLoader: () => void }).syncWorkingLoader).not.toHaveBeenCalled();
 });
