@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
 	Agent,
 	type AgentContext,
+	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
 	type AgentState,
@@ -54,6 +55,7 @@ import {
 	isAgentSessionMessage,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
+	startsAgentRun,
 } from "./agent-messages.js";
 import {
 	AGENT_OBSERVE_SKILL_NAME,
@@ -97,6 +99,7 @@ import {
 	estimateContextTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	serializeConversation,
 	shouldCompact,
 } from "./compaction/index.js";
 import {
@@ -123,6 +126,7 @@ import {
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
 	type SessionBeforeCompactResult,
+	type SessionBeforeRefineResult,
 	type SessionBeforeTreeResult,
 	type SessionStartEvent,
 	type ShutdownHandler,
@@ -163,8 +167,10 @@ import {
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
 	type CustomMessage,
+	convertToLlm,
 	createCompactionOutcomeMessage,
 	createHeartbeatPromptMessage,
+	createRefinementOutcomeMessage,
 	createRlmChildFailureMessage,
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
@@ -184,6 +190,7 @@ import {
 	type AutoRefineReview,
 	appendGlobalRefinement,
 	applyRefinementProposal,
+	generateRefinementId,
 	getGlobalHarnessStateDir,
 	getLocalHarnessStateDir,
 	getRefinementHistory,
@@ -193,6 +200,7 @@ import {
 	loadHarnessState,
 	mergeHarnessStates,
 	mergeRefinementHistory,
+	normalizeRefinementProposal,
 	planRefinement,
 	REFINE_SKILL_NAME,
 	type RefinementPlan,
@@ -378,6 +386,9 @@ type UserBashEndDetails = {
 
 export class CompactionSkippedError extends Error {}
 
+/** Thrown when a session_before_refine extension skips the refinement round. */
+export class RefineSkippedError extends Error {}
+
 export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
@@ -474,7 +485,7 @@ export type SerializedBackgroundPlanResult =
 			abort: AbortController;
 			branchVersion: number;
 	  }
-	| { status: "skip" }
+	| { status: "skip"; explicit?: boolean }
 	| { status: "invalidated"; branchVersion: number }
 	| {
 			status: "failure";
@@ -1060,6 +1071,7 @@ export class AgentSession {
 
 	private _goalState: GoalState = emptyGoalState();
 	private _goalAccountingStartedAt: number | undefined = undefined;
+	private _goalContinuationAwaitsRlmWork = false;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
@@ -1086,7 +1098,7 @@ export class AgentSession {
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
-	private readonly _unpersistedCompactionOutcomes: CustomMessage[] = [];
+	private readonly _unpersistedOutcomes: CustomMessage[] = [];
 
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _userBashRunning = false;
@@ -1284,6 +1296,11 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+	}
+
+	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
+	refreshMcpProviders(): void {
+		this._mcpManager?.refresh();
 	}
 
 	/**
@@ -1744,6 +1761,7 @@ export class AgentSession {
 	}
 
 	private _clearQueuedGoalContexts(): void {
+		this._goalContinuationAwaitsRlmWork = false;
 		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter(
 			(message) => message.customType !== GOAL_CONTEXT_CUSTOM_TYPE,
 		);
@@ -1775,6 +1793,7 @@ export class AgentSession {
 			updatedAt: now,
 		};
 		this._goalAccountingStartedAt = now;
+		this._goalContinuationAwaitsRlmWork = false;
 		this._setGoalState(goal);
 		return this._goalState;
 	}
@@ -2035,6 +2054,41 @@ export class AgentSession {
 		}
 	}
 
+	private _maybeResumeGoalContinuationAfterRlmWork(): void {
+		if (!this._goalContinuationAwaitsRlmWork) return;
+		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (this._goalState.status !== "active" || !this._goalState.objective) {
+			this._goalContinuationAwaitsRlmWork = false;
+			return;
+		}
+		// Keep the deferral while admission is paused or the pump is suspended
+		// (post-abort); the pause release and resumeQueuedWork retry.
+		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
+		const goalBeforeResume = this._goalState;
+		try {
+			this._ensureGoalRuntimeActive();
+			this._setGoalState({
+				...this._goalState,
+				continuationsUsed: this._goalState.continuationsUsed + 1,
+				lastReason: undefined,
+				lastError: undefined,
+			});
+			const message = createGoalContextMessage(this._goalState, "continuation");
+			const normalized = normalizeMessageContent(message.content);
+			// No front: a settling child's terminal notice must be read first.
+			this._admitSessionInput(
+				this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+					message,
+					resumeIfIdle: true,
+				}),
+			);
+			this._goalContinuationAwaitsRlmWork = false;
+		} catch {
+			// Admission can race a new pause; roll back so the retry re-counts.
+			this._setGoalState(goalBeforeResume);
+		}
+	}
+
 	private _runOrQueueGoalContext(kind: "continuation" | "objective_updated", images?: ImageContent[]): void {
 		if (!this._goalState.objective) return;
 		this._ensureGoalRuntimeActive();
@@ -2239,8 +2293,11 @@ export class AgentSession {
 			}
 
 			if (bgResult?.status === "skip") {
-				// Reviewer declined during background planning.
+				// Reviewer declined or an extension skipped during background planning.
 				// Reset exactly once. Never retry the interval review; only fall through for a separate pending refine.run.
+				if (bgResult.explicit) {
+					this._emitRefineFailed(new RefineSkippedError("Refinement skipped by extension"));
+				}
 				this._lastAutoRefineReviewAt = Date.now();
 				this._assistantTurnsSinceAutoRefine = 0;
 				if (!this._pendingRequestedRefine) {
@@ -2369,9 +2426,7 @@ export class AgentSession {
 				this._assistantTurnsSinceAutoRefine = 0;
 				return;
 			}
-			await this._runSerializedRefine({
-				instructions: autoRefineInstructions(reason, review),
-			});
+			await this._runSerializedRefine({ instructions: autoRefineInstructions(reason, review) }, "auto");
 			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
 				return;
 			}
@@ -2380,7 +2435,12 @@ export class AgentSession {
 		} catch (error) {
 			if (branchVersion === this._autoRefineBranchVersion) {
 				this._lastAutoRefineReviewAt = Date.now();
-				this._emitRefineFailed(error);
+				// An extension skip is an intentional non-round, not a failure.
+				if (error instanceof RefineSkippedError) {
+					this._assistantTurnsSinceAutoRefine = 0;
+				} else {
+					this._emitRefineFailed(error);
+				}
 			}
 		} finally {
 			if (this._autoRefineReviewAbort === reviewAbort) {
@@ -2542,7 +2602,7 @@ export class AgentSession {
 			}
 			// For explicit refine.run (skipReview=true), plan directly with
 			// the user-provided options — no auto-review gate.
-			const plan = await this._planRefine(planOptions, refineAbort.signal);
+			const plan = await this._planRefine(planOptions, refineAbort.signal, skipReview ? "manual" : "auto");
 			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
 				return { status: "invalidated", branchVersion };
 			}
@@ -2553,9 +2613,12 @@ export class AgentSession {
 				abort: refineAbort,
 				branchVersion,
 			};
-		} catch {
+		} catch (error) {
 			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
 				return { status: "invalidated", branchVersion };
+			}
+			if (error instanceof RefineSkippedError) {
+				return { status: "skip", explicit: skipReview };
 			}
 			return {
 				status: "failure",
@@ -2577,11 +2640,14 @@ export class AgentSession {
 	 * so the agent is between turns and _applyRefine's disconnect/reconnect
 	 * is safe.
 	 */
-	private async _runSerializedRefine(options: {
-		instructions?: string;
-		rollbackId?: string;
-		global?: boolean;
-	}): Promise<void> {
+	private async _runSerializedRefine(
+		options: {
+			instructions?: string;
+			rollbackId?: string;
+			global?: boolean;
+		},
+		trigger: "manual" | "auto" = "manual",
+	): Promise<void> {
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -2605,7 +2671,7 @@ export class AgentSession {
 		const refineAbort = new AbortController();
 		this._refineAbortController = refineAbort;
 
-		const planRun = this._planRefine(options, refineAbort.signal);
+		const planRun = this._planRefine(options, refineAbort.signal, trigger);
 		const planSettled = planRun.then(
 			() => undefined,
 			() => undefined,
@@ -3215,6 +3281,13 @@ export class AgentSession {
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
 			return [];
 		}
+		// Delegating and ending the turn is correct behavior; hold the continuation
+		// until descendants settle instead of re-prompting a waiting parent.
+		if (this._hasUnsettledRlmQuiescenceWork()) {
+			this._goalContinuationAwaitsRlmWork = true;
+			return [];
+		}
+		this._goalContinuationAwaitsRlmWork = false;
 		try {
 			this._ensureGoalRuntimeActive(context.context);
 			const nextGoal = {
@@ -3499,7 +3572,7 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "message_start" && this._isPromptTurnStartMessage(event.message)) {
+		if (event.type === "message_start" && startsAgentRun(event.message)) {
 			this._overflowRecovery = "idle";
 		}
 
@@ -3624,14 +3697,6 @@ export class AgentSession {
 				}
 			}
 		}
-	}
-
-	private _isPromptTurnStartMessage(message: AgentMessage): boolean {
-		return (
-			message.role === "user" ||
-			isAgentSessionMessage(message) ||
-			(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE)
-		);
 	}
 
 	private _resolveRetry(): void {
@@ -3864,6 +3929,9 @@ export class AgentSession {
 						!this._pendingRequestedRefine
 					) {
 						this._pendingRequestedRefine = bgResult.options;
+					}
+					if (bgResult?.status === "skip" && bgResult.explicit) {
+						this._emitRefineFailed(new RefineSkippedError("Refinement skipped by extension"));
 					}
 					// For "skip" or "failure", stamp cooldown and reset counter
 					// so the interval check below does not trigger a duplicate
@@ -4157,12 +4225,12 @@ export class AgentSession {
 		for (const message of context.messages) {
 			this._applyLateIpythonSentAgentMessages(message);
 		}
-		this._mergeUnpersistedCompactionOutcomes(context.messages);
+		this._mergeUnpersistedOutcomes(context.messages);
 		return context;
 	}
 
-	private _mergeUnpersistedCompactionOutcomes(messages: AgentMessage[]): void {
-		for (const outcome of this._unpersistedCompactionOutcomes) {
+	private _mergeUnpersistedOutcomes(messages: AgentMessage[]): void {
+		for (const outcome of this._unpersistedOutcomes) {
 			let insertAt = messages.length;
 			while (insertAt > 0 && messages[insertAt - 1]!.timestamp > outcome.timestamp) {
 				insertAt -= 1;
@@ -5979,6 +6047,7 @@ export class AgentSession {
 		const input = action.payload;
 		try {
 			let resultText: string | undefined;
+			let displayResult = true;
 			switch (input.command.name) {
 				case "compact":
 					await this.compact(input.command.args || undefined, {
@@ -5986,10 +6055,19 @@ export class AgentSession {
 					});
 					break;
 				case "refine": {
-					const options = parseRefineCommandOptions(input.command.args);
-					const result = await this.refine(options, { skipAbort: true });
-					const applied = result.appliedEdits.filter((appliedEdit) => appliedEdit.applied).length;
+					let result: RefinementResult;
+					try {
+						const options = parseRefineCommandOptions(input.command.args);
+						result = await this.refine(options, { skipAbort: true });
+					} catch (error) {
+						// Only a failure of the refinement itself is a refine failure; a later
+						// result-row persist error must not report a completed refinement as failed.
+						this._emitRefineFailed(this._asError(error));
+						throw error;
+					}
+					const applied = result.appliedEdits.filter((edit) => edit.applied).length;
 					resultText = `Refined continual harness state: ${applied} edit${applied === 1 ? "" : "s"} applied.`;
+					displayResult = false;
 					break;
 				}
 				case "goal":
@@ -6003,7 +6081,7 @@ export class AgentSession {
 					break;
 			}
 			if (resultText) {
-				this._appendDurableSessionCommandMessage(resultText, input.command, true, false);
+				this._appendDurableSessionCommandMessage(resultText, input.command, true, false, displayResult);
 			}
 		} catch (error) {
 			if (error instanceof CompactionSkippedError) return;
@@ -6016,7 +6094,15 @@ export class AgentSession {
 					true,
 				);
 			} catch {
-				// Surfacing the command failure matters more than persisting its row.
+				// The result row is also the command-correlated UI settle edge.
+				const message = createSessionSlashCommandResultMessage(`Command failed: ${commandError.message}`, {
+					command: input.command,
+					success: false,
+					severity: "error",
+					error: commandError.message,
+				});
+				this._emit({ type: "message_start", message });
+				this._emit({ type: "message_end", message });
 			}
 			throw commandError;
 		}
@@ -6027,14 +6113,19 @@ export class AgentSession {
 		command: SessionSlashCommand,
 		isResult: boolean,
 		isError = false,
+		display = true,
 	): void {
 		const message: CustomMessage = isResult
-			? createSessionSlashCommandResultMessage(content, {
-					command,
-					success: !isError,
-					severity: isError ? "error" : "info",
-					...(isError ? { error: content.replace(/^Command failed:\s*/, "") } : {}),
-				})
+			? createSessionSlashCommandResultMessage(
+					content,
+					{
+						command,
+						success: !isError,
+						severity: isError ? "error" : "info",
+						...(isError ? { error: content.replace(/^Command failed:\s*/, "") } : {}),
+					},
+					display,
+				)
 			: createSessionSlashCommandMessage(command);
 		// Persist before touching live state so a failed write cannot leave an
 		// unsaved leaf that the next entry would silently parent onto.
@@ -6572,6 +6663,7 @@ export class AgentSession {
 				this._sessionInputPumpEpoch++;
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
+				this._maybeResumeGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6688,6 +6780,7 @@ export class AgentSession {
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
 		this._resumeSessionInputAdmission();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
 	}
@@ -7362,7 +7455,7 @@ export class AgentSession {
 		);
 		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
-		this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
+		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
 		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
@@ -7577,11 +7670,11 @@ export class AgentSession {
 			await this.agent.continue();
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (message.includes("already processing")) {
+			const code = error instanceof AgentContinueError ? error.code : undefined;
+			if (code === "busy") {
 				this._schedulePostCompactionContinue();
-			} else if (!message.includes("continue from")) {
-				// "continue from" means the turn already completed; anything else must reject headless idle waiters.
+			} else if (code !== "nothing-to-continue") {
+				// "nothing-to-continue" means the turn already completed; anything else must reject headless idle waiters.
 				this._settlePostCompactionContinue(this._asError(error));
 			}
 		}
@@ -7749,9 +7842,7 @@ export class AgentSession {
 	private async _runApprovedRefine(reason: AutoRefineReason, review: AutoRefineReview): Promise<void> {
 		this._autoRefineInProgress = true;
 		try {
-			await this.refine({
-				instructions: autoRefineInstructions(reason, review),
-			});
+			await this.refine({ instructions: autoRefineInstructions(reason, review) }, { trigger: "auto" });
 			this._pendingAutoRefineReview = undefined;
 			this._turnIntervalAutoRefinePending = false;
 			this._lastAutoRefineReviewAt = Date.now();
@@ -7759,11 +7850,18 @@ export class AgentSession {
 			if (reason === "compact") {
 				this._compactAutoRefinePending = false;
 			}
-		} catch {
+		} catch (error) {
 			// Auto-refine is opportunistic; manual /refine remains available.
 			// Stamp the cooldown so a persistently failing refine doesn't retry
 			// (via a retained pending review) on every agent end.
 			this._lastAutoRefineReviewAt = Date.now();
+			if (error instanceof RefineSkippedError) {
+				// A skipped round is consumed like a reviewer decline, not retained for retry.
+				this._pendingAutoRefineReview = undefined;
+				this._turnIntervalAutoRefinePending = false;
+				this._assistantTurnsSinceAutoRefine = 0;
+				if (reason === "compact") this._compactAutoRefinePending = false;
+			}
 		} finally {
 			this._autoRefineInProgress = false;
 			this._scheduleDeferredAutoRefineIfIdle();
@@ -7822,7 +7920,7 @@ export class AgentSession {
 			rollbackId?: string;
 			global?: boolean;
 		} = {},
-		internal: { skipAbort?: boolean } = {},
+		internal: { skipAbort?: boolean; trigger?: "manual" | "auto" } = {},
 	): Promise<RefinementResult> {
 		// Queued /refine executes from the session-input pump between turns;
 		// refine never aborts the agent (planning is backgrounded and the apply
@@ -7862,7 +7960,7 @@ export class AgentSession {
 		const refineAbort = new AbortController();
 		this._refineAbortController = refineAbort;
 
-		const planRun = this._planRefine(options, refineAbort.signal);
+		const planRun = this._planRefine(options, refineAbort.signal, internal.trigger ?? "manual");
 		const planSettled = planRun.then(
 			() => undefined,
 			() => undefined,
@@ -7948,6 +8046,7 @@ export class AgentSession {
 	private async _planRefine(
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
 		signal: AbortSignal,
+		trigger: "manual" | "auto" = "manual",
 	): Promise<RefinementPlan> {
 		if (this._disposed) {
 			throw new Error("Cannot refine a disposed session.");
@@ -7989,6 +8088,33 @@ export class AgentSession {
 			: baselineScope === "global"
 				? globalPlanningState
 				: localPlanningState!;
+		if (!options.rollbackId && this._extensionRunner.hasHandlers("session_before_refine")) {
+			const result = (await this._extensionRunner.emit({
+				type: "session_before_refine",
+				preparation: {
+					trigger,
+					instructions: options.instructions,
+					scope: requestedScope,
+					planningState,
+					history,
+					conversationText: serializeConversation(convertToLlm(this.agent.state.messages)).slice(-80_000),
+				},
+				signal,
+			})) as SessionBeforeRefineResult | undefined;
+			if (this._disposed || signal.aborted) {
+				throw new Error("Refinement cancelled because the session was disposed.");
+			}
+			if (result?.skip) {
+				throw new RefineSkippedError("Refinement skipped by extension");
+			}
+			if (result?.proposal !== undefined) {
+				return {
+					proposal: normalizeRefinementProposal(result.proposal),
+					id: generateRefinementId(),
+					baselineState,
+				};
+			}
+		}
 		const plan = await planRefinement(
 			this.agent.state.messages,
 			planningState,
@@ -8004,6 +8130,24 @@ export class AgentSession {
 			throw new Error("Refinement cancelled because the session was disposed.");
 		}
 		return { ...plan, baselineState };
+	}
+
+	private _recordRefinementOutcome(result: RefinementResult): void {
+		const message = createRefinementOutcomeMessage(result);
+		try {
+			this.sessionManager.appendCustomMessageEntryWithRollback(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
+		} catch {
+			// Not in the session file, so context rebuilds would drop the outcome.
+			this._unpersistedOutcomes.push(message);
+		}
+		this.agent.state.messages.push(message);
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
 	}
 
 	/**
@@ -8078,7 +8222,18 @@ export class AgentSession {
 			if (targetScope === "global") {
 				appendGlobalRefinement(globalHarnessStateDir, result);
 			}
-			this.sessionManager.appendCustomEntry("prime-agent.refinement", result);
+			let refinementAuditAppendError: { error: unknown } | undefined;
+			try {
+				this.sessionManager.appendCustomEntry("prime-agent.refinement", result);
+			} catch (error) {
+				refinementAuditAppendError = { error };
+			}
+			try {
+				this._recordRefinementOutcome(result);
+			} catch (error) {
+				if (!refinementAuditAppendError) throw error;
+			}
+			if (refinementAuditAppendError) throw refinementAuditAppendError.error;
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
 			try {
@@ -8301,7 +8456,7 @@ export class AgentSession {
 				{ reason, outcome },
 			);
 			// Not in the session file, so context rebuilds would drop the disclosure.
-			this._unpersistedCompactionOutcomes.push(outcomeMessage);
+			this._unpersistedOutcomes.push(outcomeMessage);
 		}
 		this.agent.state.messages.push(outcomeMessage);
 		this._emit({ type: "message_start", message: outcomeMessage });
@@ -9265,6 +9420,7 @@ export class AgentSession {
 		this._abandonedRlmQuiescenceChildIds.add(run.id);
 		this._unsettledRlmChildRuns.delete(run);
 		run.settlement.resolve();
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
@@ -9603,6 +9759,7 @@ export class AgentSession {
 		run.settlement.resolve();
 		run.deletionReservation.resolve();
 		this._unsettledRlmChildRuns.delete(run);
+		this._maybeResumeGoalContinuationAfterRlmWork();
 	}
 
 	private _observeRlmRunDeletionCleanup(
@@ -10425,6 +10582,7 @@ export class AgentSession {
 					run.settled = true;
 					run.settlement.resolve();
 					this._unsettledRlmChildRuns.delete(run);
+					this._maybeResumeGoalContinuationAfterRlmWork();
 				}
 			}
 		})().catch(() => undefined);
@@ -11265,7 +11423,7 @@ export class AgentSession {
 
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
-			this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
+			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
 			this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();

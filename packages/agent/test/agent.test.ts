@@ -550,9 +550,11 @@ describe("Agent", () => {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(agent.state.isStreaming).toBe(true);
 
-		await expect(agent.continue()).rejects.toThrow(
-			"Agent is already processing. Wait for completion before continuing.",
-		);
+		await expect(agent.continue()).rejects.toMatchObject({
+			name: "AgentContinueError",
+			code: "busy",
+			message: "Agent is already processing. Wait for completion before continuing.",
+		});
 
 		agent.abort();
 		await firstPrompt.catch(() => {});
