@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -56,13 +56,13 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 	return !pidExists(pid);
 }
 
-describeIfKernel("real kernel MCP shutdown", { tags: ["kernel-heavy"] }, () => {
+describeIfKernel("real REPL kernel MCP shutdown", { tags: ["kernel-heavy"] }, () => {
 	let dir = "";
 	let fixture = "";
 	let pidFile = "";
 
 	beforeAll(() => {
-		dir = mkdtempSync(join(tmpdir(), "prime-agent-mcp-shutdown-"));
+		dir = mkdtempSync(join(tmpdir(), "prime-agent-repl-mcp-shutdown-"));
 		fixture = join(dir, "stdio_server.py");
 		pidFile = join(dir, "stdio.pid");
 		writeFileSync(fixture, MCP_SERVER);
@@ -72,7 +72,7 @@ describeIfKernel("real kernel MCP shutdown", { tags: ["kernel-heavy"] }, () => {
 		if (dir) rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("closes a stdio MCP child on graceful shutdown without an AnyIO cross-task error", async () => {
+	it("closes a stdio MCP child on graceful shutdown", async () => {
 		let manager: ReplKernelManager | undefined = new ReplKernelManager({
 			python: python as string,
 			cwd: resolve("../../prime-agent-runtime"),
@@ -90,7 +90,7 @@ describeIfKernel("real kernel MCP shutdown", { tags: ["kernel-heavy"] }, () => {
 			);
 			expect(opened.status, opened.stderr || opened.error?.traceback.join("\n")).toBe("ok");
 			expect(opened.result).toContain("fixture.echo");
-			const childPid = Number(await import("node:fs/promises").then(({ readFile }) => readFile(pidFile, "utf8")));
+			const childPid = Number(readFileSync(pidFile, "utf8"));
 			expect(pidExists(childPid)).toBe(true);
 
 			await manager.shutdown();
