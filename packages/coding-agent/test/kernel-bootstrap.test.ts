@@ -557,6 +557,6 @@ dependencies = ["httpx"]
 		writeFakePython(overridePython, []);
 		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
 
-		await expect(ensureKernelPython()).rejects.toThrow(/missing ipykernel/);
+		await expect(ensureKernelPython()).rejects.toThrow(/PRIME_AGENT_KERNEL_PYTHON points to a Python missing/);
 	});
 });

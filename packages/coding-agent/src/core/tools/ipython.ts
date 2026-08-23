@@ -11,20 +11,28 @@ import {
 	type HostRequestHandlers,
 	type KernelAttachment,
 	KernelBusyAfterInterruptError,
+	type KernelClient,
 	type KernelDiffDisplay,
 	KernelManager,
 	type KernelSentAgentMessage,
+	ReplKernelManager,
+	usesIpythonKernel,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
-import { parseIpythonBashCell } from "./ipython-cell-code.js";
+import { parseIpythonBashCell, rewriteCellMagics } from "./ipython-cell-code.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
-const RLM_BOOTSTRAP_BASE_CODE = `
+const RLM_BOOTSTRAP_HEADER_CODE = `
 import asyncio
 import os as _prime_agent_os
 
 _prime_agent_os.environ["NO_COLOR"] = "1"
+`.trim();
+
+// Only meaningful under the Jupyter client: the REPL runtime has no IPython
+// shell to configure and its event loop needs no nest_asyncio.
+const RLM_BOOTSTRAP_IPYTHON_CODE = `
 get_ipython().colors = "nocolor"
 
 try:
@@ -32,7 +40,9 @@ try:
     _prime_agent_nest_asyncio.apply()
 except Exception:
     pass
+`.trim();
 
+const RLM_BOOTSTRAP_RUNTIME_CODE = `
 try:
     import rlm as _prime_agent_rlm_module
     rlm = _prime_agent_rlm_module.rlm
@@ -73,13 +83,17 @@ except Exception as _prime_agent_rlm_error:
 `.trim();
 
 export function buildRlmBootstrapCode(pythonSkills: readonly PythonSkillRuntimeInfo[] = []): string {
+	const baseParts = [RLM_BOOTSTRAP_HEADER_CODE];
+	if (usesIpythonKernel()) baseParts.push(RLM_BOOTSTRAP_IPYTHON_CODE);
+	baseParts.push(RLM_BOOTSTRAP_RUNTIME_CODE);
+	const baseCode = baseParts.join("\n\n");
 	const importNames = [...new Set(pythonSkills.map((skill) => skill.importName))];
 	if (importNames.length === 0) {
-		return RLM_BOOTSTRAP_BASE_CODE;
+		return baseCode;
 	}
 
 	return `
-${RLM_BOOTSTRAP_BASE_CODE}
+${baseCode}
 
 import importlib as _prime_agent_importlib
 import inspect as _prime_agent_inspect
@@ -289,8 +303,8 @@ export interface IpythonToolOptions {
 	/** Resolves before this kernel starts — e.g. the previous provisioner's dispose, so a
 	 * /reload's old-kernel snapshot flush can't race the new kernel's restore. */
 	readyGate?: Promise<unknown>;
-	/** Filled with the live KernelManager after the first kernel start; cleared on construction. */
-	kernelManagerRef?: { current?: KernelManager };
+	/** Filled with the live kernel client after the first kernel start; cleared on construction. */
+	kernelManagerRef?: { current?: KernelClient };
 	/**
 	 * Fires once per kernel start when a previous session's namespace was revived
 	 * (some names restored or some failed), so the session can tell the model.
@@ -332,8 +346,8 @@ function applyShellSettingsToBashMagicCell(
  * attach mid-flight (a tool call racing a background prewarm()).
  */
 export class IpythonKernelProvisioner {
-	private managerPromise?: Promise<KernelManager>;
-	private startedManager?: KernelManager;
+	private managerPromise?: Promise<KernelClient>;
+	private startedManager?: KernelClient;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
@@ -349,7 +363,7 @@ export class IpythonKernelProvisioner {
 	}
 
 	/** The kernel manager, once a startup has completed successfully. */
-	get manager(): KernelManager | undefined {
+	get manager(): KernelClient | undefined {
 		return this.startedManager;
 	}
 
@@ -418,7 +432,7 @@ export class IpythonKernelProvisioner {
 		}
 	}
 
-	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelManager> {
+	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelClient> {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
 		}
@@ -472,7 +486,7 @@ export class IpythonKernelProvisioner {
 		}
 	}
 
-	private async startKernel(signal?: AbortSignal): Promise<KernelManager> {
+	private async startKernel(signal?: AbortSignal): Promise<KernelClient> {
 		const startupAbort = createLinkedAbortSignal([this.disposeController.signal, signal]);
 		const startupSignal = startupAbort.signal;
 		// Wait for a previous provisioner (e.g. on /reload) to finish disposing — and
@@ -489,7 +503,9 @@ export class IpythonKernelProvisioner {
 			const snapshotDir = this.options?.snapshotDir;
 			const shellPath = this.options?.shellPath?.trim();
 			const commandPrefix = this.options?.commandPrefix;
-			const m = new KernelManager({
+			// The Jupyter client is selected by PRIME_AGENT_KERNEL=ipython.
+			const KernelClientClass = usesIpythonKernel() ? KernelManager : ReplKernelManager;
+			const m = new KernelClientClass({
 				python: this.options?.python,
 				cwd: this.cwd,
 				// bash() reads these so it applies the same shell settings as %%bash cells.
@@ -665,7 +681,9 @@ export function createIpythonToolDefinition(
 			};
 
 			try {
-				const code = applyShellSettingsToBashMagicCell(params.code, options);
+				const code = usesIpythonKernel()
+					? applyShellSettingsToBashMagicCell(params.code, options)
+					: rewriteCellMagics(params.code);
 				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
 					provisioner,
 					reportStartupProgress,

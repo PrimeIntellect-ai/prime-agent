@@ -1,10 +1,21 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { join, resolve } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
 import { buildRlmBootstrapCode } from "../src/core/tools/ipython.js";
+
+// These suites pair the bootstrap cell with a Jupyter KernelManager, so pin
+// the client the bootstrap code is built for.
+const savedKernelFlag = process.env.PRIME_AGENT_KERNEL;
+beforeAll(() => {
+	process.env.PRIME_AGENT_KERNEL = "ipython";
+});
+afterAll(() => {
+	if (savedKernelFlag === undefined) delete process.env.PRIME_AGENT_KERNEL;
+	else process.env.PRIME_AGENT_KERNEL = savedKernelFlag;
+});
 
 describe("IPython RLM bootstrap", () => {
 	it("pre-imports asyncio so the prompt's subagent patterns work without a manual import", () => {
@@ -47,15 +58,18 @@ describe("IPython RLM bootstrap", () => {
 	});
 });
 
-/** Find a python that can launch an ipykernel, or null to skip. */
+/** Find a python with ipykernel and a current rlm runtime, or null to skip. */
 function resolveKernelPython(): string | null {
 	const candidates = [
 		process.env.PRIME_AGENT_KERNEL_PYTHON,
+		resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv", "bin", "python"),
 		join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
 	].filter((p): p is string => Boolean(p));
 	for (const python of candidates) {
 		if (!existsSync(python)) continue;
-		const check = spawnSync(python, ["-c", "import ipykernel"], { encoding: "utf8" });
+		const check = spawnSync(python, ["-c", "import ipykernel, rlm; assert callable(rlm.emit)"], {
+			encoding: "utf8",
+		});
 		if (check.status === 0) return python;
 	}
 	return null;

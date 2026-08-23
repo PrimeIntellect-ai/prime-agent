@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import codecs
+import contextvars
 import inspect
 import json
 import linecache
@@ -25,7 +26,7 @@ from typing import Any
 
 from .bash import _kill_live_handles
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
@@ -39,9 +40,15 @@ _protocol_fd: int = -1
 _write_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _serve_task: asyncio.Task[Any] | None = None
-_current_cell: str | None = None
+# Display attribution rides task context: asyncio tasks copy it at creation, so
+# a detached task spawned by a cell keeps emitting under that cell's id after
+# the cell finishes. Threads start with a fresh context and emit id null.
+_current_cell: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_cell", default=None)
+# Stream attribution for the pump threads, which never see task context.
+_stream_cell: str | None = None
 _active: dict[str, Any] = {"task": None, "rid": None, "interrupted": False}
 _cell_counter = 0
+_pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
 
 # Interrupt bookkeeping shared between the reader thread and the loop thread.
 _interrupt_lock = threading.Lock()
@@ -68,7 +75,38 @@ def emit(data: dict[str, Any]) -> None:
     """
     if not isinstance(data, dict) or not data or not all(isinstance(k, str) for k in data):
         raise TypeError("emit() requires a non-empty dict keyed by MIME type strings")
-    _send({"event": "display", "id": _current_cell, "data": data})
+    _send({"event": "display", "id": _current_cell.get(), "data": data})
+
+
+def is_active() -> bool:
+    """True when this process serves the repl protocol (not merely imported)."""
+    return _protocol_fd >= 0
+
+
+async def host_request(data: dict[str, Any]) -> dict[str, Any]:
+    """Send one typed request to the host and await its raw reply dict."""
+    if _loop is None:
+        raise RuntimeError("repl runtime is not serving")
+    rid = uuid.uuid4().hex
+    future: asyncio.Future[dict[str, Any]] = _loop.create_future()
+    _pending_host[rid] = future
+    try:
+        _send({"event": "host_request", "id": rid, "data": data})
+        return await future
+    finally:
+        _pending_host.pop(rid, None)
+
+
+def _resolve_host_reply(rid: str, data: dict[str, Any]) -> None:
+    """Reader-thread half of the host bridge; late/unknown replies are dropped."""
+    assert _loop is not None
+
+    def deliver() -> None:
+        future = _pending_host.get(rid)
+        if future is not None and not future.done():
+            future.set_result(data)
+
+    _loop.call_soon_threadsafe(deliver)
 
 
 class _Pump:
@@ -140,7 +178,7 @@ class _Pump:
             return
         text = self._decoder.decode(data)
         if text:
-            _send({"event": self._stream, "id": _current_cell, "text": text})
+            _send({"event": self._stream, "id": _stream_cell, "text": text})
 
 
 def _consume_task_exception(task: asyncio.Task[Any]) -> None:
@@ -307,11 +345,14 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
 
 
 async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
-    global _current_cell, _cell_counter
+    global _stream_cell, _cell_counter
     cell_id = req["id"]
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
-    _current_cell = cell_id
+    # The cell task (created below) copies this context, so detached tasks it
+    # spawns keep emitting under this cell's id after the cell finishes.
+    token = _current_cell.set(cell_id)
+    _stream_cell = cell_id
     try:
         try:
             codes, has_trailing = _compile_cell(req["code"], filename)
@@ -337,7 +378,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
-        _current_cell = None
+        _current_cell.reset(token)
+        _stream_cell = None
 
 
 def _drain_output() -> None:
@@ -510,6 +552,11 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     _send({"event": "done", "id": rid, "status": "ok", **result})
 
 
+def _list_names(ns: dict[str, Any]) -> list[str]:
+    """User-defined top-level names, filtered like the snapshot."""
+    return sorted(name for name in ns if not name.startswith("_") and name not in _ALWAYS_SKIP)
+
+
 async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> None:
     while True:
         req = await queue.get()
@@ -525,12 +572,15 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             await _handle_execute(req, ns)
         elif rtype in ("snapshot", "restore"):
             await _handle_state(req, ns)
+        elif rtype == "list_names":
+            _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
 
 
 _REQUIRED_FIELDS = {
     "execute": ("id", "code"),
     "snapshot": ("id", "path", "manifest_path"),
     "restore": ("id", "path"),
+    "list_names": ("id",),
     "shutdown": (),
 }
 
@@ -557,6 +607,16 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
             if rtype == "interrupt":
                 target = req.get("id")
                 _request_interrupt(target if isinstance(target, str) else None)
+                continue
+            if rtype == "host_reply":
+                # Bypass the FIFO queue: the awaiting cell IS the in-flight
+                # execute, so a queued reply would deadlock behind it.
+                rid = req.get("id")
+                data = req.get("data")
+                if isinstance(rid, str) and isinstance(data, dict):
+                    _resolve_host_reply(rid, data)
+                else:
+                    _protocol_error("host_reply request needs string id and dict data")
                 continue
             if rtype not in _REQUIRED_FIELDS:
                 _protocol_error(f"unknown request type: {rtype!r}")

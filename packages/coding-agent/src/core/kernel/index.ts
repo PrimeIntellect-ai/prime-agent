@@ -4,12 +4,47 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
-import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
+import { ensureKernelPython } from "./bootstrap.js";
 import { type ForkedKernelHandle, ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
+import {
+	AGENT_MESSAGE_DISPLAY_MIME,
+	ATTACHMENT_DISPLAY_MIME,
+	createDeferred,
+	createKernelStartupAbortError,
+	DEFAULT_MAX_OUTPUT_CHARS,
+	DEFAULT_SNAPSHOT_DEBOUNCE_MS,
+	DIFF_DISPLAY_MIME,
+	type ExecuteOptions,
+	type ExecuteResult,
+	errorMessage,
+	HOST_COMM_TARGET,
+	HOST_REQUEST_DISPOSE_TIMEOUT_MS,
+	installSignalHandlersOnce,
+	isRecord,
+	KERNEL_ABORT_GRACE_MS,
+	KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+	KERNEL_BUSY_REUSE_WAIT_MS,
+	KERNEL_SHUTDOWN_TIMEOUT_MS,
+	type KernelAttachment,
+	KernelBusyAfterInterruptError,
+	type KernelDiffDisplay,
+	type KernelManagerOptions,
+	type KernelSentAgentMessage,
+	type KernelStartOptions,
+	liveKernels,
+	MAX_ATTACHMENT_DATA_CHARS,
+	MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+	parseAttachmentDisplay,
+	parseDiffDisplay,
+	parseSentAgentMessage,
+	raceStartupWithAbort,
+	SNAPSHOT_DISPOSE_TIMEOUT_MS,
+	SNAPSHOT_EXECUTION_TIMEOUT_MS,
+	SNAPSHOT_MAX_OUTPUT_CHARS,
+} from "./shared.js";
 import {
 	buildListNamesCode,
 	buildRestoreCode,
@@ -23,6 +58,9 @@ import {
 	type SnapshotResult,
 } from "./state-snapshot.js";
 
+export { ReplKernelManager } from "./repl-manager.js";
+export * from "./shared.js";
+
 const DELIM = Buffer.from("<IDS|MSG>");
 const PROTOCOL_VERSION = "5.3";
 // Generous backstop for a kernel that is alive but wedged: crashes are detected
@@ -33,330 +71,8 @@ const PORTS_RESOLVE_TIMEOUT_MS = 30_000;
 const READY_TIMEOUT_MS = 30_000;
 // Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
-const DEFAULT_MAX_OUTPUT_CHARS = 65536;
-const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
-const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
-const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 // How often to poll a forked kernel's pid for unexpected death.
 const FORKED_LIVENESS_POLL_MS = 1000;
-// Snapshot/restore cells can be large to (de)serialize; give them room beyond the user cap.
-const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
-// Cap how long a graceful dispose waits on the final snapshot; the debounced
-// on-disk copy is the fallback if this is exceeded.
-const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
-const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
-const KERNEL_ABORT_GRACE_MS = 1000;
-const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
-const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
-const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
-const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
-	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
-
-export class KernelBusyAfterInterruptError extends Error {
-	constructor() {
-		super(KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE);
-		this.name = "KernelBusyAfterInterruptError";
-	}
-}
-
-/** Comm target the kernel-side `rlm.host_request` shim opens for typed host requests. */
-export const HOST_COMM_TARGET = "host.request";
-
-/**
- * Handles one typed request from Python code running in the kernel.
- * The returned record is sent back verbatim as the comm reply payload.
- *
- * This legacy unary compatibility alias remains the dispatcher and registration
- * contract while context-aware handlers are staged separately below.
- */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
-
-/**
- * Per-call authority supplied by the host-request dispatcher.
- * `requestId` is an opaque host-minted correlation token and `isCurrent()`
- * lets an implementation reject work after its authority is revoked.
- */
-export interface HostRequestContext {
-	readonly requestId: string;
-	readonly generation: number;
-	readonly signal: AbortSignal;
-	isCurrent(): boolean;
-}
-
-const hostRequestHandlerBrand = Symbol("hostRequestHandler");
-
-/** A context-aware implementation that must receive dispatcher authority. */
-export type HostRequestHandlerImplementation = (
-	payload: Record<string, unknown>,
-	context: HostRequestContext,
-) => Promise<Record<string, unknown>>;
-
-/** A factory-minted, context-aware host-request handler capability. */
-type HostRequestHandlerCapability = HostRequestHandlerImplementation & { readonly [hostRequestHandlerBrand]: true };
-
-/** Runtime provenance cannot be recreated by copying the nominal symbol property. */
-const factoryCreatedHostRequestHandlers = new WeakSet<object>();
-
-function assertGenuineHostRequestContext(context: unknown): asserts context is HostRequestContext {
-	if (
-		typeof context !== "object" ||
-		context === null ||
-		typeof (context as HostRequestContext).requestId !== "string" ||
-		!(context as HostRequestContext).requestId ||
-		!Number.isSafeInteger((context as HostRequestContext).generation) ||
-		typeof (context as HostRequestContext).isCurrent !== "function" ||
-		typeof (context as HostRequestContext).signal !== "object" ||
-		(context as HostRequestContext).signal === null ||
-		typeof (context as HostRequestContext).signal.aborted !== "boolean" ||
-		typeof (context as HostRequestContext).signal.addEventListener !== "function"
-	) {
-		throw new Error("host request context is invalid");
-	}
-}
-
-/**
- * Creates a branded wrapper rather than mutating its implementation. Both its
- * generic shape and runtime arity reject unary callbacks before they can run.
- */
-export function createHostRequestHandler<T extends HostRequestHandlerImplementation>(
-	implementation: T,
-	..._unaryRejection: Parameters<T> extends [unknown, unknown, ...unknown[]]
-		? []
-		: ["host request handlers must accept payload and context"]
-): HostRequestHandlerCapability {
-	if (implementation.length < 2) throw new Error("host request handlers must accept payload and context");
-	const handler = async (payload: Record<string, unknown>, context: HostRequestContext) => {
-		assertGenuineHostRequestContext(context);
-		return implementation(payload, context);
-	};
-	factoryCreatedHostRequestHandlers.add(handler);
-	return Object.defineProperty(handler, hostRequestHandlerBrand, { value: true }) as HostRequestHandlerCapability;
-}
-
-/** Reject copied-symbol and raw-function forgeries before they observe authenticated payloads. */
-export function assertHostRequestHandler(value: unknown): asserts value is HostRequestHandlerCapability {
-	if (
-		typeof value !== "function" ||
-		(value as Partial<HostRequestHandlerCapability>)[hostRequestHandlerBrand] !== true ||
-		!factoryCreatedHostRequestHandlers.has(value)
-	) {
-		throw new Error("host request handler is not a dispatcher-created capability");
-	}
-}
-
-/** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
-export type HostRequestHandlers = Record<string, HostRequestHandler>;
-
-/** Where and how to persist the kernel's user namespace so it survives resume. */
-export interface KernelSnapshotConfig {
-	/** Absolute path for the dill payload. */
-	path: string;
-	/** Absolute path for the JSON manifest written alongside the payload. */
-	manifestPath: string;
-	/** Maximum aggregate snapshot size. Default 256 MiB. */
-	maxBytes?: number;
-	/** Maximum serialized size of one variable. Default 16 MiB. */
-	maxVariableBytes?: number;
-	/** Debounce window for the auto-snapshot after a successful execution. Default 1500 ms. */
-	debounceMs?: number;
-}
-
-export interface KernelManagerOptions {
-	/** Python interpreter that has `ipykernel` available. Defaults to the auto-bootstrapped kernel. */
-	python?: string;
-	cwd?: string;
-	env?: Record<string, string>;
-	sessionId?: string;
-	hostHandlers?: HostRequestHandlers;
-	pythonSkills?: readonly KernelPythonSkill[];
-	/** Persist/revive the user namespace across kernel restarts and session resume. */
-	snapshot?: KernelSnapshotConfig;
-	/** Default: "prime-agent". */
-	username?: string;
-}
-
-export interface KernelStartOptions {
-	onBootstrapProgress?: KernelBootstrapProgressHandler;
-	signal?: AbortSignal;
-}
-
-export interface ExecuteOptions {
-	/** Aborting interrupts the kernel via the control channel. */
-	signal?: AbortSignal;
-	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
-	onLateSentAgentMessage?: (message: KernelSentAgentMessage) => void;
-	/** Cap stdout / stderr / result at this many characters. Default 65536. */
-	maxOutputChars?: number;
-	/** Synthetic host cell (snapshot/restore/list); excluded from lastCellCode attribution. */
-	internal?: boolean;
-}
-
-/** MIME tag the `edit` skill emits diff payloads under, via `display_data`. */
-export const DIFF_DISPLAY_MIME = "application/vnd.prime-agent.diff+json";
-
-/** MIME tag the `attach-image` skill emits media payloads under, via `display_data`. */
-export const ATTACHMENT_DISPLAY_MIME = "application/vnd.prime-agent.attachment+json";
-
-/** MIME tag the `agent-message` skill emits after sending a message. */
-export const AGENT_MESSAGE_DISPLAY_MIME = "application/vnd.prime-agent.agent-message+json";
-
-/**
- * Hard ceiling on a single attachment's base64 payload, a defensive guard
- * against a runaway direct `display_data` emit. The `attach-image` skill caps
- * its own images well under this (see `_MAX_IMAGE_BYTES`), so a skill-produced
- * attachment is never dropped here — only a non-skill emit can hit this.
- */
-const MAX_ATTACHMENT_DATA_CHARS = 10_000_000;
-
-/** One file edit, captured from a {@link DIFF_DISPLAY_MIME} display payload. */
-export interface KernelDiffDisplay {
-	path: string;
-	oldStr: string;
-	newStr: string;
-	/** 1-based line where `oldStr` begins in the file, for absolute line numbers. */
-	startLine?: number;
-}
-
-/** One media attachment, captured from an {@link ATTACHMENT_DISPLAY_MIME} display payload. */
-export interface KernelAttachment {
-	mimeType: string;
-	/** base64-encoded bytes. */
-	data: string;
-	/** Source path, surfaced to the TUI renderer. */
-	path?: string;
-}
-
-export interface KernelSentAgentMessage {
-	id: string;
-	message: string;
-	deliveryStatus: "delivered" | "queued";
-	receiverRole?: "parent" | "sibling" | "child";
-	target: {
-		activeSessionId: string;
-		sessionId: string;
-		sessionName?: string;
-	};
-}
-
-export interface ExecuteResult {
-	stdout: string;
-	stderr: string;
-	/** Last `execute_result` payload (text/plain), if the cell produced one. */
-	result?: string;
-	/** Diffs emitted via display_data, in order. */
-	diffs?: KernelDiffDisplay[];
-	/** Media attachments emitted via display_data, in order. */
-	attachments?: KernelAttachment[];
-	/** Agent messages sent from this cell, in order. */
-	sentAgentMessages?: KernelSentAgentMessage[];
-	status: "ok" | "error" | "aborted";
-	error?: { ename: string; evalue: string; traceback: string[] };
-	durationMs: number;
-}
-
-/** Parse a {@link DIFF_DISPLAY_MIME} payload, tolerating malformed input. */
-function parseDiffDisplay(payload: unknown): KernelDiffDisplay | undefined {
-	if (!isRecord(payload)) {
-		return undefined;
-	}
-	const { path, old_str: oldStr, new_str: newStr, start_line: startLine } = payload;
-	if (typeof path !== "string" || typeof oldStr !== "string" || typeof newStr !== "string") {
-		return undefined;
-	}
-	return { path, oldStr, newStr, startLine: typeof startLine === "number" ? startLine : undefined };
-}
-
-/**
- * Parse an {@link ATTACHMENT_DISPLAY_MIME} payload. Malformed payloads are
- * tolerantly ignored (`undefined`); a well-formed payload exceeding
- * {@link MAX_ATTACHMENT_DATA_CHARS} is reported as `"oversized"` so the caller
- * can fail the cell loudly rather than silently dropping the image.
- */
-function parseAttachmentDisplay(payload: unknown): KernelAttachment | "oversized" | undefined {
-	if (!isRecord(payload)) {
-		return undefined;
-	}
-	const { mime_type: mimeType, data, path } = payload;
-	if (typeof mimeType !== "string" || typeof data !== "string") {
-		return undefined;
-	}
-	if (data.length > MAX_ATTACHMENT_DATA_CHARS) {
-		return "oversized";
-	}
-	return { mimeType, data, path: typeof path === "string" ? path : undefined };
-}
-
-function parseSentAgentMessage(payload: unknown): KernelSentAgentMessage | undefined {
-	if (!isRecord(payload) || !isRecord(payload.target)) {
-		return undefined;
-	}
-	const { id, message, deliveryStatus, receiverRole, target } = payload;
-	const { activeSessionId, sessionId, sessionName } = target;
-	if (
-		typeof id !== "string" ||
-		typeof message !== "string" ||
-		(deliveryStatus !== "delivered" && deliveryStatus !== "queued") ||
-		typeof activeSessionId !== "string" ||
-		typeof sessionId !== "string"
-	) {
-		return undefined;
-	}
-	return {
-		id,
-		message,
-		deliveryStatus,
-		...(receiverRole === "parent" || receiverRole === "sibling" || receiverRole === "child" ? { receiverRole } : {}),
-		target: {
-			activeSessionId,
-			sessionId,
-			...(typeof sessionName === "string" ? { sessionName } : {}),
-		},
-	};
-}
-
-function createKernelStartupAbortError(): Error {
-	return new Error("Kernel startup aborted");
-}
-
-function raceStartupWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-	if (!signal) {
-		return promise;
-	}
-	if (signal.aborted) {
-		return Promise.reject(createKernelStartupAbortError());
-	}
-	return new Promise<T>((resolve, reject) => {
-		let settled = false;
-		const cleanup = () => signal.removeEventListener("abort", abort);
-		const abort = () => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			cleanup();
-			reject(createKernelStartupAbortError());
-		};
-		signal.addEventListener("abort", abort, { once: true });
-		promise.then(
-			(value) => {
-				if (settled) {
-					return;
-				}
-				settled = true;
-				cleanup();
-				resolve(value);
-			},
-			(error: unknown) => {
-				if (settled) {
-					return;
-				}
-				settled = true;
-				cleanup();
-				reject(error);
-			},
-		);
-	});
-}
 
 interface ConnectionInfo {
 	ip: string;
@@ -405,30 +121,6 @@ interface ActiveExecution {
 	settled: boolean;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
-}
-
-interface Deferred<T> {
-	promise: Promise<T>;
-	resolve: (value: T) => void;
-	reject: (error: Error) => void;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
-function createDeferred<T>(): Deferred<T> {
-	let resolve!: (value: T) => void;
-	let reject!: (error: Error) => void;
-	const promise = new Promise<T>((promiseResolve, promiseReject) => {
-		resolve = promiseResolve;
-		reject = promiseReject;
-	});
-	return { promise, resolve, reject };
 }
 
 function buildMessage(
@@ -546,43 +238,6 @@ function makeConnection(): { info: ConnectionInfo; path: string; tempDir: string
 	const path = join(tempDir, "connection.json");
 	writeFileSync(path, JSON.stringify(info, null, 2), { mode: 0o600 });
 	return { info, path, tempDir };
-}
-
-const liveKernels = new Set<KernelManager>();
-let signalHandlersInstalled = false;
-
-registerSessionResourceCleanup((sessionId) => {
-	for (const k of liveKernels) {
-		if (!sessionId || k.ownerSessionId === sessionId) {
-			void k.dispose();
-		}
-	}
-});
-
-function installSignalHandlersOnce(): void {
-	if (signalHandlersInstalled) return;
-	signalHandlersInstalled = true;
-
-	const asyncShutdown = async (): Promise<void> => {
-		// These paths can await, so flush the namespace snapshot before tearing down.
-		await Promise.allSettled([...liveKernels].map((k) => k.shutdown({ snapshot: true })));
-	};
-
-	// `beforeExit` and signal handlers can await async cleanup. `exit`
-	// can only do sync work (Node won't run pending microtasks past it),
-	// so it falls back to `disposeSync()` which kills the child synchronously.
-	process.on("beforeExit", () => {
-		void asyncShutdown();
-	});
-	process.on("SIGINT", () => {
-		void asyncShutdown().finally(() => process.exit(130));
-	});
-	process.on("SIGTERM", () => {
-		void asyncShutdown().finally(() => process.exit(143));
-	});
-	process.on("exit", () => {
-		for (const k of liveKernels) k.disposeSync();
-	});
 }
 
 export class KernelManager {

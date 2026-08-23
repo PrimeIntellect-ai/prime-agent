@@ -1,0 +1,271 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	AGENT_MESSAGE_DISPLAY_MIME,
+	type KernelSentAgentMessage,
+	ReplKernelManager,
+} from "../src/core/kernel/index.js";
+
+async function waitForCalls(mock: { mock: { calls: unknown[][] } }, count: number): Promise<void> {
+	for (let i = 0; i < 20; i++) {
+		if (mock.mock.calls.length >= count) {
+			return;
+		}
+		await Promise.resolve();
+	}
+	expect(mock.mock.calls.length).toBeGreaterThanOrEqual(count);
+}
+
+type ReplInternals = {
+	state: string;
+	writeLine: (request: Record<string, unknown>) => Promise<void>;
+	start: () => Promise<void>;
+	handleEvent: (event: Record<string, unknown>) => void;
+	activeExecution?: { requestId: string };
+	child?: { kill: (signal?: NodeJS.Signals | number) => boolean; pid?: number; stdin?: unknown };
+};
+
+function runningManagerWith(writeLine: (request: Record<string, unknown>) => Promise<void>): {
+	manager: ReplKernelManager;
+	internals: ReplInternals;
+	kernelKill: ReturnType<typeof vi.fn>;
+} {
+	const manager = new ReplKernelManager({ cwd: process.cwd() });
+	const kernelKill = vi.fn((_signal?: NodeJS.Signals | number) => true);
+	const internals = manager as unknown as ReplInternals;
+	Object.assign(internals, {
+		state: "running",
+		writeLine,
+		start: async () => {},
+		child: { kill: kernelKill, pid: undefined, stdin: undefined },
+	});
+	return { manager, internals, kernelKill };
+}
+
+describe("ReplKernelManager abort handling", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("does not poison startup after a caller starts with an aborted signal", async () => {
+		const manager = new ReplKernelManager({ cwd: process.cwd() });
+		let startCount = 0;
+		Object.assign(
+			manager as unknown as {
+				doStart: () => Promise<void>;
+			},
+			{
+				doStart: async () => {
+					startCount++;
+				},
+			},
+		);
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(manager.start({ signal: controller.signal })).rejects.toThrow("Kernel startup aborted");
+		await expect(manager.start()).resolves.toBeUndefined();
+		expect(startCount).toBe(1);
+	});
+
+	it("does not cancel shared startup when one waiting caller aborts", async () => {
+		const manager = new ReplKernelManager({ cwd: process.cwd() });
+		let releaseStart: () => void = () => {};
+		let startCount = 0;
+		Object.assign(
+			manager as unknown as {
+				doStart: () => Promise<void>;
+			},
+			{
+				doStart: async () => {
+					startCount++;
+					await new Promise<void>((resolve) => {
+						releaseStart = resolve;
+					});
+				},
+			},
+		);
+		const controller = new AbortController();
+
+		const firstStart = manager.start({ signal: controller.signal });
+		const secondStart = manager.start();
+		controller.abort();
+
+		await expect(firstStart).rejects.toThrow("Kernel startup aborted");
+		releaseStart();
+		await expect(secondStart).resolves.toBeUndefined();
+		expect(startCount).toBe(1);
+	});
+
+	it("settles an aborted execution when the runtime never sends done", async () => {
+		vi.useFakeTimers();
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager, internals, kernelKill } = runningManagerWith(writeLine);
+		const controller = new AbortController();
+		const lateSentAgentMessages: KernelSentAgentMessage[] = [];
+
+		const executePromise = manager.execute("while True: pass", {
+			signal: controller.signal,
+			onLateSentAgentMessage: (message) => lateSentAgentMessages.push(message),
+		});
+		await waitForCalls(writeLine, 1);
+		expect(writeLine).toHaveBeenCalledTimes(1);
+		expect(writeLine.mock.calls[0]?.[0]).toMatchObject({ type: "execute" });
+
+		controller.abort();
+		await vi.advanceTimersByTimeAsync(1000);
+
+		await expect(executePromise).resolves.toMatchObject({ status: "aborted" });
+		// The abort listener interrupted the runtime out-of-band.
+		expect(writeLine.mock.calls.some((call) => (call[0] as { type?: string }).type === "interrupt")).toBe(true);
+		expect(kernelKill).not.toHaveBeenCalled();
+
+		const activeExecution = internals.activeExecution;
+		expect(activeExecution).toBeDefined();
+		if (!activeExecution) {
+			throw new Error("Expected active execution to remain until the runtime's done");
+		}
+		// A late display event for the aborted cell still dispatches the sent message.
+		internals.handleEvent({
+			event: "display",
+			id: activeExecution.requestId,
+			data: {
+				[AGENT_MESSAGE_DISPLAY_MIME]: {
+					id: "agentmsg-after-abort",
+					message: "still sent",
+					deliveryStatus: "delivered",
+					target: { activeSessionId: "beta", sessionId: "session-beta" },
+				},
+			},
+		});
+		expect(lateSentAgentMessages).toEqual([
+			{
+				id: "agentmsg-after-abort",
+				message: "still sent",
+				deliveryStatus: "delivered",
+				target: { activeSessionId: "beta", sessionId: "session-beta" },
+			},
+		]);
+		// The next execute waits for the stale cell's done before sending.
+		const secondExecutePromise = manager.execute("x = 1");
+		await Promise.resolve();
+		expect(writeLine.mock.calls.filter((call) => (call[0] as { type?: string }).type === "execute")).toHaveLength(1);
+
+		internals.handleEvent({ event: "done", id: activeExecution.requestId, status: "error" });
+		await vi.waitFor(() => {
+			expect(writeLine.mock.calls.filter((call) => (call[0] as { type?: string }).type === "execute")).toHaveLength(
+				2,
+			);
+		});
+
+		const secondExecution = internals.activeExecution;
+		expect(secondExecution).toBeDefined();
+		if (!secondExecution) {
+			throw new Error("Expected second execution to start after the stale cell settled");
+		}
+		internals.handleEvent({ event: "done", id: secondExecution.requestId, status: "ok" });
+		await expect(secondExecutePromise).resolves.toMatchObject({ status: "ok" });
+
+		manager.disposeSync();
+		expect(kernelKill).toHaveBeenCalledWith("SIGTERM");
+	});
+
+	it("settles an aborted execution when the stdin write never resolves", async () => {
+		vi.useFakeTimers();
+		const interruptWrites: Record<string, unknown>[] = [];
+		const writeLine = vi.fn((request: Record<string, unknown>) => {
+			if (request.type === "interrupt") {
+				interruptWrites.push(request);
+				return Promise.resolve();
+			}
+			return new Promise<void>(() => {});
+		});
+		const { manager } = runningManagerWith(writeLine);
+		const controller = new AbortController();
+
+		const executePromise = manager.execute("while True: pass", { signal: controller.signal });
+		await waitForCalls(writeLine, 1);
+		controller.abort();
+		await vi.advanceTimersByTimeAsync(1000);
+
+		await expect(executePromise).resolves.toMatchObject({ status: "aborted" });
+		expect(interruptWrites.length).toBeGreaterThan(0);
+	});
+
+	it("fails a later execution fast when the interrupted cell never settles", async () => {
+		vi.useFakeTimers();
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager } = runningManagerWith(writeLine);
+		const controller = new AbortController();
+
+		const executePromise = manager.execute("while True: pass", { signal: controller.signal });
+		await waitForCalls(writeLine, 1);
+		controller.abort();
+		await vi.advanceTimersByTimeAsync(1000);
+		await expect(executePromise).resolves.toMatchObject({ status: "aborted" });
+
+		const secondExecutePromise = manager.execute("x = 1");
+		const secondExecuteExpectation = expect(secondExecutePromise).rejects.toThrow(
+			"IPython kernel is still running the previously interrupted cell",
+		);
+		await Promise.resolve();
+		await vi.advanceTimersByTimeAsync(5000);
+
+		await secondExecuteExpectation;
+		expect(writeLine.mock.calls.filter((call) => (call[0] as { type?: string }).type === "execute")).toHaveLength(1);
+		expect(writeLine.mock.calls.some((call) => (call[0] as { type?: string }).type === "interrupt")).toBe(true);
+		manager.disposeSync();
+	});
+
+	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
+		vi.useFakeTimers();
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		let releaseQueue: () => void = () => {};
+		const previousExecution = new Promise<void>((resolve) => {
+			releaseQueue = resolve;
+		});
+		const executeInner = vi.fn(
+			async (
+				_requestFields: Record<string, unknown>,
+				_code: string,
+				opts: { signal?: AbortSignal },
+			): Promise<{ stdout: string; stderr: string; status: "aborted"; durationMs: number }> =>
+				await new Promise((resolve) => {
+					opts.signal?.addEventListener(
+						"abort",
+						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
+						{ once: true },
+					);
+				}),
+		);
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+			},
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {} },
+		);
+
+		const snapshot = (
+			manager as unknown as {
+				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
+			}
+		).captureSnapshot({ executionTimeoutMs: 5000 });
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(executeInner).not.toHaveBeenCalled();
+
+		releaseQueue();
+		await waitForCalls(executeInner, 1);
+		const signal = executeInner.mock.calls[0]?.[2].signal;
+		expect(signal?.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(signal?.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(signal?.aborted).toBe(true);
+		await expect(snapshot).resolves.toBeNull();
+	});
+});

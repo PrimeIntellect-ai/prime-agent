@@ -12,13 +12,18 @@ let tempDir = "";
 
 // These tests count spawns of a stub python; the default-on forkserver adds an
 // extra spawn + ready handshake the stub never answers, so pin direct-spawn.
+// They also assert the Jupyter client's startup failures, so pin that client.
 const savedForkFlag = process.env.PRIME_AGENT_KERNEL_FORKSERVER;
+const savedKernelFlag = process.env.PRIME_AGENT_KERNEL;
 beforeAll(() => {
 	process.env.PRIME_AGENT_KERNEL_FORKSERVER = "0";
+	process.env.PRIME_AGENT_KERNEL = "ipython";
 });
 afterAll(() => {
 	if (savedForkFlag === undefined) delete process.env.PRIME_AGENT_KERNEL_FORKSERVER;
 	else process.env.PRIME_AGENT_KERNEL_FORKSERVER = savedForkFlag;
+	if (savedKernelFlag === undefined) delete process.env.PRIME_AGENT_KERNEL;
+	else process.env.PRIME_AGENT_KERNEL = savedKernelFlag;
 });
 
 function writeFakePython(opts: { sleepSeconds?: number } = {}): { python: string; countRuns: () => number } {

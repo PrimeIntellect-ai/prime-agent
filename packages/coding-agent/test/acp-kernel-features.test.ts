@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
-import type { KernelManager } from "../src/core/kernel/index.js";
+import type { KernelClient } from "../src/core/kernel/index.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import { acpUpdatesForSessionEvent } from "../src/modes/acp/acp-events.js";
@@ -65,7 +65,7 @@ describe("ACP mode over a real IPython kernel", () => {
 		// is shared, and a skill-less kernel here can leave a later skill-dependent
 		// test with an unsynced venv when files run concurrently.
 		provisioner = new IpythonKernelProvisioner(tempDir, { pythonSkills: [AGENT_MESSAGE_SKILL] });
-		const manager: KernelManager = await provisioner.ensure();
+		const manager: KernelClient = await provisioner.ensure();
 
 		const first = await manager.execute("acp_state = 41\nprint('set')");
 		expect(first.status).toBe("ok");

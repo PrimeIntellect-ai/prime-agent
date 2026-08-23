@@ -90,6 +90,15 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
     )
 
 
+def _parse_host_reply(request_type: str, reply: dict[str, Any]) -> dict[str, Any]:
+    status = reply.get("status")
+    if status == "ok":
+        return {k: v for k, v in reply.items() if k != "status"}
+    if status == "error":
+        raise RuntimeError(str(reply.get("error") or f"host request {request_type} failed"))
+    raise RuntimeError(f"host request {request_type} returned unexpected status: {status!r}")
+
+
 async def host_request(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Send a typed request to the Prime Agent host and await its reply.
 
@@ -102,6 +111,12 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
         raise TypeError("request_type must be a non-empty str")
     if payload is not None and not isinstance(payload, dict):
         raise TypeError(f"payload must be a dict or None, got {type(payload).__name__}")
+    from . import repl
+
+    if repl.is_active():
+        # request_type goes last so a payload "type" key cannot reroute the request.
+        reply = await repl.host_request({**(payload or {}), "type": request_type})
+        return _parse_host_reply(request_type, reply)
     Comm = _import_comm()
     if Comm is None:
         raise RuntimeError("Jupyter comm support is unavailable in this kernel")
@@ -153,6 +168,18 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
         if not future.done():
             future.cancel()
         comm.close()
+
+
+def emit(data: dict[str, Any]) -> None:
+    """Ship one display event (dict of MIME type -> JSON payload) to the host."""
+    from . import repl
+
+    if repl.is_active():
+        repl.emit(data)
+        return
+    from IPython.display import display
+
+    display(data, raw=True)
 
 
 async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
@@ -344,6 +371,7 @@ __all__ = [
     "RefinementEvent",
     "bash",
     "delete_subagent",
+    "emit",
     "find_models",
     "get_harness_state",
     "harness",

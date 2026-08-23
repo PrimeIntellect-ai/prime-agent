@@ -3,7 +3,7 @@
 `python -m rlm.repl` starts a CPython REPL runtime that executes code cells in
 one persistent `__main__` namespace on a single asyncio event loop. The wire
 format is newline-delimited JSON: one object per line, UTF-8, no other framing.
-The current protocol version is `1`; the runtime announces it in the `ready`
+The current protocol version is `2`; the runtime announces it in the `ready`
 event.
 
 ## Channels
@@ -24,18 +24,20 @@ event.
 |---|---|
 | `execute` | `{"type":"execute","id":str,"code":str}` |
 | `interrupt` | `{"type":"interrupt","id"?:str}` — no reply |
+| `host_reply` | `{"type":"host_reply","id":str,"data":{...}}` — no reply |
 | `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool}` |
 | `restore` | `{"type":"restore","id":str,"path":str}` |
+| `list_names` | `{"type":"list_names","id":str}` |
 | `shutdown` | `{"type":"shutdown","id"?:str}` |
 
-Requests other than `interrupt` run strictly in order, one at a time. A
-malformed line
+Requests other than `interrupt` and `host_reply` run strictly in order, one at
+a time. A malformed line
 produces `{"event":"error","id":null,"ename":"ProtocolError",...}` and the
 runtime keeps serving. Closing stdin is equivalent to `shutdown`.
 
 ## Events
 
-- `{"event":"ready","protocol":1,"python":"3.13.11"}` — sent once at startup;
+- `{"event":"ready","protocol":2,"python":"3.13.11"}` — sent once at startup;
   the handshake. No banner precedes it.
 - `{"event":"stdout"|"stderr","id":str|null,"text":str}` — captured output.
   `id` is the cell running when the bytes were read; `null` for output produced
@@ -44,12 +46,18 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   expression when the body ends in an expression whose value is not `None`.
   The value is also bound to `_` in the namespace.
 - `{"event":"display","id":str|null,"data":{mime:payload,...}}` — one dict of
-  MIME type to JSON payload, shipped verbatim from `emit()`.
+  MIME type to JSON payload, shipped verbatim from `emit()`. `id` rides task
+  context: an asyncio task spawned by a cell keeps that cell's id even after
+  the cell finishes; user threads emit `null`.
+- `{"event":"host_request","id":str,"data":{...}}` — one typed request from
+  runtime code to the host; the host answers with a `host_reply` request
+  carrying the same id.
 - `{"event":"error","id":str|null,"ename":str,"evalue":str,"traceback":[str,...]}`
 - `{"event":"done","id":str,"status":"ok"|"error"}` — exactly one per id'd
   request, always after all of that request's other events. A snapshot `done`
   adds `saved`, `skipped`, `pruned`, `bytes`; a restore `done` adds `restored`,
-  `failed`; a failed snapshot/restore adds `reason`.
+  `failed`; a `list_names` `done` adds `names`; a failed snapshot/restore adds
+  `reason`.
 
 Before a cell's `done`, the runtime flushes and drains both captured streams
 (a marker byte sequence written to each fd and awaited in the pumps), so every
@@ -103,6 +111,16 @@ running or queued, SIGINT and interrupt requests are ignored.
 `display` event. `emit(data)` takes one non-empty dict keyed by MIME type
 strings; the dict is forwarded verbatim as the event's `data`.
 
+## Host bridge
+
+`await rlm.repl.host_request(data)` ships a `host_request` event with a
+runtime-minted id and awaits the matching `host_reply`, returning its `data`
+dict verbatim. Replies are routed on the reader thread like `interrupt` —
+never through the request queue, since the awaiting cell is itself the
+in-flight execute. Replies for unknown ids, or for a request whose awaiting
+cell was cancelled, are dropped. `rlm.repl.is_active()` reports whether the
+process is serving the protocol (importing the module does not count).
+
 ## Snapshot / restore
 
 `snapshot` serializes the user namespace with `dill` (recurse mode), one name
@@ -120,6 +138,9 @@ corrupt file yields an empty restore with a `reason`, and per-name failures are
 listed in `failed`. Names `In`, `Out`, and `get_ipython` in a payload are never
 restored. `dill` is imported lazily; when unavailable, snapshot and restore
 fail with `status:"error"` and a `reason`.
+
+`list_names` replies with `done` carrying `names`: the sorted user-defined
+top-level names under the same filter the snapshot applies.
 
 ## Shutdown
 
