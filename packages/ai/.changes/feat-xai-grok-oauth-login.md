@@ -1,0 +1,1 @@
+- Added xAI Grok (SuperGrok subscription) OAuth login: `/login` now offers the xAI Grok provider with browser sign-in (PKCE + local callback), device-code fallback when the callback port is unavailable or headless, and automatic refresh-token rotation on expiry.
