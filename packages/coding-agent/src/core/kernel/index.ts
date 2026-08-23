@@ -8,6 +8,7 @@ import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
 import { recordOrphanProcessState } from "../orphan-process-journal.js";
+import { detectSkillFileReads, type SkillFileReadSource, type ToolUsageEvent } from "../retained-tools/usage.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { type ForkedKernelHandle, ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
@@ -173,6 +174,16 @@ export interface KernelManagerOptions {
 	snapshot?: KernelSnapshotConfig;
 	/** Default: "prime-agent". */
 	username?: string;
+	/**
+	 * Retained-tool usage events (honest-signal counters); see
+	 * core/retained-tools/usage.ts. Fired from the host bridge for skill
+	 * host requests and from cell execution for known SKILL.md reads.
+	 */
+	onToolUsageEvent?: (event: ToolUsageEvent) => void;
+	/** Known skill SKILL.md files; a cell that reads one counts as a `used` event. */
+	skillFileReadSources?: readonly SkillFileReadSource[];
+	/** Host request types that map to a Python skill name (usage + completed/raised). */
+	skillHostRequestTypes?: Record<string, string>;
 }
 
 export interface KernelStartOptions {
@@ -588,7 +599,16 @@ function installSignalHandlersOnce(): void {
 export class KernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
+		| "python"
+		| "cwd"
+		| "env"
+		| "sessionId"
+		| "hostHandlers"
+		| "pythonSkills"
+		| "snapshot"
+		| "onToolUsageEvent"
+		| "skillFileReadSources"
+		| "skillHostRequestTypes"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
@@ -638,6 +658,9 @@ export class KernelManager {
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
 			username: options.username ?? "prime-agent",
+			onToolUsageEvent: options.onToolUsageEvent,
+			skillFileReadSources: options.skillFileReadSources,
+			skillHostRequestTypes: options.skillHostRequestTypes,
 		};
 	}
 
@@ -1086,6 +1109,13 @@ export class KernelManager {
 			}
 			if (!opts.internal) {
 				this.lastCellCode = code;
+				for (const skillName of detectSkillFileReads(
+					code,
+					this.options.skillFileReadSources ?? [],
+					this.options.cwd ?? "",
+				)) {
+					this.emitToolUsageEvent({ skillName, event: "used" });
+				}
 			}
 			try {
 				const sendPromise = this.translateSocketClosure(shell.send(encode(msg, conn.key)));
@@ -1453,9 +1483,18 @@ export class KernelManager {
 		}
 		this.handledHostRequestCommIds.add(commId);
 
+		const hostRequestType = isRecord(data) && typeof data.type === "string" ? data.type : "";
+		const skillName = hostRequestType ? this.options.skillHostRequestTypes?.[hostRequestType] : undefined;
+		if (skillName) {
+			this.emitToolUsageEvent({ skillName, event: "used" });
+		}
+
 		const task = (async () => {
 			try {
 				const result = await this.handleHostRequest(data);
+				if (skillName) {
+					this.emitToolUsageEvent({ skillName, event: "explicit_ok" });
+				}
 				try {
 					await this.sendCommMessage(commId, { status: "ok", ...result });
 				} catch (replyError) {
@@ -1464,6 +1503,9 @@ export class KernelManager {
 					);
 				}
 			} catch (error) {
+				if (skillName) {
+					this.emitToolUsageEvent({ skillName, event: "explicit_fail", note: errorMessage(error) });
+				}
 				this.appendKernelDiagnostic(`host request failed for comm ${commId}: ${errorMessage(error)}`);
 				try {
 					await this.sendCommMessage(commId, { status: "error", error: errorMessage(error) });
@@ -1478,6 +1520,14 @@ export class KernelManager {
 		void task.finally(() => {
 			this.inFlightHostRequests.delete(task);
 		});
+	}
+
+	private emitToolUsageEvent(event: ToolUsageEvent): void {
+		try {
+			this.options.onToolUsageEvent?.(event);
+		} catch (error) {
+			this.appendKernelDiagnostic(`tool usage event failed: ${errorMessage(error)}`);
+		}
 	}
 
 	private async handleHostRequest(data: unknown): Promise<Record<string, unknown>> {

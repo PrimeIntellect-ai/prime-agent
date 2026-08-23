@@ -48,6 +48,8 @@ Deliberately conservative; all derivable from existing capture points:
 - `explicit_ok` / `explicit_fail` **only from explicit signals**: user statement in a following turn ("that worked" / "no, that broke"), a refine `record_refinement` outcome referencing the tool, or — for Python skills — the call completed / raised in the kernel.
 - **Session-level success is NEVER counted as tool success** (honest-signal rule: markdown skills have no binary outcome; see sark-concepts.md §"What not to import").
 
+Implementation (T03): capture points live in `src/core/agent-session.ts` (`_expandSkillCommand` for (a); the delivered-turn hook for user statements and `record_refinement` outcomes) and `src/core/kernel/index.ts` (known `SKILL.md` reads in `executeInner`, skill host requests in `startHostRequestFromComm` for (b)/(c)). Helpers and the attribution logic are in `src/core/retained-tools/usage.ts`; recording only updates entries that already exist in the per-scope index.
+
 ## Rebuild & merge
 
 - On skill load (startup, `/reload`, post-retention): upsert index entries from disk (scope, path, version, status, `description_hash`), merge counters by `(name, path)`, remove entries for skills that no longer exist.

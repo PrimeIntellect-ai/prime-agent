@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import {
 	Agent,
 	type AgentContext,
@@ -33,6 +33,7 @@ import {
 	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
+import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -202,6 +203,13 @@ import {
 } from "./refinement/index.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import type { ToolScope } from "./retained-tools/index.js";
+import {
+	ExplicitOutcomeTracker,
+	extractRefinementToolSignals,
+	recordToolUsageEvent,
+	type ToolUsageEventKind,
+} from "./retained-tools/usage.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -1129,6 +1137,11 @@ export class AgentSession {
 	private _disposing = false;
 	private _disposeAsyncPromise?: Promise<void>;
 	private _ipythonKernelProvisioner?: IpythonKernelProvisioner;
+	// Retained-tool usage tracking (SARK T03): pending explicit-outcome
+	// attribution, seen refinement event ids, and the skill host-request map.
+	private readonly _explicitOutcomeTracker = new ExplicitOutcomeTracker();
+	private _seenRefinementEventIds: Set<string> | undefined;
+	private _kernelSkillHostTypes: Record<string, string> = {};
 	/** Artifact dir backing the current provisioner's kernel snapshot, if any. */
 	private _ipythonKernelSnapshotDir?: string;
 	/** True once the runtime has been built once; later builds are in-process rebuilds (/reload). */
@@ -4977,6 +4990,7 @@ export class AgentSession {
 		try {
 			const content = readFileSync(skill.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
+			this._recordToolUsageEvent(skill.name, "used");
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;
 		} catch (err) {
@@ -5938,6 +5952,7 @@ export class AgentSession {
 					} else if (executionPolicy.nextTurnContextTiming !== "skip") {
 						this.agent.state.systemPrompt = this._baseSystemPrompt;
 					}
+					for (const action of turns) this._recordTurnUserStatement(action);
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
@@ -7400,6 +7415,124 @@ export class AgentSession {
 		);
 	}
 
+	// ------------------------------------------------------------------------
+	// Retained-tool usage tracking (SARK T03): honest-signal counters.
+	//
+	// All helpers degrade silently — usage tracking must never break the
+	// session, the kernel, or a prompt.
+	// ------------------------------------------------------------------------
+
+	private _toolsAgentDir(): string {
+		return this._agentDir ?? getAgentDir();
+	}
+
+	/**
+	 * Resolve the tool index scope for a loaded skill by its file location.
+	 * Only skills under the two tracked roots (agentDir/skills,
+	 * <cwd>/.prime/agent/skills) have index entries; everything else
+	 * (bundled, path-injected) is untracked and returns undefined.
+	 */
+	private _resolveToolScope(skillName: string): ToolScope | undefined {
+		try {
+			const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
+			if (!skill) return undefined;
+			const skillPath = resolve(skill.filePath);
+			const agentSkillsDir = join(this._toolsAgentDir(), "skills");
+			const projectSkillsDir = join(this._cwd, CONFIG_DIR_NAME, "skills");
+			if (skillPath === agentSkillsDir || skillPath.startsWith(agentSkillsDir + sep)) return "global";
+			if (skillPath === projectSkillsDir || skillPath.startsWith(projectSkillsDir + sep)) return "project";
+			return undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private _recordToolUsageEvent(skillName: string, event: ToolUsageEventKind, note?: string): void {
+		try {
+			const scope = this._resolveToolScope(skillName);
+			if (!scope) return;
+			const recorded = recordToolUsageEvent({
+				skillName,
+				event,
+				scope,
+				cwd: this._cwd,
+				agentDir: this._toolsAgentDir(),
+				note,
+			});
+			if (recorded && event === "used") {
+				this._explicitOutcomeTracker.markUsed(scope, skillName);
+			}
+		} catch {
+			// Usage tracking must not break the session.
+		}
+	}
+
+	/**
+	 * Classify a delivered user turn as an explicit tool outcome. Agent
+	 * messages, internal injections, custom (system) messages, and
+	 * programmatic (extension) submissions are excluded.
+	 */
+	private _recordTurnUserStatement(action: SessionAction<PreparedTurnPayload>): void {
+		try {
+			if (action.payload.acceptedAgentMessage || action.source === "extension") return;
+			if (action.payload.customMessage) return;
+			this._observeNewRefinementToolSignals();
+			const knownNames = this.resourceLoader.getSkills().skills.map((skill) => skill.name);
+			// The stored text may include the expanded /skill: block; only the
+			// user's own words count as a statement.
+			const text = action.payload.text.replace(/<skill[\s\S]*?<\/skill>/g, " ");
+			const attribution = this._explicitOutcomeTracker.onUserStatement(text, knownNames);
+			if (attribution) {
+				this._recordToolUsageEvent(attribution.skillName, attribution.event, text);
+			}
+		} catch {
+			// Usage tracking must not break the session.
+		}
+	}
+
+	/**
+	 * Observe record_refinement events recorded since this session's baseline
+	 * (global and local harness state) and attribute explicit outcomes to the
+	 * tools they reference.
+	 */
+	private _observeNewRefinementToolSignals(): void {
+		try {
+			const dirs = this._harnessStateDirsWithScope();
+			if (this._seenRefinementEventIds === undefined) {
+				const baseline = new Set<string>();
+				for (const dir of dirs) {
+					for (const event of loadHarnessState(dir.path, dir.scope).refinements) {
+						if (event?.id) baseline.add(event.id);
+					}
+				}
+				this._seenRefinementEventIds = baseline;
+			}
+			const seen = this._seenRefinementEventIds;
+			const knownNames = this.resourceLoader.getSkills().skills.map((skill) => skill.name);
+			for (const dir of dirs) {
+				for (const event of loadHarnessState(dir.path, dir.scope).refinements) {
+					if (!event?.id || seen.has(event.id)) continue;
+					seen.add(event.id);
+					const signal = extractRefinementToolSignals(event, knownNames);
+					if (signal) {
+						this._recordToolUsageEvent(signal.skillName, signal.event, event.outcome);
+					}
+				}
+			}
+		} catch {
+			// Usage tracking must not break the session.
+		}
+	}
+
+	private _harnessStateDirsWithScope(): Array<{ path: string; scope: "global" | "local" }> {
+		const dirs: Array<{ path: string; scope: "global" | "local" }> = [
+			{ path: getGlobalHarnessStateDir(this._toolsAgentDir()), scope: "global" },
+		];
+		const localDir = this._localHarnessStateDir();
+		if (localDir) dirs.push({ path: localDir, scope: "local" });
+		return dirs;
+	}
+
 	private _autoRefineAllowedForSession(): boolean {
 		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
 	}
@@ -8807,6 +8940,13 @@ export class AgentSession {
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
+				onToolUsageEvent: (event) => this._recordToolUsageEvent(event.skillName, event.event, event.note),
+				skillFileReadSources: this.resourceLoader.getSkills().skills.map((skill) => ({
+					name: skill.name,
+					skillFilePath: skill.filePath,
+					baseDir: skill.baseDir,
+				})),
+				skillHostRequestTypes: this._kernelSkillHostTypes,
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
@@ -8915,30 +9055,39 @@ export class AgentSession {
 				input: this.model?.input ?? [],
 			}),
 		};
+		const skillHostTypes: Record<string, string> = {};
+		const mapSkillHostTypes = (types: readonly string[], skillName: string): void => {
+			for (const type of types) skillHostTypes[type] = skillName;
+		};
 		if (this._includeGoals) {
 			for (const type of ["goal.get", "goal.create", "goal.complete"]) {
 				handlers[type] = async (payload) => this.handleGoalHostRequest(type, payload);
 			}
+			mapSkillHostTypes(["goal.get", "goal.create", "goal.complete"], "goal");
 		}
 		if (this._includeCompactSkill) {
 			for (const type of ["compact.run", "compact.status"]) {
 				handlers[type] = async (payload) => this.handleCompactHostRequest(type, payload);
 			}
+			mapSkillHostTypes(["compact.run", "compact.status"], "compact");
 		}
 		if (this._autoRefineAllowedForSession()) {
 			for (const type of ["refine.run", "refine.status"]) {
 				handlers[type] = async (payload) => this.handleRefineHostRequest(type, payload);
 			}
+			mapSkillHostTypes(["refine.run", "refine.status"], REFINE_SKILL_NAME);
 		}
 		if (this._rlmHeartbeatController) {
-			for (const type of [
+			const heartbeatTypes = [
 				"rlm_heartbeat.list",
 				"rlm_heartbeat.create",
 				"rlm_heartbeat.update",
 				"rlm_heartbeat.delete",
-			]) {
+			];
+			for (const type of heartbeatTypes) {
 				handlers[type] = async (payload) => this.handleRlmHeartbeatHostRequest(type, payload);
 			}
+			mapSkillHostTypes(heartbeatTypes, "rlm-heartbeat");
 		}
 		const visibleKernelSkillNames = new Set(
 			this._modelVisibleSkills()
@@ -8946,6 +9095,7 @@ export class AgentSession {
 				.map((skill) => skill.name),
 		);
 		if (this._agentMessageController && visibleKernelSkillNames.has(AGENT_MESSAGE_SKILL_NAME)) {
+			mapSkillHostTypes(["agent_message.list_agents", "agent_message.send"], AGENT_MESSAGE_SKILL_NAME);
 			Object.assign(
 				handlers,
 				createAgentMessageHostHandlers({
@@ -8982,6 +9132,10 @@ export class AgentSession {
 			);
 		}
 		if (this._agentObserveController) {
+			mapSkillHostTypes(
+				["agent_observe.list", "agent_observe.get", "agent_observe.recent"],
+				AGENT_OBSERVE_SKILL_NAME,
+			);
 			Object.assign(
 				handlers,
 				createAgentObserveHostHandlers({
@@ -9002,6 +9156,10 @@ export class AgentSession {
 		if (this._mcpManager) {
 			Object.assign(handlers, this._mcpManager.hostHandlers());
 		}
+		const loadedSkillNames = new Set(this.resourceLoader.getSkills().skills.map((skill) => skill.name));
+		this._kernelSkillHostTypes = Object.fromEntries(
+			Object.entries(skillHostTypes).filter(([, skillName]) => loadedSkillNames.has(skillName)),
+		);
 		return handlers;
 	}
 

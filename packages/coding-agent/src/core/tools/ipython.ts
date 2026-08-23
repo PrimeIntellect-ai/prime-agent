@@ -16,6 +16,7 @@ import {
 	type KernelSentAgentMessage,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
+import type { SkillFileReadSource, ToolUsageEvent } from "../retained-tools/usage.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { parseIpythonBashCell } from "./ipython-cell-code.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -293,6 +294,12 @@ export interface IpythonToolOptions {
 	 */
 	onRestore?: (result: RestoreResult) => void;
 	onLateSentAgentMessage?: (toolCallId: string, message: KernelSentAgentMessage) => void;
+	/** Retained-tool usage events (honest-signal counters); see core/retained-tools/usage.ts. */
+	onToolUsageEvent?: (event: ToolUsageEvent) => void;
+	/** Known skill SKILL.md files; a kernel cell that reads one counts as a `used` event. */
+	skillFileReadSources?: readonly SkillFileReadSource[];
+	/** Host request types that map to a Python skill name (usage + completed/raised). */
+	skillHostRequestTypes?: Record<string, string>;
 	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
 	provisioner?: IpythonKernelProvisioner;
 }
@@ -494,6 +501,9 @@ export class IpythonKernelProvisioner {
 				snapshot: snapshotDir
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
 					: undefined,
+				onToolUsageEvent: this.options?.onToolUsageEvent,
+				skillFileReadSources: this.options?.skillFileReadSources,
+				skillHostRequestTypes: this.options?.skillHostRequestTypes,
 			});
 			let pendingRestore: RestoreResult | undefined;
 			try {
