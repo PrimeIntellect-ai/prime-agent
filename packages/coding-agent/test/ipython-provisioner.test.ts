@@ -128,7 +128,7 @@ describe("IpythonKernelProvisioner", () => {
 		provisioner.prewarm();
 		const messages: string[] = [];
 		const joined = provisioner.ensure((message) => messages.push(message));
-		expect(messages).toContain("Starting IPython kernel...");
+		expect(messages).toContain("Starting Python kernel...");
 		await expect(joined).rejects.toThrow();
 	});
 
@@ -295,7 +295,7 @@ describe("IpythonKernelProvisioner", () => {
 				signal: undefined,
 			},
 		);
-		expect(setWorkingMessage).toHaveBeenCalledWith("Waiting for IPython kernel...");
+		expect(setWorkingMessage).toHaveBeenCalledWith("Waiting for Python kernel...");
 		expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
 	});
 
@@ -326,7 +326,7 @@ describe("IpythonKernelProvisioner", () => {
 		expect(ensure).toHaveBeenCalledTimes(2);
 		expect(kill).toHaveBeenCalledTimes(1);
 		expect(freshManager.execute).toHaveBeenCalledWith("x = 1", expect.objectContaining({ signal: undefined }));
-		expect(setWorkingMessage).toHaveBeenCalledWith("Restarting IPython kernel...");
+		expect(setWorkingMessage).toHaveBeenCalledWith("Restarting Python kernel...");
 		expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
 	});
 

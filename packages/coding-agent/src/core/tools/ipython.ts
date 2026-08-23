@@ -526,7 +526,7 @@ export class IpythonKernelProvisioner {
 			try {
 				// Emitted synchronously (before the permit await) so a listener attaching
 				// mid-flight can replay the current stage.
-				this.emitStartupProgress("Starting IPython kernel...");
+				this.emitStartupProgress("Starting Python kernel...");
 				// Only the process spawn + port resolve contends for OS resources under a
 				// fan-out, and it is bounded by start()'s own timeouts — so the permit
 				// covers only start(). Restore/bootstrap run per-kernel afterwards and are
@@ -544,13 +544,13 @@ export class IpythonKernelProvisioner {
 				// then overwrites live handles (rlm, skills) on top of anything restored.
 				if (snapshotDir) {
 					const snapshotExisted = existsSync(snapshotPathIn(snapshotDir));
-					this.emitStartupProgress("Restoring IPython state...");
+					this.emitStartupProgress("Restoring Python state...");
 					const restore = await raceWithAbort(m.restoreState(), startupSignal);
 					if (snapshotExisted) {
 						pendingRestore = restore ?? { restored: [], failed: [], path: snapshotPathIn(snapshotDir) };
 					}
 				}
-				this.emitStartupProgress("Preparing IPython runtime...");
+				this.emitStartupProgress("Preparing Python runtime...");
 				const bootstrap = await m.execute(buildRlmBootstrapCode(this.options?.pythonSkills), {
 					signal: startupSignal,
 				});
@@ -629,11 +629,11 @@ async function executeWithBusyKernelChoice(
 			}
 			const action = await chooseBusyKernelAction(ctx, signal);
 			if (action === "wait") {
-				onWorkingMessage("Waiting for IPython kernel...");
+				onWorkingMessage("Waiting for Python kernel...");
 				continue;
 			}
 			if (action === "kill") {
-				onWorkingMessage("Restarting IPython kernel...");
+				onWorkingMessage("Restarting Python kernel...");
 				await provisioner.kill();
 				kernelRestarted = true;
 				continue;
@@ -661,7 +661,7 @@ export function createIpythonToolDefinition(
 		name: "ipython",
 		label: "ipython",
 		description:
-			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+			"Execute Python scratchpad code and `%%bash` shell cells in a persistent Python kernel. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
 		promptSnippet: "ipython - persistent agent notebook for Python scratchpad code and %%bash orchestration",
 		// The kernel is single-threaded — pi must not run two ipython calls in parallel within a batch.
 		executionMode: "sequential",

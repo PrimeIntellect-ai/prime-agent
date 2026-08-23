@@ -49,6 +49,9 @@ _stream_cell: str | None = None
 _active: dict[str, Any] = {"task": None, "rid": None, "interrupted": False}
 _cell_counter = 0
 _pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
+# Set on the loop thread once stdin hits EOF or a shutdown request arrives; no
+# host reply can arrive after that, so waiting (and future) host_request calls fail.
+_host_closed = False
 
 # Interrupt bookkeeping shared between the reader thread and the loop thread.
 _interrupt_lock = threading.Lock()
@@ -87,6 +90,8 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
     """Send one typed request to the host and await its raw reply dict."""
     if _loop is None:
         raise RuntimeError("repl runtime is not serving")
+    if _host_closed:
+        raise RuntimeError("host connection closed; host_request cannot be answered")
     rid = uuid.uuid4().hex
     future: asyncio.Future[dict[str, Any]] = _loop.create_future()
     _pending_host[rid] = future
@@ -95,6 +100,16 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
         return await future
     finally:
         _pending_host.pop(rid, None)
+
+
+def _fail_pending_host_requests() -> None:
+    """Loop-thread half of teardown: no host reply can arrive anymore, so every
+    awaiting cell must unblock or the queued shutdown would never be served."""
+    global _host_closed
+    _host_closed = True
+    for future in _pending_host.values():
+        if not future.done():
+            future.set_exception(RuntimeError("host connection closed; host_request cannot be answered"))
 
 
 def _resolve_host_reply(rid: str, data: dict[str, Any]) -> None:
@@ -628,8 +643,13 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
             if rtype in ("execute", "snapshot", "restore"):
                 with _interrupt_lock:
                     _inflight.add(req["id"])
+            if rtype == "shutdown":
+                # No host reply follows a shutdown; a cell awaiting host_request
+                # must fail now or it would block _serve from ever consuming this.
+                _loop.call_soon_threadsafe(_fail_pending_host_requests)
             _loop.call_soon_threadsafe(queue.put_nowait, req)
     # Host closed stdin: shut the runtime down.
+    _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, {"type": "shutdown"})
 
 

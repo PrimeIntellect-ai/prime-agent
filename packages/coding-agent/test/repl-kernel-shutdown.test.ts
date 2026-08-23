@@ -1,12 +1,13 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { ReplKernelManager } from "../src/core/kernel/index.js";
+import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
 
 type ShutdownInternals = {
 	state: "running";
 	writeLine: (request: Record<string, unknown>) => Promise<void>;
 	handleEvent: (event: Record<string, unknown>) => void;
 	pendingDoneWaiters: Map<string, () => void>;
+	inFlightHostRequests: Set<Promise<void>>;
 	child: EventEmitter & {
 		exitCode: number | null;
 		signalCode: NodeJS.Signals | null;
@@ -20,11 +21,12 @@ type ShutdownInternals = {
 
 function configuredManager(
 	onSend: (request: Record<string, unknown>, internals: ShutdownInternals) => void | Promise<void>,
+	hostHandlers?: HostRequestHandlers,
 ): {
 	manager: ReplKernelManager;
 	internals: ShutdownInternals;
 } {
-	const manager = new ReplKernelManager({ cwd: process.cwd() });
+	const manager = new ReplKernelManager({ cwd: process.cwd(), hostHandlers });
 	const internals = manager as unknown as ShutdownInternals;
 	const child = Object.assign(new EventEmitter(), {
 		exitCode: null,
@@ -95,6 +97,69 @@ describe("ReplKernelManager graceful shutdown", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("settles an in-flight host request before dispose tears the kernel down", async () => {
+		let releaseHandler: (() => void) | undefined;
+		const handlerBlocked = new Promise<void>((resolve) => {
+			releaseHandler = resolve;
+		});
+		const sentReplies: Record<string, unknown>[] = [];
+		const { manager, internals } = configuredManager(
+			async (request) => {
+				if (request.type === "host_reply") sentReplies.push(request);
+			},
+			{
+				"test.slow": async () => {
+					await handlerBlocked;
+					return { answer: 42 };
+				},
+			},
+		);
+
+		internals.handleEvent({ event: "host_request", id: "hr-1", data: { type: "test.slow" } });
+		expect(internals.inFlightHostRequests.size).toBe(1);
+
+		const dispose = manager.dispose();
+		releaseHandler?.();
+		await dispose;
+
+		expect(internals.inFlightHostRequests.size).toBe(0);
+		expect(sentReplies).toEqual([{ type: "host_reply", id: "hr-1", data: { status: "ok", answer: 42 } }]);
+		expect(internals.child).toBeUndefined();
+	});
+
+	it("shutdown during an in-flight host request leaves no dangling task once the handler settles", async () => {
+		let releaseHandler: (() => void) | undefined;
+		const handlerBlocked = new Promise<void>((resolve) => {
+			releaseHandler = resolve;
+		});
+		const { manager, internals } = configuredManager(
+			(request, state) => {
+				if (request.type !== "shutdown") return;
+				state.handleEvent({ event: "done", id: request.id, status: "ok" });
+				state.child.exitCode = 0;
+				state.child.emit("exit", 0, null);
+			},
+			{
+				"test.slow": async () => {
+					await handlerBlocked;
+					return { answer: 42 };
+				},
+			},
+		);
+
+		internals.handleEvent({ event: "host_request", id: "hr-1", data: { type: "test.slow" } });
+		const tracked = [...internals.inFlightHostRequests];
+		expect(tracked).toHaveLength(1);
+
+		await manager.shutdown();
+		expect(internals.child).toBeUndefined();
+
+		// The reply write fails against the torn-down child; the task must still settle.
+		releaseHandler?.();
+		await Promise.all(tracked);
+		expect(internals.inFlightHostRequests.size).toBe(0);
 	});
 
 	it("waits for the matching shutdown done and removes its waiter", async () => {

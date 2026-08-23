@@ -38,8 +38,8 @@ export const HOST_COMM_TARGET = "host.request";
  * Handles one typed request from Python code running in the kernel.
  * The returned record is sent back verbatim as the reply payload.
  *
- * This legacy unary compatibility alias remains the dispatcher and registration
- * contract while context-aware handlers are staged separately below.
+ * The unary form is the dispatcher and registration contract; context-aware
+ * handlers are staged separately below.
  */
 export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
 

@@ -4,13 +4,14 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as kernelBootstrap from "../src/core/kernel/bootstrap.js";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../src/core/orphan-process-journal.js";
 
 const ensureKernelPythonMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../src/core/kernel/bootstrap.js", async (importOriginal) => {
-	const original = await importOriginal<typeof import("../src/core/kernel/bootstrap.js")>();
+	const original = await importOriginal<typeof kernelBootstrap>();
 	return { ...original, ensureKernelPython: ensureKernelPythonMock };
 });
 

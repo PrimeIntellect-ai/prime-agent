@@ -516,6 +516,32 @@ class ReplTest(unittest.TestCase):
     def test_shutdown_clean_exit(self):
         self.assertEqual(self.repl.shutdown(), 0)
 
+    def _start_pending_host_request(self) -> None:
+        code = "\n".join(
+            [
+                "from rlm.repl import host_request",
+                "await host_request({'type': 'never-answered'})",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "hr-pending", "code": code})
+        request = self.repl.read_event()
+        while request.get("event") != "host_request":
+            request = self.repl.read_event()
+
+    def test_stdin_eof_with_pending_host_request_exits(self):
+        self._start_pending_host_request()
+        assert self.repl.proc.stdin is not None
+        self.repl.proc.stdin.close()
+        self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
+    def test_shutdown_with_pending_host_request_exits(self):
+        self._start_pending_host_request()
+        self.repl.send({"type": "shutdown", "id": "__shutdown__"})
+        events = self.repl.until_done("hr-pending")
+        self.assertEqual(one(events, "error")["ename"], "RuntimeError")
+        self.repl.until_done("__shutdown__")
+        self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

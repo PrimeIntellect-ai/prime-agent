@@ -95,8 +95,8 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 	it("restores a snapshot artifact containing IPython-injected blobs, skipping those names", async () => {
 		// Synthesize the artifact shape an IPython-kernel snapshot writes: a dict of
 		// dill blobs including In/Out/get_ipython entries.
-		const legacyDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-legacy-"));
-		const legacyPath = join(legacyDir, "kernel-state.dill");
+		const ipythonArtifactDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-ipython-artifact-"));
+		const ipythonArtifactPath = join(ipythonArtifactDir, "kernel-state.dill");
 		const buildScript = [
 			"import dill",
 			"dill.settings['recurse'] = True",
@@ -107,7 +107,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			"    'Out': dill.dumps({1: 'x'}),",
 			"    'get_ipython': dill.dumps(None),",
 			"}",
-			`with open(${JSON.stringify(legacyPath)}, "wb") as fh:`,
+			`with open(${JSON.stringify(ipythonArtifactPath)}, "wb") as fh:`,
 			"    dill.dump(payload, fh)",
 		].join("\n");
 		const build = spawnSync(python as string, ["-c", buildScript], { encoding: "utf8" });
@@ -115,8 +115,8 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 
 		const manager = new ReplKernelManager({
 			python: python as string,
-			cwd: legacyDir,
-			snapshot: { path: legacyPath, manifestPath: join(legacyDir, "kernel-state.json") },
+			cwd: ipythonArtifactDir,
+			snapshot: { path: ipythonArtifactPath, manifestPath: join(ipythonArtifactDir, "kernel-state.json") },
 		});
 		try {
 			const restore = await manager.restoreState();
@@ -126,7 +126,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			expect(echo.stdout.trim()).toBe("42 hello False False");
 		} finally {
 			await manager.dispose();
-			rmSync(legacyDir, { recursive: true, force: true });
+			rmSync(ipythonArtifactDir, { recursive: true, force: true });
 		}
 	}, 60_000);
 
