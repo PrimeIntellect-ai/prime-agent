@@ -241,6 +241,43 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(text.endswith("b" * 1000))
         self.assertIn("a" * 1000 + "b" * 1000, text)
 
+    async def test_running_reflects_group_liveness(self):
+        handle = bash("echo fg; sleep 30 &")
+        result = await asyncio.wait_for(handle, timeout=5)
+        self.assertEqual(result.exit_code, 0)
+        # The foreground result is in, but the group still anchors `sleep 30 &`.
+        self.assertIsNotNone(handle.poll())
+        self.assertTrue(handle.running)
+        handle.kill(signal.SIGKILL)
+        for _ in range(100):
+            if not handle.running:
+                break
+            await asyncio.sleep(0.05)
+        self.assertFalse(handle.running)
+
+    async def test_windows_kill_terminates_tree(self):
+        handle = bash("sleep 30")
+        try:
+            completed = mock.Mock(returncode=0)
+            with mock.patch.object(bash_module, "_IS_POSIX", False):
+                with mock.patch.object(handle._proc, "kill") as proc_kill:
+                    patched_run = mock.patch.object(
+                        bash_module.subprocess, "run", return_value=completed
+                    )
+                    with patched_run as run:
+                        handle.kill()
+                    self.assertEqual(
+                        run.call_args.args[0], ["taskkill", "/PID", str(handle.pid), "/T", "/F"]
+                    )
+                    proc_kill.assert_not_called()
+                    # taskkill unavailable or failing must fall back to Popen.kill().
+                    with mock.patch.object(bash_module.subprocess, "run", side_effect=OSError):
+                        handle.kill()
+                    proc_kill.assert_called_once()
+        finally:
+            handle.kill(signal.SIGKILL)
+            await asyncio.wait_for(handle, timeout=5)
+
     def test_windows_process_start_id(self):
         completed = mock.Mock(stdout="638000000000000000\n")
         with mock.patch.object(bash_module.os, "name", "nt"):
