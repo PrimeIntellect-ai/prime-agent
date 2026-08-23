@@ -19,7 +19,7 @@ export default defineConfig({
 			},
 			{
 				name: "kernel-heavy",
-				description: "Boots a real IPython kernel and syncs skills into the shared venv",
+				description: "Boots a real Python kernel and syncs skills into the shared venv",
 			},
 		],
 		// Kernel-heavy tests are excluded from the default sharded run: several files
