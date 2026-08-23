@@ -216,6 +216,18 @@ Normally the package manager's global modules location is queried using `root -g
 
 When multiple sources specify a session directory, precedence is `--session-dir`, `PRIME_AGENT_SESSION_DIR`, the legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in `settings.json`.
 
+### Recursion
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `rlmMaxDepth` | non-negative integer | `1` | Maximum RLM recursion depth: how many levels of `rlm(...)` subagent nesting are allowed. `0` disables recursion. |
+
+```json
+{ "rlmMaxDepth": 3 }
+```
+
+When multiple sources specify the depth, precedence is: per-chat state (set with `/rlm-max-depth [<int> [--global]]`, where `--global` writes this setting), an inherited parent value, `rlmMaxDepth` in settings.json, then the `RLM_MAX_DEPTH` environment variable, then the default of `1`. The effective depth and its source are shown by `/rlm-max-depth` with no argument.
+
 ### Model Cycling
 
 | Setting | Type | Default | Description |

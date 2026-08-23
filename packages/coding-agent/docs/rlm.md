@@ -103,7 +103,9 @@ Successfully completed daemon-backed children remain addressable while their par
 await rlm.delete_subagent(children[0])
 ```
 
-The default recursion depth allows a root agent to create children. Raising the configured depth allows descendants to recurse further.
+The default recursion depth is `1`, which allows a root agent to create children but not grandchildren. Raising the configured depth allows descendants to recurse further; setting it to `0` disables recursion entirely.
+
+Configure the depth with the `rlmMaxDepth` setting in `settings.json`, or change it live in a chat with the `/rlm-max-depth [<int> [--global]]` command (`--global` also saves it as the default for new sessions). Precedence is: per-chat state set via `/rlm-max-depth`, an inherited parent value, then `rlmMaxDepth` in settings, then the `RLM_MAX_DEPTH` environment variable, then the default of `1`. See [Settings](settings.md#recursion).
 
 ### 3. Skills add programmatic capability
 
