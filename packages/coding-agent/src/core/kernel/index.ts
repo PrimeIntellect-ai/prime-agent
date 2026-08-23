@@ -1216,6 +1216,8 @@ export class KernelManager {
 				.kill(killSignal === "SIGKILL" ? "KILL" : "TERM")
 				.then((outcome) => {
 					if (outcome === "signaled") recordOrphanProcessState(forked.pid, false);
+					// Reap again: bash children journaled while the async kill was in flight.
+					reapKernelOrphanProcesses(forked.pid);
 				})
 				.catch(() => this.appendKernelDiagnostic("forkserver kill unconfirmed; leaving orphan record active"));
 			// Same reaping as the direct branch: bash() children journaled under this kernel pid.
