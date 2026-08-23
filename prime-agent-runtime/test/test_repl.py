@@ -516,6 +516,11 @@ class ReplTest(unittest.TestCase):
     def test_shutdown_clean_exit(self):
         self.assertEqual(self.repl.shutdown(), 0)
 
+    def test_shutdown_after_mcp_import_exits_cleanly(self):
+        events = self.repl.execute("mcp-import", "import rlm.mcp")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertEqual(self.repl.shutdown(), 0)
+
     def _start_pending_host_request(self) -> None:
         code = "\n".join(
             [

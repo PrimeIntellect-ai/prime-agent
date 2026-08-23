@@ -1,55 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { rewriteCellMagics } from "../src/core/tools/ipython-cell-code.js";
+import { magicRejection } from "../src/core/tools/ipython-cell-code.js";
 
-describe("rewriteCellMagics", () => {
-	it("rewrites a %%bash cell into an awaited bash() stanza", () => {
-		const rewritten = rewriteCellMagics("%%bash\necho hi\nls -la");
-		expect(rewritten).toContain(`_prime_agent_bash = await bash(${JSON.stringify("echo hi\nls -la")})`);
-		expect(rewritten).toContain('print(_prime_agent_bash.output, end="")');
-		expect(rewritten).toContain('raise RuntimeError(f"bash exited with code {_prime_agent_bash.exit_code}")');
+describe("magicRejection", () => {
+	it("rejects a %%bash cell with the bash() teaching message", () => {
+		expect(magicRejection("%%bash\necho hi")).toBe(
+			"%%bash cells are not supported; use bash('cmd') / await bash('cmd')",
+		);
 	});
 
-	it("drops %%bash magic arguments (shell settings flow via env)", () => {
-		const rewritten = rewriteCellMagics("%%bash --login\necho hi");
-		expect(rewritten).toContain(`await bash(${JSON.stringify("echo hi")})`);
-		expect(rewritten).not.toContain("--login");
+	it("rejects other %% cell magics", () => {
+		expect(magicRejection("%%timeit\nx = 1")).toBe("%% cell magics are not supported; this is a plain Python REPL");
 	});
 
-	it("preserves leading blank lines before a %%bash cell", () => {
-		const rewritten = rewriteCellMagics("\n\n%%bash\necho hi");
-		expect(rewritten.startsWith("\n\n_prime_agent_bash")).toBe(true);
+	it("rejects %cd with the os.chdir teaching message", () => {
+		expect(magicRejection("%cd /tmp/dir")).toBe("%cd is not supported; use os.chdir(...)");
 	});
 
-	it("rewrites %cd with a target directory", () => {
-		expect(rewriteCellMagics("%cd /tmp/dir")).toBe('__import__("os").chdir("/tmp/dir")');
+	it("rejects %env with the os.environ teaching message", () => {
+		expect(magicRejection("%env FOO=bar")).toBe("%env is not supported; use os.environ[...]");
 	});
 
-	it("rewrites bare %cd to the home directory", () => {
-		expect(rewriteCellMagics("%cd")).toBe('__import__("os").chdir(__import__("os").path.expanduser("~"))');
+	it("rejects other % line magics", () => {
+		expect(magicRejection("%timeit x = 1")).toBe("% line magics are not supported; this is a plain Python REPL");
 	});
 
-	it("rewrites %env NAME=value to an environ assignment", () => {
-		expect(rewriteCellMagics("%env FOO=bar baz")).toBe('__import__("os").environ["FOO"] = "bar baz"');
+	it("rejects ! shell escapes with the bash() teaching message", () => {
+		expect(magicRejection("!ls -la")).toBe("! shell escapes are not supported; use bash('cmd') / await bash('cmd')");
 	});
 
-	it("rewrites %env NAME to an environ read", () => {
-		expect(rewriteCellMagics("%env FOO")).toBe('print(__import__("os").environ["FOO"])');
+	it("tolerates leading blank lines before the magic", () => {
+		expect(magicRejection("\n\n  \n%%bash\necho hi")).toBe(
+			"%%bash cells are not supported; use bash('cmd') / await bash('cmd')",
+		);
 	});
 
-	it("rewrites magics only at column 0 and keeps other lines untouched", () => {
-		const code = 'x = 1\n%cd /tmp\ny = "  %cd /other"\n    %cd indented';
-		const rewritten = rewriteCellMagics(code);
-		expect(rewritten).toContain('__import__("os").chdir("/tmp")');
-		expect(rewritten).toContain('y = "  %cd /other"');
-		expect(rewritten).toContain("    %cd indented");
+	it("passes through plain Python", () => {
+		expect(magicRejection("x = 1\nprint(x)")).toBeUndefined();
 	});
 
-	it("passes plain Python through untouched", () => {
-		const code = "import os\nprint(os.getcwd())";
-		expect(rewriteCellMagics(code)).toBe(code);
+	it("passes through mid-cell % (modulo) and !=", () => {
+		expect(magicRejection("x = 7 % 3")).toBeUndefined();
+		expect(magicRejection("if x != 1:\n    print(x)")).toBeUndefined();
 	});
 
-	it("passes unknown magics through untouched", () => {
-		expect(rewriteCellMagics("%timeit x = 1")).toBe("%timeit x = 1");
+	it("passes through an empty cell", () => {
+		expect(magicRejection("")).toBeUndefined();
+		expect(magicRejection("\n  \n")).toBeUndefined();
 	});
 });

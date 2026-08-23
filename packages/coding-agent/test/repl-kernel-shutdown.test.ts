@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
 
@@ -180,5 +182,13 @@ describe("ReplKernelManager graceful shutdown", () => {
 
 		expect(internals.pendingDoneWaiters.size).toBe(0);
 		expect(internals.child).toBeUndefined();
+	});
+
+	it("keeps the kernel MCP close budget strictly inside the host shutdown deadline", () => {
+		const source = readFileSync(resolve(__dirname, "../../../prime-agent-runtime/src/rlm/mcp.py"), "utf8");
+		const match = source.match(/^_SHUTDOWN_TIMEOUT = ([\d.]+)$/m);
+		expect(match).not.toBeNull();
+		// +1s dispatch slack in mcp.py close(); the sum must undercut the host's 5s kill deadline.
+		expect((Number(match![1]) + 1) * 1000).toBeLessThan(5000);
 	});
 });

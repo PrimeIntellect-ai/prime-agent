@@ -99,8 +99,7 @@ export class ReplKernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
 		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
-	> &
-		Required<Pick<KernelManagerOptions, "username">>;
+	>;
 	private readonly handledHostRequestIds = new Set<string>();
 	private child?: ChildProcess;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
@@ -134,7 +133,6 @@ export class ReplKernelManager {
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
-			username: options.username ?? "prime-agent",
 		};
 	}
 

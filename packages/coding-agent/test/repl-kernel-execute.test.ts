@@ -10,7 +10,6 @@ import {
 	type HostRequestHandlers,
 	ReplKernelManager,
 } from "../src/core/kernel/index.js";
-import { rewriteCellMagics } from "../src/core/tools/ipython-cell-code.js";
 
 function resolveReplPython(): string | null {
 	const candidates = [
@@ -121,34 +120,5 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		const unknown = await manager.execute("import rlm\nawait rlm.host_request('test.unknown')");
 		expect(unknown.status).toBe("error");
 		expect(unknown.error?.evalue).toContain('host request type "test.unknown" is not available');
-	}, 30_000);
-
-	it("runs a rewritten %%bash cell end-to-end", async () => {
-		manager = new ReplKernelManager({ python: python as string, cwd: dir });
-		await manager.execute("from rlm import bash");
-		const ok = await manager.execute(rewriteCellMagics("%%bash\necho repl-bash-ok"));
-		expect(ok.status).toBe("ok");
-		expect(ok.stdout).toContain("repl-bash-ok");
-
-		const failing = await manager.execute(rewriteCellMagics("%%bash\nexit 3"));
-		expect(failing.status).toBe("error");
-		expect(failing.error?.evalue).toContain("bash exited with code 3");
-	}, 30_000);
-
-	it("applies %cd and %env rewrites", async () => {
-		manager = new ReplKernelManager({ python: python as string, cwd: dir });
-		const cd = await manager.execute(rewriteCellMagics(`%cd ${dir}\nimport os\nprint(os.getcwd())`));
-		expect(cd.status).toBe("ok");
-		expect(cd.stdout.trim().endsWith(dir.split("/").pop() as string)).toBe(true);
-
-		const env = await manager.execute(
-			rewriteCellMagics("%env PRIME_TEST_MAGIC=hello\nimport os\nos.environ['PRIME_TEST_MAGIC']"),
-		);
-		expect(env.status).toBe("ok");
-		expect(env.result).toBe("'hello'");
-
-		const read = await manager.execute(rewriteCellMagics("%env PRIME_TEST_MAGIC"));
-		expect(read.status).toBe("ok");
-		expect(read.stdout.trim()).toBe("hello");
 	}, 30_000);
 });

@@ -6,8 +6,6 @@ export const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 export const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
-// Snapshot/restore payloads can be large to (de)serialize; give them room beyond the user cap.
-export const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
 // Cap how long a graceful dispose waits on the final snapshot; the debounced
 // on-disk copy is the fallback if this is exceeded.
 export const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
@@ -17,12 +15,7 @@ export const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 export const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 export const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
-	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
-
-/** Selects the Jupyter/ZMQ kernel client instead of the REPL runtime client. */
-export function usesIpythonKernel(): boolean {
-	return process.env.PRIME_AGENT_KERNEL === "ipython";
-}
+	"The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.";
 
 export class KernelBusyAfterInterruptError extends Error {
 	constructor() {
@@ -30,9 +23,6 @@ export class KernelBusyAfterInterruptError extends Error {
 		this.name = "KernelBusyAfterInterruptError";
 	}
 }
-
-/** Comm target the kernel-side `rlm.host_request` shim opens for typed host requests. */
-export const HOST_COMM_TARGET = "host.request";
 
 /**
  * Handles one typed request from Python code running in the kernel.
@@ -143,8 +133,6 @@ export interface KernelManagerOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
-	/** Default: "prime-agent". */
-	username?: string;
 }
 
 export interface KernelStartOptions {

@@ -13,7 +13,7 @@ import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/
 /**
  * Real-kernel verification for ACP mode.
  *
- * These tests boot an actual IPython kernel (no API key, no network) to prove
+ * These tests boot an actual Python kernel (no API key, no network) to prove
  * the capabilities ACP mode claims to preserve genuinely work, and that the
  * resulting output is representable over ACP. Mapper-level unit tests cannot
  * show that a kernel round trip still holds state or that harness CRUD runs.
@@ -42,7 +42,7 @@ function toolEndEvent(toolCallId: string, output: string, isError = false): Agen
 	} as AgentConnectionSessionEvent;
 }
 
-describe("ACP mode over a real IPython kernel", () => {
+describe("ACP mode over a real Python kernel", () => {
 	let tempDir: string;
 	let provisioner: IpythonKernelProvisioner | undefined;
 
@@ -57,7 +57,7 @@ describe("ACP mode over a real IPython kernel", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("keeps IPython state across cells and represents each cell as an ACP execute call", {
+	it("keeps Python state across cells and represents each cell as an ACP execute call", {
 		tags: ["kernel-heavy"],
 		timeout: 180_000,
 	}, async () => {

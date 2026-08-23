@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { KernelManager } from "../src/core/kernel/index.js";
+import { ReplKernelManager } from "../src/core/kernel/index.js";
 
 const runtimePython = resolve("../../prime-agent-runtime/.venv/bin/python");
 const fallbackPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
@@ -11,7 +11,7 @@ const fallbackPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", 
 function resolveKernelPython(): string | null {
 	for (const python of [process.env.PRIME_AGENT_KERNEL_PYTHON, runtimePython, fallbackPython]) {
 		if (!python || !existsSync(python)) continue;
-		const check = spawnSync(python, ["-c", "import ipykernel, mcp, rlm"], { encoding: "utf8" });
+		const check = spawnSync(python, ["-c", "import rlm.repl, mcp, rlm"], { encoding: "utf8" });
 		if (check.status === 0) return python;
 	}
 	return null;
@@ -56,7 +56,7 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 	return !pidExists(pid);
 }
 
-describeIfKernel("real IPython MCP shutdown", { tags: ["kernel-heavy"] }, () => {
+describeIfKernel("real kernel MCP shutdown", { tags: ["kernel-heavy"] }, () => {
 	let dir = "";
 	let fixture = "";
 	let pidFile = "";
@@ -72,8 +72,8 @@ describeIfKernel("real IPython MCP shutdown", { tags: ["kernel-heavy"] }, () => 
 		if (dir) rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("closes a stdio MCP child on control-channel shutdown without an AnyIO cross-task error", async () => {
-		let manager: KernelManager | undefined = new KernelManager({
+	it("closes a stdio MCP child on graceful shutdown without an AnyIO cross-task error", async () => {
+		let manager: ReplKernelManager | undefined = new ReplKernelManager({
 			python: python as string,
 			cwd: resolve("../../prime-agent-runtime"),
 			hostHandlers: {
@@ -86,7 +86,7 @@ describeIfKernel("real IPython MCP shutdown", { tags: ["kernel-heavy"] }, () => 
 		});
 		try {
 			const opened = await manager.execute(
-				"import rlm.mcp as mcp; mcp.install_shutdown_hook(); tools = await mcp.list_tools('fixture'); [t['name'] for t in tools]",
+				"import rlm.mcp as mcp; tools = await mcp.list_tools('fixture'); [t['name'] for t in tools]",
 			);
 			expect(opened.status, opened.stderr || opened.error?.traceback.join("\n")).toBe("ok");
 			expect(opened.result).toContain("fixture.echo");

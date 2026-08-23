@@ -51,7 +51,7 @@ describe("ACP session event mapping", () => {
 			{
 				sessionUpdate: "tool_call",
 				toolCallId: "call-1",
-				title: "IPython cell",
+				title: "Python cell",
 				kind: "execute",
 				status: "in_progress",
 				rawInput: { code: "print(1)" },

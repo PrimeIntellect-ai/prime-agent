@@ -90,7 +90,6 @@ async function runCli(
 			[ENV_AGENT_DIR]: options.agentDir,
 			PI_SKIP_VERSION_CHECK: "1",
 			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
-			PRIME_AGENT_KERNEL_FORKSERVER: "0",
 			RLM_DEPTH: "0",
 			// The test deliberately RE-INJECTS the worker role env var
 			// (via options.environment, applied last) to prove the
