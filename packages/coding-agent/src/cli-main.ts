@@ -6,6 +6,7 @@ import {
 	isOwnedSessionWorkerProcess,
 	maybeRunOwnedSessionWorkerFrontend,
 } from "./cli/owned-session-worker.js";
+import { ensureStartupCwd } from "./cli/startup-cwd.js";
 import { APP_NAME } from "./config.js";
 
 export async function runCli(): Promise<void> {
@@ -19,9 +20,14 @@ export async function runCli(): Promise<void> {
 	process.env.PI_CODING_AGENT = "true";
 	process.emitWarning = (() => {}) as typeof process.emitWarning;
 
+	const args = process.argv.slice(2);
+	if (!ensureStartupCwd(args, { log: console.error })) {
+		process.exitCode = 1;
+		return;
+	}
+
 	installOwnedSessionWorkerOwnerWatch();
 
-	const args = process.argv.slice(2);
 	const handledByOwnedWorker = await maybeRunOwnedSessionWorkerFrontend(args);
 	if (!handledByOwnedWorker) {
 		if (!isOwnedSessionWorkerProcess()) {

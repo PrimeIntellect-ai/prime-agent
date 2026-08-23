@@ -1,0 +1,1 @@
+- Fixed startup from a deleted working directory to show recovery guidance instead of a Node stack trace.
