@@ -323,7 +323,12 @@ class ReplTest(unittest.TestCase):
             e["text"] for e in events if e.get("event") == "stdout" and e.get("id") is None
         )
         self.assertEqual(raw.count("x"), 262144)
-        self.assertIn("wrote 262144", stream_text(events, "stdout"))
+        # Cross-channel ordering is not guaranteed: raw x-chunks may interleave
+        # between print()'s tagged fragments, so join only the tagged channel.
+        tagged = "".join(
+            e["text"] for e in events if e.get("event") == "stdout" and e.get("id") == "bigbuf"
+        )
+        self.assertIn("wrote 262144", tagged)
 
     def test_interrupt_without_pthread_kill_cancels_awaited_cell(self):
         # Windows fallback seam: with pthread_kill absent the reader cancels
