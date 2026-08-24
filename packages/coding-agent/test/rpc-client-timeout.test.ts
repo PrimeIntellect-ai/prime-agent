@@ -39,6 +39,23 @@ describe("RpcClient operation completion", () => {
 		await expect(result).resolves.toMatchObject({ output: "done", exitCode: 0 });
 	});
 
+	it("rejects promptAndWait when the prompt response fails", async () => {
+		const client = await createClient();
+		const result = expect(client.promptAndWait("rejected prompt")).rejects.toThrow("prompt rejected");
+
+		client["handleLine"](
+			JSON.stringify({
+				id: "req_1",
+				type: "response",
+				command: "prompt",
+				success: false,
+				error: "prompt rejected",
+			}),
+		);
+
+		await result;
+	});
+
 	it("does not time out agent completion by default", async () => {
 		const client = await createClient();
 		vi.useFakeTimers();
