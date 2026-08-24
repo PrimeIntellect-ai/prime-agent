@@ -548,5 +548,138 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(self.repl.proc.wait(timeout=10), 0)
 
 
+    def test_interrupt_with_non_string_id_is_protocol_error(self):
+        self.repl.send({"type": "execute", "id": "busy", "code": "import asyncio\nawait asyncio.sleep(0.6)\n'done'"})
+        time.sleep(0.2)
+        self.repl.send({"type": "interrupt", "id": 123})
+        events = self.repl.until_done("busy")
+        protocol_errors = [e for e in events if e.get("ename") == "ProtocolError"]
+        self.assertEqual(len(protocol_errors), 1)
+        self.assertIn("interrupt request id must be a string", protocol_errors[0]["evalue"])
+        # The running cell was not interrupted by the malformed request.
+        self.assertEqual(one(events, "result")["text"], "'done'")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_snapshot_rejects_non_boolean_and_non_integer_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            self.repl.execute("v1", "big = b'x' * 100_000")
+            self.repl.send(
+                {
+                    "type": "snapshot",
+                    "id": "v2",
+                    "path": path,
+                    "manifest_path": manifest_path,
+                    "max_variable_bytes": 1024,
+                    "prune_oversized": "false",
+                }
+            )
+            done = one(self.repl.until_done("v2"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertIn("boolean", done["reason"])
+            events = self.repl.execute("v3", "'big' in dir()")
+            self.assertEqual(one(events, "result")["text"], "True")
+
+            self.repl.send(
+                {"type": "snapshot", "id": "v4", "path": path, "manifest_path": manifest_path, "max_bytes": "10"}
+            )
+            done = one(self.repl.until_done("v4"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertIn("max_bytes must be an integer", done["reason"])
+
+            # An explicit JSON null is present-but-invalid, not "use the default".
+            self.repl.send(
+                {"type": "snapshot", "id": "v5", "path": path, "manifest_path": manifest_path, "max_bytes": None}
+            )
+            done = one(self.repl.until_done("v5"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertIn("max_bytes must be an integer", done["reason"])
+
+            self.repl.send(
+                {
+                    "type": "snapshot",
+                    "id": "v6",
+                    "path": path,
+                    "manifest_path": manifest_path,
+                    "max_variable_bytes": None,
+                }
+            )
+            done = one(self.repl.until_done("v6"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertIn("max_variable_bytes must be an integer", done["reason"])
+
+    def test_exception_with_broken_str_reported_safely(self):
+        code = "\n".join(
+            [
+                "class Broken(Exception):",
+                "    def __str__(self):",
+                "        raise RuntimeError('nope')",
+                "raise Broken()",
+            ]
+        )
+        events = self.repl.execute("brk", code)
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "Broken")
+        self.assertEqual(error["evalue"], "<exception str() failed>")
+        self.assertEqual(one(events, "done")["status"], "error")
+        follow = self.repl.execute("after-brk", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+
+    def test_snapshot_manifest_write_failure_fails_without_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "missing-dir", "kernel-state.json")
+            self.repl.execute("m1", "big = b'x' * 100_000")
+            self.repl.send(
+                {
+                    "type": "snapshot",
+                    "id": "m2",
+                    "path": path,
+                    "manifest_path": manifest_path,
+                    "max_variable_bytes": 1024,
+                    "prune_oversized": True,
+                }
+            )
+            done = one(self.repl.until_done("m2"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertTrue(done["reason"].startswith("manifest write failed"))
+            events = self.repl.execute("m3", "'big' in dir()")
+            self.assertEqual(one(events, "result")["text"], "True")
+
+    def test_restore_missing_snapshot_is_ok_with_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.repl.send({"type": "restore", "id": "r0", "path": os.path.join(tmp, "absent.dill")})
+            done = one(self.repl.until_done("r0"), "done")
+            self.assertEqual(done["status"], "ok")
+            self.assertEqual(done["restored"], [])
+            self.assertEqual(done["failed"], [])
+            self.assertEqual(done["reason"], "snapshot not found")
+
+
+class FinishRequestTest(unittest.TestCase):
+    """In-process checks of the parked-interrupt bookkeeping on request finish."""
+
+    def setUp(self) -> None:
+        import rlm.repl as repl_module
+
+        self.repl_module = repl_module
+        self.addCleanup(self._reset)
+
+    def _reset(self) -> None:
+        self.repl_module._inflight.clear()
+        self.repl_module._pending_interrupts["ids"].clear()
+        self.repl_module._pending_interrupts["any"] = False
+
+    def test_parked_any_survives_while_another_request_is_inflight(self):
+        repl = self.repl_module
+        repl._inflight.update({"a", "b"})
+        repl._pending_interrupts["any"] = True
+        repl._finish_request("a")
+        self.assertTrue(repl._pending_interrupts["any"])
+        repl._finish_request("b")
+        self.assertFalse(repl._pending_interrupts["any"])
+
+
 if __name__ == "__main__":
     unittest.main()
