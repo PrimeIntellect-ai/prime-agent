@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
@@ -386,7 +386,7 @@ export class DaemonCatalogClient {
 	private async spawnCatalog(): Promise<void> {
 		const launch = this.launchSpec();
 		const child = spawn(launch.command, launch.args, {
-			cwd: process.cwd(),
+			cwd: tmpdir(),
 			env: createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" }),
 			stdio: ["ignore", "ignore", "ignore", "ipc"],
 		});
