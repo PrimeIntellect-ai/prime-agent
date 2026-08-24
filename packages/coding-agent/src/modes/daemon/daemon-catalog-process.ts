@@ -11,8 +11,14 @@ export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
 const CATALOG_STOP_GRACE_MS = 2000;
 const CATALOG_STOP_KILL_GRACE_MS = 1000;
 
-function delay(milliseconds: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+	return new Promise((resolve) => {
+		const timeout = setTimeout(() => resolve(false), timeoutMs);
+		void promise.then(() => {
+			clearTimeout(timeout);
+			resolve(true);
+		});
+	});
 }
 
 function waitForChildExit(child: ChildProcess): Promise<void> {
@@ -354,23 +360,16 @@ export class DaemonCatalogClient {
 			return;
 		}
 		const exited = waitForChildExit(child);
-		const shutdown = this.request(
+		void this.request(
 			{ type: "request", id: randomUUID(), command: "shutdown" },
 			undefined,
 			CATALOG_STOP_GRACE_MS,
 			child,
 		).catch(() => undefined);
-		const exitedGracefully = await Promise.race([
-			exited.then(() => true),
-			shutdown.then(() => exited).then(() => true),
-			delay(CATALOG_STOP_GRACE_MS).then(() => false),
-		]);
+		const exitedGracefully = await settlesWithin(exited, CATALOG_STOP_GRACE_MS);
 		if (!exitedGracefully && child.exitCode === null && child.signalCode === null) {
 			child.kill("SIGKILL");
-			const killed = await Promise.race([
-				exited.then(() => true),
-				delay(CATALOG_STOP_KILL_GRACE_MS).then(() => false),
-			]);
+			const killed = await settlesWithin(exited, CATALOG_STOP_KILL_GRACE_MS);
 			if (!killed) {
 				throw new Error("Daemon catalog did not exit after SIGKILL");
 			}

@@ -88,6 +88,7 @@ function createHarness(
 			recordResult: vi.fn(),
 			acknowledge: vi.fn(),
 		},
+		acceptingCommands: true,
 		updateRestartPhase: options.updateRestartPhase,
 		findWorkerForClient: options.findWorker,
 		forwardToWorker: options.forwardToWorker,
@@ -587,13 +588,36 @@ describe("daemon supervisor prompt admission ownership", () => {
 
 describe("daemon supervisor shutdown admission", () => {
 	it("rejects new sockets after shutdown begins", () => {
-		const supervisor = createHarness() as SupervisorHarness & { shuttingDown: boolean };
-		supervisor.shuttingDown = true;
+		const supervisor = createHarness() as SupervisorHarness & { acceptingCommands: boolean };
+		supervisor.acceptingCommands = false;
 		const socket = Object.assign(new PassThrough(), { destroy: vi.fn() }) as unknown as Socket;
 
 		supervisor.handleConnection(socket);
 
 		expect(socket.destroy).toHaveBeenCalledOnce();
 		expect(supervisor.clients).toHaveLength(0);
+	});
+
+	it("rejects commands queued after shutdown admission closes", async () => {
+		const supervisor = createHarness() as SupervisorHarness & {
+			acceptingCommands: boolean;
+			write: ReturnType<typeof vi.fn>;
+		};
+		supervisor.acceptingCommands = false;
+		const owner = client("connection-owner");
+
+		await supervisor.handleLine(
+			owner,
+			commandLine({ id: "list-after-shutdown", type: "list" } satisfies DaemonCommand),
+		);
+
+		expect(supervisor.write).toHaveBeenCalledWith(
+			owner,
+			expect.objectContaining({
+				command: "list",
+				error: "Daemon is shutting down",
+				success: false,
+			}),
+		);
 	});
 });

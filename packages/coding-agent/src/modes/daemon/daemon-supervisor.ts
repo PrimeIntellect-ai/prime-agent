@@ -617,6 +617,7 @@ export class DaemonSupervisor {
 	private socketLease?: DaemonSocketPathLease;
 	private ownership?: Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 	private cleanupPromise?: Promise<void>;
+	private acceptingCommands = true;
 	private shuttingDown = false;
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
 	private readonly mutationDrain = new MutationDrainLatch();
@@ -1051,7 +1052,7 @@ export class DaemonSupervisor {
 	}
 
 	private handleConnection(socket: Socket): void {
-		if (this.shuttingDown) {
+		if (!this.acceptingCommands) {
 			socket.destroy();
 			return;
 		}
@@ -1360,6 +1361,11 @@ export class DaemonSupervisor {
 		}
 		const command = preParsed.command;
 		const parsedAdmission = preParsed.admission;
+		if (!this.acceptingCommands) {
+			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
+			this.write(client, failure(command.id, command.type, "Daemon is shutting down"));
+			return;
+		}
 		if (command.type === "cancel_prompt_admission" && this.updateRestartPhase !== undefined) {
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
 			return;
@@ -1796,9 +1802,11 @@ export class DaemonSupervisor {
 				return success(command.id, command.type, summary ? this.publicSummary(worker, summary) : undefined);
 			}
 			case "restart":
+				this.acceptingCommands = false;
 				setImmediate(() => void this.shutdown(0, false, true, false, "update"));
 				return success(command.id, command.type);
 			case "shutdown":
+				this.acceptingCommands = false;
 				setImmediate(() => void this.shutdown(0, true, false, command.force === true, "shutdown"));
 				return success(command.id, "shutdown");
 			case "prepare_update_restart": {
@@ -5327,7 +5335,10 @@ export class DaemonSupervisor {
 			signals.push("SIGHUP");
 		}
 		for (const signal of signals) {
-			const handler = () => void this.shutdown(signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143, false);
+			const handler = () => {
+				this.acceptingCommands = false;
+				void this.shutdown(signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143, false);
+			};
 			process.on(signal, handler);
 			this.signalCleanupHandlers.push(() => process.off(signal, handler));
 		}
@@ -5355,6 +5366,7 @@ export class DaemonSupervisor {
 	}
 
 	private async cleanupSupervisorResourcesOnce(): Promise<void> {
+		this.acceptingCommands = false;
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);
@@ -5454,6 +5466,7 @@ export class DaemonSupervisor {
 		if (this.shuttingDown) {
 			process.exit(exitCode);
 		}
+		this.acceptingCommands = false;
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);
