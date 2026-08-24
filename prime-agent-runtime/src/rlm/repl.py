@@ -22,6 +22,7 @@ import threading
 import traceback
 import types
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .bash import _kill_live_handles
@@ -130,13 +131,15 @@ class _Pump:
 
     def __init__(self, read_fd: int, write_fd: int, stream: str) -> None:
         self._read_fd = read_fd
-        self._write_fd = write_fd
+        # Private write end: a cell closing/reclaiming fd 1/2 cannot hijack drain tokens.
+        self._token_fd = os.dup(write_fd)
         self._stream = stream
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._lock = threading.Lock()
         self._watch: tuple[bytes, threading.Event] | None = None
         self._buf = b""
-        threading.Thread(target=self._run, daemon=True).start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def drain(self) -> None:
         """Block until every byte written to the fd so far has been shipped."""
@@ -145,12 +148,16 @@ class _Pump:
         with self._lock:
             self._watch = (token, seen)
         try:
-            os.write(self._write_fd, token)
+            os.write(self._token_fd, token)
+            # Backstop only: a dead pump (read end closed under it) can never set seen.
+            while not seen.wait(0.1):
+                if not self._thread.is_alive():
+                    return
         except OSError:
             return
-        seen.wait()
-        with self._lock:
-            self._watch = None
+        finally:
+            with self._lock:
+                self._watch = None
 
     def _run(self) -> None:
         while True:
@@ -386,19 +393,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     token = _current_cell.set(cell_id)
     _stream_cell = cell_id
     try:
-        try:
-            codes, has_trailing = _compile_cell(req["code"], filename)
-        except (SyntaxError, ValueError) as exc:
-            with _interrupt_lock:
-                # An interrupt parked for this request belongs to it: consume it
-                # (mirroring _run_guarded's activation) so it cannot leak to the
-                # next cell while other requests keep "any" alive in _finish_locked.
-                _consume_pending_interrupt(cell_id)
-                _finish_locked(cell_id)
-            _stream_cell = None
-            _send(_error_event(cell_id, exc))
-            _send({"event": "done", "id": cell_id, "status": "error"})
-            return
+        codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
         task = _loop.create_task(_run_codes(codes, ns))
         status, value, error = await _run_guarded(task, cell_id)
@@ -425,12 +420,13 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
 
 def _drain_output() -> None:
     # Per-stream, and ValueError too: a cell may close sys.stdout/sys.stderr, and
-    # flushing a closed file raises ValueError; neither may kill the serve loop
-    # nor skip flushing the other stream.
+    # flushing a closed file raises ValueError, or rebind them to a flush-less
+    # object (AttributeError); neither may kill the serve loop nor skip flushing
+    # the other stream.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError):
             pass
     _pump_out.drain()
     _pump_err.drain()
@@ -609,6 +605,27 @@ def _list_names(ns: dict[str, Any]) -> list[str]:
     return sorted(name for name in ns if not name.startswith("_") and name not in _ALWAYS_SKIP)
 
 
+async def _handle_request(
+    handler: Callable[[dict[str, Any], dict[str, Any]], Awaitable[None]],
+    req: dict[str, Any],
+    ns: dict[str, Any],
+) -> None:
+    # Backstop: one broken request (e.g. RecursionError in compile) fails alone, never the serve loop.
+    try:
+        await handler(req, ns)
+    except BaseException as exc:  # noqa: BLE001 - any per-request failure becomes error+done
+        rid = req["id"]
+        with _interrupt_lock:
+            # Only a still-inflight request (never reached _run_guarded, e.g. compile
+            # failure) owns a parked interrupt; after _run_guarded finished it, a parked
+            # "any" belongs to the next request and must survive.
+            if rid in _inflight:
+                _consume_pending_interrupt(rid)
+            _finish_locked(rid)
+        _send(_error_event(rid, exc))
+        _send({"event": "done", "id": rid, "status": "error"})
+
+
 async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> None:
     while True:
         req = await queue.get()
@@ -628,9 +645,9 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
                 _send({"event": "done", "id": rid, "status": "ok"})
             return
         if rtype == "execute":
-            await _handle_execute(req, ns)
+            await _handle_request(_handle_execute, req, ns)
         elif rtype in ("snapshot", "restore"):
-            await _handle_state(req, ns)
+            await _handle_request(_handle_state, req, ns)
         elif rtype == "list_names":
             _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
 
