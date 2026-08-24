@@ -10,6 +10,7 @@
 - Fixed a compile-phase crash (e.g. RecursionError from a pathologically deep attribute chain) killing the REPL runtime instead of failing the one cell: any per-request failure now becomes error+done and the serve loop keeps running; rebinding sys.stdout/sys.stderr to flush-less objects no longer kills it either.
 - Fixed the REPL runtime hanging before done when a cell closes fd 1/2 and a later open() reclaims the number: drain sync tokens now go through a private dup of the capture pipe, with a pump-liveness backstop so a dead pump can no longer wedge the serve loop.
 - Fixed the Windows orphan reaper killing only the journaled bash() shell pid; it now uses taskkill /T so descendants die with the tree, matching the in-kernel bash() kill paths.
+- Fixed an interrupt landing mid-snapshot leaving prune deletions half-applied: once the snapshot manifest is committed, SIGINT is deferred until every oversized name is removed, so the namespace always matches the on-disk snapshot.
 
 ## [0.8.0] - 2026-08-21
 
