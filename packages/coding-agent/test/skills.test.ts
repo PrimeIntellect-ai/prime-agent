@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "os";
 import { join, resolve } from "path";
 import { describe, expect, it } from "vitest";
 import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
+import type { RetainedMeta } from "../src/core/retained-tools/meta.js";
 import {
 	formatSkillsForPrompt,
 	getPythonSkillRuntimeInfo,
@@ -22,6 +23,7 @@ function createTestSkill(options: {
 	filePath: string;
 	baseDir: string;
 	disableModelInvocation?: boolean;
+	retained?: RetainedMeta;
 	python?: SkillPythonMetadata;
 	source?: string;
 }): Skill {
@@ -32,6 +34,8 @@ function createTestSkill(options: {
 		baseDir: options.baseDir,
 		sourceInfo: createSyntheticSourceInfo(options.filePath, { source: options.source ?? "test" }),
 		disableModelInvocation: options.disableModelInvocation ?? false,
+		// Only set when provided so tests can distinguish an absent field from undefined.
+		...(options.retained !== undefined ? { retained: options.retained } : {}),
 	};
 	return options.python
 		? {
@@ -263,6 +267,96 @@ describe("skills", () => {
 			expect(skills[0].disableModelInvocation).toBe(false);
 		});
 
+		it("should attach retained meta to skills with the retained frontmatter", () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-skills-"));
+			try {
+				const skillDir = join(tempDir, "retained-active");
+				mkdirSync(skillDir, { recursive: true });
+				writeFileSync(
+					join(skillDir, "SKILL.md"),
+					[
+						"---",
+						"name: retained-active",
+						"description: A retained skill.",
+						"metadata:",
+						"  prime-agent:",
+						"    retained:",
+						"      version: 2",
+						"      status: active",
+						"      provenance:",
+						"        created_by: refine",
+						"        source_sessions:",
+						"          - 01a0205d-0b6f-74f8-94f4-ad4cde6226c8",
+						"        first_seen: 2026-08-20T18:00:00Z",
+						"        summary: Retained from 2 sessions.",
+						"    smoke:",
+						'      - "import deploy_canary; assert deploy_canary.ping()"',
+						"    always_in_prompt: true",
+						"---",
+						"",
+						"# Body",
+					].join("\n"),
+				);
+
+				const { skills, diagnostics } = loadSkillsFromDir({ dir: skillDir, source: "test" });
+
+				expect(skills).toHaveLength(1);
+				expect(skills[0].retained).toEqual({ version: 2, status: "active" });
+				expect(diagnostics).toHaveLength(0);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		});
+
+		it("should leave retained undefined for skills without the frontmatter", () => {
+			const { skills } = loadSkillsFromDir({
+				dir: join(fixturesDir, "valid-skill"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			expect(skills[0].retained).toBeUndefined();
+		});
+
+		it("should attach default version with an explicit disabled status", () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-skills-"));
+			try {
+				const skillDir = join(tempDir, "retained-disabled");
+				mkdirSync(skillDir, { recursive: true });
+				writeFileSync(
+					join(skillDir, "SKILL.md"),
+					"---\nname: retained-disabled\ndescription: A disabled retained skill.\nmetadata:\n  prime-agent:\n    retained:\n      status: disabled\n---\n\n# Body\n",
+				);
+
+				const { skills } = loadSkillsFromDir({ dir: skillDir, source: "test" });
+
+				expect(skills).toHaveLength(1);
+				expect(skills[0].retained).toEqual({ version: 1, status: "disabled" });
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		});
+
+		it("should fall back to defaults for malformed retained values", () => {
+			const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-skills-"));
+			try {
+				const skillDir = join(tempDir, "retained-malformed");
+				mkdirSync(skillDir, { recursive: true });
+				writeFileSync(
+					join(skillDir, "SKILL.md"),
+					'---\nname: retained-malformed\ndescription: A malformed retained skill.\nmetadata:\n  prime-agent:\n    retained:\n      version: "3"\n      status: bogus\n---\n\n# Body\n',
+				);
+
+				const { skills, diagnostics } = loadSkillsFromDir({ dir: skillDir, source: "test" });
+
+				expect(skills).toHaveLength(1);
+				expect(skills[0].retained).toEqual({ version: 1, status: "active" });
+				expect(diagnostics).toHaveLength(0);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		});
+
 		it("should load Python-backed skills from the same skill root", () => {
 			const skillDir = join(fixturesDir, "python-skill");
 			const { skills, diagnostics } = loadSkillsFromDir({
@@ -451,6 +545,117 @@ describe("skills", () => {
 
 			const result = formatSkillsForPrompt(skills);
 			expect(result).toBe("");
+		});
+
+		it("should exclude retained skills with disabled or archived status from prompt", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "plain-skill",
+					description: "A plain skill.",
+					filePath: "/path/plain/SKILL.md",
+					baseDir: "/path/plain",
+				}),
+				createTestSkill({
+					name: "retained-disabled",
+					description: "A disabled retained skill.",
+					filePath: "/path/disabled/SKILL.md",
+					baseDir: "/path/disabled",
+					retained: { version: 3, status: "disabled" },
+				}),
+				createTestSkill({
+					name: "retained-archived",
+					description: "An archived retained skill.",
+					filePath: "/path/archived/SKILL.md",
+					baseDir: "/path/archived",
+					retained: { version: 2, status: "archived" },
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+
+			expect(result).toContain("<name>plain-skill</name>");
+			expect(result).not.toContain("<name>retained-disabled</name>");
+			expect(result).not.toContain("<name>retained-archived</name>");
+			expect((result.match(/<skill>/g) || []).length).toBe(1);
+		});
+
+		it("should keep retained skills with active or flagged status in prompt", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "retained-active",
+					description: "An active retained skill.",
+					filePath: "/path/active/SKILL.md",
+					baseDir: "/path/active",
+					retained: { version: 1, status: "active" },
+				}),
+				createTestSkill({
+					name: "retained-flagged",
+					description: "A flagged retained skill.",
+					filePath: "/path/flagged/SKILL.md",
+					baseDir: "/path/flagged",
+					retained: { version: 5, status: "flagged" },
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+
+			expect(result).toContain("<name>retained-active</name>");
+			expect(result).toContain("<name>retained-flagged</name>");
+			expect((result.match(/<skill>/g) || []).length).toBe(2);
+		});
+
+		it("should keep disableModelInvocation precedence over a retained active status", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "hidden-retained",
+					description: "A hidden retained skill.",
+					filePath: "/path/hidden/SKILL.md",
+					baseDir: "/path/hidden",
+					disableModelInvocation: true,
+					retained: { version: 1, status: "active" },
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+			expect(result).not.toContain("<name>hidden-retained</name>");
+		});
+
+		it("should return empty string when all retained skills are hidden", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "retained-disabled",
+					description: "A disabled retained skill.",
+					filePath: "/path/disabled/SKILL.md",
+					baseDir: "/path/disabled",
+					retained: { version: 1, status: "disabled" },
+				}),
+			];
+
+			expect(formatSkillsForPrompt(skills)).toBe("");
+		});
+
+		it("renders plain skills byte-identically whether retained is undefined or absent", () => {
+			const withUndefined: Skill = {
+				kind: "markdown",
+				name: "plain-skill",
+				description: "A plain skill.",
+				filePath: "/path/plain/SKILL.md",
+				baseDir: "/path/plain",
+				sourceInfo: createSyntheticSourceInfo("/path/plain/SKILL.md", { source: "test" }),
+				disableModelInvocation: false,
+				retained: undefined,
+			};
+			const absent: Skill = {
+				kind: "markdown",
+				name: "plain-skill",
+				description: "A plain skill.",
+				filePath: "/path/plain/SKILL.md",
+				baseDir: "/path/plain",
+				sourceInfo: createSyntheticSourceInfo("/path/plain/SKILL.md", { source: "test" }),
+				disableModelInvocation: false,
+			};
+
+			expect(formatSkillsForPrompt([withUndefined])).toBe(formatSkillsForPrompt([absent]));
 		});
 	});
 

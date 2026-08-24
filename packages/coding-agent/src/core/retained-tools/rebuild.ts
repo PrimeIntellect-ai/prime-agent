@@ -12,13 +12,13 @@ import {
 	type ToolIndex,
 	type ToolIndexEntry,
 	type ToolScope,
-	type ToolStatus,
 	type ToolUsage,
 } from "./index.js";
+import { parseRetainedMeta, type RetainedMeta } from "./meta.js";
+
+export type { RetainedMeta };
 
 const log = getLogger("coding-agent.retained-tools");
-
-const KNOWN_STATUSES: ReadonlySet<string> = new Set(["active", "flagged", "disabled", "archived"]);
 
 function toPosixPath(p: string): string {
 	return p.split(sep).join("/");
@@ -40,11 +40,6 @@ export function zeroToolUsage(): ToolUsage {
 	};
 }
 
-interface RetainedMeta {
-	version: number;
-	status: ToolStatus;
-}
-
 /**
  * Read `metadata.prime-agent.retained.{version,status}` from a skill file's frontmatter.
  * Skills without the frontmatter (the common case in phase A) get defaults.
@@ -57,32 +52,7 @@ export function readRetainedMeta(skillFilePath: string): RetainedMeta {
 	} catch {
 		return defaults;
 	}
-	if (typeof frontmatter !== "object" || frontmatter === null) {
-		return defaults;
-	}
-	const metadata = (frontmatter as Record<string, unknown>).metadata;
-	if (typeof metadata !== "object" || metadata === null) {
-		return defaults;
-	}
-	const primeAgent = (metadata as Record<string, unknown>)["prime-agent"];
-	if (typeof primeAgent !== "object" || primeAgent === null) {
-		return defaults;
-	}
-	const retained = (primeAgent as Record<string, unknown>).retained;
-	if (typeof retained !== "object" || retained === null) {
-		return defaults;
-	}
-
-	const meta = { ...defaults };
-	const version = (retained as Record<string, unknown>).version;
-	if (typeof version === "number" && Number.isInteger(version) && version > 0) {
-		meta.version = version;
-	}
-	const status = (retained as Record<string, unknown>).status;
-	if (typeof status === "string" && KNOWN_STATUSES.has(status)) {
-		meta.status = status as ToolStatus;
-	}
-	return meta;
+	return parseRetainedMeta(frontmatter as Record<string, unknown>) ?? defaults;
 }
 
 export interface ScopeIndexRefreshOptions {

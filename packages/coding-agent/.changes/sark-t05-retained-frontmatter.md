@@ -1,0 +1,1 @@
+- Added `metadata.prime-agent.retained` frontmatter support: the skill loader now parses `version` and `status` into the loaded skill and the per-scope tool index, and retained skills with status `disabled` or `archived` are hidden from the system-prompt skills block while remaining invocable via `/skill:<name>` ([#5](https://github.com/badvision/prime-agent/issues/5)).

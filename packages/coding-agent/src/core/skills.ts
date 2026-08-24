@@ -7,6 +7,8 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import { canonicalizePath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
+import type { ToolStatus } from "./retained-tools/index.js";
+import { parseRetainedMeta, type RetainedMeta } from "./retained-tools/meta.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 
 const log = getLogger("coding-agent.skills");
@@ -92,6 +94,8 @@ interface BaseSkill {
 	baseDir: string;
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
+	/** Parsed `metadata.prime-agent.retained` frontmatter; undefined for plain skills. */
+	retained?: RetainedMeta;
 }
 
 export interface MarkdownSkill extends BaseSkill {
@@ -412,6 +416,7 @@ function loadSkillFromFile(
 		}
 
 		const python = basename(filePath) === "SKILL.md" ? detectPythonSkill(skillDir, name, diagnostics) : null;
+		const retained = parseRetainedMeta(frontmatter);
 		const baseSkill: BaseSkill = {
 			name,
 			description: frontmatter.description,
@@ -419,6 +424,7 @@ function loadSkillFromFile(
 			baseDir: skillDir,
 			sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 			disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+			retained: retained ?? undefined,
 		};
 
 		return {
@@ -433,15 +439,26 @@ function loadSkillFromFile(
 }
 
 /**
+ * Retained tools whose lifecycle status removes them from prompt injection.
+ * They are still loaded, indexed, and explicitly invocable via /skill:<name>.
+ */
+const PROMPT_HIDDEN_STATUSES: ReadonlySet<ToolStatus> = new Set(["disabled", "archived"]);
+
+/**
  * Format skills for inclusion in a system prompt.
  * Uses XML format per Agent Skills standard.
  * See: https://agentskills.io/integrate-skills
  *
  * Skills with disableModelInvocation=true are excluded from the prompt
- * (they can only be invoked explicitly via /skill:name commands).
+ * (they can only be invoked explicitly via /skill:name commands). Retained
+ * skills with status disabled or archived are excluded the same way: they
+ * remain loaded, indexed, and invocable via /skill:<name>, but do not appear
+ * in the rendered block.
  */
 export function formatSkillsForPrompt(skills: Skill[]): string {
-	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
+	const visibleSkills = skills.filter(
+		(s) => !s.disableModelInvocation && !(s.retained !== undefined && PROMPT_HIDDEN_STATUSES.has(s.retained.status)),
+	);
 
 	if (visibleSkills.length === 0) {
 		return "";

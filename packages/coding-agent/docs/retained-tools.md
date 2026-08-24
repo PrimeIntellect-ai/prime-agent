@@ -65,6 +65,7 @@ Required ADRs: **ADR-1** layering (recorded in #1), **ADR-2** embedding vendor (
 | If you are… | Read |
 |---|---|
 | Picking up a `sark:` issue | This page, then the matching `retained-tools/phase-*.md` doc (phase design + task specs), then the issue body (live "Done when") |
+| Writing or validating the retained frontmatter | [retained-tools/frontmatter-contract.md](retained-tools/frontmatter-contract.md) (canonical field table + rules), then the matching phase doc |
 | Asking *why* a design decision exists | [retained-tools/sark-concepts.md](retained-tools/sark-concepts.md) (SARK background, 17-row concept map, gap analysis, what not to import) |
 | Planning work order, parallelism, or ADRs | [retained-tools/build-plan.md](retained-tools/build-plan.md) |
 | Hitting a risk, an open decision, or writing acceptance tests | [retained-tools/risks-and-decisions.md](retained-tools/risks-and-decisions.md) |

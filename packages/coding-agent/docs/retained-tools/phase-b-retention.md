@@ -4,7 +4,7 @@ Read this doc when working on #5–#9. The user-visible core of the effort: **a 
 
 ## Data model: the retained frontmatter contract (#5)
 
-A retained tool is an ordinary skill directory plus additive frontmatter (unknown frontmatter is already tolerated by the loader, `packages/coding-agent/docs/skills.md`):
+A retained tool is an ordinary skill directory plus additive frontmatter (unknown frontmatter is already tolerated by the loader, `packages/coding-agent/docs/skills.md`). The canonical field table, validation behavior, and rules live in [frontmatter-contract.md](frontmatter-contract.md); the sample below is the phase-B context view:
 
 ```yaml
 # .prime/agent/skills/deploy-staging-canary/SKILL.md  (or ~/.prime/agent/skills/ for global)
