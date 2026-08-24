@@ -507,9 +507,14 @@ export class IPythonCellComponent implements Component {
 		this.addBlank(lines, width);
 		const isBashCell = parseIpythonBashCell(code) !== undefined;
 		const rawLines = code.split("\n");
+		// Highlight the whole cell at once so multi-line strings keep their color.
+		const highlightedLines = isBashCell ? [] : highlightCode(code, "python");
 		for (const [index, rawLine] of rawLines.entries()) {
 			const prefix = index === 0 ? theme.fg("dim", "› ") : theme.fg("dim", "  ");
-			const highlighted = this.highlightInputLine(rawLine, isBashCell);
+			const highlighted =
+				isBashCell || MAGIC_LINE_PATTERN.test(rawLine) || parseIpythonBashCell(rawLine) !== undefined
+					? theme.fg("bashMode", rawLine)
+					: (highlightedLines[index] ?? theme.fg("mdCodeBlock", rawLine));
 			this.addWrapped(lines, prefix, highlighted || " ", width);
 		}
 
