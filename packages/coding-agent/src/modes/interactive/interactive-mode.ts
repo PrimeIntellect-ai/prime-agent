@@ -1017,8 +1017,6 @@ export class InteractiveMode {
 	private retryCountdown: CountdownTimer | undefined = undefined;
 	private traceUploadAllAbortController: AbortController | undefined = undefined;
 
-	// Session-owned queued messages mirrored from connection events.
-	private connectionQueue: AgentConnectionQueueState = { steering: [], followUp: [] };
 	private readonly queueSelection = new QueueSelection();
 	private isApplyingQueueSelectionText = false;
 	private queueMutationChain: Promise<void> = Promise.resolve();
@@ -2510,24 +2508,28 @@ export class InteractiveMode {
 		}
 	}
 
+	private getConnectionQueue(): AgentConnectionQueueState {
+		return {
+			steering: [...(this.connectionState?.sessionActions.steering ?? [])],
+			followUp: [...(this.connectionState?.sessionActions.followUps ?? [])],
+		};
+	}
+
 	private async refreshConnectionQueue(): Promise<void> {
 		this.replaceConnectionQueue(await this.agentConnection.getQueue());
 	}
 
 	private replaceConnectionQueue(queue: AgentConnectionQueueState): void {
-		this.connectionQueue = {
-			steering: [...queue.steering],
-			followUp: [...queue.followUp],
-		};
-		const dropped = this.queueSelection.sync(this.connectionQueue);
-		if (dropped !== undefined) {
-			const editorText = this.editor.getText();
-			if (editorText === dropped) {
-				this.setEditorTextFromQueueSelection(this.queueSelection.reset());
-			} else if (!this.pendingQueueEdit) {
-				this.queueSelection.replaceDraft(editorText);
-			}
-		}
+		const sessionActions = this.connectionState?.sessionActions;
+		if (!sessionActions) return;
+		this.patchConnectionState({
+			sessionActions: {
+				...sessionActions,
+				queuedCount: queue.steering.length + queue.followUp.length,
+				steering: [...queue.steering],
+				followUps: [...queue.followUp],
+			},
+		});
 		this.updatePendingMessagesDisplay();
 	}
 
@@ -2829,7 +2831,6 @@ export class InteractiveMode {
 		this.shortcutGuideContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.queuedMessagesContainer.clear();
-		this.connectionQueue = { steering: [], followUp: [] };
 		this.pendingQueueEdit = undefined;
 		// The selection and its stashed draft belong to the previous session;
 		// every editor draft is cleared below, so discard rather than restore.
@@ -4420,7 +4421,8 @@ export class InteractiveMode {
 		for (const entry of this.editor.getHistory?.() ?? []) {
 			add(entry);
 		}
-		for (const msg of [...this.connectionQueue.steering, ...this.connectionQueue.followUp]) {
+		const queue = this.getConnectionQueue();
+		for (const msg of [...queue.steering, ...queue.followUp]) {
 			add(msg);
 		}
 		return ids;
@@ -5363,10 +5365,7 @@ export class InteractiveMode {
 				break;
 
 			case "session_action_update": {
-				this.replaceConnectionQueue({
-					steering: [...event.actions.steering],
-					followUp: [...event.actions.followUps],
-				});
+				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				break;
 			}
@@ -6992,7 +6991,7 @@ export class InteractiveMode {
 
 	private browseQueueSelection(direction: -1 | 1): void {
 		if (this.pendingQueueEdit) return;
-		const text = this.queueSelection.move(this.connectionQueue, this.editor.getText(), direction);
+		const text = this.queueSelection.move(this.getConnectionQueue(), this.editor.getText(), direction);
 		if (text === undefined) return;
 		this.setEditorTextFromQueueSelection(text);
 		this.ui.requestRender();
@@ -7009,46 +7008,21 @@ export class InteractiveMode {
 	}
 
 	private moveQueueSelection(direction: -1 | 1): void {
-		if (this.pendingQueueEdit) return;
-		const submittedSelection = this.queueSelection.selected;
-		if (!submittedSelection) return;
+		if (this.pendingQueueEdit || !this.queueSelection.selected) return;
 		const sessionGeneration = this.sessionEventGeneration;
 		void this.enqueueQueueMutation(async () => {
 			if (sessionGeneration !== this.sessionEventGeneration) return;
-			const lane = this.connectionQueue[submittedSelection.lane];
-			const resolvedIndex =
-				lane[submittedSelection.index] === submittedSelection.text
-					? submittedSelection.index
-					: lane.indexOf(submittedSelection.text);
-			if (resolvedIndex < 0) {
-				this.showStatus("Queue changed; reorder not applied");
-				return;
-			}
-			const selected = { ...submittedSelection, index: resolvedIndex };
-			const queueBefore = this.connectionQueue;
+			const selected = this.queueSelection.selected;
+			if (!selected) return;
 			const status = await this.agentConnection.mutateQueuedMessage(selected.lane, selected.index, selected.text, {
 				type: "move",
 				direction,
 			});
 			if (sessionGeneration !== this.sessionEventGeneration) return;
 			if (status === "applied") {
-				// The queue event for this mutation can land before or after the
-				// response. Patch the mirror only when no event has replaced it
-				// meanwhile (events always assign a fresh object); patching an
-				// already-updated mirror would apply the mutation twice.
-				const lane = this.connectionQueue[selected.lane];
-				const target = selected.index + direction;
-				if (
-					this.connectionQueue === queueBefore &&
-					lane[selected.index] === selected.text &&
-					target >= 0 &&
-					target < lane.length
-				) {
-					[lane[selected.index], lane[target]] = [lane[target] as string, selected.text];
-					this.queueSelection.sync(this.connectionQueue);
-					this.updatePendingMessagesDisplay();
-					this.ui.requestRender();
-				}
+				await this.refreshConnectionQueue();
+				this.queueSelection.refreshAfterMove(this.getConnectionQueue(), selected.lane, selected.index + direction);
+				this.ui.requestRender();
 			} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
 			else this.showStatus("Queue changed; reorder not applied");
 		}).catch((error) => {
@@ -7064,9 +7038,7 @@ export class InteractiveMode {
 	 * Empty text deletes; otherwise replaces, moving the item to `targetLane`.
 	 */
 	private applyQueueSelection(text: string, targetLane: "steering" | "followUp"): Promise<boolean> {
-		if (this.pendingQueueEdit) return Promise.resolve(false);
-		const submittedSelection = this.queueSelection.selected;
-		if (!submittedSelection) return Promise.resolve(false);
+		if (this.pendingQueueEdit || !this.queueSelection.selected) return Promise.resolve(false);
 		const pendingQueueEdit = Symbol("pending-queue-edit");
 		this.pendingQueueEdit = pendingQueueEdit;
 		const sessionGeneration = this.sessionEventGeneration;
@@ -7096,27 +7068,8 @@ export class InteractiveMode {
 		};
 		return this.enqueueQueueMutation(async () => {
 			if (discardStaleSelection()) return true;
-			// Earlier serialized moves may have changed the selected item's index.
-			const lane = this.connectionQueue[submittedSelection.lane];
-			const resolvedIndex =
-				lane[submittedSelection.index] === submittedSelection.text
-					? submittedSelection.index
-					: lane.indexOf(submittedSelection.text);
-			if (resolvedIndex < 0) {
-				this.queueSelection.sync(this.connectionQueue);
-				const editorUntouched =
-					submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
-				if (editorUntouched) {
-					this.setEditorTextFromQueueSelection(text);
-				}
-				this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
-				this.showStatus("Queue changed; edit kept in the editor");
-				this.updatePendingMessagesDisplay();
-				this.ui.requestRender();
-				return true;
-			}
-			const selected = { ...submittedSelection, index: resolvedIndex };
-			const queueBefore = this.connectionQueue;
+			const selected = this.queueSelection.selected;
+			if (!selected) return true;
 			let status: AgentConnectionQueuedMessageMutationStatus;
 			try {
 				status = await this.agentConnection.mutateQueuedMessage(
@@ -7142,22 +7095,11 @@ export class InteractiveMode {
 			const editorUntouched =
 				submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
 			if (status === "applied") {
-				// Same optimistic patch as moveQueueSelection, and the same guard:
-				// skip when a queue event already replaced the mirror.
-				const lane = this.connectionQueue[selected.lane];
-				if (this.connectionQueue === queueBefore && lane[selected.index] === selected.text) {
-					if (!trimmed) lane.splice(selected.index, 1);
-					else if (targetLane === selected.lane) lane[selected.index] = trimmed;
-					else {
-						lane.splice(selected.index, 1);
-						this.connectionQueue[targetLane].push(trimmed);
-					}
-				}
+				await this.refreshConnectionQueue();
 				if (trimmed) this.editor.addToHistory?.(trimmed);
 				const draft = this.queueSelection.reset();
 				if (editorUntouched) this.setEditorTextFromQueueSelection(draft);
 			} else {
-				this.queueSelection.sync(this.connectionQueue);
 				// Enter submissions clear the editor before onSubmit runs; restore the
 				// edit so a failed mutation never swallows it.
 				if (editorUntouched) this.setEditorTextFromQueueSelection(text);
@@ -7422,10 +7364,7 @@ export class InteractiveMode {
 	}
 
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
-		return {
-			steering: [...this.connectionQueue.steering],
-			followUp: [...this.connectionQueue.followUp],
-		};
+		return this.getConnectionQueue();
 	}
 
 	private updatePendingMessagesDisplay(): void {
