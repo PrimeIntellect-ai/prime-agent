@@ -914,8 +914,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("preserves the OpenRouter model default when reasoning is unspecified", async () => {
-		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
-		const model = { ...baseModel, compat: { ...baseModel.compat, supportsReasoningEffort: true } };
+		const model = getModel("openrouter", "deepseek/deepseek-r1")!;
 		let payload: unknown;
 
 		await streamSimple(
@@ -930,6 +929,29 @@ describe("openai-completions tool_choice", () => {
 		).result();
 
 		expect((payload as { reasoning?: unknown }).reasoning).toBeUndefined();
+	});
+
+	it("distinguishes omitted reasoning from explicit off for Prime effort models", async () => {
+		const model = getModel("prime-inference", "moonshotai/kimi-k3")!;
+		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
+		let payload: unknown;
+
+		await streamSimple(model, context, {
+			apiKey: "test",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBeUndefined();
+
+		await streamSimple(model, context, {
+			apiKey: "test",
+			reasoning: "off",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
 	});
 
 	it("serializes explicit off only for models that allow disabling reasoning", async () => {

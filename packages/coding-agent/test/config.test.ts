@@ -6,6 +6,7 @@ import {
 	detectInstallMethod,
 	ENV_LEGACY_SESSION_DIR,
 	ENV_SESSION_DIR,
+	getDaemonLogPath,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	getSessionsDir,
@@ -444,5 +445,15 @@ describe("session paths", () => {
 		const sessionDir = getDefaultSessionDir(cwd, join(tempDir, "agent"));
 
 		expect(sessionDir).toBe(sessionRoot);
+	});
+});
+
+describe("getDaemonLogPath", () => {
+	test("normalizes socket path spellings to one log file", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		expect(getDaemonLogPath("/a//b.sock")).toBe(getDaemonLogPath("/a/b.sock"));
 	});
 });

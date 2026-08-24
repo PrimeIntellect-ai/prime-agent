@@ -5,9 +5,7 @@ export type AgentActivity = "waiting" | "thinking" | "writing" | "writing-code" 
 
 export interface AgentActivityStatus {
 	activity: AgentActivity;
-	/** "down" while receiving model output, "up" while sending (request in flight or tool executing). */
 	direction: "down" | "up";
-	/** Output tokens accumulated since the user's last message. */
 	tokens: number;
 }
 
@@ -19,14 +17,8 @@ export const AGENT_ACTIVITY_LABELS: Record<AgentActivity, string> = {
 	executing: "Executing",
 };
 
-/** Fallback estimate for providers that only report usage when the message completes. */
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 
-/**
- * Derives what the agent is doing right now (and how many output tokens it has
- * produced since the user's last message) from the session event stream, so the
- * working loader can show more than a static "Working...".
- */
 export class AgentActivityTracker {
 	private activity: AgentActivity = "waiting";
 	private completedTokens = 0;
@@ -134,7 +126,6 @@ export class AgentActivityTracker {
 	}
 }
 
-// Same tiers as the token formatter in the pre-fork footer (removed in #21).
 export function formatTokenCount(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;

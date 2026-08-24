@@ -96,6 +96,7 @@ import {
 	defaultDaemonSocketPath,
 	InProcessAgentConnection,
 	InteractiveMode,
+	normalizeSocketPath,
 	resolveAttachModelFallbackMessage,
 	runAcpMode,
 	runAcpModeWithConnection,
@@ -193,6 +194,10 @@ function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
 
 function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc" | "acp" | "daemon"> {
 	return appMode === "json" ? "json" : "text";
+}
+
+export function isClientOwnedDaemonSession(appMode: AppMode, noSession?: boolean): boolean {
+	return appMode !== "acp" || noSession === true;
 }
 
 // `prime-agent agents` opens the agents view directly.
@@ -969,6 +974,7 @@ async function createDaemonClientConnection(options: {
 				closeClientOnDispose: true,
 				sendClientEnv: true,
 				ownedSession: options.clientOwned,
+				ownedSessionRecoveryConfig: options.clientOwned ? options.config : undefined,
 				supportsExtensionUi: options.supportsExtensionUi,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
 				telemetryDisabled: options.config.telemetryDisabled,
@@ -986,7 +992,7 @@ async function createDaemonClientConnection(options: {
 				await listActiveDaemonSessionSummaries(client),
 				options.sessionPath,
 			);
-			if (activeSummary) {
+			if (activeSummary && activeSummary.workerState !== "failed") {
 				return await attach(activeSummary);
 			}
 		}
@@ -1005,7 +1011,7 @@ async function createDaemonClientConnection(options: {
 			noSession: options.noSession,
 			env: collectDaemonClientEnv(),
 			lifecycle: options.clientOwned ? "client_owned" : "resident",
-			launchEnv: options.clientOwned ? collectDaemonLaunchEnv() : undefined,
+			launchEnv: collectDaemonLaunchEnv(),
 		});
 		if (!response.success) {
 			throw deserializeDaemonError(response);
@@ -1135,6 +1141,10 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(chalk.red(`Error: Cannot use cwd ${cwd}: ${message}`));
 			process.exit(1);
 		}
+	}
+	if (parsed.daemonSocket) {
+		// After --cwd so a relative socket path resolves against the requested directory.
+		parsed.daemonSocket = normalizeSocketPath(parsed.daemonSocket);
 	}
 
 	// Run migrations (pass cwd for project-local migrations)
@@ -1537,7 +1547,7 @@ export async function main(args: string[], options?: MainOptions) {
 				config: defaultSessionConfig,
 				sessionPath: parsed.noSession ? undefined : sessionManager.getSessionFile(),
 				continueRecent: parsed.continue,
-				clientOwned: true,
+				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession),
 				noSession: parsed.noSession,
 				supportsExtensionUi: appMode === "rpc",
 			}));

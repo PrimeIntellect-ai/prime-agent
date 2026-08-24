@@ -1,6 +1,3 @@
-// Generic OAuth 2.1 (PKCE + dynamic client registration) for remote MCP servers.
-// One provider per server, registered as `mcp:<server>` so it reuses auth.json. Node-only (callback server).
-
 import type { Server } from "node:http";
 import { oauthErrorHtml, oauthSuccessHtml } from "../utils/oauth/oauth-page.js";
 import { generatePKCE } from "../utils/oauth/pkce.js";
@@ -17,40 +14,136 @@ const redirectUriFor = (port: number) => `http://localhost:${port}${CALLBACK_PAT
 const ALL_REDIRECT_URIS = CALLBACK_PORTS.map(redirectUriFor);
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
-/** Authorization-server metadata we rely on (RFC 8414 / OAuth 2.1 + DCR). */
 interface AuthServerMetadata {
-	issuer?: string;
+	issuer: string;
 	authorization_endpoint: string;
 	token_endpoint: string;
 	registration_endpoint?: string;
 	scopes_supported?: string[];
 }
 
+interface ProtectedResourceMetadata {
+	resource: string;
+	authorization_servers: string[];
+}
+
+interface Discovery {
+	metadata: AuthServerMetadata;
+	resource?: string;
+	issuer?: string;
+}
+
 export interface McpOAuthConfig {
 	/** MCP server name; provider id becomes `mcp:<server>`. */
 	server: string;
-	/** Human label for UI. */
+	/** Human-readable label shown in OAuth UI; defaults to `server`. */
 	label?: string;
-	/** The MCP endpoint URL — discovery is rooted at its origin. */
+	/** MCP resource URL used for protected-resource and authorization-server discovery. */
 	url: string;
 	/** Pre-registered client id (servers without DCR, e.g. Slack). */
 	clientId?: string;
-	/** Explicit scopes; falls back to the server's advertised scopes. */
+	/** Requested OAuth scopes; defaults to the server's advertised scopes. */
 	scopes?: string;
 }
 
-/** Extra fields we persist alongside the standard credential triple. */
 interface McpCredentials extends OAuthCredentials {
 	tokenEndpoint?: string;
 	clientId?: string;
+	/** MCP endpoint the token was issued for; consumers refuse to send it elsewhere. */
+	endpoint?: string;
+	/** RFC 9728 resource indicator. Its presence marks a PRM-based login. */
+	resource?: string;
+	/** RFC 8414/OIDC issuer selected by the protected-resource metadata. */
+	issuer?: string;
+}
+
+function validatedHttpsUrl(value: string, name: string): URL {
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		throw new Error(`${name} must be an absolute HTTPS URL`);
+	}
+	if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+		throw new Error(`${name} must be an absolute HTTPS URL without credentials or a fragment`);
+	}
+	return url;
+}
+
+function canonicalResource(url: URL): string {
+	if (url.pathname === "/" && !url.search) return url.origin;
+	return `${url.origin}${url.pathname}${url.search}`;
+}
+
+function authorizationServerMetadataUrls(issuer: string): string[] {
+	const url = validatedHttpsUrl(issuer, "Authorization server issuer");
+	if (url.search) throw new Error("Authorization server issuer must not contain a query string");
+	const path = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
+	return [
+		new URL(`/.well-known/oauth-authorization-server${path}`, url.origin).toString(),
+		new URL(`${path}/.well-known/openid-configuration`, url.origin).toString(),
+	];
+}
+
+async function fetchResponse(url: string, init?: RequestInit): Promise<Response> {
+	return fetch(url, { ...init, redirect: "error" });
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
-	const res = await fetch(url, init);
+	const res = await fetchResponse(url, init);
 	if (!res.ok) {
-		throw new Error(`${init?.method ?? "GET"} ${url} failed: ${res.status} ${await res.text()}`);
+		throw new Error(`${init?.method ?? "GET"} ${url} failed: ${res.status}`);
 	}
 	return res.json();
+}
+
+function authorizationServerMetadata(value: unknown, issuer: string, requireExactIssuer: boolean): AuthServerMetadata {
+	if (!value || typeof value !== "object") throw new Error(`Authorization server metadata for ${issuer} is invalid`);
+	const metadata = value as Partial<AuthServerMetadata>;
+	if (typeof metadata.issuer !== "string") {
+		throw new Error(`Authorization server metadata for ${issuer} is missing its issuer`);
+	}
+	if (requireExactIssuer) {
+		if (metadata.issuer !== issuer) {
+			throw new Error(`Authorization server metadata issuer does not exactly match ${issuer}`);
+		}
+	} else {
+		const advertisedIssuer = validatedHttpsUrl(metadata.issuer, "Authorization server metadata issuer");
+		if (advertisedIssuer.origin !== new URL(issuer).origin || advertisedIssuer.search) {
+			throw new Error(`Origin authorization server metadata issuer must stay on ${new URL(issuer).origin}`);
+		}
+	}
+	if (typeof metadata.authorization_endpoint !== "string" || typeof metadata.token_endpoint !== "string") {
+		throw new Error(`Authorization server metadata for ${issuer} is missing required endpoints`);
+	}
+	validatedHttpsUrl(metadata.authorization_endpoint, "Authorization endpoint");
+	validatedHttpsUrl(metadata.token_endpoint, "Token endpoint");
+	if (metadata.registration_endpoint) validatedHttpsUrl(metadata.registration_endpoint, "Registration endpoint");
+	return metadata as AuthServerMetadata;
+}
+
+async function jsonMetadata(response: Response, url: string): Promise<unknown> {
+	if (response.status !== 200) throw new Error(`GET ${url} failed: ${response.status}`);
+	const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+	if (contentType !== "application/json") throw new Error(`GET ${url} did not return application/json`);
+	return response.json();
+}
+
+async function discoverAuthorizationServer(issuer: string, requireExactIssuer: boolean): Promise<AuthServerMetadata> {
+	const candidates = authorizationServerMetadataUrls(issuer);
+	let lastError: unknown;
+	for (const candidate of candidates) {
+		try {
+			const response = await fetchResponse(candidate);
+			if (response.status === 404) continue;
+			return authorizationServerMetadata(await jsonMetadata(response, candidate), issuer, requireExactIssuer);
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw new Error(
+		`Could not discover OAuth metadata for ${issuer}. Tried ${candidates.join(", ")}. Last error: ${String(lastError)}`,
+	);
 }
 
 /** Random, URL-safe CSRF `state` value, independent of the PKCE verifier. */
@@ -63,32 +156,70 @@ function randomState(): string {
 		.replace(/=/g, "");
 }
 
-/** Try the protected-resource and auth-server well-known docs at the URL's origin. */
-async function discover(url: string): Promise<AuthServerMetadata> {
-	const origin = new URL(url).origin;
-	const candidates = [
-		`${origin}/.well-known/oauth-authorization-server`,
-		`${origin}/.well-known/openid-configuration`,
-	];
-	let lastError: unknown;
-	for (const candidate of candidates) {
-		try {
-			const meta = (await fetchJson(candidate)) as AuthServerMetadata;
-			if (meta.authorization_endpoint && meta.token_endpoint) {
-				return meta;
-			}
-		} catch (error) {
-			lastError = error;
-		}
+function resourceMetadata(value: unknown, resource: string): ProtectedResourceMetadata {
+	if (!value || typeof value !== "object") throw new Error("Protected-resource metadata is invalid");
+	const metadata = value as Partial<ProtectedResourceMetadata>;
+	if (metadata.resource !== resource)
+		throw new Error(`Protected-resource metadata resource does not exactly match ${resource}`);
+	if (!Array.isArray(metadata.authorization_servers) || metadata.authorization_servers.length === 0) {
+		throw new Error("Protected-resource metadata has no authorization_servers");
 	}
-	throw new Error(
-		`Could not discover OAuth metadata for ${origin}. ` +
-			`Tried ${candidates.join(", ")}. Last error: ${String(lastError)}`,
-	);
+	for (const issuer of metadata.authorization_servers) {
+		if (typeof issuer !== "string")
+			throw new Error("Protected-resource metadata has an invalid authorization server");
+		validatedHttpsUrl(issuer, "Authorization server issuer");
+	}
+	return metadata as ProtectedResourceMetadata;
 }
 
-/** Dynamic client registration (RFC 7591). Returns the issued client_id. */
+function resourceMetadataUrl(resource: URL): string {
+	const path = resource.pathname === "/" ? "" : resource.pathname;
+	return `${resource.origin}/.well-known/oauth-protected-resource${path}${resource.search}`;
+}
+
+function headerResourceMetadata(value: string | null): string | undefined {
+	const match = value?.match(/(?:^|[,\s])resource_metadata\s*=\s*"((?:[^"\\]|\\.)*)"/i);
+	if (!match) return undefined;
+	return match[1].replace(/\\(.)/g, "$1");
+}
+
+async function tryProtectedResourceMetadata(url: string): Promise<ProtectedResourceMetadata | undefined> {
+	const resource = validatedHttpsUrl(url, "MCP endpoint");
+	let headerUrl: string | undefined;
+	try {
+		// This probe deliberately has no Authorization header. It must not leak an existing token.
+		const response = await fetchResponse(resource.toString());
+		headerUrl = headerResourceMetadata(response.headers.get("www-authenticate"));
+		await response.body?.cancel();
+	} catch {
+		// The server need not support a GET probe; use the RFC well-known locations below.
+	}
+
+	const candidate = headerUrl
+		? validatedHttpsUrl(headerUrl, "resource_metadata").toString()
+		: resourceMetadataUrl(resource);
+	const response = await fetchResponse(candidate);
+	if (response.status === 404 && !headerUrl) return undefined;
+	return resourceMetadata(await jsonMetadata(response, candidate), canonicalResource(resource));
+}
+
+/** Discover RFC 9728 protected-resource metadata before the origin-level authorization server fallback. */
+async function discover(url: string): Promise<Discovery> {
+	const protectedResource = await tryProtectedResourceMetadata(url);
+	if (protectedResource) {
+		const issuer = protectedResource.authorization_servers[0];
+		return {
+			metadata: await discoverAuthorizationServer(issuer, true),
+			resource: protectedResource.resource,
+			issuer,
+		};
+	}
+	const issuer = validatedHttpsUrl(url, "MCP endpoint").origin;
+	return { metadata: await discoverAuthorizationServer(issuer, false) };
+}
+
 async function registerClient(registrationEndpoint: string, label: string): Promise<string> {
+	validatedHttpsUrl(registrationEndpoint, "Registration endpoint");
 	const body = {
 		client_name: label,
 		redirect_uris: ALL_REDIRECT_URIS,
@@ -100,8 +231,8 @@ async function registerClient(registrationEndpoint: string, label: string): Prom
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(body),
-	})) as { client_id?: string };
-	if (!data.client_id) {
+	})) as { client_id?: unknown };
+	if (typeof data.client_id !== "string" || !data.client_id) {
 		throw new Error(`Dynamic client registration at ${registrationEndpoint} returned no client_id`);
 	}
 	return data.client_id;
@@ -216,22 +347,46 @@ async function exchangeToken(
 	tokenEndpoint: string,
 	params: Record<string, string>,
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number }> {
-	const res = await fetch(tokenEndpoint, {
+	validatedHttpsUrl(tokenEndpoint, "Token endpoint");
+	const res = await fetchResponse(tokenEndpoint, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams(params).toString(),
 	});
 	const text = await res.text();
 	if (!res.ok) {
-		throw new Error(`Token request to ${tokenEndpoint} failed: ${res.status} ${text}`);
+		throw new Error(`Token request to ${tokenEndpoint} failed: ${res.status}`);
 	}
-	return JSON.parse(text);
+	let token: unknown;
+	try {
+		token = JSON.parse(text);
+	} catch {
+		throw new Error(`Token request to ${tokenEndpoint} returned invalid JSON`);
+	}
+	if (!token || typeof token !== "object" || typeof (token as { access_token?: unknown }).access_token !== "string") {
+		throw new Error(`Token request to ${tokenEndpoint} returned no access_token`);
+	}
+	const result = token as { access_token: string; refresh_token?: unknown; expires_in?: unknown };
+	if (!result.access_token) throw new Error(`Token request to ${tokenEndpoint} returned no access_token`);
+	if (result.refresh_token !== undefined && typeof result.refresh_token !== "string") {
+		throw new Error(`Token request to ${tokenEndpoint} returned an invalid refresh_token`);
+	}
+	if (
+		result.expires_in !== undefined &&
+		(typeof result.expires_in !== "number" || !Number.isFinite(result.expires_in))
+	) {
+		throw new Error(`Token request to ${tokenEndpoint} returned an invalid expires_in`);
+	}
+	return result as { access_token: string; refresh_token?: string; expires_in?: number };
 }
 
 function toCredentials(
 	token: { access_token: string; refresh_token?: string; expires_in?: number },
 	tokenEndpoint: string,
 	clientId: string,
+	endpoint: string | undefined,
+	resource: string | undefined,
+	issuer: string | undefined,
 	previousRefresh?: string,
 ): McpCredentials {
 	return {
@@ -243,16 +398,19 @@ function toCredentials(
 			: Date.now() + 3600 * 1000 - TOKEN_EXPIRY_BUFFER_MS,
 		tokenEndpoint,
 		clientId,
+		endpoint,
+		resource,
+		issuer,
 	};
 }
 
-/** Build a provider for one MCP server. Register it with registerOAuthProvider(). */
 export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInterface {
 	const label = config.label ?? config.server;
 
 	async function login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-		const meta = await discover(config.url);
-		callbacks.onProgress?.(`Discovered ${meta.issuer ?? new URL(config.url).origin}`);
+		const discovery = await discover(config.url);
+		const { metadata: meta } = discovery;
+		callbacks.onProgress?.(`Discovered ${discovery.issuer ?? meta.issuer}`);
 
 		let clientId = config.clientId;
 		if (!clientId) {
@@ -282,9 +440,12 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				state,
 			});
 			if (scope) authParams.set("scope", scope);
+			if (discovery.resource) authParams.set("resource", discovery.resource);
 
+			const authorizationUrl = new URL(meta.authorization_endpoint);
+			for (const [name, value] of authParams) authorizationUrl.searchParams.set(name, value);
 			callbacks.onAuth({
-				url: `${meta.authorization_endpoint}?${authParams.toString()}`,
+				url: authorizationUrl.toString(),
 				instructions:
 					"Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
 			});
@@ -347,8 +508,9 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				redirect_uri: cb.redirectUri,
 				client_id: clientId,
 				code_verifier: verifier,
+				...(discovery.resource ? { resource: discovery.resource } : {}),
 			});
-			return toCredentials(token, meta.token_endpoint, clientId);
+			return toCredentials(token, meta.token_endpoint, clientId, config.url, discovery.resource, discovery.issuer);
 		} finally {
 			cb.server.close();
 		}
@@ -356,17 +518,58 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 
 	async function refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
 		const creds = credentials as McpCredentials;
-		const tokenEndpoint = creds.tokenEndpoint ?? (await discover(config.url)).token_endpoint;
-		const clientId = creds.clientId ?? config.clientId;
+		if (creds.endpoint !== config.url) {
+			throw new Error(`Stored OAuth credentials are not bound to ${config.url}; re-run /mcp login ${config.server}`);
+		}
+		const configuredResource = canonicalResource(validatedHttpsUrl(config.url, "MCP endpoint"));
+		if (creds.resource !== undefined && creds.resource !== configuredResource) {
+			throw new Error(
+				`Stored OAuth credentials are not bound to ${configuredResource}; re-run /mcp login ${config.server}`,
+			);
+		}
+		if ((creds.resource === undefined) !== (creds.issuer === undefined)) {
+			throw new Error(
+				`Stored OAuth credentials for ${label} have incomplete resource binding; re-run /mcp login ${config.server}`,
+			);
+		}
+		if (creds.issuer !== undefined) validatedHttpsUrl(creds.issuer, "Stored authorization server issuer");
 		if (!creds.refresh) {
 			throw new Error(`No refresh token stored for ${label}; re-run /mcp login ${config.server}`);
 		}
+		const discovery = await discover(config.url);
+		if ((creds.resource === undefined) !== (discovery.resource === undefined)) {
+			throw new Error(`OAuth discovery mode changed for ${config.url}; re-run /mcp login ${config.server}`);
+		}
+		if (creds.resource) {
+			if (discovery.resource !== creds.resource || discovery.issuer !== creds.issuer) {
+				throw new Error(
+					`Stored OAuth credentials do not match current protected-resource metadata for ${config.url}`,
+				);
+			}
+		}
+		const tokenEndpoint = creds.tokenEndpoint ?? discovery.metadata.token_endpoint;
+		if (creds.tokenEndpoint && discovery.metadata.token_endpoint !== creds.tokenEndpoint) {
+			throw new Error(
+				`Stored OAuth token endpoint does not match current authorization-server metadata for ${config.url}`,
+			);
+		}
+		const clientId = creds.clientId ?? config.clientId;
+		if (!tokenEndpoint) throw new Error(`No token endpoint stored for ${label}; re-run /mcp login ${config.server}`);
 		const token = await exchangeToken(tokenEndpoint, {
 			grant_type: "refresh_token",
 			refresh_token: creds.refresh,
 			...(clientId ? { client_id: clientId } : {}),
+			...(creds.resource ? { resource: creds.resource } : {}),
 		});
-		return toCredentials(token, tokenEndpoint, clientId ?? "", creds.refresh);
+		return toCredentials(
+			token,
+			tokenEndpoint,
+			clientId ?? "",
+			creds.endpoint,
+			creds.resource,
+			creds.issuer,
+			creds.refresh,
+		);
 	}
 
 	return {

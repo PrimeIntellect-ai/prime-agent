@@ -60,7 +60,7 @@ describe("built-in slash commands", () => {
 	test("describes /mcp as the MCP Connections menu entry point", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "mcp")).toMatchObject({
 			description: "Open MCP Connections or manage MCP integrations",
-			argumentHint: "[list|login <name>|logout <name>]",
+			argumentHint: "[add|list|get|remove|login|logout]",
 			takesArgument: true,
 		});
 	});

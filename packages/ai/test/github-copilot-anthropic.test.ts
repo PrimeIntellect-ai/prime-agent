@@ -66,24 +66,19 @@ describe("Copilot Claude via Anthropic Messages", () => {
 		const opts = mockState.constructorOpts!;
 		expect(opts).toBeDefined();
 
-		// Auth: apiKey null, authToken for Bearer
 		expect(opts.apiKey).toBeNull();
 		expect(opts.authToken).toBe("tid_copilot_session_test_token");
 		const headers = opts.defaultHeaders as Record<string, string>;
 
-		// Copilot static headers from model.headers
 		expect(headers["User-Agent"]).toContain("GitHubCopilotChat");
 		expect(headers["Copilot-Integration-Id"]).toBe("vscode-chat");
 
-		// Dynamic headers
 		expect(headers["X-Initiator"]).toBe("user");
 		expect(headers["Openai-Intent"]).toBe("conversation-edits");
 
-		// No fine-grained-tool-streaming (Copilot doesn't support it)
 		const beta = headers["anthropic-beta"] ?? "";
 		expect(beta).not.toContain("fine-grained-tool-streaming");
 
-		// Payload is valid Anthropic Messages format
 		const params = mockState.createParams!;
 		expect(params.model).toBe("claude-sonnet-4.5");
 		expect(params.stream).toBe(true);

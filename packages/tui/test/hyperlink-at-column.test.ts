@@ -58,7 +58,7 @@ describe("hyperlinkAtColumn", () => {
 	});
 
 	it("counts wide graphemes as two columns", () => {
-		const line = `你好 ${link("https://example.com", "docs")}`;
+		const line = `\u4f60\u597d ${link("https://example.com", "docs")}`;
 		assert.strictEqual(hyperlinkAtColumn(line, 4), null);
 		assert.strictEqual(hyperlinkAtColumn(line, 5), "https://example.com");
 	});

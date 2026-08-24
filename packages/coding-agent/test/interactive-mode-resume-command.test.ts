@@ -17,13 +17,14 @@ type ResumeCommandContext = {
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
+
 const emptySessionDir = mkdtempSync(join(tmpdir(), "resume-command-test-"));
 
 afterAll(() => {
 	rmSync(emptySessionDir, { recursive: true, force: true });
 });
 
-function makeContext(): ResumeCommandContext {
+function makeContext() {
 	return {
 		requestAgentsView: vi.fn<() => Promise<void>>(async () => undefined),
 		handleResumeSession: vi.fn<(sessionPath: string) => Promise<{ cancelled: boolean }>>(async () => ({
@@ -32,7 +33,7 @@ function makeContext(): ResumeCommandContext {
 		showError: vi.fn<(message: string) => void>(),
 		getCurrentCwd: () => emptySessionDir,
 		connectionState: { sessionDir: emptySessionDir },
-	};
+	} satisfies ResumeCommandContext;
 }
 
 describe("InteractiveMode /resume command", () => {

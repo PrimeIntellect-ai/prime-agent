@@ -760,17 +760,8 @@ export class TUI extends Container {
 		return this.fullscreen?.viewport.scrollInfo() ?? null;
 	}
 
-	private copySelection(text: string): void {
-		if (this.onCopy) {
-			this.onCopy(text);
-			return;
-		}
-		// fallback: OSC 52 works locally, over SSH, and through tmux (set-clipboard)
-		const base64 = Buffer.from(text, "utf8").toString("base64");
-		this.terminal.write(`\x1b]52;c;${base64}\x07`);
-	}
-
-	// Terminals gate their native link handling while mouse reporting is active,
+	// Terminals gate their native link handling while mouse reporting is active
+	// (Ghostty only refreshes link hover when reporting is off or shift is held),
 	// so clicks the TUI consumes must open OSC 8 hyperlinks itself.
 	private openHyperlink(url: string): void {
 		if (/\p{Cc}/u.test(url)) return;
@@ -797,6 +788,16 @@ export class TUI extends Container {
 						]
 					: ["xdg-open", href];
 		execFile(command, args, () => {});
+	}
+
+	private copySelection(text: string): void {
+		if (this.onCopy) {
+			this.onCopy(text);
+			return;
+		}
+		// fallback: OSC 52 works locally, over SSH, and through tmux (set-clipboard)
+		const base64 = Buffer.from(text, "utf8").toString("base64");
+		this.terminal.write(`\x1b]52;c;${base64}\x07`);
 	}
 
 	private updateSelectionAutoScroll(viewport: FullscreenViewport, screenRow: number, screenColumn: number): void {

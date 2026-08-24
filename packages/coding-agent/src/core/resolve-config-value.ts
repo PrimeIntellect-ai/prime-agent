@@ -6,7 +6,6 @@
 import { execSync, spawnSync } from "child_process";
 import { getShellConfig } from "../utils/shell.js";
 
-// Cache for shell command results (persists for process lifetime)
 const commandResultCache = new Map<string, string | undefined>();
 
 /**
@@ -18,8 +17,16 @@ export function resolveConfigValue(config: string): string | undefined {
 	if (config.startsWith("!")) {
 		return executeCommand(config);
 	}
+	return resolveEnvOrLiteral(config);
+}
+
+/** Unset env var: fall back to the literal string. Set-but-empty: missing credential, never the var name. */
+function resolveEnvOrLiteral(config: string): string | undefined {
 	const envValue = process.env[config];
-	return envValue || config;
+	if (envValue !== undefined) {
+		return envValue || undefined;
+	}
+	return config;
 }
 
 function executeWithConfiguredShell(command: string): { executed: boolean; value: string | undefined } {
@@ -92,8 +99,7 @@ export function resolveConfigValueUncached(config: string): string | undefined {
 	if (config.startsWith("!")) {
 		return executeCommandUncached(config);
 	}
-	const envValue = process.env[config];
-	return envValue || config;
+	return resolveEnvOrLiteral(config);
 }
 
 export function resolveConfigValueOrThrow(config: string, description: string): string {

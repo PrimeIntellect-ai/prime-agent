@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
 	psCalls: [] as boolean[],
 	reapCalls: [] as Array<[boolean, boolean]>,
 	shutdownCalls: [] as Array<[boolean, boolean]>,
+	mcpCommands: [] as string[][],
 }));
 
 vi.mock("../src/cli/daemon-command.js", () => ({
@@ -22,6 +23,19 @@ vi.mock("../src/package-manager-cli.js", () => ({
 		return true;
 	},
 	isSelfUpdateSource: (source: string) => source === "self" || source === "pi" || source === "prime-agent",
+}));
+
+vi.mock("../src/core/mcp/mcp-command.js", () => ({
+	runMcpManagementCommand: async (args: string[]) => {
+		mocks.mcpCommands.push(args);
+		return { action: args[0], message: "managed", changed: false };
+	},
+}));
+
+vi.mock("../src/core/settings-manager.js", () => ({
+	SettingsManager: {
+		create: () => ({ flush: async () => {}, drainErrors: () => [], getGlobalMcpServers: () => undefined }),
+	},
 }));
 
 vi.mock("../src/cli/daemon-ps.js", () => ({
@@ -48,6 +62,7 @@ describe("public command routing", () => {
 		mocks.psCalls.length = 0;
 		mocks.reapCalls.length = 0;
 		mocks.shutdownCalls.length = 0;
+		mocks.mcpCommands.length = 0;
 		process.exitCode = undefined;
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
@@ -96,6 +111,13 @@ describe("public command routing", () => {
 			args: ["--verbose", "--provider", "anthropic"],
 			explicitAgentsView: true,
 		});
+	});
+
+	it("routes MCP management without entering agent startup", async () => {
+		await expect(
+			handlePublicCommand(["mcp", "add", "local", "--", "node", "server file.js", "--stdio"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.mcpCommands).toEqual([["add", "local", "--", "node", "server file.js", "--stdio"]]);
 	});
 
 	it("routes agent operations through the internal protocol adapter", async () => {

@@ -1,5 +1,5 @@
 import { appendFileSync } from "node:fs";
-import type { AgentMessage, ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
+import { AgentContinueError, type AgentMessage, type ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.js";
@@ -94,9 +94,35 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
-		const result = await harness.session.compact();
+		const pruneOversizedVariables = vi.fn(async () => ["large_text"]);
+		const listNamespaceNames = vi.fn(async () => ["small_value"]);
+		const internals = harness.session as unknown as { _ipythonKernelProvisioner?: unknown };
+		const previousProvisioner = internals._ipythonKernelProvisioner;
+		internals._ipythonKernelProvisioner = {
+			hasRunningKernel: true,
+			pruneOversizedVariables,
+			listNamespaceNames,
+		};
+		let result!: Awaited<ReturnType<typeof harness.session.compact>>;
+		try {
+			result = await harness.session.compact();
+		} finally {
+			internals._ipythonKernelProvisioner = previousProvisioner;
+		}
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 
+		expect(pruneOversizedVariables).toHaveBeenCalledOnce();
+		expect(listNamespaceNames).toHaveBeenCalledOnce();
+		expect(pruneOversizedVariables.mock.invocationCallOrder[0] as number).toBeLessThan(
+			listNamespaceNames.mock.invocationCallOrder[0] as number,
+		);
+		expect(harness.session.messages).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: "ipython_state",
+				content: expect.stringContaining("were removed: large_text"),
+			}),
+		);
 		expect(result.summary).toBe("summary from extension");
 		expect(compactionEntries).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
@@ -921,7 +947,7 @@ describe("AgentSession compaction characterization", () => {
 		];
 		const continueSpy = vi
 			.spyOn(harness.session.agent, "continue")
-			.mockRejectedValueOnce(new Error("already processing"));
+			.mockRejectedValueOnce(new AgentContinueError("busy", "already processing"));
 
 		sessionInternals._schedulePostCompactionContinue();
 		await vi.advanceTimersByTimeAsync(100);

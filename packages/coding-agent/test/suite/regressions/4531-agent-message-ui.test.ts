@@ -685,8 +685,8 @@ describe("ENG-4531 agent message UI", () => {
 		const sentAgentMessage = {
 			id: "agentmsg_4531_decoupled",
 			message: "Decouple me.",
-			deliveryStatus: "delivered" as const,
-			receiverRole: "parent" as const,
+			deliveryStatus: "delivered",
+			receiverRole: "parent",
 			target: {
 				activeSessionId: "worker-active",
 				sessionId: "worker-session",

@@ -7,6 +7,8 @@ import type { WorkflowArtifactRef } from "../workflow/contracts.js";
 
 /** Default ceiling on inline durable snapshot bytes. */
 export const DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024;
+/** Default ceiling for one serialized variable. */
+export const DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024;
 
 /** Maximum number of retained metadata records in one checkpoint. */
 export const DEFAULT_SNAPSHOT_MAX_RETAINED_VALUES = 256;
@@ -94,6 +96,10 @@ export interface KernelSnapshotCodeOptions {
 	readonly previousDurableBytes?: number | null;
 	/** Maximum retained metadata records. */
 	readonly maxRetainedValues?: number;
+	/** Maximum serialized size of one variable. */
+	readonly maxVariableBytes?: number;
+	/** Delete over-cap variables after the checkpoint commits. */
+	readonly pruneOversized?: boolean;
 }
 
 /** Absolute path to the dill payload within a session's artifact directory. */
@@ -133,12 +139,14 @@ export function buildSnapshotCode(
 	const previousCheckpointTurn = options.previousCheckpointTurn ?? null;
 	const previousDurableBytes = options.previousDurableBytes ?? null;
 	const maxRetainedValues = options.maxRetainedValues ?? DEFAULT_SNAPSHOT_MAX_RETAINED_VALUES;
+	const maxVariableBytes = options.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES;
+	const pruneOversized = options.pruneOversized ?? false;
 
 	// All builtins are sourced via the locally-imported _b alias so the helper keeps
 	// working even when the user namespace shadows names like list/open/print/len.
 	return `
 def _prime_agent_snapshot_state():
-    import builtins as _b, datetime, hashlib, json, os, sys, time
+    import builtins as _b, datetime, hashlib, io, json, os, sys, time
     try:
         import dill
     except _b.Exception:
@@ -151,6 +159,9 @@ def _prime_agent_snapshot_state():
     _previous_durable_bytes = ${previousDurableBytes === null ? "None" : previousDurableBytes}
     _max_bytes = ${maxBytes}
     _max_retained = ${maxRetainedValues}
+    _max_variable_bytes = ${maxVariableBytes}
+    _identify_oversized = ${pruneOversized ? "True" : "False"}
+    _oversized = []
     _transient_names = _b.set(${pyJson(transientNames)})
     _host_only_names = _b.set(${pyJson(hostOnlyNames)})
     _reproducible_names = _b.set(${pyJson(reproducibleNames)})
@@ -158,7 +169,7 @@ def _prime_agent_snapshot_state():
     _transient_classifications = ${pyJson(transientClassifications)}
     _artifact_root = ${pyStr(artifactRoot)}
     _artifact_dir_name = "kernel-state-artifacts"
-    _always_skip = {"rlm", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open", "goal", "agent_message", "mempalace", "workflow", "workflow_ledger", "ledger", "lease", "leases", "worker", "message_obligations"}
+    _always_skip = {"rlm", "mcp", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open", "goal", "agent_message", "mempalace", "workflow", "workflow_ledger", "ledger", "lease", "leases", "worker", "message_obligations"}
 
     _ip = None
     try:
@@ -205,6 +216,19 @@ def _prime_agent_snapshot_state():
             "reason": _reason,
         })
 
+    class _SnapshotSizeLimitExceeded(_b.Exception):
+        pass
+
+    class _SnapshotBuffer(io.BytesIO):
+        def __init__(self, _limit):
+            io.BytesIO.__init__(self)
+            self.limit = _limit
+
+        def write(self, _chunk):
+            if self.tell() + _b.len(_chunk) > self.limit:
+                raise _SnapshotSizeLimitExceeded()
+            return io.BytesIO.write(self, _chunk)
+
     def _write_artifact(_name, _blob, _checkpoint):
         _digest = hashlib.sha256(_blob).hexdigest()
         _relative = _artifact_dir_name + "/" + _digest + ".dill"
@@ -239,7 +263,7 @@ def _prime_agent_snapshot_state():
         if not _b.isinstance(_required_name, _b.str) or _required_name not in _ns or _required_name in _hidden or _required_name in _always_skip:
             _fatal.append("required state is missing from the kernel namespace")
 
-    for _name in _b.sorted(_ns.keys()):
+    for _name in _b.list(_ns.keys()):
         if not _b.isinstance(_name, _b.str) or _name.startswith("_") or _name in _hidden or _name in _always_skip:
             continue
         _value = _ns[_name]
@@ -256,8 +280,24 @@ def _prime_agent_snapshot_state():
             if _required:
                 _fatal.append("required transient state is not kernel durable")
             continue
+        _exempt = _name in _required_names or _name in _reproducible_names
+        _remaining = _max_bytes - _inline_total
         try:
-            _blob = dill.dumps(_value)
+            if _exempt:
+                _blob = dill.dumps(_value)
+            else:
+                _buffer = _SnapshotBuffer(_max_variable_bytes if _identify_oversized else _b.min(_max_variable_bytes, _remaining))
+                dill.dump(_value, _buffer)
+                _blob = _buffer.getvalue()
+        except _SnapshotSizeLimitExceeded:
+            if not _identify_oversized and _remaining < _max_variable_bytes:
+                _record(_name, _value_type, 0, "durable_fact", _required, "unavailable", None, None, "over budget")
+                _skipped.append({"name": _name, "reason": "exceeds aggregate snapshot size cap"})
+            else:
+                _record(_name, _value_type, 0, "durable_fact", _required, "unavailable", None, None, "over budget")
+                _skipped.append({"name": _name, "reason": "exceeds per-variable snapshot size cap"})
+                _oversized.append(_name)
+            continue
         except _b.Exception:
             _record(_name, _value_type, 0, "durable_fact", _required, "unavailable", None, None, "unpicklable")
             _skipped.append({"name": _name, "reason": "unpicklable"})
@@ -325,6 +365,8 @@ def _prime_agent_snapshot_state():
         return
 
     _ended_ms = _b.int(time.perf_counter() * 1000)
+    _pruned = _b.sorted(_name for _name in _oversized if _name in _ns) if _identify_oversized else []
+    _pruned_ids = {_b.id(_ns[_name]) for _name in _pruned}
     _manifest = {
         "schemaVersion": 2,
         "status": "committed",
@@ -342,6 +384,7 @@ def _prime_agent_snapshot_state():
         "checkpointTurn": _checkpoint_turn,
         "serializeStartedAtMonotonicMs": _started_ms,
         "serializeEndedAtMonotonicMs": _ended_ms,
+        "pruned": _pruned,
         "pythonVersion": sys.version.split()[0],
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -358,6 +401,24 @@ def _prime_agent_snapshot_state():
             pass
         _b.print(${pyStr(KERNEL_STATE_RESULT_MARKER)} + json.dumps({"error": "manifest write failed"}))
         return
+    while True:
+        try:
+            for _name in _pruned:
+                if _name in _ns:
+                    del _ns[_name]
+            _output_cache = _ns.get("Out")
+            if _b.isinstance(_output_cache, _b.dict):
+                for _key in _b.list(_output_cache.keys()):
+                    if _b.id(_output_cache[_key]) in _pruned_ids:
+                        del _output_cache[_key]
+            for _name in _hidden:
+                if _name in _ns and _b.id(_ns[_name]) in _pruned_ids:
+                    del _ns[_name]
+            break
+        except _b.KeyboardInterrupt:
+            # Deletion is idempotent. Finish the short critical section so a
+            # snapshot timeout cannot leave only some purge candidates live.
+            continue
     _b.print(${pyStr(KERNEL_STATE_RESULT_MARKER)} + json.dumps({
         "saved": _saved,
         "skipped": _skipped,
@@ -371,6 +432,7 @@ def _prime_agent_snapshot_state():
         "previousDurableBytes": _previous_durable_bytes,
         "retainedValues": _retained,
         "largestRetainedValues": _largest,
+        "pruned": _pruned,
     }))
 
 
@@ -708,7 +770,7 @@ def _prime_agent_list_state_names():
         _ip = None
     _ns = _ip.user_ns if _ip is not None else _b.globals()
     _hidden = _b.set(_b.getattr(_ip, "user_ns_hidden", {}) or {}) if _ip is not None else _b.set()
-    _always_skip = {"rlm", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open", "goal", "agent_message", "mempalace", "workflow", "workflow_ledger", "ledger", "lease", "leases", "worker", "message_obligations"}
+    _always_skip = {"rlm", "mcp", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open", "goal", "agent_message", "mempalace", "workflow", "workflow_ledger", "ledger", "lease", "leases", "worker", "message_obligations"}
     _names = []
     for _name in _b.list(_ns.keys()):
         if _name.startswith("_") or _name in _hidden or _name in _always_skip:
@@ -732,6 +794,7 @@ interface RawListNames {
 interface RawSnapshot {
 	saved?: unknown;
 	skipped?: unknown;
+	pruned?: unknown;
 	bytes?: unknown;
 	error?: unknown;
 	checkpointTurn?: unknown;
@@ -941,9 +1004,11 @@ export function parseSnapshotResult(stdout: string, path: string): SnapshotResul
 	const raw = parseMarkerLine<RawSnapshot>(stdout);
 	if (!raw || raw.error) return null;
 	const metrics = metricsFromRaw(raw);
+	const pruned = asStringArray(raw.pruned);
 	return {
 		saved: asStringArray(raw.saved),
 		skipped: asReasonArray(raw.skipped),
+		pruned: pruned.length > 0 ? pruned : undefined,
 		bytes: typeof raw.bytes === "number" ? raw.bytes : 0,
 		path,
 		...(metrics ?? {}),
@@ -982,6 +1047,8 @@ export function parseListNamesResult(stdout: string): string[] | null {
 export interface SnapshotResult extends Partial<KernelSnapshotMetrics> {
 	readonly saved: string[];
 	readonly skipped: { name: string; reason: string }[];
+	/** Oversized live variables removed by an explicit compaction snapshot. */
+	readonly pruned?: string[];
 	readonly bytes: number;
 	readonly path: string;
 }
