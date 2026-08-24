@@ -510,6 +510,23 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
                     bash_module._shell()
 
+    async def test_pump_paused_between_read_and_commit_does_not_lose_output(self):
+        # Reviewer repro: the chunk is out of the pipe (FIONREAD 0) but not yet
+        # in the buffer; the drain fence must wait for the commit.
+        original_write = bash_module._BoundedBuffer.write
+        delayed_once = threading.Event()
+
+        def delayed_write(buffer_self, chunk):
+            if not delayed_once.is_set():
+                delayed_once.set()
+                time.sleep(0.3)
+            original_write(buffer_self, chunk)
+
+        with mock.patch.object(bash_module._BoundedBuffer, "write", delayed_write):
+            result = await asyncio.wait_for(bash("printf between-read-and-write"), timeout=5)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("between-read-and-write", result.output)
+
     async def test_slow_pump_does_not_lose_foreground_output(self):
         # A descheduled pump must not let _drain_grace conclude quiescence
         # while the shell's output still sits unread in the pipe.

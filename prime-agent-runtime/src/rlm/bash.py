@@ -125,6 +125,8 @@ class BashHandle:
         self._status_read = -1
         self._wake_read = -1
         self._wake_write = -1
+        # True only while the pump moves a chunk from the pipe into the buffer.
+        self._pump_transfer = False
         status_write = -1
         if _IS_POSIX:
             # Full-duplex status channel: the child end rides in as stdin (fd 0)
@@ -244,12 +246,40 @@ class BashHandle:
     def _pump(self) -> None:
         stdout = self._proc.stdout
         assert stdout is not None
+        if not _IS_POSIX:
+            # Windows: no FIONREAD fence; the drain keeps its quiescence
+            # heuristic (best-effort parity).
+            try:
+                while chunk := stdout.read1(_READ_CHUNK):
+                    self._buffer.write(chunk)
+            except (OSError, ValueError):
+                pass
+            stdout.close()
+            self._eof.set()
+            return
+        # POSIX: select-gate the read and flag the read->commit window, so the
+        # drain fence never sees "pipe empty + buffer quiescent" while a chunk
+        # is in flight between the pipe read and the buffer commit.
+        fd = stdout.fileno()
         try:
-            while chunk := stdout.read1(_READ_CHUNK):
-                self._buffer.write(chunk)
+            with selectors.DefaultSelector() as sel:
+                sel.register(fd, selectors.EVENT_READ)
+                while True:
+                    sel.select()
+                    self._pump_transfer = True
+                    try:
+                        chunk = os.read(fd, _READ_CHUNK)
+                        if not chunk:
+                            break
+                        self._buffer.write(chunk)
+                    finally:
+                        self._pump_transfer = False
         except (OSError, ValueError):
             pass
-        stdout.close()
+        try:
+            stdout.close()
+        except OSError:
+            pass
         self._eof.set()
 
     def _report(self) -> None:
@@ -351,7 +381,9 @@ class BashHandle:
         while time.monotonic() < deadline:
             if self._eof.wait(0.05):
                 return
-            if self._pipe_pending():
+            # A chunk between pipe read and buffer commit (transfer flag) is
+            # invisible to both FIONREAD and the buffer size; wait it out.
+            if self._pipe_pending() or self._pump_transfer:
                 size = self._buffer.size()
                 continue
             current = self._buffer.size()
