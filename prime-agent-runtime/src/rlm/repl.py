@@ -10,7 +10,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import codecs
+import contextvars
 import inspect
+import io
 import json
 import linecache
 import os
@@ -40,7 +42,7 @@ _protocol_fd: int = -1
 _write_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _serve_task: asyncio.Task[Any] | None = None
-_current_cell: str | None = None
+_current_cell: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_cell", default=None)
 _active: dict[str, Any] = {"task": None, "rid": None, "interrupted": False}
 _cell_counter = 0
 
@@ -70,7 +72,7 @@ def emit(data: dict[str, Any]) -> None:
     """
     if not isinstance(data, dict) or not data or not all(isinstance(k, str) for k in data):
         raise TypeError("emit() requires a non-empty dict keyed by MIME type strings")
-    _send({"event": "display", "id": _current_cell, "data": data})
+    _send({"event": "display", "id": _current_cell.get(), "data": data})
 
 
 class _Pump:
@@ -148,7 +150,48 @@ class _Pump:
             return
         text = self._decoder.decode(data)
         if text:
-            _send({"event": self._stream, "id": _current_cell, "text": text})
+            # Raw fd bytes have no provable owner (os.write, C extensions,
+            # subprocesses, threads from earlier cells): never credit a cell.
+            _send({"event": self._stream, "id": None, "text": text})
+
+
+class _TaggedWriter(io.TextIOBase):
+    """sys.stdout/sys.stderr replacement tagging writes with the writer's cell id.
+
+    Python-level writes carry write-time provenance from the _current_cell
+    contextvar (asyncio tasks inherit the spawning cell's id; user threads see
+    None) and ship straight to the protocol, bypassing the fd pipe. fileno()
+    exposes a dup of the captured pipe so subprocesses and C-level writers keep
+    working through the raw channel (null-attributed).
+    """
+
+    def __init__(self, stream: str, fallback_fd: int) -> None:
+        self._stream = stream
+        self._fallback_fd = fallback_fd
+
+    def write(self, text: str) -> int:
+        if not isinstance(text, str):
+            raise TypeError(f"write() argument must be str, not {type(text).__name__}")
+        if text:
+            _send({"event": self._stream, "id": _current_cell.get(), "text": text})
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def fileno(self) -> int:
+        return self._fallback_fd
+
+    def writable(self) -> bool:
+        return True
+
+    @property
+    def encoding(self) -> str:
+        return "utf-8"
+
+    @property
+    def errors(self) -> str:
+        return "replace"
 
 
 def _consume_task_exception(task: asyncio.Task[Any]) -> None:
@@ -331,11 +374,13 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
 
 
 async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
-    global _current_cell, _cell_counter
+    global _cell_counter
     cell_id = req["id"]
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
-    _current_cell = cell_id
+    # The cell task (created below) copies this context, so writes made from
+    # the cell and from asyncio tasks it spawns carry this cell's id.
+    token = _current_cell.set(cell_id)
     try:
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
@@ -349,16 +394,13 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
                 status, error = "error", _error_event(cell_id, exc)
         _drain_output()
-        # `done` must be the last event carrying this cell id: once drained, output from
-        # stray background threads must observe a null current cell, so clear it now.
-        _current_cell = None
         if result_text is not None:
             _send({"event": "result", "id": cell_id, "text": result_text})
         if error is not None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
-        _current_cell = None
+        _current_cell.reset(token)
 
 
 def _drain_output() -> None:
@@ -660,8 +702,8 @@ def _setup_fds() -> int:
     os.dup2(err_w, 2)
     os.close(out_w)
     os.close(err_w)
-    sys.stdout = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8", errors="replace")
-    sys.stderr = os.fdopen(os.dup(2), "w", buffering=1, encoding="utf-8", errors="replace")
+    sys.stdout = _TaggedWriter("stdout", fallback_fd=os.dup(1))
+    sys.stderr = _TaggedWriter("stderr", fallback_fd=os.dup(2))
     stdin_fd = os.dup(0)
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)
