@@ -5,6 +5,7 @@
 - Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
 - Fixed two bash() spawn races: status-channel fds no longer leak when pipe creation fails mid-setup, and a status-socket gate keeps the command from starting until its pid is journaled (a kernel kill in that window now stops the child instead of orphaning it past the reaper).
 - Fixed the Windows orphan reaper killing only the journaled bash() shell pid; it now uses taskkill /T so descendants die with the tree, matching the in-kernel bash() kill paths.
+- Hardened bash(): cancelling `await bash(cmd)` now kills the command's process group (background handles are unaffected), Windows helper binaries resolve via absolute System32 paths, kill() retries taskkill for already-reaped Windows trees, and orphan-journal enrollment fails closed when configured.
 
 ## [0.8.0] - 2026-08-21
 
