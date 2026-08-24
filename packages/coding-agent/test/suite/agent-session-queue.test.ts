@@ -39,7 +39,7 @@ type AutoRefineInternals = {
 	_scheduleAutoRefine(reason: AutoRefineReason): void;
 	_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
 	_scheduleAutoRefineAfterAgentEnd(): void;
-	_schedulePostCompactionContinue(): void;
+	_schedulePostCompactionContinue(continueAfterSessionInput?: boolean): void;
 	_invalidatePendingAutoRefineForBranchChange(): Promise<void>;
 	_cancelPostCompactionContinue(): void;
 	_assistantTurnsSinceAutoRefine: number;
@@ -351,6 +351,22 @@ describe("AgentSession queue characterization", () => {
 		activeRunSettled.resolve();
 		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(2));
 		expect(internals._postCompactionContinuationScheduled).toBe(false);
+	});
+
+	it("waits for a queued-work pause to release before post-compaction continuation", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as AutoRefineInternals;
+		const pause = harness.session.acquireQueuedWorkPause();
+		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+
+		internals._schedulePostCompactionContinue();
+		await new Promise<void>(setImmediate);
+		expect(continueAgent).not.toHaveBeenCalled();
+
+		pause.release();
+		await harness.session.waitForHeadlessIdle();
+		expect(continueAgent).toHaveBeenCalledTimes(1);
 	});
 
 	it("cancels scheduled post-compaction continuation on branch changes", async () => {
