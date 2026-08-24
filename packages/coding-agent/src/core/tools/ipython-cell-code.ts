@@ -47,7 +47,7 @@ export function magicRejection(code: string): string | undefined {
 	if (firstLine.startsWith("!")) {
 		return "! shell escapes are not supported; use bash('cmd') / await bash('cmd')";
 	}
-	// Column-0 scan of every line matches the legacy rewrite backend's heuristic (including its false positives on %-lines inside triple-quoted strings).
+	// Column-0 scan of every line; may false-positive on %-lines inside triple-quoted strings (accepted).
 	for (const line of code.split("\n")) {
 		if (line.startsWith("%cd")) {
 			return "%cd is not supported; use os.chdir(...)";
