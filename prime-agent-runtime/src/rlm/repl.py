@@ -523,14 +523,24 @@ def _snapshot_state(
         "pythonVersion": sys.version.split()[0],
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    # A SIGINT-raised KeyboardInterrupt anywhere between the committed manifest and the
+    # last prune deletion would desync the namespace from the manifest: park SIGINT for
+    # the whole interval (manifest commit through deletions), then re-deliver.
+    parked: list[int] = []
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: parked.append(signum))
     try:
-        with open(manifest_path, "w") as fh:
-            json.dump(manifest, fh)
-    except OSError as err:
-        # Fail before the prune deletions so a bad manifest path never destroys state.
-        return {"error": f"manifest write failed: {err}"}
-    for name in pruned:
-        ns.pop(name, None)
+        try:
+            with open(manifest_path, "w") as fh:
+                json.dump(manifest, fh)
+        except OSError as err:
+            # Fail before the prune deletions so a bad manifest path never destroys state.
+            return {"error": f"manifest write failed: {err}"}
+        for name in pruned:
+            ns.pop(name, None)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if parked:
+            signal.raise_signal(signal.SIGINT)
     return {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
 
 
@@ -602,7 +612,14 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
 
 def _list_names(ns: dict[str, Any]) -> list[str]:
     """User-defined top-level names, filtered like the snapshot."""
-    return sorted(name for name in ns if not name.startswith("_") and name not in _ALWAYS_SKIP)
+    # Non-string keys (globals()[1] = 1) are not user-listable names.
+    return sorted(
+        name for name in ns if isinstance(name, str) and not name.startswith("_") and name not in _ALWAYS_SKIP
+    )
+
+
+async def _handle_list_names(req: dict[str, Any], ns: dict[str, Any]) -> None:
+    _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
 
 
 async def _handle_request(
@@ -649,7 +666,7 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
         elif rtype in ("snapshot", "restore"):
             await _handle_request(_handle_state, req, ns)
         elif rtype == "list_names":
-            _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
+            await _handle_request(_handle_list_names, req, ns)
 
 
 _REQUIRED_FIELDS = {

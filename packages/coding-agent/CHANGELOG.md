@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed the REPL runtime `list_names` request crashing the serve loop when the namespace held a non-string key; non-string keys are now skipped and every runtime request fails individually through the shared backstop instead of killing the loop.
 - Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel, made `%cd`/`%env` rewrites match IPython semantics (`~` expansion, quoted `%cd` targets, `%cd -` and new-cwd echo, `=`-preferred and space-separated assignments, `$var`/`${var}` value expansion, bare `%env` listing with `key`/`token`/`secret` values redacted) with linear-time magic patterns, kept `%cd -` previous-directory tracking intact when a `%cd` target does not exist, and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
 - Fixed graceful REPL kernel `shutdown()` losing teardown ownership to its own child's exit handler, which made `restart()` misread the shutdown as superseded and never start the kernel again.
 - Fixed REPL kernel `start()` waiting out the full 30s ready timeout when the kernel process fails to spawn; the spawn error now rejects startup immediately.
@@ -14,6 +15,7 @@
 - Fixed a compile-phase crash (e.g. RecursionError from a pathologically deep attribute chain) killing the REPL runtime instead of failing the one cell: any per-request failure now becomes error+done and the serve loop keeps running; rebinding sys.stdout/sys.stderr to flush-less objects no longer kills it either.
 - Fixed the REPL runtime hanging before done when a cell closes fd 1/2 and a later open() reclaims the number: drain sync tokens now go through a private dup of the capture pipe, with a pump-liveness backstop so a dead pump can no longer wedge the serve loop.
 - Fixed the Windows orphan reaper killing only the journaled bash() shell pid; it now uses taskkill /T so descendants die with the tree, matching the in-kernel bash() kill paths.
+- Fixed an interrupt landing mid-snapshot leaving prune deletions half-applied: once the snapshot manifest is committed, SIGINT is deferred until every oversized name is removed, so the namespace always matches the on-disk snapshot.
 
 ## [0.8.0] - 2026-08-21
 
