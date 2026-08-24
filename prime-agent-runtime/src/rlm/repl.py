@@ -217,7 +217,12 @@ class _TaggedBuffer(io.RawIOBase):
         self._fallback_fd = fallback_fd
 
     def write(self, data: Any) -> int:
-        return os.write(self._fallback_fd, bytes(data))
+        # Pipe writes can be short for payloads above the pipe capacity.
+        view = memoryview(bytes(data))
+        total = len(view)
+        while view:
+            view = view[os.write(self._fallback_fd, view) :]
+        return total
 
     def flush(self) -> None:
         pass
@@ -582,11 +587,13 @@ def _snapshot_state(
         with open(tmp, "wb") as fh:
             dill.dump(payload, fh)
         os.replace(tmp, path)
-    except Exception as err:  # noqa: BLE001 - report any write failure to the host
+    except BaseException as err:  # noqa: BLE001 - never leave the temp file behind
         try:
             os.remove(tmp)
         except OSError:
             pass
+        if not isinstance(err, Exception):
+            raise  # e.g. KeyboardInterrupt: clean up, then propagate
         return {"error": f"write failed: {err}"}
 
     bytes_written = os.path.getsize(path)
@@ -766,6 +773,50 @@ def _protocol_error(message: str) -> None:
     _send({"event": "error", "id": None, "ename": "ProtocolError", "evalue": message, "traceback": []})
 
 
+def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> None:
+    assert _loop is not None
+    req = json.loads(raw)
+    if not isinstance(req, dict):
+        raise ValueError("request is not a JSON object")
+    rtype = req.get("type")
+    if rtype == "interrupt":
+        if "id" in req and not isinstance(req["id"], str):
+            _protocol_error("interrupt request id must be a string")
+            return
+        _request_interrupt(req.get("id"))
+        return
+    if rtype == "host_reply":
+        # Bypass the FIFO queue: the awaiting cell IS the in-flight
+        # execute, so a queued reply would deadlock behind it.
+        rid = req.get("id")
+        data = req.get("data")
+        if isinstance(rid, str) and isinstance(data, dict):
+            _resolve_host_reply(rid, data)
+        else:
+            _protocol_error("host_reply request needs string id and dict data")
+        return
+    if not isinstance(rtype, str) or rtype not in _REQUIRED_FIELDS:
+        _protocol_error(f"unknown request type: {rtype!r}")
+        return
+    missing = [f for f in _REQUIRED_FIELDS[rtype] if not isinstance(req.get(f), str)]
+    if missing:
+        _protocol_error(f"{rtype} request needs string fields: {', '.join(missing)}")
+        return
+    if rtype in ("execute", "snapshot", "restore"):
+        with _interrupt_lock:
+            # A reused in-flight id would corrupt interrupt/finish bookkeeping
+            # (a targeted interrupt could land on the wrong request).
+            if req["id"] in _inflight:
+                _protocol_error(f"duplicate in-flight request id: {req['id']!r}")
+                return
+            _inflight.add(req["id"])
+    if rtype == "shutdown":
+        # No host reply follows a shutdown; a cell awaiting host_request
+        # must fail now or it would block _serve from ever consuming this.
+        _loop.call_soon_threadsafe(_fail_pending_host_requests)
+    _loop.call_soon_threadsafe(queue.put_nowait, req)
+
+
 def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
     assert _loop is not None
     with os.fdopen(stdin_fd, "rb") as stream:
@@ -774,45 +825,12 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
             if not raw:
                 continue
             try:
-                req = json.loads(raw)
-                if not isinstance(req, dict):
-                    raise ValueError("request is not a JSON object")
-            except BaseException as err:  # noqa: BLE001 - a hostile line (e.g. RecursionError
-                # from pathological nesting) must not kill the reader thread.
+                # The whole per-line handling sits inside the backstop: hostile
+                # input (RecursionError from pathological nesting, unhashable
+                # field types, ...) must never kill the reader thread.
+                _handle_request_line(raw, queue)
+            except BaseException as err:  # noqa: BLE001
                 _protocol_error(f"{type(err).__name__}: {_safe_str(err)}")
-                continue
-            rtype = req.get("type")
-            if rtype == "interrupt":
-                if "id" in req and not isinstance(req["id"], str):
-                    _protocol_error("interrupt request id must be a string")
-                    continue
-                _request_interrupt(req.get("id"))
-                continue
-            if rtype == "host_reply":
-                # Bypass the FIFO queue: the awaiting cell IS the in-flight
-                # execute, so a queued reply would deadlock behind it.
-                rid = req.get("id")
-                data = req.get("data")
-                if isinstance(rid, str) and isinstance(data, dict):
-                    _resolve_host_reply(rid, data)
-                else:
-                    _protocol_error("host_reply request needs string id and dict data")
-                continue
-            if rtype not in _REQUIRED_FIELDS:
-                _protocol_error(f"unknown request type: {rtype!r}")
-                continue
-            missing = [f for f in _REQUIRED_FIELDS[rtype] if not isinstance(req.get(f), str)]
-            if missing:
-                _protocol_error(f"{rtype} request needs string fields: {', '.join(missing)}")
-                continue
-            if rtype in ("execute", "snapshot", "restore"):
-                with _interrupt_lock:
-                    _inflight.add(req["id"])
-            if rtype == "shutdown":
-                # No host reply follows a shutdown; a cell awaiting host_request
-                # must fail now or it would block _serve from ever consuming this.
-                _loop.call_soon_threadsafe(_fail_pending_host_requests)
-            _loop.call_soon_threadsafe(queue.put_nowait, req)
     # Host closed stdin: shut the runtime down.
     _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, {"type": "shutdown"})

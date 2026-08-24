@@ -277,6 +277,54 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "2")
         self.assertEqual(one(follow, "done")["status"], "ok")
 
+    def test_unhashable_request_type_does_not_kill_reader(self):
+        self.repl.send({"type": []})
+        error = self.repl.read_event()
+        self.assertEqual(error["event"], "error")
+        self.assertEqual(error["ename"], "ProtocolError")
+        self.repl.send({"type": {"x": 1}, "id": 5})
+        error = self.repl.read_event()
+        self.assertEqual(error["ename"], "ProtocolError")
+        follow = self.repl.execute("after-unhashable", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
+    def test_duplicate_inflight_id_rejected_and_original_still_interruptible(self):
+        self.repl.send({"type": "execute", "id": "dup", "code": "import time\nwhile True:\n    time.sleep(0.05)"})
+        time.sleep(0.3)
+        self.repl.send({"type": "execute", "id": "dup", "code": "print('imposter')"})
+        error = self.repl.read_event()
+        self.assertEqual(error["event"], "error")
+        self.assertEqual(error["ename"], "ProtocolError")
+        self.assertIn("duplicate", error["evalue"])
+        # The original request is unaffected and its targeted interrupt still lands.
+        self.repl.send({"type": "interrupt", "id": "dup"})
+        events = self.repl.until_done("dup")
+        self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
+        self.assertNotIn("imposter", stream_text(events, "stdout"))
+        follow = self.repl.execute("after-dup", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+
+    def test_large_buffer_write_survives_short_pipe_writes(self):
+        # 256 KiB exceeds the 64 KiB pipe capacity; the binary proxy must loop
+        # until every byte is written.
+        code = "\n".join(
+            [
+                "import sys",
+                "n = sys.stdout.buffer.write(b'x' * 262144)",
+                "sys.stdout.buffer.flush()",
+                "print('wrote', n)",
+            ]
+        )
+        events = self.repl.execute("bigbuf", code)
+        self.assertEqual(one(events, "done")["status"], "ok")
+        raw = "".join(
+            e["text"] for e in events if e.get("event") == "stdout" and e.get("id") is None
+        )
+        self.assertEqual(raw.count("x"), 262144)
+        self.assertIn("wrote 262144", stream_text(events, "stdout"))
+
     def test_interrupt_without_pthread_kill_cancels_awaited_cell(self):
         # Windows fallback seam: with pthread_kill absent the reader cancels
         # the active task on the loop; an await-suspended cell still interrupts.
@@ -1024,6 +1072,41 @@ class SnapshotPruneShieldTest(unittest.TestCase):
             self.assertEqual(ns, {})
             with open(manifest_path) as fh:
                 self.assertEqual(json.load(fh)["pruned"], ["big1", "big2"])
+
+
+class SnapshotTempCleanupTest(unittest.TestCase):
+    def test_keyboard_interrupt_during_payload_write_removes_temp_file(self):
+        from unittest import mock as unittest_mock
+
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        import dill
+
+        from rlm.repl import _snapshot_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+
+            real_dump = dill.dump
+
+            def interrupted_dump(payload, fh):
+                if hasattr(fh, "name"):  # the temp-file dump, not per-variable buffers
+                    fh.write(b"partial")
+                    raise KeyboardInterrupt
+                return real_dump(payload, fh)
+
+            with unittest_mock.patch.object(dill, "dump", interrupted_dump):
+                with self.assertRaises(KeyboardInterrupt):
+                    _snapshot_state(
+                        {"x": 1},
+                        path,
+                        os.path.join(tmp, "manifest.json"),
+                        max_bytes=1 << 20,
+                        max_variable_bytes=1 << 20,
+                        prune_oversized=False,
+                    )
+            self.assertFalse(os.path.exists(path + ".tmp"))
+            self.assertFalse(os.path.exists(path))
 
 
 if __name__ == "__main__":
