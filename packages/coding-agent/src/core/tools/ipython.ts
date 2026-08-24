@@ -669,6 +669,9 @@ export function createIpythonToolDefinition(
 				if (r.status === "error" && r.error) {
 					text += (text ? "\n" : "") + r.error.traceback.join("\n");
 				}
+				if (r.backgroundOutput) {
+					text += `${text ? "\n" : ""}[background output (unattributed)]\n${r.backgroundOutput}`;
+				}
 				if (kernelRestarted) {
 					text = text ? `${KERNEL_RESTART_NOTICE}\n\n${text}` : KERNEL_RESTART_NOTICE;
 				}

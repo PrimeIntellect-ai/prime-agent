@@ -280,12 +280,23 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     patched_run = mock.patch.object(
                         bash_module.subprocess, "run", return_value=completed
                     )
-                    with patched_run as run:
-                        handle.kill()
+                    with mock.patch.dict(os.environ, {"SystemRoot": r"C:\WinTest"}):
+                        with patched_run as run:
+                            handle.kill()
+                    taskkill = os.path.join(r"C:\WinTest", "System32", "taskkill.exe")
                     self.assertEqual(
-                        run.call_args.args[0], ["taskkill", "/PID", str(handle.pid), "/T", "/F"]
+                        run.call_args.args[0], [taskkill, "/PID", str(handle.pid), "/T", "/F"]
+                    )
+                    self.assertEqual(
+                        run.call_args.kwargs["env"]["NoDefaultCurrentDirectoryInExePath"], "1"
                     )
                     proc_kill.assert_not_called()
+                    # No SystemRoot in the env falls back to C:\Windows.
+                    with mock.patch.dict(os.environ):
+                        os.environ.pop("SystemRoot", None)
+                        with patched_run as run:
+                            handle.kill()
+                    self.assertTrue(run.call_args.args[0][0].startswith(r"C:\Windows"))
                     # taskkill unavailable or failing must fall back to Popen.kill().
                     with mock.patch.object(bash_module.subprocess, "run", side_effect=OSError):
                         handle.kill()
@@ -344,16 +355,175 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
     def test_windows_process_start_id(self):
         completed = mock.Mock(stdout="638000000000000000\n")
-        with mock.patch.object(bash_module.os, "name", "nt"):
-            with mock.patch.object(bash_module.subprocess, "run", return_value=completed) as run:
-                self.assertEqual(bash_module._process_start_id(1234), "win:638000000000000000")
+        with mock.patch.dict(os.environ, {"SystemRoot": r"C:\WinTest"}):
+            with mock.patch.object(bash_module.os, "name", "nt"):
+                with mock.patch.object(
+                    bash_module.subprocess, "run", return_value=completed
+                ) as run:
+                    self.assertEqual(bash_module._process_start_id(1234), "win:638000000000000000")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[0], "powershell.exe")
+        self.assertEqual(
+            argv[0],
+            os.path.join(r"C:\WinTest", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        )
+        self.assertEqual(run.call_args.kwargs["env"]["NoDefaultCurrentDirectoryInExePath"], "1")
         self.assertIn("GetProcessById(1234)", argv[-1])
         garbage = mock.Mock(stdout="not a number\n")
         with mock.patch.object(bash_module.os, "name", "nt"):
             with mock.patch.object(bash_module.subprocess, "run", return_value=garbage):
                 self.assertIsNone(bash_module._process_start_id(1234))
+
+    async def test_cancelled_direct_await_kills_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker")
+            pids: list[int] = []
+            original_init = bash_module.BashHandle.__init__
+
+            def capturing_init(handle_self, command):
+                original_init(handle_self, command)
+                pids.append(handle_self._pid)
+
+            async def run_oneshot():
+                await bash(f"sleep 1.0 && touch {marker}")
+
+            with mock.patch.object(bash_module.BashHandle, "__init__", capturing_init):
+                task = asyncio.ensure_future(run_oneshot())
+                await asyncio.sleep(0.3)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            await _poll_group_dead(pids[0])
+            await asyncio.sleep(1.0)
+            self.assertFalse(os.path.exists(marker))
+
+    async def test_background_handle_survives_cancel_of_creating_context(self):
+        handles: list[bash_module.BashHandle] = []
+
+        async def run_background():
+            h = bash("sleep 30")
+            handles.append(h)
+            h.pid  # released as a deliberate background handle
+            await asyncio.sleep(10)
+
+        task = asyncio.ensure_future(run_background())
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        handle = handles[0]
+        try:
+            os.killpg(handle._pid, 0)  # still alive
+        finally:
+            handle.kill(signal.SIGKILL)
+        await asyncio.wait_for(handle, timeout=5)
+
+    async def test_cancelling_await_on_released_handle_does_not_kill(self):
+        handle = bash("sleep 30")
+        self.assertTrue(handle.running)  # release as background handle
+
+        async def wait_for_it():
+            await handle
+
+        task = asyncio.ensure_future(wait_for_it())
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        try:
+            os.killpg(handle._pid, 0)  # still alive
+        finally:
+            handle.kill(signal.SIGKILL)
+        await asyncio.wait_for(handle, timeout=5)
+
+    async def test_second_await_after_cancelled_oneshot_only_waits(self):
+        handle = bash("echo done")
+        # First await consumes the one-shot ownership; later awaits only wait.
+        result = await handle
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(handle._released)
+        again = await handle
+        self.assertEqual(again, result)
+
+    async def test_relative_bash_shell_override_rejected(self):
+        with mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "bash"}):
+            with self.assertRaises(ValueError):
+                bash("echo hi")
+
+    async def test_windows_reap_and_reaped_kill_use_taskkill(self):
+        handle = bash("echo hi")
+        await asyncio.wait_for(handle, timeout=5)
+        for _ in range(100):
+            if handle._reaped:
+                break
+            await asyncio.sleep(0.05)
+        with mock.patch.object(bash_module, "_IS_POSIX", False):
+            with mock.patch.object(bash_module, "_taskkill_tree") as taskkill:
+                handle.kill()  # already reaped: best-effort retry, no no-op
+                taskkill.assert_called_once_with(handle._pid)
+                taskkill.reset_mock()
+                handle._reap_group()  # watcher path: taskkill before marking reaped
+                taskkill.assert_called_once_with(handle._pid)
+
+    async def test_journal_configured_but_unwritable_kills_child_and_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker")
+            pids: list[int] = []
+            real_popen = subprocess.Popen
+
+            def capturing_popen(*args, **kwargs):
+                proc = real_popen(*args, **kwargs)
+                pids.append(proc.pid)
+                return proc
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": tmp,  # a directory: open fails
+                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                },
+            ):
+                with mock.patch.object(bash_module.subprocess, "Popen", capturing_popen):
+                    with self.assertRaises(RuntimeError):
+                        bash(f"touch {marker}")
+            await _poll_group_dead(pids[0])
+            await asyncio.sleep(0.2)
+            self.assertFalse(os.path.exists(marker))
+            with bash_module._live_lock:
+                self.assertFalse(bash_module._live_handles)
+
+    async def test_journal_bad_owner_pid_rejects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.jsonl")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "PRIME_AGENT_KERNEL_OWNER_PID": "notanint",
+                },
+            ):
+                with self.assertRaises(RuntimeError):
+                    bash("echo hi")
+
+    async def test_missing_start_id_rejects_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.jsonl")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                },
+            ):
+                with mock.patch.object(bash_module, "_process_start_id", return_value=None):
+                    with self.assertRaises(RuntimeError):
+                        bash("sleep 30")
+
+    async def test_unconfigured_journal_stays_permissive(self):
+        # Permissiveness is about configuration, not start-id availability.
+        with mock.patch.object(bash_module, "_process_start_id", return_value=None):
+            result = await bash("echo ok")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("ok", result.output)
 
 
 async def _poll_group_dead(pgid: int, timeout: float = 5.0) -> None:

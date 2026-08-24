@@ -52,6 +52,8 @@ const READY_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
 // misbehaving runtime from growing the dedup set forever.
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
+// Cap for unattributed background output buffered between and during cells.
+const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
 
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */
 interface InternalExecuteResult extends ExecuteResult {
@@ -73,6 +75,9 @@ interface ActiveExecution {
 	diffs: KernelDiffDisplay[];
 	attachments: KernelAttachment[];
 	sentAgentMessages: KernelSentAgentMessage[];
+	/** Stream text without this execution's id: user threads, other cells' leftovers, raw fd writes. */
+	backgroundOutput: string;
+	backgroundOutputTruncated: boolean;
 	error?: ExecuteResult["error"];
 	status: ExecuteResult["status"];
 	doneFields?: Record<string, unknown>;
@@ -115,6 +120,8 @@ export class ReplKernelManager {
 	// rlm.run spawns from detached asyncio tasks (cell already idle) can still
 	// attribute their spawning program.
 	private lastCellCode?: string;
+	/** Unattributed stream text that arrived between cells; surfaced on the next execution. */
+	private pendingBackgroundOutput = "";
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
@@ -350,6 +357,10 @@ export class ReplKernelManager {
 		if (!execution || id !== execution.requestId) {
 			if (type === "display" && isRecord(event.data)) {
 				this.dispatchLateSentAgentMessage(id, event.data[AGENT_MESSAGE_DISPLAY_MIME]);
+			} else if (type === "stdout" || type === "stderr") {
+				// Unowned output (null id, or another cell's id): never merge it into
+				// the active cell's streams; buffer it as background output instead.
+				this.appendBackgroundOutput(typeof event.text === "string" ? event.text : "");
 			} else if (type === "done" && id) {
 				const waiter = this.pendingDoneWaiters.get(id);
 				this.pendingDoneWaiters.delete(id);
@@ -516,11 +527,14 @@ export class ReplKernelManager {
 			diffs: [],
 			attachments: [],
 			sentAgentMessages: [],
+			backgroundOutput: this.pendingBackgroundOutput,
+			backgroundOutputTruncated: false,
 			status: "ok",
 			settled: false,
 			resolve: result.resolve,
 			reject: result.reject,
 		};
+		this.pendingBackgroundOutput = "";
 		let abortTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		const clearAbortTimer = () => {
 			if (abortTimer) {
@@ -575,6 +589,24 @@ export class ReplKernelManager {
 		}
 	}
 
+	private appendBackgroundOutput(text: string): void {
+		if (!text) return;
+		const execution = this.activeExecution;
+		if (execution) {
+			if (execution.backgroundOutput.length >= MAX_BACKGROUND_OUTPUT_CHARS) {
+				execution.backgroundOutputTruncated = true;
+				return;
+			}
+			execution.backgroundOutput += text;
+			if (execution.backgroundOutput.length > MAX_BACKGROUND_OUTPUT_CHARS) {
+				execution.backgroundOutput = execution.backgroundOutput.slice(0, MAX_BACKGROUND_OUTPUT_CHARS);
+				execution.backgroundOutputTruncated = true;
+			}
+			return;
+		}
+		this.pendingBackgroundOutput = (this.pendingBackgroundOutput + text).slice(0, MAX_BACKGROUND_OUTPUT_CHARS);
+	}
+
 	private finishActiveExecution(execution: ActiveExecution): void {
 		if (this.activeExecution !== execution) {
 			return;
@@ -605,6 +637,11 @@ export class ReplKernelManager {
 
 			if (execution.opts.signal?.aborted) status = "aborted";
 
+			let backgroundOutput = execution.backgroundOutput;
+			if (execution.backgroundOutputTruncated) {
+				backgroundOutput += `\n[... background output truncated at ${MAX_BACKGROUND_OUTPUT_CHARS} chars ...]`;
+			}
+
 			execution.resolve({
 				stdout,
 				stderr,
@@ -612,6 +649,7 @@ export class ReplKernelManager {
 				diffs: execution.diffs.length > 0 ? execution.diffs : undefined,
 				attachments: execution.attachments.length > 0 ? execution.attachments : undefined,
 				sentAgentMessages: execution.sentAgentMessages.length > 0 ? execution.sentAgentMessages : undefined,
+				backgroundOutput: backgroundOutput.length > 0 ? backgroundOutput : undefined,
 				error: execution.error,
 				status,
 				durationMs: Date.now() - execution.started,
