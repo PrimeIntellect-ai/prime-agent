@@ -333,7 +333,12 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         try:
             codes, has_trailing = _compile_cell(req["code"], filename)
         except (SyntaxError, ValueError) as exc:
-            _finish_request(cell_id)
+            with _interrupt_lock:
+                # An interrupt parked for this request belongs to it: consume it
+                # (mirroring _run_guarded's activation) so it cannot leak to the
+                # next cell while other requests keep "any" alive in _finish_locked.
+                _consume_pending_interrupt(cell_id)
+                _finish_locked(cell_id)
             _current_cell = None
             _send(_error_event(cell_id, exc))
             _send({"event": "done", "id": cell_id, "status": "error"})
@@ -362,11 +367,14 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
 
 
 def _drain_output() -> None:
-    try:
-        sys.stdout.flush()
-        sys.stderr.flush()
-    except OSError:
-        pass
+    # Per-stream, and ValueError too: a cell may close sys.stdout/sys.stderr, and
+    # flushing a closed file raises ValueError; neither may kill the serve loop
+    # nor skip flushing the other stream.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
     _pump_out.drain()
     _pump_err.drain()
 

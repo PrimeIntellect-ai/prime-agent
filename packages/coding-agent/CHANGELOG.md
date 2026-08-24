@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed two REPL runtime request-lifecycle bugs: a cell closing sys.stdout/sys.stderr no longer kills the serve loop (done still arrives and later cells run), and an untargeted interrupt parked for a request that fails to compile is consumed with that request instead of spuriously cancelling the next cell.
 - Fixed the REPL runtime leaking a finished cell's id onto late background-thread output: the current cell is now cleared right after the post-cell drain, so `done` stays the last event with that id and between-cell output carries a null id.
 - Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
 - Fixed rlm.run outside a live kernel hanging forever instead of failing fast, which stalled CI shard 3 until timeout.
