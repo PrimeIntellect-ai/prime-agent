@@ -657,11 +657,9 @@ export async function runAcpModeWithConnection(
 					"terminalQuiescence",
 					finalFailure ? "error" : pending.outcome,
 				);
-				// publish() admits the terminal update synchronously before its first await.
-				// Release the next prompt only after that ordering cut, not after the client
-				// has already observed the notification.
-				if (entry.pendingTerminal === pending) entry.pendingTerminal = undefined;
-				if (entry.abort === pending.abort) entry.abort = undefined;
+				// Keep terminal ownership until this settlement task has fully drained.
+				// A follow-up prompt awaits that task; clearing ownership at publication
+				// admission would let it overlap the first prompt handler.
 				if (!(await publication)) return;
 				await entry.producer.drain();
 				return;
@@ -673,7 +671,6 @@ export async function runAcpModeWithConnection(
 			})
 			.finally(() => {
 				entry.producer.finishTerminalLifecycle(pending.promptTurnId);
-				if (!pending.abort.signal.aborted) return;
 				if (entry.pendingTerminal === pending) entry.pendingTerminal = undefined;
 				if (entry.abort === pending.abort) entry.abort = undefined;
 			});

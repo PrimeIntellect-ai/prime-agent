@@ -560,6 +560,52 @@ describe("ACP mode end to end", () => {
 		close();
 	});
 
+	it("does not admit the next prompt while terminal settlement is still publishing", async () => {
+		let terminalPublicationStarted!: () => void;
+		let releaseTerminalPublication!: () => void;
+		const terminalPublicationStart = new Promise<void>((resolve) => {
+			terminalPublicationStarted = resolve;
+		});
+		const terminalPublicationRelease = new Promise<void>((resolve) => {
+			releaseTerminalPublication = resolve;
+		});
+		let promptCalls = 0;
+		let blockTerminalPublication = true;
+		const connection = fakeAcpConnection({
+			onPromptAndWait: () => {
+				promptCalls++;
+			},
+		});
+		const { client, close } = connectAcpClient(connection, {
+			beforeAcpUpdatePublish: async (update) => {
+				if (acpUpdatePhase(update) !== "terminalQuiescence" || !blockTerminalPublication) return;
+				blockTerminalPublication = false;
+				terminalPublicationStarted();
+				await terminalPublicationRelease;
+			},
+		});
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const first = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "first" }],
+		});
+		await terminalPublicationStart;
+		const second = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "second" }],
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const promptCallsBeforeSettlement = promptCalls;
+
+		releaseTerminalPublication();
+		await expect(first).resolves.toBeDefined();
+		await expect(second).resolves.toBeDefined();
+		expect(promptCallsBeforeSettlement).toBe(1);
+		expect(promptCalls).toBe(2);
+		close();
+	});
+
 	it("coalesces duplicate cancellation notifications under one stop owner", async () => {
 		let releaseAbort!: () => void;
 		const abortGate = new Promise<void>((resolve) => {
