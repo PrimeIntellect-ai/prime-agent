@@ -41,9 +41,6 @@ const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 const FORKED_LIVENESS_POLL_MS = 1000;
 // Snapshot/restore cells can be large to (de)serialize; give them room beyond the user cap.
 const SNAPSHOT_MAX_OUTPUT_CHARS = 1_000_000;
-// Cap how long a graceful dispose waits on the final snapshot; the debounced
-// on-disk copy is the fallback if this is exceeded.
-const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 const KERNEL_ABORT_GRACE_MS = 1000;
 const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
@@ -1794,19 +1791,8 @@ export class KernelManager {
 		}
 	}
 
-	/** Best-effort final snapshot before a graceful dispose, bounded by a timeout. */
 	private async flushSnapshotForDispose(): Promise<void> {
-		if (!this.options.snapshot || !this.isRunning) return;
-		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
-		const guard = new Promise<void>((resolve) => {
-			timeout = globalThis.setTimeout(resolve, SNAPSHOT_DISPOSE_TIMEOUT_MS);
-			if (timeout && typeof timeout === "object" && "unref" in timeout) timeout.unref();
-		});
-		try {
-			await Promise.race([this.snapshotState().then(() => undefined), guard]);
-		} finally {
-			if (timeout) clearTimeout(timeout);
-		}
+		await this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS });
 	}
 
 	/** Graceful cleanup. Waits briefly for in-flight host request handlers before closing sockets. */

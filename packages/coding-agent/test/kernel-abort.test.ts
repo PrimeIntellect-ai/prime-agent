@@ -314,7 +314,7 @@ describe("KernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
-	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
+	it("starts the final snapshot timeout after earlier kernel work finishes", async () => {
 		vi.useFakeTimers();
 		const manager = new KernelManager({
 			cwd: process.cwd(),
@@ -334,23 +334,22 @@ describe("KernelManager abort handling", () => {
 					);
 				}),
 		);
+		const cleanupResources = vi.fn();
 		Object.assign(
 			manager as unknown as {
 				state: "running";
 				executionQueue: Promise<void>;
 				executeInner: typeof executeInner;
 				start: () => Promise<void>;
+				cleanupResources: () => void;
 			},
-			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {} },
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
 		);
 
-		const snapshot = (
-			manager as unknown as {
-				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
-			}
-		).captureSnapshot({ executionTimeoutMs: 5000 });
+		const disposal = manager.dispose();
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(executeInner).not.toHaveBeenCalled();
+		expect(cleanupResources).not.toHaveBeenCalled();
 
 		releaseQueue();
 		await waitForCalls(executeInner, 1);
@@ -360,6 +359,7 @@ describe("KernelManager abort handling", () => {
 		expect(signal?.aborted).toBe(false);
 		await vi.advanceTimersByTimeAsync(1);
 		expect(signal?.aborted).toBe(true);
-		await expect(snapshot).resolves.toBeNull();
+		await expect(disposal).resolves.toBeUndefined();
+		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
 });
