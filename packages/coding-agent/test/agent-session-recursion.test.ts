@@ -138,7 +138,7 @@ interface InspectableRlmSession {
 		}
 	>;
 	_rlmChildCleanupFailures: Map<string, Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number]>;
-	_rlmChildSessions: Map<string, AgentSession>;
+	_rlmChildSessions: Map<string, { session: AgentSession; run?: InspectableRlmRun }>;
 	_rlmChildUnsubscribes: Map<string, () => void>;
 	_deletedRlmChildIds: Set<string>;
 	_rlmQuiescenceWaitAborts: Set<AbortController>;
@@ -744,9 +744,9 @@ describe("AgentSession rlm recursion", () => {
 				});
 				// The same child can be visible in both lifecycle registries while
 				// deletion settles; it must be traversed exactly once and remain hidden.
-				rootInternals._rlmChildSessions.set(id, parent);
+				rootInternals._rlmChildSessions.set(id, { session: parent });
 			} else {
-				rootInternals._rlmChildSessions.set(id, parent);
+				rootInternals._rlmChildSessions.set(id, { session: parent });
 				if (hiding === "deleted") {
 					rootInternals._deletedRlmChildIds.add(id);
 				} else {
@@ -838,6 +838,14 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => childUpdates.some((update) => update.status === "done"));
 		const doneUpdate = [...childUpdates].reverse().find((update) => update.status === "done");
 		expect(doneUpdate?.answerPreview).toBe("child answer: summarize shard 1");
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({
+				id: result.rlm_child_id,
+				status: "done",
+				answerPreview: doneUpdate?.answerPreview,
+				durationMs: expect.any(Number),
+			}),
+		]);
 		const child = root.getRlmChildSession(result.rlm_child_id);
 		expect(child?.messages[0]).toMatchObject({
 			role: "custom",
@@ -935,6 +943,9 @@ describe("AgentSession rlm recursion", () => {
 			},
 		});
 		const spawned = await root.runRlmChild("pending task", { name: "pending-child" });
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({ id: spawned.rlm_child_id, status: "queued" }),
+		]);
 		const handlers = (root as unknown as InspectableRlmSession)._createKernelHostHandlers();
 		const send = handlers["agent_message.send"];
 		if (!send) throw new Error("Missing agent_message.send host handler");
