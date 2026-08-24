@@ -15,6 +15,7 @@
 - Fixed the REPL runtime hanging before done when a cell closes fd 1/2 and a later open() reclaims the number: drain sync tokens now go through a private dup of the capture pipe, with a pump-liveness backstop so a dead pump can no longer wedge the serve loop.
 - Fixed the Windows orphan reaper killing only the journaled bash() shell pid; it now uses taskkill /T so descendants die with the tree, matching the in-kernel bash() kill paths.
 - Fixed a snapshot request with identical `path` and `manifest_path` silently clobbering the just-written state payload; the runtime now rejects it as a failed request.
+- Fixed a snapshot request with a negative `max_bytes`/`max_variable_bytes` and `prune_oversized` writing an empty payload and then deleting every user variable; size caps must now be non-negative integers.
 - Fixed an interrupt landing mid-snapshot leaving prune deletions half-applied: once the snapshot manifest is committed, SIGINT is deferred until every oversized name is removed, so the namespace always matches the on-disk snapshot.
 
 ## [0.8.0] - 2026-08-21
