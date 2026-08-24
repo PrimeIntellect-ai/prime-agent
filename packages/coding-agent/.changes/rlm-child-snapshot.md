@@ -1,0 +1,1 @@
+- Fixed reattached sessions omitting queued child agents or showing the wrong child activity.
