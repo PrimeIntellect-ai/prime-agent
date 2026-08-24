@@ -49,7 +49,9 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
 - `{"event":"done","id":str,"status":"ok"|"error"}` — exactly one per id'd
   request, always after all of that request's other events. A snapshot `done`
   adds `saved`, `skipped`, `pruned`, `bytes`; a restore `done` adds `restored`,
-  `failed`; a failed snapshot/restore adds `reason`.
+  `failed`; a failed snapshot/restore adds `reason`. Restoring a missing file
+  reports `status:"ok"` with empty `restored`/`failed` lists and
+  `reason:"snapshot not found"`.
 
 Before a cell's `done`, the runtime flushes and drains both captured streams
 (a marker byte sequence written to each fd and awaited in the pumps), so every
@@ -109,16 +111,19 @@ strings; the dict is forwarded verbatim as the event's `data`.
 at a time: `_`-prefixed names and
 `{rlm, mcp, bash, asyncio, In, Out, get_ipython, exit, quit, open}` are always
 skipped; a name whose pickle exceeds `max_variable_bytes` or would push the
-total over `max_bytes` is skipped and reported; with `prune_oversized` the
-over-cap names are also deleted from the namespace and listed in `pruned`. The
+total over `max_bytes` is skipped and reported. With `prune_oversized`, only
+names exceeding the per-variable cap (`max_variable_bytes`) are also deleted
+from the namespace and listed in `pruned`; names skipped for the aggregate
+`max_bytes` cap are reported in `skipped` but kept in the namespace. The
 payload is written atomically (tmp file + `os.replace`) and a JSON manifest
 (`version`, `savedNames`, `skipped`, `pruned`, `bytes`, `pythonVersion`,
-`timestamp`) is written to `manifest_path`.
+`timestamp`) is written to `manifest_path`. A manifest write failure fails the
+snapshot (and nothing is pruned).
 
-`restore` loads the payload and revives each name independently; a missing or
-corrupt file yields an empty restore with a `reason`, and per-name failures are
-listed in `failed`. Names `In`, `Out`, and `get_ipython` in a payload are never
-restored. `dill` is imported lazily; when unavailable, snapshot and restore
+`restore` loads the payload and revives each name independently; a missing
+file yields an ok empty restore with `reason:"snapshot not found"`, a corrupt
+file fails with a `reason`, and per-name failures are listed in `failed`.
+Names `In`, `Out`, and `get_ipython` in a payload are never restored. `dill` is imported lazily; when unavailable, snapshot and restore
 fail with `status:"error"` and a `reason`.
 
 ## Shutdown

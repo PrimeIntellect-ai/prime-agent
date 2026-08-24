@@ -47,6 +47,7 @@ _cell_counter = 0
 _interrupt_lock = threading.Lock()
 _inflight: set[str] = set()
 _pending_interrupts: dict[str, Any] = {"ids": set(), "any": False}
+_sigint_target: str | None = None
 
 
 def _send(event: dict[str, Any]) -> None:
@@ -84,7 +85,7 @@ class _Pump:
         self._buf = b""
         threading.Thread(target=self._run, daemon=True).start()
 
-    def drain(self, timeout: float = 2.0) -> None:
+    def drain(self) -> None:
         """Block until every byte written to the fd so far has been shipped."""
         token = b"\xff<drain:" + uuid.uuid4().hex.encode() + b">\xff"
         seen = threading.Event()
@@ -94,7 +95,7 @@ class _Pump:
             os.write(self._write_fd, token)
         except OSError:
             return
-        seen.wait(timeout)
+        seen.wait()
         with self._lock:
             self._watch = None
 
@@ -151,7 +152,9 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
 
 def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
     task = _active["task"]
-    if task is None or task.done():
+    # No lock (the main thread may hold it): the rid equality revalidates the
+    # target so a SIGINT delayed past its request's finish cannot hit a later cell.
+    if task is None or task.done() or _active["rid"] != _sigint_target:
         return
     _active["interrupted"] = True
     # Handler runs in the main (loop) thread: current_task is whose step the signal interrupted.
@@ -176,11 +179,12 @@ def _request_interrupt(target: str | None) -> None:
     applies to that request only. Interrupts for finished or unknown requests
     are dropped.
     """
+    global _sigint_target
     with _interrupt_lock:
         task = _active["task"]
         active = task is not None and not task.done()
         if active and (target is None or target == _active["rid"]):
-            pass  # deliver below, outside the lock
+            _sigint_target = _active["rid"]
         elif target is not None:
             if target in _inflight:
                 _pending_interrupts["ids"].add(target)
@@ -205,10 +209,17 @@ def _consume_pending_interrupt(rid: str) -> bool:
     return pending
 
 
+def _finish_locked(rid: str) -> None:
+    """Drop a finished request; a parked untargeted interrupt survives while others are inflight."""
+    _inflight.discard(rid)
+    _pending_interrupts["ids"].discard(rid)
+    if not _inflight:
+        _pending_interrupts["any"] = False
+
+
 def _finish_request(rid: str) -> None:
     with _interrupt_lock:
-        _inflight.discard(rid)
-        _consume_pending_interrupt(rid)
+        _finish_locked(rid)
 
 
 _RUNTIME_FILE = __file__
@@ -225,6 +236,13 @@ def _cell_stack(stack: traceback.StackSummary) -> traceback.StackSummary | None:
     return traceback.StackSummary.from_list([f for f in stack[start:] if f.filename != _RUNTIME_FILE])
 
 
+def _safe_str(exc: BaseException) -> str:
+    try:
+        return str(exc)
+    except BaseException:  # noqa: BLE001 - a broken __str__ must not kill the runtime
+        return "<exception str() failed>"
+
+
 def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     # No cell frame (e.g. SyntaxError): exception-only keeps filename, source, and caret.
     te = traceback.TracebackException.from_exception(exc)
@@ -238,7 +256,7 @@ def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
         "event": "error",
         "id": cell_id,
         "ename": type(exc).__name__,
-        "evalue": str(exc),
+        "evalue": _safe_str(exc),
         "traceback": lines,
     }
 
@@ -302,8 +320,7 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
         with _interrupt_lock:
             _active["task"] = None
             _active["rid"] = None
-            _inflight.discard(rid)
-            _consume_pending_interrupt(rid)
+            _finish_locked(rid)
 
 
 async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
@@ -408,7 +425,7 @@ def _snapshot_state(
                 oversized.append(name)
             continue
         except Exception as err:  # noqa: BLE001 - one unpicklable name must not abort the snapshot
-            skipped.append({"name": name, "reason": f"{type(err).__name__}: {str(err)[:200]}"})
+            skipped.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
             continue
         if total + len(blob) > max_bytes:
             skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
@@ -444,8 +461,9 @@ def _snapshot_state(
     try:
         with open(manifest_path, "w") as fh:
             json.dump(manifest, fh)
-    except OSError:
-        pass
+    except OSError as err:
+        # Fail before the prune deletions so a bad manifest path never destroys state.
+        return {"error": f"manifest write failed: {err}"}
     for name in pruned:
         ns.pop(name, None)
     return {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
@@ -453,7 +471,7 @@ def _snapshot_state(
 
 def _restore_state(ns: dict[str, Any], path: str) -> dict[str, Any]:
     if not os.path.exists(path):
-        return {"restored": [], "failed": []}
+        return {"restored": [], "failed": [], "reason": "snapshot not found"}
     try:
         import dill
     except Exception as err:  # noqa: BLE001
@@ -462,7 +480,7 @@ def _restore_state(ns: dict[str, Any], path: str) -> dict[str, Any]:
         with open(path, "rb") as fh:
             payload = dill.load(fh)
     except Exception as err:  # noqa: BLE001 - a corrupt snapshot yields an empty restore
-        return {"error": f"load failed: {err}"}
+        return {"error": f"load failed: {_safe_str(err)}"}
     if not isinstance(payload, dict):
         return {"error": "corrupt snapshot: not a dict"}
 
@@ -475,7 +493,7 @@ def _restore_state(ns: dict[str, Any], path: str) -> dict[str, Any]:
             ns[name] = dill.loads(blob)
             restored.append(name)
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
-            failed.append({"name": name, "reason": f"{type(err).__name__}: {str(err)[:200]}"})
+            failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
     return {"restored": sorted(restored), "failed": failed}
 
 
@@ -485,13 +503,20 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
 
     async def run() -> dict[str, Any]:
         if req["type"] == "snapshot":
+            prune = req.get("prune_oversized", False)
+            if not isinstance(prune, bool):
+                return {"error": "prune_oversized must be a boolean"}
+            for field in ("max_bytes", "max_variable_bytes"):
+                # Any present value must be an int; a JSON null is not a valid way to ask for the default.
+                if field in req and (isinstance(req[field], bool) or not isinstance(req[field], int)):
+                    return {"error": f"{field} must be an integer"}
             return _snapshot_state(
                 ns,
                 req["path"],
                 req["manifest_path"],
-                int(req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES)),
-                int(req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES)),
-                bool(req.get("prune_oversized", False)),
+                req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES),
+                req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
+                prune,
             )
         return _restore_state(ns, req["path"])
 
@@ -555,8 +580,10 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
                 continue
             rtype = req.get("type")
             if rtype == "interrupt":
-                target = req.get("id")
-                _request_interrupt(target if isinstance(target, str) else None)
+                if "id" in req and not isinstance(req["id"], str):
+                    _protocol_error("interrupt request id must be a string")
+                    continue
+                _request_interrupt(req.get("id"))
                 continue
             if rtype not in _REQUIRED_FIELDS:
                 _protocol_error(f"unknown request type: {rtype!r}")
