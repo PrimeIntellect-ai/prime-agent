@@ -60,6 +60,11 @@ export class QueueSelection {
 		return this.items[next]?.text;
 	}
 
+	refreshAfterMove(queue: AgentConnectionQueueState, lane: QueueLane, index: number): void {
+		this.items = flatten(queue);
+		this.cursor = lane === "steering" ? index : queue.steering.length + index;
+	}
+
 	/** Called after a mutation or submit resolved the selection. Returns the stashed draft. */
 	reset(): string {
 		this.cursor = -1;

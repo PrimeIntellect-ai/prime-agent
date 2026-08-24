@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { QueuedMessageMutation } from "../src/core/session-action-store.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
 
@@ -329,6 +330,55 @@ describe("interactive queued-message editing", () => {
 
 		expect(harness.agentConnection.getQueue).toHaveBeenCalledOnce();
 		expect(harness.getConnectionQueue()).toEqual({ steering: ["s2", "s1"], followUp: [] });
+		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "s2" });
+	});
+
+	it("uses canonical post-move positions for consecutive moves and an edit", async () => {
+		const queue = ["s1", "s2", "s3"];
+		const harness = createHarness({ steering: queue, followUp: [] });
+		harness.agentConnection.getQueue.mockImplementation(async () => ({ steering: [...queue], followUp: [] }));
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			async (
+				_lane: "steering" | "followUp",
+				index: number,
+				expectedText: string,
+				mutation: QueuedMessageMutation,
+			) => {
+				const item = queue[index];
+				if (item !== expectedText) return "rejected";
+				if (mutation.type === "move") {
+					const target = index + mutation.direction;
+					const neighbor = queue[target];
+					if (neighbor === undefined) return "rejected";
+					queue[index] = neighbor;
+					queue[target] = item;
+				} else if (mutation.type === "replace") {
+					queue[index] = mutation.text;
+				}
+				return "applied";
+			},
+		);
+		harness.browseQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		const edited = harness.applyQueueSelection("s3 edited", "steering");
+		await edited;
+
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenNthCalledWith(1, "steering", 2, "s3", {
+			type: "move",
+			direction: -1,
+		});
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenNthCalledWith(2, "steering", 1, "s3", {
+			type: "move",
+			direction: -1,
+		});
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenNthCalledWith(3, "steering", 0, "s3", {
+			type: "replace",
+			text: "s3 edited",
+			images: [],
+			lane: "steering",
+		});
+		expect(harness.getConnectionQueue()).toEqual({ steering: ["s3 edited", "s1", "s2"], followUp: [] });
 	});
 
 	it("keeps the selected index when duplicate text shifts before an edit", async () => {

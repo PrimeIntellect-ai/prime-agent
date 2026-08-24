@@ -7008,21 +7008,20 @@ export class InteractiveMode {
 	}
 
 	private moveQueueSelection(direction: -1 | 1): void {
-		if (this.pendingQueueEdit) return;
-		const submittedSelection = this.queueSelection.selected;
-		if (!submittedSelection) return;
+		if (this.pendingQueueEdit || !this.queueSelection.selected) return;
 		const sessionGeneration = this.sessionEventGeneration;
 		void this.enqueueQueueMutation(async () => {
 			if (sessionGeneration !== this.sessionEventGeneration) return;
-			const status = await this.agentConnection.mutateQueuedMessage(
-				submittedSelection.lane,
-				submittedSelection.index,
-				submittedSelection.text,
-				{ type: "move", direction },
-			);
+			const selected = this.queueSelection.selected;
+			if (!selected) return;
+			const status = await this.agentConnection.mutateQueuedMessage(selected.lane, selected.index, selected.text, {
+				type: "move",
+				direction,
+			});
 			if (sessionGeneration !== this.sessionEventGeneration) return;
 			if (status === "applied") {
 				await this.refreshConnectionQueue();
+				this.queueSelection.refreshAfterMove(this.getConnectionQueue(), selected.lane, selected.index + direction);
 				this.ui.requestRender();
 			} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
 			else this.showStatus("Queue changed; reorder not applied");
@@ -7039,9 +7038,7 @@ export class InteractiveMode {
 	 * Empty text deletes; otherwise replaces, moving the item to `targetLane`.
 	 */
 	private applyQueueSelection(text: string, targetLane: "steering" | "followUp"): Promise<boolean> {
-		if (this.pendingQueueEdit) return Promise.resolve(false);
-		const submittedSelection = this.queueSelection.selected;
-		if (!submittedSelection) return Promise.resolve(false);
+		if (this.pendingQueueEdit || !this.queueSelection.selected) return Promise.resolve(false);
 		const pendingQueueEdit = Symbol("pending-queue-edit");
 		this.pendingQueueEdit = pendingQueueEdit;
 		const sessionGeneration = this.sessionEventGeneration;
@@ -7071,12 +7068,14 @@ export class InteractiveMode {
 		};
 		return this.enqueueQueueMutation(async () => {
 			if (discardStaleSelection()) return true;
+			const selected = this.queueSelection.selected;
+			if (!selected) return true;
 			let status: AgentConnectionQueuedMessageMutationStatus;
 			try {
 				status = await this.agentConnection.mutateQueuedMessage(
-					submittedSelection.lane,
-					submittedSelection.index,
-					submittedSelection.text,
+					selected.lane,
+					selected.index,
+					selected.text,
 					mutation,
 				);
 			} catch (error) {
