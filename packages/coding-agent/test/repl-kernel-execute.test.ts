@@ -122,6 +122,26 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		expect(unknown.error?.evalue).toContain('host request type "test.unknown" is not available');
 	}, 30_000);
 
+	it("dispose sends the protocol shutdown so live bash children die with the kernel", async () => {
+		manager = new ReplKernelManager({ python: python as string, cwd: dir });
+		const r = await manager.execute("from rlm import bash\nh = bash('sleep 600')\nh.pid");
+		expect(r.status).toBe("ok");
+		const pid = Number(r.result);
+		expect(Number.isInteger(pid)).toBe(true);
+		await manager.dispose();
+		let alive = true;
+		for (let i = 0; i < 100; i++) {
+			try {
+				process.kill(pid, 0);
+			} catch {
+				alive = false;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		expect(alive).toBe(false);
+	}, 30_000);
+
 	it("surfaces unattributed background output separately from cell stdout", async () => {
 		manager = new ReplKernelManager({ python: python as string, cwd: dir });
 		const first = await manager.execute(

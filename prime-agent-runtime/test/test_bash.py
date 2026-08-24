@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
@@ -474,6 +475,54 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handle._released)
         again = await handle
         self.assertEqual(again, result)
+
+    async def test_second_cancel_during_cleanup_still_confirms_group_death(self):
+        # Python 3.11: an await inside an except-CancelledError block of a
+        # cancelled task is re-cancelled immediately; the shielded confirm task
+        # must survive repeated cancels and the group must be dead on return.
+        pids: list[int] = []
+        original_init = bash_module.BashHandle.__init__
+
+        def capturing_init(handle_self, command):
+            original_init(handle_self, command)
+            pids.append(handle_self._pid)
+
+        async def run_oneshot():
+            await bash("trap '' TERM; sleep 30")
+
+        with mock.patch.object(bash_module, "_CANCEL_TERM_GRACE", 0.2):
+            with mock.patch.object(bash_module.BashHandle, "__init__", capturing_init):
+                task = asyncio.ensure_future(run_oneshot())
+                await asyncio.sleep(0.2)
+                task.cancel()
+                await asyncio.sleep(0.05)
+                task.cancel()  # lands inside the cleanup awaits
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pids[0], 0)
+
+    async def test_windows_without_bash_raises_teaching_error(self):
+        with mock.patch.object(bash_module, "_IS_POSIX", False):
+            with mock.patch.object(bash_module.shutil, "which", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
+                    bash_module._shell()
+
+    async def test_slow_pump_does_not_lose_foreground_output(self):
+        # A descheduled pump must not let _drain_grace conclude quiescence
+        # while the shell's output still sits unread in the pipe.
+        original_pump = bash_module.BashHandle._pump
+
+        def slow_pump(handle_self):
+            time.sleep(0.3)
+            original_pump(handle_self)
+
+        with mock.patch.object(bash_module.BashHandle, "_pump", slow_pump):
+            result = await asyncio.wait_for(bash("printf slow-pump-x"), timeout=5)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("slow-pump-x", result.output)
 
     async def test_relative_bash_shell_override_rejected(self):
         with mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "bash"}):

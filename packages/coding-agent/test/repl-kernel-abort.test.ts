@@ -315,6 +315,25 @@ describe("ReplKernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
+	it("dispose writes a protocol shutdown request before hard-killing the child", async () => {
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager, internals } = runningManagerWith(writeLine);
+		const killSignals: (NodeJS.Signals | number | undefined)[] = [];
+		internals.child = {
+			kill: (signal?: NodeJS.Signals | number) => {
+				killSignals.push(signal);
+				return true;
+			},
+			pid: undefined,
+			stdin: { destroyed: false, destroy: () => undefined },
+		};
+
+		await manager.dispose();
+		const types = writeLine.mock.calls.map((call) => (call[0] as { type?: string }).type);
+		expect(types).toContain("shutdown");
+		expect(killSignals).toContain("SIGTERM");
+	});
+
 	it("marks between-cell background output as truncated once the pending cap is hit", async () => {
 		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
 		const { manager, internals } = runningManagerWith(writeLine);

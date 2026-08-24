@@ -1122,15 +1122,54 @@ export class ReplKernelManager {
 			if (this.startStale(generation)) return; // superseded mid-flush: the newer owner already cleaned this kernel
 			this.state = "shutdown";
 			liveKernels.delete(this);
+			// Claim the teardown so the child's exit handler does not run
+			// cleanupResources mid-dispose (same contract as shutdown()).
+			this.gracefulShutdownGeneration = generation;
 			const inFlightHostRequests = [...this.inFlightHostRequests];
 			try {
 				if (inFlightHostRequests.length > 0) {
 					await this.waitForHostRequestsToSettle(inFlightHostRequests, HOST_REQUEST_DISPOSE_TIMEOUT_MS);
 				}
+				if (!this.startStale(generation)) {
+					// Bounded protocol shutdown first: the runtime's shutdown branch
+					// closes MCP servers and kills live bash() process groups, which
+					// a bare hard-kill would leak until the orphan reaper runs.
+					await this.requestProtocolShutdown(KERNEL_SHUTDOWN_TIMEOUT_MS);
+				}
 			} finally {
+				if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 				if (!this.startStale(generation)) this.cleanupResources(); // else: superseded, the newer owner already cleaned
 			}
 		})();
+	}
+
+	/** Best-effort bounded protocol shutdown; the caller's hard kill remains the backstop. */
+	private async requestProtocolShutdown(timeoutMs: number): Promise<void> {
+		const stdin = this.child?.stdin;
+		if (!stdin || stdin.destroyed) return;
+		const requestId = uuid();
+		let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		try {
+			const doneReply = new Promise<void>((resolve) => {
+				this.pendingDoneWaiters.set(requestId, resolve);
+			});
+			const send = this.writeLine({ type: "shutdown", id: requestId });
+			send.catch(() => undefined);
+			const kernelExit = this.waitForKernelExit();
+			const deadline = new Promise<void>((resolve) => {
+				timer = globalThis.setTimeout(resolve, timeoutMs);
+				timer.unref?.();
+			});
+			const gracefulReply = Promise.all([send, doneReply]).then(() => undefined);
+			gracefulReply.catch(() => undefined);
+			await Promise.race([gracefulReply, kernelExit, deadline]);
+			await Promise.race([kernelExit, deadline]);
+		} catch {
+			// Best-effort: cleanupResources still hard-kills the child.
+		} finally {
+			if (timer) globalThis.clearTimeout(timer);
+			this.pendingDoneWaiters.delete(requestId);
+		}
 	}
 
 	/** Synchronous best-effort cleanup. Safe to call from `process.on('exit')`. */
