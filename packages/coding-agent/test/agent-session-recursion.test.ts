@@ -2771,7 +2771,8 @@ describe("AgentSession rlm recursion", () => {
 		const runtime = join(process.cwd(), "..", "..", "prime-agent-runtime", "src");
 		const probe = spawnSync(
 			python,
-			["-c", "import asyncio, rlm; rlm.Comm = None; asyncio.run(rlm.run('raised live cap'))"],
+			// Forcing the _import_comm seam to None pins the intended comm-unavailable fail-fast path.
+			["-c", "import asyncio, rlm; rlm._import_comm = lambda: None; asyncio.run(rlm.run('raised live cap'))"],
 			{
 				env: { ...process.env, PYTHONPATH: runtime, RLM_DEPTH: "1", RLM_MAX_DEPTH: "1" },
 				encoding: "utf8",

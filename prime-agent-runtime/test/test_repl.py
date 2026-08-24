@@ -798,5 +798,73 @@ class FinishRequestTest(unittest.TestCase):
         self.assertIn("other", repl._inflight)
 
 
+class SnapshotPruneShieldTest(unittest.TestCase):
+    """The prune-deletion window must not be split by a SIGINT-raised KeyboardInterrupt."""
+
+    def test_sigint_mid_prune_defers_until_all_deletions_ran(self):
+        import signal
+
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm.repl import _snapshot_state
+
+        class SigintOnFirstPop(dict):
+            fired = False
+
+            def pop(self, key, default=None):
+                if not self.fired:
+                    self.fired = True
+                    # Synchronous SIGINT on the main thread: lands exactly mid-loop.
+                    signal.raise_signal(signal.SIGINT)
+                return super().pop(key, default)
+
+        ns = SigintOnFirstPop(big1=b"x" * 100_000, big2=b"y" * 100_000)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(KeyboardInterrupt):
+                _snapshot_state(
+                    ns,
+                    os.path.join(tmp, "kernel-state.dill"),
+                    os.path.join(tmp, "kernel-state.json"),
+                    max_bytes=1 << 20,
+                    max_variable_bytes=1024,
+                    prune_oversized=True,
+                )
+        # Both deletions ran before the interrupt was re-delivered: ns matches the manifest.
+        self.assertEqual(dict(ns), {})
+
+    def test_sigint_after_manifest_commit_before_deletions_defers(self):
+        import signal
+        from unittest import mock
+
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm.repl import _snapshot_state
+
+        real_dump = json.dump
+
+        def dump_then_sigint(obj, fh, **kwargs):
+            real_dump(obj, fh, **kwargs)
+            # Synchronous SIGINT right after the manifest commit, before any deletion.
+            signal.raise_signal(signal.SIGINT)
+
+        ns = {"big1": b"x" * 100_000, "big2": b"y" * 100_000}
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            with mock.patch("json.dump", dump_then_sigint):
+                with self.assertRaises(KeyboardInterrupt):
+                    _snapshot_state(
+                        ns,
+                        os.path.join(tmp, "kernel-state.dill"),
+                        manifest_path,
+                        max_bytes=1 << 20,
+                        max_variable_bytes=1024,
+                        prune_oversized=True,
+                    )
+            # The deletions still ran: ns is consistent with the committed manifest.
+            self.assertEqual(ns, {})
+            with open(manifest_path) as fh:
+                self.assertEqual(json.load(fh)["pruned"], ["big1", "big2"])
+
+
 if __name__ == "__main__":
     unittest.main()

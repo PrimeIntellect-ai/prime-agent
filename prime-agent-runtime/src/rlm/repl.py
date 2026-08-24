@@ -523,14 +523,24 @@ def _snapshot_state(
         "pythonVersion": sys.version.split()[0],
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    # A SIGINT-raised KeyboardInterrupt anywhere between the committed manifest and the
+    # last prune deletion would desync the namespace from the manifest: park SIGINT for
+    # the whole interval (manifest commit through deletions), then re-deliver.
+    parked: list[int] = []
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: parked.append(signum))
     try:
-        with open(manifest_path, "w") as fh:
-            json.dump(manifest, fh)
-    except OSError as err:
-        # Fail before the prune deletions so a bad manifest path never destroys state.
-        return {"error": f"manifest write failed: {err}"}
-    for name in pruned:
-        ns.pop(name, None)
+        try:
+            with open(manifest_path, "w") as fh:
+                json.dump(manifest, fh)
+        except OSError as err:
+            # Fail before the prune deletions so a bad manifest path never destroys state.
+            return {"error": f"manifest write failed: {err}"}
+        for name in pruned:
+            ns.pop(name, None)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if parked:
+            signal.raise_signal(signal.SIGINT)
     return {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
 
 
