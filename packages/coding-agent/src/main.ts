@@ -302,11 +302,8 @@ export function shouldEnsureDaemonBeforeActiveSessionLookup(options: DaemonActiv
 	);
 }
 
-type ActiveDaemonSessionSummaryLookup = (socketPath: string, selector: string) => Promise<SessionSummary | undefined>;
-
 interface ActiveDaemonSessionSummaryLookupOptions {
 	fallbackOnError?: boolean;
-	lookup?: ActiveDaemonSessionSummaryLookup;
 }
 
 export async function findActiveDaemonSessionSummaryForInteractiveStartup(
@@ -315,7 +312,7 @@ export async function findActiveDaemonSessionSummaryForInteractiveStartup(
 	options: ActiveDaemonSessionSummaryLookupOptions = {},
 ): Promise<SessionSummary | undefined> {
 	try {
-		return await (options.lookup ?? findActiveDaemonSessionSummary)(socketPath, selector);
+		return await findActiveDaemonSessionSummary(socketPath, selector);
 	} catch (error) {
 		if (options.fallbackOnError === false) {
 			throw error;
