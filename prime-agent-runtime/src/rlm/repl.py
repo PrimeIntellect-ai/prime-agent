@@ -582,9 +582,12 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
             if not isinstance(prune, bool):
                 return {"error": "prune_oversized must be a boolean"}
             for field in ("max_bytes", "max_variable_bytes"):
-                # Any present value must be an int; a JSON null is not a valid way to ask for the default.
-                if field in req and (isinstance(req[field], bool) or not isinstance(req[field], int)):
-                    return {"error": f"{field} must be an integer"}
+                # Any present value must be a non-negative int; a JSON null is not a valid way to ask
+                # for the default, and a negative cap would prune every user variable from ns.
+                if field in req and (
+                    isinstance(req[field], bool) or not isinstance(req[field], int) or req[field] < 0
+                ):
+                    return {"error": f"{field} must be a non-negative integer"}
             # realpath resolves symlinks, so aliased paths cannot silently clobber the payload.
             if os.path.realpath(req["path"]) == os.path.realpath(req["manifest_path"]):
                 return {"error": "path and manifest_path must differ"}
