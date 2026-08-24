@@ -10,6 +10,8 @@ type Harness = {
 	_sessionInputPumpSuspended: boolean;
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
 	_stopGoalContinuationForTerminalMessage: () => boolean;
+	_workflowOwnsGoalState: () => boolean;
+	_createGoalContextMessage: (kind: string) => unknown;
 	_ensureGoalRuntimeActive: () => void;
 	_setGoalState: (goal: unknown) => void;
 	_createPreparedTurnAction: ReturnType<typeof vi.fn>;
@@ -34,6 +36,10 @@ function harness(overrides: Partial<Harness> = {}): Harness {
 		_sessionInputPumpSuspended: false,
 		_hasUnsettledRlmQuiescenceWork: () => false,
 		_stopGoalContinuationForTerminalMessage: () => false,
+		// This fork scopes the deferral to non-workflow goals and routes every
+		// continuation message through the wrapper that carries plannerDirective.
+		_workflowOwnsGoalState: () => false,
+		_createGoalContextMessage: (kind: string) => ({ role: "custom", customType: "goal_context", content: kind }),
 		_ensureGoalRuntimeActive: () => {},
 		_setGoalState: function (this: Harness, goal: unknown) {
 			this._goalState = goal as Harness["_goalState"];

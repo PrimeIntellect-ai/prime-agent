@@ -4,6 +4,7 @@ import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
+	DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY,
 } from "../src/modes/daemon/daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "../src/modes/daemon/daemon-runtime-identity.js";
 
@@ -281,7 +282,10 @@ describe("daemon command", () => {
 	});
 
 	it("omits workflow capability fields when talking to an older daemon", async () => {
-		daemonClientMock.behavior.schemaRevision = DAEMON_SCHEMA_REVISION - 1;
+		// Anchored to the projection gate, not the current revision: the merge that
+		// opened revision 23 left DAEMON_SCHEMA_REVISION - 1 still above the gate.
+		daemonClientMock.behavior.schemaRevision =
+			(DAEMON_WORKFLOW_STATUS_PROJECTION_COMPATIBILITY.minSchemaRevision ?? 0) - 1;
 		daemonClientMock.behavior.serverCapabilities = ["workflow_status_projection"];
 
 		await expect(

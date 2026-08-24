@@ -50,6 +50,14 @@
 - Optional daemon metadata and UI features must degrade locally. They must not prevent the agent, session attachment, or interactive startup from working.
 - Never make a new daemon command part of startup without a protocol or capability gate.
 
+## Memory
+
+- Durable knowledge goes into MemPalace, via its MCP tools. A durable item is a *why* or a *how* that
+  outlives this task: why an approach failed, how a subsystem actually behaves, a constraint that will
+  bite the next person. Write it when you learn it.
+- Not durable, so do not file it: individual decisions, thread history, run output, or anything the
+  repository and git history already record.
+
 ## Dependencies
 
 - A 7-day minimum release age applies to all dependency updates: `.npmrc` sets `min-release-age=7` and `.github/dependabot.yml` uses a matching `cooldown`. Never bypass it for routine updates.

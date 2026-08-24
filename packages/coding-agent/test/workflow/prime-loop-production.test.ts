@@ -426,6 +426,7 @@ describe("production Prime workflow composition", () => {
 			);
 			const foreignContext: HostRequestContext = {
 				requestId: "foreign-request",
+				generation: 1,
 				version: HOST_REQUEST_GATEWAY_VERSION,
 				signal: new AbortController().signal,
 				capability: {
@@ -497,6 +498,7 @@ describe("production Prime workflow composition", () => {
 				throw new Error("prime_kernel_handlers_missing");
 			const contextFor = (requestType: string, requestId: string): HostRequestContext => ({
 				requestId,
+				generation: 1,
 				version: HOST_REQUEST_GATEWAY_VERSION,
 				signal: new AbortController().signal,
 				capability: host?.resolveHostRequestCapability?.(requestType) ?? { capabilities: [] },
