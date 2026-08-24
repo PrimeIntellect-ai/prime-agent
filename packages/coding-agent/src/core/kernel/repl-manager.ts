@@ -842,6 +842,9 @@ export class ReplKernelManager {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		this.pendingDoneWaiters.clear();
+		// Stale pre-teardown background output must not surface after a restart.
+		this.pendingBackgroundOutput = "";
+		this.pendingBackgroundOutputTruncated = false;
 		this.rejectActiveExecution(new Error("Kernel has been shut down"));
 		const child = this.child;
 		this.child = undefined;

@@ -334,6 +334,29 @@ describe("ReplKernelManager abort handling", () => {
 		expect(killSignals).toContain("SIGTERM");
 	});
 
+	it("drops stale between-cell background output on kernel teardown", async () => {
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager, internals } = runningManagerWith(writeLine);
+
+		internals.handleEvent({ event: "stdout", id: null, text: "pre-restart-leftover\n" });
+		manager.disposeSync();
+
+		// Simulate the restarted kernel: a new execution must start clean.
+		Object.assign(internals, { state: "running", start: async () => {} });
+		const executePromise = manager.execute("x = 1");
+		await waitForCalls(writeLine, 1);
+		const execution = internals.activeExecution;
+		expect(execution).toBeDefined();
+		if (!execution) {
+			throw new Error("Expected an active execution");
+		}
+		internals.handleEvent({ event: "done", id: execution.requestId, status: "ok" });
+
+		const result = await executePromise;
+		expect(result.backgroundOutput).toBeUndefined();
+		manager.disposeSync();
+	});
+
 	it("marks between-cell background output as truncated once the pending cap is hit", async () => {
 		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
 		const { manager, internals } = runningManagerWith(writeLine);
