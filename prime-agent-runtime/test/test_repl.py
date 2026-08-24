@@ -520,7 +520,7 @@ class ReplTest(unittest.TestCase):
             )
             done = one(self.repl.until_done("v4"), "done")
             self.assertEqual(done["status"], "error")
-            self.assertIn("max_bytes must be an integer", done["reason"])
+            self.assertIn("max_bytes must be a non-negative integer", done["reason"])
 
             # An explicit JSON null is present-but-invalid, not "use the default".
             self.repl.send(
@@ -528,7 +528,7 @@ class ReplTest(unittest.TestCase):
             )
             done = one(self.repl.until_done("v5"), "done")
             self.assertEqual(done["status"], "error")
-            self.assertIn("max_bytes must be an integer", done["reason"])
+            self.assertIn("max_bytes must be a non-negative integer", done["reason"])
 
             self.repl.send(
                 {
@@ -541,7 +541,25 @@ class ReplTest(unittest.TestCase):
             )
             done = one(self.repl.until_done("v6"), "done")
             self.assertEqual(done["status"], "error")
-            self.assertIn("max_variable_bytes must be an integer", done["reason"])
+            self.assertIn("max_variable_bytes must be a non-negative integer", done["reason"])
+
+            # A negative cap with prune_oversized would delete every user variable: reject it
+            # before the snapshot runs, leaving the namespace untouched.
+            self.repl.send(
+                {
+                    "type": "snapshot",
+                    "id": "v7",
+                    "path": path,
+                    "manifest_path": manifest_path,
+                    "max_variable_bytes": -1,
+                    "prune_oversized": True,
+                }
+            )
+            done = one(self.repl.until_done("v7"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertIn("max_variable_bytes must be a non-negative integer", done["reason"])
+            events = self.repl.execute("v8", "'big' in dir()")
+            self.assertEqual(one(events, "result")["text"], "True")
 
     def test_snapshot_rejects_identical_path_and_manifest_path(self):
         with tempfile.TemporaryDirectory() as tmp:
