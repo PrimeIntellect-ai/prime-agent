@@ -54,13 +54,32 @@ describe("RpcClient operation completion", () => {
 		await expect(events).resolves.toEqual([{ type: "agent_end" }]);
 	});
 
-	it("rejects pending commands and completion waits when the child exits", async () => {
+	it("waits for child close before restarting", async () => {
+		const client = await createClient();
+
+		await client.stop();
+		await client.start();
+		const state = client.getState();
+		client["handleLine"](
+			JSON.stringify({ id: "req_1", type: "response", command: "get_state", success: true, data: {} }),
+		);
+
+		await expect(state).resolves.toEqual({});
+	});
+
+	it("rejects start when the child cannot spawn", async () => {
+		const client = new RpcClient({ cliPath: fixturePath, env: { PATH: "" } });
+
+		await expect(client.start()).rejects.toThrow("RPC process error");
+	});
+
+	it("rejects pending commands and completion waits when the child output closes", async () => {
 		const client = await createClient();
 		const child = client["process"];
 		if (!child) throw new Error("RPC child did not start");
-		const command = expect(client.getState()).rejects.toThrow(/RPC process (exited|output closed)/);
-		const idle = expect(client.waitForIdle()).rejects.toThrow(/RPC process (exited|output closed)/);
-		const events = expect(client.collectEvents()).rejects.toThrow(/RPC process (exited|output closed)/);
+		const command = expect(client.getState()).rejects.toThrow("RPC process output closed");
+		const idle = expect(client.waitForIdle()).rejects.toThrow("RPC process output closed");
+		const events = expect(client.collectEvents()).rejects.toThrow("RPC process output closed");
 
 		child.kill("SIGTERM");
 
