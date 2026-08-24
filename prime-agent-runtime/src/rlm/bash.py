@@ -23,6 +23,9 @@ _IS_POSIX = os.name == "posix"
 _HEAD_CAP = 512 * 1024
 _TAIL_CAP = 3 * 512 * 1024
 _READ_CHUNK = 65536
+# Fixed child-side fd for the status pipe; POSIX shells (notably dash) only
+# guarantee single-digit fds in redirection syntax.
+_STATUS_FD = 9
 
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
@@ -109,17 +112,20 @@ class BashHandle:
         if _IS_POSIX:
             self._status_read, status_write = os.pipe()
             self._wake_read, self._wake_write = os.pipe()
-            script = _status_script(_with_prefix(command), status_write)
-            spawn_kwargs: dict[str, Any] = {"start_new_session": True, "pass_fds": (status_write,)}
+            script = _status_script(_with_prefix(command))
+            # The status pipe rides in as stdin (fd 0) and the script remaps it to
+            # _STATUS_FD before swapping in /dev/null: dash rejects multi-digit fds
+            # in redirections at parse time, so the script can never reference
+            # status_write directly once it lands >= 10.
+            spawn_kwargs: dict[str, Any] = {"start_new_session": True, "stdin": status_write}
         else:
             script = _with_prefix(command)
-            spawn_kwargs = {}
+            spawn_kwargs = {"stdin": subprocess.DEVNULL}
         try:
             self._proc = subprocess.Popen(
                 [_shell(), "-c", script],
                 cwd=os.getcwd(),
                 env=_child_env(),
-                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 **spawn_kwargs,
@@ -355,17 +361,21 @@ def _with_prefix(command: str) -> str:
     return f"{prefix}\n{command}" if prefix else command
 
 
-def _status_script(command: str, status_fd: int) -> str:
-    # The brace group runs the command with the status fd closed so `&` children
+def _status_script(command: str) -> str:
+    # The status pipe arrives as stdin (fd 0); the prologue dups it to the
+    # single-digit _STATUS_FD (dash rejects multi-digit fds in redirections at
+    # parse time) and points stdin at /dev/null, so no other copy remains. The
+    # brace group runs the command with the status fd closed so `&` children
     # do not inherit it; the trailing `wait` keeps the shell alive as group
     # leader until its own jobs exit (double-forked daemons stay out of scope).
     return (
+        f"exec {_STATUS_FD}>&0 0</dev/null\n"
         "{\n"
         f"{command}\n"
-        f"}} {status_fd}>&-\n"
+        f"}} {_STATUS_FD}>&-\n"
         "__prime_status=$?\n"
-        f"printf '%s\\n' \"$__prime_status\" >&{status_fd}\n"
-        f"exec {status_fd}>&-\n"
+        f"printf '%s\\n' \"$__prime_status\" >&{_STATUS_FD}\n"
+        f"exec {_STATUS_FD}>&-\n"
         "wait\n"
         'exit "$__prime_status"\n'
     )
