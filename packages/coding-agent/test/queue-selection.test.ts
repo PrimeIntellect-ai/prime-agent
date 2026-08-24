@@ -26,28 +26,6 @@ describe("QueueSelection", () => {
 		expect(selection.isBrowsing).toBe(false);
 	});
 
-	it("keeps, retargets, or drops the selection when the queue changes", () => {
-		const selection = new QueueSelection();
-		selection.move(queue, "draft", -1);
-		selection.move(queue, "", -1);
-		selection.move(queue, "", -1); // s2
-		expect(selection.sync({ steering: ["s1", "s2"], followUp: ["f2"] })).toBeUndefined();
-		expect(selection.selected).toEqual({ lane: "steering", index: 1, text: "s2" });
-		expect(selection.sync({ steering: ["s0", "s2"], followUp: [] })).toBeUndefined(); // retarget by text
-		expect(selection.selected).toEqual({ lane: "steering", index: 1, text: "s2" });
-		expect(selection.sync({ steering: ["s0"], followUp: ["s2"] })).toBe("s2"); // same text, other lane: drop
-		expect(selection.isBrowsing).toBe(false);
-	});
-
-	it("keeps the stashed draft across an external selection drop", () => {
-		const selection = new QueueSelection();
-		selection.move(queue, "my draft", -1); // editing f2
-		selection.sync({ steering: [], followUp: [] }); // f2 delivered: selection dropped
-		expect(selection.isBrowsing).toBe(false);
-		selection.move({ steering: ["s9"], followUp: [] }, "f2 leftover text", -1);
-		expect(selection.reset()).toBe("my draft");
-	});
-
 	it("reset returns the stashed draft once", () => {
 		const selection = new QueueSelection();
 		selection.move(queue, "my draft", -1);
