@@ -314,52 +314,42 @@ describe("KernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
-	it("starts the final snapshot timeout after earlier kernel work finishes", async () => {
+	it("tears down when the final snapshot is blocked behind a hung execution", async () => {
 		vi.useFakeTimers();
 		const manager = new KernelManager({
 			cwd: process.cwd(),
 			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
 		});
-		let releaseQueue: () => void = () => {};
-		const previousExecution = new Promise<void>((resolve) => {
-			releaseQueue = resolve;
-		});
-		const executeInner = vi.fn(
-			async (_code: string, opts: { signal?: AbortSignal }) =>
-				await new Promise<{ stdout: string; stderr: string; status: "aborted"; durationMs: number }>((resolve) => {
-					opts.signal?.addEventListener(
-						"abort",
-						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
-						{ once: true },
-					);
-				}),
-		);
+		const executeInner = vi.fn();
+		const interrupt = vi.fn(async () => {});
 		const cleanupResources = vi.fn();
 		Object.assign(
 			manager as unknown as {
 				state: "running";
 				executionQueue: Promise<void>;
+				activeExecution: object;
 				executeInner: typeof executeInner;
-				start: () => Promise<void>;
+				interrupt: typeof interrupt;
 				cleanupResources: () => void;
 			},
-			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
+			{
+				state: "running",
+				executionQueue: new Promise<void>(() => {}),
+				activeExecution: {},
+				executeInner,
+				interrupt,
+				cleanupResources,
+			},
 		);
 
 		const disposal = manager.dispose();
-		await vi.advanceTimersByTimeAsync(5000);
-		expect(executeInner).not.toHaveBeenCalled();
-		expect(cleanupResources).not.toHaveBeenCalled();
-
-		releaseQueue();
-		await waitForCalls(executeInner, 1);
-		const signal = executeInner.mock.calls[0]?.[1].signal;
-		expect(signal?.aborted).toBe(false);
+		expect(interrupt).toHaveBeenCalledOnce();
 		await vi.advanceTimersByTimeAsync(4999);
-		expect(signal?.aborted).toBe(false);
+		expect(cleanupResources).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
-		expect(signal?.aborted).toBe(true);
+
 		await expect(disposal).resolves.toBeUndefined();
+		expect(executeInner).not.toHaveBeenCalled();
 		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
 });

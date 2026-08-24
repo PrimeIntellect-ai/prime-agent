@@ -1792,6 +1792,19 @@ export class KernelManager {
 	}
 
 	private async flushSnapshotForDispose(): Promise<void> {
+		if (!this.options.snapshot || !this.isRunning) return;
+		const pendingExecutions = this.executionQueue;
+		if (this.activeExecution) void this.interrupt().catch(() => undefined);
+		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+		const queueSettled = await Promise.race([
+			pendingExecutions.then(() => true),
+			new Promise<false>((resolve) => {
+				timeout = globalThis.setTimeout(() => resolve(false), SNAPSHOT_EXECUTION_TIMEOUT_MS);
+				timeout.unref?.();
+			}),
+		]);
+		if (timeout) globalThis.clearTimeout(timeout);
+		if (!queueSettled) return;
 		await this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS });
 	}
 
