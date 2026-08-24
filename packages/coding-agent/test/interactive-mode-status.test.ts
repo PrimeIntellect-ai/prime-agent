@@ -711,7 +711,6 @@ describe("InteractiveMode working timer", () => {
 				model: null,
 			})),
 			seedSubagentSummary: vi.fn(),
-			setSessionHasMessages: vi.fn(),
 			applyConnectionStateSnapshot: vi.fn((state: AgentConnectionState) => {
 				streaming = state.isStreaming;
 			}),
@@ -1435,6 +1434,31 @@ describe("InteractiveMode pending bash components", () => {
 });
 
 describe("InteractiveMode connection events", () => {
+	test("updates the session message count from message starts", () => {
+		const builtInHeader = { invalidate: vi.fn() };
+		const subagentSummaryLine = { invalidate: vi.fn() };
+		const harness = {
+			connectionState: createConnectionState(),
+			builtInHeader,
+			subagentSummaryLine,
+			patchConnectionState(patch: Partial<AgentConnectionState>) {
+				this.connectionState = { ...this.connectionState, ...patch };
+			},
+		};
+		const updateConnectionStateFromEvent = (
+			InteractiveMode.prototype as unknown as {
+				updateConnectionStateFromEvent(this: typeof harness, event: AgentConnectionSessionEvent): void;
+			}
+		).updateConnectionStateFromEvent;
+
+		updateConnectionStateFromEvent.call(harness, { type: "message_start", message: userMessage("one", 1) });
+		updateConnectionStateFromEvent.call(harness, { type: "message_start", message: userMessage("two", 2) });
+
+		expect(harness.connectionState.messageCount).toBe(2);
+		expect(builtInHeader.invalidate).toHaveBeenCalledOnce();
+		expect(subagentSummaryLine.invalidate).toHaveBeenCalledOnce();
+	});
+
 	test("rendering a switched session updates the pending display from its snapshot", async () => {
 		const harness = {
 			resetCurrentSessionRenderState: vi.fn(),
@@ -1501,7 +1525,6 @@ describe("InteractiveMode connection events", () => {
 				model: null,
 			})),
 			seedSubagentSummary: vi.fn(),
-			setSessionHasMessages: vi.fn(),
 			applyConnectionStateSnapshot: vi.fn(),
 			renderSessionContext: renderSessionContextMock,
 			restoreStreamingMessageFromSnapshot,
@@ -3262,7 +3285,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 			getCurrentCwd: () => startupRunResult.source.cwd,
-			sessionHasMessages: false,
+			connectionState: { messageCount: 0 },
 			...overrides,
 		};
 	}
