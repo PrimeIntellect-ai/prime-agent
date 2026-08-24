@@ -60,9 +60,17 @@ export class QueueSelection {
 		return this.items[next]?.text;
 	}
 
-	refreshAfterMove(queue: AgentConnectionQueueState, lane: QueueLane, index: number): void {
+	refreshAfterMove(
+		queue: AgentConnectionQueueState,
+		lane: QueueLane,
+		index: number,
+		expectedText: string,
+	): string | undefined {
 		this.items = flatten(queue);
-		this.cursor = lane === "steering" ? index : queue.steering.length + index;
+		const cursor = lane === "steering" ? index : queue.steering.length + index;
+		const selected = this.items[cursor];
+		if (selected?.lane !== lane || selected.index !== index || selected.text !== expectedText) return this.reset();
+		this.cursor = cursor;
 	}
 
 	/** Called after a mutation or submit resolved the selection. Returns the stashed draft. */

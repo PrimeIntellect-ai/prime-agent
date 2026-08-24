@@ -2515,24 +2515,6 @@ export class InteractiveMode {
 		};
 	}
 
-	private async refreshConnectionQueue(): Promise<void> {
-		this.replaceConnectionQueue(await this.agentConnection.getQueue());
-	}
-
-	private replaceConnectionQueue(queue: AgentConnectionQueueState): void {
-		const sessionActions = this.connectionState?.sessionActions;
-		if (!sessionActions) return;
-		this.patchConnectionState({
-			sessionActions: {
-				...sessionActions,
-				queuedCount: queue.steering.length + queue.followUp.length,
-				steering: [...queue.steering],
-				followUps: [...queue.followUp],
-			},
-		});
-		this.updatePendingMessagesDisplay();
-	}
-
 	private async refreshConnectionCatalog(): Promise<void> {
 		this.invalidateConnectionModelRefresh();
 		const [state, commands, modelCatalog, resources] = await Promise.all([
@@ -2808,7 +2790,8 @@ export class InteractiveMode {
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
-		await Promise.all([this.refreshConnectionQueue(), this.refreshHeartbeatCatalog().catch(() => undefined)]);
+		this.updatePendingMessagesDisplay();
+		await this.refreshHeartbeatCatalog().catch(() => undefined);
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
@@ -2889,9 +2872,7 @@ export class InteractiveMode {
 		await this.sessionEventQueue;
 		this.resetCurrentSessionRenderState();
 		await this.renderInitialMessages();
-		// The session transition and transcript are already authoritative here;
-		// a transient queue read must not turn a successful switch into a fatal error.
-		await this.refreshConnectionQueue().catch(() => undefined);
+		this.updatePendingMessagesDisplay();
 		this.syncWorkingLoader();
 	}
 
@@ -2917,7 +2898,7 @@ export class InteractiveMode {
 			updateFooter: true,
 		});
 		await this.restoreStreamingMessageFromSnapshot(snapshot.streamingMessage);
-		await this.refreshConnectionQueue();
+		this.updatePendingMessagesDisplay();
 		if (bashFinished) {
 			if (this.activeBashComponent) {
 				this.activeBashComponent.setComplete(undefined, false);
@@ -7020,8 +7001,17 @@ export class InteractiveMode {
 			});
 			if (sessionGeneration !== this.sessionEventGeneration) return;
 			if (status === "applied") {
-				await this.refreshConnectionQueue();
-				this.queueSelection.refreshAfterMove(this.getConnectionQueue(), selected.lane, selected.index + direction);
+				await this.sessionEventQueue;
+				if (sessionGeneration !== this.sessionEventGeneration) return;
+				const dropped = this.queueSelection.refreshAfterMove(
+					this.getConnectionQueue(),
+					selected.lane,
+					selected.index + direction,
+					selected.text,
+				);
+				if (dropped !== undefined && this.editor.getText() === selected.text) {
+					this.setEditorTextFromQueueSelection(dropped);
+				}
 				this.ui.requestRender();
 			} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
 			else this.showStatus("Queue changed; reorder not applied");
@@ -7095,7 +7085,6 @@ export class InteractiveMode {
 			const editorUntouched =
 				submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
 			if (status === "applied") {
-				await this.refreshConnectionQueue();
 				if (trimmed) this.editor.addToHistory?.(trimmed);
 				const draft = this.queueSelection.reset();
 				if (editorUntouched) this.setEditorTextFromQueueSelection(draft);
