@@ -947,14 +947,12 @@ describe("AgentSession compaction characterization", () => {
 			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
 		];
 		const activeRunSettled = createDeferred();
-		vi.spyOn(harness.session.agent, "waitForIdle")
-			.mockResolvedValueOnce()
-			.mockResolvedValueOnce()
-			.mockReturnValueOnce(activeRunSettled.promise)
-			.mockResolvedValue();
 		const continueSpy = vi
 			.spyOn(harness.session.agent, "continue")
 			.mockRejectedValueOnce(new AgentContinueError("busy", "already processing"));
+		vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(() =>
+			continueSpy.mock.calls.length === 0 ? Promise.resolve() : activeRunSettled.promise,
+		);
 
 		sessionInternals._schedulePostCompactionContinue();
 		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(1));

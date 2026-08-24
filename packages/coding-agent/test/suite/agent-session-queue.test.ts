@@ -334,17 +334,15 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
 		const activeRunSettled = createDeferred();
-		vi.spyOn(harness.session.agent, "waitForIdle")
-			.mockResolvedValueOnce()
-			.mockResolvedValueOnce()
-			.mockReturnValueOnce(activeRunSettled.promise)
-			.mockResolvedValue();
 		const continueAgent = vi
 			.spyOn(harness.session.agent, "continue")
 			.mockRejectedValueOnce(
 				new AgentContinueError("busy", "Agent is already processing. Wait for completion before continuing."),
 			)
 			.mockResolvedValueOnce();
+		vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(() =>
+			continueAgent.mock.calls.length === 0 ? Promise.resolve() : activeRunSettled.promise,
+		);
 
 		internals._schedulePostCompactionContinue();
 		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(1));
