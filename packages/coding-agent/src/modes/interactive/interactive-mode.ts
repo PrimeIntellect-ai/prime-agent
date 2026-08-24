@@ -252,7 +252,7 @@ import {
 	shouldRunPrimeCliOnboardingSplash,
 } from "./onboarding.js";
 import type { ClientPromptStashStore, PromptStash, PromptStashState } from "./prompt-stash-state.js";
-import { QueueSelection } from "./queue-selection.js";
+import { QueueSelection, type QueueSelectionItem } from "./queue-selection.js";
 import { formatResumeHint } from "./resume-hint.js";
 import {
 	getAvailableThemes,
@@ -1021,6 +1021,7 @@ export class InteractiveMode {
 	private isApplyingQueueSelectionText = false;
 	private queueMutationChain: Promise<void> = Promise.resolve();
 	private pendingQueueEdit: symbol | undefined;
+	private pendingQueueMove = false;
 
 	private shutdownRequested = false;
 
@@ -2647,9 +2648,14 @@ export class InteractiveMode {
 			case "agent_end":
 				this.patchConnectionState({ isStreaming: false, activeToolNames: [] });
 				break;
-			case "session_action_update":
+			case "session_action_update": {
 				this.patchConnectionState({ sessionActions: event.actions });
+				const selected = this.queueSelection.selected;
+				if (selected && !this.pendingQueueEdit && !this.pendingQueueMove) {
+					this.refreshQueueSelectionAt(this.getConnectionQueue(), selected, selected.index);
+				}
 				break;
+			}
 			case "compaction_start":
 				this.patchConnectionState({ isCompacting: true });
 				break;
@@ -2815,6 +2821,7 @@ export class InteractiveMode {
 		this.pendingMessagesContainer.clear();
 		this.queuedMessagesContainer.clear();
 		this.pendingQueueEdit = undefined;
+		this.pendingQueueMove = false;
 		// The selection and its stashed draft belong to the previous session;
 		// every editor draft is cleared below, so discard rather than restore.
 		this.queueSelection.reset();
@@ -6970,6 +6977,17 @@ export class InteractiveMode {
 		}
 	}
 
+	private refreshQueueSelectionAt(
+		queue: AgentConnectionQueueState,
+		selected: QueueSelectionItem,
+		index: number,
+	): void {
+		const dropped = this.queueSelection.refreshAt(queue, selected.lane, index, selected.text);
+		if (dropped !== undefined && this.editor.getText() === selected.text) {
+			this.setEditorTextFromQueueSelection(dropped);
+		}
+	}
+
 	private browseQueueSelection(direction: -1 | 1): void {
 		if (this.pendingQueueEdit) return;
 		const text = this.queueSelection.move(this.getConnectionQueue(), this.editor.getText(), direction);
@@ -6995,26 +7013,28 @@ export class InteractiveMode {
 			if (sessionGeneration !== this.sessionEventGeneration) return;
 			const selected = this.queueSelection.selected;
 			if (!selected) return;
-			const status = await this.agentConnection.mutateQueuedMessage(selected.lane, selected.index, selected.text, {
-				type: "move",
-				direction,
-			});
-			if (sessionGeneration !== this.sessionEventGeneration) return;
-			if (status === "applied") {
-				await this.sessionEventQueue;
-				if (sessionGeneration !== this.sessionEventGeneration) return;
-				const dropped = this.queueSelection.refreshAfterMove(
-					this.getConnectionQueue(),
+			this.pendingQueueMove = true;
+			try {
+				const status = await this.agentConnection.mutateQueuedMessage(
 					selected.lane,
-					selected.index + direction,
+					selected.index,
 					selected.text,
+					{
+						type: "move",
+						direction,
+					},
 				);
-				if (dropped !== undefined && this.editor.getText() === selected.text) {
-					this.setEditorTextFromQueueSelection(dropped);
-				}
-				this.ui.requestRender();
-			} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
-			else this.showStatus("Queue changed; reorder not applied");
+				if (sessionGeneration !== this.sessionEventGeneration) return;
+				if (status === "applied") {
+					await this.sessionEventQueue;
+					if (sessionGeneration !== this.sessionEventGeneration) return;
+					this.refreshQueueSelectionAt(this.getConnectionQueue(), selected, selected.index + direction);
+					this.ui.requestRender();
+				} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
+				else this.showStatus("Queue changed; reorder not applied");
+			} finally {
+				this.pendingQueueMove = false;
+			}
 		}).catch((error) => {
 			if (sessionGeneration === this.sessionEventGeneration) {
 				this.showError(error instanceof Error ? error.message : String(error));

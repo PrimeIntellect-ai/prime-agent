@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { QueuedMessageMutation } from "../src/core/session-action-store.js";
+import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
 
@@ -29,12 +30,19 @@ type Harness = {
 	sessionEventQueue: Promise<void>;
 	inputSubmissionGeneration: number;
 	pendingQueueEdit: symbol | undefined;
+	pendingQueueMove: boolean;
 	queueMutationChain: Promise<void>;
 	enqueueQueueMutation: <T>(run: () => Promise<T>) => Promise<T>;
 	applyQueueSelection: (text: string, targetLane: "steering" | "followUp") => Promise<boolean>;
 	browseQueueSelection: (direction: -1 | 1) => void;
 	moveQueueSelection: (direction: -1 | 1) => void;
 	getConnectionQueue: () => QueueState;
+	refreshQueueSelectionAt: (
+		queue: QueueState,
+		selected: { lane: "steering" | "followUp"; index: number; text: string },
+		index: number,
+	) => void;
+	updateConnectionStateFromEvent: (event: AgentConnectionSessionEvent) => void;
 	patchConnectionState: (patch: Partial<Harness["connectionState"]>) => void;
 	setEditorTextFromQueueSelection: (text: string) => void;
 	collectQueueReplaceImages: (text: string) => unknown;
@@ -74,12 +82,15 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		sessionEventQueue: Promise.resolve(),
 		inputSubmissionGeneration: 0,
 		pendingQueueEdit: undefined,
+		pendingQueueMove: false,
 		queueMutationChain: Promise.resolve(),
 		enqueueQueueMutation: proto.enqueueQueueMutation,
 		applyQueueSelection: proto.applyQueueSelection,
 		browseQueueSelection: proto.browseQueueSelection,
 		moveQueueSelection: proto.moveQueueSelection,
 		getConnectionQueue: proto.getConnectionQueue,
+		refreshQueueSelectionAt: proto.refreshQueueSelectionAt,
+		updateConnectionStateFromEvent: proto.updateConnectionStateFromEvent,
 		patchConnectionState: () => {},
 		setEditorTextFromQueueSelection: proto.setEditorTextFromQueueSelection,
 		collectQueueReplaceImages: proto.collectQueueReplaceImages,
@@ -97,6 +108,17 @@ function setQueue(harness: Harness, queue: QueueState): void {
 		steering: queue.steering,
 		followUps: queue.followUp,
 	};
+}
+
+function emitQueueUpdate(harness: Harness, queue: QueueState): void {
+	harness.updateConnectionStateFromEvent({
+		type: "session_action_update",
+		actions: {
+			queuedCount: queue.steering.length + queue.followUp.length,
+			steering: queue.steering,
+			followUps: queue.followUp,
+		},
+	});
 }
 
 describe("interactive queued-message editing", () => {
@@ -326,10 +348,33 @@ describe("interactive queued-message editing", () => {
 		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce();
 	});
 
+	it("exits browsing when an external event removes the selected item", async () => {
+		const harness = createHarness({ steering: [], followUp: ["queued"] });
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+
+		emitQueueUpdate(harness, { steering: [], followUp: [] });
+
+		expect(harness.queueSelection.isBrowsing).toBe(false);
+		expect(harness.editor.getText()).toBe("draft");
+		await expect(harness.applyQueueSelection("draft", "steering")).resolves.toBe(false);
+		expect(harness.agentConnection.mutateQueuedMessage).not.toHaveBeenCalled();
+	});
+
+	it("refreshes browse navigation from external queue events", () => {
+		const harness = createHarness({ steering: ["s1"], followUp: ["f1", "f2"] });
+		harness.browseQueueSelection(-1);
+
+		emitQueueUpdate(harness, { steering: ["s1"], followUp: ["f0", "f2", "f3"] });
+		harness.browseQueueSelection(-1);
+
+		expect(harness.editor.getText()).toBe("f0");
+	});
+
 	it("refreshes selection from event-driven queue state after a move", async () => {
 		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
 		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
-			setQueue(harness, { steering: ["s2", "s1"], followUp: [] });
+			emitQueueUpdate(harness, { steering: ["s2", "s1"], followUp: [] });
 			return "applied";
 		});
 		harness.browseQueueSelection(-1);
@@ -343,7 +388,7 @@ describe("interactive queued-message editing", () => {
 	it("leaves browse mode when the moved tuple is absent from the event snapshot", async () => {
 		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
 		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
-			setQueue(harness, { steering: ["s1"], followUp: [] });
+			emitQueueUpdate(harness, { steering: ["s1"], followUp: [] });
 			return "applied";
 		});
 		harness.editor.setText("draft");
@@ -376,7 +421,7 @@ describe("interactive queued-message editing", () => {
 				} else if (mutation.type === "replace") {
 					queue[index] = mutation.text;
 				}
-				setQueue(harness, { steering: [...queue], followUp: [] });
+				emitQueueUpdate(harness, { steering: [...queue], followUp: [] });
 				return "applied";
 			},
 		);
