@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
+- Fixed rlm.run outside a live kernel hanging forever instead of failing fast, which stalled CI shard 3 until timeout.
 
 ## [0.8.0] - 2026-08-21
 
