@@ -1,0 +1,1 @@
+- Fixed graceful IPython kernel disposal so timed-out final snapshots are cancelled before socket teardown.
