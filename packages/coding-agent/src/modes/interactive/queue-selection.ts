@@ -44,8 +44,6 @@ export class QueueSelection {
 			if (direction > 0) return undefined;
 			this.items = flatten(queue);
 			if (this.items.length === 0) return undefined;
-			// A drop (sync) keeps the previous draft stashed; do not overwrite it
-			// with the dropped item's text still sitting in the editor.
 			if (!this.hasStashedDraft) {
 				this.draft = draft;
 				this.hasStashedDraft = true;
@@ -60,25 +58,6 @@ export class QueueSelection {
 		}
 		this.cursor = next;
 		return this.items[next]?.text;
-	}
-
-	/**
-	 * Track queue changes while browsing: keep the selection when its text is
-	 * still present. Returns the dropped item's text when the selection could
-	 * not be kept, so the caller can restore the stashed draft.
-	 */
-	sync(queue: AgentConnectionQueueState): string | undefined {
-		const selected = this.selected;
-		this.items = flatten(queue);
-		if (!selected) return undefined;
-		const exact = this.items[selected.lane === "steering" ? selected.index : queue.steering.length + selected.index];
-		if (exact?.lane === selected.lane && exact.text === selected.text) {
-			this.cursor = this.items.indexOf(exact);
-			return undefined;
-		}
-		const retargeted = this.items.find((item) => item.lane === selected.lane && item.text === selected.text);
-		this.cursor = retargeted ? this.items.indexOf(retargeted) : -1;
-		return retargeted ? undefined : selected.text;
 	}
 
 	/** Called after a mutation or submit resolved the selection. Returns the stashed draft. */
