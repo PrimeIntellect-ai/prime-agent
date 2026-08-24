@@ -830,11 +830,12 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 
 /** One-shot settlement for a scheduled post-compaction continuation; a settled failure is never re-exposed to later waiters. */
 interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
+	continueAfterSessionInput: boolean;
 	settled: boolean;
 }
 
 function createPostCompactionContinuationSettlement(): PostCompactionContinuationSettlement {
-	return { ...createAgentMessageDeferred(), settled: false };
+	return { ...createAgentMessageDeferred(), continueAfterSessionInput: false, settled: false };
 }
 
 export interface ModelCycleResult {
@@ -7310,6 +7311,7 @@ export class AgentSession {
 			throw new Error("Cannot compact without aborting while the agent is running.");
 		}
 		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
+		const continueAfterSessionInput = this._postCompactionContinuationSettlement?.continueAfterSessionInput ?? false;
 		this._disconnectFromAgent();
 		if (!options.skipAbort) await this.abort();
 		let didCompact = false;
@@ -7378,7 +7380,7 @@ export class AgentSession {
 			if (didCompact) {
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 				if (hadPostCompactionContinue) {
-					this._schedulePostCompactionContinue();
+					this._schedulePostCompactionContinue(continueAfterSessionInput);
 				}
 				// Queued agent or session-owned inputs resume the loop; defer refine
 				// behind them instead of interleaving it before their turns.
@@ -7602,14 +7604,15 @@ export class AgentSession {
 		this._scheduleAutoRefine("compact");
 	}
 
-	private _schedulePostCompactionContinue(): void {
-		if (this._postCompactionContinuationScheduled) {
-			return;
-		}
+	private _schedulePostCompactionContinue(continueAfterSessionInput = false): void {
 		if (!this._postCompactionContinuationSettlement || this._postCompactionContinuationSettlement.settled) {
 			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement();
 		}
 		const settlement = this._postCompactionContinuationSettlement;
+		settlement.continueAfterSessionInput ||= continueAfterSessionInput;
+		if (this._postCompactionContinuationScheduled) {
+			return;
+		}
 		this._postCompactionContinuationScheduled = true;
 		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
 		void this._runScheduledPostCompactionContinue(settlement)
@@ -7625,11 +7628,27 @@ export class AgentSession {
 		return continuationMessages.some((message) => this._postCompactionContinuationMessages.includes(message));
 	}
 
+	private async _waitForQueuedWorkResume(settlement: PostCompactionContinuationSettlement): Promise<void> {
+		while (this._queuedWorkPauses.size > 0 && this._postCompactionContinuationSettlement === settlement) {
+			let resume = () => {};
+			const resumed = new Promise<void>((resolve) => {
+				resume = resolve;
+				this._sessionInputCheckpointWaiters.add(resolve);
+			});
+			try {
+				await Promise.race([resumed, settlement.promise]);
+			} finally {
+				this._sessionInputCheckpointWaiters.delete(resume);
+			}
+		}
+	}
+
 	private async _runScheduledPostCompactionContinue(settlement: PostCompactionContinuationSettlement): Promise<void> {
 		while (this._postCompactionContinuationScheduled && this._postCompactionContinuationSettlement === settlement) {
 			await this.agent.waitForIdle();
 			await this.waitForRetry();
 			await this._waitForRefineIdle();
+			await this._waitForQueuedWorkResume(settlement);
 
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let continuation: Promise<void> | undefined;
@@ -7642,6 +7661,10 @@ export class AgentSession {
 					this._postCompactionContinuationSettlement !== settlement
 				) {
 					return;
+				}
+
+				if (this._queuedWorkPauses.size > 0) {
+					continue;
 				}
 
 				continuationMessages = [...this._scheduledPostCompactionContinuationMessages];
@@ -7665,9 +7688,8 @@ export class AgentSession {
 				await this.waitForIdle();
 				if (this._postCompactionContinuationSettlement !== settlement) return;
 				const shouldContinue =
-					continuationMessages.length === 0
-						? this.unfinishedActionCount > 0
-						: this._sessionOwnsScheduledContinuations(continuationMessages);
+					(settlement.continueAfterSessionInput && continuationMessages.length === 0) ||
+					this._sessionOwnsScheduledContinuations(continuationMessages);
 				if (shouldContinue) {
 					this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
 					continue;
@@ -8508,7 +8530,7 @@ export class AgentSession {
 				(reason === "requested" || reason === "threshold") &&
 				(shouldContinueAfterCompaction || this.agent.hasQueuedMessages() || this.hasPendingSessionWork)
 			) {
-				this._schedulePostCompactionContinue();
+				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
 			}
 		};
 
@@ -8560,13 +8582,13 @@ export class AgentSession {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
 
-				this._schedulePostCompactionContinue();
+				this._schedulePostCompactionContinue(true);
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 				return true;
 			} else if (shouldContinueAfterCompaction || hasQueuedMessages) {
 				// Compaction can intentionally stop a tool loop between turns.
 				// Queued follow-up/steering/custom messages can also be waiting.
-				this._schedulePostCompactionContinue();
+				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 			} else {
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
