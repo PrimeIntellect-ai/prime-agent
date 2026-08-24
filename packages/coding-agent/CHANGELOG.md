@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel, made `%cd`/`%env` rewrites match IPython semantics (`~` expansion, quoted `%cd` targets, `%cd -`, space-separated assignments, `$var`/`${var}` value expansion, bare `%env` listing) with linear-time magic patterns, and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
+- Fixed the REPL runtime leaking a finished cell's id onto late background-thread output: the current cell is now cleared right after the post-cell drain, so `done` stays the last event with that id and between-cell output carries a null id.
 - Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
 - Fixed rlm.run outside a live kernel hanging forever instead of failing fast, which stalled CI shard 3 until timeout.
 - Fixed two bash() spawn races: status-channel fds no longer leak when pipe creation fails mid-setup, and a status-socket gate keeps the command from starting until its pid is journaled (a kernel kill in that window now stops the child instead of orphaning it past the reaper).
