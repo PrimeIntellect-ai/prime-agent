@@ -585,6 +585,9 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
                 # Any present value must be an int; a JSON null is not a valid way to ask for the default.
                 if field in req and (isinstance(req[field], bool) or not isinstance(req[field], int)):
                     return {"error": f"{field} must be an integer"}
+            # realpath resolves symlinks, so aliased paths cannot silently clobber the payload.
+            if os.path.realpath(req["path"]) == os.path.realpath(req["manifest_path"]):
+                return {"error": "path and manifest_path must differ"}
             return _snapshot_state(
                 ns,
                 req["path"],
