@@ -8,6 +8,7 @@ type ShutdownInternals = {
 	state: "running";
 	writeLine: (request: Record<string, unknown>) => Promise<void>;
 	handleEvent: (event: Record<string, unknown>) => void;
+	wireChild: (child: ShutdownInternals["child"]) => void;
 	pendingDoneWaiters: Map<string, () => void>;
 	inFlightHostRequests: Set<Promise<void>>;
 	child: EventEmitter & {
@@ -16,8 +17,8 @@ type ShutdownInternals = {
 		kill: (signal?: NodeJS.Signals | number) => boolean;
 		pid?: number;
 		stdin: { destroyed: boolean; destroy: () => void };
-		stdout?: { destroy: () => void };
-		stderr?: { destroy: () => void };
+		stdout?: { destroy: () => void; on: (event: string, listener: (...args: unknown[]) => void) => void };
+		stderr?: { destroy: () => void; on: (event: string, listener: (...args: unknown[]) => void) => void };
 	};
 };
 
@@ -36,14 +37,16 @@ function configuredManager(
 		kill: vi.fn(() => true),
 		pid: undefined,
 		stdin: { destroyed: false, destroy: vi.fn() },
-		stdout: { destroy: vi.fn() },
-		stderr: { destroy: vi.fn() },
+		stdout: { destroy: vi.fn(), on: vi.fn() },
+		stderr: { destroy: vi.fn(), on: vi.fn() },
 	});
 	Object.assign(internals, {
 		state: "running",
 		writeLine: vi.fn(async (request: Record<string, unknown>) => onSend(request, internals)),
 		child,
 	});
+	// Attach the real exit/error handlers so teardown-ownership races are exercised.
+	internals.wireChild(child);
 	return { manager, internals };
 }
 
@@ -162,6 +165,23 @@ describe("ReplKernelManager graceful shutdown", () => {
 		releaseHandler?.();
 		await Promise.all(tracked);
 		expect(internals.inFlightHostRequests.size).toBe(0);
+	});
+
+	it("restart after a graceful shutdown starts the kernel again", async () => {
+		const { manager, internals } = configuredManager((request, state) => {
+			if (request.type !== "shutdown") return;
+			state.handleEvent({ event: "done", id: request.id, status: "ok" });
+			// The runtime exits after acking shutdown; the exit handler must not
+			// steal teardown ownership from the in-flight graceful shutdown().
+			state.child.exitCode = 0;
+			state.child.emit("exit", 0, null);
+		});
+		const start = vi.spyOn(manager, "start").mockResolvedValue(undefined);
+
+		await manager.restart();
+
+		expect(internals.child).toBeUndefined();
+		expect(start).toHaveBeenCalledTimes(1);
 	});
 
 	it("restart does not resurrect a kernel a concurrent kill superseded", async () => {
