@@ -36,6 +36,7 @@ out.html
 packages/coding-agent/binaries/
 todo.md
 plans/
+/tmp/
 .prime/agent/
 collect.sh
 .kernel-venv/

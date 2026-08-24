@@ -1,14 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
@@ -22,6 +13,7 @@ const REGISTRY_LOCK_UPDATE_MS = 1000;
 const REGISTRY_LOCK_RETRIES = 500;
 const REGISTRY_LOCK_RETRY_MS = 10;
 const STARTUP_FENCE_POLL_MS = 250;
+const OWNER_REFRESH_MS = 60_000;
 const SHUTDOWN_ADMISSION_FILE_NAME = "shutdown-admission.json";
 const SHUTDOWN_ADMISSION_LEASE_MS = 5000;
 const SHUTDOWN_ADMISSION_REFRESH_MS = 1000;
@@ -56,7 +48,7 @@ interface DaemonShutdownAdmissionRecord extends ProcessIdentity {
 	expiresAt: string;
 }
 
-interface DaemonSupervisorOwnerScope {
+interface DaemonSupervisorOwnerScope extends ProcessIdentity {
 	version: 1;
 	role: "supervisor";
 	token: string;
@@ -64,6 +56,8 @@ interface DaemonSupervisorOwnerScope {
 	socketPath: string;
 	descriptorDir: string;
 }
+
+type DaemonSupervisorOwnerReference = DaemonSupervisorOwnerRecord | DaemonSupervisorOwnerScope;
 
 interface DaemonStartupFenceRecord extends ProcessIdentity {
 	version: 1;
@@ -94,7 +88,7 @@ interface AcquireDaemonSupervisorOwnershipOptions {
 class DaemonSupervisorAlreadyRunningError extends Error {
 	readonly code = "daemon_supervisor_already_running" as const;
 
-	constructor(readonly owner: DaemonSupervisorOwnerRecord) {
+	constructor(readonly owner: DaemonSupervisorOwnerReference) {
 		super(`Daemon supervisor ${owner.generation} already owns ${owner.socketPath}`);
 		this.name = "DaemonSupervisorAlreadyRunningError";
 	}
@@ -119,63 +113,175 @@ class DaemonShutdownAdmissionError extends Error {
 }
 
 class DaemonSupervisorOwnership {
-	private released = false;
+	private state: "active" | "lost" | "releasing" | "released" = "active";
+	private operationQueue: Promise<void> = Promise.resolve();
+	private releasePromise?: Promise<void>;
+	private refreshTimer?: ReturnType<typeof setInterval>;
 
 	constructor(
 		readonly record: DaemonSupervisorOwnerRecord,
 		private readonly registryDir: string,
 		private readonly ownerDirectory: string,
-	) {}
+	) {
+		this.startRefreshTimer();
+	}
 
 	async assertCurrent(): Promise<void> {
-		if (this.released) {
+		if (this.state !== "active") {
 			throw new DaemonSupervisorOwnershipLostError(this.record.generation);
 		}
-		const current = readOwnerRecord(this.ownerDirectory);
-		if (!current || !sameOwnerRecord(current, this.record)) {
-			throw new DaemonSupervisorOwnershipLostError(this.record.generation);
-		}
+		return this.enqueueOperation(async () => {
+			if (this.state !== "active") {
+				throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			}
+			const current = readOwnerRecord(this.ownerDirectory);
+			if (current && sameOwnerRecord(current, this.record)) {
+				return;
+			}
+			if (current) {
+				this.markLost();
+				throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			}
+			const updated = await this.renew();
+			if (this.state !== "active" || !updated) {
+				if (this.state === "active") {
+					this.markLost();
+				}
+				throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			}
+		});
 	}
 
 	async updatePhase(phase: DaemonSupervisorOwnerPhase): Promise<void> {
-		if (this.released) {
+		if (this.state === "lost") {
+			throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+		}
+		if (this.state !== "active") {
 			return;
 		}
-		const updated = await mutateDaemonSupervisorOwner(
-			this.record.generation,
-			this.record.token,
-			(owner) => {
+		return this.enqueueOperation(async () => {
+			if (this.state === "lost") {
+				throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			}
+			if (this.state !== "active") {
+				return;
+			}
+			const updated = await this.renew((owner) => {
 				owner.phase = phase;
-			},
-			this.registryDir,
-		);
-		if (!updated) {
-			throw new Error(`Daemon supervisor ownership was lost for ${this.record.socketPath}`);
-		}
-		this.record.phase = phase;
-		this.record.updatedAt = updated.updatedAt;
+			});
+			if (this.state !== "active") {
+				return;
+			}
+			if (!updated) {
+				this.markLost();
+				throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			}
+		});
 	}
 
 	async release(): Promise<void> {
-		if (this.released) {
+		if (this.state === "released") {
 			return;
 		}
-		let releasedDirectory: string | undefined;
+		if (this.releasePromise) {
+			return this.releasePromise;
+		}
+		const previousState = this.state;
+		this.state = "releasing";
+		this.stopRefreshTimer();
+		this.releasePromise = this.enqueueOperation(async () => {
+			let releasedDirectory: string | undefined;
+			let releaseCommitted = false;
+			try {
+				await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
+					const current = readOwnerRecord(this.ownerDirectory);
+					if (current?.token === this.record.token) {
+						releasedDirectory = `${this.ownerDirectory}.released-${randomUUID()}`;
+						renameSync(this.ownerDirectory, releasedDirectory);
+					}
+					releaseCommitted = true;
+				});
+			} catch (error) {
+				if (!releaseCommitted) {
+					throw error;
+				}
+			}
+			this.state = "released";
+			if (releasedDirectory) {
+				try {
+					rmSync(releasedDirectory, { recursive: true, force: true });
+				} catch {
+					// The canonical owner is already gone; quarantine cleanup is best-effort.
+				}
+			}
+		}).catch((error) => {
+			this.state = previousState;
+			if (this.state === "active") {
+				this.startRefreshTimer();
+			}
+			throw error;
+		});
 		try {
-			await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
-				const current = readOwnerRecord(this.ownerDirectory);
-				if (!current || current.token !== this.record.token) {
+			await this.releasePromise;
+		} finally {
+			this.releasePromise = undefined;
+		}
+	}
+
+	private enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this.operationQueue.then(operation);
+		this.operationQueue = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
+
+	private startRefreshTimer(): void {
+		if (this.refreshTimer || this.state !== "active") {
+			return;
+		}
+		this.refreshTimer = setInterval(() => {
+			void this.enqueueOperation(async () => {
+				if (this.state !== "active") {
 					return;
 				}
-				releasedDirectory = `${this.ownerDirectory}.released-${randomUUID()}`;
-				renameSync(this.ownerDirectory, releasedDirectory);
-			});
-			this.released = true;
-		} finally {
-			if (releasedDirectory) {
-				rmSync(releasedDirectory, { recursive: true, force: true });
-			}
+				const updated = await this.renew();
+				if (this.state === "active" && !updated) {
+					this.markLost();
+				}
+			}).catch(() => undefined);
+		}, OWNER_REFRESH_MS);
+		this.refreshTimer.unref();
+	}
+
+	private stopRefreshTimer(): void {
+		if (this.refreshTimer) {
+			clearInterval(this.refreshTimer);
+			this.refreshTimer = undefined;
 		}
+	}
+
+	private markLost(): void {
+		if (this.state === "active") {
+			this.state = "lost";
+		}
+		this.stopRefreshTimer();
+	}
+
+	private async renew(mutation?: (owner: DaemonSupervisorOwnerRecord) => void): Promise<boolean> {
+		const updated = await renewDaemonSupervisorOwner(
+			this.record,
+			this.registryDir,
+			this.ownerDirectory,
+			() => this.state === "active",
+			mutation,
+		);
+		if (!updated) {
+			return false;
+		}
+		Object.assign(this.record, updated);
+		return true;
 	}
 }
 
@@ -271,33 +377,97 @@ async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action:
 	}
 }
 
-async function mutateDaemonSupervisorOwner(
-	generation: string,
-	expectedToken: string,
-	mutation: (owner: DaemonSupervisorOwnerRecord) => void,
-	registryDir: string = defaultDaemonSupervisorRegistryDir(),
+async function renewDaemonSupervisorOwner(
+	expected: DaemonSupervisorOwnerRecord,
+	registryDir: string,
+	ownerDirectory: string,
+	canRenew: () => boolean,
+	mutation?: (owner: DaemonSupervisorOwnerRecord) => void,
 ): Promise<DaemonSupervisorOwnerRecord | undefined> {
 	return withDaemonSupervisorRegistryGuard(registryDir, () => {
-		const directory = ownerDirectoryPath(registryDir, generation);
-		if (!existsSync(directory)) {
+		if (!canRenew()) {
 			return undefined;
 		}
-		const current = requireOwnerRecord(directory);
-		if (current.token !== expectedToken) {
-			return undefined;
+		const current = readOwnerRecord(ownerDirectory);
+		if (current) {
+			if (!sameOwnerRecord(current, expected)) {
+				return undefined;
+			}
+			return refreshDaemonSupervisorOwner(current, expected, ownerDirectory, mutation);
 		}
-		mutation(current);
-		current.updatedAt = new Date().toISOString();
-		if (
-			!isDaemonSupervisorOwnerRecord(current) ||
-			current.generation !== generation ||
-			current.token !== expectedToken
-		) {
-			throw new Error(`Invalid mutation for daemon supervisor owner ${generation}`);
+
+		const staleDirectories: string[] = [];
+		let matchingOwnerScope = false;
+		for (const directory of listOwnerDirectories(registryDir)) {
+			if (directory === ownerDirectory) {
+				const scope = readOwnerScope(directory);
+				if (scope) {
+					if (!sameOwnerScope(scope, expected)) {
+						return undefined;
+					}
+					matchingOwnerScope = true;
+				} else {
+					const entries = readdirSync(directory);
+					if (entries.includes("owner.json") || entries.includes("scope.json")) {
+						return undefined;
+					}
+					staleDirectories.push(directory);
+				}
+				continue;
+			}
+
+			const owner = readOwnerRecordForScope(directory, (scope) => ownerConflicts(scope, expected));
+			if (!owner || !ownerConflicts(owner, expected)) {
+				continue;
+			}
+			if (isProcessIdentityAlive(owner)) {
+				return undefined;
+			}
+			staleDirectories.push(directory);
 		}
-		writeOwnerRecord(directory, current);
-		return current;
+
+		for (const directory of staleDirectories) {
+			const staleDirectory = `${directory}.stale-${randomUUID()}`;
+			try {
+				renameSync(directory, staleDirectory);
+				rmSync(staleDirectory, { recursive: true, force: true });
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw error;
+				}
+			}
+		}
+		if (matchingOwnerScope) {
+			return refreshDaemonSupervisorOwner({ ...expected }, expected, ownerDirectory, mutation);
+		}
+
+		const candidateDirectory = resolve(registryDir, `.candidate-${process.pid}-${randomUUID()}`);
+		mkdirSync(candidateDirectory, { mode: 0o700 });
+		try {
+			const recovered = refreshDaemonSupervisorOwner({ ...expected }, expected, candidateDirectory, mutation);
+			renameSync(candidateDirectory, ownerDirectory);
+			return recovered;
+		} catch (error) {
+			rmSync(candidateDirectory, { recursive: true, force: true });
+			throw error;
+		}
 	});
+}
+
+function refreshDaemonSupervisorOwner(
+	owner: DaemonSupervisorOwnerRecord,
+	expected: DaemonSupervisorOwnerRecord,
+	directory: string,
+	mutation?: (owner: DaemonSupervisorOwnerRecord) => void,
+): DaemonSupervisorOwnerRecord {
+	mutation?.(owner);
+	owner.updatedAt = new Date().toISOString();
+	if (!isDaemonSupervisorOwnerRecord(owner) || !sameOwnerRecord(owner, expected)) {
+		throw new Error(`Invalid mutation for daemon supervisor owner ${expected.generation}`);
+	}
+	writeOwnerScope(directory, owner);
+	writeOwnerRecord(directory, owner);
+	return owner;
 }
 
 export async function acquireDaemonSupervisorOwnership(
@@ -589,6 +759,17 @@ function sameOwnerRecord(left: DaemonSupervisorOwnerRecord, right: DaemonSupervi
 	);
 }
 
+function sameOwnerScope(left: DaemonSupervisorOwnerScope, right: DaemonSupervisorOwnerRecord): boolean {
+	return (
+		left.token === right.token &&
+		left.generation === right.generation &&
+		left.pid === right.pid &&
+		left.processStartId === right.processStartId &&
+		left.socketPath === right.socketPath &&
+		left.descriptorDir === right.descriptorDir
+	);
+}
+
 function ownerRecordFingerprint(record: DaemonSupervisorOwnerRecord): string {
 	return createHash("sha256").update(JSON.stringify(record)).digest("hex");
 }
@@ -606,32 +787,41 @@ function ownerDirectoryPath(registryDir: string, generation: string): string {
 	return resolve(registryDir, `${generation}.owner`);
 }
 
-function requireOwnerRecord(directory: string): DaemonSupervisorOwnerRecord {
-	const owner = readOwnerRecord(directory);
-	if (!owner) {
-		throw new Error(`Invalid daemon supervisor owner record: ${directory}`);
-	}
-	return owner;
-}
-
 function readOwnerRecordForScope(
 	directory: string,
 	isRelevant: (scope: DaemonSupervisorOwnerScope) => boolean,
-): DaemonSupervisorOwnerRecord | undefined {
+): DaemonSupervisorOwnerReference | undefined {
 	const owner = readOwnerRecord(directory);
 	if (owner) {
 		return owner;
 	}
 	const scope = readOwnerScope(directory);
-	const entries = !scope ? readdirSync(directory) : [];
+	let entries: string[];
+	try {
+		entries = readdirSync(directory);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return undefined;
+		}
+		throw error;
+	}
 	if (!scope && !entries.includes("owner.json") && !entries.includes("scope.json")) {
 		const abandonedDirectory = `${directory}.abandoned-${randomUUID()}`;
 		renameSync(directory, abandonedDirectory);
 		rmSync(abandonedDirectory, { recursive: true, force: true });
 		return undefined;
 	}
-	if (!scope || isRelevant(scope)) {
+	if (!scope) {
 		throw new Error(`Invalid daemon supervisor owner record: ${directory}`);
+	}
+	if (entries.includes("owner.json")) {
+		if (isRelevant(scope)) {
+			throw new Error(`Invalid daemon supervisor owner record: ${directory}`);
+		}
+		return undefined;
+	}
+	if (isRelevant(scope)) {
+		return scope;
 	}
 	return undefined;
 }
@@ -690,6 +880,9 @@ function isDaemonSupervisorOwnerScope(value: unknown): value is DaemonSupervisor
 		scope.role === "supervisor" &&
 		typeof scope.token === "string" &&
 		typeof scope.generation === "string" &&
+		Number.isInteger(scope.pid) &&
+		(scope.pid ?? 0) > 0 &&
+		(scope.processStartId === undefined || typeof scope.processStartId === "string") &&
 		typeof scope.socketPath === "string" &&
 		typeof scope.descriptorDir === "string"
 	);
@@ -701,6 +894,8 @@ function writeOwnerScope(directory: string, owner: DaemonSupervisorOwnerRecord):
 		role: owner.role,
 		token: owner.token,
 		generation: owner.generation,
+		pid: owner.pid,
+		...(owner.processStartId ? { processStartId: owner.processStartId } : {}),
 		socketPath: owner.socketPath,
 		descriptorDir: owner.descriptorDir,
 	};

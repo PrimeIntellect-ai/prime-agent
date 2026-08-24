@@ -1,5 +1,6 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
+import type { StreamLivenessHost } from "./utils/stream-liveness.js";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.js";
 
@@ -137,13 +138,16 @@ export interface StreamOptions {
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
 	 */
 	metadata?: Record<string, unknown>;
+	/** Host-owned stream liveness policy and runtime hooks. */
+	streamLiveness?: StreamLivenessHost;
 }
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
-	reasoning?: ThinkingLevel;
+	/** Explicit model reasoning selection. Omit to preserve the provider default. */
+	reasoning?: ModelThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
 }

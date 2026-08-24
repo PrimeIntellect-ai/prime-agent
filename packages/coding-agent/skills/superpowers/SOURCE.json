@@ -1,0 +1,38 @@
+{
+	"name": "superpowers",
+	"version": "6.2.0",
+	"sourceRepository": "https://github.com/obra/superpowers",
+	"upstreamRepository": "https://github.com/obra/superpowers",
+	"sourceCommit": "9ba3bcd10b9e92be0b299d8721f1393b92e911a0",
+	"supersedesSourceCommit": "b6b58974aa8c731d7c160975959a0e62777975c6",
+	"license": "MIT",
+	"copyright": "Copyright (c) 2025 Jesse Vincent",
+	"importedPaths": ["skills/**", "LICENSE"],
+	"includedPaths": ["skills/**/*.md"],
+	"referenceOnlyPaths": [
+		"skills/**/scripts/**",
+		"skills/**/*.sh",
+		"skills/**/*.js",
+		"skills/**/*.cjs",
+		"skills/**/*.ts",
+		"skills/**/*.html",
+		"skills/**/*.dot"
+	],
+	"excludedPaths": [
+		".git/**",
+		"plugin-manifests/**",
+		"hooks/**",
+		"docs/**",
+		"release-notes/**",
+		"package-metadata/**",
+		"unrelated assets"
+	],
+	"localProvenanceFiles": ["UPSTREAM.md", "PATCHES.md", "SOURCE.json", "THIRD_PARTY_NOTICE.md"],
+	"licensePath": "LICENSE",
+	"visualCompanion": {
+		"assetsIncluded": true,
+		"execution": "denied",
+		"runtimeCapability": "unavailable"
+	},
+	"vendorFormat": 1
+}

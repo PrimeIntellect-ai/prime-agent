@@ -40,6 +40,20 @@ import {
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import {
+	classifyStreamFailure,
+	extractStreamFailureInfo,
+	formatStreamFailureMessage,
+	recordStreamFailure,
+} from "../utils/stream-failure.js";
+import {
+	applyProviderStreamStall,
+	createProviderStreamLiveness,
+	isProviderStreamStalledError,
+	observeProviderAsyncIterable,
+	type ProviderStreamLiveness,
+	type ProviderStreamStalledError,
+} from "../utils/stream-liveness.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
@@ -99,7 +113,12 @@ interface RequestBody {
 // Retry Helpers
 // ============================================================================
 
-function isRetryableError(status: number, errorText: string): boolean {
+function isRetryableError(
+	status: number,
+	errorText: string,
+	failureKind?: ReturnType<typeof classifyStreamFailure>,
+): boolean {
+	if (failureKind === "resource_exhausted") return false;
 	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
 		return true;
 	}
@@ -149,6 +168,13 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let liveness: ProviderStreamLiveness | undefined;
+		let terminalEventPushed = false;
+		const cleanStreamingScratch = (): void => {
+			for (const block of output.content) {
+				delete (block as { partialJson?: string }).partialJson;
+			}
+		};
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -173,6 +199,15 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			);
 			const bodyJson = JSON.stringify(body);
 			const transport = options?.transport || "auto";
+			const onStall = (error: ProviderStreamStalledError) => {
+				cleanStreamingScratch();
+				applyProviderStreamStall(output, error);
+				if (!terminalEventPushed) {
+					terminalEventPushed = true;
+					stream.push({ type: "error", reason: "error", error: output });
+					stream.end();
+				}
+			};
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
 			if (websocketDisabledForSession) {
 				recordWebSocketSseFallback(options?.sessionId);
@@ -192,11 +227,13 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							websocketStarted = true;
 						},
 						options,
+						onStall,
 					);
 
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
 					}
+					terminalEventPushed = true;
 					stream.push({
 						type: "done",
 						reason: output.stopReason as "stop" | "length" | "toolUse",
@@ -206,7 +243,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					return;
 				} catch (error) {
 					const aborted = options?.signal?.aborted;
-					if (aborted || isCodexNonTransportError(error)) {
+					if (aborted || isCodexNonTransportError(error) || isProviderStreamStalledError(error)) {
 						throw error;
 					}
 					appendAssistantMessageDiagnostic(
@@ -235,14 +272,21 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
+				liveness = createProviderStreamLiveness({
+					identity: { provider: model.provider, model: model.id, transport: "sse" },
+					host: options?.streamLiveness,
+					signal: options?.signal,
+					onStall,
+				});
 
 				try {
 					response = await fetch(resolveCodexUrl(model.baseUrl), {
 						method: "POST",
 						headers: sseHeaders,
 						body: bodyJson,
-						signal: options?.signal,
+						signal: liveness.signal,
 					});
+					liveness.observe({ type: "headers", receivedBytes: 0 });
 					await options?.onResponse?.(
 						{ status: response.status, headers: headersToRecord(response.headers) },
 						model,
@@ -251,28 +295,39 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					if (response.ok) {
 						break;
 					}
+					liveness.markError();
+					liveness.close();
 
-					const errorText = await response.text();
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
+					const info = await parseErrorResponse(response);
+					if (attempt < MAX_RETRIES && isRetryableError(response.status, info.message, info.kind)) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
 
-					// Parse error for friendly message on final attempt or non-retryable error
-					const fakeResponse = new Response(errorText, {
+					throw new CodexApiError(info.friendlyMessage || info.message, {
+						code: info.code,
 						status: response.status,
-						statusText: response.statusText,
+						limitClass: info.limitClass,
+						resetAt: info.resetAt,
+						resetInSeconds: info.resetInSeconds,
+						creditsUnavailable: info.creditsUnavailable,
 					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
 				} catch (error) {
+					const stalled = liveness.stalledError();
+					if (stalled) throw stalled;
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
 						}
 					}
+					if (error instanceof CodexApiError) {
+						const failureKind = classifyStreamFailure(error.code, error.status);
+						if (!isRetryableError(error.status ?? 0, error.message, failureKind)) throw error;
+					}
 					lastError = error instanceof Error ? error : new Error(String(error));
+					liveness.markError();
+					liveness.close();
 					// Network errors are retryable
 					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
@@ -290,25 +345,43 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			if (!response.body) {
 				throw new Error("No response body");
 			}
+			const activeLiveness = liveness;
+			if (!activeLiveness) throw new Error("Codex SSE liveness was not initialized");
 
 			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model, options);
+			await processStream(response, output, stream, model, options, activeLiveness);
 
-			if (options?.signal?.aborted) {
+			activeLiveness.markFinal();
+			if (activeLiveness.callerAborted()) {
 				throw new Error("Request was aborted");
 			}
 
+			terminalEventPushed = true;
 			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+			cleanStreamingScratch();
+			const stalled = liveness?.stalledError();
+			if (stalled) {
+				applyProviderStreamStall(output, stalled);
+			} else if (isProviderStreamStalledError(error)) {
+				applyProviderStreamStall(output, error);
+			} else {
+				output.stopReason = liveness?.callerAborted() || options?.signal?.aborted ? "aborted" : "error";
+				output.errorMessage = formatStreamFailureMessage(error);
+				recordStreamFailure(model, output, error);
 			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : String(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			if (!terminalEventPushed) {
+				terminalEventPushed = true;
+				stream.push({
+					type: "error",
+					reason: output.stopReason === "aborted" ? "aborted" : "error",
+					error: output,
+				});
+				stream.end();
+			}
+		} finally {
+			liveness?.close();
 		}
 	})();
 
@@ -453,23 +526,66 @@ async function processStream(
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
 	options?: OpenAICodexResponsesOptions,
+	liveness?: ProviderStreamLiveness,
 ): Promise<void> {
-	await processResponsesStream(mapCodexEvents(parseSSE(response)), output, stream, model, {
-		serviceTier: options?.serviceTier,
-		resolveServiceTier: resolveCodexServiceTier,
-		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
-	});
+	if (!liveness) throw new Error("Codex SSE liveness was not initialized");
+	await processResponsesStream(
+		observeProviderAsyncIterable(mapCodexEvents(parseSSE(response)), liveness),
+		output,
+		stream,
+		model,
+		{
+			serviceTier: options?.serviceTier,
+			resolveServiceTier: resolveCodexServiceTier,
+			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+			onLivenessObservation: liveness.observe,
+		},
+	);
+}
+
+interface ParsedCodexError {
+	message: string;
+	friendlyMessage?: string;
+	code?: string;
+	status?: number;
+	kind: ReturnType<typeof classifyStreamFailure>;
+	limitClass?: string;
+	resetAt?: number;
+	resetInSeconds?: number;
+	creditsUnavailable?: boolean;
 }
 
 class CodexApiError extends Error {
 	readonly code?: string;
+	readonly status?: number;
 	readonly payload?: Record<string, unknown>;
+	readonly limitClass?: string;
+	readonly resetAt?: number;
+	readonly resetInSeconds?: number;
+	readonly creditsUnavailable?: boolean;
 
-	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
+	constructor(
+		message: string,
+		options?: {
+			code?: string;
+			status?: number;
+			payload?: Record<string, unknown>;
+			limitClass?: string;
+			resetAt?: number;
+			resetInSeconds?: number;
+			creditsUnavailable?: boolean;
+			cause?: unknown;
+		},
+	) {
 		super(message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
+		this.status = options?.status;
 		this.payload = options?.payload;
+		this.limitClass = options?.limitClass;
+		this.resetAt = options?.resetAt;
+		this.resetInSeconds = options?.resetInSeconds;
+		this.creditsUnavailable = options?.creditsUnavailable;
 		this.cause = options?.cause;
 	}
 }
@@ -489,25 +605,159 @@ function isCodexNonTransportError(error: unknown): boolean {
 	return error instanceof CodexApiError || error instanceof CodexProtocolError;
 }
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string" && value.trim().length > 0) {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : undefined;
+	}
+	return undefined;
+}
+
+const CODEX_SAFE_QUOTA_HEADERS = {
+	"x-codex-active-limit": "X-Codex-Active-Limit",
+	"x-codex-credits-has-credits": "X-Codex-Credits-Has-Credits",
+	"x-codex-reset-at": "X-Codex-Reset-At",
+	"x-codex-reset-in-seconds": "X-Codex-Reset-In-Seconds",
+} as const;
+
+function safeCodexQuotaHeaders(...values: unknown[]): Record<string, string> {
+	const safeHeaders: Record<string, string> = {};
+	for (const value of values) {
+		if (value && typeof (value as Headers).get === "function") {
+			for (const [name, canonicalName] of Object.entries(CODEX_SAFE_QUOTA_HEADERS)) {
+				const headerValue = (value as Headers).get(name);
+				if (headerValue !== null) safeHeaders[canonicalName] = headerValue;
+			}
+			continue;
+		}
+		const headers = recordValue(value);
+		if (!headers) continue;
+		for (const [name, headerValue] of Object.entries(headers)) {
+			const canonicalName = CODEX_SAFE_QUOTA_HEADERS[name.toLowerCase() as keyof typeof CODEX_SAFE_QUOTA_HEADERS];
+			if (canonicalName && typeof headerValue === "string") safeHeaders[canonicalName] = headerValue;
+		}
+	}
+	return safeHeaders;
+}
+
+function sanitizeCodexErrorPayload(payload: unknown): Record<string, unknown> | undefined {
+	const root = recordValue(payload);
+	if (!root) return undefined;
+	const sanitized = { ...root };
+	if ("headers" in sanitized) {
+		const headers = safeCodexQuotaHeaders(sanitized.headers);
+		if (Object.keys(headers).length > 0) sanitized.headers = headers;
+		else delete sanitized.headers;
+	}
+	for (const key of ["error", "response"] as const) {
+		const nested = sanitizeCodexErrorPayload(sanitized[key]);
+		if (nested) sanitized[key] = nested;
+	}
+	return sanitized;
+}
+
+function parseCodexErrorPayload(payload: unknown, fallbackStatus?: number): ParsedCodexError {
+	const root = recordValue(payload) ?? {};
+	const nestedError = recordValue(root.error);
+	const response = recordValue(root.response);
+	const responseError = recordValue(response?.error);
+	const nestedErrorResponse = recordValue(nestedError?.response);
+	const quotaHeaders = safeCodexQuotaHeaders(
+		root.headers,
+		nestedError?.headers,
+		nestedErrorResponse?.headers,
+		response?.headers,
+		responseError?.headers,
+	);
+	const merged = { ...root };
+	delete merged.error;
+	delete merged.response;
+	delete merged.headers;
+	Object.assign(merged, nestedError ?? {}, responseError ?? {});
+	delete merged.headers;
+	if (Object.keys(quotaHeaders).length > 0) merged.headers = quotaHeaders;
+	if (merged.status === undefined && merged.status_code === undefined && merged.statusCode === undefined) {
+		const nestedStatus =
+			response?.status ??
+			response?.status_code ??
+			response?.statusCode ??
+			nestedErrorResponse?.status ??
+			nestedErrorResponse?.status_code ??
+			nestedErrorResponse?.statusCode;
+		if (nestedStatus !== undefined) merged.status_code = nestedStatus;
+	}
+	const code =
+		typeof merged.code === "string"
+			? merged.code
+			: typeof merged.type === "string" && merged.type !== "error"
+				? merged.type
+				: undefined;
+	const message = typeof merged.message === "string" ? merged.message : undefined;
+	const status =
+		fallbackStatus ?? numberValue(merged.status) ?? numberValue(merged.status_code) ?? numberValue(merged.statusCode);
+	const diagnosticError = Object.assign(new Error(message || code || "Codex request failed"), {
+		status,
+		code,
+		error: merged,
+	});
+	const info = extractStreamFailureInfo(diagnosticError);
+	return {
+		message: message || code || "Codex request failed",
+		code,
+		status,
+		kind: info.kind,
+		limitClass: info.limitClass ?? (info.kind === "resource_exhausted" ? code : undefined),
+		resetAt: info.resetAt,
+		resetInSeconds: info.resetInSeconds,
+		creditsUnavailable: info.creditsUnavailable,
+	};
+}
+
+function addCodexQuotaHeaders(payload: unknown, response: Response): unknown {
+	const activeLimit = response.headers.get("x-codex-active-limit");
+	const creditsHasCredits = response.headers.get("x-codex-credits-has-credits");
+	if (activeLimit === null && creditsHasCredits === null) return payload;
+	const root = recordValue(payload);
+	const headers = safeCodexQuotaHeaders(root?.headers);
+	if (activeLimit !== null) headers["X-Codex-Active-Limit"] = activeLimit;
+	if (creditsHasCredits !== null) headers["X-Codex-Credits-Has-Credits"] = creditsHasCredits;
+	return { ...(root ?? {}), headers };
+}
+
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
 
 		if (type === "error") {
-			const code = (event as { code?: string }).code || "";
-			const message = (event as { message?: string }).message || "";
-			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
-				code: code || undefined,
-				payload: event,
+			const info = parseCodexErrorPayload(event);
+			throw new CodexApiError(info.message, {
+				code: info.code,
+				status: info.status,
+				limitClass: info.limitClass,
+				resetAt: info.resetAt,
+				resetInSeconds: info.resetInSeconds,
+				creditsUnavailable: info.creditsUnavailable,
+				payload: sanitizeCodexErrorPayload(event),
 			});
 		}
 
 		if (type === "response.failed") {
-			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
-			const code = response?.error?.code;
-			const message = response?.error?.message;
-			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
+			const info = parseCodexErrorPayload(event);
+			throw new CodexApiError(info.message || "Codex response failed", {
+				code: info.code,
+				status: info.status,
+				limitClass: info.limitClass,
+				resetAt: info.resetAt,
+				resetInSeconds: info.resetInSeconds,
+				creditsUnavailable: info.creditsUnavailable,
+				payload: sanitizeCodexErrorPayload(event),
+			});
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
@@ -532,6 +782,34 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // SSE Parsing
 // ============================================================================
 
+function findSSEBoundary(buffer: string): { index: number; length: number } | undefined {
+	const lfIndex = buffer.indexOf("\n\n");
+	const crlfIndex = buffer.indexOf("\r\n\r\n");
+	if (lfIndex === -1 && crlfIndex === -1) return undefined;
+	if (lfIndex === -1 || (crlfIndex !== -1 && crlfIndex < lfIndex)) {
+		return { index: crlfIndex, length: 4 };
+	}
+	return { index: lfIndex, length: 2 };
+}
+
+function parseSSEChunk(chunk: string): Record<string, unknown> | undefined {
+	const dataLines = chunk
+		.split(/\r?\n/)
+		.filter((line) => line.startsWith("data:"))
+		.map((line) => line.slice(5).trim());
+	if (dataLines.length === 0) return undefined;
+	const data = dataLines.join("\n").trim();
+	if (!data || data === "[DONE]") return undefined;
+	try {
+		return JSON.parse(data) as Record<string, unknown>;
+	} catch (cause) {
+		throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
+			cause,
+			payload: data,
+		});
+	}
+}
+
 async function* parseSSE(response: Response): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
@@ -542,33 +820,31 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
-			if (done) break;
+			if (done) {
+				buffer += decoder.decode();
+				break;
+			}
 			buffer += decoder.decode(value, { stream: true });
 
-			let idx = buffer.indexOf("\n\n");
-			while (idx !== -1) {
-				const chunk = buffer.slice(0, idx);
-				buffer = buffer.slice(idx + 2);
-
-				const dataLines = chunk
-					.split("\n")
-					.filter((l) => l.startsWith("data:"))
-					.map((l) => l.slice(5).trim());
-				if (dataLines.length > 0) {
-					const data = dataLines.join("\n").trim();
-					if (data && data !== "[DONE]") {
-						try {
-							yield JSON.parse(data) as Record<string, unknown>;
-						} catch (cause) {
-							throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
-								cause,
-								payload: data,
-							});
-						}
-					}
-				}
-				idx = buffer.indexOf("\n\n");
+			let boundary = findSSEBoundary(buffer);
+			while (boundary) {
+				const chunk = buffer.slice(0, boundary.index);
+				buffer = buffer.slice(boundary.index + boundary.length);
+				const event = parseSSEChunk(chunk);
+				if (event) yield event;
+				boundary = findSSEBoundary(buffer);
 			}
+		}
+
+		// Dispatch a final event even when the server closes without a blank line.
+		buffer += "\n\n";
+		let boundary = findSSEBoundary(buffer);
+		while (boundary) {
+			const chunk = buffer.slice(0, boundary.index);
+			buffer = buffer.slice(boundary.index + boundary.length);
+			const event = parseSSEChunk(chunk);
+			if (event) yield event;
+			boundary = findSSEBoundary(buffer);
 		}
 	} finally {
 		// Best-effort stream teardown: the reader may already be closed or errored.
@@ -1151,8 +1427,23 @@ async function processWebSocketStream(
 	model: Model<"openai-codex-responses">,
 	onStart: () => void,
 	options?: OpenAICodexResponsesOptions,
+	onStall?: (error: ProviderStreamStalledError) => void,
 ): Promise<void> {
-	const { socket, entry, reused, release } = await acquireWebSocket(url, headers, options?.sessionId, options?.signal);
+	const liveness = createProviderStreamLiveness({
+		identity: { provider: model.provider, model: model.id, transport: "websocket" },
+		host: options?.streamLiveness,
+		signal: options?.signal,
+		onStall,
+	});
+	let acquired: Awaited<ReturnType<typeof acquireWebSocket>>;
+	try {
+		acquired = await acquireWebSocket(url, headers, options?.sessionId, liveness.signal);
+	} catch (error) {
+		liveness.markError();
+		liveness.close();
+		throw error;
+	}
+	const { socket, entry, reused, release } = acquired;
 	let keepConnection = true;
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
@@ -1178,10 +1469,11 @@ async function processWebSocketStream(
 		}
 	}
 	try {
+		liveness.observe({ type: "headers", receivedBytes: 0 });
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
-				mapCodexEvents(parseWebSocket(socket, options?.signal)),
+				observeProviderAsyncIterable(mapCodexEvents(parseWebSocket(socket, liveness.signal)), liveness),
 				output,
 				stream,
 				onStart,
@@ -1193,8 +1485,10 @@ async function processWebSocketStream(
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				onLivenessObservation: liveness.observe,
 			},
 		);
+		liveness.markFinal();
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 		} else if (useCachedContext && entry && output.responseId) {
@@ -1208,13 +1502,16 @@ async function processWebSocketStream(
 			};
 		}
 	} catch (error) {
+		const stalled = liveness.stalledError();
 		if (entry) {
 			entry.continuation = undefined;
 		}
 		keepConnection = false;
+		if (stalled) throw stalled;
 		throw error;
 	} finally {
 		release({ keep: keepConnection });
+		liveness.close();
 	}
 }
 
@@ -1222,33 +1519,31 @@ async function processWebSocketStream(
 // Error Handling
 // ============================================================================
 
-async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
+async function parseErrorResponse(response: Response): Promise<ParsedCodexError> {
 	const raw = await response.text();
-	let message = raw || response.statusText || "Request failed";
-	let friendlyMessage: string | undefined;
-
+	let parsed: unknown;
 	try {
-		const parsed = JSON.parse(raw) as {
-			error?: { code?: string; type?: string; message?: string; plan_type?: string; resets_at?: number };
-		};
-		const err = parsed?.error;
-		if (err) {
-			const code = err.code || err.type || "";
-			if (/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429) {
-				const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
-				const mins = err.resets_at
-					? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000))
-					: undefined;
-				const when = mins !== undefined ? ` Try again in ~${mins} min.` : "";
-				friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${when}`.trim();
-			}
-			message = err.message || friendlyMessage || message;
-		}
+		parsed = raw ? (JSON.parse(raw) as unknown) : undefined;
 	} catch {
-		// Unparseable error body: fall back to the raw message.
+		parsed = undefined;
 	}
 
-	return { message, friendlyMessage };
+	const info = parseCodexErrorPayload(addCodexQuotaHeaders(parsed, response), response.status);
+	const message =
+		info.code || info.message !== "Codex request failed"
+			? info.message
+			: raw || response.statusText || "Request failed";
+	let friendlyMessage: string | undefined;
+	if (info.kind === "resource_exhausted") {
+		const payload = recordValue(parsed);
+		const err = recordValue(payload?.error) ?? payload;
+		const plan = typeof err?.plan_type === "string" ? ` (${err.plan_type.toLowerCase()} plan)` : "";
+		const mins = info.resetInSeconds === undefined ? undefined : Math.max(0, Math.round(info.resetInSeconds / 60));
+		const when = mins === undefined ? "" : ` Try again in ~${mins} min.`;
+		friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${when}`.trim();
+	}
+
+	return { ...info, message, friendlyMessage };
 }
 
 // ============================================================================

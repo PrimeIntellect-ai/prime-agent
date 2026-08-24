@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { formatSessionDisplayId } from "../modes/daemon/daemon-session-id.js";
-import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
+import type { DaemonWorkflowStatusProjection, SessionSummary } from "../modes/daemon/daemon-session-list.js";
 
 // Display status derived from the lifecycle + activity axes.
 type ListStatus = "working" | "idle" | "archived";
@@ -26,6 +26,10 @@ type ListRow = {
 	model: string;
 	messages: string;
 	clients: string;
+	workflow: string;
+	next: string;
+	blocker: string;
+	head: string;
 };
 
 export function formatSessionListTable(sessions: readonly SessionSummary[], nowMs = Date.now()): string {
@@ -33,12 +37,20 @@ export function formatSessionListTable(sessions: readonly SessionSummary[], nowM
 		name: session.sessionName ?? "",
 		id: formatSessionDisplayId(session.id),
 		status: listStatusForSummary(session),
+		workflow: formatWorkflowStatus(session.workflowStatus),
+		next: formatWorkflowNext(session.workflowStatus),
+		blocker: formatWorkflowBlocker(session.workflowStatus),
+		head: formatWorkflowHead(session.workflowStatus),
 		age: formatSessionAge(session.modified, nowMs),
 		model: formatSessionModel(session.model),
 		messages: String(session.messageCount),
 		clients: String(session.attachedClients),
 	}));
-	return formatTable(["name", "id", "status", "age", "model", "messages", "clients"], rows, formatListCell);
+	return formatTable(
+		["name", "id", "status", "workflow", "next", "blocker", "head", "age", "model", "messages", "clients"],
+		rows,
+		formatListCell,
+	);
 }
 
 function sortSessionsForList(sessions: readonly SessionSummary[]): SessionSummary[] {
@@ -101,6 +113,35 @@ function formatSessionAge(modified: string | undefined, nowMs: number): string {
 
 function formatSessionModel(model: SessionSummary["model"]): string {
 	return model ? `${model.provider}/${model.id}` : "";
+}
+
+function formatWorkflowStatus(status: DaemonWorkflowStatusProjection | undefined): string {
+	if (!status) {
+		return "";
+	}
+	return status.phase ? `${status.status}/${status.phase}` : status.status;
+}
+
+function formatWorkflowNext(status: DaemonWorkflowStatusProjection | undefined): string {
+	if (!status) {
+		return "";
+	}
+	const next = [status.nextGate, status.nextTask].filter((value): value is string => value !== null);
+	if (status.approvalRequest) {
+		next.push(`approval:${status.approvalRequest.approvalRequestId}`);
+	}
+	return next.join("/");
+}
+
+function formatWorkflowBlocker(status: DaemonWorkflowStatusProjection | undefined): string {
+	if (status?.blocker) {
+		return `${status.blocker.kind}:${status.blocker.reason}`;
+	}
+	return status?.approvalRequest ? "approval_pending" : "";
+}
+
+function formatWorkflowHead(status: DaemonWorkflowStatusProjection | undefined): string {
+	return status?.headDigest ?? status?.approvalRequest?.headDigest ?? "";
 }
 
 function formatTable<T extends Record<string, string>>(

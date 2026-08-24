@@ -3,6 +3,8 @@ import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { AgentSession } from "../../core/agent-session.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
+import { projectResourceExhaustedBlocker } from "../../core/session-manager.js";
+import { projectWorkerModelCapabilityBlocker } from "../../core/workflow/worker-model-capability-gate.js";
 import type {
 	AgentConnectionArtifactReference,
 	AgentConnectionArtifactType,
@@ -56,6 +58,14 @@ export function createAgentConnectionState(
 		contextUsage: session.getContextUsage(),
 		// Baseline recap; the daemon overlays the live summary on attach.
 		recap: persistedRecap(sessionManager),
+		resourceExhaustedBlocker: (() => {
+			const blocker = sessionManager.getLatestResourceExhaustedBlocker?.();
+			return blocker ? projectResourceExhaustedBlocker(blocker) : undefined;
+		})(),
+		workerModelCapabilityBlocker: (() => {
+			const blocker = session.getWorkerModelCapabilityBlocker?.();
+			return blocker ? projectWorkerModelCapabilityBlocker(blocker) : undefined;
+		})(),
 	};
 }
 

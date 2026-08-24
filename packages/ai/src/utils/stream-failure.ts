@@ -12,6 +12,7 @@ export type StreamFailureKind =
 	| "refusal"
 	| "safety"
 	| "overloaded"
+	| "resource_exhausted"
 	| "rate_limit"
 	| "server_error"
 	| "auth"
@@ -25,6 +26,14 @@ export interface StreamFailureInfo {
 	providerErrorType?: string;
 	status?: number;
 	requestId?: string;
+	/** Stable provider quota class, retained only for resource exhaustion failures. */
+	limitClass?: string;
+	/** Unix timestamp in seconds for the next quota reset. */
+	resetAt?: number;
+	/** Seconds until the next quota reset when supplied by the provider. */
+	resetInSeconds?: number;
+	/** True when the provider explicitly reports that credits are unavailable. */
+	creditsUnavailable?: boolean;
 	/** Truncated raw provider payload for post-mortems. */
 	raw?: string;
 }
@@ -39,10 +48,18 @@ export class StreamFailureError extends Error {
 	}
 }
 
+function redactProviderSensitiveText(value: string): string {
+	return value
+		.replace(/(\b(?:authorization|proxy-authorization)\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+/gi, "$1[REDACTED]")
+		.replace(/(\bbearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
+		.replace(/(\b(?:x-)?api[-_ ]?key\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+}
+
 const KIND_MESSAGES: Record<StreamFailureKind, string> = {
 	refusal: "Model refused to respond",
 	safety: "Response blocked by provider safety filters",
 	overloaded: "Provider overloaded",
+	resource_exhausted: "Provider resource limit reached",
 	rate_limit: "Provider rate limit exceeded",
 	server_error: "Provider server error",
 	auth: "Provider authentication failed",
@@ -58,7 +75,7 @@ export function streamFailureMessage(info: StreamFailureInfo, detail?: string): 
 		.join(", ");
 	let message = KIND_MESSAGES[info.kind];
 	if (qualifiers) message += ` (${qualifiers})`;
-	if (detail) message += `: ${detail}`;
+	if (detail) message += `: ${redactProviderSensitiveText(detail)}`;
 	if (info.requestId) message += ` [request_id: ${info.requestId}]`;
 	return message;
 }
@@ -66,6 +83,19 @@ export function streamFailureMessage(info: StreamFailureInfo, detail?: string): 
 export function classifyStreamFailure(providerErrorType?: string, status?: number): StreamFailureKind {
 	const type = providerErrorType?.toLowerCase() ?? "";
 	if (type === "refusal") return "refusal";
+	if (
+		type.includes("usage_limit") ||
+		type.includes("usage_not_included") ||
+		type.includes("insufficient_quota") ||
+		type.includes("quota_exceeded") ||
+		type.includes("quota_exhaust") ||
+		type.includes("credits_unavailable") ||
+		type.includes("credit_exhaust") ||
+		type.includes("spend_control") ||
+		type.includes("workspace_member_usage_limit")
+	) {
+		return "resource_exhausted";
+	}
 	if (/sensitive|safety|prohibited_content|blocklist|spii|recitation|content.?filter|guardrail|flagged/.test(type)) {
 		return "safety";
 	}
@@ -114,6 +144,112 @@ export function truncateRawPayload(raw: string): string {
 	return raw.length > MAX_RAW_LENGTH ? `${raw.slice(0, MAX_RAW_LENGTH)}…` : raw;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function unixSeconds(value: unknown): number | undefined {
+	const number = finiteNumber(value);
+	if (number !== undefined) {
+		return Math.round(number > 100_000_000_000 ? number / 1000 : number);
+	}
+	if (typeof value !== "string" || value.trim().length === 0) return undefined;
+	const numeric = Number(value);
+	if (Number.isFinite(numeric)) return unixSeconds(numeric);
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? Math.round(parsed / 1000) : undefined;
+}
+
+function durationSeconds(value: unknown): number | undefined {
+	const number = finiteNumber(value);
+	if (number !== undefined) return number;
+	if (typeof value !== "string" || value.trim().length === 0) return undefined;
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function firstValue(sources: readonly Record<string, unknown>[], keys: readonly string[]): unknown {
+	for (const source of sources) {
+		for (const key of keys) {
+			if (source[key] !== undefined) return source[key];
+		}
+	}
+	return undefined;
+}
+
+function firstHeaderValue(sources: readonly Record<string, unknown>[], name: string): string | undefined {
+	const normalizedName = name.toLowerCase();
+	for (const source of sources) {
+		const headers = source.headers;
+		if (headers && typeof (headers as Headers).get === "function") {
+			const value = (headers as Headers).get(name);
+			if (value !== null) return value;
+		}
+		const headerRecord = asRecord(headers);
+		if (!headerRecord) continue;
+		for (const [key, value] of Object.entries(headerRecord)) {
+			if (key.toLowerCase() === normalizedName && typeof value === "string") return value;
+		}
+	}
+	return undefined;
+}
+
+function safeQuotaLabel(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim();
+	return /^[A-Za-z0-9_.:-]{1,64}$/.test(normalized) ? normalized : undefined;
+}
+
+function extractResourceMetadata(
+	sources: readonly Record<string, unknown>[],
+): Pick<StreamFailureInfo, "limitClass" | "resetAt" | "resetInSeconds" | "creditsUnavailable"> {
+	const activeLimit = safeQuotaLabel(firstHeaderValue(sources, "x-codex-active-limit"));
+	const rawLimitClass =
+		activeLimit ?? firstValue(sources, ["limitClass", "limit_class", "rate_limit_type", "quota_type"]);
+	const rawResetAt =
+		firstValue(sources, ["resetAt", "reset_at", "resetsAt", "resets_at"]) ??
+		firstHeaderValue(sources, "x-codex-reset-at");
+	const rawResetInSeconds =
+		firstValue(sources, [
+			"resetInSeconds",
+			"reset_in_seconds",
+			"resetsInSeconds",
+			"resets_in_seconds",
+			"reset_after_seconds",
+			"reset_seconds",
+		]) ?? firstHeaderValue(sources, "x-codex-reset-in-seconds");
+	const creditsHasCredits = firstHeaderValue(sources, "x-codex-credits-has-credits");
+	const rawCreditsUnavailable = firstValue(sources, ["creditsUnavailable", "credits_unavailable"]);
+	const rawCreditsAvailable = firstValue(sources, ["creditsAvailable", "credits_available"]);
+	const resetAt = unixSeconds(rawResetAt);
+	const suppliedResetInSeconds = durationSeconds(rawResetInSeconds);
+	const resetInSeconds =
+		suppliedResetInSeconds !== undefined
+			? Math.max(0, Math.round(suppliedResetInSeconds))
+			: resetAt !== undefined
+				? Math.max(0, resetAt - Math.floor(Date.now() / 1000))
+				: undefined;
+	const creditsUnavailable =
+		creditsHasCredits !== undefined
+			? creditsHasCredits.trim().toLowerCase() === "false"
+			: typeof rawCreditsUnavailable === "boolean"
+				? rawCreditsUnavailable
+				: typeof rawCreditsAvailable === "boolean"
+					? !rawCreditsAvailable
+					: undefined;
+
+	return {
+		limitClass: safeQuotaLabel(rawLimitClass),
+		resetAt,
+		resetInSeconds,
+		creditsUnavailable,
+	};
+}
+
 function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; detail?: string } {
 	if (error instanceof StreamFailureError) return { info: error.info };
 	if (!(error instanceof Error)) return { info: { kind: "unknown" } };
@@ -121,6 +257,7 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 	const err = error as Error & {
 		status?: unknown;
 		statusCode?: unknown;
+		status_code?: unknown;
 		code?: unknown;
 		requestID?: unknown;
 		request_id?: unknown;
@@ -130,16 +267,21 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 	};
 
 	const status =
-		typeof err.status === "number" ? err.status : typeof err.statusCode === "number" ? err.statusCode : undefined;
+		typeof err.status === "number"
+			? err.status
+			: typeof err.statusCode === "number"
+				? err.statusCode
+				: typeof err.status_code === "number"
+					? err.status_code
+					: undefined;
 
 	// Error bodies come nested differently per SDK: Anthropic/OpenAI expose
 	// `error.error = {type|code, message}` (sometimes doubly nested).
-	let body = err.error as { type?: unknown; code?: unknown; message?: unknown; error?: unknown } | undefined;
-	if (body && typeof body === "object" && body.error && typeof body.error === "object") {
-		body = body.error as { type?: unknown; code?: unknown; message?: unknown };
-	}
-	const bodyType = body && typeof body === "object" ? (body.type ?? body.code) : undefined;
-	const bodyMessage = body && typeof body === "object" ? body.message : undefined;
+	let body = asRecord(err.error);
+	if (body?.error && typeof body.error === "object") body = asRecord(body.error);
+	const sources = [err as unknown as Record<string, unknown>, ...(body ? [body] : [])];
+	const bodyType = body?.type ?? body?.code;
+	const bodyMessage = body?.message;
 	const providerErrorType =
 		typeof bodyType === "string"
 			? bodyType
@@ -159,13 +301,20 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 				: undefined;
 	const rawRequestId = err.requestID ?? err.request_id ?? err.$metadata?.requestId ?? headerRequestId;
 	const requestId = typeof rawRequestId === "string" ? rawRequestId : undefined;
+	const resourceMetadata = extractResourceMetadata(sources);
+	let kind = classifyStreamFailure(providerErrorType ?? error.message, status);
+	if (kind === "rate_limit" && resourceMetadata.creditsUnavailable === true) kind = "resource_exhausted";
+	if (kind === "resource_exhausted" && resourceMetadata.limitClass === undefined) {
+		resourceMetadata.limitClass = providerErrorType;
+	}
 
 	return {
 		info: {
-			kind: classifyStreamFailure(providerErrorType ?? error.message, status),
+			kind,
 			providerErrorType,
 			status,
 			requestId,
+			...resourceMetadata,
 		},
 		detail: typeof bodyMessage === "string" ? bodyMessage : undefined,
 	};
@@ -187,12 +336,27 @@ export function extractStreamFailureInfo(error: unknown): StreamFailureInfo {
  * may depend on) is preserved.
  */
 export function formatStreamFailureMessage(error: unknown): string {
-	if (error instanceof StreamFailureError) return error.message;
+	if (error instanceof StreamFailureError) return redactProviderSensitiveText(error.message);
 	const { info, detail } = extractStreamFailureParts(error);
 	if (info.kind === "unknown") {
-		return error instanceof Error ? error.message : JSON.stringify(error);
+		const message = redactProviderSensitiveText(
+			error instanceof Error ? error.message : (JSON.stringify(error) ?? String(error)),
+		);
+		const qualifiers = [info.providerErrorType, info.status !== undefined ? String(info.status) : undefined]
+			.filter(Boolean)
+			.join(", ");
+		return qualifiers ? `Provider stream failed (${qualifiers}): ${message}` : message;
 	}
 	return streamFailureMessage(info, detail);
+}
+
+function extractRedactedDiagnosticError(error: unknown): ReturnType<typeof extractDiagnosticError> {
+	const diagnostic = extractDiagnosticError(error);
+	return {
+		...diagnostic,
+		message: redactProviderSensitiveText(diagnostic.message),
+		stack: diagnostic.stack ? redactProviderSensitiveText(diagnostic.stack) : undefined,
+	};
 }
 
 const log = getLogger("ai.provider");
@@ -213,7 +377,7 @@ export function recordStreamFailure(
 	appendAssistantMessageDiagnostic(output, {
 		type: "provider_stream_failure",
 		timestamp: Date.now(),
-		error: extractDiagnosticError(error),
+		error: extractRedactedDiagnosticError(error),
 		details: { ...info },
 	});
 	const rawMessage = error instanceof Error ? error.message : String(error);
@@ -227,6 +391,9 @@ export function recordStreamFailure(
 		requestId: info.requestId,
 		message: output.errorMessage,
 		// errorMessage is user-facing and concise; keep the raw cause for debugging.
-		cause: rawMessage === output.errorMessage ? undefined : truncateRawPayload(rawMessage),
+		cause:
+			redactProviderSensitiveText(rawMessage) === output.errorMessage
+				? undefined
+				: truncateRawPayload(redactProviderSensitiveText(rawMessage)),
 	});
 }

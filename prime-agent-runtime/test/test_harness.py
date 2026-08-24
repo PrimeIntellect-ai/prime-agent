@@ -6,11 +6,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 from rlm import harness as package_harness
 from rlm import rlm as callable_rlm
-from rlm.harness import HarnessState, get_harness_state
+from rlm.harness import (
+    NONAUTHORITATIVE_REFINEMENT_REJECTED,
+    WORKFLOW_HARNESS_READ_ONLY_ENV,
+    HarnessState,
+    HarnessWriteDeniedError,
+    get_harness_state,
+)
 
 PYTHON_REFERENCE = {
     "type": "python",
@@ -21,6 +28,92 @@ PYTHON_REFERENCE = {
 
 
 class HarnessStateTest(unittest.TestCase):
+    def test_workflow_read_only_marker_blocks_all_durable_mutations(self) -> None:
+        previous_marker = os.environ.get(WORKFLOW_HARNESS_READ_ONLY_ENV)
+        previous_local = os.environ.get("RLM_HARNESS_STATE_DIR")
+        previous_global = os.environ.get("RLM_GLOBAL_HARNESS_STATE_DIR")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_dir = Path(temp_dir) / "local"
+            global_dir = Path(temp_dir) / "global"
+            local_path = local_dir / "harness_state.json"
+            global_path = global_dir / "harness_state.json"
+            os.environ["RLM_HARNESS_STATE_DIR"] = str(local_dir)
+            os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = str(global_dir)
+            try:
+                local_state = HarnessState(local_path)
+                local_state.create_memory("Local baseline", "unchanged", id="local_baseline")
+                global_state = HarnessState(global_path, scope="global")
+                global_state.create_memory("Global baseline", "unchanged", id="global_baseline")
+                baseline = {path: path.read_bytes() for path in (local_path, global_path)}
+
+                os.environ[WORKFLOW_HARNESS_READ_ONLY_ENV] = "1"
+                local_state = HarnessState(local_path)
+                global_state = HarnessState(global_path, scope="global")
+                self.assertEqual(local_state.get("memory", "local_baseline").content, "unchanged")
+                self.assertEqual(
+                    local_state.get("memory", "global_baseline", global_=True).content,
+                    "unchanged",
+                )
+                self.assertEqual(len(local_state.list()), 1)
+                self.assertEqual(len(local_state.list(global_=True)), 1)
+
+                def assert_denied(operation: Callable[[], object]) -> None:
+                    with self.assertRaises(HarnessWriteDeniedError) as context:
+                        operation()
+                    self.assertIn(NONAUTHORITATIVE_REFINEMENT_REJECTED, str(context.exception))
+
+                local_operations = (
+                    lambda: local_state.save(),
+                    lambda: local_state.create_memory("Local new", "blocked", id="local_new"),
+                    lambda: local_state.update_memory("local_baseline", "Local baseline", "blocked"),
+                    lambda: local_state.delete_memory("local_baseline"),
+                    lambda: local_state.upsert("memory", "Local upsert", "blocked", id="local_upsert"),
+                    lambda: local_state.record_refinement("blocked", ["change"]),
+                    lambda: local_state.create_memory("Global new", "blocked", id="global_new", global_=True),
+                    lambda: local_state.update_memory(
+                        "global_baseline", "Global baseline", "blocked", global_=True
+                    ),
+                    lambda: local_state.delete_memory("global_baseline", global_=True),
+                    lambda: local_state.upsert(
+                        "memory", "Global upsert", "blocked", id="global_upsert", global_=True
+                    ),
+                    lambda: local_state.record_refinement("blocked global", ["change"], global_=True),
+                    lambda: package_harness.create_memory("Proxy local", "blocked", id="proxy_local"),
+                    lambda: package_harness.create_memory(
+                        "Proxy global", "blocked", id="proxy_global", global_=True
+                    ),
+                    lambda: package_harness.record_refinement("blocked proxy", ["change"]),
+                )
+                global_operations = (
+                    lambda: global_state.save(),
+                    lambda: global_state.create_memory("Global new", "blocked", id="global_new_direct"),
+                    lambda: global_state.update_memory("global_baseline", "Global baseline", "blocked"),
+                    lambda: global_state.delete_memory("global_baseline"),
+                    lambda: global_state.upsert(
+                        "memory", "Global upsert", "blocked", id="global_upsert_direct"
+                    ),
+                    lambda: global_state.record_refinement("blocked direct", ["change"]),
+                )
+
+                for operation in (*local_operations, *global_operations):
+                    assert_denied(operation)
+
+                self.assertEqual(local_path.read_bytes(), baseline[local_path])
+                self.assertEqual(global_path.read_bytes(), baseline[global_path])
+            finally:
+                if previous_marker is None:
+                    os.environ.pop(WORKFLOW_HARNESS_READ_ONLY_ENV, None)
+                else:
+                    os.environ[WORKFLOW_HARNESS_READ_ONLY_ENV] = previous_marker
+                if previous_local is None:
+                    os.environ.pop("RLM_HARNESS_STATE_DIR", None)
+                else:
+                    os.environ["RLM_HARNESS_STATE_DIR"] = previous_local
+                if previous_global is None:
+                    os.environ.pop("RLM_GLOBAL_HARNESS_STATE_DIR", None)
+                else:
+                    os.environ["RLM_GLOBAL_HARNESS_STATE_DIR"] = previous_global
+
     def test_crud_for_all_entry_kinds(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")

@@ -4,6 +4,8 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { type AgentCollaborationOptions, resolveAgentCollaboration } from "./workflow/agent-collaboration.js";
+import type { WorkflowComputeClass } from "./workflow/default-task-runtime.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -164,6 +166,11 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	workflowWorkerModelsByComputeClass?: Partial<Record<WorkflowComputeClass, string>>; // Model selector per Prime workflow compute-class tier ("cheap"/"standard"/"deep"); unset tiers fall back to the session default
+	workflowImmutablePaths?: string[]; // Repo-relative path prefixes no workflow task may change; the host reports any write under them from git, without running anything
+	workflowWorkspacePaths?: string[]; // Repo-relative roots a workflow task may own paths under; defaults to ["src"], which rejects ownership of code anywhere else
+	agentMessageMidRunDelivery?: boolean; // Deliver an agent-to-agent message at the recipient's next turn boundary instead of waiting for its whole task to finish. Off by default: mid-run delivery keeps the recipient's loop alive, so mutual sends can hold each other running.
+	agentCollaboration?: Partial<AgentCollaborationOptions>; // How sibling workers share work: mode "blind" | "push_diffs" | "full_comms", plus midRunDelivery, finalCheck, maxDiffBytes
 }
 
 export interface AgentTracesSettings {
@@ -1104,6 +1111,56 @@ export class SettingsManager {
 
 	getThinkingBudgets(): ThinkingBudgetsSettings | undefined {
 		return this.settings.thinkingBudgets;
+	}
+
+	getWorkflowWorkerModelsByComputeClass(): Partial<Record<WorkflowComputeClass, string>> | undefined {
+		return this.settings.workflowWorkerModelsByComputeClass;
+	}
+
+	/**
+	 * Path prefixes no workflow task may change.
+	 *
+	 * The evaluator that judges the work, the manifest that fixes the sample, the control the result
+	 * is measured against: writes to these are what gaming a metric looks like in practice, and they
+	 * are visible to git without executing anything.
+	 *
+	 * Return: Declared prefixes, or undefined when the operator declared none.
+	 */
+	/**
+	 * Roots a workflow task may declare owned paths under.
+	 *
+	 * Graph validation rejects any `ownedPaths` outside these, so the default `["src"]` refuses a task
+	 * that owns code at the repository root - correct for a src-layout project and wrong for every
+	 * other, which is why it belongs in settings rather than a constant.
+	 *
+	 * Return: Declared roots, or undefined to keep the built-in default.
+	 */
+	getWorkflowWorkspacePaths(): readonly string[] | undefined {
+		const paths = this.settings.workflowWorkspacePaths;
+		return paths === undefined || paths.length === 0 ? undefined : paths;
+	}
+
+	getWorkflowImmutablePaths(): readonly string[] | undefined {
+		const paths = this.settings.workflowImmutablePaths;
+		return paths === undefined || paths.length === 0 ? undefined : paths;
+	}
+
+	/**
+	 * Whether agent-to-agent messages may be delivered mid-run.
+	 *
+	 * Return: True when the recipient should receive a message at its next turn boundary.
+	 */
+	getAgentMessageMidRunDelivery(): boolean {
+		return this.settings.agentMessageMidRunDelivery === true;
+	}
+
+	/**
+	 * Resolved sibling-collaboration options.
+	 *
+	 * Return: Complete options, defaulting to blind collaboration with a final check.
+	 */
+	getAgentCollaboration(): AgentCollaborationOptions {
+		return resolveAgentCollaboration(this.settings.agentCollaboration);
 	}
 
 	getShowImages(): boolean {

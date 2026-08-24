@@ -72,6 +72,8 @@ import { SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
+import { MIN_WORKFLOW_RUNTIME_VERSION } from "./core/workflow/runtime-store-adapter.js";
+import { WORKER_MODEL_SELECTOR } from "./core/workflow/worker-model-capability-gate.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
 import { deserializeDaemonError } from "./modes/daemon/daemon-errors.js";
@@ -166,8 +168,8 @@ export function shouldRejectNonInteractiveAttach(attachAgent: string | undefined
 	return attachAgent !== undefined && appMode !== "interactive";
 }
 
-export function shouldRejectBareResume(resume: true | string | undefined): boolean {
-	return resume === true;
+export function shouldRejectNonInteractiveBareResume(resume: true | string | undefined, appMode: AppMode): boolean {
+	return resume === true && appMode !== "interactive";
 }
 
 function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
@@ -253,13 +255,12 @@ export interface AgentsViewStartupDecision {
 }
 
 export function shouldOpenAgentsViewForDaemonInteractive(options: AgentsViewStartupDecision): boolean {
+	const bareResume = options.resume === true;
+	const requestsAgentsView = bareResume || (options.explicitAgentsView && !options.needsOnboarding);
 	return (
 		options.useDaemonInteractive &&
-		// `prime-agent` opens a new chat by default; the unified agents view is reached via
-		// left-arrow from a session or requested explicitly (`agents`).
-		!!options.explicitAgentsView &&
-		!options.needsOnboarding &&
-		// A resume selector resolves and opens its target directly.
+		// A selector, continuation, or fork must open its target directly rather than the agents view.
+		!!requestsAgentsView &&
 		typeof options.resume !== "string" &&
 		!options.continue &&
 		!options.fork
@@ -276,7 +277,12 @@ export interface DaemonInteractiveSessionManagerDecision {
 export function shouldUseEphemeralSessionManagerForDaemonInteractive(
 	options: DaemonInteractiveSessionManagerDecision,
 ): boolean {
-	return !options.hasActiveDaemonSession && options.resume === undefined && !options.continue && !options.fork;
+	return (
+		!options.hasActiveDaemonSession &&
+		(options.resume === undefined || options.resume === true) &&
+		!options.continue &&
+		!options.fork
+	);
 }
 
 export interface DaemonActiveSessionLookupDecision {
@@ -713,6 +719,7 @@ export function resolveRuntimeSessionOptions(
 		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
 		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,
 		subagentRuntimeHost: runtimeSessionOptions?.subagentRuntimeHost,
+		kernelPythonLauncher: runtimeSessionOptions?.kernelPythonLauncher ?? sessionOptions.kernelPythonLauncher,
 	};
 }
 
@@ -733,6 +740,8 @@ async function prepareRuntimeServices(options: {
 		cwd: options.cwd,
 		agentDir: effectiveAgentDir,
 		authStorage,
+		runtimeVersion: MIN_WORKFLOW_RUNTIME_VERSION,
+		primeWorkflowWorkerModel: WORKER_MODEL_SELECTOR,
 		extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
 		// Subagents share the parent's Herdr pane; their own reporter would race
 		// the parent's and a subagent quit would release the still-active pane.
@@ -1077,10 +1086,8 @@ export async function main(args: string[], options?: MainOptions) {
 		console.error(chalk.red("Error: attach requires an interactive terminal"));
 		process.exit(1);
 	}
-	if (shouldRejectBareResume(parsed.resume)) {
-		console.error(
-			chalk.red("Error: --resume requires a session id or path; browse sessions with left-arrow from a chat"),
-		);
+	if (shouldRejectNonInteractiveBareResume(parsed.resume, appMode)) {
+		console.error(chalk.red("Error: --resume without a session selector requires an interactive terminal"));
 		process.exit(1);
 	}
 	setLogContext({ mode: appMode });
@@ -1640,7 +1647,7 @@ export async function main(args: string[], options?: MainOptions) {
 		printTimings();
 		await runAcpMode(runtime);
 	} else if (appMode === "interactive") {
-		if (explicitAgentsView) {
+		if (explicitAgentsView || parsed.resume === true) {
 			console.error(chalk.yellow("Warning: the agents view needs the daemon; opening a normal chat instead"));
 		}
 		if (scopedModels.length > 0 && (parsed.verbose || !settingsManager.getQuietStartup())) {

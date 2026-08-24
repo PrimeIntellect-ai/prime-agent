@@ -54,8 +54,9 @@ async def send(
         payload = {
             "message": message,
             "receiver_role": receiver_role,
-            "receiver_name": receiver_name,
         }
+        if receiver_name is not None:
+            payload["receiver_name"] = receiver_name
     receipt = await host_request("agent_message.send", payload)
     receipts = receipt.get("receipts") if isinstance(receipt, dict) else None
     if isinstance(receipts, list):
@@ -69,11 +70,17 @@ async def send(
 
 def _emit_sent_message(receipt: dict[str, Any], receiver_role: str | None = None) -> None:
     try:
-        label = (
-            "Agent message queued"
-            if receipt.get("deliveryStatus") == "queued"
-            else "Agent message sent"
-        )
+        if receipt.get("deliveryStatus") == "queued":
+            label = "Agent message queued"
+        elif receipt.get("deliveryStatus") == "blocked":
+            reason = receipt.get("blockedReason")
+            label = (
+                f"Agent message blocked (audit-only: {reason})"
+                if isinstance(reason, str) and reason.strip()
+                else "Agent message blocked (audit-only)"
+            )
+        else:
+            label = "Agent message sent"
         display_receipt = dict(receipt)
         if receiver_role in ("parent", "sibling", "child"):
             display_receipt["receiverRole"] = receiver_role

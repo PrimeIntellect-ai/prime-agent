@@ -6,6 +6,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type AssistantMessageEventStream,
 	type Context,
 	EventStream,
 	streamSimple,
@@ -149,6 +150,17 @@ function createAbortedAssistantMessage(
 function getTerminalMessage(event: Extract<AssistantMessageEvent, { type: "done" | "error" }>): AssistantMessage {
 	return event.type === "done" ? event.message : event.error;
 }
+
+function isProviderStreamStalledMessage(message: AssistantMessage): boolean {
+	return (
+		message.stopReason === "error" &&
+		message.diagnostics?.some((diagnostic) => diagnostic.type === "provider_stream_stalled") === true
+	);
+}
+
+type PeekableAssistantMessageEventStream = AssistantMessageEventStream & {
+	resultIfSettled?: () => AssistantMessage | undefined;
+};
 
 function endAgentStreamOnError(
 	stream: EventStream<AgentEvent, AgentMessage[]>,
@@ -473,6 +485,7 @@ async function streamAssistantResponse(
 ): Promise<AssistantMessage> {
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
+	let response: AssistantMessageEventStream | undefined;
 	const finishAbortedMessage = async () => {
 		const finalMessage = createAbortedAssistantMessage(config, partialMessage);
 		if (addedPartial) {
@@ -511,14 +524,15 @@ async function streamAssistantResponse(
 			tools: context.tools,
 		};
 
-		const response = await maybePromiseWithAbort(
-			streamFunction(config.model, llmContext, {
-				...config,
-				apiKey: resolvedApiKey,
-				signal,
-			}),
+		const createdResponse = streamFunction(config.model, llmContext, {
+			...config,
+			apiKey: resolvedApiKey,
 			signal,
-		);
+		});
+		if (!(createdResponse instanceof Promise)) {
+			response = createdResponse;
+		}
+		response = await maybePromiseWithAbort(createdResponse, signal);
 		const iterator = response[Symbol.asyncIterator]();
 		const closeIterator = () => {
 			void Promise.resolve(iterator.return?.()).catch(() => undefined);
@@ -596,6 +610,17 @@ async function streamAssistantResponse(
 		return finalMessage;
 	} catch (error) {
 		if (signal?.aborted && isAbortError(error)) {
+			const settledMessage = (response as PeekableAssistantMessageEventStream | undefined)?.resultIfSettled?.();
+			if (settledMessage && isProviderStreamStalledMessage(settledMessage)) {
+				if (addedPartial) {
+					context.messages[context.messages.length - 1] = settledMessage;
+				} else {
+					context.messages.push(settledMessage);
+					await emit({ type: "message_start", message: { ...settledMessage } });
+				}
+				await emit({ type: "message_end", message: settledMessage });
+				return settledMessage;
+			}
 			return finishAbortedMessage();
 		}
 		throw error;

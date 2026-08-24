@@ -35,6 +35,11 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import {
+	applyProviderStreamStall,
+	createProviderStreamLiveness,
+	type ProviderStreamLiveness,
+} from "../utils/stream-liveness.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -78,6 +83,8 @@ function isImageContentBlock(block: { type: string }): block is ImageContent {
 export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	/** Explicit reasoning toggle. undefined preserves the provider/model default. */
+	reasoningEnabled?: boolean;
 }
 
 interface OpenAICompatCacheControl {
@@ -134,6 +141,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let liveness: ProviderStreamLiveness | undefined;
+		let terminalEventPushed = false;
+		const cleanStreamingScratch = (): void => {
+			for (const block of output.content) {
+				delete (block as { index?: number }).index;
+				delete (block as { partialArgs?: string }).partialArgs;
+				delete (block as { streamIndex?: number }).streamIndex;
+			}
+		};
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -151,14 +167,31 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
+			liveness = createProviderStreamLiveness({
+				identity: { provider: model.provider, model: model.id, transport: "sse" },
+				host: options?.streamLiveness,
+				signal: options?.signal,
+				onStall: (error) => {
+					cleanStreamingScratch();
+					applyProviderStreamStall(output, error);
+					if (!terminalEventPushed) {
+						terminalEventPushed = true;
+						stream.push({ type: "error", reason: "error", error: output });
+						stream.end();
+					}
+				},
+			});
 			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
+				...(liveness ? { signal: liveness.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
 			const { data: openaiStream, response } = await client.chat.completions
 				.create(params, requestOptions)
 				.withResponse();
+			const activeLiveness = liveness;
+			if (!activeLiveness) throw new Error("OpenAI Completions liveness was not initialized");
+			activeLiveness.observe({ type: "headers", receivedBytes: 0 });
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -212,6 +245,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				if (!textBlock) {
 					textBlock = { type: "text", text: "" };
 					blocks.push(textBlock);
+					activeLiveness.observe({ type: "block" });
 					stream.push({ type: "text_start", contentIndex: getContentIndex(textBlock), partial: output });
 				}
 				return textBlock;
@@ -224,6 +258,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						thinkingSignature,
 					};
 					blocks.push(thinkingBlock);
+					activeLiveness.observe({ type: "block" });
 					stream.push({ type: "thinking_start", contentIndex: getContentIndex(thinkingBlock), partial: output });
 				}
 				return thinkingBlock;
@@ -250,6 +285,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						toolCallBlocksById.set(toolCall.id, block);
 					}
 					blocks.push(block);
+					activeLiveness.observe({ type: "block" });
 					stream.push({
 						type: "toolcall_start",
 						contentIndex: getContentIndex(block),
@@ -268,6 +304,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 			for await (const chunk of openaiStream) {
 				if (!chunk || typeof chunk !== "object") continue;
+				activeLiveness.observe({ type: "provider_event", eventId: chunk.id });
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -289,6 +326,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 
 				if (choice.finish_reason) {
+					activeLiveness.markFinalizing();
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
@@ -304,6 +342,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					) {
 						const block = ensureTextBlock();
 						block.text += choice.delta.content;
+						activeLiveness.observe({
+							type: "text_delta",
+							delta: choice.delta.content,
+						});
 						stream.push({
 							type: "text_delta",
 							contentIndex: getContentIndex(block),
@@ -332,6 +374,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						if (typeof delta === "string" && delta.length > 0) {
 							const block = ensureThinkingBlock(foundReasoningField);
 							block.thinking += delta;
+							activeLiveness.observe({ type: "thinking_delta", delta });
 							stream.push({
 								type: "thinking_delta",
 								contentIndex: getContentIndex(block),
@@ -358,6 +401,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
 								block.arguments = parseStreamingJson(block.partialArgs);
 							}
+							activeLiveness.observe({
+								type: "tool_call",
+								id: block.id,
+								name: block.name,
+								args: block.partialArgs ?? "",
+							});
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: getContentIndex(block),
@@ -386,7 +435,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			for (const block of blocks) {
 				finishBlock(block);
 			}
-			if (options?.signal?.aborted) {
+			activeLiveness.markFinal();
+			if (activeLiveness.callerAborted()) {
 				throw new Error("Request was aborted");
 			}
 
@@ -397,22 +447,32 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				throw new Error(output.errorMessage || "Provider returned an error stop reason");
 			}
 
+			terminalEventPushed = true;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// Streaming scratch buffers are only used during parsing; never persist them.
-				delete (block as { partialArgs?: string }).partialArgs;
-				delete (block as { streamIndex?: number }).streamIndex;
+			cleanStreamingScratch();
+			const stalled = liveness?.stalledError();
+			if (stalled) {
+				applyProviderStreamStall(output, stalled);
+			} else {
+				output.stopReason = liveness?.callerAborted() || options?.signal?.aborted ? "aborted" : "error";
+				output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+				// Some providers via OpenRouter give additional information in this field.
+				const rawMetadata = (error as any)?.error?.metadata?.raw;
+				if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			// Some providers via OpenRouter give additional information in this field.
-			const rawMetadata = (error as any)?.error?.metadata?.raw;
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			if (!terminalEventPushed) {
+				terminalEventPushed = true;
+				stream.push({
+					type: "error",
+					reason: output.stopReason === "aborted" ? "aborted" : "error",
+					error: output,
+				});
+				stream.end();
+			}
+		} finally {
+			liveness?.close();
 		}
 	})();
 
@@ -430,13 +490,16 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+	const requestedReasoning = options?.reasoning;
+	const reasoningSpecified = requestedReasoning !== undefined;
+	const clampedReasoning = reasoningSpecified ? clampThinkingLevel(model, requestedReasoning) : undefined;
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
 	const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
 
 	return streamOpenAICompletions(model, context, {
 		...base,
 		reasoningEffort,
+		reasoningEnabled: reasoningSpecified ? clampedReasoning !== "off" : undefined,
 		toolChoice,
 	} satisfies OpenAICompletionsOptions);
 };
@@ -577,22 +640,27 @@ function buildParams(
 				model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
 		}
 	} else if (compat.thinkingFormat === "openrouter" && model.reasoning) {
-		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
-		const openRouterParams = params as typeof params & { reasoning?: { effort?: string } };
-		if (options?.reasoningEffort) {
+		// OpenRouter distinguishes an omitted reasoning preference (use the model
+		// default), an explicit toggle, and an explicit effort selection.
+		const openRouterParams = params as typeof params & { reasoning?: { enabled?: boolean; effort?: string } };
+		if (options?.reasoningEffort && compat.supportsReasoningEffort) {
 			openRouterParams.reasoning = {
 				effort: model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort,
 			};
-		} else if (model.thinkingLevelMap?.off !== null) {
-			openRouterParams.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
+		} else if (options?.reasoningEnabled === true) {
+			openRouterParams.reasoning = { enabled: true };
+		} else if (options?.reasoningEnabled === false && model.thinkingLevelMap?.off !== null) {
+			openRouterParams.reasoning = compat.supportsReasoningEffort
+				? { effort: model.thinkingLevelMap?.off ?? "none" }
+				: { enabled: false };
 		}
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
 		(params as any).reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-	} else if (!options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
+	} else if (options?.reasoningEnabled === false && model.reasoning && compat.supportsReasoningEffort) {
 		const offValue = model.thinkingLevelMap?.off;
-		if (typeof offValue === "string") {
-			(params as any).reasoning_effort = offValue;
+		if (offValue !== null) {
+			(params as any).reasoning_effort = offValue ?? "none";
 		}
 	}
 

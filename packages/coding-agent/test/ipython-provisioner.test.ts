@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupSessionResources } from "@earendil-works/pi-ai";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -136,6 +136,90 @@ describe("IpythonKernelProvisioner", () => {
 		expect(provisioner.manager).toBeUndefined();
 	});
 
+	it("propagates a pending startup cleanup failure from kill", async () => {
+		const startupFailure = Object.assign(new Error("pending container cleanup failed"), {
+			code: "KERNEL_CONTAINER_CLEANUP_FAILED",
+		});
+		let rejectStart: ((error: unknown) => void) | undefined;
+		const start = vi.spyOn(KernelManager.prototype, "start").mockImplementation(
+			() =>
+				new Promise<void>((_resolve, reject) => {
+					rejectStart = reject;
+				}),
+		);
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python: process.execPath });
+		try {
+			const startup = provisioner.ensure().catch((error: unknown) => error);
+			await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+			const kill = provisioner.kill();
+			rejectStart?.(startupFailure);
+			await expect(kill).rejects.toMatchObject({ code: "KERNEL_CONTAINER_CLEANUP_FAILED" });
+			await expect(startup).resolves.toMatchObject({ code: "KERNEL_CONTAINER_CLEANUP_FAILED" });
+		} finally {
+			start.mockRestore();
+		}
+	});
+
+	it("kills the exact kernel without waiting for a blocked bootstrap import", { timeout: 30_000 }, async () => {
+		const delegatePython =
+			process.env.PRIME_AGENT_KERNEL_PYTHON ?? join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
+		const python = join(tempDir, "python");
+		const pidFile = join(tempDir, "kernel-pids");
+		const importMarker = join(tempDir, "bootstrap-import-started");
+		const skillPath = join(tempDir, "blocked-skill");
+		mkdirSync(join(skillPath, "src", "blocked_skill"), { recursive: true });
+		writeFileSync(
+			join(skillPath, "src", "blocked_skill", "__init__.py"),
+			[
+				"from pathlib import Path",
+				"import time",
+				`Path(${JSON.stringify(importMarker)}).write_text("started")`,
+				"time.sleep(2)",
+			].join("\n"),
+		);
+		writeFileSync(
+			python,
+			[
+				"#!/bin/sh",
+				`"${delegatePython}" "$@" &`,
+				"child=$!",
+				`echo "$$ $child" > "${pidFile}"`,
+				'trap \'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0\' TERM INT',
+				'wait "$child"',
+				"",
+			].join("\n"),
+		);
+		chmodSync(python, 0o755);
+		const provisioner = new IpythonKernelProvisioner(tempDir, {
+			python,
+			pythonSkills: [
+				{
+					name: "blocked-skill",
+					importName: "blocked_skill",
+					packagePath: skillPath,
+					pyprojectPath: join(skillPath, "pyproject.toml"),
+				},
+			],
+			requiredPythonSkillImports: ["blocked_skill"],
+		});
+
+		const startup = provisioner.ensure().then(
+			() => ({ status: "resolved" as const }),
+			(error: unknown) => ({ status: "rejected" as const, error }),
+		);
+		await vi.waitFor(() => expect(existsSync(importMarker)).toBe(true), { timeout: 10_000 });
+		const startedAt = Date.now();
+		await provisioner.kill();
+		const killDurationMs = Date.now() - startedAt;
+		const startupOutcome = await startup;
+
+		const [wrapperPid, kernelPid] = readFileSync(pidFile, "utf8").trim().split(" ").map(Number);
+		expect(killDurationMs).toBeLessThan(1_000);
+		expect(startupOutcome).toMatchObject({ status: "rejected", error: expect.any(Error) });
+		expect(() => process.kill(wrapperPid, 0)).toThrow();
+		expect(() => process.kill(kernelPid, 0)).toThrow();
+	});
+
 	it("dispose() before the boot slot prevents the kernel from spawning", async () => {
 		const { python, countRuns } = writeFakePython();
 		let release: () => void = () => {};
@@ -261,6 +345,33 @@ describe("IpythonKernelProvisioner", () => {
 			"\n \r\n\t%%script /custom/bash\r\nexport TEST_PREFIX=1\necho body",
 			expect.objectContaining({ signal: undefined, onStream: expect.any(Function) }),
 		);
+	});
+
+	it("bounds untrusted execute fields before joining the tool response", async () => {
+		const large = "x".repeat(1_000_001);
+		const execute = vi.fn<KernelManager["execute"]>().mockResolvedValueOnce({
+			stdout: large,
+			stderr: large,
+			result: large,
+			status: "error",
+			error: { ename: "RuntimeError", evalue: large, traceback: [large] },
+			durationMs: 1,
+		});
+		const manager = { execute } as unknown as KernelManager;
+		const provisioner = {
+			ensure: vi.fn(async () => manager),
+		} as unknown as IpythonKernelProvisioner;
+		const tool = createIpythonToolDefinition(tempDir, { provisioner });
+
+		const result = await tool.execute("tool-call", { code: "x" }, undefined, undefined, {} as ExtensionContext);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text.length).toBeLessThanOrEqual(1_000_000);
+		expect(result.details.stdout?.length ?? 0).toBeLessThanOrEqual(1_000_000);
+		expect(result.details.stderr?.length ?? 0).toBeLessThanOrEqual(1_000_000);
+		expect(result.details.result?.length ?? 0).toBeLessThanOrEqual(1_000_000);
+		expect(result.details.error?.evalue.length ?? 0).toBeLessThanOrEqual(1_000_000);
+		expect(result.details.error?.traceback.join("\n").length ?? 0).toBeLessThanOrEqual(1_000_000);
 	});
 
 	it("lets the user wait when an interrupted kernel is still busy", async () => {

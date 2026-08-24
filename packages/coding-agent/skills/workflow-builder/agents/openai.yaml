@@ -1,0 +1,4 @@
+interface:
+  display_name: "Workflow Builder"
+  short_description: "Builds authenticated /workflow preflight"
+  default_prompt: "Use $workflow-builder to implement Prime Agent’s automatic /workflow command."

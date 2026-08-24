@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkflowShell } from "../../src/core/workflow/shell.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionInternals = {
@@ -9,6 +12,10 @@ type SessionInternals = {
 	_serializedExplicitRefineOptions?: { instructions?: string; global?: boolean };
 	_refineAbortController?: AbortController;
 	_createKernelHostHandlers: () => Record<string, unknown>;
+	_planRefine: (...args: unknown[]) => Promise<unknown>;
+	_runSerializedRefine: (...args: unknown[]) => Promise<void>;
+	_runSerializedRefineCheckpoint: () => Promise<void>;
+	_maybeAutoRefine: (...args: unknown[]) => Promise<void>;
 	refine: (options: { instructions?: string; global?: boolean }) => Promise<unknown>;
 };
 
@@ -132,6 +139,138 @@ describe("AgentSession refine skill host requests", () => {
 		expect(result.scheduled).toBe(false);
 		expect(result.reason).toContain("no active turn");
 		expect(harness.session.handleRefineHostRequest("refine.status").pending).toBe(false);
+	});
+
+	it("keeps workflow-owned nonauthoritative findings out of durable refinement", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			settings: {
+				autoRefine: { enabled: true, compact: true, turnInterval: 1, cooldownMs: 0 },
+				compaction: { keepRecentTokens: 1 },
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "workflow-owned compaction summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: { source: "extension" },
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		const workflowHost: WorkflowShell = {
+			execute: async () => workflowHost.status(),
+			status: () => ({
+				workflowId: harness.session.sessionId,
+				status: "paused",
+				phase: "recovering",
+				goal: harness.session.goalState,
+				goalContract: null,
+				approvalRequest: null,
+				stateDigest: "paused-nonauthoritative-state",
+				decisionRefs: [],
+				resourceEnvelopeDigest: null,
+				scorecardDigest: null,
+				acceptanceCheckIds: [],
+				protectedInvariantIds: [],
+				pendingWaitReasons: [{ code: "nonauthoritative_evidence" }],
+			}),
+		};
+		harness.session.setWorkflowHost(workflowHost);
+		const workflowHandlers = (harness.session as unknown as SessionInternals)._createKernelHostHandlers();
+		expect(Object.keys(workflowHandlers)).toContain("refine.run");
+
+		setStreaming(harness, true);
+		const result = harness.session.handleRefineHostRequest("refine.run", {
+			instructions: "promote NONAUTHORITATIVE_RECON_ONLY checkpoint",
+			global: true,
+		});
+		setStreaming(harness, false);
+
+		expect(result).toMatchObject({
+			scheduled: false,
+			status: "rejected",
+			code: "nonauthoritative_refinement_rejected",
+			reason: expect.stringContaining("authenticated learning promotion receipt"),
+		});
+		expect(harness.session.handleRefineHostRequest("refine.status").pending).toBe(false);
+		await expect(
+			harness.session.refine({ instructions: "promote NONAUTHORITATIVE_RECON_ONLY checkpoint", global: true }),
+		).rejects.toMatchObject({
+			code: "nonauthoritative_refinement_rejected",
+			message: expect.stringContaining("authenticated learning promotion receipt"),
+		});
+
+		const internals = harness.session as unknown as SessionInternals;
+		const planRefine = vi.spyOn(internals, "_planRefine");
+		const runSerializedRefine = vi.spyOn(internals, "_runSerializedRefine");
+		const maybeAutoRefine = vi.spyOn(internals, "_maybeAutoRefine");
+		internals._pendingRequestedRefine = { instructions: "must not plan" };
+		await expect(internals._runSerializedRefine({ instructions: "must not plan" })).rejects.toMatchObject({
+			code: "nonauthoritative_refinement_rejected",
+		});
+		// The automatic paths skip instead of rejecting. An explicit /refine is a user asking for
+		// something the workflow owns, so refusing it is the answer; automatic refinement is a
+		// background courtesy, and throwing from it replaced the assistant's actual response for the
+		// turn. What matters either way is that nothing is planned or promoted, asserted below.
+		await expect(internals._runSerializedRefineCheckpoint()).resolves.toBeUndefined();
+		await expect(internals._maybeAutoRefine("turn_interval")).resolves.toBeUndefined();
+		expect(internals._consumePendingRequestedRefine()).toBe(false);
+		expect(planRefine).not.toHaveBeenCalled();
+		expect(runSerializedRefine).toHaveBeenCalledTimes(1);
+		expect(maybeAutoRefine).toHaveBeenCalledTimes(1);
+
+		await harness.session.compact();
+		const harnessStatePath = join(
+			harness.session.sessionManager.getSessionArtifactDir()!,
+			"harness",
+			"harness_state.json",
+		);
+		expect(existsSync(harnessStatePath)).toBe(false);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === "prime-agent.refinement"),
+		).toBe(false);
+	});
+
+	it("routes an authenticated learning promotion through the host authority exactly once", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		await harness.session.prompt("one");
+
+		const consumeAndApply = vi.fn().mockResolvedValue({
+			applicationId: "application-1",
+			appliedBytesDigest: "a".repeat(64),
+			previousBytesDigest: null,
+			rollbackToken: "rollback-1",
+		});
+		harness.session.setWorkflowHost({
+			execute: async () => {
+				throw new Error("not used");
+			},
+			status: () =>
+				({ status: "active", workflowId: harness.session.sessionId, stateDigest: "workflow-head" }) as never,
+			learningPromotionReceipts: { consumeAndApply } as never,
+		} as never);
+
+		const input = { receipt: { receiptId: "receipt-1" }, refinement: { action: "create" } };
+		await expect(harness.session.applyWorkflowLearningPromotionRefinement(input as never)).resolves.toMatchObject({
+			applicationId: "application-1",
+		});
+		expect(consumeAndApply).toHaveBeenCalledTimes(1);
+		expect(consumeAndApply).toHaveBeenCalledWith(input);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === "prime-agent.refinement"),
+		).toBe(false);
 	});
 
 	it("validates instructions type in refine.run", async () => {

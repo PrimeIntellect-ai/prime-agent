@@ -13,7 +13,15 @@ import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
 import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
-import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
+import {
+	type CanonicalDaemonRuntimeAttestation,
+	classifyDaemonRuntimeMismatch,
+	DAEMON_RUNTIME_ATTESTATION_FIELDS,
+	findDaemonRuntimeAttestationMismatches,
+	getCanonicalDaemonRuntimeAttestation,
+	getDaemonRuntimeIdentity,
+	safeDaemonRuntimeIdentity,
+} from "../modes/daemon/daemon-runtime-identity.js";
 import { isSessionSummaryBusy, type SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
 import {
@@ -50,6 +58,7 @@ function logDaemonLaunch(message: string): void {
 }
 
 async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promise<boolean> {
+	// This is only a post-shutdown liveness check; attach/start decisions must use probeDaemonVersion.
 	const client = new DaemonClient(socketPath);
 	try {
 		await client.connect(timeoutMs);
@@ -61,10 +70,19 @@ async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promis
 	}
 }
 
+export type DaemonStaleReason = "version_mismatch" | "runtime_mismatch";
+
 type DaemonVersionProbe =
 	| { status: "absent" }
 	| { status: "current"; hello: DaemonHello }
-	| { status: "stale"; hello?: DaemonHello };
+	| {
+			status: "stale";
+			reason: DaemonStaleReason;
+			hello?: DaemonHello;
+			expectedRuntime?: CanonicalDaemonRuntimeAttestation;
+			observedRuntime?: Record<string, string | number | undefined>;
+			mismatchedRuntimeFields?: readonly string[];
+	  };
 
 /** Connect to a running daemon and check whether it matches this client's protocol and app version. */
 export async function probeDaemonVersion(socketPath: string): Promise<DaemonVersionProbe> {
@@ -84,25 +102,58 @@ export async function probeDaemonVersion(socketPath: string): Promise<DaemonVers
 	}
 	try {
 		const hello = await client.waitForHello(2000);
-		const current =
+		const versionCurrent =
 			hello.protocol.version === DAEMON_PROTOCOL_VERSION &&
 			hello.schemaId === DAEMON_SCHEMA_ID &&
 			hello.appVersion === VERSION;
-		if (!current) {
+		const expectedRuntime = getCanonicalDaemonRuntimeAttestation(getDaemonRuntimeIdentity());
+		const observedRuntime = getCanonicalDaemonRuntimeAttestation(hello.runtime);
+		const mismatchedRuntimeFields =
+			expectedRuntime && observedRuntime
+				? findDaemonRuntimeAttestationMismatches(expectedRuntime, observedRuntime)
+				: DAEMON_RUNTIME_ATTESTATION_FIELDS;
+		const runtimeCurrent =
+			versionCurrent &&
+			expectedRuntime !== undefined &&
+			observedRuntime !== undefined &&
+			mismatchedRuntimeFields.length === 0;
+		const reason: DaemonStaleReason = runtimeCurrent
+			? "version_mismatch"
+			: versionCurrent
+				? "runtime_mismatch"
+				: "version_mismatch";
+		if (!runtimeCurrent) {
+			const observedSafeRuntime = safeDaemonRuntimeIdentity(hello.runtime);
+			const observedDisplay = JSON.stringify(safeDaemonRuntimeIdentity(hello.runtime));
+			const expectedDisplay = JSON.stringify(safeDaemonRuntimeIdentity(expectedRuntime));
 			logDaemonLaunch(
 				`running daemon on ${socketPath} is stale: daemon v${hello.appVersion}/proto${hello.protocol.version}` +
-					`/schema ${hello.schemaId ?? "legacy"}/build ${hello.runtime?.buildId ?? "unknown"} vs client ` +
-					`v${VERSION}/proto${DAEMON_PROTOCOL_VERSION}/schema ${DAEMON_SCHEMA_ID}/build ${getDaemonRuntimeIdentity().buildId}`,
+					`/schema ${hello.schemaId ?? "legacy"}/build ${observedSafeRuntime.buildId ?? "unknown"} vs client ` +
+					`v${VERSION}/proto${DAEMON_PROTOCOL_VERSION}/schema ${DAEMON_SCHEMA_ID}/build ${getDaemonRuntimeIdentity().buildId}` +
+					(reason === "runtime_mismatch"
+						? `; runtime expected ${expectedDisplay}, observed ${observedDisplay}`
+						: ""),
 			);
 		}
-		if (current) {
+		if (runtimeCurrent) {
 			return { status: "current", hello };
 		}
-		return { status: "stale", hello };
+		return {
+			status: "stale",
+			reason,
+			hello,
+			...(reason === "runtime_mismatch"
+				? {
+						expectedRuntime,
+						observedRuntime: safeDaemonRuntimeIdentity(hello.runtime),
+						mismatchedRuntimeFields,
+					}
+				: {}),
+		};
 	} catch {
 		// Connected but no recognizable greeting: assume a stale daemon.
 		logDaemonLaunch(`running daemon on ${socketPath} sent no recognizable hello; treating as stale`);
-		return { status: "stale" };
+		return { status: "stale", reason: "version_mismatch" };
 	} finally {
 		client.close();
 	}
@@ -148,23 +199,73 @@ async function queryActiveDaemonSessions(
 
 /** Thrown when a stale-version daemon can't be replaced. The message is user-facing. */
 export class StaleDaemonError extends Error {
+	readonly reason: DaemonStaleReason;
+	readonly expectedRuntime?: CanonicalDaemonRuntimeAttestation;
+	readonly observedRuntime?: Record<string, string | number | undefined>;
+	readonly mismatchedRuntimeFields?: readonly string[];
+
 	constructor(
 		readonly socketPath: string,
 		hello?: DaemonHello,
+		details: {
+			reason?: DaemonStaleReason;
+			expectedRuntime?: CanonicalDaemonRuntimeAttestation;
+			observedRuntime?: Record<string, string | number | undefined>;
+			mismatchedRuntimeFields?: readonly string[];
+		} = {},
 	) {
+		const reason = details.reason ?? "version_mismatch";
+		const expectedRuntime = details.expectedRuntime;
+		const observedRuntime = details.observedRuntime;
+		const safeHelloRuntime = safeDaemonRuntimeIdentity(hello?.runtime);
 		const daemonIdentity = hello
 			? `Daemon: v${hello.appVersion ?? "unknown"}, protocol ${hello.protocol.version}, schema ${hello.schemaId ?? "legacy"}, ` +
-				`build ${hello.runtime?.buildId ?? "unknown"}, PID ${hello.supervisorPid ?? "unknown"}, ` +
-				`executable ${hello.runtime?.launcherPath ?? hello.runtime?.entrypointPath ?? hello.runtime?.executablePath ?? "unknown"}`
+				`build ${safeHelloRuntime.buildId ?? "unknown"}, PID ${hello.supervisorPid ?? "unknown"}, ` +
+				`executable ${safeHelloRuntime.launcherPath ?? safeHelloRuntime.entrypointPath ?? safeHelloRuntime.executablePath ?? "unknown"}`
 			: `Daemon: unknown build on ${socketPath}`;
 		const client = getDaemonRuntimeIdentity();
+		const runtimeDetails =
+			reason === "runtime_mismatch"
+				? `\n\nRuntime attestation mismatch (explicit action required).\n` +
+					`Expected runtime: ${JSON.stringify(safeDaemonRuntimeIdentity(expectedRuntime))}\n` +
+					`Observed runtime: ${JSON.stringify(observedRuntime ?? {})}\n` +
+					`Mismatched fields: ${
+						Object.keys(observedRuntime ?? {}).length > 0
+							? (details.mismatchedRuntimeFields ?? []).join(", ") || "unknown"
+							: "missing attestation"
+					}`
+				: "";
+		// Source drift and a wire break are not the same problem and must not get the same advice.
+		// `shutdown --force` stops every agent on the machine, which is the wrong remedy when the
+		// daemon speaks an identical protocol and merely predates the working tree.
+		const sourceOnly =
+			reason === "runtime_mismatch" &&
+			(details.mismatchedRuntimeFields ?? []).length > 0 &&
+			classifyDaemonRuntimeMismatch(
+				details.mismatchedRuntimeFields as readonly (keyof CanonicalDaemonRuntimeAttestation)[],
+			) === "source";
+		const headline = sourceOnly
+			? "This Prime Agent daemon predates the current source."
+			: "An incompatible Prime Agent daemon is running.";
+		const remedy = sourceOnly
+			? `The protocol and schema match, so the daemon is running older or newer code, not an incompatible one.\n` +
+				`Sessions on it are unaffected and keep running. To adopt the current source, stop just this daemon's\n` +
+				`agents and start again; restarting is only needed to pick up code changes.\n\n` +
+				`Note: ${formatCurrentCliCommand(["shutdown", "--force"])} stops every agent on this machine, not only\n` +
+				`this socket's. If you only need to observe a running session, an --mode rpc client on the same socket\n` +
+				`is unaffected by this check.`
+			: `Run:\n${formatCurrentCliCommand(["shutdown", "--force"])}\n\nThen retry the original command.`;
 		super(
-			`An incompatible Prime Agent daemon is running.\n\n${daemonIdentity}\n` +
+			`${headline}\n\n${daemonIdentity}\n` +
+				runtimeDetails +
 				`Client: v${VERSION}, protocol ${DAEMON_PROTOCOL_VERSION}, schema ${DAEMON_SCHEMA_ID}, build ${client.buildId}, ` +
-				`executable ${client.launcherPath ?? client.entrypointPath ?? client.executablePath}\n\nRun:\n` +
-				`${formatCurrentCliCommand(["shutdown", "--force"])}\n\nThen retry the original command.`,
+				`executable ${client.launcherPath ?? client.entrypointPath ?? client.executablePath}\n\n${remedy}`,
 		);
 		this.name = "StaleDaemonError";
+		this.reason = reason;
+		this.expectedRuntime = expectedRuntime;
+		this.observedRuntime = observedRuntime;
+		this.mismatchedRuntimeFields = details.mismatchedRuntimeFields;
 	}
 }
 
@@ -343,8 +444,11 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 		return;
 	}
 	if (probe.status === "stale") {
+		if (probe.reason === "runtime_mismatch") {
+			throw new StaleDaemonError(socketPath, probe.hello, probe);
+		}
 		const stopped = await shutdownStaleDaemonIfNotBusy(socketPath);
-		if (!stopped) throw new StaleDaemonError(socketPath, probe.hello);
+		if (!stopped) throw new StaleDaemonError(socketPath, probe.hello, probe);
 	}
 
 	const entrypoint = process.argv[1];
@@ -416,6 +520,9 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 		const started = await probeDaemonVersion(socketPath);
 		if (started.status === "current") {
 			return;
+		}
+		if (started.status === "stale" && started.reason === "runtime_mismatch") {
+			throw new StaleDaemonError(socketPath, started.hello, started);
 		}
 		if (childFailure) {
 			exitDeadline ??= Date.now() + DAEMON_STARTUP_EXIT_GRACE_MS;

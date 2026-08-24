@@ -1,5 +1,13 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	ServiceTier,
+	StreamLivenessDiagnostic,
+	TextContent,
+	Usage,
+} from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -28,7 +36,17 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
+import {
+	parseToolExecutionStallDiagnostic,
+	TOOL_EXECUTION_STALL_CUSTOM_TYPE,
+	type ToolExecutionStallDiagnostic,
+} from "./tool-execution-liveness.js";
 import { cloneUsage } from "./usage.js";
+import {
+	parseWorkerModelCapabilityBlocker,
+	projectWorkerModelCapabilityBlocker,
+	type WorkerModelCapabilityBlocker,
+} from "./workflow/worker-model-capability-gate.js";
 
 export const CURRENT_SESSION_VERSION = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
@@ -203,12 +221,16 @@ export interface SessionStateEntry extends SessionEntryBase {
 }
 
 /** Whether an idle agent's turn left the task complete or awaiting more input. */
-export type AgentTaskState = "needs_input" | "completed";
+export type AgentTaskState = "needs_input" | "completed" | "resource_exhausted" | "blocked_model_capability";
 
 /** Latest short status for an agent, shown in the agents view. */
 export interface AgentStatus {
 	summary: string;
 	taskState?: AgentTaskState;
+	/** Host-owned provider resource blocker, when the latest turn hit a quota. */
+	resourceExhaustedBlocker?: ResourceExhaustedBlocker;
+	/** Host-owned worker-model blocker, when a queued worker cannot be admitted. */
+	workerModelCapabilityBlocker?: WorkerModelCapabilityBlocker;
 	/** Message count this status was derived from, used to skip redundant work. */
 	basedOnMessageCount: number;
 }
@@ -218,6 +240,69 @@ export interface AgentStatusEntry extends SessionEntryBase {
 	type: "agent_status";
 	status: AgentStatus;
 }
+
+export type ResourceExhaustedCreditsAvailability = "available" | "unavailable" | "unknown";
+
+/** Safe, durable provider resource metadata. Never include provider bodies or headers here. */
+
+/** Closed host-owned blocker discriminants; add a concrete envelope before accepting a new kind. */
+export type SessionBlockerKind = "resource_exhausted" | "blocked_model_capability";
+
+export interface SessionBlockerEnvelope {
+	kind: SessionBlockerKind;
+	authorizationRevision: string;
+	capacityRevision: string;
+}
+
+export interface ResourceExhaustedBlocker extends SessionBlockerEnvelope {
+	kind: "resource_exhausted";
+	provider: string;
+	model: string;
+	limitClass?: string;
+	resetAt?: number;
+	resetInSeconds?: number;
+	creditsAvailability: ResourceExhaustedCreditsAvailability;
+}
+
+/** Project a persisted blocker with a fresh host-derived remaining duration. */
+export function projectResourceExhaustedBlocker(blocker: ResourceExhaustedBlocker): ResourceExhaustedBlocker {
+	if (blocker.resetAt === undefined) return { ...blocker };
+	return {
+		...blocker,
+		resetInSeconds: Math.max(0, blocker.resetAt - Math.floor(Date.now() / 1000)),
+	};
+}
+
+export type ResourceExhaustedBlockerEntryState = "blocked" | "probe_leased" | "cleared";
+
+export interface ResourceExhaustedBlockerEntryData extends ResourceExhaustedBlocker {
+	state: ResourceExhaustedBlockerEntryState;
+	/** Digest of the safe blocker fields bound by a probe lease. */
+	blockerDigest?: string;
+	probeLeaseId?: string;
+	probeLeasedAt?: number;
+	probeLeaseExpiresAt?: number;
+	probeLeaseWallTimeMs?: number;
+	probeLeaseMonotonicTimeMs?: number;
+	probeLeaseProvider?: string;
+	probeLeaseModel?: string;
+	probeLeaseAuthorizationRevision?: string;
+	probeLeaseCapacityRevision?: string;
+	probeLeaseActionId?: string;
+	probeLeaseHeadId?: string;
+}
+
+export type WorkerModelCapabilityBlockerEntryState = "blocked" | "cleared";
+
+export interface WorkerModelCapabilityBlockerEntryData extends WorkerModelCapabilityBlocker {
+	state: WorkerModelCapabilityBlockerEntryState;
+}
+
+/** Custom-entry identifier for the host-owned resource breaker. */
+export const RESOURCE_EXHAUSTED_BLOCKER_CUSTOM_TYPE = "resource_exhausted_blocker";
+
+/** Custom-entry identifier for the durable worker-model admission blocker. */
+export const WORKER_MODEL_CAPABILITY_BLOCKER_CUSTOM_TYPE = "blocked_model_capability";
 
 /** Append-only repo-state entry; ignored by buildSessionContext and other readers. */
 export interface GitStateEntry extends SessionEntryBase {
@@ -305,6 +390,14 @@ export interface SessionInfo {
 	allMessagesText: string;
 	/** Latest persisted recap/verdict, so off-daemon sessions keep their status. */
 	agentStatus?: AgentStatus;
+	/** Latest host-owned resource blocker, so off-daemon sessions stay blocked. */
+	resourceExhaustedBlocker?: ResourceExhaustedBlocker;
+	/** Latest host-owned worker-model blocker, so off-daemon sessions stay queued. */
+	workerModelCapabilityBlocker?: WorkerModelCapabilityBlocker;
+	/** Latest structured provider-stream stall on the active branch. */
+	providerStreamStallDiagnostic?: StreamLivenessDiagnostic;
+	/** Latest structured tool-execution stall on the active branch. */
+	toolExecutionStallDiagnostic?: ToolExecutionStallDiagnostic;
 }
 
 export type ReadonlySessionManager = Pick<
@@ -870,6 +963,211 @@ function normalizeSessionStateStatus(value: unknown): SessionStateStatus | undef
 	return undefined;
 }
 
+function safeBlockerText(value: unknown, maxLength: number): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return undefined;
+	return /[\u0000-\u001f\u007f]/.test(value) ? undefined : value;
+}
+
+function safeBlockerNumber(value: unknown, minimum: number): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= minimum ? value : undefined;
+}
+
+export function parseProviderStreamStallDiagnostic(value: unknown): StreamLivenessDiagnostic | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const candidate = value as Record<string, unknown>;
+	if (
+		candidate.type !== "provider_stream_stalled" ||
+		(candidate.phase !== "connecting" &&
+			candidate.phase !== "headers" &&
+			candidate.phase !== "streaming" &&
+			candidate.phase !== "finalizing") ||
+		(candidate.reason !== "no_provider_event" &&
+			candidate.reason !== "no_meaningful_content_progress" &&
+			candidate.reason !== "finalizing_timeout")
+	) {
+		return undefined;
+	}
+	const at = safeBlockerNumber(candidate.at, 0);
+	const elapsedMs = safeBlockerNumber(candidate.elapsedMs, 0);
+	const idleMs = safeBlockerNumber(candidate.idleMs, 0);
+	const receivedBytes = safeBlockerNumber(candidate.receivedBytes, 0);
+	const blocks = safeBlockerNumber(candidate.blocks, 0);
+	const provider = safeBlockerText(candidate.provider, 128);
+	const model = safeBlockerText(candidate.model, 256);
+	const transport = safeBlockerText(candidate.transport, 128);
+	const requestId = candidate.requestId === undefined ? undefined : safeBlockerText(candidate.requestId, 256);
+	const attemptId = candidate.attemptId === undefined ? undefined : safeBlockerText(candidate.attemptId, 256);
+	if (
+		at === undefined ||
+		elapsedMs === undefined ||
+		idleMs === undefined ||
+		receivedBytes === undefined ||
+		blocks === undefined ||
+		provider === undefined ||
+		model === undefined ||
+		transport === undefined ||
+		(candidate.requestId !== undefined && requestId === undefined) ||
+		(candidate.attemptId !== undefined && attemptId === undefined)
+	) {
+		return undefined;
+	}
+	return {
+		type: "provider_stream_stalled",
+		phase: candidate.phase,
+		reason: candidate.reason,
+		at,
+		elapsedMs,
+		idleMs,
+		receivedBytes,
+		blocks,
+		provider,
+		model,
+		transport,
+		requestId,
+		attemptId,
+	};
+}
+
+function providerStreamStallDiagnosticFromAssistantMessage(
+	message: AssistantMessage,
+): StreamLivenessDiagnostic | undefined {
+	const diagnostic = message.diagnostics?.find((candidate) => candidate.type === "provider_stream_stalled");
+	return parseProviderStreamStallDiagnostic(diagnostic?.details);
+}
+
+function parseResourceExhaustedBlockerEntryData(value: unknown): ResourceExhaustedBlockerEntryData | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const candidate = value as Record<string, unknown>;
+	const provider = safeBlockerText(candidate.provider, 128);
+	const model = safeBlockerText(candidate.model, 256);
+	const kind = candidate.kind;
+	const authorizationRevision = safeBlockerText(candidate.authorizationRevision, 256);
+	const capacityRevision = safeBlockerText(candidate.capacityRevision, 256);
+	const creditsAvailability = candidate.creditsAvailability;
+	const state = candidate.state;
+	if (
+		!provider ||
+		!model ||
+		kind !== "resource_exhausted" ||
+		!authorizationRevision ||
+		!capacityRevision ||
+		!/^epoch:[0-9]+$/u.test(capacityRevision) ||
+		(state !== "blocked" && state !== "probe_leased" && state !== "cleared") ||
+		(creditsAvailability !== "available" &&
+			creditsAvailability !== "unavailable" &&
+			creditsAvailability !== "unknown")
+	) {
+		return undefined;
+	}
+	const limitClass = candidate.limitClass === undefined ? undefined : safeBlockerText(candidate.limitClass, 64);
+	if (candidate.limitClass !== undefined && !limitClass) return undefined;
+	const resetAt = candidate.resetAt === undefined ? undefined : safeBlockerNumber(candidate.resetAt, 0);
+	if (candidate.resetAt !== undefined && resetAt === undefined) return undefined;
+	const resetInSeconds =
+		candidate.resetInSeconds === undefined ? undefined : safeBlockerNumber(candidate.resetInSeconds, 0);
+	if (candidate.resetInSeconds !== undefined && resetInSeconds === undefined) return undefined;
+	const probeLeaseId = candidate.probeLeaseId === undefined ? undefined : safeBlockerText(candidate.probeLeaseId, 128);
+	if (candidate.probeLeaseId !== undefined && !probeLeaseId) return undefined;
+	const blockerDigest =
+		candidate.blockerDigest === undefined ? undefined : safeBlockerText(candidate.blockerDigest, 128);
+	if (candidate.blockerDigest !== undefined && !blockerDigest) return undefined;
+	const probeLeasedAt =
+		candidate.probeLeasedAt === undefined ? undefined : safeBlockerNumber(candidate.probeLeasedAt, 0);
+	if (candidate.probeLeasedAt !== undefined && probeLeasedAt === undefined) return undefined;
+	const probeLeaseExpiresAt =
+		candidate.probeLeaseExpiresAt === undefined ? undefined : safeBlockerNumber(candidate.probeLeaseExpiresAt, 0);
+	if (candidate.probeLeaseExpiresAt !== undefined && probeLeaseExpiresAt === undefined) return undefined;
+	const probeLeaseWallTimeMs =
+		candidate.probeLeaseWallTimeMs === undefined ? undefined : safeBlockerNumber(candidate.probeLeaseWallTimeMs, 0);
+	if (candidate.probeLeaseWallTimeMs !== undefined && probeLeaseWallTimeMs === undefined) return undefined;
+	const probeLeaseMonotonicTimeMs =
+		candidate.probeLeaseMonotonicTimeMs === undefined
+			? undefined
+			: safeBlockerNumber(candidate.probeLeaseMonotonicTimeMs, 0);
+	if (candidate.probeLeaseMonotonicTimeMs !== undefined && probeLeaseMonotonicTimeMs === undefined) return undefined;
+	const probeLeaseProvider =
+		candidate.probeLeaseProvider === undefined ? undefined : safeBlockerText(candidate.probeLeaseProvider, 128);
+	if (candidate.probeLeaseProvider !== undefined && !probeLeaseProvider) return undefined;
+	const probeLeaseModel =
+		candidate.probeLeaseModel === undefined ? undefined : safeBlockerText(candidate.probeLeaseModel, 256);
+	if (candidate.probeLeaseModel !== undefined && !probeLeaseModel) return undefined;
+	const probeLeaseAuthorizationRevision =
+		candidate.probeLeaseAuthorizationRevision === undefined
+			? undefined
+			: safeBlockerText(candidate.probeLeaseAuthorizationRevision, 256);
+	if (candidate.probeLeaseAuthorizationRevision !== undefined && !probeLeaseAuthorizationRevision) return undefined;
+	const probeLeaseCapacityRevision =
+		candidate.probeLeaseCapacityRevision === undefined
+			? undefined
+			: safeBlockerText(candidate.probeLeaseCapacityRevision, 256);
+	if (
+		candidate.probeLeaseCapacityRevision !== undefined &&
+		(!probeLeaseCapacityRevision || !/^epoch:[0-9]+$/u.test(probeLeaseCapacityRevision))
+	)
+		return undefined;
+	const probeLeaseActionId =
+		candidate.probeLeaseActionId === undefined ? undefined : safeBlockerText(candidate.probeLeaseActionId, 128);
+	if (candidate.probeLeaseActionId !== undefined && !probeLeaseActionId) return undefined;
+	const probeLeaseHeadId =
+		candidate.probeLeaseHeadId === undefined ? undefined : safeBlockerText(candidate.probeLeaseHeadId, 128);
+	if (candidate.probeLeaseHeadId !== undefined && !probeLeaseHeadId) return undefined;
+	return {
+		kind: "resource_exhausted",
+		provider,
+		model,
+		...(limitClass ? { limitClass } : {}),
+		...(resetAt !== undefined ? { resetAt } : {}),
+		...(resetInSeconds !== undefined ? { resetInSeconds } : {}),
+		creditsAvailability,
+		authorizationRevision,
+		capacityRevision,
+		state,
+		...(blockerDigest ? { blockerDigest } : {}),
+		...(probeLeaseId ? { probeLeaseId } : {}),
+		...(probeLeasedAt !== undefined ? { probeLeasedAt } : {}),
+		...(probeLeaseExpiresAt !== undefined ? { probeLeaseExpiresAt } : {}),
+		...(probeLeaseWallTimeMs !== undefined ? { probeLeaseWallTimeMs } : {}),
+		...(probeLeaseMonotonicTimeMs !== undefined ? { probeLeaseMonotonicTimeMs } : {}),
+		...(probeLeaseProvider ? { probeLeaseProvider } : {}),
+		...(probeLeaseModel ? { probeLeaseModel } : {}),
+		...(probeLeaseAuthorizationRevision ? { probeLeaseAuthorizationRevision } : {}),
+		...(probeLeaseCapacityRevision ? { probeLeaseCapacityRevision } : {}),
+		...(probeLeaseActionId ? { probeLeaseActionId } : {}),
+		...(probeLeaseHeadId ? { probeLeaseHeadId } : {}),
+	};
+}
+
+function resourceExhaustedBlockerFromEntry(data: ResourceExhaustedBlockerEntryData): ResourceExhaustedBlocker {
+	return {
+		kind: "resource_exhausted",
+		provider: data.provider,
+		model: data.model,
+		...(data.limitClass ? { limitClass: data.limitClass } : {}),
+		...(data.resetAt !== undefined ? { resetAt: data.resetAt } : {}),
+		...(data.resetInSeconds !== undefined ? { resetInSeconds: data.resetInSeconds } : {}),
+		creditsAvailability: data.creditsAvailability,
+		authorizationRevision: data.authorizationRevision,
+		capacityRevision: data.capacityRevision,
+	};
+}
+
+function parseWorkerModelCapabilityBlockerEntryData(value: unknown): WorkerModelCapabilityBlockerEntryData | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const candidate = value as Record<string, unknown>;
+	if (candidate.state !== "blocked" && candidate.state !== "cleared") return undefined;
+	const { state, ...blockerValue } = candidate;
+	const blocker = parseWorkerModelCapabilityBlocker(blockerValue);
+	if (blocker === undefined) return undefined;
+	return { ...projectWorkerModelCapabilityBlocker(blocker), state };
+}
+
+function workerModelCapabilityBlockerFromEntry(
+	data: WorkerModelCapabilityBlockerEntryData,
+): WorkerModelCapabilityBlocker {
+	const { state: _state, ...blocker } = data;
+	return projectWorkerModelCapabilityBlocker(blocker);
+}
+
 function updateLastActivityTime(lastActivityTime: number | undefined, entry: FileEntry): number | undefined {
 	if (entry.type !== "message") {
 		return lastActivityTime;
@@ -1027,6 +1325,12 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let name: string | undefined;
 		let state: SessionState | undefined;
 		let agentStatus: AgentStatus | undefined;
+		let leafId: string | undefined;
+		const parentIds = new Map<string, string | null>();
+		const resourceBlockerEntries = new Map<string, ResourceExhaustedBlockerEntryData>();
+		const workerModelBlockerEntries = new Map<string, WorkerModelCapabilityBlockerEntryData>();
+		const assistantStreamStallEntries = new Map<string, StreamLivenessDiagnostic | undefined>();
+		const toolExecutionStallEntries = new Map<string, ToolExecutionStallDiagnostic>();
 		let lastActivityTime: number | undefined;
 
 		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
@@ -1058,6 +1362,10 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 				// Skip malformed lines
 				continue;
 			}
+			if (entry.type !== "session") {
+				leafId = entry.id;
+				parentIds.set(entry.id, entry.parentId);
+			}
 
 			// Extract session name (use latest, including explicit clears)
 			if (entry.type === "session_info") {
@@ -1075,6 +1383,21 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			// unjudged in the agents view. Append-only, so last seen wins.
 			if (entry.type === "agent_status") {
 				agentStatus = (entry as AgentStatusEntry).status;
+			}
+			if (entry.type === "custom" && entry.customType === RESOURCE_EXHAUSTED_BLOCKER_CUSTOM_TYPE) {
+				const data = parseResourceExhaustedBlockerEntryData(entry.data);
+				if (data) resourceBlockerEntries.set(entry.id, data);
+			}
+			if (entry.type === "custom" && entry.customType === WORKER_MODEL_CAPABILITY_BLOCKER_CUSTOM_TYPE) {
+				const data = parseWorkerModelCapabilityBlockerEntryData(entry.data);
+				if (data) workerModelBlockerEntries.set(entry.id, data);
+			}
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				assistantStreamStallEntries.set(entry.id, providerStreamStallDiagnosticFromAssistantMessage(entry.message));
+			}
+			if (entry.type === "custom_message" && entry.customType === TOOL_EXECUTION_STALL_CUSTOM_TYPE) {
+				const diagnostic = parseToolExecutionStallDiagnostic(entry.details);
+				if (diagnostic) toolExecutionStallEntries.set(entry.id, diagnostic);
 			}
 
 			if (!header) {
@@ -1104,6 +1427,42 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 
 		if (!header) return null;
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
+		let resourceExhaustedBlockerEntry: ResourceExhaustedBlockerEntryData | undefined;
+		let workerModelCapabilityBlockerEntry: WorkerModelCapabilityBlockerEntryData | undefined;
+		let providerStreamStallDiagnostic: StreamLivenessDiagnostic | undefined;
+		let toolExecutionStallDiagnostic: ToolExecutionStallDiagnostic | undefined;
+		let foundLatestAssistant = false;
+		let foundLatestToolOutcome = false;
+		let activeId = leafId;
+		while (activeId) {
+			const resourceCandidate = resourceBlockerEntries.get(activeId);
+			if (resourceCandidate && resourceExhaustedBlockerEntry === undefined)
+				resourceExhaustedBlockerEntry = resourceCandidate;
+			const workerModelCandidate = workerModelBlockerEntries.get(activeId);
+			if (workerModelCandidate && workerModelCapabilityBlockerEntry === undefined)
+				workerModelCapabilityBlockerEntry = workerModelCandidate;
+			if (!foundLatestAssistant && assistantStreamStallEntries.has(activeId)) {
+				foundLatestAssistant = true;
+				providerStreamStallDiagnostic = assistantStreamStallEntries.get(activeId);
+			}
+			if (!foundLatestToolOutcome) {
+				const toolCandidate = toolExecutionStallEntries.get(activeId);
+				if (toolCandidate !== undefined) {
+					foundLatestToolOutcome = true;
+					toolExecutionStallDiagnostic = toolCandidate;
+				} else if (assistantStreamStallEntries.has(activeId)) {
+					foundLatestToolOutcome = true;
+				}
+			}
+			if (
+				resourceExhaustedBlockerEntry !== undefined &&
+				workerModelCapabilityBlockerEntry !== undefined &&
+				foundLatestAssistant &&
+				foundLatestToolOutcome
+			)
+				break;
+			activeId = parentIds.get(activeId) ?? undefined;
+		}
 		const parentSessionPath = header.parentSession;
 		const rlmDepth = resolveSessionRlmDepth(header, filePath);
 		const modified = getSessionModifiedDateFromLastActivity(lastActivityTime, header, stats.mtime);
@@ -1122,6 +1481,16 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText,
 			agentStatus,
+			resourceExhaustedBlocker:
+				resourceExhaustedBlockerEntry && resourceExhaustedBlockerEntry.state !== "cleared"
+					? resourceExhaustedBlockerFromEntry(resourceExhaustedBlockerEntry)
+					: undefined,
+			workerModelCapabilityBlocker:
+				workerModelCapabilityBlockerEntry && workerModelCapabilityBlockerEntry.state !== "cleared"
+					? workerModelCapabilityBlockerFromEntry(workerModelCapabilityBlockerEntry)
+					: undefined,
+			providerStreamStallDiagnostic,
+			toolExecutionStallDiagnostic,
 		};
 	} catch {
 		return null;
@@ -1578,6 +1947,118 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Append a redacted host-owned resource blocker and force it to disk. */
+	appendResourceExhaustedBlocker(blocker: ResourceExhaustedBlocker): string {
+		return this._appendResourceExhaustedBlockerEntry({ ...blocker, state: "blocked" });
+	}
+
+	/** Append the durable single-probe lease for a resource blocker. */
+	appendResourceExhaustedProbeLease(
+		blocker: ResourceExhaustedBlocker,
+		lease: Pick<
+			ResourceExhaustedBlockerEntryData,
+			| "blockerDigest"
+			| "probeLeaseId"
+			| "probeLeasedAt"
+			| "probeLeaseExpiresAt"
+			| "probeLeaseWallTimeMs"
+			| "probeLeaseMonotonicTimeMs"
+			| "probeLeaseProvider"
+			| "probeLeaseModel"
+			| "probeLeaseAuthorizationRevision"
+			| "probeLeaseCapacityRevision"
+			| "probeLeaseActionId"
+			| "probeLeaseHeadId"
+		>,
+	): string {
+		return this._appendResourceExhaustedBlockerEntry({
+			...blocker,
+			state: "probe_leased",
+			...lease,
+		});
+	}
+
+	/** Append the durable success transition that clears the resource blocker. */
+	appendResourceExhaustedBlockerCleared(blocker: ResourceExhaustedBlocker): string {
+		return this._appendResourceExhaustedBlockerEntry({ ...blocker, state: "cleared" });
+	}
+
+	private _appendResourceExhaustedBlockerEntry(data: ResourceExhaustedBlockerEntryData): string {
+		const parsed = parseResourceExhaustedBlockerEntryData(data);
+		if (!parsed) throw new Error("Resource exhaustion blocker metadata is invalid or unsafe.");
+		const id = this.appendCustomEntry(RESOURCE_EXHAUSTED_BLOCKER_CUSTOM_TYPE, parsed);
+		this.flushNow();
+		return id;
+	}
+
+	/** Append a durable host-owned worker-model blocker and force it to disk. */
+	appendWorkerModelCapabilityBlocker(blocker: WorkerModelCapabilityBlocker): string {
+		return this._appendWorkerModelCapabilityBlockerEntry({ ...blocker, state: "blocked" });
+	}
+
+	/** Append the durable transition that clears a worker-model blocker. */
+	appendWorkerModelCapabilityBlockerCleared(blocker: WorkerModelCapabilityBlocker): string {
+		return this._appendWorkerModelCapabilityBlockerEntry({ ...blocker, state: "cleared" });
+	}
+
+	private _appendWorkerModelCapabilityBlockerEntry(data: WorkerModelCapabilityBlockerEntryData): string {
+		const parsed = parseWorkerModelCapabilityBlockerEntryData(data);
+		if (!parsed) throw new Error("Worker-model capability blocker metadata is invalid or unsafe.");
+		const id = this.appendCustomEntry(WORKER_MODEL_CAPABILITY_BLOCKER_CUSTOM_TYPE, parsed);
+		this.flushNow();
+		return id;
+	}
+
+	/** Read the latest resource blocker transition on the active branch. */
+	getLatestResourceExhaustedBlockerEntry(): ResourceExhaustedBlockerEntryData | undefined {
+		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
+		while (current) {
+			if (current.type === "custom" && current.customType === RESOURCE_EXHAUSTED_BLOCKER_CUSTOM_TYPE) {
+				const parsed = parseResourceExhaustedBlockerEntryData(current.data);
+				if (parsed) return parsed;
+			}
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		return undefined;
+	}
+
+	/** Return the active-branch entry id for the latest resource blocker transition. */
+	getLatestResourceExhaustedBlockerEntryId(): string | undefined {
+		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
+		while (current) {
+			if (current.type === "custom" && current.customType === RESOURCE_EXHAUSTED_BLOCKER_CUSTOM_TYPE) {
+				if (parseResourceExhaustedBlockerEntryData(current.data)) return current.id;
+			}
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		return undefined;
+	}
+
+	/** Read the active resource blocker, omitting cleared/probe transition details. */
+	getLatestResourceExhaustedBlocker(): ResourceExhaustedBlocker | undefined {
+		const entry = this.getLatestResourceExhaustedBlockerEntry();
+		return entry && entry.state !== "cleared" ? resourceExhaustedBlockerFromEntry(entry) : undefined;
+	}
+
+	/** Read the latest worker-model blocker transition on the active branch. */
+	getLatestWorkerModelCapabilityBlockerEntry(): WorkerModelCapabilityBlockerEntryData | undefined {
+		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
+		while (current) {
+			if (current.type === "custom" && current.customType === WORKER_MODEL_CAPABILITY_BLOCKER_CUSTOM_TYPE) {
+				const parsed = parseWorkerModelCapabilityBlockerEntryData(current.data);
+				if (parsed) return parsed;
+			}
+			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+		}
+		return undefined;
+	}
+
+	/** Read the active worker-model blocker, omitting cleared transition details. */
+	getLatestWorkerModelCapabilityBlocker(): WorkerModelCapabilityBlocker | undefined {
+		const entry = this.getLatestWorkerModelCapabilityBlockerEntry();
+		return entry && entry.state !== "cleared" ? workerModelCapabilityBlockerFromEntry(entry) : undefined;
+	}
+
 	/** Append a custom entry and undo its in-memory index if persistence fails. */
 	appendCustomEntryWithRollback(customType: string, data?: unknown): string {
 		return this._appendEntryWithRollback(() => this.appendCustomEntry(customType, data));
@@ -1701,6 +2182,12 @@ export class SessionManager {
 			status: {
 				summary: status.summary,
 				taskState: status.taskState,
+				resourceExhaustedBlocker: status.resourceExhaustedBlocker
+					? resourceExhaustedBlockerFromEntry({ ...status.resourceExhaustedBlocker, state: "blocked" })
+					: undefined,
+				workerModelCapabilityBlocker: status.workerModelCapabilityBlocker
+					? projectWorkerModelCapabilityBlocker(status.workerModelCapabilityBlocker)
+					: undefined,
 				basedOnMessageCount: status.basedOnMessageCount,
 			},
 		};
@@ -1748,7 +2235,15 @@ export class SessionManager {
 		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
 		while (current) {
 			if (current.type === "agent_status") {
-				return { ...current.status };
+				return {
+					...current.status,
+					resourceExhaustedBlocker: current.status.resourceExhaustedBlocker
+						? { ...current.status.resourceExhaustedBlocker }
+						: undefined,
+					workerModelCapabilityBlocker: current.status.workerModelCapabilityBlocker
+						? projectWorkerModelCapabilityBlocker(current.status.workerModelCapabilityBlocker)
+						: undefined,
+				};
 			}
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
 		}

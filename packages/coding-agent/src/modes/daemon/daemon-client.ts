@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { getDaemonLogPath } from "../../config.js";
+import { parseWorkerModelCapabilityBlocker } from "../../core/workflow/worker-model-capability-gate.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import {
 	createDaemonCommandEnvelope,
@@ -673,7 +674,29 @@ function isDaemonSavedSessionInfo(value: unknown): value is DaemonSavedSessionIn
 		typeof candidate.messageCount === "number" &&
 		typeof candidate.firstMessage === "string" &&
 		typeof candidate.allMessagesText === "string" &&
-		(candidate.agentStatus === undefined || isDaemonSavedSessionAgentStatus(candidate.agentStatus))
+		(candidate.agentStatus === undefined || isDaemonSavedSessionAgentStatus(candidate.agentStatus)) &&
+		(candidate.resourceExhaustedBlocker === undefined ||
+			isDaemonResourceExhaustedBlocker(candidate.resourceExhaustedBlocker)) &&
+		(candidate.workerModelCapabilityBlocker === undefined ||
+			parseWorkerModelCapabilityBlocker(candidate.workerModelCapabilityBlocker) !== undefined)
+	);
+}
+
+function isDaemonResourceExhaustedBlocker(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const candidate = value as Record<string, unknown>;
+	return (
+		candidate.kind === "resource_exhausted" &&
+		typeof candidate.provider === "string" &&
+		typeof candidate.model === "string" &&
+		typeof candidate.authorizationRevision === "string" &&
+		typeof candidate.capacityRevision === "string" &&
+		(candidate.limitClass === undefined || typeof candidate.limitClass === "string") &&
+		(candidate.resetAt === undefined || typeof candidate.resetAt === "number") &&
+		(candidate.resetInSeconds === undefined || typeof candidate.resetInSeconds === "number") &&
+		(candidate.creditsAvailability === "available" ||
+			candidate.creditsAvailability === "unavailable" ||
+			candidate.creditsAvailability === "unknown")
 	);
 }
 
@@ -687,6 +710,8 @@ function isDaemonSavedSessionAgentStatus(value: unknown): boolean {
 		typeof candidate.basedOnMessageCount === "number" &&
 		(candidate.taskState === undefined ||
 			candidate.taskState === "needs_input" ||
-			candidate.taskState === "completed")
+			candidate.taskState === "completed" ||
+			candidate.taskState === "resource_exhausted" ||
+			candidate.taskState === "blocked_model_capability")
 	);
 }

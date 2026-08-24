@@ -9,6 +9,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
+import type { DefaultPrimeWorkerFailureNotice } from "./workflow/default-task-runtime.js";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -33,6 +34,7 @@ export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_r
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
+export const WORKFLOW_WORKER_FAILURE_CUSTOM_TYPE = "workflow_worker_failure";
 
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
@@ -59,7 +61,7 @@ export interface SessionSlashCommandResultMessage extends CustomMessage<SessionS
 	details: SessionSlashCommandResultDetails;
 }
 
-export type CompactionOutcomeReason = "threshold" | "overflow" | "requested";
+export type CompactionOutcomeReason = "manual" | "threshold" | "overflow" | "requested";
 export type CompactionOutcome = "skipped" | "cancelled" | "failed";
 
 export interface CompactionOutcomeDetails {
@@ -101,6 +103,20 @@ export function createRlmChildFailureMessage(
 		role: "custom",
 		customType: RLM_CHILD_FAILURE_CUSTOM_TYPE,
 		content: `RLM child ${details.sessionName} (${details.childId}) failed: ${details.error}`,
+		display: true,
+		details,
+		timestamp,
+	};
+}
+
+export function createWorkflowWorkerFailureMessage(
+	details: DefaultPrimeWorkerFailureNotice,
+	timestamp = Date.now(),
+): CustomMessage<DefaultPrimeWorkerFailureNotice> {
+	return {
+		role: "custom",
+		customType: WORKFLOW_WORKER_FAILURE_CUSTOM_TYPE,
+		content: `Workflow worker ${details.workerId} failed stage ${details.taskId}. Recovery: ${details.recoveryDecision}. Evidence: ${details.resultEvidenceRef.digest}. Error: ${details.error}`,
 		display: true,
 		details,
 		timestamp,

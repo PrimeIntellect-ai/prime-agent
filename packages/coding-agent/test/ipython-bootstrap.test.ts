@@ -83,6 +83,52 @@ describeIfKernel("IPython RLM bootstrap (real kernel)", () => {
 		}
 	}, 60_000);
 
+	it("admits a required Python skill from its declared package and rejects an unavailable facade", async () => {
+		const skillRoot = join(dir, "required-goal-facade");
+		const skillSource = join(skillRoot, "src", "required_goal_facade");
+		mkdirSync(skillSource, { recursive: true });
+		writeFileSync(join(skillSource, "__init__.py"), "async def get():\n    return {'status': 'active'}\n");
+		const manager = new KernelManager({ python: python as string, cwd: dir });
+		try {
+			await manager.start();
+			const admitted = await manager.execute(
+				buildRlmBootstrapCode(
+					[
+						{
+							name: "required-goal-facade",
+							importName: "required_goal_facade",
+							packagePath: skillRoot,
+							pyprojectPath: join(skillRoot, "pyproject.toml"),
+						},
+					],
+					["required_goal_facade"],
+				),
+			);
+			expect(admitted.status).toBe("ok");
+			const facade = await manager.execute("print((await required_goal_facade.get())['status'])");
+			expect(facade.status).toBe("ok");
+			expect(facade.stdout.trim()).toBe("active");
+
+			const rejected = await manager.execute(
+				buildRlmBootstrapCode(
+					[
+						{
+							name: "missing-goal-facade",
+							importName: "missing_goal_facade",
+							packagePath: join(dir, "missing-goal-facade"),
+							pyprojectPath: join(dir, "missing-goal-facade", "pyproject.toml"),
+						},
+					],
+					["missing_goal_facade"],
+				),
+			);
+			expect(rejected.status).toBe("error");
+			expect(rejected.error?.evalue).toContain("required Python skill missing_goal_facade is unavailable");
+		} finally {
+			await manager.dispose();
+		}
+	}, 60_000);
+
 	it("emits canonical paths for edits after the kernel changes directories", async () => {
 		const firstDir = join(dir, "first");
 		const secondDir = join(dir, "second");

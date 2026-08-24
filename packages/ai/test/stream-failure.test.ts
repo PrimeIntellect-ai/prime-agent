@@ -39,6 +39,8 @@ describe("classifyStreamFailure", () => {
 		[undefined, 529, "overloaded"],
 		["rate_limit_error", undefined, "rate_limit"],
 		[undefined, 429, "rate_limit"],
+		["usage_limit_reached", 429, "resource_exhausted"],
+		["usage_not_included", 403, "resource_exhausted"],
 		["refusal", undefined, "refusal"],
 		["sensitive", undefined, "safety"],
 		["SAFETY", undefined, "safety"],
@@ -92,6 +94,59 @@ describe("extractStreamFailureInfo", () => {
 			status: 529,
 			requestId: "req_sdk",
 		});
+	});
+
+	test("preserves safe resource exhaustion metadata from a nested provider error", () => {
+		const sdkError = Object.assign(new Error("usage limit"), {
+			status: 429,
+			error: {
+				type: "error",
+				error: {
+					code: "usage_limit_reached",
+					message: "The usage limit has been reached",
+					resets_at: 2_000_000_000,
+					credits_unavailable: true,
+					headers: { Authorization: "Bearer secret" },
+				},
+			},
+		});
+
+		expect(extractStreamFailureInfo(sdkError)).toMatchObject({
+			kind: "resource_exhausted",
+			providerErrorType: "usage_limit_reached",
+			status: 429,
+			limitClass: "usage_limit_reached",
+			resetAt: 2_000_000_000,
+			creditsUnavailable: true,
+		});
+		expect(JSON.stringify(extractStreamFailureInfo(sdkError))).not.toContain("Bearer secret");
+	});
+
+	test("matches allowlisted Codex quota headers case-insensitively", () => {
+		const sdkError = Object.assign(new Error("The usage limit has been reached"), {
+			status_code: 429,
+			error: {
+				type: "usage_limit_reached",
+				resets_at: 1_787_402_590,
+				resets_in_seconds: 419704,
+			},
+			headers: {
+				"x-codex-active-limit": "premium",
+				"x-codex-credits-has-credits": "false",
+				Authorization: "Bearer secret",
+			},
+		});
+
+		expect(extractStreamFailureInfo(sdkError)).toMatchObject({
+			kind: "resource_exhausted",
+			providerErrorType: "usage_limit_reached",
+			status: 429,
+			limitClass: "premium",
+			resetAt: 1_787_402_590,
+			resetInSeconds: 419704,
+			creditsUnavailable: true,
+		});
+		expect(JSON.stringify(extractStreamFailureInfo(sdkError))).not.toContain("Authorization");
 	});
 
 	test("extracts AWS SDK request id and exception name", () => {

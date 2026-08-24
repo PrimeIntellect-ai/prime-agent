@@ -1,4 +1,5 @@
 import { basename, resolve } from "node:path";
+import { projectResourceExhaustedBlocker } from "../../core/session-manager.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
@@ -242,10 +243,14 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 			rlmDepth: record.daemon.rlmDepth ?? saved.rlmDepth,
 			created: record.daemon.created ?? saved.created.toISOString(),
 			modified: record.daemon.modified ?? saved.modified.toISOString(),
+			lastActivityAt: record.daemon.lastActivityAt ?? saved.modified.toISOString(),
 		};
 	}
 	const saved = record.saved;
 	if (!saved) throw new Error("Unified session record has no daemon or saved source");
+	const resourceExhaustedBlocker = saved.resourceExhaustedBlocker
+		? projectResourceExhaustedBlocker(saved.resourceExhaustedBlocker)
+		: undefined;
 	return {
 		id: saved.id,
 		lifecycle: "archived",
@@ -265,9 +270,11 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		created: saved.created.toISOString(),
 		modified: saved.modified.toISOString(),
+		lastActivityAt: saved.modified.toISOString(),
 		firstMessage: saved.firstMessage,
-		summary: saved.agentStatus?.summary,
-		taskState: saved.agentStatus?.taskState,
+		summary: resourceExhaustedBlocker ? "Provider resource limit reached" : saved.agentStatus?.summary,
+		taskState: resourceExhaustedBlocker ? "resource_exhausted" : saved.agentStatus?.taskState,
+		resourceExhaustedBlocker,
 	};
 }
 
@@ -853,6 +860,12 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow): number {
 	if (sectionDiff !== 0) {
 		return sectionDiff;
 	}
+	if (a.section !== "running") {
+		const activityDiff = getTimestamp(b.summary.lastActivityAt) - getTimestamp(a.summary.lastActivityAt);
+		if (activityDiff !== 0) {
+			return activityDiff;
+		}
+	}
 	const createdDiff = getTimestamp(b.summary.created) - getTimestamp(a.summary.created);
 	if (createdDiff !== 0) {
 		return createdDiff;
@@ -893,7 +906,7 @@ function findParentRow(
 	return undefined;
 }
 
-function isSubagentSummary(summary: SessionSummary): boolean {
+export function isSubagentSummary(summary: SessionSummary): boolean {
 	if (summary.runtimeKind) {
 		return summary.runtimeKind === "subagent";
 	}
@@ -987,5 +1000,7 @@ function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = sum
 	if (summary.activity === "working") {
 		return "classifying";
 	}
-	return summary.taskState === "completed" ? "completed" : "needs input";
+	if (summary.taskState === "completed") return "completed";
+	if (summary.taskState === "resource_exhausted") return "resource exhausted";
+	return "needs input";
 }

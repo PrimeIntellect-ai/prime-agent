@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Generate a review package: commit list, stat summary, and the net
+# diff with extended context, written to a file the reviewer reads in one
+# call. Using the recorded per-task BASE (not an inferred parent ref) keeps multi-commit
+# tasks intact.
+#
+# Usage: review-package PLAN_FILE BASE_SHA CANDIDATE_SHA INTEGRATION_SHA [OUTFILE]
+# Default OUTFILE: <repo-root>/.superpowers/sdd/<plan-basename>/review-<base-sha>..<candidate-sha>.diff
+# (named per range, so a re-review after fixes gets a distinct fresh file).
+set -euo pipefail
+
+if [ $# -lt 4 ] || [ $# -gt 5 ]; then
+  echo "usage: review-package PLAN_FILE BASE_SHA CANDIDATE_SHA INTEGRATION_SHA [OUTFILE]" >&2
+  exit 2
+fi
+
+plan=$1
+base=$2
+candidate=$3
+integration=$4
+[ -f "$plan" ] || { echo "no such plan file: $plan" >&2; exit 2; }
+
+canonical_commit() {
+  local label=$1
+  local sha=$2
+  if ! printf '%s\n' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "$label must be a canonical full lowercase SHA: $sha" >&2
+    exit 2
+  fi
+  local resolved
+  resolved=$(git rev-parse --verify --end-of-options "${sha}^{commit}") || {
+    echo "bad $label: $sha" >&2
+    exit 2
+  }
+  if [ "$resolved" != "$sha" ]; then
+    echo "$label is not the canonical commit SHA: $sha" >&2
+    exit 2
+  fi
+}
+
+canonical_commit BASE_SHA "$base"
+canonical_commit CANDIDATE_SHA "$candidate"
+canonical_commit INTEGRATION_SHA "$integration"
+git merge-base --is-ancestor "$integration" "$base" || {
+  echo "INTEGRATION_SHA is not an ancestor of BASE_SHA" >&2
+  exit 2
+}
+git merge-base --is-ancestor "$base" "$candidate" || {
+  echo "BASE_SHA is not an ancestor of CANDIDATE_SHA" >&2
+  exit 2
+}
+git merge-base --is-ancestor "$integration" "$candidate" || {
+  echo "INTEGRATION_SHA is not an ancestor of CANDIDATE_SHA" >&2
+  exit 2
+}
+
+if [ $# -eq 5 ]; then
+  out=$5
+else
+  dir=$("$(cd "$(dirname "$0")" && pwd)/sdd-workspace" "$plan")
+  out="$dir/review-${base}..${candidate}.diff"
+fi
+
+{
+  echo "# Review package: ${base}..${candidate}"
+  echo
+  echo "## Review binding"
+  echo "Base SHA: ${base}"
+  echo "Candidate SHA: ${candidate}"
+  echo "Integration SHA: ${integration}"
+  echo "Review receipt binding: candidate=${candidate}; integration=${integration}"
+  echo "Review range: ${base}..${candidate}"
+  echo
+  echo "## Commits"
+  git log --oneline "${base}..${candidate}"
+  echo
+  echo "## Files changed"
+  git diff --stat "${base}..${candidate}"
+  echo
+  echo "## Diff"
+  git diff -U10 "${base}..${candidate}"
+} > "$out"
+
+commits=$(git rev-list --count "${base}..${candidate}")
+echo "wrote ${out}: ${commits} commit(s), $(wc -c < "$out" | tr -d ' ') bytes"

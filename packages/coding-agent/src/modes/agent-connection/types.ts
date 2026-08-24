@@ -25,7 +25,9 @@ import type {
 	SessionActionSnapshot,
 } from "../../core/session-action-store.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import type { ResourceExhaustedBlocker } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import type { WorkerModelCapabilityBlocker } from "../../core/workflow/worker-model-capability-gate.js";
 
 /**
  * Client-side interaction boundary consumed by InteractiveMode.
@@ -105,7 +107,9 @@ export interface AgentConnectionSavedSessionState {
 
 export interface AgentConnectionAgentStatus {
 	summary: string;
-	taskState?: "needs_input" | "completed";
+	taskState?: "needs_input" | "completed" | "resource_exhausted" | "blocked_model_capability";
+	resourceExhaustedBlocker?: ResourceExhaustedBlocker;
+	workerModelCapabilityBlocker?: WorkerModelCapabilityBlocker;
 	basedOnMessageCount: number;
 }
 
@@ -132,6 +136,8 @@ export interface AgentConnectionSavedSessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
+	resourceExhaustedBlocker?: ResourceExhaustedBlocker;
+	workerModelCapabilityBlocker?: WorkerModelCapabilityBlocker;
 }
 
 export type AgentConnectionSessionListProgress = (loaded: number, total: number) => void;
@@ -350,6 +356,10 @@ export interface AgentConnectionState {
 	contextUsage: SessionStats["contextUsage"];
 	/** One-line recap of the agent's recent work, shown above the prompt. */
 	recap?: string;
+	/** Host-owned provider resource blocker; clients must not infer completion while present. */
+	resourceExhaustedBlocker?: ResourceExhaustedBlocker;
+	/** Host-owned worker-model blocker; clients must not infer needs-input while present. */
+	workerModelCapabilityBlocker?: WorkerModelCapabilityBlocker;
 }
 
 export interface AgentConnectionSlashCommand {

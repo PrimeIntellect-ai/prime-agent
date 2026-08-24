@@ -74,6 +74,7 @@ export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
 	"disable-model-invocation"?: boolean;
+	"python-import"?: string;
 	[key: string]: unknown;
 }
 
@@ -203,6 +204,7 @@ function detectPythonSkill(
 	skillDir: string,
 	name: string,
 	diagnostics: ResourceDiagnostic[],
+	explicitImportName: unknown,
 ): SkillPythonMetadata | null {
 	const pyprojectPath = join(skillDir, "pyproject.toml");
 	if (!existsSync(pyprojectPath)) {
@@ -217,7 +219,15 @@ function detectPythonSkill(
 		return null;
 	}
 
-	const importName = pythonImportNameForSkill(name);
+	if (explicitImportName !== undefined && typeof explicitImportName !== "string") {
+		diagnostics.push({
+			type: "warning",
+			message: "python-import must be a string",
+			path: pyprojectPath,
+		});
+		return null;
+	}
+	const importName = explicitImportName ?? pythonImportNameForSkill(name);
 	if (!isValidPythonImportName(importName)) {
 		diagnostics.push({
 			type: "warning",
@@ -418,7 +428,10 @@ function loadSkillFromFile(
 			return { skill: null, diagnostics };
 		}
 
-		const python = basename(filePath) === "SKILL.md" ? detectPythonSkill(skillDir, name, diagnostics) : null;
+		const python =
+			basename(filePath) === "SKILL.md"
+				? detectPythonSkill(skillDir, name, diagnostics, frontmatter["python-import"])
+				: null;
 		const baseSkill: BaseSkill = {
 			name,
 			description: frontmatter.description,
@@ -543,17 +556,24 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 
 			const existing = skillMap.get(skill.name);
 			if (existing) {
-				collisionDiagnostics.push({
-					type: "collision",
-					message: `name "${skill.name}" collision`,
-					path: skill.filePath,
-					collision: {
-						resourceType: "skill",
-						name: skill.name,
-						winnerPath: existing.filePath,
-						loserPath: skill.filePath,
-					},
-				});
+				// A user-provided skill shadowing a bundled one of the same name is intended
+				// precedence, not a conflict: the vendored copy exists so the skill works out of
+				// the box, and a local checkout is meant to win. Only report genuinely ambiguous
+				// collisions, where neither side is the bundled fallback.
+				const shadowsBundled = skill.sourceInfo.source === "builtin" && existing.sourceInfo.source !== "builtin";
+				if (!shadowsBundled) {
+					collisionDiagnostics.push({
+						type: "collision",
+						message: `name "${skill.name}" collision`,
+						path: skill.filePath,
+						collision: {
+							resourceType: "skill",
+							name: skill.name,
+							winnerPath: existing.filePath,
+							loserPath: skill.filePath,
+						},
+					});
+				}
 			} else {
 				skillMap.set(skill.name, skill);
 				realPathSet.add(realPath);

@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -16,6 +16,7 @@ import {
 import {
 	type AgentFamilyCatalogEntry,
 	type AgentSessionMessageAgentSummary,
+	agentFamilyRelationship,
 	assertAgentFamilyReach,
 	assertAgentSessionNameAvailable,
 	formatAgentSessionNameUnavailable,
@@ -77,11 +78,12 @@ import {
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "./daemon-protocol.js";
-import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
+import { detectDaemonSourceDrift, getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
 	classifySessionRosterStatus,
 	isSessionSummaryBusy,
+	projectSessionSummaryForClient,
 	type SessionSummary,
 	summaryForInactiveSession,
 } from "./daemon-session-list.js";
@@ -735,6 +737,30 @@ export class DaemonSupervisor {
 			this.server?.once("listening", onListening);
 			this.server?.listen(this.socketPath);
 		});
+	}
+
+	private sourceDriftReported = false;
+
+	/** Log source drift at most once per daemon lifetime; it cannot change without a restart. */
+	private reportSourceDriftOnce(): void {
+		if (this.sourceDriftReported) return;
+		this.sourceDriftReported = true;
+		const drift = detectDaemonSourceDrift(process.env, (sourceDir) => {
+			try {
+				return execFileSync("git", ["describe", "--tags", "--always", "--dirty"], {
+					cwd: sourceDir,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				}).trim();
+			} catch {
+				return undefined;
+			}
+		});
+		if (drift === undefined) return;
+		this.log(
+			`Daemon source has moved since startup: running ${drift.recorded}, tree is now ${drift.current}. ` +
+				"Sessions on this daemon will not pick up changes made after it started; restart to adopt them.",
+		);
 	}
 
 	private log(message: string): void {
@@ -1839,11 +1865,18 @@ export class DaemonSupervisor {
 					throw new Error("Agent messaging cannot target the sending session");
 				}
 				const targetClient = this.requireAvailableWorkerClient(target.worker);
+				const fromRelationship = agentFamilyRelationship(
+					this.familyCatalogEntry(target.summary),
+					this.familyCatalogEntry(source.summary),
+				);
 				const response = await targetClient.requestWorker(
 					{
 						type: "worker_deliver_message",
 						targetActiveSessionId,
 						message: command.message,
+						...(command.messageId === undefined ? {} : { messageId: command.messageId }),
+						...(command.observationId === undefined ? {} : { observationId: command.observationId }),
+						...(fromRelationship === undefined ? {} : { fromRelationship }),
 						sender: {
 							activeSessionId: source.summary.activeSessionId ?? source.summary.id,
 							sessionId: source.summary.sessionId,
@@ -1922,6 +1955,13 @@ export class DaemonSupervisor {
 		client: DaemonSocketClient,
 		command: Extract<DaemonCommand, { type: "list" }>,
 	): Promise<DaemonResponse> {
+		if (command.capabilities !== undefined) {
+			const requested = normalizeCapabilities(command.capabilities, undefined);
+			for (const capability of requested) {
+				client.capabilities.add(capability);
+			}
+		}
+		const includeWorkflowStatus = client.capabilities.has("workflow_status_projection");
 		await Promise.all(
 			[...this.workers.values()]
 				.filter((worker) => !this.isWorkerStopping(worker))
@@ -1937,7 +1977,9 @@ export class DaemonSupervisor {
 					this.isVisibleWorker(worker) ||
 					(command.includeClientOwned === true && this.isWorkerAccessibleToClient(client, worker)),
 			)
-			.flatMap((worker) => [...worker.summaries.values()].map((summary) => this.publicSummary(worker, summary)));
+			.flatMap((worker) =>
+				[...worker.summaries.values()].map((summary) => this.publicSummary(worker, summary, includeWorkflowStatus)),
+			);
 		const busyClientOwnedSessionCount = clientOwnedWorkers
 			.flatMap((worker) => [...worker.summaries.values()])
 			.filter(isSessionSummaryBusy).length;
@@ -2180,6 +2222,10 @@ export class DaemonSupervisor {
 			}),
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
 		});
+		// Once per worker start, say whether this daemon is running source that has since moved. A pinned
+		// daemon silently withholds every later fix, and the operator has no way to know a restart is the
+		// remedy - that cost a real run an hour.
+		this.reportSourceDriftOnce();
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
 					maxLineLength: 64 * 1024,
@@ -2408,12 +2454,23 @@ export class DaemonSupervisor {
 		const supportsExtensionUi = [...this.clients].some(
 			(client) => client.attachedActiveSessionIds.has(activeSessionId) && client.supportsExtensionUi,
 		);
+		const supportsWorkflowStatus = [...this.clients].some(
+			(client) =>
+				client.attachedActiveSessionIds.has(activeSessionId) &&
+				client.capabilities.has("workflow_status_projection"),
+		);
+		const capabilities: DaemonClientCapability[] = [
+			"attach_snapshot",
+			"event_sequence",
+			"slim_attach",
+			"chunked_snapshot",
+			...(supportsExtensionUi ? ["extension_ui" as const] : []),
+			...(supportsWorkflowStatus ? ["workflow_status_projection" as const] : []),
+		];
 		const response = await worker.client.requestWorker({
 			type: "worker_subscribe",
 			activeSessionId,
-			capabilities: supportsExtensionUi
-				? ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"]
-				: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
+			capabilities,
 			supportsExtensionUi,
 		});
 		if (!response.success) {
@@ -2972,7 +3029,10 @@ export class DaemonSupervisor {
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
-		const response = await worker.client.request({ type: "list" }, 5000);
+		const response = await worker.client.request(
+			{ type: "list", capabilities: ["workflow_status_projection"] },
+			5000,
+		);
 		const summaries = sessionSummariesFromResponse(response);
 		worker.summaries = new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary]));
 		for (const summary of summaries) {
@@ -3225,10 +3285,15 @@ export class DaemonSupervisor {
 		};
 	}
 
-	private publicSummary(worker: ResidentWorker, summary: SessionSummary): SessionSummary {
+	private publicSummary(
+		worker: ResidentWorker,
+		summary: SessionSummary,
+		includeWorkflowStatus = false,
+	): SessionSummary {
 		const activeSessionId = summary.activeSessionId ?? summary.id;
+		const projectedSummary = projectSessionSummaryForClient(summary, includeWorkflowStatus);
 		return {
-			...summary,
+			...projectedSummary,
 			attachedClients: [...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId))
 				.length,
 			workerState: this.effectiveWorkerState(worker),
@@ -3399,6 +3464,14 @@ export class DaemonSupervisor {
 		) {
 			result = undefined;
 		}
+		if (
+			result &&
+			client.capabilities.has("workflow_status_projection") &&
+			match.summary.workflowStatus !== undefined &&
+			result.snapshot.summary.workflowStatus === undefined
+		) {
+			result = undefined;
+		}
 		if (!result) {
 			const snapshotLoadKey = `${activeSessionId}:${client.capabilities.has("chunked_snapshot") ? "chunked" : "full"}`;
 			let retryInvalidatedLoad = true;
@@ -3413,9 +3486,13 @@ export class DaemonSupervisor {
 						const response = await workerClient.request({
 							type: "attach",
 							activeSessionId,
-							capabilities: client.capabilities.has("chunked_snapshot")
-								? ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"]
-								: ["attach_snapshot", "event_sequence", "slim_attach"],
+							capabilities: [
+								"attach_snapshot",
+								"event_sequence",
+								"slim_attach",
+								...(client.capabilities.has("chunked_snapshot") ? ["chunked_snapshot"] : []),
+								"workflow_status_projection",
+							] as DaemonClientCapability[],
 							supportsExtensionUi: false,
 							env: command.env ?? collectDaemonClientEnv(),
 						});
@@ -3485,7 +3562,11 @@ export class DaemonSupervisor {
 		const releaseTranscript = transcript?.retain();
 		client.attachedActiveSessionIds.add(activeSessionId);
 		try {
-			const publicSummary = this.publicSummary(match.worker, result.snapshot.summary);
+			const publicSummary = this.publicSummary(
+				match.worker,
+				result.snapshot.summary,
+				client.capabilities.has("workflow_status_projection"),
+			);
 			if (publicSummary.streamingMessage?.role === "assistant") {
 				this.streamReconstructor.seed(activeSessionId, publicSummary.streamingMessage);
 			} else {
@@ -3856,7 +3937,7 @@ export class DaemonSupervisor {
 				) {
 					throw new Error("Worker returned an invalid snapshot begin frame");
 				}
-				const publicSummary = this.publicSummary(worker, begin.snapshot.summary);
+				const publicSummary = this.publicSummary(worker, begin.snapshot.summary, true);
 				const snapshot = {
 					...begin.snapshot,
 					summary: publicSummary,

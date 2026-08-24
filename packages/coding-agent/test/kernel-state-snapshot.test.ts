@@ -59,6 +59,47 @@ describe("parseSnapshotResult", () => {
 		const result = parseSnapshotResult(`${MARKER}{}`, "/tmp/s.dill");
 		expect(result).toEqual({ saved: [], skipped: [], bytes: 0, path: "/tmp/s.dill" });
 	});
+
+	it("parses bounded checkpoint metadata without retaining raw values", () => {
+		const result = parseSnapshotResult(
+			`${MARKER}${JSON.stringify({
+				saved: ["answer"],
+				skipped: [],
+				bytes: 128,
+				checkpointTurn: 4,
+				serializationDurationMs: 12,
+				previousCheckpointTurn: 3,
+				previousDurableBytes: 96,
+				retainedValues: [
+					{
+						valueId: "answer",
+						type: "list",
+						bytes: 128,
+						classification: "durable_fact",
+						required: true,
+						representation: "durable",
+						digest: "a".repeat(64),
+						artifactRef: null,
+						reason: null,
+					},
+				],
+				largestRetainedValues: [{ valueId: "answer", type: "list", bytes: 128, classification: "durable_fact" }],
+				raw: "secret-value-that-must-not-be-retained",
+			})}\n`,
+			"/tmp/s.dill",
+		);
+
+		expect(result).toMatchObject({
+			checkpointTurn: 4,
+			serializationDurationMs: 12,
+			previousCheckpointTurn: 3,
+			previousDurableBytes: 96,
+			growthBytesPerTurn: 32,
+			retainedValues: [{ valueId: "answer", type: "list", bytes: 128, classification: "durable_fact" }],
+			largestRetainedValues: [{ valueId: "answer", type: "list", bytes: 128, classification: "durable_fact" }],
+		});
+		expect(JSON.stringify(result)).not.toContain("secret-value");
+	});
 });
 
 describe("parseRestoreResult", () => {

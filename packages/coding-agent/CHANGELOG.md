@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+- Added negotiated workflow phase, next-gate, blocker, head-digest, and approval details to daemon session listings and attachments.
+- Added workflow proposal support for sealing a verified local copy of an immutable external goal source while preserving its original URI, generation, and digest authority.
+- Fixed assistant rendering for malformed responses containing null content blocks.
+- Changed the default Cerebras model to `gpt-oss-120b` and sorted idle sessions by last message activity.
+- Added a trace-sharing feature hint and changed the splash hint to point users to session search.
+- Changed `ctrl+p` to expand sent agent-message text inside IPython cells as well as received messages.
+- Added bare `--resume` and `/resume` routes for the agents view and session selectors.
+- Added `/workflow` brainstorming from a prompt or the current task, with restart-safe proposal sealing and native trusted approval before any workflow authority or execution is created.
+- Added the production Prime workflow host seam around one authenticated runtime store, exact-decision capabilities, canonical MemPalace recall, bounded AutoResearch proposals, and fail-closed no-active-attempt recovery.
+- Renamed the bundled AutoResearch workflow skill to `workflow-autoresearch` so personal `autoresearch` skills remain available alongside its host-owned facade.
+- Changed autonomous goal continuations to measure progress against intended and forbidden outcomes, adversarially challenge proxy metrics, and require public-boundary evidence instead of coverage, test counts, unit probes, or mocks.
+- Changed workflow acceptance to reject permanent tests that use private symbols, source inspection, or production test hooks while public behavior remains wrong.
+- Changed AutoResearch to reject parameter-only candidates and repeated solution families before execution, requiring adversarially reviewed independent mechanisms instead.
+- Added host-authenticated learning of verified AutoResearch outcomes with evidence deduplication and journal replay across session restart.
+- Added durable workflow worker result evidence, root-visible failure notices, released capacity on terminal workers, and explicit lost-worker recovery after restart.
+- Fixed custom Prime adapters bypassing durable recipe admission by requiring an opaque host-issued consumption proof.
+- Fixed session lists exposing stale `needs_input` verdicts while background workers were still active.
+- Fixed accepted agent messages remaining queued without a scheduler wake after an abort boundary.
+- Fixed workflow sessions admitting an unavailable goal facade by loading declared Python skill packages and failing closed when the required facade cannot import.
+- Fixed completed child tasks retaining a live IPython process by fencing the exact kernel before publishing terminal status.
+- Changed workflow-owned refinement to require an authenticated learning-promotion receipt instead of persisting unauthoritative session findings.
+- Changed the default adaptive workflow to preserve the complete recon-through-edge-test critical path in one authenticated recipe.
+- Fixed transient append contention poisoning adaptive review and goal accounting, with persistent contention now producing a typed workflow-host blocker.
+- Fixed task-result reconciliation bypassing the host append-operation owner and delaying dependency-successor admission beyond its bounded handoff window.
+- Fixed dependency launches waiting for a model boundary to persist accepted child messages by draining the durable batch at the host launch barrier.
+- Fixed worker heartbeats and post-deadline model or tool starts bypassing signed task deadlines by fencing the exact child before publishing one typed retryable expiry result and one fresh bounded retry.
+- Fixed source CLI workflows failing before their first exact Luna worker by composing model availability with the persisted signed admission gate.
+- Fixed authenticated child launches reaching their first model turn before the durable spawn-message obligation existed.
+- Fixed repository runtime artifacts under `tmp/` invalidating worktree-bound Intent-TDD evidence while the workflow was active.
+- Fixed retryable workflow task failures waiting for the generic progress lease before receiving a bounded restart-safe retry or typed blocker.
+
 ## [0.7.2] - 2026-08-11
 
 - Fixed Down Arrow focusing the Agents View entry before moving a nonempty prompt cursor to the end ([ENG-5147](https://linear.app/primeintellect/issue/ENG-5147/keep-down-arrow-in-the-prompt-until-the-cursor-reaches-the-end)).

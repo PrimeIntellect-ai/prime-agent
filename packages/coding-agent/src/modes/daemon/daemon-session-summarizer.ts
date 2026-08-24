@@ -2,7 +2,12 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "../../core/model-registry.js";
-import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js";
+import {
+	type AgentStatus,
+	type AgentTaskState,
+	projectResourceExhaustedBlocker,
+	type ResourceExhaustedBlocker,
+} from "../../core/session-manager.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
 const SWEEP_INTERVAL_MS = 25_000;
@@ -197,6 +202,32 @@ export function agentStatusChanged(previous: AgentStatus | undefined, next: Agen
 	return previous.summary !== next.summary || previous.taskState !== next.taskState;
 }
 
+function resourceBlockerStatus(blocker: ResourceExhaustedBlocker, messageCount: number): AgentStatus {
+	const projectedBlocker = projectResourceExhaustedBlocker(blocker);
+	return {
+		summary: "Provider resource limit reached",
+		taskState: "resource_exhausted",
+		resourceExhaustedBlocker: projectedBlocker,
+		basedOnMessageCount: messageCount,
+	};
+}
+
+function sameResourceBlocker(
+	left: ResourceExhaustedBlocker | undefined,
+	right: ResourceExhaustedBlocker | undefined,
+): boolean {
+	return (
+		left?.provider === right?.provider &&
+		left?.model === right?.model &&
+		left?.limitClass === right?.limitClass &&
+		left?.resetAt === right?.resetAt &&
+		left?.resetInSeconds === right?.resetInSeconds &&
+		left?.creditsAvailability === right?.creditsAvailability &&
+		left?.authorizationRevision === right?.authorizationRevision &&
+		left?.capacityRevision === right?.capacityRevision
+	);
+}
+
 function isSessionWorking(state: ActiveSessionState): boolean {
 	const session = state.runtime.session;
 	return session.isSessionActive;
@@ -265,6 +296,11 @@ export class DaemonSessionSummarizer {
 
 	/** Seed in-memory status from the persisted entry when a session is added. */
 	seed(state: ActiveSessionState): void {
+		const blocker = state.runtime.session.getResourceExhaustedBlocker?.();
+		if (blocker) {
+			state.summaryState = resourceBlockerStatus(blocker, state.runtime.session.messages.length);
+			return;
+		}
 		if (state.summaryState) {
 			return;
 		}
@@ -291,11 +327,25 @@ export class DaemonSessionSummarizer {
 
 	private async summarize(state: ActiveSessionState): Promise<void> {
 		const id = state.activeSessionId;
+		const session = state.runtime.session;
+		const blocker = session.getResourceExhaustedBlocker?.();
+		if (blocker) {
+			this.inFlight.get(id)?.abort();
+			const previous = state.summaryState;
+			const status = resourceBlockerStatus(blocker, session.messages.length);
+			state.summaryState = status;
+			if (
+				!sameResourceBlocker(previous?.resourceExhaustedBlocker, blocker) ||
+				previous?.summary !== status.summary
+			) {
+				this.onStatusChanged?.(state);
+			}
+			return;
+		}
 		if (this.inFlight.has(id)) {
 			this.rerunRequested.add(id); // run once more after the current pass
 			return;
 		}
-		const session = state.runtime.session;
 		const messages = session.messages;
 		if (messages.length === 0) {
 			return;
@@ -344,7 +394,8 @@ export class DaemonSessionSummarizer {
 				controller.signal.aborted ||
 				state.runtime.session !== session ||
 				isSessionWorking(state) !== isWorking ||
-				session.messages.length !== messageCount
+				session.messages.length !== messageCount ||
+				session.getResourceExhaustedBlocker?.() !== undefined
 			) {
 				return;
 			}
@@ -355,6 +406,7 @@ export class DaemonSessionSummarizer {
 			const status: AgentStatus = {
 				summary: result.summary,
 				taskState,
+				resourceExhaustedBlocker: undefined,
 				basedOnMessageCount: messageCount,
 			};
 			const changed = previous?.summary !== status.summary || previous?.taskState !== status.taskState;

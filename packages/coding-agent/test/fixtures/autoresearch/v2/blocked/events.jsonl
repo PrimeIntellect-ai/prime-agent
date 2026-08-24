@@ -1,0 +1,2 @@
+{"schema_version":2,"run_id":"fixture-blocked","seq":0,"time":"2026-08-13T00:00:01Z","event":"baseline","head":"base-commit","metric":7,"verify_log":"logs/baseline-verify.log","guard_log":null}
+{"schema_version":2,"run_id":"fixture-blocked","seq":1,"time":"2026-08-13T00:00:02Z","event":"blocked","reason":"approval required","head":"base-commit","metric":7,"unresolved_candidates":[]}

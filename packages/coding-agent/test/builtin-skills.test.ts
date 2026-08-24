@@ -174,6 +174,35 @@ describe("builtin skills", () => {
 	});
 
 	describe("DefaultResourceLoader", () => {
+		it("keeps personal autoresearch alongside the bundled workflow facade", async () => {
+			const originalHome = process.env.HOME;
+			process.env.HOME = tempDir;
+			try {
+				writeSkill(join(agentDir, "skills"), "autoresearch", "Personal repository experiment loop");
+
+				const loader = new DefaultResourceLoader({
+					cwd,
+					agentDir,
+					bundledSkillsDir: getBundledSkillsDir(),
+				});
+				await loader.reload();
+
+				const { skills, diagnostics } = loader.getSkills();
+				const personal = skills.find((skill) => skill.name === "autoresearch");
+				const workflow = skills.find((skill) => skill.name === "workflow-autoresearch");
+				expect(personal).toMatchObject({
+					description: "Personal repository experiment loop",
+					sourceInfo: { scope: "user" },
+				});
+				expect(workflow).toMatchObject({ name: "workflow-autoresearch", kind: "python" });
+				expect(workflow?.kind === "python" && workflow.python.importName).toBe("autoresearch");
+				expect(diagnostics.some((diagnostic) => diagnostic.collision?.name === "autoresearch")).toBe(false);
+			} finally {
+				if (originalHome === undefined) delete process.env.HOME;
+				else process.env.HOME = originalHome;
+			}
+		});
+
 		it("loads bundled skills with builtin source info", async () => {
 			writeSkill(bundledDir, "builtin-skill");
 

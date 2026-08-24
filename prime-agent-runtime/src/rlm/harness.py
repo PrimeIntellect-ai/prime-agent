@@ -1,9 +1,10 @@
 """Persistent harness-state helpers for Prime Agent's RLM kernel.
 
 The state model is intentionally small: it records prompt notes, memory,
-skills, subagent specs, and refinement events in the global agent harness
-directory by default. Execution still belongs to Prime Agent's TypeScript host
-and the existing ``rlm.run`` recursion bridge.
+skills, subagent specs, and refinement events in the session-local harness
+store by default; pass ``global_=True`` for the cross-session global store.
+Execution still belongs to Prime Agent's TypeScript host and the existing
+``rlm.run`` recursion bridge.
 """
 
 from __future__ import annotations
@@ -22,6 +23,27 @@ _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
+WORKFLOW_HARNESS_READ_ONLY_ENV = "RLM_HARNESS_READ_ONLY"
+NONAUTHORITATIVE_REFINEMENT_REJECTED = "nonauthoritative_refinement_rejected"
+
+
+class HarnessWriteDeniedError(RuntimeError):
+    """Raised when a workflow-owned kernel attempts a durable harness mutation."""
+
+    marker = NONAUTHORITATIVE_REFINEMENT_REJECTED
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"{self.marker}: workflow-owned harness state is read-only without an authenticated learning promotion receipt"
+        )
+
+
+def _workflow_harness_read_only() -> bool:
+    """Return whether the host marked this kernel's harness as workflow-owned and read-only.
+
+    Return: True when the host-owned read-only marker is enabled.
+    """
+    return os.environ.get(WORKFLOW_HARNESS_READ_ONLY_ENV) == "1"
 
 
 def _now() -> str:
@@ -172,8 +194,14 @@ class HarnessState:
         self.load()
 
     def _ensure_local_writable(self) -> None:
+        self._ensure_writable()
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
+
+    def _ensure_writable(self) -> None:
+        """Reject durable writes when the host marked this kernel read-only."""
+        if _workflow_harness_read_only():
+            raise HarnessWriteDeniedError()
 
     def _disk_mtime(self) -> int | None:
         if self.file_path is None:
@@ -273,7 +301,15 @@ class HarnessState:
         self._loaded_mtime = mtime
         return self
 
-    def _global_target(self, global_: bool, extra: dict[str, Any] | None = None) -> "HarnessState | None":
+    def _global_target(
+        self,
+        global_: bool,
+        extra: dict[str, Any] | None = None,
+        *,
+        for_write: bool = False,
+    ) -> "HarnessState | None":
+        if for_write:
+            self._ensure_writable()
         if not _resolve_global_flag(global_, extra):
             return None
         target = get_harness_state(state_dir=self._global_target_state_dir, global_=True)
@@ -282,6 +318,7 @@ class HarnessState:
         return target
 
     def save(self) -> "HarnessState":
+        self._ensure_writable()
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
             return self
@@ -315,7 +352,7 @@ class HarnessState:
         **kwargs: Any,
     ) -> HarnessEntry:
         id, global_ = _strip_scope_prefix(id, global_)
-        if target := self._global_target(global_, kwargs):
+        if target := self._global_target(global_, kwargs, for_write=True):
             return target.upsert(
                 kind,
                 title,
@@ -354,6 +391,7 @@ class HarnessState:
         metadata: dict[str, Any] | None = None,
         source: str = "agent",
     ) -> HarnessEntry:
+        self._ensure_writable()
         # Caller is responsible for syncing from disk first. create()/update() sync
         # once and then call this directly so their existence check and the write are
         # not separated by a second reload (which could turn create-or-fail into a
@@ -410,7 +448,7 @@ class HarnessState:
 
     def delete(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         id, global_ = _strip_scope_prefix(id, global_)
-        if target := self._global_target(global_, kwargs):
+        if target := self._global_target(global_, kwargs, for_write=True):
             return target.delete(kind, id)
         self._ensure_local_writable()
         self._sync_from_disk()
@@ -450,7 +488,7 @@ class HarnessState:
         **kwargs: Any,
     ) -> HarnessEntry:
         id, global_ = _strip_scope_prefix(id, global_)
-        if target := self._global_target(global_, kwargs):
+        if target := self._global_target(global_, kwargs, for_write=True):
             return target.create(
                 kind,
                 title,
@@ -497,7 +535,7 @@ class HarnessState:
         **kwargs: Any,
     ) -> HarnessEntry:
         id, global_ = _strip_scope_prefix(id, global_)
-        if target := self._global_target(global_, kwargs):
+        if target := self._global_target(global_, kwargs, for_write=True):
             return target.update(
                 kind,
                 id,
@@ -684,7 +722,7 @@ class HarnessState:
         global_: bool = False,
         **kwargs: Any,
     ) -> RefinementEvent:
-        if target := self._global_target(global_, kwargs):
+        if target := self._global_target(global_, kwargs, for_write=True):
             return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
         self._ensure_local_writable()
         self._sync_from_disk()
@@ -810,10 +848,13 @@ def get_harness_state(
 
 
 __all__ = [
+    "NONAUTHORITATIVE_REFINEMENT_REJECTED",
+    "WORKFLOW_HARNESS_READ_ONLY_ENV",
     "HarnessEntry",
     "HarnessKind",
     "HarnessScope",
     "HarnessState",
+    "HarnessWriteDeniedError",
     "RefinementEvent",
     "get_harness_state",
 ]

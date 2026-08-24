@@ -1,0 +1,10 @@
+{
+  "sourceCommit": "95e2fa1189f08ce694eb1a2b3e85d4bf58d3cfbf",
+  "linkedTreeDigest": "516333967c2a0042922ce3e5b80f725debc138cb",
+  "linkedLocatorDigest": "58ed3d5cb0d47dcae80abb128cef1c5cdd27097738180b9c5ffa5d612e34f676",
+  "approvalDigest": "1152a9410008de681627290161e3ebcae327108317d43b665e141d76b46195d0",
+  "noGrantScanDigest": "d26b07b0903fa71a792e9bfdd5b7b51678e3214a055e0f2d7bcb15fae6449572",
+  "trackedForbiddenPaths": [],
+  "forbiddenTextMatches": [],
+  "result": "clean"
+}

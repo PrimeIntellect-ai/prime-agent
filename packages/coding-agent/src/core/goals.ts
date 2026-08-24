@@ -13,6 +13,8 @@ export type GoalContextKind = "continuation" | "budget_limit" | "objective_updat
 export interface GoalState {
 	active: boolean;
 	status: GoalStatus;
+	/** Durable workflow owner set only by an authenticated workflow projection. */
+	workflowId?: string;
 	goalId?: string;
 	objective?: string;
 	tokenBudget?: number;
@@ -115,6 +117,9 @@ export function isPersistedGoalState(value: unknown): value is GoalState {
 	) {
 		return false;
 	}
+	if (record.workflowId !== undefined && (typeof record.workflowId !== "string" || record.workflowId.length === 0)) {
+		return false;
+	}
 	return (
 		typeof record.tokensUsed === "number" &&
 		typeof record.timeUsedSeconds === "number" &&
@@ -155,12 +160,14 @@ export function createGoalContextMessage(
 	goal: GoalState,
 	kind: GoalContextKind,
 	images?: ImageContent[],
+	workflowDirective?: string,
 ): CustomMessage<GoalContextDetails> {
 	if (!goal.objective) {
 		throw new Error("Cannot create goal context without an objective.");
 	}
 	const prompt = goalContextPrompt(goal, kind);
-	const text = `<goal_context>\n${prompt}\n</goal_context>`;
+	const directive = workflowDirective === undefined ? "" : `\n\n${workflowDirective}`;
+	const text = `<goal_context>\n${prompt}${directive}\n</goal_context>`;
 	const content: string | (TextContent | ImageContent)[] =
 		images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
 	return {
@@ -222,7 +229,9 @@ Goal state:
 - token budget: ${budget}
 - remaining tokens: ${remaining}
 
-The goal persists across turns. Ending one turn does not reduce or redefine the objective. If the goal is not complete yet, make concrete progress toward the full objective.
+The goal persists across turns. Ending one turn does not reduce or redefine the objective. If the goal is not complete yet, keep the planner moving and make concrete progress toward the full objective. A failed approach is a signal to re-plan, reallocate bounded resources, or try an independent route; pause only for a required user decision or a demonstrated hard blocker.
+
+Keep the plan accountable to the user's intended outcome and explicitly name relevant forbidden outcomes before choosing a consequential action. Adversarially challenge consequential decisions, including whether the chosen metric can be gamed or whether apparent progress merely optimizes a proxy. Test counts and coverage are diagnostic only. Unit tests are debugging probes only, and mock-only evidence cannot establish progress or completion. Permanent evidence that calls private symbols, inspects source text, or requires production test hooks is invalid; those probes are temporary, nonauthorizing, and removed before terminal review. Judge progress and completion from observable evidence that can falsify the intended or forbidden outcomes through public host, store, process, restart, or integration boundaries.
 
 Before marking the goal complete, audit the current state against every requirement in the objective. Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. If the objective is achieved, run \`await goal.complete()\` in ipython so usage accounting is preserved.
 

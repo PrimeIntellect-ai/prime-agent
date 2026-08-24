@@ -221,6 +221,52 @@ describe("agents view state", () => {
 		expect(refreshedOrder).toEqual(initialOrder);
 	});
 
+	test("sorts idle rows by last message activity, newest first", () => {
+		const rows = buildAgentsViewRows([
+			makeSummary({
+				id: "created-newest",
+				sessionId: "created-newest",
+				sessionName: "created newest",
+				activity: "idle",
+				created: "2026-01-03T00:00:00Z",
+				lastActivityAt: "2026-01-01T00:00:00Z",
+			}),
+			makeSummary({
+				id: "middle",
+				sessionId: "middle",
+				sessionName: "middle",
+				activity: "idle",
+				created: "2026-01-02T00:00:00Z",
+				lastActivityAt: "2026-01-02T00:00:00Z",
+			}),
+			makeSummary({
+				id: "active-newest",
+				sessionId: "active-newest",
+				sessionName: "active newest",
+				activity: "idle",
+				created: "2026-01-01T00:00:00Z",
+				lastActivityAt: "2026-01-03T00:00:00Z",
+			}),
+			makeSummary({
+				id: "running-oldest",
+				sessionId: "running-oldest",
+				sessionName: "running oldest",
+				activity: "working",
+				isStreaming: true,
+				created: "2025-12-31T00:00:00Z",
+				lastActivityAt: "2025-12-31T00:00:00Z",
+			}),
+		]);
+
+		expect(rows.map((row) => row.summary.sessionId)).toEqual([
+			"running-oldest",
+			"active-newest",
+			"middle",
+			"created-newest",
+		]);
+		expect(rows.map((row) => row.section)).toEqual(["running", "idle", "idle", "idle"]);
+	});
+
 	test("uses deterministic fallbacks when creation times are unavailable", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({ id: "beta-2", sessionId: "beta-2", sessionName: "beta", modified: "2026-01-03T00:00:00Z" }),

@@ -35,38 +35,54 @@ import type {
 	ImageContent,
 	Model,
 	ServiceTier,
+	StreamLivenessDiagnostic,
+	StreamLivenessHost,
+	StreamLivenessState,
+	StreamLivenessTerminalOutcome,
 	TextContent,
+	ToolResultMessage,
 	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	createStreamLivenessHost,
+	getDefaultStreamLivenessHost,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
+import type { DaemonWorkflowStatusProjection } from "../modes/daemon/daemon-session-list.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
 import {
+	AGENT_FAMILY_REACH_ERROR,
 	AGENT_MESSAGE_CUSTOM_TYPE,
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
 	AGENT_MESSAGE_SKILL_NAME,
+	AGENT_MESSAGE_SOURCE,
 	type AgentFamilyCatalogEntry,
 	type AgentFamilyRosterResult,
 	type AgentSessionMessage,
 	type AgentSessionMessageAgentSummary,
+	AgentSessionMessageBlockedError,
 	type AgentSessionMessageController,
 	type AgentSessionMessageListResult,
+	type AgentSessionMessagePayload,
 	type AgentSessionMessageReceipt,
 	assertAgentSessionNameAvailable,
 	assertDirectAgentMessageTarget,
 	createAgentMessageHostHandlers,
+	createAgentSessionMessage,
+	createAgentSessionMessageId,
+	createAgentSessionMessageReceipt,
 	formatAgentSessionNameUnavailable,
 	isAgentSessionMessage,
+	isAgentSessionMessageBlockedError,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
 } from "./agent-messages.js";
@@ -159,6 +175,7 @@ import {
 	GOAL_CONTEXT_PREVIEW_LABEL,
 	GOAL_SKILL_NAME,
 	GOAL_STATE_CUSTOM_TYPE,
+	type GoalContextKind,
 	type GoalHostResponse,
 	type GoalState,
 	type GoalStatus,
@@ -169,7 +186,15 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
-import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
+import {
+	createHostRequestGateway,
+	type HostRequestCapabilityContext,
+	type HostRequestHandlers,
+	installHostRequestCapabilityContext,
+	installHostRequestCapabilityResolver,
+	type KernelSentAgentMessage,
+} from "./kernel/index.js";
+import type { KernelContainerIsolationOptions } from "./kernel/isolation.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
@@ -183,6 +208,7 @@ import {
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
 	createSessionSlashCommandResultMessage,
+	createWorkflowWorkerFailureMessage,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
@@ -250,13 +276,23 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
-import type { BranchSummaryEntry, CompactionEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	ResourceExhaustedBlocker,
+	ResourceExhaustedBlockerEntryData,
+	SessionContext,
+	SessionMessageEntry,
+} from "./session-manager.js";
 import {
 	CURRENT_SESSION_VERSION,
 	getLatestCompactionEntry,
+	parseProviderStreamStallDiagnostic,
+	projectResourceExhaustedBlocker,
 	type SessionHeader,
 	SessionManager,
 } from "./session-manager.js";
+import type { SessionMessageObligationBridge } from "./session-message-obligation-bridge.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
@@ -269,12 +305,93 @@ import {
 } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import {
+	parseToolExecutionLeaseRecord,
+	parseToolExecutionStallDiagnostic,
+	TOOL_EXECUTION_LEASE_CUSTOM_TYPE,
+	TOOL_EXECUTION_STALL_CUSTOM_TYPE,
+	type ToolExecutionLeaseRecord,
+	type ToolExecutionLiveness,
+	type ToolExecutionStallDiagnostic,
+} from "./tool-execution-liveness.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { addAssistantUsage, emptyUsage } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
+import type { PrimeAdaptiveRuntimeState } from "./workflow/adaptive-runtime.js";
+import {
+	changedPaths,
+	computePathDiff,
+	formatDiffPush,
+	pathsInsideProtected,
+	pathsOutsideOwned,
+	sharesDiffs,
+	touchedPaths,
+	trackedUnder,
+	worktreesWithChanges,
+} from "./workflow/agent-collaboration.js";
+import {
+	createWorkflowBrainstormState,
+	createWorkflowProposalTool,
+	restoreWorkflowBrainstormState,
+	WORKFLOW_PROPOSE_TOOL_NAME,
+	type WorkflowBrainstormProposal,
+	type WorkflowBrainstormState,
+	workflowBrainstormMessage,
+	workflowBrainstormPrompt,
+	workflowProposalDigest,
+	workflowStartRequestFromProposal,
+} from "./workflow/brainstorm.js";
+import { readWorkflowCliApprovalDelivery, removeWorkflowCliApprovalDelivery } from "./workflow/cli-approval.js";
+import { digestObject, sha256Hex } from "./workflow/contracts.js";
+import type { DefaultPrimeWorkerFailureNotice } from "./workflow/default-task-runtime.js";
+import type {
+	WorkflowExecutionEvidenceSource,
+	WorkflowExecutionEvidenceState,
+	WorkflowExecutionToolCallFact,
+	WorkflowExecutionToolResultFact,
+	WorkflowExecutionTurnHandle,
+} from "./workflow/execution-evidence.js";
+import {
+	isWorkflowExecutionEvidenceSourceForHost,
+	revokeWorkflowExecutionEvidenceSource,
+} from "./workflow/execution-evidence.js";
+import {
+	consumeWorkflowGoalProjectionAuthorization,
+	validateWorkflowGoalProjectionAuthorization,
+	type WorkflowGoalProjectionAuthorization,
+} from "./workflow/journal.js";
+import type {
+	WorkflowLearningPromotionApplication,
+	WorkflowLearningPromotionConsumeAndApplyInput,
+} from "./workflow/learning-promotion-authority.js";
+import type { WorkflowLearningRuntimeAdapter } from "./workflow/learning-runtime-adapter.js";
+import { digestWorkflowGoalState, workflowGoalProjectionSnapshot } from "./workflow/projections.js";
+import type { WorkflowSchedulerState } from "./workflow/scheduler.js";
+import {
+	normalizeWorkflowAcceptanceRequest,
+	type WorkflowCommand,
+	type WorkflowShell,
+	type WorkflowShellStatus,
+} from "./workflow/shell.js";
+import type {
+	WorkflowSkillExecutor,
+	WorkflowSkillHostInvocationContext,
+	WorkflowSkillSnapshot,
+} from "./workflow/skill-snapshots.js";
+import {
+	parseWorkerModelCapabilityAdmission,
+	WORKER_MODEL_REASONING,
+	WORKER_MODEL_SELECTOR,
+	type WorkerModelCapabilityBlocker,
+	type WorkerModelCapabilityLaunchAdmission,
+	type WorkerModelCapabilityLaunchAuthorizer,
+	type WorkerModelCapabilityLaunchInput,
+	type WorkerModelChildModelBinding,
+	workerModelReasoningFor,
+} from "./workflow/worker-model-capability-gate.js";
 
 export type { GoalState, GoalStatus } from "./goals.js";
 export type { SessionStats } from "./session-stats.js";
@@ -403,6 +520,60 @@ type UserBashEndDetails = {
 /** Thrown when compaction is skipped for a benign reason (surfaced as a warning, not an error) */
 export class CompactionSkippedError extends Error {}
 
+const DEFAULT_COMPACTION_DEADLINE_MS = 120_000;
+const DEFAULT_TOOL_EXECUTION_DEADLINE_MS = 600_000;
+const DEFAULT_AGENT_MESSAGE_DELIVERY_DEADLINE_MS = 120_000;
+const AGENT_MESSAGE_DELIVERY_COMMIT_GRACE_MS = 5_000;
+const TOOL_EXECUTION_HARD_DEADLINE_MULTIPLIER = 4;
+
+function isWorkflowGoalAccountingContention(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		(error.message === "workflow_append_lease_guard_timeout" ||
+			error.message === "workflow_goal_accounting_rebase_exhausted")
+	);
+}
+
+export type AgentSessionCompactionPhase =
+	| "authenticating"
+	| "preparing"
+	| "before_extension"
+	| "summarizing"
+	| "committing"
+	| "after_extension"
+	| "kernel_notification"
+	| "child_cleanup"
+	| "recovering";
+
+export interface AgentSessionCompactionLiveness {
+	readonly phase: AgentSessionCompactionPhase;
+	readonly startedAt: number;
+	readonly deadlineAt: number;
+	readonly elapsedMs: number;
+}
+
+export interface AgentSessionProviderStreamLiveness {
+	readonly phase: StreamLivenessState["phase"];
+	readonly startedAt: number;
+	readonly deadlineAt: number;
+	readonly elapsedMs: number;
+	readonly lastProviderEventAt: number | undefined;
+	readonly lastMeaningfulContentDeltaAt: number | undefined;
+	readonly receivedBytes: number;
+	readonly blocks: number;
+	readonly abortability: StreamLivenessState["abortability"];
+}
+
+class CompactionDeadlineExceededError extends Error {
+	constructor(
+		readonly phase: AgentSessionCompactionPhase,
+		readonly deadlineMs: number,
+	) {
+		super(`Compaction deadline exceeded after ${deadlineMs}ms during ${phase}`);
+		this.name = "CompactionDeadlineExceededError";
+	}
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -498,6 +669,22 @@ export interface AgentSessionConfig {
 	 * is 0 and no persisted thread_goal_state entry exists in the branch.
 	 */
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Durable workflow shell supplied by the session service boundary. */
+	workflowHost?: WorkflowShell;
+	/** Host-owned construction gate; workflow kernels cannot prewarm before it resolves. */
+	workflowSetupGate?: Promise<void>;
+	/** Host-installed workflow/decision capabilities for mutating kernel requests. */
+	hostRequestCapabilityContext?: HostRequestCapabilityContext;
+	/** Host-owned total deadline for one compaction attempt. */
+	compactionDeadlineMs?: number;
+	/** Host-owned provider stream liveness policy and clock. */
+	streamLiveness?: StreamLivenessHost;
+	/** Host-owned absolute deadline for one tool invocation. */
+	toolExecutionDeadlineMs?: number;
+	/** Host-owned deadline for accepted agent messages to reach recipient context. */
+	agentMessageDeliveryDeadlineMs?: number;
+	/** Exact executable used to launch session kernels after separate host admission. */
+	kernelPythonLauncher?: string;
 }
 
 export interface ExtensionBindings {
@@ -797,6 +984,114 @@ function visibleSessionActionProjection(actions: readonly QueuedSessionAction[])
 }
 
 const IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY = "ipython_sent_agent_message";
+const WORKFLOW_TASK_BINDING_CUSTOM_ENTRY = "workflow_task_binding";
+const WORKFLOW_TASK_TERMINAL_CUSTOM_ENTRY = "workflow_task_terminal";
+const AGENT_MESSAGE_BATCH_MAX_ACTIONS = 32;
+const AGENT_MESSAGE_BATCH_MAX_CHARS = 32_768;
+
+type WorkflowTaskTerminalStatus = "completed" | "error" | "cancelled" | "deadline";
+
+interface WorkflowTaskBindingData {
+	schemaVersion: 1;
+	kind: "workflow_task_binding";
+	workflowId: string;
+	taskId: string;
+	attemptId: string;
+	executionKey: string;
+	epochRef: { storeEpoch: number; coordinatorEpoch: number };
+	deadlineAt: string;
+	capsuleDigest: string;
+}
+
+interface WorkflowTaskBinding extends WorkflowTaskBindingData {
+	readonly isActive?: () => boolean;
+}
+
+interface WorkflowTaskTerminalRecord {
+	readonly schemaVersion: 1;
+	readonly kind: "workflow_task_terminal";
+	readonly binding: WorkflowTaskBindingData;
+	readonly status: WorkflowTaskTerminalStatus;
+	readonly reason?: string;
+	readonly terminalAt: string;
+	readonly recordDigest: string;
+}
+
+function parseWorkflowTaskBinding(value: unknown): WorkflowTaskBindingData | undefined {
+	if (!isObjectRecord(value)) return undefined;
+	const epochRef = value.epochRef;
+	const workflowId = value.workflowId;
+	const taskId = value.taskId;
+	const attemptId = value.attemptId;
+	const executionKey = value.executionKey;
+	const deadlineAt = value.deadlineAt;
+	const capsuleDigest = value.capsuleDigest;
+	if (
+		value.schemaVersion !== 1 ||
+		value.kind !== "workflow_task_binding" ||
+		typeof workflowId !== "string" ||
+		workflowId.length === 0 ||
+		typeof taskId !== "string" ||
+		taskId.length === 0 ||
+		typeof attemptId !== "string" ||
+		attemptId.length === 0 ||
+		typeof executionKey !== "string" ||
+		executionKey.length === 0 ||
+		typeof deadlineAt !== "string" ||
+		deadlineAt.length === 0 ||
+		typeof capsuleDigest !== "string" ||
+		capsuleDigest.length === 0 ||
+		!isObjectRecord(epochRef) ||
+		!isNonNegativeInteger(epochRef.storeEpoch) ||
+		!isNonNegativeInteger(epochRef.coordinatorEpoch)
+	)
+		return undefined;
+	if (!Number.isFinite(Date.parse(deadlineAt))) return undefined;
+	return {
+		schemaVersion: 1,
+		kind: "workflow_task_binding",
+		workflowId,
+		taskId,
+		attemptId,
+		executionKey,
+		epochRef: { storeEpoch: epochRef.storeEpoch, coordinatorEpoch: epochRef.coordinatorEpoch },
+		deadlineAt,
+		capsuleDigest,
+	};
+}
+
+function parseWorkflowTaskTerminalRecord(value: unknown): WorkflowTaskTerminalRecord | undefined {
+	if (!isObjectRecord(value)) return undefined;
+	const binding = parseWorkflowTaskBinding(value.binding);
+	const status = value.status;
+	const reason = value.reason;
+	const terminalAt = value.terminalAt;
+	const recordDigest = value.recordDigest;
+	if (
+		value.schemaVersion !== 1 ||
+		value.kind !== WORKFLOW_TASK_TERMINAL_CUSTOM_ENTRY ||
+		binding === undefined ||
+		(status !== "completed" && status !== "error" && status !== "cancelled" && status !== "deadline") ||
+		typeof terminalAt !== "string" ||
+		!Number.isFinite(Date.parse(terminalAt)) ||
+		(reason !== undefined && typeof reason !== "string") ||
+		typeof recordDigest !== "string"
+	)
+		return undefined;
+	const unsigned: Omit<WorkflowTaskTerminalRecord, "recordDigest"> = {
+		schemaVersion: 1 as const,
+		kind: WORKFLOW_TASK_TERMINAL_CUSTOM_ENTRY,
+		binding,
+		status,
+		...(reason === undefined ? {} : { reason }),
+		terminalAt,
+	};
+	if (digestObject(unsigned) !== recordDigest) return undefined;
+	return {
+		...unsigned,
+		recordDigest,
+	};
+}
 
 interface PersistedIpythonSentAgentMessage {
 	toolCallId: string;
@@ -811,11 +1106,13 @@ function parsePersistedIpythonSentAgentMessage(value: unknown): PersistedIpython
 	if (!isObjectRecord(value) || typeof value.toolCallId !== "string" || !isObjectRecord(value.message)) {
 		return undefined;
 	}
-	const { id, message, deliveryStatus, target } = value.message;
+	const { id, message, deliveryStatus, blockedReason, auditOnly, target } = value.message;
 	if (
 		typeof id !== "string" ||
 		typeof message !== "string" ||
-		(deliveryStatus !== "delivered" && deliveryStatus !== "queued") ||
+		(deliveryStatus !== "delivered" && deliveryStatus !== "queued" && deliveryStatus !== "blocked") ||
+		(blockedReason !== undefined && typeof blockedReason !== "string") ||
+		(auditOnly !== undefined && auditOnly !== true) ||
 		!isObjectRecord(target) ||
 		typeof target.activeSessionId !== "string" ||
 		typeof target.sessionId !== "string"
@@ -828,6 +1125,8 @@ function parsePersistedIpythonSentAgentMessage(value: unknown): PersistedIpython
 			id,
 			message,
 			deliveryStatus,
+			...(typeof blockedReason === "string" ? { blockedReason } : {}),
+			...(auditOnly === true ? { auditOnly: true as const } : {}),
 			target: {
 				activeSessionId: target.activeSessionId,
 				sessionId: target.sessionId,
@@ -880,6 +1179,7 @@ interface AgentMessageDeferred {
  */
 interface AgentMessageOutcome {
 	delivery?: AgentMessageDeferred;
+	context?: AgentMessageDeferred;
 	completion?: AgentMessageDeferred;
 }
 
@@ -920,6 +1220,200 @@ type GoalSlashCommand =
 
 type AutonomousSlashCommand = { kind: "status" } | { kind: "on" } | { kind: "off" };
 
+interface WorkflowKernelHostBindings {
+	readonly hostRequestHandlers?: HostRequestHandlers;
+	readonly resolveHostRequestCapability?: (requestType: string) => HostRequestCapabilityContext;
+	readonly admitWorkerModel?: WorkerModelCapabilityLaunchAuthorizer;
+	readonly ensurePrimeWorkflow?: () => Promise<unknown>;
+	readonly primeWorkflow?: {
+		readonly plannerDirective?: string;
+		readonly snapshots?: {
+			readonly recipe: { readonly recipeDigest: string };
+			readonly skills: readonly WorkflowSkillSnapshot[];
+		};
+		readonly taskGraph?: { readonly graphDigest: string };
+		readonly readSchedulerState?: () => Promise<WorkflowSchedulerState>;
+		readonly executeSkill?: <TResult>(input: {
+			readonly snapshotDigest: string;
+			readonly token: string | Readonly<Uint8Array>;
+			readonly current: WorkflowSkillHostInvocationContext;
+			readonly executor: WorkflowSkillExecutor<TResult>;
+		}) => Promise<TResult>;
+		readonly executeSkillIteration?: <TResult>(input: {
+			readonly skillName: string;
+			readonly current: WorkflowSkillHostInvocationContext;
+			readonly executor: WorkflowSkillExecutor<TResult>;
+		}) => Promise<TResult>;
+		readonly learning?: WorkflowLearningRuntimeAdapter;
+		readonly pipeline?: {
+			read(): Promise<{
+				readonly workflowId: string;
+				readonly recipeDigest: string;
+				readonly completedStageIds: readonly string[];
+				readonly readyStageIds: readonly string[];
+				readonly stateDigest: string;
+			}>;
+		};
+		readonly executionEvidence?: { read(): Promise<WorkflowExecutionEvidenceState> };
+		readonly adaptiveRuntime?: { read(): Promise<PrimeAdaptiveRuntimeState> };
+		readonly recordSkillOutcome?: (skillName: string, result: Record<string, unknown>) => Promise<void>;
+	};
+}
+
+interface WorkflowKernelOwnership {
+	readonly workflowId: string | undefined;
+	readonly workflowBound: boolean;
+}
+
+export type AgentSessionWorkflowWorkerLaunchContext = Omit<
+	WorkerModelCapabilityLaunchInput,
+	"prompt" | "sessionName" | "selector" | "provider" | "model" | "reasoning" | "allowFallback"
+> & { readonly deadlineAt: string; readonly capsuleDigest?: string };
+
+export interface WorkflowSkillExecutionInput {
+	/** Admitted built-in skill name; raw paths and unregistered names are rejected. */
+	readonly skillName: string;
+}
+
+const WORKFLOW_START_USAGE = "Usage: /workflow start [--profile inline|parallel] [--max-workers <n>] [objective]";
+const WORKFLOW_RESPOND_USAGE =
+	"Usage: /workflow respond <approval-request-id> <option-id> (requires a structured trusted approval proof from the host boundary)";
+const WORKFLOW_BRAINSTORM_CONTEXT_QUESTION =
+	"What are we working on? Provide /workflow <what we are working on> before workflow execution can begin.";
+
+function readWorkflowToken(value: string): { token: string; remainder: string } {
+	const match = /^(\S+)(?:\s+([\s\S]*))?$/u.exec(value);
+	if (match === null) throw new Error(WORKFLOW_START_USAGE);
+	return { token: match[1], remainder: match[2]?.trim() ?? "" };
+}
+
+type WorkflowSessionCommand =
+	| WorkflowCommand
+	| {
+			kind: "brainstorm";
+			prompt?: string;
+			requestedProfile?: "inline" | "parallel";
+			maxWorkers?: number;
+	  }
+	| { kind: "approve"; cloud: boolean };
+
+function parseWorkflowStartCommand(remainder: string): Extract<WorkflowSessionCommand, { kind: "brainstorm" }> {
+	let remaining = remainder.trim();
+	let requestedProfile: "inline" | "parallel" | undefined;
+	let maxWorkers: number | undefined;
+	while (remaining.startsWith("--")) {
+		const option = readWorkflowToken(remaining);
+		remaining = option.remainder;
+		if (option.token === "--profile" || option.token.startsWith("--profile=")) {
+			if (requestedProfile !== undefined) throw new Error(WORKFLOW_START_USAGE);
+			const value =
+				option.token === "--profile"
+					? readWorkflowToken(remaining)
+					: { token: option.token.slice(10), remainder: remaining };
+			if (option.token === "--profile") remaining = value.remainder;
+			if (value.token !== "inline" && value.token !== "parallel") throw new Error(WORKFLOW_START_USAGE);
+			requestedProfile = value.token;
+			continue;
+		}
+		if (option.token === "--max-workers" || option.token.startsWith("--max-workers=")) {
+			if (maxWorkers !== undefined) throw new Error(WORKFLOW_START_USAGE);
+			const value =
+				option.token === "--max-workers"
+					? readWorkflowToken(remaining)
+					: { token: option.token.slice(14), remainder: remaining };
+			if (option.token === "--max-workers") remaining = value.remainder;
+			if (!/^\d+$/u.test(value.token)) throw new Error(WORKFLOW_START_USAGE);
+			const parsed = Number(value.token);
+			if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(WORKFLOW_START_USAGE);
+			maxWorkers = parsed;
+			continue;
+		}
+		throw new Error(WORKFLOW_START_USAGE);
+	}
+	return {
+		kind: "brainstorm",
+		...(remaining.length === 0 ? {} : { prompt: remaining }),
+		...(requestedProfile === undefined ? {} : { requestedProfile }),
+		...(maxWorkers === undefined ? {} : { maxWorkers }),
+	};
+}
+
+function parseWorkflowSessionCommand(args: string): WorkflowSessionCommand {
+	const trimmed = args.trim();
+	if (trimmed.length === 0) return { kind: "brainstorm" };
+	const separator = trimmed.search(/\s/u);
+	const action = separator < 0 ? trimmed : trimmed.slice(0, separator);
+	const remainder = separator < 0 ? "" : trimmed.slice(separator).trim();
+
+	switch (action) {
+		case "start":
+			return parseWorkflowStartCommand(remainder);
+		case "status":
+			if (remainder.length > 0) throw new Error("Usage: /workflow status");
+			return { kind: "status" };
+		case "decisions":
+			if (remainder.length > 0) throw new Error("Usage: /workflow decisions");
+			return { kind: "decisions" };
+		case "resources":
+			if (remainder.length > 0) throw new Error("Usage: /workflow resources");
+			return { kind: "resources" };
+		case "respond":
+			if (remainder.length === 0) throw new Error(WORKFLOW_RESPOND_USAGE);
+			throw new Error(
+				"Workflow approval responses require a structured trusted proof from the host boundary; textual option text is not an approval.",
+			);
+		case "approve":
+			if (remainder !== "" && remainder !== "--cloud") throw new Error("Usage: /workflow approve [--cloud]");
+			return { kind: "approve", cloud: remainder === "--cloud" };
+		case "pause":
+			if (remainder.length === 0) throw new Error("Usage: /workflow pause <reason>");
+			return { kind: "pause", reason: remainder };
+		case "resume":
+			return { kind: "resume", note: remainder || undefined };
+		case "cancel":
+			return { kind: "cancel", reason: remainder || undefined };
+		default:
+			return { kind: "brainstorm", prompt: trimmed };
+	}
+}
+
+function formatWorkflowSessionStatus(status: WorkflowShellStatus): string {
+	const phase = status.phase === null ? "" : ` (${status.phase})`;
+	const objective = status.goal.objective === undefined ? "" : ` objective=${JSON.stringify(status.goal.objective)}`;
+	const acceptance = ` acceptance=${status.acceptanceCheckIds.join(",")}`;
+	const invariants = ` invariants=${status.protectedInvariantIds.join(",")}`;
+	const decisions = ` decisions=${status.decisionRefs
+		.map((ref) => `${ref.decisionId}@${ref.revision}:${ref.decisionDigest}`)
+		.join(",")}`;
+	const scorecard = ` scorecard=${status.scorecardDigest ?? "none"}`;
+	const resources = ` resources=${status.resourceEnvelopeDigest ?? "none"}`;
+	const waits = ` waits=${status.pendingWaitReasons.map((reason) => reason.code).join(",")}`;
+	const next =
+		status.status === "awaiting_user" && status.approvalRequest === null
+			? ' next="/workflow resume" to approve this exact proposal'
+			: "";
+	const blocked = status.blocked === undefined ? "" : ` [blocked:${status.blocked.kind}] ${status.blocked.reason}`;
+	return `Workflow ${status.workflowId ?? "none"}: ${status.status}${phase}${objective}${acceptance}${invariants}${decisions}${scorecard}${resources}${waits}${next}${blocked}`;
+}
+
+function sameWorkflowGoalProjection(left: GoalState, right: GoalState): boolean {
+	return (
+		left.active === right.active &&
+		left.status === right.status &&
+		left.workflowId === right.workflowId &&
+		left.goalId === right.goalId &&
+		left.objective === right.objective &&
+		left.tokenBudget === right.tokenBudget &&
+		left.tokensUsed === right.tokensUsed &&
+		left.timeUsedSeconds === right.timeUsedSeconds &&
+		left.continuationsUsed === right.continuationsUsed &&
+		left.createdAt === right.createdAt &&
+		left.updatedAt === right.updatedAt &&
+		left.lastReason === right.lastReason &&
+		left.lastError === right.lastError
+	);
+}
+
 import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
 export type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
@@ -940,8 +1434,10 @@ interface RlmChildRun {
 	sessionDir: string;
 	status: RlmChildAgentStatus;
 	error?: string;
+	retryable?: boolean;
 	abort: () => void;
 	publication: AgentMessageDeferred;
+	completion: RlmChildCompletionDeferred;
 	/** Child session, once its runtime exists. Used to cancel nested child runs. */
 	session?: AgentSession;
 	/** True once the detached run task has finished its catch and cleanup paths. */
@@ -950,8 +1446,37 @@ interface RlmChildRun {
 	detachedDeletion?: RlmSubagentRegistryEntry;
 	/** Re-emits the run's rlm_child_update snapshot with its current status. */
 	emitUpdate?: () => void;
+	/** Exact workflow-child kernel fence started at terminal cancellation. */
+	terminalFence?: Promise<void>;
+	/** True once the exact terminal fence has settled and its proof can be published. */
+	terminalFenceSettled?: boolean;
+	/** Exact cleanup failure that prevented terminal publication. */
+	terminalFenceError?: Error;
 	/** Idempotent child-event forwarder cleanup, once the child runtime exists. */
 	unsubscribe?: () => void;
+}
+
+interface RlmChildCompletionResult {
+	readonly status: "completed" | "error" | "cancelled";
+	readonly output: string;
+	readonly error: string | null;
+	readonly retryable: boolean;
+}
+
+interface RlmChildCompletionDeferred {
+	readonly promise: Promise<RlmChildCompletionResult>;
+	resolve(result: RlmChildCompletionResult): void;
+}
+
+function createRlmChildCompletionDeferred(): RlmChildCompletionDeferred {
+	let resolveCompletion: ((result: RlmChildCompletionResult) => void) | undefined;
+	const promise = new Promise<RlmChildCompletionResult>((resolve) => {
+		resolveCompletion = resolve;
+	});
+	return {
+		promise,
+		resolve: (result) => resolveCompletion?.(result),
+	};
 }
 
 interface RlmSubagentModelSelection {
@@ -968,6 +1493,34 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 /** Cap on the post-compaction kernel namespace probe so a wedged kernel can't stall recovery. */
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
+const DEFAULT_PRIME_WORKER_MODEL = WORKER_MODEL_SELECTOR;
+/** Upper bound on back-to-back mid-run messages accepted from one sender within a single run. */
+const MAX_CONSECUTIVE_AGENT_MESSAGE_STEERS = 3;
+
+/**
+ * Tools brainstorming may use. Reconnaissance needs to read the workspace, so the
+ * propose tool alone leaves the planner blind and it asks the user for file contents
+ * it could have read. The read-only boundary is instructed in the brainstorm prompt
+ * and enforced for real at the recon stage, which runs under the read_workspace
+ * capability rather than session tools.
+ */
+const WORKFLOW_BRAINSTORM_TOOL_NAMES = [WORKFLOW_PROPOSE_TOOL_NAME, "ipython"] as const;
+
+/** Split a `provider/model-id` worker selector; model ids may themselves contain slashes. */
+function workerModelProvider(selector: string): string {
+	const separator = selector.indexOf("/");
+	return separator < 0 ? selector : selector.slice(0, separator);
+}
+
+function workerModelId(selector: string): string {
+	const separator = selector.indexOf("/");
+	return separator < 0 ? "" : selector.slice(separator + 1);
+}
+
+/** Reasoning level for a worker selector; the gate denies any id this does not cover. */
+function workerModelReasoning(selector: string): string {
+	return workerModelReasoningFor(workerModelId(selector)) ?? WORKER_MODEL_REASONING;
+}
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -978,6 +1531,19 @@ function autoRefineInstructions(reason: AutoRefineReason, review: AutoRefineRevi
 Reviewer instructions: ${review.instructions}`
 		: "";
 	return `Automatic refine review triggered by ${reason}. Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories. Do not promote anything global unless explicitly requested. Reviewer rationale: ${review.rationale}${detail}`;
+}
+
+export const NONAUTHORITATIVE_REFINEMENT_REJECTED = "nonauthoritative_refinement_rejected" as const;
+
+const WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED = `${NONAUTHORITATIVE_REFINEMENT_REJECTED}: workflow refinement requires an authenticated learning promotion receipt bound to an accepted stage result`;
+
+export class AgentSessionRefinementError extends Error {
+	readonly code = NONAUTHORITATIVE_REFINEMENT_REJECTED;
+
+	constructor() {
+		super(WORKFLOW_REFINEMENT_AUTHORITY_REQUIRED);
+		this.name = "AgentSessionRefinementError";
+	}
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
@@ -1035,6 +1601,63 @@ function readAssistantText(message: AssistantMessage): string {
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("");
+}
+
+function workflowExecutionAssistantDigest(message: AssistantMessage): string {
+	return digestObject({
+		api: message.api,
+		provider: message.provider,
+		model: message.model,
+		stopReason: message.stopReason,
+		errorMessage: message.errorMessage ?? null,
+		timestamp: message.timestamp,
+		content: message.content.map((block) => {
+			if (block.type === "text") return { type: block.type, text: block.text };
+			if (block.type === "thinking") return { type: block.type, thinking: block.thinking };
+			return {
+				type: block.type,
+				id: block.id,
+				name: block.name,
+				argumentsDigest: digestObject(block.arguments),
+			};
+		}),
+		usage: {
+			input: message.usage.input,
+			output: message.usage.output,
+			cacheRead: message.usage.cacheRead,
+			cacheWrite: message.usage.cacheWrite,
+			totalTokens: message.usage.totalTokens,
+			costTotal: message.usage.cost.total,
+		},
+	});
+}
+
+function workflowExecutionToolResultDigest(result: unknown, isError: boolean): string {
+	if (typeof result !== "object" || result === null || Array.isArray(result))
+		throw new Error("Workflow tool result is not a canonical result object.");
+	const content = (result as { readonly content?: unknown }).content;
+	if (!Array.isArray(content)) throw new Error("Workflow tool result content is unavailable.");
+	return digestObject({
+		content: content.map((block) => {
+			if (typeof block !== "object" || block === null || Array.isArray(block))
+				throw new Error("Workflow tool result content is invalid.");
+			const item = block as Record<string, unknown>;
+			if (item.type === "text" && typeof item.text === "string") return { type: item.type, text: item.text };
+			if (item.type === "image" && typeof item.data === "string" && typeof item.mimeType === "string")
+				return { type: item.type, data: item.data, mimeType: item.mimeType };
+			throw new Error("Workflow tool result content is invalid.");
+		}),
+		isError,
+	});
+}
+
+function workflowExecutionToolResultFact(message: ToolResultMessage<unknown>): WorkflowExecutionToolResultFact {
+	return {
+		toolCallId: message.toolCallId,
+		toolName: message.toolName,
+		isError: message.isError,
+		resultDigest: workflowExecutionToolResultDigest(message, message.isError),
+	};
 }
 
 function waitForPromiseOrAbort<T>(
@@ -1101,17 +1724,30 @@ export class AgentSession {
 		followUps: [],
 	};
 	private _agentEventQueue: Promise<void> = Promise.resolve();
+	private _workflowExecutionEventQueue: Promise<void> = Promise.resolve();
+	private _workflowExecutionNextTurnIndex = 0;
 
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
 	private readonly _actionStore = new ActionStore<QueuedSessionAction>();
+	private _agentMessageObligationBridge: SessionMessageObligationBridge | undefined;
 	private _sessionInputPump: Promise<void> = Promise.resolve();
 	// Coalesces wakes so overlapping submissions cannot start competing pumps.
 	private _sessionInputPumpRequested = false;
+	private _sessionInputPumpActive = false;
 	// Invalidates preparation when a branch pause starts and finishes before its next await resumes.
 	private _sessionInputPumpEpoch = 0;
 	private _sessionInputArrivalEpoch = 0;
 	// Persists abort/restart suspension after the initiating call returns.
 	private _sessionInputPumpSuspended = false;
+	/** Per-sender consecutive steer count, reset when the recipient finishes a run. */
+	private readonly _consecutiveSteersBySender = new Map<string, number>();
+	/** Content fingerprints already steered, so a repeated message cannot re-enter the loop. */
+	private readonly _steeredAgentMessageFingerprints = new Set<string>();
+	/** Sibling sessions that receive this worker's diffs, and how this worker identifies itself. */
+	private _collaborationPeers?: { readonly author: string; readonly reviewers: readonly string[] };
+	private _ownedPaths?: readonly string[];
+	private _reportedScopeViolations = new Set<string>();
+	private _immutablePathsAudited = false;
 	// Branch mutation pause leases can overlap and must all release before dispatch resumes.
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
@@ -1127,7 +1763,9 @@ export class AgentSession {
 	private _goalState: GoalState = emptyGoalState();
 	private _goalAccountingStartedAt: number | undefined = undefined;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
+	private _goalAccountingInFlight = new WeakMap<AssistantMessage, Promise<boolean>>();
 	private _goalAbortInProgress = false;
+	private _abortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
@@ -1136,6 +1774,19 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _compactionOperation: Promise<void> | undefined = undefined;
+	private readonly _compactionDeadlineMs: number;
+	private _compactionAttempt = 0;
+	private _compactionLiveness: Omit<AgentSessionCompactionLiveness, "elapsedMs"> | undefined;
+	private _providerStreamLiveness: AgentSessionProviderStreamLiveness | undefined;
+	private _providerStreamStartedAt: number | undefined;
+	private _providerStreamIdentity: number | undefined;
+	private _providerStreamStallDiagnostic: StreamLivenessDiagnostic | undefined;
+	private readonly _toolExecutionDeadlineMs: number;
+	private readonly _kernelPythonLauncher: string | undefined;
+	private readonly _toolExecutionLiveness = new Map<string, ToolExecutionLiveness>();
+	private readonly _toolExecutionDeadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private readonly _toolExecutionProgressDigests = new Map<string, string>();
+	private _toolExecutionStallDiagnostic: ToolExecutionStallDiagnostic | undefined;
 	/** One recovery attempt per overflow; "reported" dedups the failure notice. */
 	private _overflowRecovery: "idle" | "attempted" | "reported" = "idle";
 	private _continueAfterThresholdCompaction = false;
@@ -1152,7 +1803,13 @@ export class AgentSession {
 	private _retryPromise: Promise<void> | undefined = undefined;
 	private _retryResolve: (() => void) | undefined = undefined;
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
+	private _resourceCapacityRevision = "epoch:0";
+	private _resourceProbeWakeTimer: ReturnType<typeof setTimeout> | undefined;
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
+	private readonly _agentMessageDeliveryDeadlineMs: number;
+	private readonly _agentMessageDeliveryDeadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private readonly _pendingAgentMessageContextDeliveries = new Set<string>();
+	private _agentMessageDeadlineContextCommit: Promise<void> = Promise.resolve();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
 	private readonly _unpersistedCompactionOutcomes: CustomMessage[] = [];
@@ -1192,6 +1849,22 @@ export class AgentSession {
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
+	private _workflowHost?: WorkflowShell;
+	private _workflowHostLoader?: () => Promise<void>;
+	private _workflowHostLoading?: Promise<WorkflowShell>;
+	private _workflowHostRequestHandlers?: HostRequestHandlers;
+	private _workflowExecutionEvidenceSource?: WorkflowExecutionEvidenceSource;
+	private _workflowBrainstorm?: WorkflowBrainstormState;
+	private _workflowExecutionTurnHandle?: WorkflowExecutionTurnHandle;
+	private _workflowExecutionToolStarts: WorkflowExecutionToolCallFact[] = [];
+	private _workflowExecutionToolEnds: WorkflowExecutionToolResultFact[] = [];
+	private _workflowTaskBinding?: WorkflowTaskBinding;
+	private _workflowTaskTerminal?: WorkflowTaskTerminalRecord;
+	private _workflowTaskDeadlineMonotonicAtMs?: number;
+	private _workflowTaskDeadlineAbort?: () => void;
+	private _queuedWorkflowPlannerStateDigest?: string;
+	private _hostRequestCapabilityContext: HostRequestCapabilityContext;
+	private readonly _hasExplicitHostRequestCapabilityContext: boolean;
 	private _disposed = false;
 	private readonly _disposeCallbacks = new Set<() => void | Promise<void>>();
 	private _disposeCallbacksPromise?: Promise<void>;
@@ -1200,6 +1873,10 @@ export class AgentSession {
 	private _disposing = false;
 	private _disposeAsyncPromise?: Promise<void>;
 	private _ipythonKernelProvisioner?: IpythonKernelProvisioner;
+	/** Prewarm is held until workflow identity and task binding are available. */
+	private _ipythonPrewarmPending = false;
+	private readonly _workflowSetupGate: Promise<void>;
+	private _workflowSetupReady = false;
 	/** Artifact dir backing the current provisioner's kernel snapshot, if any. */
 	private _ipythonKernelSnapshotDir?: string;
 	/** True once the runtime has been built once; later builds are in-process rebuilds (/reload). */
@@ -1216,6 +1893,7 @@ export class AgentSession {
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
+	private _rlmChildCompletionPromises = new Map<string, Promise<RlmChildCompletionResult>>();
 	private _pendingRlmSubagentSessionNames = new Set<string>();
 	// Inline mode keeps finished child sessions so the inspector can still read them;
 	// the daemon does the same by leaving the child session resident in its registry.
@@ -1297,9 +1975,39 @@ export class AgentSession {
 		this._cwd = config.cwd;
 		this._agentDir = config.agentDir;
 		this._modelRegistry = config.modelRegistry;
+		this._compactionDeadlineMs = config.compactionDeadlineMs ?? DEFAULT_COMPACTION_DEADLINE_MS;
+		if (!Number.isFinite(this._compactionDeadlineMs) || this._compactionDeadlineMs <= 0) {
+			throw new Error("compactionDeadlineMs must be a positive finite number");
+		}
+		this._toolExecutionDeadlineMs = config.toolExecutionDeadlineMs ?? DEFAULT_TOOL_EXECUTION_DEADLINE_MS;
+		if (!Number.isFinite(this._toolExecutionDeadlineMs) || this._toolExecutionDeadlineMs <= 0) {
+			throw new Error("toolExecutionDeadlineMs must be a positive finite number");
+		}
+		this._agentMessageDeliveryDeadlineMs =
+			config.agentMessageDeliveryDeadlineMs ?? DEFAULT_AGENT_MESSAGE_DELIVERY_DEADLINE_MS;
+		if (!Number.isFinite(this._agentMessageDeliveryDeadlineMs) || this._agentMessageDeliveryDeadlineMs <= 0) {
+			throw new Error("agentMessageDeliveryDeadlineMs must be a positive finite number");
+		}
+		this._kernelPythonLauncher = config.kernelPythonLauncher;
+		const streamLiveness = config.streamLiveness ?? getDefaultStreamLivenessHost();
+		this.agent.streamLiveness = createStreamLivenessHost({
+			policyResolver: streamLiveness.policyResolver,
+			clock: streamLiveness.clock,
+			scheduler: streamLiveness.scheduler,
+			abortability: streamLiveness.abortability,
+			onState: (state) => {
+				this._observeProviderStreamLiveness(state, streamLiveness);
+				streamLiveness.onState?.(state);
+			},
+			onTerminal: (outcome) => {
+				this._observeProviderStreamTerminal(outcome);
+				streamLiveness.onTerminal?.(outcome);
+			},
+		});
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
+		this._allowedToolNames?.add(WORKFLOW_PROPOSE_TOOL_NAME);
 		this._includeGoals = config.includeGoals ?? true;
 		this._includeCompactSkill = config.includeCompactSkill ?? this.settingsManager.getCompactionAgentCallable();
 		this._rlmHeartbeatController = config.rlmHeartbeatController;
@@ -1320,11 +2028,26 @@ export class AgentSession {
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
+		this._workflowSetupGate = config.workflowSetupGate ?? Promise.resolve();
+		void this._workflowSetupGate.then(
+			() => {
+				this._workflowSetupReady = true;
+				this._releaseDeferredIpythonPrewarm();
+			},
+			() => undefined,
+		);
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
+		this._workflowHost = config.workflowHost;
+		this._hasExplicitHostRequestCapabilityContext = config.hostRequestCapabilityContext !== undefined;
+		this._hostRequestCapabilityContext = config.hostRequestCapabilityContext ?? { capabilities: [] };
+		if (this._workflowHost !== undefined) {
+			const workflowHost = this._workflowHost;
+			this.registerDisposeCallback(() => workflowHost.dispose?.());
+		}
 		// A resumed child may have replied before this process started; false would
 		// claim knowledge that is not present in the session transcript.
 		this._repliedToParentSinceTask =
@@ -1336,6 +2059,14 @@ export class AgentSession {
 			cwd: this._cwd,
 		});
 		this._goalState = this._loadPersistedGoalState();
+		const restoredWorkflowBrainstorm = restoreWorkflowBrainstormState(this.agent.state.messages);
+		this._workflowBrainstorm =
+			restoredWorkflowBrainstorm?.workflowId === this.sessionManager.getSessionId()
+				? restoredWorkflowBrainstorm
+				: undefined;
+		this._providerStreamStallDiagnostic = this._loadPersistedProviderStreamStallDiagnostic();
+		this._toolExecutionStallDiagnostic = this._loadPersistedToolExecutionStallDiagnostic();
+		this._restorePersistedToolExecutionLeases();
 		// Seed initial goal from CLI --goal flag, but only for top-level sessions
 		// and only when the branch contains only bootstrap entry types (model_change,
 		// thinking_level_change, service_tier_change) and no persisted
@@ -1345,12 +2076,13 @@ export class AgentSession {
 			this._goalState = this._startGoal(config.initialGoal.objective, config.initialGoal.tokenBudget);
 			// Goal context is the model's only source of goal visibility; action
 			// admission is unavailable mid-construction, so ride the next turn.
-			this._pendingNextTurnMessages.push(createGoalContextMessage(this._goalState, "continuation"));
+			this._pendingNextTurnMessages.push(this._createGoalContextMessage("continuation"));
 		}
 		this._restoreLateIpythonSentAgentMessages();
 		if (this._goalState.status === "active") {
 			this._goalAccountingStartedAt = Date.now();
 		}
+		this._restoreWorkflowTaskAdmission();
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -1360,9 +2092,19 @@ export class AgentSession {
 		this._installAgentContinuationHook();
 
 		this._buildRuntime({
-			activeToolNames: this._initialActiveToolNames,
+			activeToolNames:
+				this._workflowBrainstorm?.status === "draft"
+					? [WORKFLOW_PROPOSE_TOOL_NAME]
+					: this._workflowBrainstorm?.status === "proposed"
+						? []
+						: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		const persistedResourceBlocker = this.sessionManager.getLatestResourceExhaustedBlocker();
+		if (persistedResourceBlocker) {
+			this._resourceCapacityRevision = persistedResourceBlocker.capacityRevision;
+			this._scheduleResourceExhaustionProbeWake(persistedResourceBlocker);
+		}
 	}
 
 	/**
@@ -1392,6 +2134,604 @@ export class AgentSession {
 		this._subagentRuntimeHost = host;
 	}
 
+	/**
+	 * Bind the persisted-session workflow shell once and register its lifecycle with this session.
+	 *
+	 * Args:
+	 * host: Durable workflow shell created by the session service, or undefined before initial binding.
+	 * Return: No value.
+	 */
+	setWorkflowHost(host?: WorkflowShell, executionEvidenceSource?: WorkflowExecutionEvidenceSource): void {
+		if (
+			executionEvidenceSource !== undefined &&
+			(host === undefined || !isWorkflowExecutionEvidenceSourceForHost(executionEvidenceSource, host))
+		)
+			throw new Error("The workflow execution-evidence source is not host issued.");
+		if (this._workflowHost === host) {
+			if (this._workflowExecutionEvidenceSource !== executionEvidenceSource)
+				throw new Error("The durable workflow host cannot be rebound with a different execution-evidence source.");
+			return;
+		}
+		if (this._workflowHost !== undefined) {
+			throw new Error("The durable workflow host cannot be detached or replaced once bound.");
+		}
+		this._workflowHost = host;
+		this._workflowExecutionEvidenceSource = executionEvidenceSource;
+		if (host !== undefined && host.status().status === "awaiting_user") {
+			if (this._workflowBrainstorm?.status === "draft")
+				this._persistWorkflowBrainstormState({ ...this._workflowBrainstorm, status: "proposed" });
+			if (this._workflowBrainstorm?.status === "proposed") this.setActiveToolsByName([]);
+		}
+		const bindings = host as WorkflowKernelHostBindings | undefined;
+		if (bindings?.hostRequestHandlers !== undefined) {
+			if (this._workflowHostRequestHandlers === undefined)
+				throw new Error("Workflow kernel host handlers were not installed before workflow binding.");
+			Object.assign(this._workflowHostRequestHandlers, bindings.hostRequestHandlers);
+		}
+		// KernelManager snapshots both its gateway handler map and environment at
+		// construction. Rebuild after durable binding so a prewarmed kernel cannot
+		// retain pre-host refinement permissions or a writable harness.
+		this._buildRuntime({ activeToolNames: this.getActiveToolNames(), includeAllExtensionTools: true });
+		if (host !== undefined) this.registerDisposeCallback(() => host.dispose?.());
+		this._releaseDeferredIpythonPrewarm();
+	}
+
+	/**
+	 * Register the one-use loader that creates workflow authority only after a proposal is complete.
+	 * Args:
+	 * loader: Host-owned initializer that must bind the resulting workflow host to this session.
+	 * Return: No value.
+	 */
+	setWorkflowHostLoader(loader: () => Promise<void>): void {
+		if (this._workflowHost !== undefined || this._workflowHostLoader !== undefined)
+			throw new Error("The durable workflow host loader is already configured.");
+		this._workflowHostLoader = loader;
+	}
+
+	/**
+	 * Read safe workflow status from the already-bound host without loading workflow runtime state.
+
+	 * Return: Safe workflow status projection, or undefined before host binding.
+	 */
+	getWorkflowStatusProjection(): DaemonWorkflowStatusProjection | undefined {
+		const status = this._workflowHost?.status();
+		if (status === undefined) return undefined;
+		const blocked = status.blocked;
+		const approvalRequest = status.approvalRequest;
+		return {
+			workflowId: status.workflowId,
+			status: status.status,
+			phase: status.phase === "recovering" ? null : status.phase,
+			nextGate: null,
+			nextTask: null,
+			blocker:
+				blocked === undefined
+					? null
+					: {
+							kind: blocked.kind,
+							reason: blocked.reason,
+							...(blocked.blockerId === undefined ? {} : { blockerId: blocked.blockerId }),
+							...(blocked.blockerDigest === undefined ? {} : { blockerDigest: blocked.blockerDigest }),
+							...(blocked.owner === undefined ? {} : { owner: blocked.owner }),
+							...(blocked.resumeEventKind === undefined ? {} : { resumeEventKind: blocked.resumeEventKind }),
+							...(blocked.resumePredicateDigest === undefined
+								? {}
+								: { resumePredicateDigest: blocked.resumePredicateDigest }),
+							...(blocked.nextEligibleAt === undefined ? {} : { nextEligibleAt: blocked.nextEligibleAt }),
+						},
+			headDigest: status.stateDigest,
+			approvalRequest:
+				approvalRequest === null
+					? null
+					: {
+							approvalRequestId: approvalRequest.approvalRequestId,
+							question: approvalRequest.question,
+							expiresAt: approvalRequest.expiresAt,
+							expectedResponseSequence: approvalRequest.expectedResponseSequence,
+							headDigest: approvalRequest.headDigest,
+							stateDigest: approvalRequest.stateDigest,
+							options: approvalRequest.options.map(({ optionId, label, effectDigest }) => ({
+								optionId,
+								label,
+								effectDigest,
+							})),
+						},
+		};
+	}
+
+	private async _ensureWorkflowHost(): Promise<WorkflowShell> {
+		if (this._workflowHost !== undefined) return this._workflowHost;
+		if (this._workflowHostLoading !== undefined) return this._workflowHostLoading;
+		const loader = this._workflowHostLoader;
+		if (loader === undefined) throw new Error("Workflow commands require a persisted session artifact root.");
+		this._workflowHostLoading = (async () => {
+			await loader();
+			if (this._workflowHost === undefined)
+				throw new Error("The durable workflow host loader did not bind workflow authority.");
+			this._workflowHostLoader = undefined;
+			return this._workflowHost;
+		})();
+		try {
+			return await this._workflowHostLoading;
+		} finally {
+			this._workflowHostLoading = undefined;
+		}
+	}
+
+	private _persistWorkflowBrainstormState(state: WorkflowBrainstormState): void {
+		const message = workflowBrainstormMessage(state);
+		this.sessionManager.appendCustomMessageEntryWithRollback(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+		);
+		this._workflowBrainstorm = state;
+		this.agent.state.messages.push(message);
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
+	}
+
+	private _currentWorkflowTaskContext(): string | undefined {
+		for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
+			const message = this.agent.state.messages[index];
+			if (message?.role !== "user") continue;
+			const text = normalizeMessageContent(message.content).text.trim();
+			if (text.length > 0 && !text.startsWith("/workflow")) return text;
+		}
+		return undefined;
+	}
+
+	private async _beginWorkflowBrainstorm(input: {
+		prompt?: string;
+		requestedProfile?: "inline" | "parallel";
+		maxWorkers?: number;
+	}): Promise<string> {
+		const hostStatus = this._workflowHost?.status();
+		if (hostStatus !== undefined && hostStatus.status !== "idle")
+			throw new Error(
+				`Workflow brainstorming requires idle workflow authority; current status is ${hostStatus.status}.`,
+			);
+		if (this._workflowBrainstorm?.status === "proposed")
+			throw new Error("The sealed workflow proposal is already awaiting trusted approval.");
+		const prompt = input.prompt?.trim() || this._currentWorkflowTaskContext();
+		if (prompt === undefined) {
+			const state =
+				this._workflowBrainstorm?.status === "draft"
+					? this._workflowBrainstorm
+					: createWorkflowBrainstormState({
+							workflowId: this.sessionManager.getSessionId(),
+							prompt: WORKFLOW_BRAINSTORM_CONTEXT_QUESTION,
+							requestedProfile: input.requestedProfile,
+							maxWorkers: input.maxWorkers,
+							previousToolNames: this.getActiveToolNames().filter((name) => name !== WORKFLOW_PROPOSE_TOOL_NAME),
+						});
+			if (this._workflowBrainstorm !== state) this._persistWorkflowBrainstormState(state);
+			this.setActiveToolsByName([...WORKFLOW_BRAINSTORM_TOOL_NAMES]);
+			return WORKFLOW_BRAINSTORM_CONTEXT_QUESTION;
+		}
+		const state =
+			this._workflowBrainstorm?.status === "draft" && input.prompt === undefined
+				? this._workflowBrainstorm
+				: createWorkflowBrainstormState({
+						workflowId: this.sessionManager.getSessionId(),
+						prompt,
+						requestedProfile: input.requestedProfile,
+						maxWorkers: input.maxWorkers,
+						previousToolNames: this.getActiveToolNames().filter((name) => name !== WORKFLOW_PROPOSE_TOOL_NAME),
+					});
+		if (this._workflowBrainstorm !== state) this._persistWorkflowBrainstormState(state);
+		this.setActiveToolsByName([...WORKFLOW_BRAINSTORM_TOOL_NAMES]);
+		await this._queuePreparedPrompt("followUp", workflowBrainstormPrompt(state), undefined, {
+			resumeIfIdle: true,
+			source: "internal",
+			queueKey: `workflow-brainstorm:${state.draftId}`,
+			previewLabel: "Workflow brainstorming",
+			suppressAutonomousContinuation: true,
+		});
+		return "Workflow brainstorming started. I will ask only for material missing decisions, then present one exact proposal for approval.";
+	}
+
+	private async _submitWorkflowBrainstormProposal(
+		proposal: WorkflowBrainstormProposal,
+	): Promise<{ readonly status: string }> {
+		const state = this._workflowBrainstorm;
+		if (state?.status !== "draft")
+			throw new Error("Workflow proposal submission requires an active brainstorm draft.");
+		const artifactRoot = this.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined)
+			throw new Error("Workflow proposal submission requires persisted session artifacts.");
+		const request = await workflowStartRequestFromProposal({ artifactRoot, state, proposal });
+		normalizeWorkflowAcceptanceRequest(request);
+		await this._ensureWorkflowHost();
+		const status = await this.executeWorkflowCommand({ kind: "start", request });
+		if (status.status !== "awaiting_user")
+			throw new Error("Workflow proposal did not reach the durable awaiting-user approval state.");
+		this._persistWorkflowBrainstormState({
+			...state,
+			status: "proposed",
+			proposalDigest: workflowProposalDigest(proposal),
+		});
+		this.setActiveToolsByName([]);
+		return { status: status.status };
+	}
+
+	private async _approveWorkflowProposal(cloud: boolean): Promise<WorkflowShellStatus> {
+		const workflowHost = await this._ensureWorkflowHost();
+		const pending = workflowHost.status();
+		if (pending.status !== "awaiting_user" || pending.approvalRequest === null)
+			throw new Error("Workflow approval requires one pending durable proposal.");
+		const artifactRoot = this.sessionManager.getSessionArtifactDir();
+		if (artifactRoot === undefined) throw new Error("Workflow approval requires persisted session artifacts.");
+		const delivery = await readWorkflowCliApprovalDelivery(artifactRoot);
+		if (
+			delivery === undefined ||
+			delivery.request.workflowId !== pending.approvalRequest.workflowId ||
+			delivery.request.approvalRequestId !== pending.approvalRequest.approvalRequestId ||
+			delivery.request.stateDigest !== pending.approvalRequest.stateDigest
+		)
+			throw new Error("The trusted approval credential is unavailable or stale for this proposal.");
+		const optionId = cloud ? "approve_cloud" : "approve";
+		const proof = delivery.proofs[optionId];
+		if (proof === undefined) throw new Error(`The trusted approval option ${optionId} is unavailable.`);
+		const status = await this.executeWorkflowCommand({
+			kind: "respond",
+			approvalRequestId: pending.approvalRequest.approvalRequestId,
+			optionId,
+			proof,
+		});
+		if (status.status !== "active")
+			throw new Error("Trusted workflow approval did not activate the durable workflow.");
+		await removeWorkflowCliApprovalDelivery(artifactRoot);
+		const state = this._workflowBrainstorm;
+		if (state?.status === "proposed") {
+			this._persistWorkflowBrainstormState({ ...state, status: "activated" });
+			this.setActiveToolsByName([...state.previousToolNames]);
+		}
+		return status;
+	}
+
+	/**
+	 * Execute one durable workflow command and start planner continuity when it activates the goal.
+	 *
+	 * Args:
+	 * command: Structured command authorized by the session boundary.
+	 * Return: Current durable workflow status after the command.
+	 */
+	async executeWorkflowCommand(command: WorkflowCommand): Promise<WorkflowShellStatus> {
+		const workflowHost = await this._ensureWorkflowHost();
+		if (command.kind === "start" && command.request.goalContract === undefined) {
+			throw new Error(
+				"A causal goal contract is required before starting the default workflow; provide explicit success metrics, protected guards, non-goals, and budgets for user approval.",
+			);
+		}
+		const status = await workflowHost.execute(command);
+		if (status.status === "active") await (workflowHost as WorkflowKernelHostBindings).ensurePrimeWorkflow?.();
+		const activatesPlanner = command.kind === "start" || command.kind === "respond" || command.kind === "resume";
+		if (activatesPlanner) this._queueWorkflowPlannerIfActive(status, false);
+		return status;
+	}
+
+	/**
+	 * Execute an admitted built-in skill through the authenticated Prime host.
+	 *
+	 * Args:
+	 * input: Snapshot token, current invocation tuple, and the host-side executor.
+	 * Return: Executor result after durable admission and nonce consumption.
+	 */
+	async executeWorkflowSkill(input: WorkflowSkillExecutionInput): Promise<Record<string, unknown>> {
+		if (input.skillName.length === 0) throw new Error("Workflow skill name is required.");
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow skill execution requires a persisted session host.");
+		const workflowStatus = workflowShell.status().status;
+		if (workflowStatus === "complete" && input.skillName === "mempalace") {
+			await (workflowShell as WorkflowKernelHostBindings).ensurePrimeWorkflow?.();
+			return this.executeWorkflowHostRequest("workflow.v1.mempalace.recall", {
+				query: `skill:${input.skillName}`,
+				limit: 1,
+			});
+		}
+		if (workflowStatus !== "active")
+			throw new Error("Workflow skill execution requires an active authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const executeSkillIteration = workflowHost.primeWorkflow?.executeSkillIteration;
+		if (executeSkillIteration === undefined) throw new Error("Workflow skill execution is unavailable on this host.");
+		const snapshot = workflowHost.primeWorkflow?.snapshots?.skills.find(
+			(candidate) => candidate.skillName === input.skillName,
+		);
+		if (snapshot === undefined) throw new Error("Workflow skill is not admitted by the active Prime recipe.");
+		const current: WorkflowSkillHostInvocationContext = {
+			workflowId: snapshot.workflowId,
+			taskId: snapshot.taskId,
+			decisionRef: snapshot.decisionRef,
+			configDigest: snapshot.configDigest,
+			workspaceDigest: snapshot.workspaceDigest,
+			attemptId: snapshot.attemptId,
+			epochRef: snapshot.epochRef,
+			dependencyManifestDigest: snapshot.dependencyManifestDigest,
+			workflowContractRevision: snapshot.workflowContractRevision,
+			trustedNow: snapshot.trustedNow,
+			journalHeadDigest: snapshot.journalHeadDigest,
+		};
+		const result = await executeSkillIteration({
+			skillName: input.skillName,
+			current,
+			executor: {
+				execute: async () => {
+					if (input.skillName === "workflow-autoresearch") {
+						return this.executeWorkflowHostRequest("workflow.v1.autoresearch.run", {
+							recipe_digest: workflowHost.primeWorkflow?.snapshots?.recipe.recipeDigest,
+							evidence_refs: [],
+						});
+					}
+					if (input.skillName === "mempalace") {
+						return this.executeWorkflowHostRequest("workflow.v1.mempalace.recall", {
+							query: `skill:${input.skillName}`,
+							limit: 1,
+						});
+					}
+					throw new Error("Workflow skill has no host-owned execution route.");
+				},
+			},
+		});
+		await workflowHost.primeWorkflow?.recordSkillOutcome?.(input.skillName, result);
+		return result;
+	}
+
+	/**
+	 * Apply one host-authenticated learning promotion to the canonical workflow refinement store.
+	 *
+	 * Args:
+	 * input: One-use promotion receipt and the host-validated refinement payload.
+	 * Return: Canonical application result returned by the workflow authority.
+	 */
+	async applyWorkflowLearningPromotionRefinement(
+		input: WorkflowLearningPromotionConsumeAndApplyInput,
+	): Promise<WorkflowLearningPromotionApplication> {
+		const workflowHost = this._workflowHost;
+		if (workflowHost === undefined)
+			throw new Error("Workflow learning promotion refinement requires a persisted session host.");
+		const receipts = workflowHost.learningPromotionReceipts;
+		if (receipts === undefined)
+			throw new Error("Workflow learning promotion refinement is unavailable on this host.");
+		return receipts.consumeAndApply(input);
+	}
+
+	/**
+	 * Read the durable learning state composed by the active Prime workflow.
+	 *
+	 * Return: Authenticated learning experiences, reviews, triggers, and state digest replayed from the workflow journal.
+	 */
+	async getWorkflowLearningState(): ReturnType<WorkflowLearningRuntimeAdapter["getState"]> {
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow learning requires a persisted session host.");
+		if (!["active", "complete"].includes(workflowShell.status().status))
+			throw new Error("Workflow learning requires an active or completed authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const learning = workflowHost.primeWorkflow?.learning;
+		if (learning === undefined) throw new Error("Workflow learning is unavailable on this host.");
+		return learning.getState();
+	}
+
+	/**
+	 * Read the receipt-backed cursor over the admitted Prime workflow stages.
+	 *
+	 * Return: Completed and dependency-ready stages replayed from the durable learning journal.
+	 */
+	async getWorkflowPipelineState(): Promise<{
+		readonly workflowId: string;
+		readonly recipeDigest: string;
+		readonly completedStageIds: readonly string[];
+		readonly readyStageIds: readonly string[];
+		readonly stateDigest: string;
+	}> {
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow pipeline requires a persisted session host.");
+		if (!["active", "complete"].includes(workflowShell.status().status))
+			throw new Error("Workflow pipeline requires an active or completed authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const pipeline = workflowHost.primeWorkflow?.pipeline;
+		if (pipeline === undefined) throw new Error("Workflow pipeline is unavailable on this host.");
+		return pipeline.read();
+	}
+
+	/**
+	 * Read non-authorizing evidence of model and tool turns executed by this session.
+	 *
+	 * Return: Receipt-backed observations replayed from the durable learning journal.
+	 */
+	async getWorkflowExecutionEvidenceState(): Promise<WorkflowExecutionEvidenceState> {
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined)
+			throw new Error("Workflow execution evidence requires a persisted session host.");
+		if (!["active", "complete"].includes(workflowShell.status().status))
+			throw new Error("Workflow execution evidence requires an active or completed authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const executionEvidence = workflowHost.primeWorkflow?.executionEvidence;
+		if (executionEvidence === undefined) throw new Error("Workflow execution evidence is unavailable on this host.");
+		return executionEvidence.read();
+	}
+
+	/**
+	 * Read the immutable recipe digest admitted by the active Prime workflow.
+	 *
+	 * Return: The host-authenticated recipe digest used by canonical kernel requests.
+	 */
+	async getWorkflowPrimeRecipeDigest(): Promise<string> {
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow recipe requires a persisted session host.");
+		if (!["active", "complete"].includes(workflowShell.status().status))
+			throw new Error("Workflow recipe requires an active or completed authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const recipeDigest = workflowHost.primeWorkflow?.snapshots?.recipe.recipeDigest;
+		if (recipeDigest === undefined) throw new Error("Workflow recipe is unavailable on this host.");
+		return recipeDigest;
+	}
+
+	/**
+	 * Read the exact task-graph digest bound to the active recipe admission.
+	 *
+	 * Return: The host-validated DAG digest retained across workflow reopen.
+	 */
+	async getWorkflowPrimeTaskGraphDigest(): Promise<string> {
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow task graph requires a persisted session host.");
+		if (!["active", "complete"].includes(workflowShell.status().status))
+			throw new Error("Workflow task graph requires an active or completed authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const graphDigest = workflowHost.primeWorkflow?.taskGraph?.graphDigest;
+		if (graphDigest === undefined) throw new Error("Workflow task graph is unavailable on this host.");
+		return graphDigest;
+	}
+
+	/**
+	 * Read the durable default scheduler projection.
+	 *
+	 * Return: Queue, active-attempt, and terminal-attempt state retained across reopen.
+	 */
+	async getWorkflowSchedulerState(): Promise<WorkflowSchedulerState> {
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow scheduler requires a persisted session host.");
+		if (!["active", "complete"].includes(workflowShell.status().status))
+			throw new Error("Workflow scheduler requires an active or completed authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const readSchedulerState = workflowHost.primeWorkflow?.readSchedulerState;
+		if (readSchedulerState === undefined) throw new Error("Workflow scheduler is unavailable on this host.");
+		return readSchedulerState();
+	}
+
+	/**
+	 * Persist and display a scheduler-bound worker failure for root-agent recovery.
+	 *
+	 * Args:
+	 * notice: Durable task, attempt, recovery, and evidence binding produced by the scheduler.
+	 * Return: Nothing.
+	 */
+	recordWorkflowWorkerFailure(notice: DefaultPrimeWorkerFailureNotice): void {
+		if (
+			this.agent.state.messages.some(
+				(message) =>
+					message.role === "custom" &&
+					message.customType === "workflow_worker_failure" &&
+					(message.details as DefaultPrimeWorkerFailureNotice | undefined)?.attemptId === notice.attemptId &&
+					(message.details as DefaultPrimeWorkerFailureNotice | undefined)?.executionKey === notice.executionKey,
+			)
+		)
+			return;
+		const message = createWorkflowWorkerFailureMessage(notice);
+		this.sessionManager.appendCustomMessageEntryWithRollback(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+		);
+		this.agent.state.messages.push(message);
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
+	}
+
+	/**
+	 * Read the durable adaptive planner and efficiency-review projection.
+	 *
+	 * Return: Non-authoritative recommendation bound to the authenticated pipeline state.
+	 */
+	async getWorkflowAdaptiveState(): Promise<PrimeAdaptiveRuntimeState> {
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow adaptive state requires a persisted session host.");
+		if (!["active", "complete"].includes(workflowShell.status().status))
+			throw new Error("Workflow adaptive state requires an active or completed authenticated workflow.");
+		const workflowHost = workflowShell as WorkflowKernelHostBindings;
+		await workflowHost.ensurePrimeWorkflow?.();
+		const adaptiveRuntime = workflowHost.primeWorkflow?.adaptiveRuntime;
+		if (adaptiveRuntime === undefined) throw new Error("Workflow adaptive state is unavailable on this host.");
+		return adaptiveRuntime.read();
+	}
+
+	/**
+	 * Dispatch one schema-validated workflow kernel request through the host gateway.
+	 *
+	 * Args:
+	 * requestType: Canonical `workflow.v1.*` request name; raw skill names are rejected.
+	 * payload: Closed request payload validated by the kernel gateway.
+	 * Return: Host-produced result envelope payload.
+	 */
+	async executeWorkflowHostRequest(
+		requestType: `workflow.v1.${string}`,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
+		if (!requestType.startsWith("workflow.v1."))
+			throw new Error("Workflow requests require the canonical v1 namespace.");
+		const workflowShell = this._workflowHost;
+		if (workflowShell === undefined) throw new Error("Workflow requests require a persisted session host.");
+		const workflowStatus = workflowShell.status().status;
+		const completedRead =
+			workflowStatus === "complete" &&
+			(requestType === "workflow.v1.mempalace.recall" || requestType === "workflow.v1.execution_evidence.read");
+		if (workflowStatus !== "active" && !completedRead)
+			throw new Error("Workflow requests require an active workflow or a completed-workflow read route.");
+		await (workflowShell as WorkflowKernelHostBindings).ensurePrimeWorkflow?.();
+		const handlers = this._workflowHostRequestHandlers;
+		if (handlers === undefined) throw new Error("Workflow kernel host handlers are unavailable.");
+		const bindings = workflowShell as WorkflowKernelHostBindings;
+		const response = await createHostRequestGateway({
+			handlers,
+			capabilityResolver: (type) =>
+				bindings.resolveHostRequestCapability?.(type) ?? this._resolveKernelHostCapability(type),
+		}).dispatch({ ...payload, type: requestType });
+		return response.result;
+	}
+
+	/**
+	 * Resume planner continuity for an active workflow restored from durable storage.
+	 *
+	 * Return: True when a fresh planner turn was admitted.
+	 */
+	async resumeActiveWorkflow(): Promise<boolean> {
+		const workflowHost = this._workflowHost;
+		if (workflowHost === undefined) return false;
+		const status = workflowHost.status();
+		if (status.status === "active") await (workflowHost as WorkflowKernelHostBindings).ensurePrimeWorkflow?.();
+		return this._queueWorkflowPlannerIfActive(status, false);
+	}
+
+	/** Wake planner continuity from a durable host-owned workflow obligation. */
+	async wakeActiveWorkflow(): Promise<boolean> {
+		const workflowHost = this._workflowHost;
+		if (workflowHost === undefined) return false;
+		const status = workflowHost.status();
+		if (status.status === "active") await (workflowHost as WorkflowKernelHostBindings).ensurePrimeWorkflow?.();
+		return this._queueWorkflowPlannerIfActive(status, true);
+	}
+
+	private _queueWorkflowPlannerIfActive(status: WorkflowShellStatus, wake: boolean): boolean {
+		if (status.status !== "active") {
+			this._queuedWorkflowPlannerStateDigest = undefined;
+			return false;
+		}
+		const currentGoal = this.readGoalStateForWorkflowProjection();
+		if (
+			status.stateDigest === null ||
+			status.stateDigest.length === 0 ||
+			!status.goal.active ||
+			status.goal.status !== "active" ||
+			status.goal.objective === undefined ||
+			!sameWorkflowGoalProjection(status.goal, currentGoal)
+		)
+			throw new Error("Active workflow status is not bound to the current durable goal projection.");
+		if (this._queuedWorkflowPlannerStateDigest === status.stateDigest) return false;
+		this._clearQueuedGoalContexts();
+		this._queuedWorkflowPlannerStateDigest = status.stateDigest;
+		this._runOrQueueGoalContext("continuation", undefined, wake);
+		return true;
+	}
+
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
 		apiKey: string;
 		headers?: Record<string, string>;
@@ -1414,6 +2754,125 @@ export class AgentSession {
 		throw new Error(formatNoApiKeyFoundMessage(model.provider));
 	}
 
+	private _restoreWorkflowTaskAdmission(): void {
+		const branch = this.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "custom") continue;
+			if (entry.customType === WORKFLOW_TASK_TERMINAL_CUSTOM_ENTRY) {
+				const terminal = parseWorkflowTaskTerminalRecord(entry.data);
+				if (terminal === undefined) continue;
+				this._workflowTaskBinding = terminal.binding;
+				this._workflowTaskTerminal = terminal;
+				return;
+			}
+			if (entry.customType !== WORKFLOW_TASK_BINDING_CUSTOM_ENTRY) continue;
+			const binding = parseWorkflowTaskBinding(entry.data);
+			if (binding !== undefined) {
+				this._workflowTaskBinding = binding;
+				return;
+			}
+		}
+	}
+
+	private _bindWorkflowTask(bindingData: WorkflowTaskBindingData, isActive: () => boolean): void {
+		if (this._workflowTaskTerminal !== undefined) throw new Error("workflow_task_terminal");
+		if (this._workflowTaskBinding !== undefined) {
+			if (this._workflowTaskBinding.isActive === undefined) throw new Error("workflow_task_admission_required");
+			const { isActive: _existingIsActive, ...existingBinding } = this._workflowTaskBinding;
+			if (digestObject(existingBinding) !== digestObject(bindingData)) {
+				throw new Error("workflow_task_binding_mismatch");
+			}
+		}
+		this._workflowTaskBinding = { ...bindingData, isActive };
+		const persisted = this.sessionManager.getBranch().some((entry) => {
+			if (entry.type !== "custom" || entry.customType !== WORKFLOW_TASK_BINDING_CUSTOM_ENTRY) return false;
+			const parsed = parseWorkflowTaskBinding(entry.data);
+			return parsed !== undefined && digestObject(parsed) === digestObject(bindingData);
+		});
+		if (!persisted) {
+			this.sessionManager.appendCustomEntryWithRollback(WORKFLOW_TASK_BINDING_CUSTOM_ENTRY, bindingData);
+			this.sessionManager.flushNow();
+		}
+		// A child may have built its provisioner before the scheduler issued the
+		// task binding. Rebuild it now so isolation, host handlers, and the
+		// read-only harness marker are captured before any deferred prewarm.
+		this._buildRuntime({ activeToolNames: this.getActiveToolNames(), includeAllExtensionTools: true });
+		this._releaseDeferredIpythonPrewarm();
+	}
+
+	private _workflowTaskAdmissionBlockReason(): string | undefined {
+		if (this._workflowTaskTerminal !== undefined) {
+			return this._workflowTaskTerminal.status === "deadline"
+				? "workflow_task_deadline_expired"
+				: "workflow_task_terminal";
+		}
+		if (
+			this._workflowTaskDeadlineMonotonicAtMs !== undefined &&
+			performance.now() >= this._workflowTaskDeadlineMonotonicAtMs
+		) {
+			return "workflow_task_deadline_expired";
+		}
+		const binding = this._workflowTaskBinding;
+		if (binding === undefined) return undefined;
+		if (Date.parse(binding.deadlineAt) <= Date.now()) return "workflow_task_deadline_expired";
+		if (binding.isActive === undefined || !binding.isActive()) return "workflow_task_admission_required";
+		return undefined;
+	}
+
+	private _recordWorkflowTaskTerminal(status: WorkflowTaskTerminalStatus, reason?: string): void {
+		const binding = this._workflowTaskBinding;
+		if (binding === undefined || this._workflowTaskTerminal !== undefined) return;
+		const { isActive: _isActive, ...persistedBinding } = binding;
+		const unsigned: Omit<WorkflowTaskTerminalRecord, "recordDigest"> = {
+			schemaVersion: 1 as const,
+			kind: WORKFLOW_TASK_TERMINAL_CUSTOM_ENTRY,
+			binding: persistedBinding,
+			status,
+			...(reason === undefined ? {} : { reason }),
+			terminalAt: new Date().toISOString(),
+		};
+		const record: WorkflowTaskTerminalRecord = {
+			...unsigned,
+			recordDigest: digestObject(unsigned),
+		};
+		this._workflowTaskTerminal = record;
+		this.sessionManager.appendCustomEntryWithRollback(WORKFLOW_TASK_TERMINAL_CUSTOM_ENTRY, record);
+		this.sessionManager.flushNow();
+	}
+
+	private _assertWorkflowTaskAdmissionAllowed(): void {
+		const reason = this._workflowTaskAdmissionBlockReason();
+		if (reason === undefined) return;
+		if (reason === "workflow_task_deadline_expired") {
+			this._recordWorkflowTaskTerminal("deadline", reason);
+			this._workflowTaskDeadlineAbort?.();
+		}
+		throw new AgentSessionMessageBlockedError(reason);
+	}
+
+	private async _settleRejectedWorkflowAgentMessage(
+		message: AgentSessionMessage | undefined,
+		error: Error,
+	): Promise<void> {
+		if (message === undefined) return;
+		this._rejectAgentMessage(message.details.id, error);
+		const bridge = this._agentMessageObligationBridge;
+		if (bridge !== undefined) {
+			try {
+				if (isAgentSessionMessageBlockedError(error)) {
+					await bridge.beforeAgentMessageDispatch(message);
+					await bridge.settleAgentMessage(message, "failed", `quarantine:${error.reason}`);
+					error.obligationSettled = true;
+				} else {
+					await bridge.settleAgentMessage(message, "failed", error.message);
+				}
+			} catch {
+				// Preserve the typed rejection so recovery can retry its durable settlement.
+			}
+		}
+	}
+
 	/**
 	 * Install tool hooks once on the Agent instance.
 	 *
@@ -1424,20 +2883,24 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			this._assertWorkflowTaskAdmissionAllowed();
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
 			}
 
 			await this._agentEventQueue;
+			this._assertWorkflowTaskAdmissionAllowed();
 
 			try {
-				return await runner.emitToolCall({
+				const hookResult = await runner.emitToolCall({
 					type: "tool_call",
 					toolName: toolCall.name,
 					toolCallId: toolCall.id,
 					input: args as Record<string, unknown>,
 				});
+				this._assertWorkflowTaskAdmissionAllowed();
+				return hookResult;
 			} catch (err) {
 				if (err instanceof Error) {
 					throw err;
@@ -1664,10 +3127,48 @@ export class AgentSession {
 		this.sessionManager.flushNow();
 	}
 
-	private _setGoalState(next: GoalState, options: { persist?: boolean } = {}): void {
+	private _resolveWorkflowKernelOwnership(): WorkflowKernelOwnership {
+		const binding = this._workflowTaskBinding;
+		let workflowId = binding?.workflowId;
+		let workflowBound = binding !== undefined;
+		if (workflowId === undefined) {
+			try {
+				workflowId = this._workflowHost?.status().workflowId ?? undefined;
+				workflowBound = workflowId !== undefined;
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					(error.message.includes("durable acceptance projection") ||
+						error.message.includes("Workflow start approval is incomplete"))
+				) {
+					workflowBound = true;
+				} else {
+					throw error;
+				}
+			}
+		}
+		workflowId ??= this._loadPersistedGoalState().workflowId;
+		return { workflowId, workflowBound };
+	}
+
+	private _workflowOwnsGoalState(): boolean {
+		const ownership = this._resolveWorkflowKernelOwnership();
+		return ownership.workflowId !== undefined || ownership.workflowBound;
+	}
+
+	private _assertRefinementAuthority(): void {
+		if (this._workflowOwnsGoalState()) throw new AgentSessionRefinementError();
+	}
+
+	private _setGoalState(
+		next: GoalState,
+		options: { persist?: boolean; rewriteUpdatedAt?: boolean; workflowProjection?: boolean } = {},
+	): void {
+		if (this._workflowOwnsGoalState() && options.workflowProjection !== true)
+			throw new Error("Workflow-bound GoalState is owned by the durable workflow host.");
 		const normalized = normalizeGoalState({
 			...next,
-			updatedAt: Date.now(),
+			...(options.rewriteUpdatedAt === false ? {} : { updatedAt: Date.now() }),
 		});
 		this._goalState = normalized;
 		if (normalized.status === "active") {
@@ -1758,6 +3259,14 @@ export class AgentSession {
 					);
 				}
 			}
+			if (action.payload.kind === "turn" && this._agentMessageObligationBridge !== undefined) {
+				const primary = primaryDeliveryRecord(action).message;
+				if (isAgentSessionMessage(primary)) {
+					void this._agentMessageObligationBridge
+						.settleAgentMessage(primary, "cancelled", error.message)
+						.catch(() => undefined);
+				}
+			}
 			if (!dispatched) {
 				this._actionStore.releaseTerminal(action);
 			}
@@ -1804,11 +3313,15 @@ export class AgentSession {
 	}
 
 	private _clearGoal(): void {
+		if (this._workflowOwnsGoalState())
+			throw new Error("Workflow-bound GoalState must be cleared through the durable workflow host.");
 		this._clearQueuedGoalContexts();
 		this._setGoalState(emptyGoalState());
 	}
 
 	private _pauseGoal(reason = "Paused by user"): void {
+		if (this._workflowOwnsGoalState())
+			throw new Error("Workflow-bound GoalState must be paused through the durable workflow host.");
 		this._clearQueuedGoalContexts();
 		if (this._goalState.status !== "active") {
 			this._emitGoalUpdate();
@@ -1825,6 +3338,8 @@ export class AgentSession {
 	}
 
 	private async _resumeGoal(): Promise<void> {
+		if (this._workflowOwnsGoalState())
+			throw new Error("Workflow-bound GoalState must be resumed through the durable workflow host.");
 		if (!this._goalState.objective) {
 			this._emitGoalUpdate();
 			return;
@@ -1852,6 +3367,10 @@ export class AgentSession {
 		if (!this._goalState.objective || this._goalState.status !== "active") {
 			return;
 		}
+		if (this._workflowOwnsGoalState()) {
+			this._queueWorkflowPauseAfterPlannerFailure(errorMessage);
+			return;
+		}
 		const goal = this._goalWithAccountedWallClock();
 		this._setGoalState({
 			...goal,
@@ -1860,6 +3379,19 @@ export class AgentSession {
 			lastReason: errorMessage,
 			lastError: errorMessage,
 		});
+		this._queueWorkflowPauseAfterPlannerFailure(errorMessage);
+	}
+
+	private _queueWorkflowPauseAfterPlannerFailure(errorMessage: string): void {
+		const pause = () => this._pauseWorkflowAfterPlannerFailure(errorMessage);
+		this._agentEventQueue = this._agentEventQueue.then(pause, pause).catch(() => undefined);
+	}
+
+	private async _pauseWorkflowAfterPlannerFailure(errorMessage: string): Promise<void> {
+		const workflowHost = this._workflowHost;
+		if (workflowHost === undefined || this._disposed || workflowHost.status().status !== "active") return;
+		await workflowHost.execute({ kind: "pause", reason: `Planner failed: ${errorMessage}` });
+		this._queuedWorkflowPlannerStateDigest = undefined;
 	}
 
 	private _finishGoalForTerminalAssistantMessage(message: AssistantMessage): void {
@@ -1977,7 +3509,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		} satisfies CustomMessage<AgentAutonomousStatus>;
 		this.agent.state.messages.push(message);
-		this.sessionManager.appendCustomMessageEntry(
+		this.sessionManager.appendCustomMessageEntryWithRollback(
 			message.customType,
 			message.content,
 			message.display,
@@ -2042,6 +3574,7 @@ export class AgentSession {
 		if (!this._includeGoals) {
 			throw new Error("Goals are disabled. Enable goals before using /goal.");
 		}
+		if (this._workflowBrainstorm?.status === "draft" || this._workflowBrainstorm?.status === "proposed") return;
 		const ipythonTool = this._toolRegistry.get("ipython");
 		if (!ipythonTool) {
 			throw new Error("Goals require the ipython tool, which is not available in this session.");
@@ -2060,16 +3593,26 @@ export class AgentSession {
 		}
 	}
 
-	private _runOrQueueGoalContext(kind: "continuation" | "objective_updated", images?: ImageContent[]): void {
+	private _runOrQueueGoalContext(
+		kind: "continuation" | "objective_updated",
+		images?: ImageContent[],
+		wake = false,
+	): void {
 		if (!this._goalState.objective) return;
 		this._ensureGoalRuntimeActive();
-		const message = createGoalContextMessage(this._goalState, kind, images);
+		const message = this._createGoalContextMessage(kind, images);
 		const normalized = normalizeMessageContent(message.content);
 		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
 			message,
 			resumeIfIdle: true,
 		});
-		this._admitSessionInput(action, { front: true, wake: false });
+		this._admitSessionInput(action, { front: true, wake });
+	}
+
+	private _createGoalContextMessage(kind: GoalContextKind, images?: ImageContent[]) {
+		const plannerDirective = (this._workflowHost as WorkflowKernelHostBindings | undefined)?.primeWorkflow
+			?.plannerDirective;
+		return createGoalContextMessage(this._goalState, kind, images, plannerDirective);
 	}
 
 	private async _handleGoalSlashCommand(text: string, images: ImageContent[] | undefined): Promise<boolean> {
@@ -2109,7 +3652,20 @@ export class AgentSession {
 		return true;
 	}
 
-	private _accountGoalUsageForAssistantMessage(message: AssistantMessage): boolean {
+	private async _accountGoalUsageForAssistantMessage(message: AssistantMessage): Promise<boolean> {
+		const inFlight = this._goalAccountingInFlight.get(message);
+		if (inFlight !== undefined) return inFlight;
+		const pending = this._accountGoalUsageForAssistantMessageUnserialized(message);
+		this._goalAccountingInFlight.set(message, pending);
+		try {
+			return await pending;
+		} finally {
+			if (this._goalAccountingInFlight.get(message) === pending) this._goalAccountingInFlight.delete(message);
+		}
+	}
+
+	private async _accountGoalUsageForAssistantMessageUnserialized(message: AssistantMessage): Promise<boolean> {
+		const workflowOwned = this._workflowOwnsGoalState();
 		if (!this._goalState.objective) {
 			return false;
 		}
@@ -2127,9 +3683,21 @@ export class AgentSession {
 		if (this._goalState.status !== "active") {
 			return false;
 		}
-		this._goalAccountedAssistantMessages.add(message);
 		const tokenDelta = goalTokenDeltaForUsage(message.usage);
 		const goal = this._goalWithAccountedWallClock();
+		if (workflowOwned) {
+			const accountAssistantUsage = this._workflowHost?.accountAssistantUsage;
+			if (accountAssistantUsage === undefined)
+				throw new Error("Workflow-bound goal usage coordinator is unavailable.");
+			await accountAssistantUsage({
+				tokenDelta,
+				wallTimeDeltaSeconds: Math.max(0, goal.timeUsedSeconds - this._goalState.timeUsedSeconds),
+				continuationDelta: 0,
+			});
+			this._goalAccountedAssistantMessages.add(message);
+			this._reloadGoalStateFromBranch();
+			return this._loadPersistedGoalState().status === "budget_limited";
+		}
 		const nextGoal: GoalState = {
 			...goal,
 			tokensUsed: goal.tokensUsed + tokenDelta,
@@ -2149,6 +3717,30 @@ export class AgentSession {
 		return true;
 	}
 
+	private _handleGoalAccountingFailure(error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		if (this._workflowOwnsGoalState()) {
+			if (isWorkflowGoalAccountingContention(error)) return;
+			this._queueWorkflowPauseAfterPlannerFailure(`Workflow goal accounting failed: ${message}`);
+			return;
+		}
+		this._finishGoalWithError(message);
+	}
+
+	private async _accountGoalUsageAtMessageEnd(message: AssistantMessage): Promise<void> {
+		try {
+			if (!(await this._accountGoalUsageForAssistantMessage(message))) return;
+			const goalContext = this._createGoalContextMessage("budget_limit");
+			const normalized = normalizeMessageContent(goalContext.content);
+			await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+				message: goalContext,
+				resumeIfIdle: true,
+			});
+		} catch (error) {
+			this._handleGoalAccountingFailure(error);
+		}
+	}
+
 	private get _steeringStopPending(): boolean {
 		return (
 			this._actionStore.queuedActions("next_turn_boundary").length > 0 ||
@@ -2163,6 +3755,14 @@ export class AgentSession {
 	}
 
 	private _shouldStopBeforeTurn(): boolean {
+		const reason = this._workflowTaskAdmissionBlockReason();
+		if (reason !== undefined) {
+			if (reason === "workflow_task_deadline_expired") {
+				this._recordWorkflowTaskTerminal("deadline", reason);
+				this._workflowTaskDeadlineAbort?.();
+			}
+			return true;
+		}
 		return this._steeringStopPending;
 	}
 
@@ -2171,16 +3771,16 @@ export class AgentSession {
 			return true;
 		}
 		try {
-			if (this._accountGoalUsageForAssistantMessage(context.message)) {
-				const message = createGoalContextMessage(this._goalState, "budget_limit");
+			if (await this._accountGoalUsageForAssistantMessage(context.message)) {
+				const message = this._createGoalContextMessage("budget_limit");
 				const normalized = normalizeMessageContent(message.content);
 				await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
 					message,
 					resumeIfIdle: true,
 				});
 			}
-		} catch {
-			// Goal accounting must not interrupt the core agent loop.
+		} catch (error) {
+			this._handleGoalAccountingFailure(error);
 		}
 		// Serialized refine checkpoint: in print/headless mode, run refinement
 		// planning+apply synchronously here — the quiescent boundary between
@@ -2224,6 +3824,10 @@ export class AgentSession {
 	 * in-flight guards and counter resets.
 	 */
 	private async _runSerializedRefineCheckpoint(): Promise<void> {
+		// Automatic refinement is a background courtesy. When a workflow owns the goal the
+		// refinement must go through its learning path instead, so skip quietly rather than
+		// failing the turn — throwing here replaced the assistant's actual response.
+		if (this._workflowOwnsGoalState()) return;
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -2313,6 +3917,7 @@ export class AgentSession {
 	}
 
 	private async _runSerializedRefineCheckpointAfterBackground(branchVersion: number): Promise<void> {
+		this._assertRefinementAuthority();
 		// No background result, or a refine.run arrived while the background result was
 		// in flight. Fall through so an explicit pending request is serviced at this boundary.
 
@@ -2380,6 +3985,7 @@ export class AgentSession {
 		reason: "compact" | "turn_interval",
 		branchVersion: number,
 	): Promise<void> {
+		this._assertRefinementAuthority();
 		const reviewAbort = new AbortController();
 		this._autoRefineReviewAbort = reviewAbort;
 		this._autoRefineInProgress = true;
@@ -2461,6 +4067,7 @@ export class AgentSession {
 	private async _applySerializedPlan(
 		bgResult: Extract<SerializedBackgroundPlanResult, { status: "plan" }>,
 	): Promise<void> {
+		this._assertRefinementAuthority();
 		let resolveApplySettled: () => void = () => {};
 		const applySettled = new Promise<void>((resolve) => {
 			resolveApplySettled = resolve;
@@ -2487,6 +4094,7 @@ export class AgentSession {
 		if (!this._serializedRefine || this._disposed || this._disposing) {
 			return;
 		}
+		if (this._workflowOwnsGoalState()) return;
 		// Don't start if a plan is already in flight.
 		if (this._serializedPlanInFlight || this._refineInFlight || this._refinePlanInFlight) {
 			return;
@@ -2546,6 +4154,7 @@ export class AgentSession {
 		skipReview = false,
 	): Promise<SerializedBackgroundPlanResult | undefined> {
 		try {
+			this._assertRefinementAuthority();
 			let planOptions = options;
 			if (!skipReview) {
 				// Interval-triggered: run the review gate first, then derive
@@ -2609,6 +4218,7 @@ export class AgentSession {
 		rollbackId?: string;
 		global?: boolean;
 	}): Promise<void> {
+		this._assertRefinementAuthority();
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -2915,6 +4525,15 @@ export class AgentSession {
 				};
 			}
 			case "refine.run": {
+				if (this._workflowOwnsGoalState()) {
+					const rejection = new AgentSessionRefinementError();
+					return {
+						scheduled: false,
+						status: "rejected",
+						code: rejection.code,
+						reason: rejection.message,
+					};
+				}
 				const instructions = payload.instructions;
 				if (instructions !== undefined && typeof instructions !== "string") {
 					throw new Error("refine.run instructions must be a string when provided");
@@ -3149,6 +4768,9 @@ export class AgentSession {
 		if (!this._goalState.objective || this._goalState.status === "idle") {
 			throw new Error("cannot complete goal because this thread has no goal");
 		}
+		if (this._workflowHost !== undefined || this._workflowOwnsGoalState()) {
+			throw new Error("cannot complete goal directly while the durable workflow completion gate owns completion");
+		}
 		const goal = this._goalWithAccountedWallClock();
 		// A turn can cross the budget and complete the goal at once: accounting
 		// runs at message_end, before the completing ipython cell executes, so a
@@ -3174,8 +4796,22 @@ export class AgentSession {
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
 			return [];
 		}
+		const workflowOwned = this._workflowOwnsGoalState();
 		try {
 			this._ensureGoalRuntimeActive(context.context);
+			if (workflowOwned) {
+				const accountContinuation = this._workflowHost?.accountContinuation;
+				if (accountContinuation === undefined)
+					throw new Error("Workflow-bound goal continuation coordinator is unavailable.");
+				const goal = this._goalWithAccountedWallClock();
+				await accountContinuation({
+					tokenDelta: 0,
+					wallTimeDeltaSeconds: Math.max(0, goal.timeUsedSeconds - this._goalState.timeUsedSeconds),
+					continuationDelta: 1,
+				});
+				this._reloadGoalStateFromBranch();
+				return [];
+			}
 			const nextGoal = {
 				...this._goalState,
 				continuationsUsed: this._goalState.continuationsUsed + 1,
@@ -3183,14 +4819,12 @@ export class AgentSession {
 				lastError: undefined,
 			};
 			this._setGoalState(nextGoal);
-			return [createGoalContextMessage(this._goalState, "continuation")];
+			return [this._createGoalContextMessage("continuation")];
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			try {
-				this._finishGoalWithError(message);
-			} catch {
-				// The continuation hook must not reject; listener failures should not crash the agent loop.
-			}
+			if (workflowOwned) {
+				if (!isWorkflowGoalAccountingContention(error)) this._queueWorkflowPauseAfterPlannerFailure(message);
+			} else this._finishGoalWithError(message);
 			return [];
 		}
 	}
@@ -3254,35 +4888,135 @@ export class AgentSession {
 		return outcome.delivery.promise;
 	}
 
+	private waitForAgentMessagePromptContext(agentMessageId: string): Promise<void> {
+		const outcome = this._agentMessageOutcome(agentMessageId);
+		outcome.context ??= createAgentMessageDeferred();
+		return outcome.context.promise;
+	}
+
 	/** Resolve (no error) or reject an existing leg of an agent message outcome. */
 	private _settleAgentMessage(
 		agentMessageId: string | undefined,
-		leg: "delivery" | "completion",
+		leg: "delivery" | "context" | "completion",
 		error?: Error,
 	): void {
 		if (agentMessageId === undefined) return;
+		if (leg === "context") {
+			this._pendingAgentMessageContextDeliveries.delete(agentMessageId);
+			this._clearAgentMessageDeliveryDeadline(agentMessageId);
+		}
 		const outcome = this._agentMessageOutcomes.get(agentMessageId);
 		if (!outcome) return;
 		const deferred = outcome[leg];
 		if (!deferred) return;
 		outcome[leg] = undefined;
-		if (!outcome.delivery && !outcome.completion) {
+		if (!outcome.delivery && !outcome.context && !outcome.completion) {
 			this._agentMessageOutcomes.delete(agentMessageId);
 		}
 		if (error) deferred.reject(error);
 		else deferred.resolve();
 	}
 
+	private _clearAgentMessageDeliveryDeadline(agentMessageId: string): void {
+		const timer = this._agentMessageDeliveryDeadlineTimers.get(agentMessageId);
+		if (timer === undefined) return;
+		clearTimeout(timer);
+		this._agentMessageDeliveryDeadlineTimers.delete(agentMessageId);
+	}
+
+	private async _persistPendingAgentMessageContextBatch(): Promise<void> {
+		const pendingIds = [...this._pendingAgentMessageContextDeliveries];
+		const pending = pendingIds.flatMap((agentMessageId) => {
+			const action = this._actionStore
+				.ownedActions()
+				.find((candidate) => candidate.agentMessageId === agentMessageId && candidate.payload.kind === "turn");
+			if (action?.payload.kind !== "turn") return [];
+			const record = primaryDeliveryRecord(action);
+			if (!isAgentSessionMessage(record.message)) return [];
+			return [{ agentMessageId, message: record.message, record }];
+		});
+		const claimed: typeof pending = [];
+		for (const item of pending) {
+			if (!this._pendingAgentMessageContextDeliveries.has(item.agentMessageId)) continue;
+			const dispatch = await this._agentMessageObligationBridge?.beforeAgentMessageDispatch(item.message);
+			if (dispatch === "quarantine") {
+				if (this.hasPersistedAgentMessage(item.agentMessageId)) {
+					item.record.durable = true;
+					this._settleAgentMessage(item.agentMessageId, "context");
+				}
+				continue;
+			}
+			claimed.push(item);
+		}
+		let appended = false;
+		for (const item of claimed) {
+			if (!this.hasPersistedAgentMessage(item.agentMessageId)) {
+				this.sessionManager.appendCustomMessageEntry(
+					item.message.customType,
+					item.message.content,
+					item.message.display,
+					item.message.details,
+				);
+				appended = true;
+			}
+			item.record.durable = true;
+		}
+		if (appended) this.sessionManager.flushNow();
+		for (const item of claimed) {
+			if (!this._pendingAgentMessageContextDeliveries.has(item.agentMessageId)) continue;
+			try {
+				await this._agentMessageObligationBridge?.afterAgentMessageTranscriptAppend(item.message);
+				this._settleAgentMessage(item.agentMessageId, "context");
+			} catch (error) {
+				this._settleAgentMessage(item.agentMessageId, "context", this._asError(error));
+				throw error;
+			}
+		}
+	}
+
+	private _scheduleAgentMessageDeliveryDeadline(agentMessageId: string): void {
+		this._clearAgentMessageDeliveryDeadline(agentMessageId);
+		this._pendingAgentMessageContextDeliveries.add(agentMessageId);
+		const timer = setTimeout(
+			() => {
+				this._agentMessageDeliveryDeadlineTimers.delete(agentMessageId);
+				const pending = this._pendingAgentMessageContextDeliveries.has(agentMessageId);
+				if (!pending || this._disposed || this._disposing) return;
+				this._agentMessageDeadlineContextCommit = this._agentMessageDeadlineContextCommit
+					.catch(() => undefined)
+					.then(() => this._persistPendingAgentMessageContextBatch());
+				void this._agentMessageDeadlineContextCommit.then(
+					() => {
+						if (this._disposed || this._disposing) return;
+						this._sessionInputPumpSuspended = false;
+						this._scheduleSessionInputPump();
+						if (this.isStreaming) this.agent.abort();
+					},
+					() => undefined,
+				);
+			},
+			Math.max(
+				1,
+				this._agentMessageDeliveryDeadlineMs -
+					Math.min(AGENT_MESSAGE_DELIVERY_COMMIT_GRACE_MS, Math.floor(this._agentMessageDeliveryDeadlineMs / 2)),
+			),
+		);
+		timer.unref();
+		this._agentMessageDeliveryDeadlineTimers.set(agentMessageId, timer);
+	}
+
 	/** Reject both currently registered legs of an agent message outcome. */
 	private _rejectAgentMessage(agentMessageId: string | undefined, error: Error): void {
 		if (agentMessageId === undefined) return;
 		this._settleAgentMessage(agentMessageId, "delivery", error);
+		this._settleAgentMessage(agentMessageId, "context", error);
 		this._settleAgentMessage(agentMessageId, "completion", error);
 	}
 
 	private _rejectQueuedAgentMessageDeliveries(deliveryError: Error, completionError = deliveryError): void {
 		for (const action of this._actionStore.unfinishedActions()) {
 			this._settleAgentMessage(action.agentMessageId, "delivery", deliveryError);
+			this._settleAgentMessage(action.agentMessageId, "context", deliveryError);
 			this._settleAgentMessage(action.agentMessageId, "completion", completionError);
 		}
 	}
@@ -3312,6 +5046,32 @@ export class AgentSession {
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = (event: AgentEvent): void => {
 		this._createRetryPromiseForAgentEnd(event);
+		this._observeToolExecutionLiveness(event);
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			void this._accountGoalUsageAtMessageEnd(event.message as AssistantMessage);
+		}
+		let workflowTurnIndex: number | undefined;
+		if (event.type === "agent_start") {
+			this._workflowExecutionNextTurnIndex = 0;
+		} else if (event.type === "turn_start") {
+			workflowTurnIndex = this._workflowExecutionNextTurnIndex;
+			this._workflowExecutionNextTurnIndex++;
+		}
+		const recordWorkflowEvent = async (): Promise<void> => {
+			try {
+				await this._recordWorkflowExecutionEvent(event, workflowTurnIndex);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				await this._pauseWorkflowAfterPlannerFailure(`Execution evidence failed: ${message}`).catch(
+					() => undefined,
+				);
+			}
+		};
+		this._workflowExecutionEventQueue = this._workflowExecutionEventQueue.then(
+			recordWorkflowEvent,
+			recordWorkflowEvent,
+		);
+		this._workflowExecutionEventQueue.catch(() => {});
 		if (event.type === "message_start" || event.type === "message_end") {
 			for (const action of this._actionStore.ownedActions()) {
 				if (
@@ -3424,6 +5184,77 @@ export class AgentSession {
 		message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
 	}
 
+	/**
+	 * Project exact lifecycle events into the opaque persisted-host evidence source.
+	 * Calling this out of event order would corrupt turn causality, so it remains private.
+	 */
+	private async _recordWorkflowExecutionEvent(event: AgentEvent, turnIndex: number | undefined): Promise<void> {
+		const source = this._workflowExecutionEvidenceSource;
+		if (source === undefined) return;
+		if (event.type === "turn_start") {
+			if (turnIndex === undefined) throw new Error("Workflow execution turn index was not captured.");
+			if (this._workflowExecutionTurnHandle !== undefined)
+				throw new Error("Workflow execution turn started before the prior turn completed.");
+			this._workflowExecutionToolStarts = [];
+			this._workflowExecutionToolEnds = [];
+			this._workflowExecutionTurnHandle = (await source.beginTurn(turnIndex)) ?? undefined;
+			return;
+		}
+		if (this._workflowExecutionTurnHandle === undefined) return;
+		if (event.type === "tool_execution_start") {
+			this._workflowExecutionToolStarts.push({
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				argumentsDigest: digestObject(event.args),
+			});
+			return;
+		}
+		if (event.type === "tool_execution_end") {
+			this._workflowExecutionToolEnds.push({
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				isError: event.isError,
+				resultDigest: workflowExecutionToolResultDigest(event.result, event.isError),
+			});
+			// A successful mutation is the trigger for sharing work in progress. The host computes
+			// and delivers the diff, so neither the author nor the reviewer spends a model turn.
+			if (!event.isError && this._collaborationPeers !== undefined) void this._pushChangedDiffs();
+			if (!event.isError) void this._reportScopeViolations();
+			return;
+		}
+		if (event.type !== "turn_end" || event.message.role !== "assistant") return;
+		const handle = this._workflowExecutionTurnHandle;
+		const message = event.message as AssistantMessage;
+		try {
+			await source.completeTurn(handle, {
+				assistantMessageDigest: workflowExecutionAssistantDigest(message),
+				assistantStopReason: message.stopReason,
+				modelProvider: message.provider,
+				modelId: message.model,
+				usage: {
+					inputTokens: message.usage.input,
+					outputTokens: message.usage.output,
+					cacheReadTokens: message.usage.cacheRead,
+					cacheWriteTokens: message.usage.cacheWrite,
+					totalTokens: message.usage.totalTokens,
+					costMicrounits: Math.round(message.usage.cost.total * 1_000_000),
+				},
+				toolCalls: message.content
+					.filter((block) => block.type === "toolCall")
+					.map((block) => ({
+						toolCallId: block.id,
+						toolName: block.name,
+						argumentsDigest: digestObject(block.arguments),
+					})),
+				toolStarts: this._workflowExecutionToolStarts,
+				toolResults: event.toolResults.map(workflowExecutionToolResultFact),
+				toolEnds: this._workflowExecutionToolEnds,
+			});
+		} finally {
+			if (this._workflowExecutionTurnHandle === handle) this._workflowExecutionTurnHandle = undefined;
+		}
+	}
+
 	private async _processAgentEvent(event: AgentEvent): Promise<void> {
 		let clearedDispatchEnded = false;
 		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "toolResult") {
@@ -3438,6 +5269,9 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "agent_end") {
+			// A completed run ends the steer budget: the next task starts with a fresh allowance
+			// and previously-seen content may legitimately be sent again.
+			this._resetAgentMessageSteerBudget();
 			const cleared = this._actionStore
 				.ownedActions()
 				.filter(
@@ -3487,12 +5321,23 @@ export class AgentSession {
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-				);
+				if (!isAgentSessionMessage(event.message) || !this.hasPersistedAgentMessage(event.message.details.id)) {
+					this.sessionManager.appendCustomMessageEntry(
+						event.message.customType,
+						event.message.content,
+						event.message.display,
+						event.message.details,
+					);
+				}
+				if (isAgentSessionMessage(event.message)) {
+					try {
+						await this._agentMessageObligationBridge?.afterAgentMessageTranscriptAppend(event.message);
+						this._settleAgentMessage(event.message.details.id, "context");
+					} catch (error) {
+						this._settleAgentMessage(event.message.details.id, "context", this._asError(error));
+						throw error;
+					}
+				}
 			} else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
@@ -3508,6 +5353,13 @@ export class AgentSession {
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
+				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted")
+					this._toolExecutionStallDiagnostic = undefined;
+				if (this._isResourceExhaustedFailure(assistantMsg)) {
+					this._recordResourceExhaustedBlocker(assistantMsg);
+				} else {
+					this._clearResourceExhaustedBlockerAfterProbe(assistantMsg);
+				}
 				if (assistantMsg.stopReason !== "error") {
 					addAutonomousUsage(this._autonomousState, assistantMsg.usage);
 				}
@@ -3537,14 +5389,6 @@ export class AgentSession {
 					});
 					this._retryAttempt = 0;
 					this._retryAuthFailureSources = [];
-				}
-				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
-					const message = createGoalContextMessage(this._goalState, "budget_limit");
-					const normalized = normalizeMessageContent(message.content);
-					await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
-						message,
-						resumeIfIdle: true,
-					});
 				}
 			}
 		}
@@ -3579,7 +5423,8 @@ export class AgentSession {
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
 
-			const compactionWillRetry = await this._checkCompaction(msg);
+			const resourceExhausted = this._isResourceExhaustedFailure(msg);
+			const compactionWillRetry = resourceExhausted ? false : await this._checkCompaction(msg);
 			if (compactionWillRetry && this._retryAttempt > 0) {
 				return;
 			}
@@ -3589,7 +5434,7 @@ export class AgentSession {
 				this._finishGoalForTerminalAssistantMessage(msg);
 				// In serialized mode, agent-callable refine.run is serviced
 				// at the shouldStopAfterTurn boundary, not here at agent_end.
-				if (!this._serializedRefine) {
+				if (!resourceExhausted && !this._serializedRefine) {
 					const consumedRequestedRefine = this._consumePendingRequestedRefine();
 					if (!consumedRequestedRefine) {
 						this._scheduleAutoRefineAfterAgentEnd();
@@ -3785,11 +5630,14 @@ export class AgentSession {
 			// Drain before marking _disposing so a refine triggered at the final
 			// agent_end completes instead of being aborted by dispose().
 			await this._drainPendingRefinementForDisposal();
+			await this._agentEventQueue;
 			if (this._disposed) {
 				return this._disposeCallbacksPromise;
 			}
 			this._disposing = true;
 			this._sessionActionCommitDisposeAbortController.abort();
+			if (this._workflowExecutionEvidenceSource !== undefined)
+				revokeWorkflowExecutionEvidenceSource(this._workflowExecutionEvidenceSource);
 			await this._disposeAsyncOnce();
 		})();
 		return this._disposeAsyncPromise;
@@ -3811,6 +5659,22 @@ export class AgentSession {
 			clearTimeout(timer);
 		}
 		this._scheduledAutoRefineTimers.clear();
+		if (this._workflowOwnsGoalState()) {
+			this._autoRefineReviewAbort?.abort();
+			this._refineAbortController?.abort();
+			this._pendingRequestedRefine = undefined;
+			this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+			while (this._refineInFlight || this._refinePlanInFlight || this._serializedPlanInFlight) {
+				if (this._refineInFlight) {
+					await this._refineInFlight;
+				} else if (this._refinePlanInFlight) {
+					await this._refinePlanInFlight;
+				} else {
+					await this._consumeSerializedBackgroundPlan(async () => true);
+				}
+			}
+			return;
+		}
 		// Wait for in-flight refinement (including serialized background plan) to settle.
 		while (this._refineInFlight || this._refinePlanInFlight || this._serializedPlanInFlight) {
 			if (this._refineInFlight) {
@@ -3929,9 +5793,18 @@ export class AgentSession {
 	private async _disposeAsyncOnce(): Promise<void> {
 		// Flush kernels/traces for both still-running and retained children; the sync
 		// dispose() below only tears them down synchronously.
+		let cleanupError: Error | undefined;
+		const rememberCleanupError = (error: unknown): void => {
+			if (cleanupError !== undefined) return;
+			cleanupError = error instanceof Error ? error : new Error(String(error));
+		};
 		for (const run of this._activeRlmChildRuns.values()) {
 			if (run.session) {
-				await run.session.disposeAsync().catch(() => undefined);
+				try {
+					await run.session.disposeAsync();
+				} catch (error) {
+					rememberCleanupError(error);
+				}
 			}
 		}
 		for (const unsubscribe of this._rlmChildUnsubscribes.values()) {
@@ -3939,18 +5812,23 @@ export class AgentSession {
 		}
 		this._rlmChildUnsubscribes.clear();
 		for (const session of this._rlmChildSessions.values()) {
-			await session.disposeAsync().catch(() => undefined);
+			try {
+				await session.disposeAsync();
+			} catch (error) {
+				rememberCleanupError(error);
+			}
 		}
 		this._rlmChildSessions.clear();
 		this._rlmChildCleanupFailures.clear();
 		this._deletedRlmChildIds.clear();
 		try {
 			await this._ipythonKernelProvisioner?.dispose();
-		} catch {
-			// a failed kernel startup already cleaned up after itself
+		} catch (error) {
+			rememberCleanupError(error);
 		}
 		this.dispose();
 		await this._disposeCallbacksPromise;
+		if (cleanupError !== undefined) throw cleanupError;
 	}
 
 	private _startDisposeCallbacks(): Promise<void> {
@@ -3978,8 +5856,16 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
+		if (this._resourceProbeWakeTimer !== undefined) {
+			clearTimeout(this._resourceProbeWakeTimer);
+			this._resourceProbeWakeTimer = undefined;
+		}
+		for (const timer of this._agentMessageDeliveryDeadlineTimers.values()) clearTimeout(timer);
+		this._agentMessageDeliveryDeadlineTimers.clear();
+		this._pendingAgentMessageContextDeliveries.clear();
 		this._sessionActionCommitDisposeAbortController.abort();
 		try {
+			for (const toolCallId of [...this._toolExecutionLiveness.keys()]) this._clearToolExecutionLiveness(toolCallId);
 			// Invalidate scheduled timers and abort any in-flight review so a late
 			// resolution cannot write harness state or re-subscribe handlers.
 			this._autoRefineReviewAbort?.abort();
@@ -4002,6 +5888,7 @@ export class AgentSession {
 				session.dispose();
 			}
 			this._rlmChildSessions.clear();
+			this._rlmChildCompletionPromises.clear();
 			this._rlmChildCleanupFailures.clear();
 			this._deletedRlmChildIds.clear();
 			this._pendingNextTurnMessages = [];
@@ -4010,6 +5897,7 @@ export class AgentSession {
 			this._rejectQueuedAgentMessageDeliveries(deliveryError, completionError);
 			for (const [agentMessageId, outcome] of this._agentMessageOutcomes) {
 				if (outcome.delivery) this._settleAgentMessage(agentMessageId, "delivery", deliveryError);
+				if (outcome.context) this._settleAgentMessage(agentMessageId, "context", deliveryError);
 				if (outcome.completion) this._settleAgentMessage(agentMessageId, "completion", completionError);
 			}
 			this._cancelSessionActions(() => true, deliveryError);
@@ -4076,6 +5964,17 @@ export class AgentSession {
 		return this._retryAttempt;
 	}
 
+	/** Current durable provider resource blocker, if the session is blocked. */
+	getResourceExhaustedBlocker(): ResourceExhaustedBlocker | undefined {
+		const blocker = this.sessionManager.getLatestResourceExhaustedBlocker();
+		return blocker ? projectResourceExhaustedBlocker(blocker) : undefined;
+	}
+
+	/** Current durable worker-model capability blocker, if the workflow is queued. */
+	getWorkerModelCapabilityBlocker(): WorkerModelCapabilityBlocker | undefined {
+		return this.sessionManager.getLatestWorkerModelCapabilityBlocker();
+	}
+
 	/**
 	 * Get the names of currently active tools.
 	 * Returns the names of tools currently set on the agent.
@@ -4135,6 +6034,241 @@ export class AgentSession {
 			this._compactionAbortController !== undefined ||
 			this._branchSummaryAbortController !== undefined
 		);
+	}
+
+	/** Host-observed phase and deadline for the active compaction attempt. */
+	getCompactionLiveness(): AgentSessionCompactionLiveness | undefined {
+		const liveness = this._compactionLiveness;
+		if (!liveness) return undefined;
+		return {
+			...liveness,
+			elapsedMs: Math.max(0, Date.now() - liveness.startedAt),
+		};
+	}
+
+	private _observeProviderStreamLiveness(state: StreamLivenessState, host: StreamLivenessHost): void {
+		const monotonicNow = host.clock?.now() ?? globalThis.performance.now();
+		const wallNow = Date.now();
+		if (this._providerStreamIdentity !== state.startedAt || this._providerStreamStartedAt === undefined) {
+			this._providerStreamIdentity = state.startedAt;
+			this._providerStreamStartedAt = wallNow - Math.max(0, monotonicNow - state.startedAt);
+			this._providerStreamStallDiagnostic = undefined;
+		}
+		if (state.terminal && this._providerStreamStallDiagnostic === undefined) {
+			this._providerStreamLiveness = undefined;
+			return;
+		}
+		const startedAt = this._providerStreamStartedAt;
+		const toWallTime = (timestamp: number | undefined): number | undefined =>
+			timestamp === undefined ? undefined : startedAt + (timestamp - state.startedAt);
+		this._providerStreamLiveness = {
+			phase: state.phase,
+			startedAt,
+			deadlineAt: startedAt + (state.deadlineAt - state.startedAt),
+			elapsedMs: Math.max(0, wallNow - startedAt),
+			lastProviderEventAt: toWallTime(state.lastProviderEventAt),
+			lastMeaningfulContentDeltaAt: toWallTime(state.lastMeaningfulContentDeltaAt),
+			receivedBytes: state.receivedBytes,
+			blocks: state.blocks,
+			abortability: state.abortability,
+		};
+	}
+
+	private _observeProviderStreamTerminal(outcome: StreamLivenessTerminalOutcome): void {
+		if (outcome.type === "provider_stream_stalled") {
+			this._providerStreamStallDiagnostic = outcome.diagnostic;
+			return;
+		}
+		this._providerStreamLiveness = undefined;
+	}
+
+	private _loadPersistedProviderStreamStallDiagnostic(): StreamLivenessDiagnostic | undefined {
+		const latestAssistant = [...this.sessionManager.getBranch()]
+			.reverse()
+			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+		if (latestAssistant?.type !== "message" || latestAssistant.message.role !== "assistant") return undefined;
+		const diagnostic = latestAssistant.message.diagnostics?.find(
+			(candidate) => candidate.type === "provider_stream_stalled",
+		);
+		return parseProviderStreamStallDiagnostic(diagnostic?.details);
+	}
+
+	/** Host-observed liveness for the active or most recently stalled provider stream. */
+	getProviderStreamLiveness(): AgentSessionProviderStreamLiveness | undefined {
+		const liveness = this._providerStreamLiveness;
+		if (!liveness) return undefined;
+		return { ...liveness, elapsedMs: Math.max(liveness.elapsedMs, Date.now() - liveness.startedAt) };
+	}
+
+	/** Structured provider-stall diagnostic retained until the next provider attempt. */
+	getProviderStreamStallDiagnostic(): StreamLivenessDiagnostic | undefined {
+		return this._providerStreamStallDiagnostic;
+	}
+
+	private _loadPersistedToolExecutionStallDiagnostic(): ToolExecutionStallDiagnostic | undefined {
+		for (const entry of [...this.sessionManager.getBranch()].reverse()) {
+			if (entry.type === "message" && entry.message.role === "assistant") return undefined;
+			if (entry.type === "custom_message" && entry.customType === TOOL_EXECUTION_STALL_CUSTOM_TYPE)
+				return parseToolExecutionStallDiagnostic(entry.details);
+		}
+		return undefined;
+	}
+
+	private _persistToolExecutionLease(status: "active" | "released", liveness: ToolExecutionLiveness): void {
+		const unsigned = {
+			type: "tool_execution_lease" as const,
+			schemaVersion: 1 as const,
+			status,
+			liveness,
+			recordedAt: new Date().toISOString(),
+		};
+		const record: ToolExecutionLeaseRecord = { ...unsigned, recordDigest: digestObject(unsigned) };
+		this.sessionManager.appendCustomEntryWithRollback(TOOL_EXECUTION_LEASE_CUSTOM_TYPE, record);
+	}
+
+	private _scheduleToolExecutionDeadline(toolCallId: string, deadlineAt: string): void {
+		const existing = this._toolExecutionDeadlineTimers.get(toolCallId);
+		if (existing !== undefined) clearTimeout(existing);
+		const timer = setTimeout(
+			() => this._expireToolExecution(toolCallId),
+			Math.max(0, Date.parse(deadlineAt) - Date.now()),
+		);
+		timer.unref();
+		this._toolExecutionDeadlineTimers.set(toolCallId, timer);
+	}
+
+	private _restorePersistedToolExecutionLeases(): void {
+		const active = new Map<string, ToolExecutionLiveness>();
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type === "custom" && entry.customType === TOOL_EXECUTION_LEASE_CUSTOM_TYPE) {
+				const record = parseToolExecutionLeaseRecord(entry.data);
+				if (record === undefined) continue;
+				const { recordDigest, ...unsigned } = record;
+				if (digestObject(unsigned) !== recordDigest) continue;
+				if (record.status === "active") active.set(record.liveness.toolCallId, record.liveness);
+				else active.delete(record.liveness.toolCallId);
+				continue;
+			}
+			if (entry.type === "custom_message" && entry.customType === TOOL_EXECUTION_STALL_CUSTOM_TYPE) {
+				const diagnostic = parseToolExecutionStallDiagnostic(entry.details);
+				if (diagnostic !== undefined) active.delete(diagnostic.toolCallId);
+			}
+		}
+		for (const liveness of active.values()) {
+			this._toolExecutionLiveness.set(liveness.toolCallId, liveness);
+			if (Date.parse(liveness.deadlineAt) <= Date.now()) this._expireToolExecution(liveness.toolCallId, false);
+			else this._scheduleToolExecutionDeadline(liveness.toolCallId, liveness.deadlineAt);
+		}
+	}
+
+	private _observeToolExecutionLiveness(event: AgentEvent): void {
+		if (event.type === "tool_execution_start") {
+			const startedAt = Date.now();
+			const deadlineAt = startedAt + this._toolExecutionDeadlineMs;
+			const hardDeadlineAt = startedAt + this._toolExecutionDeadlineMs * TOOL_EXECUTION_HARD_DEADLINE_MULTIPLIER;
+			const liveness: ToolExecutionLiveness = {
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				startedAt: new Date(startedAt).toISOString(),
+				lastProgressAt: new Date(startedAt).toISOString(),
+				deadlineAt: new Date(deadlineAt).toISOString(),
+				hardDeadlineAt: new Date(hardDeadlineAt).toISOString(),
+				leaseDurationMs: this._toolExecutionDeadlineMs,
+				progressEventCount: 0,
+				phase: "running",
+			};
+			this._toolExecutionStallDiagnostic = undefined;
+			this._toolExecutionLiveness.set(event.toolCallId, liveness);
+			this._persistToolExecutionLease("active", liveness);
+			this._scheduleToolExecutionDeadline(event.toolCallId, liveness.deadlineAt);
+			return;
+		}
+		if (event.type === "tool_execution_update") {
+			const current = this._toolExecutionLiveness.get(event.toolCallId);
+			if (current === undefined || current.phase !== "running") return;
+			const progressDigest = digestObject({
+				toolCallId: event.toolCallId,
+				partialResult: event.partialResult,
+			});
+			if (this._toolExecutionProgressDigests.get(event.toolCallId) === progressDigest) return;
+			this._toolExecutionProgressDigests.set(event.toolCallId, progressDigest);
+			const progressedAt = Date.now();
+			const progressed: ToolExecutionLiveness = {
+				...current,
+				lastProgressAt: new Date(progressedAt).toISOString(),
+				deadlineAt: new Date(
+					Math.min(Date.parse(current.hardDeadlineAt), progressedAt + current.leaseDurationMs),
+				).toISOString(),
+				progressEventCount: current.progressEventCount + 1,
+			};
+			this._toolExecutionLiveness.set(event.toolCallId, progressed);
+			this._persistToolExecutionLease("active", progressed);
+			this._scheduleToolExecutionDeadline(event.toolCallId, progressed.deadlineAt);
+			return;
+		}
+		if (event.type === "tool_execution_end") {
+			const current = this._toolExecutionLiveness.get(event.toolCallId);
+			if (current !== undefined) this._persistToolExecutionLease("released", current);
+			this._clearToolExecutionLiveness(event.toolCallId);
+		}
+	}
+
+	private _clearToolExecutionLiveness(toolCallId: string): void {
+		const timer = this._toolExecutionDeadlineTimers.get(toolCallId);
+		if (timer !== undefined) clearTimeout(timer);
+		this._toolExecutionDeadlineTimers.delete(toolCallId);
+		this._toolExecutionProgressDigests.delete(toolCallId);
+		this._toolExecutionLiveness.delete(toolCallId);
+	}
+
+	private _expireToolExecution(toolCallId: string, abortActive = true): void {
+		const current = this._toolExecutionLiveness.get(toolCallId);
+		if (current === undefined || current.phase !== "running") return;
+		const detectedAt = new Date().toISOString();
+		const diagnostic: ToolExecutionStallDiagnostic = {
+			...current,
+			type: "tool_execution_stalled",
+			phase: "stalled",
+			detectedAt,
+			reason: "deadline_exceeded",
+		};
+		this._toolExecutionStallDiagnostic = diagnostic;
+		this.sessionManager.appendCustomMessageEntry(
+			TOOL_EXECUTION_STALL_CUSTOM_TYPE,
+			`Tool ${current.toolName} exceeded its host deadline.`,
+			false,
+			diagnostic,
+		);
+		for (const activeToolCallId of [...this._toolExecutionLiveness.keys()])
+			this._clearToolExecutionLiveness(activeToolCallId);
+		if (current.toolName === "ipython" && this._ipythonKernelProvisioner !== undefined) {
+			void this._fenceExpiredIpythonExecution(abortActive);
+			return;
+		}
+		if (abortActive && this.isStreaming) void this.abort().catch(() => undefined);
+		else this._scheduleSessionInputPump();
+	}
+
+	private async _fenceExpiredIpythonExecution(abortActive: boolean): Promise<void> {
+		await this._ipythonKernelProvisioner?.kill();
+		if (abortActive && this.isStreaming) await this.abort().catch(() => undefined);
+		this._scheduleSessionInputPump();
+	}
+
+	private async _fenceTerminalTaskKernel(): Promise<void> {
+		await this._ipythonKernelProvisioner?.kill();
+	}
+
+	/** Host-observed bounded invocation leases for tools that are currently executing. */
+	getToolExecutionLiveness(): readonly ToolExecutionLiveness[] {
+		return [...this._toolExecutionLiveness.values()]
+			.map((value) => ({ ...value }))
+			.sort((left, right) => left.toolCallId.localeCompare(right.toolCallId));
+	}
+
+	/** Latest durable tool-stall blocker, cleared by a subsequent tool attempt or assistant turn. */
+	getToolExecutionStallDiagnostic(): ToolExecutionStallDiagnostic | undefined {
+		return this._toolExecutionStallDiagnostic === undefined ? undefined : { ...this._toolExecutionStallDiagnostic };
 	}
 
 	/** All messages including custom types like BashExecutionMessage */
@@ -4202,6 +6336,51 @@ export class AgentSession {
 
 	get goalState(): GoalState {
 		return { ...this._goalWithCurrentWallClock() };
+	}
+
+	/**
+	 * Read the stable persisted GoalState used by durable workflow projection CAS.
+	 *
+	 * Return: Persisted GoalState without the UI-only live elapsed-time projection.
+	 */
+	readGoalStateForWorkflowProjection(): GoalState {
+		return workflowGoalProjectionSnapshot(this._loadPersistedGoalState());
+	}
+
+	/**
+	 * Compare the durable GoalState snapshot and apply one workflow-authorized projection update.
+	 *
+	 * Args:
+	 * expected: Durable GoalState snapshot the workflow transition read.
+	 * next: GoalState snapshot authorized by that transition.
+	 * authorization: Opaque journal-issued authority for the projection update.
+	 * Return: True when the exact durable snapshot was exchanged; otherwise false.
+	 */
+	compareAndSwapGoalState(
+		expected: GoalState,
+		next: GoalState,
+		authorization: WorkflowGoalProjectionAuthorization,
+	): boolean {
+		const current = this._loadPersistedGoalState();
+		if (
+			digestWorkflowGoalState(current) !== digestWorkflowGoalState(expected) ||
+			!validateWorkflowGoalProjectionAuthorization(authorization, {
+				workflowId: this.sessionManager.getSessionId(),
+				expectedGoal: expected,
+				nextGoal: next,
+			})
+		)
+			return false;
+		this._setGoalState(next, { rewriteUpdatedAt: false, workflowProjection: true });
+		if (
+			!consumeWorkflowGoalProjectionAuthorization(authorization, {
+				workflowId: this.sessionManager.getSessionId(),
+				expectedGoal: expected,
+				nextGoal: next,
+			})
+		)
+			throw new Error("Workflow goal projection authorization was consumed before its durable CAS completed.");
+		return true;
 	}
 
 	getAutonomousStatus(): AgentAutonomousStatus {
@@ -4491,26 +6670,265 @@ export class AgentSession {
 		if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 	}
 
+	/** Attach the durable bridge used by daemon-originated agent messages. */
+	setAgentMessageObligationBridge(bridge: SessionMessageObligationBridge | undefined): void {
+		this._agentMessageObligationBridge = bridge;
+	}
+
+	/** Return whether an accepted agent message already has a scheduler-owned action. */
+	hasAgentMessageAction(messageId: string): boolean {
+		return this._actionStore.ownedActions().some((action) => {
+			if (action.payload.kind !== "turn") return false;
+			const primary = primaryDeliveryRecord(action).message;
+			return isAgentSessionMessage(primary) && primary.details.id === messageId;
+		});
+	}
+
+	/** Return whether a stable agent message id already exists in the persisted transcript. */
+	hasPersistedAgentMessage(messageId: string): boolean {
+		return this.sessionManager.getEntries().some((entry) => {
+			if (entry.type !== "custom_message" || entry.customType !== AGENT_MESSAGE_CUSTOM_TYPE) return false;
+			const details = entry.details;
+			return isObjectRecord(details) && details.id === messageId;
+		});
+	}
+
+	/**
+	 * Deliver an agent-to-agent message at the recipient's next turn boundary.
+	 *
+	 * The session-level queue waits for the whole run to finish, so a message to a busy agent
+	 * cannot reach it mid-task. Steering injects at the next turn boundary instead. Steering
+	 * also keeps the recipient's loop alive (agent-loop drains it and declines to stop), so two
+	 * agents can hold each other running — the bounds below are what make this safe.
+	 *
+	 * Args:
+	 * prompt: Rendered message text delivered to the recipient.
+	 * message: Structured agent message, used for identity and de-duplication.
+	 * Return: True when the message was steered; false when the caller should fall back to queueing.
+	 */
+	/**
+	 * Register who this worker is and which siblings review its changes.
+	 *
+	 * Args:
+	 * peers: Author identity and reviewer session ids, or undefined to stop sharing.
+	 * Return: No value.
+	 */
+	setCollaborationPeers(peers: { readonly author: string; readonly reviewers: readonly string[] } | undefined): void {
+		this._collaborationPeers = peers;
+	}
+
+	/**
+	 * Deliver the diff for a just-edited path to this worker's reviewers.
+	 *
+	 * The diff is computed by the host, so the editing worker spends no model turn producing it
+	 * and reviewers spend none polling for it. That is the entire cost argument for sharing work
+	 * in progress rather than having each side fetch it.
+	 *
+	 * Args:
+	 * path: File the worker just changed.
+	 * Return: Number of reviewers the diff reached.
+	 */
+	async pushDiffToReviewers(path: string): Promise<number> {
+		const peers = this._collaborationPeers;
+		if (peers === undefined || peers.reviewers.length === 0) return 0;
+		const collaboration = this.settingsManager.getAgentCollaboration();
+		if (!sharesDiffs(collaboration)) return 0;
+		const cwd = this.sessionManager.getCwd?.() ?? process.cwd();
+		const diff = await computePathDiff(cwd, path, collaboration.maxDiffBytes).catch(() => undefined);
+		if (diff === undefined) return 0;
+		const body = formatDiffPush(diff, peers.author);
+		let delivered = 0;
+		for (const reviewer of peers.reviewers) {
+			const sent = await this._deliverCollaborationMessage(reviewer, body).catch(() => false);
+			if (sent) delivered += 1;
+		}
+		return delivered;
+	}
+
+	/**
+	 * Declare the paths this worker owns, enabling the mechanical scope check.
+	 *
+	 * Args:
+	 * paths: Canonical path prefixes from the task graph; [] for a role that may write nothing, and
+	 * undefined for a worker with no declared boundary.
+	 * Return: No value.
+	 */
+	setOwnedPaths(paths: readonly string[] | undefined): void {
+		// undefined and [] mean different things. undefined is "nothing declared, unconstrained";
+		// [] is "this task may write nothing", which is how a read-only role is enforced against what
+		// it actually wrote rather than against what it declared.
+		this._ownedPaths = paths === undefined ? undefined : [...paths];
+		this._reportedScopeViolations.clear();
+	}
+
+	/**
+	 * Record, once per path, that this worker wrote outside its declared ownership.
+	 *
+	 * This is the deterministic half of anti-cheating: weakening a control or editing the
+	 * evaluator that judges you shows up as a write to a path the task never claimed, and the
+	 * host can see that without asking a model to judge intent. Reporting is unconditional: it must
+	 * not depend on a collaboration setting, because a run with sharing turned off is exactly the run
+	 * with no other witness.
+	 *
+	 * ponytail: attribution is tree-wide. Sibling workers share one working tree, so a violation
+	 * names what the tree shows, not provably this worker's write. Per-worker worktrees would make
+	 * it exact; until then a concurrent sibling can make this report the wrong author.
+	 *
+	 * Return: No value.
+	 */
+	private async _reportScopeViolations(): Promise<void> {
+		const owned = this._ownedPaths;
+		const immutable = this.settingsManager.getWorkflowImmutablePaths();
+		// The immutable set applies to every task, including one that declared no ownership, so this
+		// cannot return early on `owned` alone.
+		if (owned === undefined && immutable === undefined) return;
+		const cwd = this.sessionManager.getCwd?.() ?? process.cwd();
+		const written = await touchedPaths(cwd).catch(() => []);
+		const taskId = this._workflowTaskBinding?.taskId ?? "unbound";
+		if (immutable !== undefined && !this._immutablePathsAudited) {
+			this._immutablePathsAudited = true;
+			await this._auditImmutablePaths(cwd, immutable);
+		}
+		// Every check above asks git about `cwd`. If the agent is editing a linked worktree instead,
+		// all of them go quiet, and quiet is indistinguishable from idle. Say so rather than imply
+		// nothing is happening.
+		const elsewhere = await worktreesWithChanges(cwd).catch(() => []);
+		for (const path of elsewhere) {
+			if (this._reportedScopeViolations.has(`worktree:${path}`)) continue;
+			this._reportedScopeViolations.add(`worktree:${path}`);
+			console.warn(
+				`workflow_work_outside_observed_tree task=${taskId} worktree=${path} observed=${cwd} ` +
+					"(scope and immutable-path checks do not see changes there)",
+			);
+		}
+		const report = (code: string, paths: readonly string[], declaredLabel: string, declared: readonly string[]) => {
+			const fresh = paths.filter((path) => !this._reportedScopeViolations.has(`${code}:${path}`));
+			if (fresh.length === 0) return;
+			for (const path of fresh) this._reportedScopeViolations.add(`${code}:${path}`);
+			console.warn(`${code} task=${taskId} paths=${fresh.join(",")} ${declaredLabel}=${declared.join(",")}`);
+		};
+		if (immutable !== undefined)
+			report("workflow_immutable_path_written", pathsInsideProtected(written, immutable), "immutable", immutable);
+		if (owned !== undefined)
+			report("workflow_task_scope_violation", pathsOutsideOwned(written, owned), "owned", owned);
+	}
+
+	/** Push a diff for every path changed in the working tree; duplicates are dropped downstream. */
+	private async _pushChangedDiffs(): Promise<void> {
+		const cwd = this.sessionManager.getCwd?.() ?? process.cwd();
+		const paths = await changedPaths(cwd).catch(() => []);
+		for (const path of paths) await this.pushDiffToReviewers(path).catch(() => {});
+	}
+
+	/**
+	 * Say once, at the first check, which declared immutable prefixes match nothing in the repo.
+	 *
+	 * A mistyped prefix protects nothing and, without this, says nothing either - the run looks
+	 * guarded while the file it was meant to guard is wide open. Absence is not always a mistake: a
+	 * prefix can legitimately mean "this must never be created". So this reports rather than refuses,
+	 * and says which case it cannot distinguish.
+	 *
+	 * Args:
+	 * cwd: Repository directory to resolve prefixes against.
+	 * immutable: Declared prefixes.
+	 * Return: No value.
+	 */
+	private async _auditImmutablePaths(cwd: string, immutable: readonly string[]): Promise<void> {
+		const unmatched: string[] = [];
+		for (const prefix of immutable) {
+			const tracked = await trackedUnder(cwd, prefix).catch(() => 0);
+			if (tracked === 0) unmatched.push(prefix);
+		}
+		if (unmatched.length === 0) return;
+		console.warn(
+			`workflow_immutable_path_matches_nothing paths=${unmatched.join(",")} ` +
+				"(a typo protects nothing; a path that does not exist yet is protected against creation)",
+		);
+	}
+
+	/** Send one collaboration message to a sibling; returns whether it was accepted. */
+	private async _deliverCollaborationMessage(target: string, body: string): Promise<boolean> {
+		const controller = this._agentMessageController;
+		if (controller === undefined) return false;
+		const receipt = await controller.sendAgentMessage({ target, message: body });
+		return receipt?.deliveryStatus === "delivered" || receipt?.deliveryStatus === "queued";
+	}
+
+	steerAgentMessage(prompt: string, message: AgentSessionMessage): boolean {
+		if (!this.settingsManager.getAgentMessageMidRunDelivery()) return false;
+		if (this._disposed || this._disposing) return false;
+		// Only useful while a run is active; otherwise the ordinary queue delivers promptly.
+		if (!this.isStreaming) return false;
+
+		const senderEndpoint = message.details.from;
+		const sender = senderEndpoint?.sessionId ?? "unknown";
+		// Identical content from the same sender cannot carry new information. This mirrors the
+		// existing autonomous-gate rule that refuses to re-run a gate when nothing changed.
+		const fingerprint = `${sender}:${sha256Hex(prompt)}`;
+		if (this._steeredAgentMessageFingerprints.has(fingerprint)) return false;
+
+		const consecutive = (this._consecutiveSteersBySender.get(sender) ?? 0) + 1;
+		if (consecutive > MAX_CONSECUTIVE_AGENT_MESSAGE_STEERS) return false;
+
+		this._steeredAgentMessageFingerprints.add(fingerprint);
+		this._consecutiveSteersBySender.set(sender, consecutive);
+		this.agent.steer({ role: "user", content: prompt, timestamp: Date.now() } satisfies UserMessage);
+		return true;
+	}
+
+	/** Clear steer budgets once the recipient completes a run, so the next task starts fresh. */
+	private _resetAgentMessageSteerBudget(): void {
+		this._consecutiveSteersBySender.clear();
+		this._steeredAgentMessageFingerprints.clear();
+	}
+
 	async queueAgentMessagePrompt(
 		text: string,
 		streamingBehavior: "steer" | "followUp",
 		customMessage?: AgentSessionMessage,
 	): Promise<boolean> {
 		const agentMessageId = customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
+		try {
+			this._assertWorkflowTaskAdmissionAllowed();
+		} catch (error) {
+			const normalized = this._asError(error);
+			await this._settleRejectedWorkflowAgentMessage(customMessage, normalized);
+			throw normalized;
+		}
 		if (streamingBehavior === "steer") {
 			await this._queuePreparedPrompt("steer", text, undefined, {
 				agentMessageId,
 				message: customMessage,
+				resumeIfIdle: true,
 			});
+			if (agentMessageId !== undefined && this.hasAgentMessageAction(agentMessageId))
+				this._scheduleAgentMessageDeliveryDeadline(agentMessageId);
 			if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 			return true;
 		}
 		const queued = await this._queuePreparedPrompt("followUp", text, undefined, {
 			agentMessageId,
 			message: customMessage,
+			resumeIfIdle: true,
 		});
+		if (queued && agentMessageId !== undefined && this.hasAgentMessageAction(agentMessageId))
+			this._scheduleAgentMessageDeliveryDeadline(agentMessageId);
 		if (queued && customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 		return queued;
+	}
+
+	/** Wait until every currently accepted agent message has reached recipient context. */
+	async waitForPendingAgentMessageDelivery(): Promise<void> {
+		const pendingIds = [...this._pendingAgentMessageContextDeliveries];
+		if (pendingIds.length === 0) return;
+		const deliveries = pendingIds.map((messageId) => this.waitForAgentMessagePromptContext(messageId));
+		this._agentMessageDeadlineContextCommit = this._agentMessageDeadlineContextCommit
+			.catch(() => undefined)
+			.then(() => this._persistPendingAgentMessageContextBatch());
+		await this._agentMessageDeadlineContextCommit;
+		this._sessionInputPumpSuspended = false;
+		this._scheduleSessionInputPump();
+		await Promise.all(deliveries);
 	}
 
 	async promptHeartbeat(job: AgentCronJob, options?: PromptOptions): Promise<void> {
@@ -4527,6 +6945,16 @@ export class AgentSession {
 		message: CustomMessage,
 		options?: InternalPromptOptions & { executionPolicy?: TurnExecutionPolicy },
 	): Promise<void> {
+		try {
+			this._assertWorkflowTaskAdmissionAllowed();
+		} catch (error) {
+			const normalized = this._asError(error);
+			await this._settleRejectedWorkflowAgentMessage(
+				isAgentSessionMessage(message) ? message : undefined,
+				normalized,
+			);
+			throw normalized;
+		}
 		if (!this.isStreaming && options?.resumeIfIdle) this._sessionInputPumpSuspended = false;
 		const admissionFence = await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
 			throwIfPromptAdmissionCancelled(options?.signal);
@@ -4595,6 +7023,16 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		try {
+			this._assertWorkflowTaskAdmissionAllowed();
+		} catch (error) {
+			const normalized = this._asError(error);
+			await this._settleRejectedWorkflowAgentMessage(
+				options?.customMessage && isAgentSessionMessage(options.customMessage) ? options.customMessage : undefined,
+				normalized,
+			);
+			throw normalized;
+		}
 		if (!this.isStreaming) {
 			this._sessionInputPumpSuspended = false;
 			this._assertSessionActionAdmissionAvailable();
@@ -4807,6 +7245,14 @@ export class AgentSession {
 			});
 	}
 
+	private _workflowSkillNamesBoundToHost(): ReadonlySet<string> {
+		const bindings = this._workflowHost as WorkflowKernelHostBindings | undefined;
+		const names = bindings?.primeWorkflow?.snapshots?.skills
+			.map((skill) => skill.skillName)
+			.filter((name) => name !== "workflow-autoresearch" && name !== "mempalace");
+		return names === undefined ? new Set<string>() : new Set(names);
+	}
+
 	/**
 	 * Expand skill commands (/skill:name args) to their full content.
 	 * Returns the expanded text, or the original text if not a skill command or skill not found.
@@ -4819,6 +7265,8 @@ export class AgentSession {
 		if (!parsed?.name.startsWith("skill:")) return text;
 		const skillName = parsed.name.slice("skill:".length);
 		const args = parsed.args;
+		if (this._workflowSkillNamesBoundToHost().has(skillName))
+			throw new Error("workflow skill execution requires an authenticated immutable snapshot admission");
 
 		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
 		if (!skill) return text; // Unknown skill, pass through
@@ -5306,6 +7754,25 @@ export class AgentSession {
 		if (this._disposed || this._disposing) {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
+		if (action.payload.kind === "turn") {
+			const reason = this._workflowTaskAdmissionBlockReason();
+			if (reason !== undefined) {
+				const error = new AgentSessionMessageBlockedError(reason);
+				const primary = primaryDeliveryRecord(action).message;
+				if (isAgentSessionMessage(primary)) {
+					this._rejectAgentMessage(action.agentMessageId, error);
+					const bridge = this._agentMessageObligationBridge;
+					if (bridge !== undefined) {
+						void bridge
+							.beforeAgentMessageDispatch(primary)
+							.then(() => bridge.settleAgentMessage(primary, "failed", `quarantine:${error.reason}`))
+							.catch(() => undefined);
+					}
+				}
+				if (options.restore) return { accepted: false, disposition: "queued" };
+				throw error;
+			}
+		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
@@ -5361,6 +7828,7 @@ export class AgentSession {
 			source?: InputSource | "internal";
 		} = {},
 	): Promise<boolean> {
+		this._assertWorkflowTaskAdmissionAllowed();
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
 		if (action.suppressAutonomousContinuation) {
 			this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
@@ -5370,7 +7838,7 @@ export class AgentSession {
 
 	private _runtimeActivity(): RuntimeActivity {
 		return {
-			lowerAgentRun: this.isStreaming,
+			lowerAgentRun: this.isStreaming || this._toolExecutionLiveness.size > 0,
 			compaction: this.isCompacting,
 			retry: this.isRetrying,
 			bash: this.isBashRunning,
@@ -5386,6 +7854,18 @@ export class AgentSession {
 			this._actionStore.queuedActions().length > 0 ||
 			this._actionStore.activeActions().some((action) => action.lifecycle.state === "selected")
 		);
+	}
+
+	private _hasSelectableAgentMessageInput(): boolean {
+		return [...this._actionStore.queuedActions(), ...this._actionStore.activeActions()].some((action) => {
+			if (
+				action.payload.kind !== "turn" ||
+				(action.lifecycle.state !== "queued" && action.lifecycle.state !== "selected")
+			) {
+				return false;
+			}
+			return isAgentSessionMessage(primaryDeliveryRecord(action).message);
+		});
 	}
 
 	get hasPendingSessionWork(): boolean {
@@ -5417,7 +7897,12 @@ export class AgentSession {
 		const epoch = this._sessionInputPumpEpoch;
 		const pump = async () => {
 			this._sessionInputPumpRequested = false;
-			await this._pumpSessionInputs(epoch);
+			this._sessionInputPumpActive = true;
+			try {
+				await this._pumpSessionInputs(epoch);
+			} finally {
+				this._sessionInputPumpActive = false;
+			}
 		};
 		this._sessionInputPump = this._sessionInputPump.then(pump, pump);
 		this._sessionInputPump.catch(() => {});
@@ -5427,6 +7912,14 @@ export class AgentSession {
 		let blocked = false;
 		try {
 			while (!this._disposed && !this._disposing && this._hasSelectableSessionInput()) {
+				const resourceBlocker = this.sessionManager.getLatestResourceExhaustedBlockerEntry();
+				if (resourceBlocker && resourceBlocker.state !== "cleared") {
+					if (!this._admitResourceExhaustionProbeIfReady()) {
+						blocked = true;
+						this._notifySessionInputCheckpointChange();
+						return;
+					}
+				}
 				await this.agent.waitForIdle();
 				const preselected = this._actionStore
 					.activeActions()
@@ -5461,7 +7954,12 @@ export class AgentSession {
 
 				const mode = first.delivery === "next_turn_boundary" ? this.steeringMode : this.followUpMode;
 				const actions: QueuedSessionAction[] = [first];
-				while (!preselected && mode === "all") {
+				const probeLease = this.sessionManager.getLatestResourceExhaustedBlockerEntry();
+				const isResourceProbe = probeLease?.state === "probe_leased" && probeLease.probeLeaseActionId === first.id;
+				const firstMessage = first.payload.kind === "turn" ? primaryDeliveryRecord(first).message : undefined;
+				const batchAgentMessages = firstMessage !== undefined && isAgentSessionMessage(firstMessage);
+				let agentMessageBatchChars = batchAgentMessages ? firstMessage.content.length : 0;
+				while (!preselected && (mode === "all" || batchAgentMessages) && !isResourceProbe) {
 					const next = this._actionStore.queuedActions(first.delivery)[0];
 					if (
 						!next ||
@@ -5469,6 +7967,17 @@ export class AgentSession {
 						!turnExecutionPoliciesEqual(first.payload.executionPolicy, next.payload.executionPolicy)
 					) {
 						break;
+					}
+					if (batchAgentMessages) {
+						const nextMessage = primaryDeliveryRecord(next).message;
+						if (
+							!isAgentSessionMessage(nextMessage) ||
+							actions.length >= AGENT_MESSAGE_BATCH_MAX_ACTIONS ||
+							agentMessageBatchChars + nextMessage.content.length > AGENT_MESSAGE_BATCH_MAX_CHARS
+						) {
+							break;
+						}
+						agentMessageBatchChars += nextMessage.content.length;
 					}
 					this._actionStore.selectFirst();
 					actions.push(next);
@@ -5494,6 +8003,10 @@ export class AgentSession {
 							}
 						}
 						if (action.lifecycle.state === "running") {
+							const primary = primaryDeliveryRecord(action).message;
+							if (this._agentMessageObligationBridge !== undefined && isAgentSessionMessage(primary)) {
+								await this._agentMessageObligationBridge.settleAgentMessage(primary, "processed");
+							}
 							transitionSessionAction(action, { state: "completed" });
 							this._actionStore.ticketFor(action).settleCompleted();
 							this._settleAgentMessage(action.agentMessageId, "completion");
@@ -5538,10 +8051,19 @@ export class AgentSession {
 								error: terminalError,
 							});
 						}
+						if (action.payload.kind === "turn" && this._agentMessageObligationBridge !== undefined) {
+							const primary = primaryDeliveryRecord(action).message;
+							if (isAgentSessionMessage(primary)) {
+								await this._agentMessageObligationBridge
+									.settleAgentMessage(primary, "failed", terminalError.message)
+									.catch(() => undefined);
+							}
+						}
 						const ticket = this._actionStore.ticketFor(action);
 						if (undelivered.includes(action)) {
 							ticket.rejectDelivered(terminalError);
 							this._settleAgentMessage(action.agentMessageId, "delivery", terminalError);
+							this._settleAgentMessage(action.agentMessageId, "context", terminalError);
 						}
 						this._settleAgentMessage(action.agentMessageId, "completion", terminalError);
 						ticket.settleCompleted(terminalError);
@@ -5739,8 +8261,13 @@ export class AgentSession {
 			const { prepared, turns } = preparedTurn;
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let promptPromise: Promise<void>;
+			let resolvePromptStarted!: () => void;
+			const promptStarted = new Promise<void>((resolve) => {
+				resolvePromptStarted = resolve;
+			});
 			try {
-				promptPromise = this._sessionActionCommitContext.run(commitFence.owner, () => {
+				promptPromise = this._sessionActionCommitContext.run(commitFence.owner, async () => {
+					this._assertWorkflowTaskAdmissionAllowed();
 					if (
 						this._isSessionInputHandoffDeferred(epoch) ||
 						this.isStreaming ||
@@ -5770,13 +8297,31 @@ export class AgentSession {
 					} else if (executionPolicy.nextTurnContextTiming !== "skip") {
 						this.agent.state.systemPrompt = this._baseSystemPrompt;
 					}
+					for (const action of turns) {
+						const primaryRecord = primaryDeliveryRecord(action);
+						const primary = primaryRecord.message;
+						if (!isAgentSessionMessage(primary) || this._agentMessageObligationBridge === undefined) continue;
+						const dispatch = await this._agentMessageObligationBridge.beforeAgentMessageDispatch(primary);
+						if (
+							dispatch === "quarantine" &&
+							(!primaryRecord.durable || !this.hasPersistedAgentMessage(primary.details.id))
+						) {
+							throw new Error(
+								`Agent message ${primary.details.id} was quarantined after durable transcript reconciliation`,
+							);
+						}
+					}
+					this._assertWorkflowTaskAdmissionAllowed();
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
-					return turns.some((action) => action.suppressAutonomousContinuation)
+					const modelPrompt = turns.some((action) => action.suppressAutonomousContinuation)
 						? this._runWithAutonomousContinuationSuppressed(() => this.agent.prompt(preparedMessages))
 						: this.agent.prompt(preparedMessages);
+					resolvePromptStarted();
+					return modelPrompt;
 				});
+				await Promise.race([promptStarted, promptPromise.then(() => undefined)]);
 			} finally {
 				commitFence.release();
 			}
@@ -5833,6 +8378,23 @@ export class AgentSession {
 				case "autonomous":
 					await this._handleAutonomousSlashCommand(input.text);
 					break;
+				case "workflow": {
+					const workflowCommand = parseWorkflowSessionCommand(input.command.args);
+					if (workflowCommand.kind === "brainstorm") {
+						resultText = await this._beginWorkflowBrainstorm(workflowCommand);
+					} else if (workflowCommand.kind === "approve") {
+						resultText = formatWorkflowSessionStatus(await this._approveWorkflowProposal(workflowCommand.cloud));
+					} else if (workflowCommand.kind === "cancel" && this._workflowBrainstorm?.status === "draft") {
+						const state = this._workflowBrainstorm;
+						this._persistWorkflowBrainstormState({ ...state, status: "cancelled" });
+						this.setActiveToolsByName([...state.previousToolNames]);
+						resultText = "Workflow brainstorming cancelled before workflow authority was created.";
+					} else {
+						const status = await this.executeWorkflowCommand(workflowCommand);
+						resultText = formatWorkflowSessionStatus(status);
+					}
+					break;
+				}
 			}
 			if (resultText) {
 				this._appendDurableSessionCommandMessage(resultText, input.command, true, false);
@@ -6033,6 +8595,7 @@ export class AgentSession {
 			const error =
 				action.payload.kind === "turn" && action.lifecycle.state === "preparing" ? promptError : agentMessageError;
 			this._settleAgentMessage(action.agentMessageId, "delivery", error);
+			this._settleAgentMessage(action.agentMessageId, "context", error);
 			this._settleAgentMessage(action.agentMessageId, "completion", error);
 		}
 		const clearableIds = new Set(clearable.map((action) => action.id));
@@ -6185,6 +8748,23 @@ export class AgentSession {
 
 	get unfinishedActionCount(): number {
 		return this._actionStore.unfinishedActions().length;
+	}
+
+	get sessionInputWakeInvariantViolation(): "queued_without_wake" | undefined {
+		if (!this._hasSelectableAgentMessageInput()) return undefined;
+		if (
+			this._sessionInputPumpRequested ||
+			this._sessionInputPumpActive ||
+			this._abortInProgress ||
+			this.isStreaming ||
+			this.isCompacting ||
+			this.isRetrying ||
+			this.isBashRunning ||
+			this._queuedWorkPauses.size > 0
+		) {
+			return undefined;
+		}
+		return "queued_without_wake";
 	}
 
 	get isQueuedWorkSuspended(): boolean {
@@ -6583,6 +9163,19 @@ export class AgentSession {
 		return this._resourceLoader;
 	}
 
+	/**
+	 * Clear the abort suspension and restart the pump when any input is still selectable.
+	 *
+	 * Return: No value.
+	 */
+	private _resumeSessionInputPumpAfterAbort(): void {
+		if (this._disposed || this._disposing) return;
+		if (!this._hasSelectableSessionInput()) return;
+		this._sessionInputPumpSuspended = false;
+		this._notifySessionInputCheckpointChange();
+		this._scheduleSessionInputPump();
+	}
+
 	requestAbort(): void {
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
@@ -6601,6 +9194,14 @@ export class AgentSession {
 		this._autoRefineReviewAbort?.abort();
 		this._refineAbortController?.abort();
 		this.agent.abort();
+		// abort() has its own recovery in a finally block; callers that use requestAbort()
+		// directly (daemon-mode, in-process-agent-connection) would otherwise strand the queue.
+		void this.agent
+			.waitForIdle()
+			.catch(() => {})
+			.then(() => {
+				if (!this._abortInProgress) this._resumeSessionInputPumpAfterAbort();
+			});
 	}
 
 	/**
@@ -6609,6 +9210,7 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		const compactionOperation = this._compactionOperation;
 		const branchSummaryOperation = this._branchSummaryOperation;
+		this._abortInProgress = true;
 		this.requestAbort();
 		this._cancelActiveRlmChildRuns("Parent session aborted");
 		this._goalAbortInProgress = this._goalState.status === "active";
@@ -6621,6 +9223,11 @@ export class AgentSession {
 			]);
 		} finally {
 			this._goalAbortInProgress = false;
+			this._abortInProgress = false;
+			// Must match the pump's own gate (_hasSelectableSessionInput). Recovering only for
+			// agent-to-agent messages stranded every other queued input — follow-ups, heartbeats,
+			// cron prompts — with the pump suspended and nothing left to restart it.
+			this._resumeSessionInputPumpAfterAbort();
 		}
 	}
 
@@ -6697,6 +9304,7 @@ export class AgentSession {
 		}
 
 		const previousModel = this.model;
+		if (!modelsAreEqual(previousModel, model)) this._advanceResourceCapacityRevision();
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = model;
@@ -6774,6 +9382,7 @@ export class AgentSession {
 		const serviceTier = this._getServiceTierForModelSwitch();
 
 		// Apply model
+		if (!modelsAreEqual(currentModel, next.model)) this._advanceResourceCapacityRevision();
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
@@ -6817,6 +9426,7 @@ export class AgentSession {
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
+		if (!modelsAreEqual(currentModel, nextModel)) this._advanceResourceCapacityRevision();
 		this.agent.state.model = nextModel;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
@@ -7073,6 +9683,43 @@ export class AgentSession {
 	// Compaction
 	// =========================================================================
 
+	private async _runCompactionWithDeadline<T>(
+		controller: AbortController,
+		operation: (signal: AbortSignal, setPhase: (phase: AgentSessionCompactionPhase) => void) => Promise<T>,
+	): Promise<T> {
+		const attempt = ++this._compactionAttempt;
+		const startedAt = Date.now();
+		const deadlineAt = startedAt + this._compactionDeadlineMs;
+		const setPhase = (phase: AgentSessionCompactionPhase): void => {
+			if (this._compactionAttempt !== attempt || this._compactionLiveness === undefined) return;
+			this._compactionLiveness = { phase, startedAt, deadlineAt };
+		};
+		this._compactionLiveness = { phase: "authenticating", startedAt, deadlineAt };
+		let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<never>((_resolve, reject) => {
+			deadlineTimer = setTimeout(() => {
+				const phase = this._compactionLiveness?.phase ?? "recovering";
+				setPhase("recovering");
+				controller.abort();
+				reject(new CompactionDeadlineExceededError(phase, this._compactionDeadlineMs));
+			}, this._compactionDeadlineMs);
+		});
+
+		try {
+			return await Promise.race([operation(controller.signal, setPhase), deadline]);
+		} catch (error) {
+			if (error instanceof CompactionDeadlineExceededError) {
+				this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+				this._mergeUnpersistedCompactionOutcomes(this.agent.state.messages);
+				this._restoreLateIpythonSentAgentMessages();
+			}
+			throw error;
+		} finally {
+			if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+			if (this._compactionAttempt === attempt) this._compactionLiveness = undefined;
+		}
+	}
+
 	/**
 	 * Manually compact the session context.
 	 * Aborts current agent operation first.
@@ -7103,14 +9750,22 @@ export class AgentSession {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
-			const { apiKey, headers } = await this._getRequiredRequestAuth(this.model);
-			const result = await this._performCompaction({
-				model: this.model,
-				apiKey,
-				headers,
-				customInstructions,
-				signal: this._compactionAbortController.signal,
-			});
+			const result = await this._runCompactionWithDeadline(
+				this._compactionAbortController,
+				async (signal, setPhase) => {
+					setPhase("authenticating");
+					const { apiKey, headers } = await this._getRequiredRequestAuth(this.model!);
+					if (signal.aborted) throw new Error("Compaction cancelled");
+					return await this._performCompaction({
+						model: this.model!,
+						apiKey,
+						headers,
+						customInstructions,
+						signal,
+						setPhase,
+					});
+				},
+			);
 
 			this._emit({
 				type: "compaction_end",
@@ -7127,6 +9782,9 @@ export class AgentSession {
 			return result;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			if (error instanceof CompactionDeadlineExceededError) {
+				this._persistCompactionOutcome("manual", "failed", message);
+			}
 			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			const skipped = error instanceof CompactionSkippedError;
 			this._emit({
@@ -7173,8 +9831,10 @@ export class AgentSession {
 		headers?: Record<string, string>;
 		customInstructions?: string;
 		signal: AbortSignal;
+		setPhase: (phase: AgentSessionCompactionPhase) => void;
 	}): Promise<CompactionResult> {
-		const { model, apiKey, headers, customInstructions, signal } = options;
+		const { model, apiKey, headers, customInstructions, signal, setPhase } = options;
+		setPhase("preparing");
 		const pathEntries = this.sessionManager.getBranch();
 		const settings = this.settingsManager.getCompactionSettings();
 
@@ -7191,6 +9851,7 @@ export class AgentSession {
 		let fromExtension = false;
 
 		if (this._extensionRunner.hasHandlers("session_before_compact")) {
+			setPhase("before_extension");
 			const result = (await this._extensionRunner.emit({
 				type: "session_before_compact",
 				preparation,
@@ -7198,6 +9859,7 @@ export class AgentSession {
 				customInstructions,
 				signal,
 			})) as SessionBeforeCompactResult | undefined;
+			if (signal.aborted) throw new Error("Compaction cancelled");
 
 			if (result?.cancel) {
 				throw new Error("Compaction cancelled");
@@ -7209,6 +9871,7 @@ export class AgentSession {
 			}
 		}
 
+		setPhase("summarizing");
 		const { summary, firstKeptEntryId, tokensBefore, details } =
 			extensionCompaction ??
 			(await compact(preparation, model, apiKey, headers, customInstructions, signal, this.thinkingLevel));
@@ -7217,6 +9880,7 @@ export class AgentSession {
 			throw new Error("Compaction cancelled");
 		}
 
+		setPhase("committing");
 		this.sessionManager.appendCompaction(
 			summary,
 			firstKeptEntryId,
@@ -7235,14 +9899,20 @@ export class AgentSession {
 			| CompactionEntry
 			| undefined;
 		if (savedCompactionEntry) {
+			setPhase("after_extension");
 			await this._extensionRunner.emit({
 				type: "session_compact",
 				compactionEntry: savedCompactionEntry,
 				fromExtension,
 			});
+			if (signal.aborted) throw new Error("Compaction cancelled");
 		}
+		setPhase("kernel_notification");
 		await this._notifyKernelStateAfterCompaction();
+		if (signal.aborted) throw new Error("Compaction cancelled");
+		setPhase("child_cleanup");
 		await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
+		if (signal.aborted) throw new Error("Compaction cancelled");
 
 		return { summary, firstKeptEntryId, tokensBefore, details };
 	}
@@ -7270,7 +9940,13 @@ export class AgentSession {
 	}
 
 	private _autoRefineAllowedForSession(): boolean {
-		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
+		return (
+			this._rlmDepth === 0 &&
+			this._localHarnessStateDir() !== undefined &&
+			!this._workflowOwnsGoalState() &&
+			this._workflowBrainstorm?.status !== "draft" &&
+			this._workflowBrainstorm?.status !== "proposed"
+		);
 	}
 
 	private _cancelPostCompactionContinue(): void {
@@ -7329,6 +10005,11 @@ export class AgentSession {
 	}
 
 	private _consumePendingRequestedRefine(): boolean {
+		if (this._workflowOwnsGoalState()) {
+			this._pendingRequestedRefine = undefined;
+			this._emitRefineFailed(new AgentSessionRefinementError());
+			return false;
+		}
 		const pending = this._pendingRequestedRefine;
 		if (!pending) return false;
 		this._pendingRequestedRefine = undefined;
@@ -7428,6 +10109,7 @@ export class AgentSession {
 		}
 
 		this._postCompactionContinuationScheduled = false;
+		if (this._workflowTaskAdmissionBlockReason() !== undefined) return;
 		try {
 			await this.agent.continue();
 			this._forgetConsumedPostCompactionContinuations(continuationMessages);
@@ -7486,6 +10168,14 @@ export class AgentSession {
 	}
 
 	private async _maybeAutoRefine(reason: AutoRefineReason): Promise<void> {
+		// Same reason as _runSerializedRefineCheckpoint: automatic refinement is a background
+		// courtesy, and throwing from it replaced the assistant's actual response for the turn. When a
+		// workflow owns the goal, drop the pending request and skip. An explicit /refine still refuses
+		// loudly, because there a user asked for something the workflow owns.
+		if (this._workflowOwnsGoalState()) {
+			this._discardPendingAutoRefine();
+			return;
+		}
 		if (this._disposed || this._disposing) {
 			this._discardPendingAutoRefine();
 			return;
@@ -7599,6 +10289,7 @@ export class AgentSession {
 	}
 
 	private async _runApprovedRefine(reason: AutoRefineReason, review: AutoRefineReview): Promise<void> {
+		this._assertRefinementAuthority();
 		this._autoRefineInProgress = true;
 		try {
 			await this.refine({
@@ -7676,6 +10367,7 @@ export class AgentSession {
 		} = {},
 		internal: { skipAbort?: boolean } = {},
 	): Promise<RefinementResult> {
+		this._assertRefinementAuthority();
 		// Queued /refine executes from the session-input pump between turns;
 		// refine never aborts the agent (planning is backgrounded and the apply
 		// phase waits for quiescence), so skipAbort only asserts the pump's
@@ -7802,6 +10494,7 @@ export class AgentSession {
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
 		signal: AbortSignal,
 	): Promise<RefinementPlan> {
+		this._assertRefinementAuthority();
 		if (this._disposed) {
 			throw new Error("Cannot refine a disposed session.");
 		}
@@ -7869,6 +10562,7 @@ export class AgentSession {
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
 		refineAbort: AbortController,
 	): Promise<RefinementResult> {
+		this._assertRefinementAuthority();
 		if (this._disposed) {
 			throw new Error("Cannot refine a disposed session.");
 		}
@@ -8195,7 +10889,27 @@ export class AgentSession {
 		this._autoCompactionAbortController = new AbortController();
 
 		try {
-			const authResult = this.model ? await this._modelRegistry.getApiKeyAndHeaders(this.model) : undefined;
+			const boundedResult = await this._runCompactionWithDeadline(
+				this._autoCompactionAbortController,
+				async (signal, setPhase) => {
+					setPhase("authenticating");
+					const authResult = this.model ? await this._modelRegistry.getApiKeyAndHeaders(this.model) : undefined;
+					if (signal.aborted) throw new Error("Compaction cancelled");
+					if (!this.model || !authResult || !authResult.ok || !authResult.apiKey) {
+						return { authResult, result: undefined };
+					}
+					const result = await this._performCompaction({
+						model: this.model,
+						apiKey: authResult.apiKey,
+						headers: authResult.headers,
+						customInstructions,
+						signal,
+						setPhase,
+					});
+					return { authResult, result };
+				},
+			);
+			const { authResult, result } = boundedResult;
 			if (!this.model || !authResult || !authResult.ok || !authResult.apiKey) {
 				const detail =
 					!this.model || !authResult
@@ -8212,13 +10926,7 @@ export class AgentSession {
 				return false;
 			}
 
-			const result = await this._performCompaction({
-				model: this.model,
-				apiKey: authResult.apiKey,
-				headers: authResult.headers,
-				customInstructions,
-				signal: this._autoCompactionAbortController.signal,
-			});
+			if (!result) throw new Error("Compaction failed without a result");
 
 			this._emit({
 				type: "compaction_end",
@@ -8630,6 +11338,78 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
+	private _resolveKernelIsolation(): KernelContainerIsolationOptions | undefined {
+		const binding = this._workflowTaskBinding;
+		const { workflowId, workflowBound } = this._resolveWorkflowKernelOwnership();
+		if (workflowId === undefined) {
+			// A registered loader only means this session *can* run a workflow. Isolation is
+			// required once one is actually bound; demanding it earlier breaks IPython for
+			// every ordinary session.
+			if (workflowBound) throw new Error("workflow kernel isolation requires a bound workflow identity");
+			return undefined;
+		}
+		if (!workflowBound && this._workflowHost !== undefined) {
+			throw new Error("workflow kernel isolation requires a bound workflow identity");
+		}
+
+		const sessionPath = this.sessionManager.getSessionFile();
+		const artifactRoot = this.sessionManager.getSessionArtifactDir();
+		if (sessionPath === undefined || artifactRoot === undefined) {
+			throw new Error("workflow kernel isolation requires persisted session and artifact paths");
+		}
+		mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+		const image = process.env.PRIME_AGENT_KERNEL_IMAGE;
+		// Container isolation is a hardening measure, not a correctness requirement: the kernel
+		// runs unisolated when no image is configured, exactly as an ordinary session does. Making
+		// it mandatory meant a workflow could never dispatch a worker on a machine without a
+		// configured image, which is most local machines.
+		if (!image) return undefined;
+
+		const taskId = binding?.taskId ?? "coordinator";
+		const attemptId = binding?.attemptId ?? "coordinator";
+		const executionKey = binding?.executionKey ?? `workflow:${workflowId}:coordinator`;
+		const protectedPaths = [
+			this.sessionManager.getSessionDir(),
+			sessionPath,
+			artifactRoot,
+			...(this._agentDir ? [this._agentDir] : []),
+		];
+		return {
+			type: "docker",
+			image,
+			ownerIdentity: ["kernel", this.sessionId, workflowId, taskId, attemptId, executionKey].join(":"),
+			protectedPaths,
+			sessionId: this.sessionId,
+			sessionPath,
+			workflowId,
+			taskId,
+			attemptId,
+			executionKey,
+		};
+	}
+
+	private _scheduleIpythonPrewarm(provisioner: IpythonKernelProvisioner): void {
+		this._ipythonPrewarmPending = true;
+		void this._workflowSetupGate.then(
+			() => {
+				if (this._ipythonKernelProvisioner !== provisioner) return;
+				this._releaseDeferredIpythonPrewarm();
+			},
+			() => undefined,
+		);
+	}
+
+	private _releaseDeferredIpythonPrewarm(): void {
+		if (!this._ipythonPrewarmPending) return;
+		if (!this._workflowSetupReady || this._disposed || this._disposing) return;
+		if (this._workflowHost === undefined && this._workflowHostLoader !== undefined) return;
+		if (this._workflowTaskAdmissionBlockReason() !== undefined) return;
+		const provisioner = this._ipythonKernelProvisioner;
+		if (provisioner === undefined || !this.getActiveToolNames().includes("ipython")) return;
+		this._ipythonPrewarmPending = false;
+		provisioner.prewarm();
+	}
+
 	private _buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
@@ -8650,16 +11430,26 @@ export class AgentSession {
 			// startup on the old one's dispose (which flushes a final snapshot), so a
 			// reload can't restore from a snapshot the old kernel is still writing.
 			const previousDispose = this._ipythonKernelProvisioner?.dispose();
+			this._ipythonPrewarmPending = false;
 			this._ipythonKernelSnapshotDir = this.sessionManager.getSessionArtifactDir();
 			// Only surface the "revived from your previous session" notice on the first
 			// build (a genuine resume). A later rebuild (/reload) restores state silently
 			// for continuity — the conversation is unchanged, so there's nothing to flag.
 			const notifyRestore = !this._ipythonRuntimeBuilt;
 			this._ipythonKernelProvisioner = new IpythonKernelProvisioner(this._cwd, {
+				python: this._kernelPythonLauncher,
+				agentDir: this._agentDir,
 				env: this._rlmKernelEnv(),
 				sessionId: this.sessionId,
 				hostHandlers: this._createKernelHostHandlers(),
 				pythonSkills,
+				isolation: () => this._resolveKernelIsolation(),
+				requiredPythonSkillImports:
+					this._goalState.status === "active" ||
+					this._goalState.status === "paused" ||
+					this._goalState.status === "budget_limited"
+						? ["goal"]
+						: [],
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
@@ -8677,6 +11467,10 @@ export class AgentSession {
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(configuredBaseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
+		);
+		this._baseToolDefinitions.set(
+			WORKFLOW_PROPOSE_TOOL_NAME,
+			createWorkflowProposalTool({ propose: (proposal) => this._submitWorkflowBrainstormProposal(proposal) }),
 		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
@@ -8707,7 +11501,12 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : ["ipython"];
 		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
-		if (this._goalState.status === "active" && this._includeGoals) {
+		if (
+			this._goalState.status === "active" &&
+			this._includeGoals &&
+			this._workflowBrainstorm?.status !== "draft" &&
+			this._workflowBrainstorm?.status !== "proposed"
+		) {
 			// An active goal needs ipython so the model can reach the goal skill.
 			baseActiveToolNames.push("ipython");
 		}
@@ -8723,7 +11522,8 @@ export class AgentSession {
 		const hasSnapshot =
 			!!this._ipythonKernelSnapshotDir && existsSync(snapshotPathIn(this._ipythonKernelSnapshotDir));
 		if ((this._prewarmIpythonKernel || hasSnapshot) && this.getActiveToolNames().includes("ipython")) {
-			this._ipythonKernelProvisioner?.prewarm();
+			const provisioner = this._ipythonKernelProvisioner;
+			if (provisioner !== undefined) this._scheduleIpythonPrewarm(provisioner);
 		}
 
 		// Subsequent builds are in-process rebuilds (/reload), not a fresh resume.
@@ -8736,6 +11536,8 @@ export class AgentSession {
 	 */
 	private _modelVisibleSkills(): Skill[] {
 		let skills = this._resourceLoader.getSkills().skills;
+		const workflowSkillNames = this._workflowSkillNamesBoundToHost();
+		if (workflowSkillNames.size > 0) skills = skills.filter((skill) => !workflowSkillNames.has(skill.name));
 		if (!this._includeGoals) {
 			skills = skills.filter((skill) => skill.name !== GOAL_SKILL_NAME);
 		}
@@ -8755,6 +11557,65 @@ export class AgentSession {
 			skills = skills.filter((skill) => skill.name !== ORCHESTRATION_HEARTBEAT_SKILL_NAME);
 		}
 		return skills;
+	}
+
+	private _resolveKernelHostCapability(requestType: string): HostRequestCapabilityContext {
+		const workflowBindings = this._workflowHost as WorkflowKernelHostBindings | undefined;
+		if (
+			workflowBindings?.resolveHostRequestCapability !== undefined &&
+			(requestType === "autoresearch.run" ||
+				requestType === "workflow.v1.autoresearch.run" ||
+				requestType === "mempalace.recall" ||
+				requestType === "workflow.v1.mempalace.recall" ||
+				requestType === "mempalace.propose" ||
+				requestType === "workflow.v1.mempalace.propose" ||
+				requestType === "pipeline.record" ||
+				requestType === "workflow.v1.pipeline.record" ||
+				requestType === "execution_evidence.read" ||
+				requestType === "workflow.v1.execution_evidence.read" ||
+				requestType === "learning.review" ||
+				requestType === "workflow.v1.learning.review" ||
+				requestType === "learning.rollback" ||
+				requestType === "workflow.v1.learning.rollback" ||
+				requestType === "completion.request" ||
+				requestType === "workflow.v1.completion.request")
+		) {
+			return workflowBindings.resolveHostRequestCapability(requestType);
+		}
+		const workflowCapability =
+			requestType === "autoresearch.run" || requestType === "workflow.v1.autoresearch.run"
+				? "autoresearch.run"
+				: requestType === "mempalace.propose" || requestType === "workflow.v1.mempalace.propose"
+					? "mempalace.propose"
+					: requestType === "pipeline.record" || requestType === "workflow.v1.pipeline.record"
+						? "pipeline.record"
+						: requestType === "learning.review" || requestType === "workflow.v1.learning.review"
+							? "learning.review"
+							: requestType === "learning.rollback" || requestType === "workflow.v1.learning.rollback"
+								? "learning.rollback"
+								: requestType === "completion.request" || requestType === "workflow.v1.completion.request"
+									? "completion.request"
+									: undefined;
+		if (workflowCapability !== undefined) {
+			return { capabilities: [] };
+		}
+		if (requestType === "goal.complete" && this._goalState.status !== "active") return { capabilities: [] };
+		if (
+			requestType === "goal.create" &&
+			(this._goalState.status === "active" ||
+				this._goalState.status === "paused" ||
+				this._goalState.status === "budget_limited")
+		)
+			return { capabilities: [] };
+		const revision = Math.max(1, this.sessionManager.getBranch().length + 1);
+		return {
+			workflowId: this.sessionManager.getSessionId(),
+			decisionId: this._goalState.goalId ?? `session:${this.sessionManager.getSessionId()}`,
+			decisionRevision: revision,
+			capabilities: [requestType],
+			expiresAt: Date.now() + 60_000,
+			nonce: digestObject({ requestType, revision, nonce: randomUUID() }),
+		};
 	}
 
 	/** Typed handlers for host requests arriving from the IPython kernel comm bridge. */
@@ -8782,7 +11643,7 @@ export class AgentSession {
 				handlers[type] = async (payload) => this.handleCompactHostRequest(type, payload);
 			}
 		}
-		if (this._autoRefineAllowedForSession()) {
+		if (this._autoRefineAllowedForSession() || this._workflowOwnsGoalState()) {
 			for (const type of ["refine.run", "refine.status"]) {
 				handlers[type] = async (payload) => this.handleRefineHostRequest(type, payload);
 			}
@@ -8859,7 +11720,16 @@ export class AgentSession {
 		if (this._mcpManager) {
 			Object.assign(handlers, this._mcpManager.hostHandlers());
 		}
-		return handlers;
+		const workflowBindings = this._workflowHost as WorkflowKernelHostBindings | undefined;
+		if (workflowBindings?.hostRequestHandlers !== undefined)
+			Object.assign(handlers, workflowBindings.hostRequestHandlers);
+		const installed = this._hasExplicitHostRequestCapabilityContext
+			? installHostRequestCapabilityContext(handlers, this._hostRequestCapabilityContext)
+			: installHostRequestCapabilityResolver(handlers, (requestType) =>
+					this._resolveKernelHostCapability(requestType),
+				);
+		this._workflowHostRequestHandlers = installed;
+		return installed;
 	}
 
 	async reload(): Promise<void> {
@@ -8900,10 +11770,15 @@ export class AgentSession {
 		// Kernel env is provisioning-time only: RLM_MAX_DEPTH may be stale in an already-running kernel;
 		// the TypeScript-side spawn check remains authoritative.
 		const env: Record<string, string> = {
+			PYTHONDONTWRITEBYTECODE: "1",
 			RLM_DEPTH: String(this._rlmDepth),
 			RLM_MAX_DEPTH: String(this._rlmMaxDepth),
 			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
 		};
+		const ownership = this._resolveWorkflowKernelOwnership();
+		if (ownership.workflowId !== undefined || ownership.workflowBound) {
+			env.RLM_HARNESS_READ_ONLY = "1";
+		}
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {
 			env.RLM_SESSION_DIR = rlmSessionDir;
@@ -9013,6 +11888,7 @@ export class AgentSession {
 		spawnCode?: string;
 		sessionDir: string;
 		model: Model<any>;
+		thinkingLevel?: ThinkingLevel;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9022,7 +11898,7 @@ export class AgentSession {
 			spawnCode: options.spawnCode,
 			sessionDir: options.sessionDir,
 			model: options.model,
-			thinkingLevel: clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel,
+			thinkingLevel: clampThinkingLevel(options.model, options.thinkingLevel ?? this.thinkingLevel) as ThinkingLevel,
 			serviceTier:
 				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
 			scopedModels: [...this._scopedModels],
@@ -9031,6 +11907,8 @@ export class AgentSession {
 			customTools: [...this._customTools],
 			includeGoals: this._includeGoals,
 			includeCompactSkill: this._includeCompactSkill,
+			toolExecutionDeadlineMs: this._toolExecutionDeadlineMs,
+			kernelPythonLauncher: this._kernelPythonLauncher,
 			rlmDepth: this._rlmDepth + 1,
 			rlmMaxDepth: this._rlmMaxDepth,
 			rlmParentNodeId: options.id,
@@ -9080,6 +11958,90 @@ export class AgentSession {
 			toolExecution: this.agent.toolExecution,
 		});
 
+		let childSession: AgentSession | undefined;
+		const childMessageController: AgentSessionMessageController = {
+			listAgents: () => {
+				const child = childSession;
+				if (child === undefined)
+					throw new Error("Inline child messaging is unavailable before session publication.");
+				return {
+					current: {
+						activeSessionId: child.sessionId,
+						sessionId: child.sessionId,
+						sessionName: options.sessionName,
+					},
+					agents: [
+						{
+							activeSessionId: this.sessionId,
+							sessionId: this.sessionId,
+							sessionName: this.sessionName,
+							runtimeKind: this._rlmDepth === 0 ? "top-level" : "subagent",
+							cwd: this._cwd,
+							isStreaming: this.isStreaming,
+							unfinishedActionCount: this.unfinishedActionCount,
+							status: this.isStreaming ? "running" : "idle",
+						},
+					],
+				};
+			},
+			roster: () => {
+				const child = childSession;
+				if (child === undefined)
+					throw new Error("Inline child messaging is unavailable before session publication.");
+				return {
+					current: { name: options.sessionName, id: child.sessionId, depth: options.rlmDepth },
+					entries: [
+						{
+							relationship: "parent",
+							name: this.sessionName ?? this.sessionId,
+							id: this.sessionId,
+							depth: this._rlmDepth,
+							status: this.isStreaming ? "running" : "idle",
+						},
+					],
+				};
+			},
+			sendAgentMessage: async (input) => {
+				const child = childSession;
+				if (child === undefined)
+					throw new Error("Inline child messaging is unavailable before session publication.");
+				if (input.target !== this.sessionId) throw new Error(AGENT_FAMILY_REACH_ERROR);
+				if (this._disposed || this._disposing) throw new Error("Inline parent session is no longer active.");
+				const payload: AgentSessionMessagePayload = {
+					id: createAgentSessionMessageId(),
+					source: AGENT_MESSAGE_SOURCE,
+					message: normalizeAgentSessionMessage(input.message),
+					from: {
+						activeSessionId: child.sessionId,
+						sessionId: child.sessionId,
+						sessionName: options.sessionName,
+						runtimeKind: "subagent" as const,
+					},
+					fromRelationship: "child" as const,
+					target: {
+						activeSessionId: this.sessionId,
+						sessionId: this.sessionId,
+						sessionName: this.sessionName,
+						runtimeKind: this._rlmDepth === 0 ? ("top-level" as const) : ("subagent" as const),
+					},
+				};
+				const message = createAgentSessionMessage(payload);
+				if (this._agentMessageObligationBridge !== undefined) {
+					await this._agentMessageObligationBridge.accept({ payload, lane: "steering" });
+				}
+				let queued: boolean;
+				try {
+					queued = await this.queueAgentMessagePrompt(message.content as string, "steer", message);
+				} catch (error) {
+					if (isAgentSessionMessageBlockedError(error)) {
+						return createAgentSessionMessageReceipt(payload, "blocked", error.reason);
+					}
+					throw error;
+				}
+				if (!queued) throw new Error("Inline parent message was not queued.");
+				return createAgentSessionMessageReceipt(payload, "queued");
+			},
+		};
 		const child = new AgentSession({
 			agent: childAgent,
 			sessionManager: childSessionManager,
@@ -9094,6 +12056,9 @@ export class AgentSession {
 			allowedToolNames: options.allowedToolNames,
 			includeGoals: options.includeGoals,
 			includeCompactSkill: options.includeCompactSkill,
+			toolExecutionDeadlineMs: options.toolExecutionDeadlineMs,
+			kernelPythonLauncher: options.kernelPythonLauncher,
+			agentMessageController: childMessageController,
 			rlmDepth: options.rlmDepth,
 			rlmMaxDepth: options.rlmMaxDepth,
 			rlmSessionDir: options.sessionDir,
@@ -9101,6 +12066,7 @@ export class AgentSession {
 			rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
 			sessionStartEvent: { type: "session_start", reason: "startup" },
 		});
+		childSession = child;
 		if (child.sessionName !== options.sessionName) {
 			try {
 				child.setSessionName(options.sessionName);
@@ -9120,18 +12086,69 @@ export class AgentSession {
 		}
 	}
 
+	private _markRlmChildTerminalFenceFailure(run: RlmChildRun, error: unknown): Error {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		run.terminalFenceError = failure;
+		run.status = "error";
+		run.error = failure.message;
+		return failure;
+	}
+
+	private _beginRlmChildTerminalFence(run: RlmChildRun): Promise<void> {
+		if (run.terminalFence !== undefined) return run.terminalFence;
+		const child = run.session;
+		if (child === undefined || child._workflowTaskBinding === undefined) {
+			run.terminalFence = Promise.resolve();
+			run.terminalFenceSettled = true;
+			return run.terminalFence;
+		}
+		let fence: Promise<void>;
+		try {
+			fence = child._fenceTerminalTaskKernel();
+		} catch (error) {
+			fence = Promise.reject(error);
+		}
+		run.terminalFence = fence;
+		run.terminalFenceSettled = false;
+		void fence.then(
+			() => {
+				run.terminalFenceSettled = true;
+			},
+			(error) => {
+				this._markRlmChildTerminalFenceFailure(run, error);
+			},
+		);
+		return fence;
+	}
+
 	private _cancelRlmChildRun(run: RlmChildRun, reason: string): boolean {
 		if (run.status !== "running" && run.status !== "queued") {
 			return false;
 		}
 		run.status = "cancelled";
 		run.error = reason;
+		if (run.session?._workflowTaskBinding !== undefined) {
+			void this._beginRlmChildTerminalFence(run).then(
+				() => {
+					if (run.status === "cancelled") {
+						run.session?._recordWorkflowTaskTerminal(
+							reason === "task_deadline_expired" ? "deadline" : "cancelled",
+							reason,
+						);
+						run.emitUpdate?.();
+					}
+				},
+				(error) => {
+					this._markRlmChildTerminalFenceFailure(run, error);
+				},
+			);
+		} else {
+			run.emitUpdate?.();
+		}
 		run.publication.reject(new Error(reason));
 		run.abort();
-		// Surface the cancellation immediately; the run's own terminal update is
-		// delayed indefinitely when the child is stuck mid-stream, which is
-		// exactly when users reach for the kill.
-		run.emitUpdate?.();
+		// Generic runs surface cancellation immediately; workflow runs publish only
+		// after their exact child kernel has been fenced.
 		return true;
 	}
 
@@ -9685,7 +12702,22 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		deliverTerminalMessages = true,
+		thinkingLevel?: ThinkingLevel,
+		onMeaningfulProgress?: (progressDigest: string) => void,
+		workflowTaskDeadlineAt?: string,
+		workflowTaskBinding?: WorkflowTaskBindingData,
+		allowedToolNames?: readonly string[],
+		ownedPaths?: readonly string[],
 	): Promise<RlmSpawnHandle> {
+		const workflowTaskDeadlineAtMs =
+			workflowTaskDeadlineAt === undefined ? undefined : Date.parse(workflowTaskDeadlineAt);
+		if (workflowTaskDeadlineAtMs !== undefined && !Number.isFinite(workflowTaskDeadlineAtMs))
+			throw new Error("workflow_task_deadline_invalid");
+		if (workflowTaskDeadlineAtMs !== undefined && Date.now() >= workflowTaskDeadlineAtMs)
+			throw new Error("workflow_task_deadline_expired");
+		const workflowTaskDeadlineDelayMs =
+			workflowTaskDeadlineAtMs === undefined ? undefined : workflowTaskDeadlineAtMs - Date.now();
 		const { name: rawName, model: rawModel, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -9727,6 +12759,7 @@ export class AgentSession {
 		let runningToolCount = 0;
 		let activity: RlmChildAgentActivity | undefined;
 		let childSession: AgentSession | undefined;
+		let workflowDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
 		const run: RlmChildRun = {
 			id: childNodeId,
 			prompt,
@@ -9736,12 +12769,27 @@ export class AgentSession {
 			settled: false,
 			abort: noopRlmChildAbort,
 			publication: createAgentMessageDeferred(),
+			completion: createRlmChildCompletionDeferred(),
 		};
+		const reportMeaningfulProgress = (kind: string, value: unknown): void => {
+			onMeaningfulProgress?.(digestObject({ workflowWorkerId: childNodeId, kind, value }));
+		};
+		this._rlmChildCompletionPromises.set(run.id, run.completion.promise);
 		const throwIfCancelled = () => {
 			if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 		};
 		this._activeRlmChildRuns.set(run.id, run);
+		const terminalWorkflowFencePending = (): boolean =>
+			workflowTaskBinding !== undefined &&
+			run.terminalFence !== undefined &&
+			run.terminalFenceSettled !== true &&
+			(run.status === "done" || run.status === "error" || run.status === "cancelled");
 		const emitChildUpdate = () => {
+			if (terminalWorkflowFencePending()) {
+				// Child end events can arrive after abort; wait for the durable exact-kernel
+				// fence before exposing any terminal workflow snapshot.
+				return;
+			}
 			const childModel = childSession?.model ?? modelSelection.model;
 			this._emit({
 				type: "rlm_child_update",
@@ -9772,6 +12820,29 @@ export class AgentSession {
 			if (this._activeRlmChildRuns.get(run.id) !== run) return;
 			run.session = child;
 			run.abort = () => void child.abort();
+			if (workflowTaskBinding !== undefined) {
+				child._bindWorkflowTask(workflowTaskBinding, () => {
+					const activeRun = this._activeRlmChildRuns.get(run.id);
+					return activeRun === run && (run.status === "queued" || run.status === "running");
+				});
+			}
+			// A stage's declared capabilities become a real restriction here. Without this the
+			// child inherits the parent's full tool set and any "read-only" or "diffs only"
+			// role is advisory prose the worker may ignore.
+			if (allowedToolNames !== undefined) child.setActiveToolsByName([...allowedToolNames]);
+			child.setOwnedPaths(ownedPaths);
+			child._releaseDeferredIpythonPrewarm();
+			if (workflowTaskDeadlineDelayMs !== undefined && workflowDeadlineTimer === undefined) {
+				child._workflowTaskDeadlineMonotonicAtMs = performance.now() + workflowTaskDeadlineDelayMs;
+				child._workflowTaskDeadlineAbort = () => {
+					this._cancelRlmChildRun(run, "task_deadline_expired");
+				};
+				workflowDeadlineTimer = setTimeout(
+					child._workflowTaskDeadlineAbort,
+					Math.max(0, workflowTaskDeadlineDelayMs),
+				);
+				workflowDeadlineTimer.unref();
+			}
 			run.publication.resolve();
 		};
 		const subagentOptions: CreateRlmSubagentRuntimeOptions = {
@@ -9782,13 +12853,14 @@ export class AgentSession {
 				spawnCode,
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
+				thinkingLevel,
 			}),
 			onSessionPublished: publishChildSession,
 		};
 
 		const deliverTerminalMessageToParent = async (message: CustomMessage): Promise<void> => {
 			const childController = childSession?._agentMessageController;
-			if (childController) {
+			if (childController && this._subagentRuntimeHost) {
 				try {
 					await childController.sendAgentMessage({
 						target: this.sessionId,
@@ -9821,19 +12893,30 @@ export class AgentSession {
 				throwIfCancelled();
 				run.status = "running";
 				emitChildUpdate();
+				reportMeaningfulProgress("child_running", { sessionName });
 				const unsubscribeChildEvents = child.subscribe((event) => {
 					if (event.type === "rlm_child_update") {
+						if (
+							terminalWorkflowFencePending() &&
+							(event.child.status === "done" ||
+								event.child.status === "error" ||
+								event.child.status === "cancelled")
+						) {
+							return;
+						}
 						this._emit(event);
 						return;
 					}
 					if (event.type === "agent_start") {
 						activity = { kind: "waiting" };
+						reportMeaningfulProgress("agent_start", { messageCount: child.messages.length });
 						emitChildUpdate();
 					} else if (event.type === "agent_end") {
 						activity = undefined;
 						emitChildUpdate();
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
+						run.retryable = this._isRetryableError(assistant);
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
 							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
 							if (parentAssistantForUsage) {
@@ -9862,12 +12945,20 @@ export class AgentSession {
 						}
 						const text = compactRlmText(readAssistantText(assistant));
 						if (text) answerPreview = text;
+						reportMeaningfulProgress("assistant_end", {
+							stopReason: assistant.stopReason,
+							text,
+							usage: assistant.usage,
+						});
 						void flushAgentTraceUpload(child.sessionManager).catch(() => undefined);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
 							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
-							if (text) answerPreview = text;
+							if (text) {
+								answerPreview = text;
+								reportMeaningfulProgress("assistant_delta", { text });
+							}
 							activity = { kind: "writing" };
 							emitChildUpdate();
 						}
@@ -9875,10 +12966,23 @@ export class AgentSession {
 						toolUseCount += 1;
 						runningToolCount += 1;
 						activity = { kind: "executing", toolName: event.toolName };
+						reportMeaningfulProgress("tool_start", {
+							toolCallId: event.toolCallId,
+							toolName: event.toolName,
+						});
 						emitChildUpdate();
+					} else if (event.type === "tool_execution_update") {
+						reportMeaningfulProgress("tool_update", {
+							toolCallId: event.toolCallId,
+							partialResult: event.partialResult,
+						});
 					} else if (event.type === "tool_execution_end") {
 						runningToolCount = Math.max(0, runningToolCount - 1);
 						if (runningToolCount === 0) activity = { kind: "waiting" };
+						reportMeaningfulProgress("tool_end", {
+							toolCallId: event.toolCallId,
+							isError: event.isError,
+						});
 						emitChildUpdate();
 					} else if (event.type === "session_info_changed" || event.type === "recap_update") {
 						emitChildUpdate();
@@ -9886,24 +12990,39 @@ export class AgentSession {
 				});
 				run.unsubscribe = unsubscribeChildEvents;
 				const content = `[task from parent]\n\n${prompt}`;
+				const spawnPayload: AgentSessionMessagePayload = {
+					id: `spawn:${run.id}`,
+					source: AGENT_MESSAGE_SOURCE,
+					message: prompt,
+					from: {
+						sessionId: this.sessionId,
+						sessionName: this.sessionName,
+						activeSessionId: await this._currentActiveSessionId(),
+					},
+					fromRelationship: "parent",
+					target: {
+						sessionId: child.sessionId,
+						sessionName,
+						activeSessionId: (await child._currentActiveSessionId()) ?? child.sessionId,
+						runtimeKind: "subagent",
+					},
+				};
 				const spawnMessage: AgentSessionMessage = {
 					role: "custom",
 					customType: AGENT_MESSAGE_CUSTOM_TYPE,
 					content,
 					display: true,
 					details: {
-						id: `spawn:${run.id}`,
-						message: prompt,
-						from: {
-							sessionId: this.sessionId,
-							sessionName: this.sessionName,
-							activeSessionId: await this._currentActiveSessionId(),
-						},
-						fromRelationship: "parent",
+						id: spawnPayload.id,
+						message: spawnPayload.message,
+						from: spawnPayload.from,
+						fromRelationship: spawnPayload.fromRelationship,
+						target: spawnPayload.target,
 					},
 					timestamp: Date.now(),
 				};
 				throwIfCancelled();
+				await child._agentMessageObligationBridge?.accept({ payload: spawnPayload, lane: "steering" });
 				const parentReplyCountBeforeRun = child._parentReplyCount;
 				await child.promptAndWait(content, {
 					expandPromptTemplates: false,
@@ -9911,11 +13030,21 @@ export class AgentSession {
 					customMessage: spawnMessage,
 				});
 				if (run.error) throw new Error(run.error);
-				run.status = "done";
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
-				emitChildUpdate();
-				if (!run.detachedDeletion && child._parentReplyCount === parentReplyCountBeforeRun) {
+				if (workflowTaskBinding !== undefined) {
+					run.status = "done";
+					await this._beginRlmChildTerminalFence(run);
+					child._recordWorkflowTaskTerminal("completed");
+					emitChildUpdate();
+				} else {
+					await child._fenceTerminalTaskKernel();
+				}
+				if (
+					deliverTerminalMessages &&
+					!run.detachedDeletion &&
+					child._parentReplyCount === parentReplyCountBeforeRun
+				) {
 					const lastAssistantText = child.getLastAssistantText();
 					await deliverTerminalMessageToParent(
 						createRlmChildTerminalNoticeMessage({
@@ -9925,6 +13054,10 @@ export class AgentSession {
 							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
 						}),
 					);
+				}
+				if (workflowTaskBinding === undefined) {
+					run.status = "done";
+					emitChildUpdate();
 				}
 				if (!this.registerRlmChildSession(run.id, child)) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
@@ -9942,10 +13075,25 @@ export class AgentSession {
 					run.status = "error";
 					run.error = runError.message;
 				}
+				if (childSession?._workflowTaskBinding !== undefined) {
+					try {
+						await this._beginRlmChildTerminalFence(run);
+					} catch (fenceError) {
+						throw this._markRlmChildTerminalFenceFailure(run, fenceError);
+					}
+					childSession._recordWorkflowTaskTerminal(
+						run.status === "cancelled" && run.error === "task_deadline_expired"
+							? "deadline"
+							: run.status === "cancelled"
+								? "cancelled"
+								: "error",
+						run.error,
+					);
+				}
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
-				emitChildUpdate();
-				if (!run.detachedDeletion) {
+				if (run.status !== "cancelled") emitChildUpdate();
+				if (deliverTerminalMessages && !run.detachedDeletion) {
 					if (run.status === "error") {
 						await deliverTerminalMessageToParent(
 							createRlmChildFailureMessage({
@@ -9995,6 +13143,31 @@ export class AgentSession {
 					}
 				}
 			} finally {
+				if (workflowDeadlineTimer !== undefined) clearTimeout(workflowDeadlineTimer);
+				if (childSession !== undefined) {
+					if (
+						childSession._workflowTaskBinding !== undefined &&
+						childSession._workflowTaskTerminal === undefined &&
+						run.terminalFenceSettled === true
+					) {
+						childSession._recordWorkflowTaskTerminal(
+							run.status === "done"
+								? "completed"
+								: run.status === "cancelled" && run.error === "task_deadline_expired"
+									? "deadline"
+									: run.status === "cancelled"
+										? "cancelled"
+										: "error",
+							run.error,
+						);
+					}
+				}
+				run.completion.resolve({
+					status: run.status === "done" ? "completed" : run.status === "cancelled" ? "cancelled" : "error",
+					output: childSession?.getLastAssistantText() ?? answerPreview ?? "",
+					error: run.error ?? null,
+					retryable: run.retryable ?? false,
+				});
 				if (run.detachedDeletion && childRuntime) {
 					try {
 						await this._deleteRlmSubagentSession(run.id, childRuntime.session);
@@ -10037,12 +13210,377 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
+		if (this._workflowOwnsGoalState() || this._workflowTaskBinding !== undefined) {
+			throw new Error(
+				"workflow workers require a scheduler-issued task attempt; direct child launch is not authorized",
+			);
+		}
 		return this._startRlmChildRun(prompt, kwargs, spawnCode);
+	}
+
+	/**
+	 * Start a workflow-owned child whose terminal state is surfaced by the durable scheduler.
+	 *
+	 * Args:
+	 * prompt: Stage task sent to the child.
+	 * sessionName: Scheduler-bound child session name.
+	 * model: Authenticated worker model reference; production defaults to Luna.
+	 * Return: Admitted child handle used to bind the durable attempt.
+	 */
+	async runWorkflowRlmChild(
+		prompt: string,
+		sessionName: string,
+		model: string = DEFAULT_PRIME_WORKER_MODEL,
+		launchContext?: AgentSessionWorkflowWorkerLaunchContext,
+		onMeaningfulProgress?: (progressDigest: string) => void,
+		allowedToolNames?: readonly string[],
+		ownedPaths?: readonly string[],
+	): Promise<RlmSpawnHandle> {
+		if (launchContext === undefined)
+			throw new Error("CONTRACT_CHANGE: workflow worker launch context is required for model admission");
+		const bindings = this._workflowHost as WorkflowKernelHostBindings | undefined;
+		const admitWorkerModel: WorkerModelCapabilityLaunchAuthorizer | undefined = bindings?.admitWorkerModel;
+		if (admitWorkerModel === undefined)
+			throw new Error("CONTRACT_CHANGE: workflow_worker_model_dispatch admission binding is unavailable");
+		if (typeof launchContext.capsuleDigest !== "string" || launchContext.capsuleDigest.length === 0)
+			throw new Error("workflow_worker_task_capsule_required");
+		const admission: WorkerModelCapabilityLaunchAdmission = await admitWorkerModel({
+			...launchContext,
+			prompt,
+			sessionName,
+			selector: model,
+			provider: workerModelProvider(model),
+			model: workerModelId(model),
+			reasoning: workerModelReasoning(model),
+			allowFallback: false,
+		});
+		const parsedIntent = parseWorkerModelCapabilityAdmission(admission.intent);
+		if (parsedIntent === undefined)
+			throw new Error("CONTRACT_CHANGE: worker admission failed sealed receipt and digest validation");
+		const expectedBinding: WorkerModelChildModelBinding = parsedIntent.childModel;
+		if (
+			parsedIntent.workflowId !== launchContext.workflowId ||
+			parsedIntent.taskId !== launchContext.taskId ||
+			parsedIntent.attemptId !== launchContext.attemptId ||
+			parsedIntent.executionKey !== launchContext.executionKey ||
+			parsedIntent.epochRef.storeEpoch !== launchContext.epochRef.storeEpoch ||
+			parsedIntent.epochRef.coordinatorEpoch !== launchContext.epochRef.coordinatorEpoch ||
+			// Compare against the selector this launch asked for, not the default: the property that
+			// matters is that no substitution happened between request and admission. Pinning to the
+			// default constant here would pass a receipt naming luna while the child ran sol.
+			expectedBinding.provider !== workerModelProvider(model) ||
+			expectedBinding.model !== workerModelId(model) ||
+			expectedBinding.reasoning !== workerModelReasoning(model) ||
+			expectedBinding.allowFallback !== false
+		)
+			throw new Error("CONTRACT_CHANGE: worker admission is not bound to the scheduler task attempt");
+		const handshake = await admission.handshake(expectedBinding);
+		if (handshake.status !== "accepted") throw new Error(`blocked_model_capability: ${handshake.quarantine.reason}`);
+		const workflowStatus = this._workflowHost?.status();
+		if (
+			workflowStatus?.workflowId !== launchContext.workflowId ||
+			workflowStatus.stateDigest === null ||
+			workflowStatus.stateDigest !== parsedIntent.stateDigest
+		)
+			throw new Error("CONTRACT_CHANGE: worker admission is not bound to the current workflow head");
+		const workflowTaskBinding: WorkflowTaskBindingData = {
+			schemaVersion: 1,
+			kind: "workflow_task_binding",
+			workflowId: launchContext.workflowId,
+			taskId: launchContext.taskId,
+			attemptId: launchContext.attemptId,
+			executionKey: launchContext.executionKey,
+			epochRef: launchContext.epochRef,
+			deadlineAt: launchContext.deadlineAt,
+			capsuleDigest: launchContext.capsuleDigest,
+		};
+		const handle = await this._startRlmChildRun(
+			prompt,
+			{ name: sessionName, model },
+			undefined,
+			false,
+			// Spawn at the level the admission attested. A hardcoded "max" here meant the receipt and
+			// the running child could disagree about effort for any tier but the default.
+			workerModelReasoning(model) as ThinkingLevel,
+			onMeaningfulProgress,
+			launchContext.deadlineAt,
+			workflowTaskBinding,
+			allowedToolNames,
+			ownedPaths,
+		);
+		if (handle.model !== model) {
+			this.cancelRlmChildRun(handle.rlm_child_id, "worker model handshake mismatch");
+			throw new Error("blocked_model_capability: spawned worker model differs from the admitted selector");
+		}
+		return handle;
+	}
+
+	async awaitRlmChildCompletion(childId: string): Promise<RlmChildCompletionResult> {
+		const completion = this._rlmChildCompletionPromises.get(childId);
+		if (completion === undefined) throw new Error(`Unknown RLM child ${childId}`);
+		return completion;
 	}
 
 	// =========================================================================
 	// Auto-Retry
 	// =========================================================================
+
+	private _resourceExhaustionDetails(message: AssistantMessage): Record<string, unknown> | undefined {
+		const details = this._getProviderStreamFailureDetails(message);
+		return this._getProviderStreamFailureKind(message) === "resource_exhausted" ? details : undefined;
+	}
+
+	private _isResourceExhaustedFailure(message: AssistantMessage): boolean {
+		return this._resourceExhaustionDetails(message) !== undefined;
+	}
+
+	private _resourceAuthorizationRevision(provider: string): string {
+		const token = this._modelRegistry.getCurrentProviderAuthSourceToken(provider);
+		return token?.identityFingerprint ?? `provider:${provider}:unresolved`;
+	}
+
+	private _advanceResourceCapacityRevision(): void {
+		const current = Number(this._resourceCapacityRevision.slice("epoch:".length));
+		this._resourceCapacityRevision = `epoch:${Number.isSafeInteger(current) && current >= 0 ? current + 1 : 1}`;
+		const blocker = this.sessionManager.getLatestResourceExhaustedBlocker();
+		if (blocker) this._scheduleSessionInputPump();
+	}
+
+	private _resourceExhaustedBlockerFromAssistant(message: AssistantMessage): ResourceExhaustedBlocker | undefined {
+		const details = this._resourceExhaustionDetails(message);
+		if (!details) return undefined;
+		const resetAt = typeof details.resetAt === "number" ? details.resetAt : undefined;
+		const resetInSeconds = typeof details.resetInSeconds === "number" ? details.resetInSeconds : undefined;
+		const observedResetAt =
+			resetAt === undefined && resetInSeconds !== undefined
+				? Math.floor(Date.now() / 1000) + Math.max(0, Math.round(resetInSeconds))
+				: resetAt;
+		const creditsUnavailable = details.creditsUnavailable;
+		return {
+			kind: "resource_exhausted",
+			provider: message.provider,
+			model: message.model,
+			...(typeof details.limitClass === "string" ? { limitClass: details.limitClass } : {}),
+			...(observedResetAt !== undefined ? { resetAt: observedResetAt } : {}),
+			...(resetInSeconds !== undefined ? { resetInSeconds } : {}),
+			creditsAvailability:
+				creditsUnavailable === true ? "unavailable" : creditsUnavailable === false ? "available" : "unknown",
+			authorizationRevision: this._resourceAuthorizationRevision(message.provider),
+			capacityRevision: this._resourceCapacityRevision,
+		};
+	}
+
+	private _resourceProbeReady(entry: ResourceExhaustedBlockerEntryData): boolean {
+		if (entry.state === "probe_leased") {
+			const blocker = this._resourceBlockerFromEntry(entry);
+			const model = this.model;
+			const currentHead = this.sessionManager.getLeafId();
+			const leaseEntryId = this.sessionManager.getLatestResourceExhaustedBlockerEntryId();
+			return (
+				entry.blockerDigest === this._resourceBlockerDigest(blocker) &&
+				entry.blockerDigest !== undefined &&
+				entry.probeLeaseId !== undefined &&
+				entry.probeLeasedAt !== undefined &&
+				entry.probeLeaseWallTimeMs !== undefined &&
+				entry.probeLeaseMonotonicTimeMs !== undefined &&
+				entry.probeLeaseActionId !== undefined &&
+				entry.probeLeaseHeadId !== undefined &&
+				entry.probeLeaseExpiresAt !== undefined &&
+				entry.probeLeaseExpiresAt >= entry.probeLeasedAt &&
+				leaseEntryId === currentHead &&
+				model !== undefined &&
+				entry.probeLeaseProvider === model.provider &&
+				entry.probeLeaseModel === model.id &&
+				entry.probeLeaseAuthorizationRevision === this._resourceAuthorizationRevision(model.provider) &&
+				entry.probeLeaseCapacityRevision === this._resourceCapacityRevision
+			);
+		}
+		const model = this.model;
+		if (!model) return false;
+		const capacityChanged = entry.capacityRevision !== this._resourceCapacityRevision;
+		// A restored/configured model mismatch is not an authorization to switch
+		// capacity. An explicit model transition advances the durable epoch first.
+		if (capacityChanged) return true;
+		if (model.provider !== entry.provider || model.id !== entry.model) return false;
+		if (this._resourceAuthorizationRevision(entry.provider) !== entry.authorizationRevision) return true;
+		return entry.resetAt !== undefined && Math.floor(Date.now() / 1000) >= entry.resetAt;
+	}
+
+	private _resourceBlockerDigest(blocker: ResourceExhaustedBlocker): string {
+		return digestObject({
+			kind: blocker.kind,
+			provider: blocker.provider,
+			model: blocker.model,
+			limitClass: blocker.limitClass,
+			resetAt: blocker.resetAt,
+			resetInSeconds: blocker.resetInSeconds,
+			creditsAvailability: blocker.creditsAvailability,
+			authorizationRevision: blocker.authorizationRevision,
+			capacityRevision: blocker.capacityRevision,
+		});
+	}
+
+	private _resourceBlockerFromEntry(entry: ResourceExhaustedBlockerEntryData): ResourceExhaustedBlocker {
+		return {
+			kind: "resource_exhausted",
+			provider: entry.provider,
+			model: entry.model,
+			...(entry.limitClass ? { limitClass: entry.limitClass } : {}),
+			...(entry.resetAt !== undefined ? { resetAt: entry.resetAt } : {}),
+			...(entry.resetInSeconds !== undefined ? { resetInSeconds: entry.resetInSeconds } : {}),
+			creditsAvailability: entry.creditsAvailability,
+			authorizationRevision: entry.authorizationRevision,
+			capacityRevision: entry.capacityRevision,
+		};
+	}
+
+	private _reconcileResourceExhaustionProbeLease(entry: ResourceExhaustedBlockerEntryData): boolean {
+		if (entry.state !== "probe_leased" || entry.probeLeaseHeadId === undefined) return false;
+		const branch = this.sessionManager.getBranch();
+		const leaseIndex = branch.findIndex((candidate) => candidate.id === entry.probeLeaseHeadId);
+		if (leaseIndex < 0) return false;
+		for (const candidate of branch.slice(leaseIndex + 1)) {
+			if (candidate.type !== "message" || candidate.message.role !== "assistant") continue;
+			const assistant = candidate.message as AssistantMessage;
+			if (this._isResourceExhaustedFailure(assistant)) {
+				this._recordResourceExhaustedBlocker(assistant);
+				return true;
+			}
+			if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
+				this._clearResourceExhaustedBlockerAfterProbe(assistant);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private _admitResourceExhaustionProbeIfReady(): boolean {
+		let entry = this.sessionManager.getLatestResourceExhaustedBlockerEntry();
+		if (!entry || entry.state === "cleared") return false;
+		if (entry.state === "probe_leased") {
+			if (this._reconcileResourceExhaustionProbeLease(entry)) {
+				entry = this.sessionManager.getLatestResourceExhaustedBlockerEntry();
+				if (!entry || entry.state === "cleared") return false;
+			}
+			if (entry.state !== "probe_leased") return this._admitResourceExhaustionProbeIfReady();
+			if (entry.probeLeaseExpiresAt !== undefined && Date.now() >= entry.probeLeaseExpiresAt) {
+				this.sessionManager.appendResourceExhaustedBlocker({
+					kind: "resource_exhausted",
+					provider: entry.provider,
+					model: entry.model,
+					...(entry.limitClass ? { limitClass: entry.limitClass } : {}),
+					...(entry.resetAt !== undefined ? { resetAt: entry.resetAt } : {}),
+					...(entry.resetInSeconds !== undefined ? { resetInSeconds: entry.resetInSeconds } : {}),
+					creditsAvailability: entry.creditsAvailability,
+					authorizationRevision: entry.authorizationRevision,
+					capacityRevision: entry.capacityRevision,
+				});
+				return this._admitResourceExhaustionProbeIfReady();
+			}
+			const action = this._actionStore.queuedActions()[0] ?? this._actionStore.activeActions()[0];
+			if (!action || action.id !== entry.probeLeaseActionId) return false;
+			if (!this._resourceProbeReady(entry)) {
+				this.sessionManager.appendResourceExhaustedBlocker({
+					kind: "resource_exhausted",
+					provider: entry.provider,
+					model: entry.model,
+					...(entry.limitClass ? { limitClass: entry.limitClass } : {}),
+					...(entry.resetAt !== undefined ? { resetAt: entry.resetAt } : {}),
+					...(entry.resetInSeconds !== undefined ? { resetInSeconds: entry.resetInSeconds } : {}),
+					creditsAvailability: entry.creditsAvailability,
+					authorizationRevision: entry.authorizationRevision,
+					capacityRevision: entry.capacityRevision,
+				});
+				return this._admitResourceExhaustionProbeIfReady();
+			}
+			return true;
+		}
+		if (!this._resourceProbeReady(entry)) return false;
+		const blocker = this._resourceBlockerFromEntry(entry);
+		const action = this._actionStore.queuedActions()[0] ?? this._actionStore.activeActions()[0];
+		if (!action) return false;
+		const headId = this.sessionManager.getLeafId();
+		if (!headId) return false;
+		const wallTimeMs = Date.now();
+		const model = this.model;
+		if (!model) return false;
+		const lease = {
+			blockerDigest: this._resourceBlockerDigest(blocker),
+			probeLeaseId: randomUUID(),
+			probeLeasedAt: wallTimeMs,
+			probeLeaseExpiresAt: wallTimeMs + 60_000,
+			probeLeaseWallTimeMs: wallTimeMs,
+			probeLeaseMonotonicTimeMs: performance.now(),
+			probeLeaseProvider: model.provider,
+			probeLeaseModel: model.id,
+			probeLeaseAuthorizationRevision: this._resourceAuthorizationRevision(model.provider),
+			probeLeaseCapacityRevision: this._resourceCapacityRevision,
+			probeLeaseActionId: action.id,
+			probeLeaseHeadId: headId,
+		};
+		this.sessionManager.appendResourceExhaustedProbeLease(blocker, lease);
+		return true;
+	}
+
+	private _recordResourceExhaustedBlocker(message: AssistantMessage): void {
+		const blocker = this._resourceExhaustedBlockerFromAssistant(message);
+		if (!blocker) return;
+		const current = this.sessionManager.getLatestResourceExhaustedBlockerEntry();
+		if (
+			current?.state === "blocked" &&
+			current.provider === blocker.provider &&
+			current.model === blocker.model &&
+			current.limitClass === blocker.limitClass &&
+			current.resetAt === blocker.resetAt &&
+			current.resetInSeconds === blocker.resetInSeconds &&
+			current.creditsAvailability === blocker.creditsAvailability &&
+			current.authorizationRevision === blocker.authorizationRevision &&
+			current.capacityRevision === blocker.capacityRevision
+		) {
+			return;
+		}
+		this.sessionManager.appendResourceExhaustedBlocker(blocker);
+		this._scheduleResourceExhaustionProbeWake(blocker);
+	}
+
+	private _clearResourceExhaustedBlockerAfterProbe(message: AssistantMessage): void {
+		if (message.stopReason === "error") return;
+		const current = this.sessionManager.getLatestResourceExhaustedBlockerEntry();
+		if (current?.state !== "probe_leased") return;
+		this.sessionManager.appendResourceExhaustedBlockerCleared({
+			kind: "resource_exhausted",
+			provider: current.provider,
+			model: current.model,
+			...(current.limitClass ? { limitClass: current.limitClass } : {}),
+			...(current.resetAt !== undefined ? { resetAt: current.resetAt } : {}),
+			...(current.resetInSeconds !== undefined ? { resetInSeconds: current.resetInSeconds } : {}),
+			creditsAvailability: current.creditsAvailability,
+			authorizationRevision: current.authorizationRevision,
+			capacityRevision: current.capacityRevision,
+		});
+		if (this._resourceProbeWakeTimer !== undefined) {
+			clearTimeout(this._resourceProbeWakeTimer);
+			this._resourceProbeWakeTimer = undefined;
+		}
+	}
+
+	private _scheduleResourceExhaustionProbeWake(blocker: ResourceExhaustedBlocker): void {
+		if (this._resourceProbeWakeTimer !== undefined) clearTimeout(this._resourceProbeWakeTimer);
+		if (blocker.resetAt === undefined || this._disposed || this._disposing) return;
+		const delay = Math.max(0, blocker.resetAt * 1000 - Date.now());
+		this._resourceProbeWakeTimer = setTimeout(
+			() => {
+				this._resourceProbeWakeTimer = undefined;
+				const current = this.sessionManager.getLatestResourceExhaustedBlocker();
+				if (current && current.resetAt !== undefined && Math.floor(Date.now() / 1000) < current.resetAt) {
+					this._scheduleResourceExhaustionProbeWake(current);
+					return;
+				}
+				this._scheduleSessionInputPump();
+			},
+			Math.min(delay, 2_147_483_647),
+		);
+	}
 
 	/**
 	 * Check if an error is retryable (overloaded, rate limit, server errors).
@@ -10060,6 +13598,10 @@ export class AgentSession {
 		}
 
 		if (this._isAgentLifecycleFailure(message)) {
+			return false;
+		}
+
+		if (this._isResourceExhaustedFailure(message)) {
 			return false;
 		}
 
@@ -10300,6 +13842,7 @@ export class AgentSession {
 
 		// Retry via continue() - use setTimeout to break out of event handler chain
 		setTimeout(() => {
+			if (this._workflowTaskAdmissionBlockReason() !== undefined) return;
 			this.agent.continue().catch(() => {
 				// Retry failed - will be caught by next agent_end
 			});

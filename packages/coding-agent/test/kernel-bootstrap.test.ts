@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -201,6 +201,18 @@ describe("kernel bootstrap", () => {
 			pythonSkills: [],
 		});
 		expect(version.runtime).toMatch(/^sha256:/);
+	});
+
+	it("keeps a session-configured kernel runtime inside the host agent directory", async () => {
+		installFakeUv();
+		const agentDir = join(tempDir, "session-agent");
+		const venv = join(agentDir, "kernel-venv");
+		const globalVenv = join(tempDir, ".prime", "agent", "kernel-venv");
+
+		await expect(ensureKernelPython({ agentDir })).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(existsSync(join(venv, ".bootstrap-version"))).toBe(true);
+		expect(existsSync(globalVenv)).toBe(false);
 	});
 
 	it("routes bootstrap progress through the provided callback", async () => {

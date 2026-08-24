@@ -16,9 +16,11 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { computeCodeTreeDigest } from "../dist/modes/daemon/daemon-runtime-identity.js";
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const outdir = join(packageDir, "dist", "bundle");
+const projectRoot = dirname(dirname(packageDir));
 let buildId;
 try {
 	buildId = execFileSync("git", ["describe", "--tags", "--always", "--dirty"], {
@@ -27,6 +29,10 @@ try {
 	}).trim();
 } catch {
 	buildId = `release-${JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")).version}`;
+}
+const codeTreeDigest = computeCodeTreeDigest(projectRoot);
+if (!codeTreeDigest) {
+	throw new Error("Unable to compute the Prime Agent runtime code-tree digest from declared inputs");
 }
 
 rmSync(outdir, { recursive: true, force: true });
@@ -41,7 +47,13 @@ await build({
 	// Native or interop-sensitive packages stay external; they resolve from
 	// node_modules at runtime (and are loaded via createRequire/lazily anyway).
 	external: ["zeromq", "koffi", "undici", "@silvia-odwyer/photon-node", "@mariozechner/clipboard"],
-	define: { __PI_BUNDLED__: "true", __PI_BUILD_ID__: JSON.stringify(buildId) },
+	define: {
+		__PI_BUNDLED__: "true",
+		__PI_BUILD_ID__: JSON.stringify(buildId),
+		__PI_SOURCE_BUILD_ID__: JSON.stringify(buildId),
+		__PI_INSTALLED_BUILD_ID__: JSON.stringify(buildId),
+		__PI_CODE_TREE_DIGEST__: JSON.stringify(codeTreeDigest),
+	},
 	banner: {
 		js: "import { createRequire as __piBundleCreateRequire } from 'node:module'; const require = __piBundleCreateRequire(import.meta.url);",
 	},

@@ -215,6 +215,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly retiredEventGenerations = new Set<string>();
 	private lastEventSequence: number | undefined;
 	private latestSnapshot: AgentConnectionSnapshot | undefined;
+	private latestSessionSummary: SessionSummary | undefined;
 	private latestSnapshotIsFresh = false;
 	private attachedSessionId: string | undefined;
 	private attachedSessionFile: string | undefined;
@@ -309,6 +310,9 @@ export class DaemonAgentConnection implements AgentConnection {
 				"slim_attach",
 				"chunked_snapshot",
 				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
+				...(this.client.supportsServerCapability("workflow_status_projection")
+					? (["workflow_status_projection"] as const)
+					: []),
 			],
 			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 			launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
@@ -323,6 +327,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 		this.activeSessionId = getAttachActiveSessionId(result);
 		const summary = "snapshot" in result ? result.snapshot.summary : result;
+		this.latestSessionSummary = summary;
 		this.attachedSessionId = summary.sessionId;
 		this.attachedSessionFile =
 			summary.sessionFile ?? ("snapshot" in result ? result.snapshot.state.sessionFile : undefined);
@@ -350,6 +355,11 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshot = undefined;
 			this.latestSnapshotIsFresh = false;
 		}
+	}
+
+	/** Return the last daemon-owned workflow/status summary received during attach or resync. */
+	getSessionSummary(): SessionSummary | undefined {
+		return this.latestSessionSummary;
 	}
 
 	subscribe(listener: AgentConnectionEventListener): () => void {
@@ -1134,6 +1144,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			lastEventCursor: this.lastEventCursor,
 			lastEventSequence: this.lastEventSequence,
 			latestSnapshot: this.latestSnapshot,
+			latestSessionSummary: this.latestSessionSummary,
 			latestSnapshotIsFresh: this.latestSnapshotIsFresh,
 			retiredEventGenerations: new Set(this.retiredEventGenerations),
 		};
@@ -1141,6 +1152,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.lastEventCursor = undefined;
 		this.lastEventSequence = undefined;
 		this.latestSnapshot = undefined;
+		this.latestSessionSummary = undefined;
 		this.latestSnapshotIsFresh = false;
 		this.retiredEventGenerations.clear();
 		this.pendingReattachActiveSessionIds.add(targetActiveSessionId);
@@ -1160,6 +1172,9 @@ export class DaemonAgentConnection implements AgentConnection {
 					"slim_attach",
 					"chunked_snapshot",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
+					...(this.client.supportsServerCapability("workflow_status_projection")
+						? (["workflow_status_projection"] as const)
+						: []),
 				],
 				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
@@ -1192,6 +1207,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				this.lastEventCursor = previousState.lastEventCursor;
 				this.lastEventSequence = previousState.lastEventSequence;
 				this.latestSnapshot = previousState.latestSnapshot;
+				this.latestSessionSummary = previousState.latestSessionSummary;
 				this.latestSnapshotIsFresh = previousState.latestSnapshotIsFresh;
 				this.retiredEventGenerations.clear();
 				for (const generation of previousState.retiredEventGenerations) {
@@ -1321,6 +1337,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 		this.disposed = true;
 		this.updateRestartPending = false;
+		this.latestSessionSummary = undefined;
 		await Promise.allSettled([...this.activeSideQuestionIds].map((id) => this.abortSideQuestion(id)));
 		this.unsubscribeDaemonMessages();
 		this.unsubscribeDaemonClose();
@@ -1511,6 +1528,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (message.type === "session_resynced") {
 			this.attachedSessionId = message.snapshot.state.sessionId;
 			this.attachedSessionFile = message.snapshot.state.sessionFile;
+			this.latestSessionSummary = message.snapshot.summary;
 			this.latestSnapshot = mapDaemonSessionSnapshot(message.snapshot);
 			if (this.lastEventSequence !== undefined) {
 				this.latestSnapshot.lastEventSequence = this.lastEventSequence;
@@ -1829,6 +1847,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.attachedSessionId = snapshot.state.sessionId;
 		this.attachedSessionFile = snapshot.state.sessionFile;
 		this.latestSnapshot = mapDaemonSessionSnapshot(snapshot, replay);
+		this.latestSessionSummary = snapshot.summary;
 		this.latestSnapshotIsFresh = true;
 	}
 
@@ -1890,6 +1909,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.attachedSessionId = snapshot.state.sessionId;
 		this.attachedSessionFile = snapshot.state.sessionFile;
 		this.latestSnapshot = mapDaemonSessionSnapshot(snapshot);
+		this.latestSessionSummary = snapshot.summary;
 		this.latestSnapshotIsFresh = true;
 		assembly.resolve(snapshot);
 		const purpose = assembly.begin.purpose ?? "attach";

@@ -936,6 +936,120 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
+	it("clicking an OSC 8 hyperlink opens it through the URL handler", async () => {
+		const transcript = lines(20);
+		transcript[12] = "see \x1b]8;;https://example.com/docs\x1b\\\x1b[36mdocs\x1b[39m\x1b]8;;\x1b\\ here";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;6;1M");
+		terminal.sendInput("\x1b[<0;6;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
+
+		terminal.sendInput("\x1b[<0;2;1M");
+		terminal.sendInput("\x1b[<0;2;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
+
+		tui.stop();
+	});
+
+	it("clicking a bare URL opens it when OSC 8 metadata is absent", async () => {
+		const transcript = lines(20);
+		transcript[12] = "see https://example.com/docs here";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;6;1M");
+		transcript[12] = "updated without the URL";
+		tui.requestRender();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;6;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
+
+		tui.stop();
+	});
+
+	it("clicking a hyperlink after a tab opens the painted target", async () => {
+		const transcript = lines(20);
+		transcript[12] = "\t\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;4;1M");
+		terminal.sendInput("\x1b[<0;4;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, ["https://example.com/docs"]);
+
+		tui.stop();
+	});
+
+	it("drag-selecting over a hyperlink copies text without opening it", async () => {
+		const transcript = lines(20);
+		transcript[12] = "see \x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\ here";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		const copies: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.onCopy = (text) => copies.push(text);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;5;1M");
+		terminal.sendInput("\x1b[<32;9;1M");
+		terminal.sendInput("\x1b[<0;9;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copies, ["docs"]);
+		assert.deepStrictEqual(opened, []);
+
+		tui.stop();
+	});
+
+	it("ignores clicked hyperlinks with non-http schemes", async () => {
+		const transcript = lines(20);
+		transcript[12] = "\x1b]8;;file:///etc/passwd\x1b\\secrets\x1b]8;;\x1b\\";
+		const { terminal, tui, chat, dock } = setup(transcript);
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;3;1M");
+		terminal.sendInput("\x1b[<0;3;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, []);
+
+		tui.stop();
+	});
+
+	it("clicking a hyperlink in the dock opens it", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(20));
+		dock.lines = ["\x1b]8;;https://example.com/login\x07sign in\x1b]8;;\x07", "footer"];
+		const opened: string[] = [];
+		tui.onOpenUrl = (url) => opened.push(url);
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;3;9M");
+		terminal.sendInput("\x1b[<0;3;9m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(opened, ["https://example.com/login"]);
+
+		tui.stop();
+	});
+
 	it("a plain click copies nothing and clears any selection", async () => {
 		const { terminal, tui, chat, dock } = setup(lines(20));
 		const copies: string[] = [];
