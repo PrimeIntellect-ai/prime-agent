@@ -27,6 +27,10 @@ _READ_CHUNK = 65536
 # Fixed child-side fd for the status channel; POSIX shells (notably dash) only
 # guarantee single-digit fds in redirection syntax.
 _STATUS_FD = 9
+# Cancelled one-shot awaits: TERM grace before the group KILL, then the bounded
+# wait for a confirmed group exit before CancelledError propagates.
+_CANCEL_TERM_GRACE = 0.5
+_CANCEL_KILL_WAIT = 2.0
 
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
@@ -387,12 +391,46 @@ class BashHandle:
 
     async def _wait_owned(self) -> BashResult:
         # One-shot `await bash(cmd)` owns the process: a cancelled await (e.g.
-        # a kernel interrupt) must not leave the command running.
+        # a kernel interrupt) must not leave the command running. TERM, bounded
+        # grace, group KILL, then a bounded confirmed-exit wait before the
+        # CancelledError propagates, so no side effect can land after it.
         try:
             return await self._wait()
         except asyncio.CancelledError:
-            self.kill(grace=0.5)
+            try:
+                self.kill(grace=_CANCEL_TERM_GRACE)
+                if not await self._await_group_death(_CANCEL_TERM_GRACE):
+                    if _IS_POSIX:
+                        _signal_group(self._pid, signal.SIGKILL)
+                    else:
+                        _taskkill_tree(self._pid)
+                    await self._await_group_death(_CANCEL_KILL_WAIT)
+            except asyncio.CancelledError:
+                # A second cancel during teardown: last-resort KILL, no waiting.
+                if _IS_POSIX:
+                    _signal_group(self._pid, signal.SIGKILL)
+                else:
+                    _taskkill_tree(self._pid)
             raise
+
+    def _group_alive(self) -> bool:
+        if not _IS_POSIX:
+            return self._proc.poll() is None
+        try:
+            os.killpg(self._pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+
+    async def _await_group_death(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while self._group_alive():
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
+        return True
 
     def _abort_spawn(self) -> None:
         # Enrollment failed before the gate opened (POSIX) or right after spawn
@@ -592,10 +630,18 @@ def _record_journal(pid: int, active: bool) -> bool:
         "active": active,
         "recordedAt": datetime.now(timezone.utc).isoformat(),
     }
+    data = (json.dumps(record) + "\n").encode()
     try:
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.write(fd, (json.dumps(record) + "\n").encode())
+            # Complete-write loop: a short write would leave a truncated JSON
+            # line that the host discards, which must count as failure.
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    return False
+                view = view[written:]
             os.fsync(fd)
         finally:
             os.close(fd)
