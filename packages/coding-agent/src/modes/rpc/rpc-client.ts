@@ -63,6 +63,11 @@ export interface ModelInfo {
 export type RpcEventListener = (event: AgentEvent) => void;
 export type RpcObservedSessionListener = (event: RpcObservedSessionEvent) => void;
 
+interface RpcEventCollection {
+	promise: Promise<AgentEvent[]>;
+	cancel(): void;
+}
+
 // ============================================================================
 // RPC Client
 // ============================================================================
@@ -576,8 +581,32 @@ export class RpcClient {
 	 * Collect events until agent becomes idle.
 	 */
 	collectEvents(timeout?: number): Promise<AgentEvent[]> {
-		if (this.transportError) return Promise.reject(this.transportError);
-		return new Promise((resolve, reject) => {
+		return this.startEventCollection(timeout).promise;
+	}
+
+	/**
+	 * Send prompt and wait for completion, returning all events.
+	 */
+	async promptAndWait(message: string, images?: ImageContent[], timeout?: number): Promise<AgentEvent[]> {
+		const collection = this.startEventCollection(timeout);
+		try {
+			const [events] = await Promise.all([collection.promise, this.prompt(message, images)]);
+			return events;
+		} finally {
+			collection.cancel();
+		}
+	}
+
+	// =========================================================================
+	// Internal
+	// =========================================================================
+
+	private startEventCollection(timeout?: number): RpcEventCollection {
+		if (this.transportError) {
+			return { promise: Promise.reject(this.transportError), cancel: () => undefined };
+		}
+		let cancel = () => undefined;
+		const promise = new Promise<AgentEvent[]>((resolve, reject) => {
 			const events: AgentEvent[] = [];
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const cleanup = () => {
@@ -596,6 +625,10 @@ export class RpcClient {
 					resolve(events);
 				}
 			});
+			cancel = () => {
+				cleanup();
+				resolve(events);
+			};
 			this.pendingEventWaiters.add(onFailure);
 			if (timeout !== undefined) {
 				timer = setTimeout(() => {
@@ -604,20 +637,8 @@ export class RpcClient {
 				}, timeout);
 			}
 		});
+		return { promise, cancel };
 	}
-
-	/**
-	 * Send prompt and wait for completion, returning all events.
-	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout?: number): Promise<AgentEvent[]> {
-		const eventsPromise = this.collectEvents(timeout);
-		const [events] = await Promise.all([eventsPromise, this.prompt(message, images)]);
-		return events;
-	}
-
-	// =========================================================================
-	// Internal
-	// =========================================================================
 
 	private handleLine(line: string): void {
 		try {
