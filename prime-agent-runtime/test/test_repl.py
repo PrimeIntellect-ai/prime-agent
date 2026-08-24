@@ -266,6 +266,17 @@ class ReplTest(unittest.TestCase):
         tagged = next(e for e in events if e.get("event") == "stdout" and "tagged" in e["text"])
         self.assertEqual(tagged["id"], "rawfd")
 
+    def test_stdout_buffer_write_works_and_surfaces_as_null(self):
+        # Libraries write bytes via sys.stdout.buffer; the tagged writer must
+        # expose a working buffer whose bytes surface (null-attributed) before done.
+        events = self.repl.execute(
+            "bufw", "import sys\nsys.stdout.buffer.write(b'buffer-bytes\\n')\nsys.stdout.buffer.flush()"
+        )
+        self.assertEqual(one(events, "done")["status"], "ok")
+        buffered = next(e for e in events if e.get("event") == "stdout" and "buffer-bytes" in e["text"])
+        self.assertIsNone(buffered["id"])
+        self.assertLess(events.index(buffered), events.index(one(events, "done")))
+
     def test_asyncio_task_output_keeps_spawning_cell_id(self):
         code = "\n".join(
             [
