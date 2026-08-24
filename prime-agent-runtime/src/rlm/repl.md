@@ -11,10 +11,14 @@ event.
 - Requests arrive on fd 0 (stdin).
 - Events leave on a private dup of the original fd 1, made before anything else
   runs. Every frame is one locked write sequence, so frames never interleave.
+- Python-level writes through `sys.stdout`/`sys.stderr` are intercepted at
+  write time, tagged with the writing context's cell id, and shipped straight
+  to the protocol.
 - fds 1 and 2 are redirected into pipes at startup; pump threads read them and
-  ship the bytes as `stdout`/`stderr` events. Python-level writes and direct fd
-  writes from C extensions therefore share one ordered byte stream per fd and
-  can never corrupt protocol framing.
+  ship the bytes as `stdout`/`stderr` events with `id: null` — raw fd bytes
+  (`os.write`, C extensions, subprocesses) are never attributed to a cell.
+  Neither channel can corrupt protocol framing. Ordering is preserved within
+  each channel, not across them.
 - fd 0 is rebound to `/dev/null` after the reader thread takes it, so user
   `input()` sees EOF instead of consuming protocol frames.
 
@@ -40,8 +44,11 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
 - `{"event":"ready","protocol":2,"python":"3.13.11"}` — sent once at startup;
   the handshake. No banner precedes it.
 - `{"event":"stdout"|"stderr","id":str|null,"text":str}` — captured output.
-  `id` is the cell running when the bytes were read; `null` for output produced
-  between cells by background threads or tasks.
+  `id` is the cell whose Python execution context performed the write; asyncio
+  tasks inherit the spawning cell's id (even after that cell finished). `null`
+  for user threads, raw fd writes (`os.write`, C extensions, subprocesses),
+  and anything else without provable ownership — bytes read from the fd pipes
+  are never attributed to a cell.
 - `{"event":"result","id":str,"text":str}` — `repr` of the cell's trailing
   expression when the body ends in an expression whose value is not `None`.
   The value is also bound to `_` in the namespace.
@@ -60,9 +67,12 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   `reason`. Restoring a missing file reports `status:"ok"` with empty
   `restored`/`failed` lists and `reason:"snapshot not found"`.
 
-Before a cell's `done`, the runtime flushes and drains both captured streams
-(a marker byte sequence written to each fd and awaited in the pumps), so every
-byte the cell wrote — including direct fd writes — precedes its `done`.
+Before a cell's `done`, the runtime drains both channels: tagged Python-level
+writes ship synchronously from the writing thread, and the fd pipes are fenced
+with a marker byte sequence awaited in the pumps, so every byte the cell wrote
+synchronously — including direct fd writes — precedes its `done`. Ordering
+between a cell's Python-level writes and its raw fd writes is not guaranteed
+(two channels).
 
 ## Execution
 

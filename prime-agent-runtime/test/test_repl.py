@@ -149,6 +149,14 @@ class ReplTest(unittest.TestCase):
         self.assertIn("fd-out", out)
         self.assertIn("py-err", err)
         self.assertIn("fd-err", err)
+        # Python-level writes carry the cell id; raw fd bytes are never attributed.
+        for event in events:
+            if event.get("event") not in ("stdout", "stderr"):
+                continue
+            if "py-" in event["text"]:
+                self.assertEqual(event["id"], "io")
+            if "fd-" in event["text"]:
+                self.assertIsNone(event["id"])
         # done arrives last, after every byte the cell wrote.
         self.assertEqual(events[-1]["event"], "done")
 
@@ -211,6 +219,84 @@ class ReplTest(unittest.TestCase):
             self.assertIn("late-output", stream_text(late_events, "stdout"))
             for event in late_events:
                 self.assertIsNone(event.get("id"))
+
+    def test_background_thread_and_fd_output_during_later_cell_is_null(self):
+        # Cross-cell misattribution repro: a thread and a direct fd write from
+        # cell1 land while cell2 runs; neither may carry cell2's id.
+        code = "\n".join(
+            [
+                "import os, threading, time",
+                "def late_print():",
+                "    time.sleep(0.6)",
+                "    print('SECRET-py', flush=True)",
+                "def late_fd():",
+                "    time.sleep(0.7)",
+                "    os.write(1, b'SECRET-fd\\n')",
+                "threading.Thread(target=late_print, daemon=True).start()",
+                "threading.Thread(target=late_fd, daemon=True).start()",
+            ]
+        )
+        events = self.repl.execute("cell1", code)
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = self.repl.execute("cell2", "import time\ntime.sleep(1.2)")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        # The SECRET lines may land during cell2 or right after; scan until both seen.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            text = stream_text(events, "stdout")
+            if "SECRET-py" in text and "SECRET-fd" in text:
+                break
+            try:
+                events.append(self.repl.read_event(timeout=0.5))
+            except TimeoutError:
+                continue
+        for event in events:
+            if event.get("event") == "stdout" and "SECRET" in event["text"]:
+                self.assertIsNone(event["id"])
+        text = stream_text(events, "stdout")
+        self.assertIn("SECRET-py", text)
+        self.assertIn("SECRET-fd", text)
+
+    def test_cell_own_direct_fd_write_is_null_but_arrives_before_done(self):
+        events = self.repl.execute("rawfd", "import os\nos.write(1, b'raw\\n')\nprint('tagged')")
+        done_index = next(i for i, e in enumerate(events) if e.get("event") == "done")
+        raw = next(e for e in events if e.get("event") == "stdout" and "raw" in e["text"])
+        self.assertIsNone(raw["id"])
+        self.assertLess(events.index(raw), done_index)
+        tagged = next(e for e in events if e.get("event") == "stdout" and "tagged" in e["text"])
+        self.assertEqual(tagged["id"], "rawfd")
+
+    def test_asyncio_task_output_keeps_spawning_cell_id(self):
+        code = "\n".join(
+            [
+                "import asyncio",
+                "async def late():",
+                "    await asyncio.sleep(0.3)",
+                "    print('task-output', flush=True)",
+                "_t = asyncio.create_task(late())",
+            ]
+        )
+        events = self.repl.execute("spawn", code)
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = self.repl.execute("next", "import asyncio\nawait asyncio.sleep(0.6)")
+        late = next(e for e in events if e.get("event") == "stdout" and "task-output" in e["text"])
+        self.assertEqual(late["id"], "spawn")
+
+    def test_interrupted_await_bash_leaves_no_side_effects(self):
+        # One-shot `await bash(...)` (the %%bash-rewrite pattern) must not leak
+        # the command past an interrupt.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker")
+            code = f"from rlm import bash\nr = await bash('sleep 1.5 && touch {marker}')"
+            self.repl.send({"type": "execute", "id": "ibash", "code": code})
+            time.sleep(0.4)
+            self.repl.send({"type": "interrupt"})
+            events = self.repl.until_done("ibash")
+            error = one(events, "error")
+            self.assertEqual(error["ename"], "KeyboardInterrupt")
+            self.assertEqual(one(events, "done")["status"], "error")
+            time.sleep(1.6)
+            self.assertFalse(os.path.exists(marker))
 
     def _interrupt_after_running(self, rid: str, code: str) -> list[dict]:
         self.repl.send({"type": "execute", "id": rid, "code": code})
