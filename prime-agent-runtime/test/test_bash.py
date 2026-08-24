@@ -30,6 +30,20 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         awaited = await handle
         self.assertEqual(handle.poll(), awaited)
 
+    async def test_status_pipe_survives_high_fds_and_strict_posix_shell(self):
+        # Regression: dash rejects multi-digit fds in redirections at parse
+        # time, so the script must never reference the raw status-pipe fd.
+        dummies = [os.open(os.devnull, os.O_RDONLY) for _ in range(30)]
+        self.addCleanup(lambda: [os.close(fd) for fd in dummies])
+        if os.path.exists("/bin/dash"):
+            with mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/dash"}):
+                result = await bash("echo ok")
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("ok", result.output)
+        result = await bash("echo ok-default")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("ok-default", result.output)
+
     async def test_backgrounded_tail_and_kill(self):
         handle = bash("echo start; sleep 30")
         self.assertIsNone(handle.poll())
