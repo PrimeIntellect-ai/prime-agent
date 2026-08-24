@@ -306,7 +306,7 @@ interface ActiveDaemonSessionSummaryLookupOptions {
 	fallbackOnError?: boolean;
 }
 
-export async function findActiveDaemonSessionSummaryForInteractiveStartup(
+async function findActiveDaemonSessionSummaryForInteractiveStartup(
 	socketPath: string,
 	selector: string,
 	options: ActiveDaemonSessionSummaryLookupOptions = {},
