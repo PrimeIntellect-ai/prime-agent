@@ -54,6 +54,7 @@ describe("RpcClient operation completion", () => {
 		);
 
 		await result;
+		expect(client["pendingEventWaiters"].size).toBe(0);
 	});
 
 	it("does not time out agent completion by default", async () => {

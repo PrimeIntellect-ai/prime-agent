@@ -60,7 +60,7 @@ export class QueueSelection {
 		return this.items[next]?.text;
 	}
 
-	refreshAfterMove(
+	refreshAt(
 		queue: AgentConnectionQueueState,
 		lane: QueueLane,
 		index: number,
