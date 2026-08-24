@@ -314,6 +314,54 @@ describe("KernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
+	it("cancels a hung final snapshot execution before teardown", async () => {
+		vi.useFakeTimers();
+		const manager = new KernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		let releaseQueue: () => void = () => {};
+		const previousExecution = new Promise<void>((resolve) => {
+			releaseQueue = resolve;
+		});
+		const executeInner = vi.fn(
+			async (_code: string, opts: { signal?: AbortSignal }) =>
+				await new Promise<{ stdout: string; stderr: string; status: "aborted"; durationMs: number }>((resolve) => {
+					opts.signal?.addEventListener(
+						"abort",
+						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
+						{ once: true },
+					);
+				}),
+		);
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+				cleanupResources: () => void;
+			},
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
+		);
+
+		const disposal = manager.dispose();
+		expect(executeInner).not.toHaveBeenCalled();
+		releaseQueue();
+		await waitForCalls(executeInner, 1);
+		const signal = executeInner.mock.calls[0]?.[1].signal;
+		expect(signal?.aborted).toBe(false);
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(signal?.aborted).toBe(false);
+		expect(cleanupResources).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+
+		expect(signal?.aborted).toBe(true);
+		await expect(disposal).resolves.toBeUndefined();
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
 	it("tears down when the final snapshot is blocked behind a hung execution", async () => {
 		vi.useFakeTimers();
 		const manager = new KernelManager({
