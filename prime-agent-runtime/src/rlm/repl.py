@@ -390,6 +390,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             codes, has_trailing = _compile_cell(req["code"], filename)
         except (SyntaxError, ValueError) as exc:
             _finish_request(cell_id)
+            _stream_cell = None
             _send(_error_event(cell_id, exc))
             _send({"event": "done", "id": cell_id, "status": "error"})
             return
@@ -404,6 +405,9 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
                 status, error = "error", _error_event(cell_id, exc)
         _drain_output()
+        # `done` must be the last event carrying this cell id: once drained, stream
+        # output from stray background threads must observe a null stream cell.
+        _stream_cell = None
         if result_text is not None:
             _send({"event": "result", "id": cell_id, "text": result_text})
         if error is not None:

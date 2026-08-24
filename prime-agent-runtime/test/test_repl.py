@@ -175,6 +175,42 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("bg3", "task.cancel()\nimport asyncio\nawait asyncio.sleep(0.05)\nlen(acc)")
         self.assertEqual(one(events, "done")["status"], "ok")
 
+    def test_output_after_done_carries_null_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trigger = os.path.join(tmp, "go")
+            code = "\n".join(
+                [
+                    "import os, threading, time",
+                    "def late():",
+                    f"    while not os.path.exists({trigger!r}):",
+                    "        time.sleep(0.01)",
+                    "    print('late-output', flush=True)",
+                    "threading.Thread(target=late, daemon=True).start()",
+                ]
+            )
+            events = self.repl.execute("late", code)
+            self.assertEqual(one(events, "done")["status"], "ok")
+            # `done` is the last event carrying this cell's id.
+            tagged = [e for e in events if e.get("id") == "late"]
+            self.assertEqual(tagged[-1]["event"], "done")
+            # Release the background writer only after `done` was observed; its
+            # between-cell output must be emitted with a null id.
+            with open(trigger, "w"):
+                pass
+            deadline = time.monotonic() + 5
+            late_events: list[dict] = []
+            while time.monotonic() < deadline:
+                try:
+                    event = self.repl.read_event(timeout=0.5)
+                except TimeoutError:
+                    continue
+                late_events.append(event)
+                if event.get("event") == "stdout" and "late-output" in event["text"]:
+                    break
+            self.assertIn("late-output", stream_text(late_events, "stdout"))
+            for event in late_events:
+                self.assertIsNone(event.get("id"))
+
     def _interrupt_after_running(self, rid: str, code: str) -> list[dict]:
         self.repl.send({"type": "execute", "id": rid, "code": code})
         # Give the cell time to enter its blocking region before interrupting.
