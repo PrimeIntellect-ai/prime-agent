@@ -23,10 +23,10 @@ type Harness = {
 	ui: { requestRender: () => void };
 	agentConnection: {
 		mutateQueuedMessage: ReturnType<typeof vi.fn>;
-		getQueue: ReturnType<typeof vi.fn>;
 		abort?: ReturnType<typeof vi.fn>;
 	};
 	sessionEventGeneration: number;
+	sessionEventQueue: Promise<void>;
 	inputSubmissionGeneration: number;
 	pendingQueueEdit: symbol | undefined;
 	queueMutationChain: Promise<void>;
@@ -35,8 +35,6 @@ type Harness = {
 	browseQueueSelection: (direction: -1 | 1) => void;
 	moveQueueSelection: (direction: -1 | 1) => void;
 	getConnectionQueue: () => QueueState;
-	refreshConnectionQueue: () => Promise<void>;
-	replaceConnectionQueue: (queue: QueueState) => void;
 	patchConnectionState: (patch: Partial<Harness["connectionState"]>) => void;
 	setEditorTextFromQueueSelection: (text: string) => void;
 	collectQueueReplaceImages: (text: string) => unknown;
@@ -70,10 +68,10 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		ui: { requestRender: vi.fn() },
 		agentConnection: {
 			mutateQueuedMessage: vi.fn(async () => mutateResult),
-			getQueue: vi.fn(async () => ({ steering: [], followUp: [] })),
 			abort: vi.fn(async () => {}),
 		},
 		sessionEventGeneration: 0,
+		sessionEventQueue: Promise.resolve(),
 		inputSubmissionGeneration: 0,
 		pendingQueueEdit: undefined,
 		queueMutationChain: Promise.resolve(),
@@ -82,8 +80,6 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		browseQueueSelection: proto.browseQueueSelection,
 		moveQueueSelection: proto.moveQueueSelection,
 		getConnectionQueue: proto.getConnectionQueue,
-		refreshConnectionQueue: proto.refreshConnectionQueue,
-		replaceConnectionQueue: proto.replaceConnectionQueue,
 		patchConnectionState: () => {},
 		setEditorTextFromQueueSelection: proto.setEditorTextFromQueueSelection,
 		collectQueueReplaceImages: proto.collectQueueReplaceImages,
@@ -92,6 +88,15 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		harness.connectionState = { ...harness.connectionState, ...patch };
 	};
 	return harness;
+}
+
+function setQueue(harness: Harness, queue: QueueState): void {
+	harness.connectionState.sessionActions = {
+		...harness.connectionState.sessionActions,
+		queuedCount: queue.steering.length + queue.followUp.length,
+		steering: queue.steering,
+		followUps: queue.followUp,
+	};
 }
 
 describe("interactive queued-message editing", () => {
@@ -124,7 +129,7 @@ describe("interactive queued-message editing", () => {
 			lane: "followUp",
 		});
 
-		harness.replaceConnectionQueue({ steering: ["s1"], followUp: [] });
+		setQueue(harness, { steering: ["s1"], followUp: [] });
 		harness.browseQueueSelection(-1);
 		await harness.applyQueueSelection("   ", "steering");
 		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenLastCalledWith("steering", 0, "s1", {
@@ -205,7 +210,7 @@ describe("interactive queued-message editing", () => {
 		const pending = harness.applyQueueSelection(text, "steering");
 		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce());
 
-		harness.replaceConnectionQueue({
+		setQueue(harness, {
 			steering: text.trim() ? [text.trim()] : [],
 			followUp: [],
 		});
@@ -286,7 +291,7 @@ describe("interactive queued-message editing", () => {
 		harness.sessionEventGeneration++;
 		harness.pendingQueueEdit = undefined;
 		harness.queueSelection.reset();
-		harness.replaceConnectionQueue({ steering: ["new queued"], followUp: [] });
+		setQueue(harness, { steering: ["new queued"], followUp: [] });
 		harness.editor.setText("new draft");
 		harness.browseQueueSelection(-1);
 
@@ -321,22 +326,38 @@ describe("interactive queued-message editing", () => {
 		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce();
 	});
 
-	it("refreshes queue state from the connection after a move", async () => {
+	it("refreshes selection from event-driven queue state after a move", async () => {
 		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
-		harness.agentConnection.getQueue.mockResolvedValue({ steering: ["s2", "s1"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
+			setQueue(harness, { steering: ["s2", "s1"], followUp: [] });
+			return "applied";
+		});
 		harness.browseQueueSelection(-1);
 		harness.moveQueueSelection(-1);
 		await harness.queueMutationChain;
 
-		expect(harness.agentConnection.getQueue).toHaveBeenCalledOnce();
 		expect(harness.getConnectionQueue()).toEqual({ steering: ["s2", "s1"], followUp: [] });
 		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "s2" });
+	});
+
+	it("leaves browse mode when the moved tuple is absent from the event snapshot", async () => {
+		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
+			setQueue(harness, { steering: ["s1"], followUp: [] });
+			return "applied";
+		});
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		await harness.queueMutationChain;
+
+		expect(harness.queueSelection.isBrowsing).toBe(false);
+		expect(harness.editor.getText()).toBe("draft");
 	});
 
 	it("uses canonical post-move positions for consecutive moves and an edit", async () => {
 		const queue = ["s1", "s2", "s3"];
 		const harness = createHarness({ steering: queue, followUp: [] });
-		harness.agentConnection.getQueue.mockImplementation(async () => ({ steering: [...queue], followUp: [] }));
 		harness.agentConnection.mutateQueuedMessage.mockImplementation(
 			async (
 				_lane: "steering" | "followUp",
@@ -355,6 +376,7 @@ describe("interactive queued-message editing", () => {
 				} else if (mutation.type === "replace") {
 					queue[index] = mutation.text;
 				}
+				setQueue(harness, { steering: [...queue], followUp: [] });
 				return "applied";
 			},
 		);
@@ -389,7 +411,7 @@ describe("interactive queued-message editing", () => {
 		});
 		harness.browseQueueSelection(-1);
 		const pending = harness.applyQueueSelection("edited", "followUp");
-		harness.replaceConnectionQueue({ steering: [], followUp: ["dup"] });
+		setQueue(harness, { steering: [], followUp: ["dup"] });
 		releaseMutationChain();
 		await pending;
 
