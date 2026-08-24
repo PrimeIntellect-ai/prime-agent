@@ -327,13 +327,18 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
-	it("retries a scheduled post-compaction continuation when another run starts first", async () => {
-		vi.useFakeTimers();
+	it("waits for the active run to settle before retrying a post-compaction continuation", async () => {
 		const harness = await createAutoRefineHarness({
 			settings: { autoRefine: { enabled: true, turnInterval: 25, cooldownMs: 0 } },
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
+		const activeRunSettled = createDeferred();
+		vi.spyOn(harness.session.agent, "waitForIdle")
+			.mockResolvedValueOnce()
+			.mockResolvedValueOnce()
+			.mockReturnValueOnce(activeRunSettled.promise)
+			.mockResolvedValue();
 		const continueAgent = vi
 			.spyOn(harness.session.agent, "continue")
 			.mockRejectedValueOnce(
@@ -341,20 +346,13 @@ describe("AgentSession queue characterization", () => {
 			)
 			.mockResolvedValueOnce();
 
-		try {
-			internals._schedulePostCompactionContinue();
-			await vi.advanceTimersByTimeAsync(100);
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(1));
+		expect(internals._postCompactionContinuationScheduled).toBe(true);
 
-			expect(continueAgent).toHaveBeenCalledTimes(1);
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
-
-			await vi.advanceTimersByTimeAsync(100);
-
-			expect(continueAgent).toHaveBeenCalledTimes(2);
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
-		} finally {
-			vi.useRealTimers();
-		}
+		activeRunSettled.resolve();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(2));
+		expect(internals._postCompactionContinuationScheduled).toBe(false);
 	});
 
 	it("cancels scheduled post-compaction continuation on branch changes", async () => {
@@ -407,24 +405,22 @@ describe("AgentSession queue characterization", () => {
 	});
 
 	it("keeps scheduled post-compaction continuation when session-input pump compaction skips without aborting", async () => {
-		vi.useFakeTimers();
 		const harness = await createAutoRefineHarness({
 			settings: { autoRefine: { enabled: true, turnInterval: 25, cooldownMs: 0 } },
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		try {
-			internals._schedulePostCompactionContinue();
+		const idle = createDeferred();
+		vi.spyOn(harness.session.agent, "waitForIdle").mockReturnValue(idle.promise);
+		internals._schedulePostCompactionContinue();
 
-			await expect(harness.session.compact(undefined, { skipAbort: true })).rejects.toThrow(
-				"Session is too short to compact",
-			);
+		await expect(harness.session.compact(undefined, { skipAbort: true })).rejects.toThrow(
+			"Session is too short to compact",
+		);
 
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
-		} finally {
-			internals._cancelPostCompactionContinue();
-			vi.useRealTimers();
-		}
+		expect(internals._postCompactionContinuationScheduled).toBe(true);
+		internals._cancelPostCompactionContinue();
+		idle.resolve();
 	});
 
 	it("auto-refine pending review uses the in-progress guard and catches refine failures", async () => {
