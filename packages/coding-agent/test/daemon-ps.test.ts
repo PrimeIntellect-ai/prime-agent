@@ -1,8 +1,10 @@
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	type DaemonInfo,
 	evaluateShutdownQuietPeriod,
+	isKernelForkServerSocketPath,
 	isWorkerSocketPath,
 	mergeDiscoveredDaemonProcesses,
 	parseLsofListeners,
@@ -26,11 +28,20 @@ describe("worker socket classification", () => {
 	});
 });
 
+describe("forkserver socket classification", () => {
+	it.runIf(process.platform !== "win32")("recognizes only internal forkserver control sockets", () => {
+		expect(isKernelForkServerSocketPath(join(tmpdir(), "prime-agent-forkserver-abc123", "control.sock"))).toBe(true);
+		expect(isKernelForkServerSocketPath(join(tmpdir(), "prime-agent-forkserver-abc123", "daemon.sock"))).toBe(false);
+		expect(isKernelForkServerSocketPath(join(tmpdir(), "custom", "control.sock"))).toBe(false);
+	});
+});
+
 describe("parseSsListeners", () => {
 	const stdout = [
 		"Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:Port",
 		'u_str LISTEN 0      511    /tmp/custom.sock 10147608 * 0 users:(("prime-agent",pid=1234,fd=22))',
 		'u_str LISTEN 0      511    /tmp/prime-agent-1000/daemon.sock 79453846 * 0 users:(("prime-agent",pid=5678,fd=24))',
+		'u_str LISTEN 0      511    /tmp/prime-agent-forkserver-probe/control.sock 79453847 * 0 users:(("prime-agent",pid=2468,fd=25))',
 		'u_str LISTEN 0      4096   /run/dbus/system_bus_socket 123 * 0 users:(("dbus-daemon",pid=900,fd=3))',
 		'u_str ESTAB  0      0      /tmp/other.sock 456 * 0 users:(("prime-agent",pid=4321,fd=9))',
 		"",
@@ -48,6 +59,7 @@ describe("parseSsListeners", () => {
 		const daemons = parseSsListeners(stdout, "prime-agent");
 		expect(daemons.some((daemon) => daemon.socketPath.includes("dbus"))).toBe(false);
 		expect(daemons.some((daemon) => daemon.pid === 4321)).toBe(false);
+		expect(daemons.some((daemon) => daemon.pid === 2468)).toBe(false);
 	});
 
 	it("honors a different app name", () => {
@@ -57,7 +69,17 @@ describe("parseSsListeners", () => {
 
 describe("parseLsofListeners", () => {
 	it("pairs each pid with its listening unix socket paths", () => {
-		const stdout = ["p1234", "fu", "n/tmp/a.sock", "p5678", "n/tmp/b.sock", "n0x0 (not a path)", ""].join("\n");
+		const stdout = [
+			"p1234",
+			"fu",
+			"n/tmp/a.sock",
+			"p2468",
+			"n/tmp/prime-agent-forkserver-probe/control.sock",
+			"p5678",
+			"n/tmp/b.sock",
+			"n0x0 (not a path)",
+			"",
+		].join("\n");
 		expect(parseLsofListeners(stdout)).toEqual([
 			{ pid: 1234, socketPath: "/tmp/a.sock" },
 			{ pid: 5678, socketPath: "/tmp/b.sock" },

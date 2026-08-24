@@ -1,0 +1,1 @@
+- Fixed `prime-agent status` terminating active IPython forkservers by excluding internal control sockets from daemon discovery and preserving the established forkserver connection.

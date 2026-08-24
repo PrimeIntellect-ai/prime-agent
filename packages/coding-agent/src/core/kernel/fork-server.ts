@@ -178,6 +178,12 @@ export class ForkServer {
 			};
 
 			server.on("connection", (socket) => {
+				// The Python forkserver owns the first connection for its lifetime. A
+				// discovery probe must not replace that control channel when it connects.
+				if (this.conn) {
+					socket.destroy();
+					return;
+				}
 				this.conn = socket;
 				socket.setEncoding("utf8");
 				socket.on("data", (chunk: string) => this.onData(chunk));

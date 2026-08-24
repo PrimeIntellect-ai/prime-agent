@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createConnection, type Server } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -229,6 +230,23 @@ describeIf("forkserver kill/liveness protocol (stub python)", () => {
 		server!.dispose();
 		await expect(handle.kill("TERM")).rejects.toBeInstanceOf(ForkServerUnavailable);
 		await expect(handle.isAlive()).rejects.toBeInstanceOf(ForkServerUnavailable);
+	}, 15_000);
+
+	it("keeps the established control channel when another client probes the socket", async () => {
+		const handle = await spawnStubKernel();
+		const listener = (server as unknown as { server?: Server }).server;
+		const address = listener?.address();
+		expect(typeof address).toBe("string");
+
+		await new Promise<void>((resolve, reject) => {
+			const probe = createConnection(address as string);
+			probe.once("connect", () => probe.end());
+			probe.once("close", () => resolve());
+			probe.once("error", reject);
+		});
+
+		expect(server!.isDead).toBe(false);
+		expect(await handle.isAlive()).toBe(true);
 	}, 15_000);
 
 	describe("forkserver orphan journal", () => {
