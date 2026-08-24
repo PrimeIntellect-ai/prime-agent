@@ -1800,6 +1800,85 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("does not retry after the supervisor receives an agent message", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-disconnect-"));
+		const socketPath = join(tempDir, "d.sock");
+		let requestCount = 0;
+		const server: Server = createServer((socket) => {
+			socket.on("error", () => undefined);
+			socket.write(
+				`${JSON.stringify({
+					type: "daemon_hello",
+					socketPath,
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaId: DAEMON_SCHEMA_ID,
+					clientId: "supervisor",
+					serverCapabilities: [],
+				})}\n`,
+			);
+			let buffer = "";
+			socket.on("data", (chunk) => {
+				buffer += chunk.toString();
+				const newline = buffer.indexOf("\n");
+				if (newline === -1) return;
+				const wire = JSON.parse(buffer.slice(0, newline)) as {
+					id: string;
+					command?: { type: string };
+					type: string;
+				};
+				const command = wire.command ?? wire;
+				requestCount++;
+				if (requestCount === 1) {
+					socket.destroy();
+					return;
+				}
+				socket.write(
+					`${JSON.stringify({
+						type: "response",
+						id: wire.id,
+						command: command.type,
+						success: true,
+						data: {},
+					})}\n`,
+				);
+			});
+		});
+		const previousSupervisorSocket = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		try {
+			await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
+			const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
+				defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+				worker: { authenticationToken: "worker-token" },
+			});
+			const sendRemoteAgentSessionMessage = (
+				daemon as unknown as {
+					sendRemoteAgentSessionMessage(
+						fromState: ActiveSessionState,
+						targetSelector: string,
+						message: string,
+					): Promise<unknown>;
+				}
+			).sendRemoteAgentSessionMessage.bind(daemon);
+
+			await expect(sendRemoteAgentSessionMessage(makeState("source"), "remote", "continue")).rejects.toThrow(
+				"Connection to the Prime Agent daemon closed",
+			);
+			expect(requestCount).toBe(1);
+		} finally {
+			if (previousSupervisorSocket === undefined) {
+				delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			} else {
+				process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
+			}
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("routes worker-local session renames through the supervisor", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-worker-rename-"));
 		const socketPath = join(tempDir, "s");
