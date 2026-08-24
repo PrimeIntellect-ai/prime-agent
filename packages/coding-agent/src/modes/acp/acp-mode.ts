@@ -873,6 +873,7 @@ export async function runAcpModeWithConnection(
 			// delivered. This prevents late producer events becoming the next turn.
 			const promptTurnId = entry.producer.beginPrompt();
 			let responseBoundaryEmitted = false;
+			let terminalSettlementCancelled = false;
 			try {
 				const { text, images } = promptContent(params.prompt);
 				const priorMessages = turnBoundary(await connection.getMessages());
@@ -943,6 +944,7 @@ export async function runAcpModeWithConnection(
 					entry.pendingTerminal = pending;
 					finalizePendingTerminal(entry, pending);
 					await pending.task;
+					terminalSettlementCancelled = abort.signal.aborted;
 					if (pending.failure) {
 						throw new Error(`ACP lifecycle reconciliation failed: ${pending.failure}`);
 					}
@@ -954,7 +956,7 @@ export async function runAcpModeWithConnection(
 				if (failure) throw new Error(`prime-agent turn failed: ${failure}`);
 				return {
 					stopReason: acpStopReason({
-						cancelled: abort.signal.aborted && !entry.producer.isResponseCommitted(promptTurnId),
+						cancelled: terminalSettlementCancelled,
 						autonomous: terminalStatus,
 					}),
 				};

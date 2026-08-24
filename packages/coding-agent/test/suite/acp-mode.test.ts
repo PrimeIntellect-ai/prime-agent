@@ -672,6 +672,37 @@ describe("ACP mode end to end", () => {
 		close();
 	});
 
+	it("reports cancellation while terminal settlement is still pending", async () => {
+		let terminalSettlementStarted!: () => void;
+		let releaseTerminalSettlement!: () => void;
+		const terminalSettlementStart = new Promise<void>((resolve) => {
+			terminalSettlementStarted = resolve;
+		});
+		const terminalSettlementRelease = new Promise<void>((resolve) => {
+			releaseTerminalSettlement = resolve;
+		});
+		const connection = fakeAcpConnection({
+			onWaitForHeadlessCompletion: async (options) => {
+				if (!options?.waitForRlmQuiescence) return;
+				terminalSettlementStarted();
+				await terminalSettlementRelease;
+			},
+			onAbort: () => releaseTerminalSettlement(),
+		});
+		const { client, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const prompt = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "cancel during terminal settlement" }],
+		});
+
+		await terminalSettlementStart;
+		await client.notify("session/cancel", { sessionId: session.sessionId });
+		await expect(prompt).resolves.toMatchObject({ stopReason: "cancelled" });
+		close();
+	});
+
 	it("closes a pending child lifecycle without publishing a false terminal", async () => {
 		const child = { id: "child-close", label: "child", status: "running", sessionDir: "/tmp/child" };
 		let releaseBarrier!: () => void;

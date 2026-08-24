@@ -401,17 +401,30 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (reasoningDetails && Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {
 							if (!detail || typeof detail !== "object" || Array.isArray(detail)) continue;
-							const index = typeof detail.index === "number" ? detail.index : nextReasoningDetailsIndex++;
-							reasoningDetailsByIndex.set(index, {
-								...reasoningDetailsByIndex.get(index),
-								...detail,
-							});
-							if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
+							const detailRecord = detail as Record<string, unknown>;
+							const explicitIndex = typeof detailRecord.index === "number" ? detailRecord.index : undefined;
+							const index = explicitIndex ?? nextReasoningDetailsIndex;
+							nextReasoningDetailsIndex = Math.max(nextReasoningDetailsIndex, index + 1);
+							const previousDetail = reasoningDetailsByIndex.get(index);
+							const mergedDetail = { ...previousDetail, ...detailRecord };
+							for (const field of ["text", "summary"] as const) {
+								const previousFragment = previousDetail?.[field];
+								const fragment = detailRecord[field];
+								if (typeof previousFragment === "string" && typeof fragment === "string") {
+									mergedDetail[field] = previousFragment + fragment;
+								}
+							}
+							reasoningDetailsByIndex.set(index, mergedDetail);
+							if (
+								detailRecord.type === "reasoning.encrypted" &&
+								typeof detailRecord.id === "string" &&
+								detailRecord.data
+							) {
 								const matchingToolCall = output.content.find(
-									(b) => b.type === "toolCall" && b.id === detail.id,
+									(b) => b.type === "toolCall" && b.id === detailRecord.id,
 								) as ToolCall | undefined;
 								if (matchingToolCall) {
-									matchingToolCall.thoughtSignature = JSON.stringify(detail);
+									matchingToolCall.thoughtSignature = JSON.stringify(detailRecord);
 								}
 							}
 						}
