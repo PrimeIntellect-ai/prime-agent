@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
+import { isProcessAlive } from "../../utils/child-process.js";
 import { defaultDaemonSocketDir, normalizeSocketPath } from "./daemon-socket.js";
 
 const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
@@ -651,15 +652,6 @@ function matchesExactProcessIdentity(identity: ProcessIdentity): boolean {
 		return false;
 	}
 	return identity.processStartId === undefined || getProcessStartId(identity.pid) === identity.processStartId;
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-	return true;
 }
 
 function canonicalizeFilesystemPath(path: string): string {

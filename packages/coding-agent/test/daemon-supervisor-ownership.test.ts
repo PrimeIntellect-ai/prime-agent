@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, describe, expect, it } from "vitest";
+import { getProcessStartId } from "../src/core/session-lease.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	acquireDaemonShutdownAdmission,
@@ -10,6 +12,7 @@ import {
 	assertDaemonSupervisorOwnerCurrent,
 	persistDaemonStartupFenceFromOwner,
 } from "../src/modes/daemon/daemon-supervisor-ownership.js";
+import { isZombieProcess } from "../src/utils/child-process.js";
 
 type Ownership = Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 
@@ -73,6 +76,40 @@ function ownerDir(paths: ReturnType<typeof createPaths>, generation: string): st
 
 function readJson(path: string): OwnerRecord {
 	return JSON.parse(readFileSync(path, "utf8")) as OwnerRecord;
+}
+
+/**
+ * Leave an unreaped child behind: the shell execs into `sleep` before the
+ * background child exits, so nothing is left to wait on it.
+ */
+async function spawnZombie(): Promise<{ pid: number; cleanup: () => void }> {
+	const parent = spawn("/bin/sh", ["-c", "sleep 0.3 & echo $!; exec sleep 30"], {
+		stdio: ["ignore", "pipe", "ignore"],
+	});
+	const cleanup = () => parent.kill("SIGKILL");
+	try {
+		const pid = await new Promise<number>((resolvePid, rejectPid) => {
+			const timer = setTimeout(() => rejectPid(new Error("timed out reading the zombie pid")), 5000);
+			parent.stdout.once("data", (chunk: Buffer) => {
+				clearTimeout(timer);
+				resolvePid(Number(chunk.toString("utf8").trim()));
+			});
+			parent.once("error", (error) => {
+				clearTimeout(timer);
+				rejectPid(error);
+			});
+		});
+		if (!Number.isInteger(pid) || pid <= 0) throw new Error(`unexpected zombie pid: ${pid}`);
+		const deadline = Date.now() + 5000;
+		while (!isZombieProcess(pid)) {
+			if (Date.now() >= deadline) throw new Error(`process ${pid} never became a zombie`);
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+		}
+		return { pid, cleanup };
+	} catch (error) {
+		cleanup();
+		throw error;
+	}
 }
 
 describe("daemon supervisor ownership registry", () => {
@@ -229,5 +266,37 @@ describe("daemon supervisor ownership registry", () => {
 		expect(lostOnDisk.message).toContain("sessions are preserved");
 		expect(lostOnDisk.message).not.toBe(neverAcquired.message);
 		await ownership.release();
+	});
+
+	it.skipIf(process.platform === "win32")("reclaims an owner whose process is an unreaped zombie", async () => {
+		const paths = createPaths();
+		const zombie = await spawnZombie();
+		try {
+			const abandoned = await acquire(paths, "zombie-owner");
+			const abandonedPath = join(ownerDir(paths, "zombie-owner"), "owner.json");
+			const startId = getProcessStartId(zombie.pid);
+			writeFileSync(
+				abandonedPath,
+				`${JSON.stringify(
+					{
+						...readJson(abandonedPath),
+						pid: zombie.pid,
+						...(startId ? { processStartId: startId } : {}),
+					},
+					null,
+					2,
+				)}\n`,
+			);
+
+			// A zombie still answers kill(pid, 0), so a bare existence probe would
+			// wedge every later launch behind DaemonSupervisorAlreadyRunningError.
+			const successor = await acquire(paths, "successor-owner");
+			expect(successor.record.pid).toBe(process.pid);
+			expect(existsSync(ownerDir(paths, "zombie-owner"))).toBe(false);
+			await successor.release();
+			await abandoned.release().catch(() => undefined);
+		} finally {
+			zombie.cleanup();
+		}
 	});
 });

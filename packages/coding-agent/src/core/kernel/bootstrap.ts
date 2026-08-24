@@ -9,6 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../../config.js";
+import { isProcessAlive } from "../../utils/child-process.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 8;
@@ -446,15 +447,6 @@ function bootstrapLockDir(venv: string): string {
 	return path.join(path.dirname(venv), `${path.basename(venv)}${BOOTSTRAP_LOCK_NAME}`);
 }
 
-function processIsRunning(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return isNodeError(error, "EPERM");
-	}
-}
-
 async function readLockPid(lockDir: string): Promise<number | null> {
 	try {
 		const raw = await readFile(path.join(lockDir, "pid"), "utf8");
@@ -487,7 +479,7 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 			if (!isNodeError(error, "EEXIST")) throw error;
 
 			const pid = await readLockPid(lockDir);
-			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
+			if (pid === null ? await lockMissingPidIsStale(lockDir) : !isProcessAlive(pid)) {
 				await rm(lockDir, { recursive: true, force: true });
 				continue;
 			}
