@@ -265,6 +265,10 @@ export class ReplKernelManager {
 			this.appendKernelDiagnostic(`spawn error: ${err.message}`);
 			this.state = "shutdown";
 			liveKernels.delete(this);
+			// Fail a pending start() promptly instead of letting it ride out the
+			// ready timeout. cleanupResources clears readyDeferred, so reject first;
+			// a late error after ready resolved is a no-op on the settled promise.
+			this.readyDeferred?.reject(err);
 			this.cleanupResources();
 		});
 
