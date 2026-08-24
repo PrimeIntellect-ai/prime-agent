@@ -10,6 +10,7 @@ import selectors
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -20,6 +21,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 _IS_POSIX = os.name == "posix"
+
+if _IS_POSIX:
+    import fcntl
+    import termios
 
 _HEAD_CAP = 512 * 1024
 _TAIL_CAP = 3 * 512 * 1024
@@ -339,16 +344,34 @@ class BashHandle:
     def _drain_grace(self) -> None:
         # Bounded wait so the result includes foreground output still in the pipe:
         # EOF arrives immediately without background jobs, otherwise stop once the
-        # buffer is quiescent for one tick.
+        # buffer is quiescent for one tick AND the pipe holds no unread bytes (a
+        # slow pump must not lose output the shell wrote before its status).
         deadline = time.monotonic() + 0.5
         size = self._buffer.size()
         while time.monotonic() < deadline:
             if self._eof.wait(0.05):
                 return
+            if self._pipe_pending():
+                size = self._buffer.size()
+                continue
             current = self._buffer.size()
             if current == size:
                 return
             size = current
+
+    def _pipe_pending(self) -> bool:
+        # POSIX only: FIONREAD on the capture pipe; Windows keeps the
+        # quiescence heuristic (best-effort parity).
+        if not _IS_POSIX or self._eof.is_set():
+            return False
+        stdout = self._proc.stdout
+        if stdout is None:
+            return False
+        try:
+            pending = struct.unpack("i", fcntl.ioctl(stdout.fileno(), termios.FIONREAD, struct.pack("i", 0)))[0]
+        except (OSError, ValueError):
+            return False
+        return pending > 0
 
     def _finalize(self, exit_code: int) -> None:
         with self._callback_lock:
@@ -397,21 +420,28 @@ class BashHandle:
         try:
             return await self._wait()
         except asyncio.CancelledError:
-            try:
-                self.kill(grace=_CANCEL_TERM_GRACE)
-                if not await self._await_group_death(_CANCEL_TERM_GRACE):
-                    if _IS_POSIX:
-                        _signal_group(self._pid, signal.SIGKILL)
-                    else:
-                        _taskkill_tree(self._pid)
-                    await self._await_group_death(_CANCEL_KILL_WAIT)
-            except asyncio.CancelledError:
-                # A second cancel during teardown: last-resort KILL, no waiting.
-                if _IS_POSIX:
-                    _signal_group(self._pid, signal.SIGKILL)
-                else:
-                    _taskkill_tree(self._pid)
+            # Signal synchronously first: even if the cleanup awaits below are
+            # re-cancelled, TERM is already delivered and the escalation timer
+            # armed. The confirm wait runs as a shielded task so repeated
+            # cancels of this task cannot skip it (they re-raise into awaits
+            # inside this except block); the loop re-awaits until it finishes
+            # (the confirm coroutine itself is bounded).
+            self.kill(grace=_CANCEL_TERM_GRACE)
+            confirm = asyncio.ensure_future(self._confirm_group_exit())
+            while not confirm.done():
+                try:
+                    await asyncio.shield(confirm)
+                except asyncio.CancelledError:
+                    continue
             raise
+
+    async def _confirm_group_exit(self) -> None:
+        if not await self._await_group_death(_CANCEL_TERM_GRACE):
+            if _IS_POSIX:
+                _signal_group(self._pid, signal.SIGKILL)
+            else:
+                _taskkill_tree(self._pid)
+            await self._await_group_death(_CANCEL_KILL_WAIT)
 
     def _group_alive(self) -> bool:
         if not _IS_POSIX:
@@ -497,7 +527,15 @@ def _shell() -> str:
         if not os.path.isabs(override):
             raise ValueError("PRIME_AGENT_BASH_SHELL must be an absolute path")
         return override
-    return shutil.which("bash") or "/bin/sh"
+    shell = shutil.which("bash")
+    if shell is None and not _IS_POSIX:
+        # cmd.exe cannot run the `-c <script>` invocation, so fail with a
+        # teaching error instead of a confusing Popen failure on /bin/sh.
+        raise RuntimeError(
+            "bash() needs a bash executable on PATH on Windows (e.g. Git Bash); "
+            "or set PRIME_AGENT_BASH_SHELL to the absolute path of a POSIX shell"
+        )
+    return shell or "/bin/sh"
 
 
 def _with_prefix(command: str) -> str:
