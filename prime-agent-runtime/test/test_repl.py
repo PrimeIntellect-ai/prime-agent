@@ -688,6 +688,43 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "2")
         self.assertEqual(one(follow, "done")["status"], "ok")
 
+    def test_compile_crash_reports_error_and_serves_next(self):
+        # A compile-phase crash outside SyntaxError/ValueError (RecursionError or
+        # MemoryError depending on build) must fail the one cell, not the runtime.
+        events = self.repl.execute("deep", "a" + ".b" * 100000)
+        self.assertIsNotNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "error")
+        follow = self.repl.execute("after-deep", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
+    def test_rebound_stdout_without_flush_still_completes(self):
+        # Rebinding sys.stdout/sys.stderr to flush-less objects must not kill drain.
+        events = self.repl.execute("rebind-io", "import sys\nsys.stdout = None\nsys.stderr = None")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        follow = self.repl.execute("after-rebind", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
+    def test_closed_fds_reclaimed_by_files_still_completes(self):
+        # A cell closing fds 1/2 with open() reclaiming the numbers must not wedge
+        # drain: tokens go through a private dup, so done still arrives.
+        code = "\n".join(
+            [
+                "import os",
+                "os.close(1)",
+                "os.close(2)",
+                "a = open(os.devnull, 'w')",
+                "b = open(os.devnull, 'w')",
+            ]
+        )
+        events = self.repl.execute("reclaim-fds", code)
+        self.assertEqual(one(events, "done")["status"], "ok")
+        # print() writes via sys.stdout's own dup, so the event must arrive and drain stays exact.
+        follow = self.repl.execute("after-reclaim", "print('hi')")
+        self.assertEqual(stream_text(follow, "stdout"), "hi\n")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
     def test_restore_missing_snapshot_is_ok_with_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.repl.send({"type": "restore", "id": "r0", "path": os.path.join(tmp, "absent.dill")})
@@ -729,9 +766,25 @@ class FinishRequestTest(unittest.TestCase):
         repl = self.repl_module
         repl._inflight.update({"bad", "other"})
         repl._pending_interrupts["any"] = True
-        asyncio.run(repl._handle_execute({"id": "bad", "code": "def broken(:\n    pass"}, {}))
+        asyncio.run(repl._handle_request(repl._handle_execute, {"id": "bad", "code": "def broken(:\n    pass"}, {}))
         self.assertFalse(repl._pending_interrupts["any"])
         self.assertNotIn("bad", repl._inflight)
+        self.assertIn("other", repl._inflight)
+
+    def test_post_run_error_leaves_parked_interrupt_for_next_request(self):
+        # Once _run_guarded finished a request (_finish_locked already ran), a
+        # later exception in the same handler must not consume an untargeted
+        # interrupt parked for the still-inflight next request.
+        repl = self.repl_module
+
+        async def finished_then_broken(req, ns):
+            repl._finish_request(req["id"])  # simulate _run_guarded completion
+            repl._pending_interrupts["any"] = True  # parked while "other" is inflight
+            raise RuntimeError("post-execution failure")
+
+        repl._inflight.update({"done", "other"})
+        asyncio.run(repl._handle_request(finished_then_broken, {"id": "done"}, {}))
+        self.assertTrue(repl._pending_interrupts["any"])
         self.assertIn("other", repl._inflight)
 
 

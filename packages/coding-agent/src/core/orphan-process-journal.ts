@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { getProcessStartId } from "./session-lease.js";
 
@@ -118,15 +119,24 @@ export function reapKernelOrphanProcesses(kernelPid: number): void {
 			continue;
 		}
 		let signaled = false;
-		try {
-			process.kill(process.platform === "win32" ? orphan.pid : -orphan.pid, "SIGKILL");
-			signaled = true;
-		} catch {
+		if (process.platform === "win32") {
+			// In-kernel bash() kill paths use taskkill /T; the reaper must kill the same tree, not just the shell pid.
+			const result = spawnSync("taskkill", ["/F", "/T", "/PID", String(orphan.pid)], {
+				stdio: "ignore",
+				timeout: 10_000,
+			});
+			signaled = result.status === 0;
+		} else {
 			try {
-				process.kill(orphan.pid, "SIGKILL");
+				process.kill(-orphan.pid, "SIGKILL");
 				signaled = true;
 			} catch {
-				// The bash child may already have exited.
+				try {
+					process.kill(orphan.pid, "SIGKILL");
+					signaled = true;
+				} catch {
+					// The bash child may already have exited.
+				}
 			}
 		}
 		// Inactive only after a delivered signal; a stale record is neutralized by the startId check.
