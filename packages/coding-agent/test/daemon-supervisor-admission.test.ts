@@ -584,3 +584,16 @@ describe("daemon supervisor prompt admission ownership", () => {
 		expect(forwarded.filter((command) => command.type === "prompt")).toHaveLength(1);
 	});
 });
+
+describe("daemon supervisor shutdown admission", () => {
+	it("rejects new sockets after shutdown begins", () => {
+		const supervisor = createHarness() as SupervisorHarness & { shuttingDown: boolean };
+		supervisor.shuttingDown = true;
+		const socket = Object.assign(new PassThrough(), { destroy: vi.fn() }) as unknown as Socket;
+
+		supervisor.handleConnection(socket);
+
+		expect(socket.destroy).toHaveBeenCalledOnce();
+		expect(supervisor.clients).toHaveLength(0);
+	});
+});

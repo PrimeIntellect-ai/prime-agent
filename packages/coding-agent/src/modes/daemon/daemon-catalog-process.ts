@@ -1,11 +1,41 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { constants } from "node:os";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
+
+const CATALOG_STOP_GRACE_MS = 2000;
+const CATALOG_STOP_KILL_GRACE_MS = 1000;
+
+function delay(milliseconds: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function waitForChildExit(child: ChildProcess): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null) {
+		return Promise.resolve();
+	}
+	return new Promise((resolve) => {
+		const onExit = () => {
+			child.off("error", onError);
+			resolve();
+		};
+		const onError = () => {
+			child.off("exit", onExit);
+			resolve();
+		};
+		child.once("exit", onExit);
+		child.once("error", onError);
+	});
+}
+
+function signalExitCode(signal: NodeJS.Signals): number {
+	return 128 + (constants.signals[signal] ?? 0);
+}
 
 interface SessionInfoWire extends Omit<SessionInfo, "created" | "modified"> {
 	created: string;
@@ -108,6 +138,12 @@ export function isDaemonCatalogProcess(environment: NodeJS.ProcessEnv = process.
 }
 
 export async function runDaemonCatalogProcess(): Promise<never> {
+	const stop = (signal: NodeJS.Signals) => process.exit(signalExitCode(signal));
+	process.on("SIGINT", () => stop("SIGINT"));
+	process.on("SIGTERM", () => stop("SIGTERM"));
+	if (process.platform !== "win32") {
+		process.on("SIGHUP", () => stop("SIGHUP"));
+	}
 	process.on("disconnect", () => process.exit(0));
 	process.on("message", (value: unknown) => {
 		if (!isCatalogRequest(value)) {
@@ -243,7 +279,11 @@ export class DaemonCatalogClient {
 		}
 	>();
 
-	constructor(private readonly onDiagnostic: (message: string) => void) {}
+	constructor(
+		private readonly onDiagnostic: (message: string) => void,
+		private readonly launchSpec: () => { command: string; args: string[] } = () =>
+			createCliSubprocessLaunchSpec(["--version"]),
+	) {}
 
 	async start(): Promise<void> {
 		if (this.child?.connected) {
@@ -313,13 +353,38 @@ export class DaemonCatalogClient {
 		if (!child) {
 			return;
 		}
-		await this.request({ type: "request", id: randomUUID(), command: "shutdown" }).catch(() => undefined);
-		child.disconnect();
-		this.child = undefined;
+		const exited = waitForChildExit(child);
+		const shutdown = this.request(
+			{ type: "request", id: randomUUID(), command: "shutdown" },
+			undefined,
+			CATALOG_STOP_GRACE_MS,
+			child,
+		).catch(() => undefined);
+		const exitedGracefully = await Promise.race([
+			exited.then(() => true),
+			shutdown.then(() => exited).then(() => true),
+			delay(CATALOG_STOP_GRACE_MS).then(() => false),
+		]);
+		if (!exitedGracefully && child.exitCode === null && child.signalCode === null) {
+			child.kill("SIGKILL");
+			const killed = await Promise.race([
+				exited.then(() => true),
+				delay(CATALOG_STOP_KILL_GRACE_MS).then(() => false),
+			]);
+			if (!killed) {
+				throw new Error("Daemon catalog did not exit after SIGKILL");
+			}
+		}
+		if (child.connected) {
+			child.disconnect();
+		}
+		if (this.child === child) {
+			this.child = undefined;
+		}
 	}
 
 	private async spawnCatalog(): Promise<void> {
-		const launch = createCliSubprocessLaunchSpec(["--version"]);
+		const launch = this.launchSpec();
 		const child = spawn(launch.command, launch.args, {
 			cwd: process.cwd(),
 			env: createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" }),
@@ -362,23 +427,31 @@ export class DaemonCatalogClient {
 		});
 	}
 
-	private async request<T = void>(request: CatalogRequest, callbacks?: CatalogListCallbacks): Promise<T> {
-		await this.start();
-		const child = this.child;
+	private async request<T = void>(
+		request: CatalogRequest,
+		callbacks?: CatalogListCallbacks,
+		timeoutMs = 5 * 60 * 1000,
+		expectedChild?: ChildProcess,
+	): Promise<T> {
+		if (expectedChild) {
+			if (this.child !== expectedChild || !expectedChild.connected) {
+				throw new Error("Daemon catalog is not connected");
+			}
+		} else {
+			await this.start();
+		}
+		const child = expectedChild ?? this.child;
 		if (!child?.connected) {
 			throw new Error("Daemon catalog is not connected");
 		}
 		return new Promise<T>((resolveRequest, rejectRequest) => {
-			const timeout = setTimeout(
-				() => {
-					if (!this.pending.delete(request.id)) {
-						return;
-					}
-					child.kill("SIGKILL");
-					rejectRequest(new Error(`Timed out waiting for daemon catalog ${request.command}`));
-				},
-				5 * 60 * 1000,
-			);
+			const timeout = setTimeout(() => {
+				if (!this.pending.delete(request.id)) {
+					return;
+				}
+				child.kill("SIGKILL");
+				rejectRequest(new Error(`Timed out waiting for daemon catalog ${request.command}`));
+			}, timeoutMs);
 			this.pending.set(request.id, {
 				resolve: (data) => resolveRequest(data as T),
 				reject: rejectRequest,

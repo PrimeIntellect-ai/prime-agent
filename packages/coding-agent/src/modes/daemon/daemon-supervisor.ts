@@ -1051,6 +1051,10 @@ export class DaemonSupervisor {
 	}
 
 	private handleConnection(socket: Socket): void {
+		if (this.shuttingDown) {
+			socket.destroy();
+			return;
+		}
 		const client: DaemonSocketClient = {
 			id: createActiveSessionId(),
 			socket,

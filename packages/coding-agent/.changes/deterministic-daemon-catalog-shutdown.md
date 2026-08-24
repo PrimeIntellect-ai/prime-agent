@@ -1,0 +1,1 @@
+- Fixed daemon catalog shutdown to reap the helper process and bound forced termination.
