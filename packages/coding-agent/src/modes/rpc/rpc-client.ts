@@ -32,9 +32,6 @@ import type {
 // Types
 // ============================================================================
 
-/** Extended response timeout for refine requests, which run an LLM pass. */
-export const REFINE_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
-
 /** Distributive Omit that works with union types */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
@@ -79,6 +76,8 @@ export class RpcClient {
 		new Map();
 	private requestId = 0;
 	private stderr = "";
+	private transportError: Error | null = null;
+	private pendingEventWaiters = new Set<(error: Error) => void>();
 
 	constructor(private options: RpcClientOptions = {}) {}
 
@@ -103,10 +102,21 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
+		this.transportError = null;
 		this.process = spawn("node", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
+		});
+		this.process.on("error", (error) => {
+			this.failPendingOperations(new Error(`RPC process error: ${error.message}. Stderr: ${this.stderr}`));
+		});
+		this.process.on("exit", (code, signal) => {
+			const status = signal ? `signal ${signal}` : `code ${code}`;
+			this.failPendingOperations(new Error(`RPC process exited with ${status}. Stderr: ${this.stderr}`));
+		});
+		this.process.stdout?.on("close", () => {
+			this.failPendingOperations(new Error(`RPC process output closed. Stderr: ${this.stderr}`));
 		});
 
 		// Collect stderr for debugging
@@ -136,6 +146,7 @@ export class RpcClient {
 
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
+		this.failPendingOperations(new Error(`RPC client stopped. Stderr: ${this.stderr}`));
 		this.process.kill("SIGTERM");
 
 		// Wait for process to exit
@@ -152,7 +163,6 @@ export class RpcClient {
 		});
 
 		this.process = null;
-		this.pendingRequests.clear();
 	}
 
 	/**
@@ -308,8 +318,6 @@ export class RpcClient {
 	async refine(
 		options: { instructions?: string; rollbackId?: string; global?: boolean } = {},
 	): Promise<RefinementResult> {
-		// Refinement runs an LLM pass that routinely exceeds the default 30s response
-		// timeout, so use the same extended window as the daemon refine path.
 		const command = { type: "refine", instructions: options.instructions, rollbackId: options.rollbackId } as {
 			type: "refine";
 			instructions?: string;
@@ -319,7 +327,7 @@ export class RpcClient {
 		if (options.global !== undefined) {
 			command.global = options.global;
 		}
-		const response = await this.send(command, REFINE_REQUEST_TIMEOUT_MS);
+		const response = await this.send(command);
 		return this.getData(response);
 	}
 
@@ -540,52 +548,76 @@ export class RpcClient {
 	 * Wait for agent to become idle (no streaming).
 	 * Resolves when agent_end event is received.
 	 */
-	waitForIdle(timeout = 60000): Promise<void> {
+	waitForIdle(timeout?: number): Promise<void> {
+		if (this.transportError) return Promise.reject(this.transportError);
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const cleanup = () => {
+				if (timer) clearTimeout(timer);
 				unsubscribe();
-				reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
-			}, timeout);
-
+				this.pendingEventWaiters.delete(onFailure);
+			};
+			const onFailure = (error: Error) => {
+				cleanup();
+				reject(error);
+			};
 			const unsubscribe = this.onEvent((event) => {
 				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
+					cleanup();
 					resolve();
 				}
 			});
+			this.pendingEventWaiters.add(onFailure);
+			if (timeout !== undefined) {
+				timer = setTimeout(() => {
+					cleanup();
+					reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
+				}, timeout);
+			}
 		});
 	}
 
 	/**
 	 * Collect events until agent becomes idle.
 	 */
-	collectEvents(timeout = 60000): Promise<AgentEvent[]> {
+	collectEvents(timeout?: number): Promise<AgentEvent[]> {
+		if (this.transportError) return Promise.reject(this.transportError);
 		return new Promise((resolve, reject) => {
 			const events: AgentEvent[] = [];
-			const timer = setTimeout(() => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const cleanup = () => {
+				if (timer) clearTimeout(timer);
 				unsubscribe();
-				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
-			}, timeout);
-
+				this.pendingEventWaiters.delete(onFailure);
+			};
+			const onFailure = (error: Error) => {
+				cleanup();
+				reject(error);
+			};
 			const unsubscribe = this.onEvent((event) => {
 				events.push(event);
 				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
+					cleanup();
 					resolve(events);
 				}
 			});
+			this.pendingEventWaiters.add(onFailure);
+			if (timeout !== undefined) {
+				timer = setTimeout(() => {
+					cleanup();
+					reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
+				}, timeout);
+			}
 		});
 	}
 
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
+	async promptAndWait(message: string, images?: ImageContent[], timeout?: number): Promise<AgentEvent[]> {
 		const eventsPromise = this.collectEvents(timeout);
-		await this.prompt(message, images);
-		return eventsPromise;
+		const [events] = await Promise.all([eventsPromise, this.prompt(message, images)]);
+		return events;
 	}
 
 	// =========================================================================
@@ -627,7 +659,8 @@ export class RpcClient {
 		}
 	}
 
-	private async send(command: RpcCommandBody, timeoutMs = 30000): Promise<RpcResponse> {
+	private async send(command: RpcCommandBody, timeoutMs?: number): Promise<RpcResponse> {
+		if (this.transportError) throw this.transportError;
 		if (!this.process?.stdin) {
 			throw new Error("Client not started");
 		}
@@ -636,26 +669,37 @@ export class RpcClient {
 		const fullCommand = { ...command, id } as RpcCommand;
 
 		return new Promise((resolve, reject) => {
-			this.pendingRequests.set(id, { resolve, reject });
-
-			const timeout = setTimeout(() => {
-				this.pendingRequests.delete(id);
-				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
-			}, timeoutMs);
-
+			let timeout: ReturnType<typeof setTimeout> | undefined;
 			this.pendingRequests.set(id, {
 				resolve: (response) => {
-					clearTimeout(timeout);
+					if (timeout) clearTimeout(timeout);
 					resolve(response);
 				},
 				reject: (error) => {
-					clearTimeout(timeout);
+					if (timeout) clearTimeout(timeout);
 					reject(error);
 				},
 			});
+			if (timeoutMs !== undefined) {
+				timeout = setTimeout(() => {
+					this.pendingRequests.delete(id);
+					reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
+				}, timeoutMs);
+			}
 
 			this.process!.stdin!.write(serializeJsonLine(fullCommand));
 		});
+	}
+
+	private failPendingOperations(error: Error): void {
+		this.transportError ??= error;
+		for (const [id, pending] of this.pendingRequests) {
+			pending.reject(this.transportError);
+			this.pendingRequests.delete(id);
+		}
+		for (const reject of [...this.pendingEventWaiters]) {
+			reject(this.transportError);
+		}
 	}
 
 	private getData<T>(response: RpcResponse): T {
