@@ -27,14 +27,27 @@ describe("rewriteCellMagics", () => {
 
 	it("rewrites %cd with a target directory, tracks the previous cwd, and echoes the new cwd", () => {
 		expect(rewriteCellMagics("%cd /tmp/dir")).toBe(
-			'_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("/tmp/dir")); print(__import__("os").getcwd())',
+			'_prime_agent_cd_old = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("/tmp/dir")); _prime_agent_prev_cd = _prime_agent_cd_old; print(__import__("os").getcwd())',
 		);
 	});
 
 	it("rewrites bare %cd to the home directory", () => {
 		expect(rewriteCellMagics("%cd")).toBe(
-			'_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("~")); print(__import__("os").getcwd())',
+			'_prime_agent_cd_old = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("~")); _prime_agent_prev_cd = _prime_agent_cd_old; print(__import__("os").getcwd())',
 		);
+	});
+
+	it("keeps _prime_agent_prev_cd untouched when %cd fails", () => {
+		const failedCd = rewriteCellMagics("%cd /prime-agent-test-missing-dir");
+		const check = [
+			'_prime_agent_prev_cd = "/pre-existing"',
+			"try:",
+			...failedCd.split("\n").map((line) => `    ${line}`),
+			"except OSError:",
+			"    pass",
+			'assert _prime_agent_prev_cd == "/pre-existing", _prime_agent_prev_cd',
+		].join("\n");
+		execFileSync("python3", ["-c", check], { stdio: "pipe" });
 	});
 
 	it("expands ~ in %cd targets", () => {
@@ -58,7 +71,9 @@ describe("rewriteCellMagics", () => {
 		const rewritten = rewriteCellMagics("%cd -");
 		expect(rewritten).toContain('globals().get("_prime_agent_prev_cd")');
 		expect(rewritten).toContain('raise RuntimeError("No previous directory to change to")');
-		expect(rewritten).toContain('__import__("os").chdir(_prime_agent_cd_target); print(__import__("os").getcwd())');
+		expect(rewritten).toContain(
+			'__import__("os").chdir(_prime_agent_cd_target); _prime_agent_prev_cd = _prime_agent_cd_old; print(__import__("os").getcwd())',
+		);
 	});
 
 	it("rewrites %cd with a tab separator and tolerates a trailing carriage return", () => {

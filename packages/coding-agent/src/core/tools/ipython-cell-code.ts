@@ -40,7 +40,9 @@ const CD_NO_PREVIOUS_ERROR = "No previous directory to change to";
 
 function rewriteChdir(targetExpression: string): string {
 	// IPython's %cd echoes the new working directory after changing into it.
-	return `_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(${targetExpression}); print(__import__("os").getcwd())`;
+	// Commit _prime_agent_prev_cd only after chdir succeeds so a failed %cd
+	// leaves the previous-directory tracking (and thus %cd -) intact.
+	return `_prime_agent_cd_old = __import__("os").getcwd(); __import__("os").chdir(${targetExpression}); _prime_agent_prev_cd = _prime_agent_cd_old; print(__import__("os").getcwd())`;
 }
 
 function rewriteCdMagic(rawTarget: string): string {

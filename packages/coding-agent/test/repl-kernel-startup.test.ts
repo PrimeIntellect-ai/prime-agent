@@ -56,6 +56,20 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
+	it("rejects promptly when the kernel process fails to spawn", async () => {
+		const python = join(tempDir, "does-not-exist");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir });
+
+		try {
+			// Without prompt rejection this would ride out the 30s ready timeout.
+			await expect(manager.start()).rejects.toThrow(/ENOENT/);
+		} finally {
+			errorSpy.mockRestore();
+			await manager.dispose();
+		}
+	});
+
 	it("times out a runtime that never sends ready", async () => {
 		vi.useFakeTimers();
 		const python = join(tempDir, "python");
