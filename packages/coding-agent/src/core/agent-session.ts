@@ -830,11 +830,12 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 
 /** One-shot settlement for a scheduled post-compaction continuation; a settled failure is never re-exposed to later waiters. */
 interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
+	continueAfterSessionInput: boolean;
 	settled: boolean;
 }
 
 function createPostCompactionContinuationSettlement(): PostCompactionContinuationSettlement {
-	return { ...createAgentMessageDeferred(), settled: false };
+	return { ...createAgentMessageDeferred(), continueAfterSessionInput: false, settled: false };
 }
 
 export interface ModelCycleResult {
@@ -882,6 +883,10 @@ interface RlmChildRun {
 	sessionDir: string;
 	model: Model<Api>;
 	status: RlmChildAgentStatus;
+	durationMs?: number;
+	answerPreview?: string;
+	toolUseCount: number;
+	activity?: RlmChildAgentActivity;
 	error?: string;
 	abort: () => void;
 	publication: AgentMessageDeferred;
@@ -909,6 +914,11 @@ interface RlmChildRun {
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
 	unsubscribe?: () => void;
+}
+
+interface RetainedRlmChild {
+	session: AgentSession;
+	run?: RlmChildRun;
 }
 
 interface RlmSubagentModelSelection {
@@ -1153,6 +1163,7 @@ export class AgentSession {
 	private _rlmSessionDir?: string;
 	private _rlmParentNodeId?: string;
 	private _rlmParentAgent?: string;
+	private _rlmParentRun?: RlmChildRun;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
@@ -1163,7 +1174,7 @@ export class AgentSession {
 	private _pendingRlmSubagentSessionNames = new Set<string>();
 	// Inline mode keeps finished child sessions so the inspector can still read them;
 	// the daemon does the same by leaving the child session resident in its registry.
-	private _rlmChildSessions = new Map<string, AgentSession>();
+	private _rlmChildSessions = new Map<string, RetainedRlmChild>();
 	private _deletedRlmChildIds = new Set<string>();
 	// Failed explicit deletes stay hidden from listings but retain their original
 	// selector so a later delete can retry cleanup without orphaning the runtime.
@@ -1198,7 +1209,6 @@ export class AgentSession {
 	private _compactAutoRefinePending = false;
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
-	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
 	private _postCompactionContinuationSettlement: PostCompactionContinuationSettlement | undefined;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
@@ -4040,7 +4050,7 @@ export class AgentSession {
 			unsubscribe();
 		}
 		this._rlmChildUnsubscribes.clear();
-		for (const session of this._rlmChildSessions.values()) {
+		for (const { session } of this._rlmChildSessions.values()) {
 			await session.disposeAsync().catch(() => undefined);
 		}
 		this._rlmChildSessions.clear();
@@ -4102,7 +4112,7 @@ export class AgentSession {
 				unsubscribe();
 			}
 			this._rlmChildUnsubscribes.clear();
-			for (const session of this._rlmChildSessions.values()) {
+			for (const { session } of this._rlmChildSessions.values()) {
 				session.dispose();
 			}
 			this._rlmChildSessions.clear();
@@ -7311,6 +7321,7 @@ export class AgentSession {
 			throw new Error("Cannot compact without aborting while the agent is running.");
 		}
 		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
+		const continueAfterSessionInput = this._postCompactionContinuationSettlement?.continueAfterSessionInput ?? false;
 		this._disconnectFromAgent();
 		if (!options.skipAbort) await this.abort();
 		let didCompact = false;
@@ -7379,7 +7390,7 @@ export class AgentSession {
 			if (didCompact) {
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 				if (hadPostCompactionContinue) {
-					this._schedulePostCompactionContinue();
+					this._schedulePostCompactionContinue(continueAfterSessionInput);
 				}
 				// Queued agent or session-owned inputs resume the loop; defer refine
 				// behind them instead of interleaving it before their turns.
@@ -7498,7 +7509,7 @@ export class AgentSession {
 	}
 
 	private _settlePostCompactionContinue(error?: Error): void {
-		if (!error && (this._postCompactionContinuationScheduled || this._postCompactionContinuationTimer)) return;
+		if (!error && this._postCompactionContinuationScheduled) return;
 		const settlement = this._postCompactionContinuationSettlement;
 		if (!settlement || settlement.settled) return;
 		settlement.settled = true;
@@ -7508,10 +7519,6 @@ export class AgentSession {
 	}
 
 	private _cancelPostCompactionContinue(): void {
-		if (this._postCompactionContinuationTimer) {
-			clearTimeout(this._postCompactionContinuationTimer);
-			this._postCompactionContinuationTimer = undefined;
-		}
 		this._postCompactionContinuationScheduled = false;
 		this._scheduledPostCompactionContinuationMessages = [];
 		this._settlePostCompactionContinue();
@@ -7607,75 +7614,119 @@ export class AgentSession {
 		this._scheduleAutoRefine("compact");
 	}
 
-	private _schedulePostCompactionContinue(): void {
-		if (this._postCompactionContinuationScheduled) {
-			return;
-		}
+	private _schedulePostCompactionContinue(continueAfterSessionInput = false): void {
 		if (!this._postCompactionContinuationSettlement || this._postCompactionContinuationSettlement.settled) {
 			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement();
 		}
+		const settlement = this._postCompactionContinuationSettlement;
+		settlement.continueAfterSessionInput ||= continueAfterSessionInput;
+		if (this._postCompactionContinuationScheduled) {
+			return;
+		}
 		this._postCompactionContinuationScheduled = true;
 		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
-		this._postCompactionContinuationTimer = setTimeout(() => {
-			this._postCompactionContinuationTimer = undefined;
-			void this._runScheduledPostCompactionContinue()
-				.catch(() => undefined)
-				.finally(() => this._settlePostCompactionContinue());
-		}, 100);
+		void this._runScheduledPostCompactionContinue(settlement)
+			.catch(() => undefined)
+			.finally(() => {
+				if (this._postCompactionContinuationSettlement === settlement) {
+					this._settlePostCompactionContinue();
+				}
+			});
 	}
 
 	private _sessionOwnsScheduledContinuations(continuationMessages: AgentMessage[]): boolean {
 		return continuationMessages.some((message) => this._postCompactionContinuationMessages.includes(message));
 	}
 
-	private async _runScheduledPostCompactionContinue(): Promise<void> {
-		await this._waitForRefineIdle();
-		if (!this._postCompactionContinuationScheduled) {
-			return;
-		}
-		if (this.isStreaming || this.isCompacting || this.isRetrying || this._queuedWorkPauses.size > 0) {
-			this._postCompactionContinuationScheduled = false;
-			this._schedulePostCompactionContinue();
-			return;
-		}
-
-		const continuationMessages = [...this._scheduledPostCompactionContinuationMessages];
-		if (continuationMessages.length > 0 && !this._sessionOwnsScheduledContinuations(continuationMessages)) {
-			this._cancelPostCompactionContinue();
-			this._scheduleAutoRefineAfterAgentEnd();
-			return;
-		}
-		// An empty queue is not idle while the scheduler still owns active work.
-		if (this.unfinishedActionCount > 0 || this._sessionInputPumpRequested) {
-			this._scheduleSessionInputPump();
-			await this._sessionInputPump;
-			if (this._postCompactionContinuationScheduled) {
-				this._postCompactionContinuationScheduled = false;
-				const shouldReschedule =
-					continuationMessages.length === 0
-						? this.unfinishedActionCount > 0
-						: this._sessionOwnsScheduledContinuations(continuationMessages);
-				if (shouldReschedule) {
-					this._schedulePostCompactionContinue();
-				} else {
-					this._scheduledPostCompactionContinuationMessages = [];
-					this._scheduleAutoRefineAfterAgentEnd();
-				}
+	private async _waitForQueuedWorkResume(settlement: PostCompactionContinuationSettlement): Promise<void> {
+		while (this._queuedWorkPauses.size > 0 && this._postCompactionContinuationSettlement === settlement) {
+			let resume = () => {};
+			const resumed = new Promise<void>((resolve) => {
+				resume = resolve;
+				this._sessionInputCheckpointWaiters.add(resolve);
+			});
+			try {
+				await Promise.race([resumed, settlement.promise]);
+			} finally {
+				this._sessionInputCheckpointWaiters.delete(resume);
 			}
-			return;
 		}
+	}
 
-		this._postCompactionContinuationScheduled = false;
-		try {
-			await this.agent.continue();
-			this._forgetConsumedPostCompactionContinuations(continuationMessages);
-		} catch (error) {
-			const code = error instanceof AgentContinueError ? error.code : undefined;
-			if (code === "busy") {
-				this._schedulePostCompactionContinue();
-			} else if (code !== "nothing-to-continue") {
-				// "nothing-to-continue" means the turn already completed; anything else must reject headless idle waiters.
-				this._settlePostCompactionContinue(this._asError(error));
+	private async _runScheduledPostCompactionContinue(settlement: PostCompactionContinuationSettlement): Promise<void> {
+		while (this._postCompactionContinuationScheduled && this._postCompactionContinuationSettlement === settlement) {
+			await this.agent.waitForIdle();
+			await this.waitForRetry();
+			await this._waitForRefineIdle();
+			await this._waitForQueuedWorkResume(settlement);
+
+			const commitFence = await this._acquireSessionActionCommitFence();
+			let continuation: Promise<void> | undefined;
+			let continuationMessages: AgentMessage[] = [];
+			let waitForSessionInput = false;
+			try {
+				await this.agent.waitForIdle();
+				if (
+					!this._postCompactionContinuationScheduled ||
+					this._postCompactionContinuationSettlement !== settlement
+				) {
+					return;
+				}
+
+				if (this._queuedWorkPauses.size > 0) {
+					continue;
+				}
+
+				continuationMessages = [...this._scheduledPostCompactionContinuationMessages];
+				if (continuationMessages.length > 0 && !this._sessionOwnsScheduledContinuations(continuationMessages)) {
+					this._cancelPostCompactionContinue();
+					this._scheduleAutoRefineAfterAgentEnd();
+					return;
+				}
+				if (this.unfinishedActionCount > 0 || this._sessionInputPumpRequested) {
+					this._scheduleSessionInputPump();
+					waitForSessionInput = true;
+				} else {
+					this._postCompactionContinuationScheduled = false;
+					continuation = this.agent.continue();
+				}
+			} finally {
+				commitFence.release();
+			}
+
+			if (waitForSessionInput) {
+				await this.waitForIdle();
+				if (this._postCompactionContinuationSettlement !== settlement) return;
+				const shouldContinue =
+					(settlement.continueAfterSessionInput && continuationMessages.length === 0) ||
+					this._sessionOwnsScheduledContinuations(continuationMessages);
+				if (shouldContinue) {
+					this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
+					continue;
+				}
+				this._postCompactionContinuationScheduled = false;
+				this._scheduledPostCompactionContinuationMessages = [];
+				this._scheduleAutoRefineAfterAgentEnd();
+				return;
+			}
+
+			try {
+				await continuation;
+				this._forgetConsumedPostCompactionContinuations(continuationMessages);
+				return;
+			} catch (error) {
+				const code = error instanceof AgentContinueError ? error.code : undefined;
+				if (code === "busy") {
+					if (this._postCompactionContinuationSettlement === settlement) {
+						this._postCompactionContinuationScheduled = true;
+						this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
+					}
+					continue;
+				}
+				if (code !== "nothing-to-continue") {
+					this._settlePostCompactionContinue(this._asError(error));
+				}
+				return;
 			}
 		}
 	}
@@ -8489,7 +8540,7 @@ export class AgentSession {
 				(reason === "requested" || reason === "threshold") &&
 				(shouldContinueAfterCompaction || this.agent.hasQueuedMessages() || this.hasPendingSessionWork)
 			) {
-				this._schedulePostCompactionContinue();
+				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
 			}
 		};
 
@@ -8541,13 +8592,13 @@ export class AgentSession {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
 
-				this._schedulePostCompactionContinue();
+				this._schedulePostCompactionContinue(true);
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 				return true;
 			} else if (shouldContinueAfterCompaction || hasQueuedMessages) {
 				// Compaction can intentionally stop a tool loop between turns.
 				// Queued follow-up/steering/custom messages can also be waiting.
-				this._schedulePostCompactionContinue();
+				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
 			} else {
 				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
@@ -9503,7 +9554,7 @@ export class AgentSession {
 			});
 			recorded.add(run.id);
 		}
-		for (const [childId, childSession] of this._rlmChildSessions) {
+		for (const [childId, { session: childSession }] of this._rlmChildSessions) {
 			if (
 				this._deletingRlmChildren.has(childId) ||
 				recorded.has(childId) ||
@@ -9591,7 +9642,7 @@ export class AgentSession {
 					return result;
 				}
 			}
-			for (const retained of this._rlmChildSessions.values()) {
+			for (const { session: retained } of this._rlmChildSessions.values()) {
 				const result = await retained.deleteInactiveRlmSubagent(childId, isExternallyRunning);
 				if (result !== "not_found") {
 					return result;
@@ -9868,7 +9919,7 @@ export class AgentSession {
 		}
 
 		this._emitRlmSubagentRemoval(subagent);
-		const retained = this._rlmChildSessions.get(childId);
+		const retained = this._rlmChildSessions.get(childId)?.session;
 		try {
 			await this._deleteRlmSubagentSession(childId, retained);
 		} catch (error) {
@@ -9904,7 +9955,9 @@ export class AgentSession {
 			void session.disposeAsync().catch(() => undefined);
 			return false;
 		}
-		this._rlmChildSessions.set(childId, session);
+		const run = this._activeRlmChildRuns.get(childId) ?? session._rlmParentRun;
+		if (run) session._rlmParentRun = run;
+		this._rlmChildSessions.set(childId, { session, run });
 		if (unsubscribe) {
 			this._rlmChildUnsubscribes.set(childId, unsubscribe);
 		}
@@ -9919,11 +9972,64 @@ export class AgentSession {
 			this._activeRlmChildRuns.delete(childId);
 			return unsubscribe;
 		}
-		if (this._rlmChildSessions.get(childId) !== session) return false;
+		if (this._rlmChildSessions.get(childId)?.session !== session) return false;
 		const unsubscribe = this._rlmChildUnsubscribes.get(childId) ?? noopRlmChildEventUnsubscribe;
 		this._rlmChildUnsubscribes.delete(childId);
 		this._rlmChildSessions.delete(childId);
 		return unsubscribe;
+	}
+
+	private _rlmChildSnapshotForRun(
+		run: RlmChildRun,
+		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
+	): RlmChildAgentSnapshot {
+		const model = child?.model ?? run.model;
+		return {
+			id: run.id,
+			parentId: this._rlmParentNodeId,
+			sessionName: child?.sessionName ?? run.sessionName,
+			model: `${model.provider}/${model.id}`,
+			label: rlmChildLabel(run.prompt),
+			status: run.status,
+			durationMs: run.durationMs,
+			answerPreview: run.answerPreview,
+			toolUseCount: run.toolUseCount > 0 ? run.toolUseCount : undefined,
+			tokenCount: child?._contextTokensForCurrentMessages(),
+			recap: child?.getCurrentRecap(),
+			sessionDir: run.sessionDir,
+			activity: run.activity,
+			repliedSinceTask: child?._repliedToParentSinceTask,
+			error: run.error,
+		};
+	}
+
+	private _rlmChildSnapshotForSession(childId: string, child: AgentSession): RlmChildAgentSnapshot {
+		let answerPreview: string | undefined;
+		let toolUseCount = 0;
+		const messages =
+			child.state.streamingMessage?.role === "assistant"
+				? [...child.messages, child.state.streamingMessage]
+				: child.messages;
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			const text = compactRlmText(readAssistantText(message));
+			if (text) answerPreview = text;
+			toolUseCount += message.content.filter((block) => block.type === "toolCall").length;
+		}
+		return {
+			id: childId,
+			parentId: this._rlmParentNodeId,
+			sessionName: child.sessionName,
+			model: child.model ? `${child.model.provider}/${child.model.id}` : undefined,
+			label: child.sessionName ?? "child agent",
+			status: "done",
+			answerPreview,
+			toolUseCount: toolUseCount > 0 ? toolUseCount : undefined,
+			tokenCount: child._contextTokensForCurrentMessages(),
+			recap: child.getCurrentRecap(),
+			sessionDir: child._rlmSessionDir ?? child.sessionManager.getSessionDir(),
+			repliedSinceTask: child._repliedToParentSinceTask,
+		};
 	}
 
 	/** Live recursive child roster from lifecycle state, including nested work under retained parents. */
@@ -9936,16 +10042,7 @@ export class AgentSession {
 				run.detachedDeletion || this._deletingRlmChildren.has(run.id) || this._deletedRlmChildIds.has(run.id);
 			const child = run.session;
 			if (!hidden) {
-				const model = child?.model ?? run.model;
-				snapshots.push({
-					id: run.id,
-					parentId: this._rlmParentNodeId,
-					sessionName: child?.sessionName ?? run.sessionName,
-					model: `${model.provider}/${model.id}`,
-					label: rlmChildLabel(run.prompt),
-					status: run.status,
-					sessionDir: run.sessionDir,
-				});
+				snapshots.push(this._rlmChildSnapshotForRun(run));
 				recorded.add(run.id);
 			}
 			if (child) {
@@ -9953,20 +10050,16 @@ export class AgentSession {
 				snapshots.push(...child.getRlmChildSnapshots());
 			}
 		}
-		for (const [childId, child] of this._rlmChildSessions) {
+		for (const [childId, { session: child, run }] of this._rlmChildSessions) {
 			if (recorded.has(childId) || traversed.has(childId)) continue;
 			const hidden = this._deletingRlmChildren.has(childId) || this._deletedRlmChildIds.has(childId);
 			if (!hidden) {
+				const snapshot = run
+					? this._rlmChildSnapshotForRun(run, child)
+					: this._rlmChildSnapshotForSession(childId, child);
 				snapshots.push({
-					id: childId,
-					parentId: this._rlmParentNodeId,
-					sessionName: child.sessionName,
-					model: child.model ? `${child.model.provider}/${child.model.id}` : undefined,
-					label: child.sessionName ?? "child agent",
-					// A failed delete retains the session solely for cleanup retry. Preserve
-					// its cancellation truth in snapshots rather than reviving it as done.
-					status: this._rlmChildCleanupFailures.has(childId) ? "cancelled" : "done",
-					sessionDir: child._rlmSessionDir ?? child.sessionManager.getSessionDir(),
+					...snapshot,
+					status: this._rlmChildCleanupFailures.has(childId) ? "cancelled" : snapshot.status,
 				});
 			}
 			snapshots.push(...child.getRlmChildSnapshots());
@@ -9985,7 +10078,7 @@ export class AgentSession {
 			}
 		}
 		// A finished direct child can still have a running nested subagent.
-		for (const session of this._rlmChildSessions.values()) {
+		for (const { session } of this._rlmChildSessions.values()) {
 			if (session.hasRunningRlmChildren()) {
 				return true;
 			}
@@ -9995,7 +10088,7 @@ export class AgentSession {
 
 	private _rlmChildSessionSnapshot(): AgentSession[] {
 		const sessions = new Set<AgentSession>();
-		for (const [childId, session] of this._rlmChildSessions) {
+		for (const [childId, { session }] of this._rlmChildSessions) {
 			if (!this._abandonedRlmQuiescenceChildIds.has(childId)) sessions.add(session);
 		}
 		for (const run of this._activeRlmChildRuns.values()) {
@@ -10066,7 +10159,7 @@ export class AgentSession {
 
 	// Inline (non-daemon) mode only; daemon clients attach to the child session directly.
 	getRlmChildSession(childId: string): AgentSession | undefined {
-		const direct = this._activeRlmChildRuns.get(childId)?.session ?? this._rlmChildSessions.get(childId);
+		const direct = this._activeRlmChildRuns.get(childId)?.session ?? this._rlmChildSessions.get(childId)?.session;
 		if (direct) {
 			return direct;
 		}
@@ -10076,7 +10169,7 @@ export class AgentSession {
 				return nested;
 			}
 		}
-		for (const retained of this._rlmChildSessions.values()) {
+		for (const { session: retained } of this._rlmChildSessions.values()) {
 			const nested = retained.getRlmChildSession(childId);
 			if (nested) {
 				return nested;
@@ -10106,7 +10199,7 @@ export class AgentSession {
 				return true;
 			}
 		}
-		for (const retained of this._rlmChildSessions.values()) {
+		for (const { session: retained } of this._rlmChildSessions.values()) {
 			if (retained.cancelRlmChildRun(childId, reason)) {
 				return true;
 			}
@@ -10123,7 +10216,7 @@ export class AgentSession {
 			[...this._activeRlmChildRuns.values()].some(
 				(run) => run.session?.sessionName === name || (!run.session && run.sessionName === name),
 			) ||
-			[...this._rlmChildSessions.values()].some((session) => session.sessionName === name) ||
+			[...this._rlmChildSessions.values()].some(({ session }) => session.sessionName === name) ||
 			[...this._rlmChildCleanupFailures.values()].some((entry) => entry.session_name === name);
 		if (localConflict) {
 			throw new Error(formatAgentSessionNameUnavailable(name, depth));
@@ -10243,12 +10336,7 @@ export class AgentSession {
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
-		const label = rlmChildLabel(prompt);
-		let answerPreview: string | undefined;
-		let durationMs: number | undefined;
-		let toolUseCount = 0;
 		let runningToolCount = 0;
-		let activity: RlmChildAgentActivity | undefined;
 		let childSession: AgentSession | undefined;
 		const run: RlmChildRun = {
 			id: childNodeId,
@@ -10257,6 +10345,7 @@ export class AgentSession {
 			sessionDir: childSessionDir,
 			model: modelSelection.model,
 			status: "queued",
+			toolUseCount: 0,
 			settled: false,
 			abort: noopRlmChildAbort,
 			publication: createAgentMessageDeferred(),
@@ -10269,27 +10358,7 @@ export class AgentSession {
 		this._activeRlmChildRuns.set(run.id, run);
 		this._unsettledRlmChildRuns.add(run);
 		const emitChildUpdate = () => {
-			const childModel = childSession?.model ?? modelSelection.model;
-			this._emit({
-				type: "rlm_child_update",
-				child: {
-					id: childNodeId,
-					parentId: this._rlmParentNodeId,
-					sessionName: childSession?.sessionName ?? sessionName,
-					model: `${childModel.provider}/${childModel.id}`,
-					label,
-					status: run.status,
-					durationMs,
-					answerPreview,
-					toolUseCount: toolUseCount > 0 ? toolUseCount : undefined,
-					tokenCount: childSession?._contextTokensForCurrentMessages(),
-					recap: childSession?.getCurrentRecap(),
-					sessionDir: childSessionDir,
-					activity,
-					repliedSinceTask: childSession?._repliedToParentSinceTask,
-					error: run.error,
-				},
-			});
+			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run) });
 		};
 		run.emitUpdate = emitChildUpdate;
 		emitChildUpdate();
@@ -10372,10 +10441,10 @@ export class AgentSession {
 						return;
 					}
 					if (event.type === "agent_start") {
-						activity = { kind: "waiting" };
+						run.activity = { kind: "waiting" };
 						emitChildUpdate();
 					} else if (event.type === "agent_end") {
-						activity = undefined;
+						run.activity = undefined;
 						emitChildUpdate();
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
@@ -10406,24 +10475,24 @@ export class AgentSession {
 							}
 						}
 						const text = compactRlmText(readAssistantText(assistant));
-						if (text) answerPreview = text;
+						if (text) run.answerPreview = text;
 						void flushAgentTraceUpload(child.sessionManager).catch(() => undefined);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
 							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
-							if (text) answerPreview = text;
-							activity = { kind: "writing" };
+							if (text) run.answerPreview = text;
+							run.activity = { kind: "writing" };
 							emitChildUpdate();
 						}
 					} else if (event.type === "tool_execution_start") {
-						toolUseCount += 1;
+						run.toolUseCount += 1;
 						runningToolCount += 1;
-						activity = { kind: "executing", toolName: event.toolName };
+						run.activity = { kind: "executing", toolName: event.toolName };
 						emitChildUpdate();
 					} else if (event.type === "tool_execution_end") {
 						runningToolCount = Math.max(0, runningToolCount - 1);
-						if (runningToolCount === 0) activity = { kind: "waiting" };
+						if (runningToolCount === 0) run.activity = { kind: "waiting" };
 						emitChildUpdate();
 					} else if (event.type === "session_info_changed" || event.type === "recap_update") {
 						emitChildUpdate();
@@ -10458,8 +10527,8 @@ export class AgentSession {
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
 				run.status = "done";
-				durationMs = Date.now() - startedAt;
-				activity = undefined;
+				run.durationMs = Date.now() - startedAt;
+				run.activity = undefined;
 				emitChildUpdate();
 				if (
 					!run.detachedDeletion &&
@@ -10492,8 +10561,8 @@ export class AgentSession {
 					run.status = "error";
 					run.error = runError.message;
 				}
-				durationMs = Date.now() - startedAt;
-				activity = undefined;
+				run.durationMs = Date.now() - startedAt;
+				run.activity = undefined;
 				emitChildUpdate();
 				if (!run.detachedDeletion && !run.suppressTerminalNotice) {
 					if (run.status === "error") {

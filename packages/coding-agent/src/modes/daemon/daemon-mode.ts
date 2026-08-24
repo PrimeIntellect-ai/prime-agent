@@ -3943,7 +3943,7 @@ export class AgentDaemon {
 				if (!name) {
 					throw new Error("Session name cannot be empty");
 				}
-				await this.setStateSessionName(state, name);
+				await this.setStateSessionNameForCommand(state, name);
 				return success(command.id, "rename", summaryForActiveSession(state));
 			}
 
@@ -3957,7 +3957,7 @@ export class AgentDaemon {
 					throw new Error("Session name cannot be empty");
 				}
 				if (state) {
-					await this.setStateSessionName(state, name);
+					await this.setStateSessionNameForCommand(state, name);
 				} else {
 					const info = await readSessionInfo(command.sessionPath);
 					if (!info) throw new Error(`Session not found: ${command.sessionPath}`);
@@ -4853,7 +4853,7 @@ export class AgentDaemon {
 				if (!name) {
 					throw new Error("Session name cannot be empty");
 				}
-				await this.setStateSessionName(state, name);
+				await this.setStateSessionNameForCommand(state, name);
 				return success(command.id, "set_session_name");
 			}
 
@@ -5527,6 +5527,15 @@ export class AgentDaemon {
 		}
 	}
 
+	private setStateSessionNameForCommand(state: ActiveSessionState, name: string): Promise<void> {
+		return this.options.worker ? this.applyStateSessionName(state, name) : this.setStateSessionName(state, name);
+	}
+
+	private async applyStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
+		state.runtime.session.setSessionName(name);
+		await this.appendRlmLedgerRenameForState(state, name);
+	}
+
 	private async setStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
 		const normalizedName = name.trim();
 		if (!normalizedName) {
@@ -5549,8 +5558,7 @@ export class AgentDaemon {
 			},
 			async () => {
 				await this.assertStateSessionNameAvailable(state, normalizedName);
-				state.runtime.session.setSessionName(normalizedName);
-				await this.appendRlmLedgerRenameForState(state, normalizedName);
+				await this.applyStateSessionName(state, normalizedName);
 			},
 		);
 	}
@@ -5860,42 +5868,45 @@ export class AgentDaemon {
 			throw new Error(`Unknown active session: ${targetSelector}`);
 		}
 		const deadline = Date.now() + 30_000;
+		let client: DaemonClient | undefined;
 		let lastError: unknown;
 		while (Date.now() < deadline && !this.shuttingDown) {
-			const client = new DaemonClient(supervisorSocketPath);
-			let receivedResponse = false;
+			const candidate = new DaemonClient(supervisorSocketPath);
 			try {
-				await client.connect(1000);
-				await client.waitForHello(1000);
-				const response = await client.request(
-					{
-						type: "send_message",
-						targetActiveSessionId: targetSelector,
-						message,
-						fromActiveSessionId: fromState.activeSessionId,
-						agentOrigin: true,
-					},
-					30_000,
-				);
-				receivedResponse = true;
-				if (!response.success) {
-					throw deserializeDaemonError(response);
-				}
-				if (!response.data || typeof response.data !== "object") {
-					throw new Error("Supervisor returned an invalid agent-message receipt");
-				}
-				return response.data as AgentSessionMessageReceipt;
+				await candidate.connect(1000);
+				await candidate.waitForHello(1000);
+				client = candidate;
+				break;
 			} catch (error) {
 				lastError = error;
-				if (receivedResponse) {
-					throw error;
-				}
-			} finally {
-				client.close();
+				candidate.close();
 			}
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
 		}
-		throw lastError instanceof Error ? lastError : new Error(`Unknown active session: ${targetSelector}`);
+		if (!client) {
+			throw lastError instanceof Error ? lastError : new Error(`Unknown active session: ${targetSelector}`);
+		}
+		try {
+			const response = await client.request(
+				{
+					type: "send_message",
+					targetActiveSessionId: targetSelector,
+					message,
+					fromActiveSessionId: fromState.activeSessionId,
+					agentOrigin: true,
+				},
+				30_000,
+			);
+			if (!response.success) {
+				throw deserializeDaemonError(response);
+			}
+			if (!response.data || typeof response.data !== "object") {
+				throw new Error("Supervisor returned an invalid agent-message receipt");
+			}
+			return response.data as AgentSessionMessageReceipt;
+		} finally {
+			client.close();
+		}
 	}
 
 	private async acceptAgentSessionMessage(
