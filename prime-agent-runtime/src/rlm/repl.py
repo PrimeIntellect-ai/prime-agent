@@ -602,7 +602,14 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
 
 def _list_names(ns: dict[str, Any]) -> list[str]:
     """User-defined top-level names, filtered like the snapshot."""
-    return sorted(name for name in ns if not name.startswith("_") and name not in _ALWAYS_SKIP)
+    # Non-string keys (globals()[1] = 1) are not user-listable names.
+    return sorted(
+        name for name in ns if isinstance(name, str) and not name.startswith("_") and name not in _ALWAYS_SKIP
+    )
+
+
+async def _handle_list_names(req: dict[str, Any], ns: dict[str, Any]) -> None:
+    _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
 
 
 async def _handle_request(
@@ -649,7 +656,7 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
         elif rtype in ("snapshot", "restore"):
             await _handle_request(_handle_state, req, ns)
         elif rtype == "list_names":
-            _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
+            await _handle_request(_handle_list_names, req, ns)
 
 
 _REQUIRED_FIELDS = {

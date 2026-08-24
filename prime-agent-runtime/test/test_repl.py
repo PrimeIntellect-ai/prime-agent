@@ -489,6 +489,16 @@ class ReplTest(unittest.TestCase):
         self.assertNotIn("rlm", done["names"])
         self.assertEqual(done["names"], sorted(done["names"]))
 
+    def test_list_names_skips_non_string_keys(self):
+        self.repl.execute("lnk1", "globals()[1] = 1\nbeta = 2")
+        self.repl.send({"type": "list_names", "id": "lnk2"})
+        done = one(self.repl.until_done("lnk2"), "done")
+        self.assertEqual(done["status"], "ok")
+        self.assertIn("beta", done["names"])
+        self.assertNotIn(1, done["names"])
+        events = self.repl.execute("lnk3", "'alive'")
+        self.assertEqual(one(events, "result")["text"], "'alive'")
+
     def test_host_request_round_trip(self):
         code = "\n".join(
             [
