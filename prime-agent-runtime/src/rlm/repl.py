@@ -274,11 +274,24 @@ def _request_interrupt(target: str | None) -> None:
             return
         else:
             return
-    # SIGINT must land on the main thread, where cells execute.
-    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+    # SIGINT must land on the main thread, where cells execute. Windows has no
+    # signal.pthread_kill: fall back to cancelling the active task on the loop
+    # (sync-blocked cells cannot be broken there; best-effort parity).
+    if hasattr(signal, "pthread_kill"):
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+        if _loop is not None:
+            # Wake the selector so a cancel scheduled by the handler runs promptly.
+            _loop.call_soon_threadsafe(lambda: None)
+        return
     if _loop is not None:
-        # Wake the selector so a cancel scheduled by the handler runs promptly.
-        _loop.call_soon_threadsafe(lambda: None)
+
+        def cancel_active() -> None:
+            current = _active["task"]
+            if current is task and current is not None and not current.done():
+                _active["interrupted"] = True
+                current.cancel()
+
+        _loop.call_soon_threadsafe(cancel_active)
 
 
 def _consume_pending_interrupt(rid: str) -> bool:
@@ -692,8 +705,9 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
                 req = json.loads(raw)
                 if not isinstance(req, dict):
                     raise ValueError("request is not a JSON object")
-            except ValueError as err:
-                _protocol_error(str(err))
+            except BaseException as err:  # noqa: BLE001 - a hostile line (e.g. RecursionError
+                # from pathological nesting) must not kill the reader thread.
+                _protocol_error(f"{type(err).__name__}: {_safe_str(err)}")
                 continue
             rtype = req.get("type")
             if rtype == "interrupt":
