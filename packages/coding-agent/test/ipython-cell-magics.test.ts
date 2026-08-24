@@ -34,6 +34,20 @@ describe("magicRejection", () => {
 		);
 	});
 
+	it("rejects column-0 line magics and shell escapes after leading code", () => {
+		expect(magicRejection("x = 1\n%cd /tmp")).toBe("%cd is not supported; use os.chdir(...)");
+		expect(magicRejection("x = 1\n%env FOO=bar")).toBe("%env is not supported; use os.environ[...]");
+		expect(magicRejection("x = 1\n!ls -la")).toBe(
+			"! shell escapes are not supported; use bash('cmd') / await bash('cmd')",
+		);
+		expect(magicRejection("x = 1\n%timeit x")).toBe("% line magics are not supported; this is a plain Python REPL");
+	});
+
+	it("passes through mid-cell % operators and indented %-lines", () => {
+		expect(magicRejection("x = 5\ny = x % 2")).toBeUndefined();
+		expect(magicRejection("x = 1\n    %cd /tmp")).toBeUndefined();
+	});
+
 	it("passes through plain Python", () => {
 		expect(magicRejection("x = 1\nprint(x)")).toBeUndefined();
 	});

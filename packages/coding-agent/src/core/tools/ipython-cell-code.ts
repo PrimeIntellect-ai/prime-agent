@@ -47,5 +47,20 @@ export function magicRejection(code: string): string | undefined {
 	if (firstLine.startsWith("!")) {
 		return "! shell escapes are not supported; use bash('cmd') / await bash('cmd')";
 	}
+	// Column-0 scan of every line matches the legacy rewrite backend's heuristic (including its false positives on %-lines inside triple-quoted strings).
+	for (const line of code.split("\n")) {
+		if (line.startsWith("%cd")) {
+			return "%cd is not supported; use os.chdir(...)";
+		}
+		if (line.startsWith("%env")) {
+			return "%env is not supported; use os.environ[...]";
+		}
+		if (line.startsWith("!")) {
+			return "! shell escapes are not supported; use bash('cmd') / await bash('cmd')";
+		}
+		if (line.startsWith("%")) {
+			return "% line magics are not supported; this is a plain Python REPL";
+		}
+	}
 	return undefined;
 }

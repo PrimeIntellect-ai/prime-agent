@@ -4,6 +4,7 @@
 
 - Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel, made `%cd`/`%env` rewrites match IPython semantics (`~` expansion, `%cd -`, space-separated and `$var` assignments, bare `%env` listing) with linear-time magic patterns, and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
 - Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
+- Fixed IPython magic rejection missing column-0 `%`/`!` lines after the first line, so stale multi-line magic cells get the one-line migration guidance instead of a raw SyntaxError.
 
 ## [0.8.0] - 2026-08-21
 
