@@ -122,6 +122,7 @@ export class ReplKernelManager {
 	private lastCellCode?: string;
 	/** Unattributed stream text that arrived between cells; surfaced on the next execution. */
 	private pendingBackgroundOutput = "";
+	private pendingBackgroundOutputTruncated = false;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
@@ -528,13 +529,14 @@ export class ReplKernelManager {
 			attachments: [],
 			sentAgentMessages: [],
 			backgroundOutput: this.pendingBackgroundOutput,
-			backgroundOutputTruncated: false,
+			backgroundOutputTruncated: this.pendingBackgroundOutputTruncated,
 			status: "ok",
 			settled: false,
 			resolve: result.resolve,
 			reject: result.reject,
 		};
 		this.pendingBackgroundOutput = "";
+		this.pendingBackgroundOutputTruncated = false;
 		let abortTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		const clearAbortTimer = () => {
 			if (abortTimer) {
@@ -604,7 +606,15 @@ export class ReplKernelManager {
 			}
 			return;
 		}
-		this.pendingBackgroundOutput = (this.pendingBackgroundOutput + text).slice(0, MAX_BACKGROUND_OUTPUT_CHARS);
+		if (this.pendingBackgroundOutput.length >= MAX_BACKGROUND_OUTPUT_CHARS) {
+			this.pendingBackgroundOutputTruncated = true;
+			return;
+		}
+		this.pendingBackgroundOutput += text;
+		if (this.pendingBackgroundOutput.length > MAX_BACKGROUND_OUTPUT_CHARS) {
+			this.pendingBackgroundOutput = this.pendingBackgroundOutput.slice(0, MAX_BACKGROUND_OUTPUT_CHARS);
+			this.pendingBackgroundOutputTruncated = true;
+		}
 	}
 
 	private finishActiveExecution(execution: ActiveExecution): void {

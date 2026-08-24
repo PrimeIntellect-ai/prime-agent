@@ -314,4 +314,26 @@ describe("ReplKernelManager abort handling", () => {
 		expect(result.backgroundOutput).toBe("between-cells\n");
 		manager.disposeSync();
 	});
+
+	it("marks between-cell background output as truncated once the pending cap is hit", async () => {
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager, internals } = runningManagerWith(writeLine);
+
+		// Overflow the pending buffer while idle; nothing more arrives during the cell.
+		internals.handleEvent({ event: "stdout", id: null, text: "x".repeat(70 * 1024) });
+
+		const executePromise = manager.execute("x = 1");
+		await waitForCalls(writeLine, 1);
+		const execution = internals.activeExecution;
+		expect(execution).toBeDefined();
+		if (!execution) {
+			throw new Error("Expected an active execution");
+		}
+		internals.handleEvent({ event: "done", id: execution.requestId, status: "ok" });
+
+		const result = await executePromise;
+		expect(result.backgroundOutput).toContain("background output truncated at");
+		expect(result.backgroundOutput?.length).toBeLessThan(70 * 1024);
+		manager.disposeSync();
+	});
 });
