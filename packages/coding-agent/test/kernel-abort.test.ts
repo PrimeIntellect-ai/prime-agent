@@ -314,7 +314,7 @@ describe("KernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
-	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
+	it("cancels a hung final snapshot execution before teardown", async () => {
 		vi.useFakeTimers();
 		const manager = new KernelManager({
 			cwd: process.cwd(),
@@ -334,32 +334,70 @@ describe("KernelManager abort handling", () => {
 					);
 				}),
 		);
+		const cleanupResources = vi.fn();
 		Object.assign(
 			manager as unknown as {
 				state: "running";
 				executionQueue: Promise<void>;
 				executeInner: typeof executeInner;
 				start: () => Promise<void>;
+				cleanupResources: () => void;
 			},
-			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {} },
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
 		);
 
-		const snapshot = (
-			manager as unknown as {
-				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
-			}
-		).captureSnapshot({ executionTimeoutMs: 5000 });
-		await vi.advanceTimersByTimeAsync(5000);
+		const disposal = manager.dispose();
 		expect(executeInner).not.toHaveBeenCalled();
-
 		releaseQueue();
 		await waitForCalls(executeInner, 1);
 		const signal = executeInner.mock.calls[0]?.[1].signal;
 		expect(signal?.aborted).toBe(false);
 		await vi.advanceTimersByTimeAsync(4999);
 		expect(signal?.aborted).toBe(false);
+		expect(cleanupResources).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
+
 		expect(signal?.aborted).toBe(true);
-		await expect(snapshot).resolves.toBeNull();
+		await expect(disposal).resolves.toBeUndefined();
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
+	it("tears down when the final snapshot is blocked behind a hung execution", async () => {
+		vi.useFakeTimers();
+		const manager = new KernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		const executeInner = vi.fn();
+		const interrupt = vi.fn(async () => {});
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				activeExecution: object;
+				executeInner: typeof executeInner;
+				interrupt: typeof interrupt;
+				cleanupResources: () => void;
+			},
+			{
+				state: "running",
+				executionQueue: new Promise<void>(() => {}),
+				activeExecution: {},
+				executeInner,
+				interrupt,
+				cleanupResources,
+			},
+		);
+
+		const disposal = manager.dispose();
+		expect(interrupt).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(cleanupResources).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+
+		await expect(disposal).resolves.toBeUndefined();
+		expect(executeInner).not.toHaveBeenCalled();
+		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
 });
