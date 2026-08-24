@@ -42,7 +42,9 @@ function rewriteChdir(targetExpression: string): string {
 	return `_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(${targetExpression})`;
 }
 
-function rewriteCdMagic(target: string): string {
+function rewriteCdMagic(rawTarget: string): string {
+	// Strip one pair of matching outer quotes, as IPython does for %cd 'dir with spaces'.
+	const target = rawTarget.replace(/^(['"])(.*)\1$/, "$2");
 	if (target === "-") {
 		return [
 			'_prime_agent_cd_target = globals().get("_prime_agent_prev_cd")',
@@ -54,18 +56,74 @@ function rewriteCdMagic(target: string): string {
 	return rewriteChdir(`__import__("os").path.expanduser(${expression})`);
 }
 
+const ENV_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*/;
+const ENV_FULL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Escape a literal character for inclusion inside a double-quoted Python f-string. */
+function escapeFStringLiteralChar(char: string): string {
+	if (char === "\\") return "\\\\";
+	if (char === '"') return '\\"';
+	if (char === "{") return "{{";
+	if (char === "}") return "}}";
+	const code = char.charCodeAt(0);
+	if (code <= 0x1f) {
+		if (char === "\n") return "\\n";
+		if (char === "\r") return "\\r";
+		if (char === "\t") return "\\t";
+		return `\\x${code.toString(16).padStart(2, "0")}`;
+	}
+	return char;
+}
+
+/** Translate IPython's $var / ${var} / $$ substitution in a %env value into a Python f-string literal. */
+function pythonFStringFromEnvValue(value: string): string {
+	let source = "";
+	let index = 0;
+	while (index < value.length) {
+		const char = value.charAt(index);
+		if (char === "$") {
+			if (value.charAt(index + 1) === "$") {
+				source += "$";
+				index += 2;
+				continue;
+			}
+			if (value.charAt(index + 1) === "{") {
+				const close = value.indexOf("}", index + 2);
+				const contents = close > index + 2 ? value.slice(index + 2, close) : "";
+				if (ENV_FULL_IDENTIFIER_PATTERN.test(contents)) {
+					source += `{${contents}}`;
+					index = close + 1;
+					continue;
+				}
+			}
+			const identifier = ENV_IDENTIFIER_PATTERN.exec(value.slice(index + 1));
+			if (identifier) {
+				source += `{${identifier[0]}}`;
+				index += 1 + identifier[0].length;
+				continue;
+			}
+			source += "$";
+			index += 1;
+			continue;
+		}
+		source += escapeFStringLiteralChar(char);
+		index += 1;
+	}
+	return `f"${source}"`;
+}
+
 function rewriteEnvMagic(argument: string): string {
 	if (!argument) {
 		return 'print(dict(__import__("os").environ))';
 	}
 	// %env NAME=value and %env NAME value both assign; split on whichever separator comes first.
-	const separator = [...argument].findIndex((char) => char === "=" || char === " " || char === "\t");
+	const separator = argument.search(/[= \t]/);
 	if (separator <= 0) {
 		return `print(__import__("os").environ[${JSON.stringify(argument)}])`;
 	}
 	const name = argument.slice(0, separator).trim();
 	const value = argument.slice(separator + 1).trim();
-	const valueExpression = value.startsWith("$") ? `str(${value.slice(1)})` : JSON.stringify(value);
+	const valueExpression = value.includes("$") ? pythonFStringFromEnvValue(value) : JSON.stringify(value);
 	return `__import__("os").environ[${JSON.stringify(name)}] = ${valueExpression}`;
 }
 

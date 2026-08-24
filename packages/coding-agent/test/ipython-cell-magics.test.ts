@@ -1,5 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { rewriteCellMagics } from "../src/core/tools/ipython-cell-code.js";
+
+function assertValidPython(code: string): void {
+	execFileSync("python3", ["-c", `x = "X"\n${code}`], { stdio: "pipe" });
+}
 
 describe("rewriteCellMagics", () => {
 	it("rewrites a %%bash cell into an awaited bash() stanza", () => {
@@ -36,6 +41,19 @@ describe("rewriteCellMagics", () => {
 		expect(rewriteCellMagics("%cd ~/projects")).toContain('__import__("os").path.expanduser("~/projects")');
 	});
 
+	it("strips matching outer quotes from %cd targets", () => {
+		expect(rewriteCellMagics("%cd 'dir with spaces'")).toContain(
+			'__import__("os").path.expanduser("dir with spaces")',
+		);
+		expect(rewriteCellMagics('%cd "dir with spaces"')).toContain(
+			'__import__("os").path.expanduser("dir with spaces")',
+		);
+	});
+
+	it("keeps mismatched quotes in %cd targets literal", () => {
+		expect(rewriteCellMagics("%cd 'dir\"")).toContain('__import__("os").path.expanduser("\'dir\\"")');
+	});
+
 	it("rewrites %cd - to the previous directory with a helpful error", () => {
 		const rewritten = rewriteCellMagics("%cd -");
 		expect(rewritten).toContain('globals().get("_prime_agent_prev_cd")');
@@ -62,7 +80,41 @@ describe("rewriteCellMagics", () => {
 	});
 
 	it("expands $var values in %env assignments from Python variables", () => {
-		expect(rewriteCellMagics("%env FOO=$bar")).toBe('__import__("os").environ["FOO"] = str(bar)');
+		expect(rewriteCellMagics("%env FOO=$bar")).toBe('__import__("os").environ["FOO"] = f"{bar}"');
+	});
+
+	it("expands braced and embedded $var occurrences in %env values", () => {
+		expect(rewriteCellMagics("%env FOO=$" + "{bar}")).toBe('__import__("os").environ["FOO"] = f"{bar}"');
+		expect(rewriteCellMagics("%env FOO=$bar.suffix")).toBe('__import__("os").environ["FOO"] = f"{bar}.suffix"');
+		expect(rewriteCellMagics("%env FOO=a$b-c")).toBe('__import__("os").environ["FOO"] = f"a{b}-c"');
+	});
+
+	it("keeps non-identifier braced forms in %env values literal", () => {
+		const rewritten = rewriteCellMagics("%env FOO=$" + "{1abc}$x");
+		expect(rewritten).toBe('__import__("os").environ["FOO"] = f"$' + '{{1abc}}{x}"');
+		assertValidPython(rewritten);
+	});
+
+	it("escapes control characters in %env f-string values", () => {
+		const rewritten = rewriteCellMagics("%env FOO=a\r$x");
+		expect(rewritten).toBe('__import__("os").environ["FOO"] = f"a\\r{x}"');
+		assertValidPython(rewritten);
+		expect(rewriteCellMagics("%env FOO=a\tb$x")).toBe('__import__("os").environ["FOO"] = f"a\\tb{x}"');
+	});
+
+	it("translates $$ in %env values to a literal $", () => {
+		expect(rewriteCellMagics("%env FOO=$$PATH")).toBe('__import__("os").environ["FOO"] = f"$PATH"');
+	});
+
+	it("escapes literal braces, quotes, and backslashes in expanded %env values", () => {
+		expect(rewriteCellMagics("%env FOO=has{braces}$x")).toBe('__import__("os").environ["FOO"] = f"has{{braces}}{x}"');
+		expect(rewriteCellMagics('%env FOO=say "hi"\\$x')).toBe(
+			'__import__("os").environ["FOO"] = f"say \\"hi\\"\\\\{x}"',
+		);
+	});
+
+	it("splits %env names on UTF-16 indices for non-BMP names", () => {
+		expect(rewriteCellMagics("%env \u{1F40D}=x")).toBe('__import__("os").environ["\u{1F40D}"] = "x"');
 	});
 
 	it("rewrites %env NAME to an environ read", () => {
