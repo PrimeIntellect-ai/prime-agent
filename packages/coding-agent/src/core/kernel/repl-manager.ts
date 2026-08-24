@@ -907,7 +907,8 @@ export class ReplKernelManager {
 		await prev;
 
 		try {
-			await this.shutdown();
+			const performedCleanup = await this.shutdown();
+			if (!performedCleanup) return;
 			this.state = "idle";
 			this.kernelStderr = "";
 			await this.start();

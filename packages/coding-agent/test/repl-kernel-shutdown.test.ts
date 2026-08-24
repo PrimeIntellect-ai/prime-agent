@@ -162,6 +162,19 @@ describe("ReplKernelManager graceful shutdown", () => {
 		expect(internals.inFlightHostRequests.size).toBe(0);
 	});
 
+	it("restart does not resurrect a kernel a concurrent kill superseded", async () => {
+		const { manager } = configuredManager((_request, state) => {
+			// A concurrent kill supersedes the in-flight graceful shutdown.
+			void manager.kill();
+			state.child.emit("exit", null, "SIGKILL");
+		});
+		const start = vi.spyOn(manager, "start").mockResolvedValue(undefined);
+
+		await manager.restart();
+
+		expect(start).not.toHaveBeenCalled();
+	});
+
 	it("waits for the matching shutdown done and removes its waiter", async () => {
 		const { manager, internals } = configuredManager(async (request, state) => {
 			expect(request.type).toBe("shutdown");

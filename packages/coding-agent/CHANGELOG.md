@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel, made `%cd`/`%env` rewrites match IPython semantics (`~` expansion, `%cd -`, space-separated and `$var` assignments, bare `%env` listing) with linear-time magic patterns, and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
+
 ## [0.8.0] - 2026-08-21
 
 - Fixed an OAuth login that finishes after its server was retargeted arming the old-endpoint token against the new URL: credentials are endpoint-bound at issuance, and the host and kernel only use a token bound to the configured endpoint. **Breaking**: generic MCP OAuth credentials stored before this release lack the binding and require one `/mcp login <server>`.

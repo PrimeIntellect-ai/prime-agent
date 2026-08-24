@@ -303,7 +303,7 @@ describe("KernelManager abort handling", () => {
 
 		const secondExecutePromise = manager.execute("x = 1");
 		const secondExecuteExpectation = expect(secondExecutePromise).rejects.toThrow(
-			"IPython kernel is still running the previously interrupted cell",
+			"The Python kernel is still running the previously interrupted cell",
 		);
 		await Promise.resolve();
 		await vi.advanceTimersByTimeAsync(5000);

@@ -17,7 +17,7 @@ export const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 export const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 export const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
-	"IPython kernel is still running the previously interrupted cell. Wait and try again, or kill the IPython kernel to start fresh.";
+	"The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.";
 
 /** Selects the Jupyter/ZMQ kernel client instead of the REPL runtime client. */
 export function usesIpythonKernel(): boolean {
