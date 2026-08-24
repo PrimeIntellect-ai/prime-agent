@@ -125,6 +125,8 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
     comm = Comm(target_name=HOST_COMM_TARGET, primary=False)
+    if getattr(comm, "kernel", None) is None:
+        raise RuntimeError("Jupyter comm support is unavailable in this kernel")
 
     def _on_msg(msg: dict[str, Any]) -> None:
         content = msg.get("content", {})

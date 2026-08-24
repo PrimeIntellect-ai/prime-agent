@@ -9,6 +9,7 @@ import os
 import selectors
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -23,7 +24,7 @@ _IS_POSIX = os.name == "posix"
 _HEAD_CAP = 512 * 1024
 _TAIL_CAP = 3 * 512 * 1024
 _READ_CHUNK = 65536
-# Fixed child-side fd for the status pipe; POSIX shells (notably dash) only
+# Fixed child-side fd for the status channel; POSIX shells (notably dash) only
 # guarantee single-digit fds in redirection syntax.
 _STATUS_FD = 9
 
@@ -110,15 +111,26 @@ class BashHandle:
         self._wake_write = -1
         status_write = -1
         if _IS_POSIX:
-            self._status_read, status_write = os.pipe()
-            self._wake_read, self._wake_write = os.pipe()
+            # Full-duplex status channel: the child end rides in as stdin (fd 0)
+            # and the script remaps it to _STATUS_FD before swapping in /dev/null
+            # (dash rejects multi-digit fds in redirections at parse time). The
+            # parent end doubles as the gate: the child blocks on it until the
+            # pid is journaled, so a kernel kill in that window cannot leak an
+            # unjournaled command (parent death closes the socket -> child exits).
+            parent_sock, child_sock = socket.socketpair()
+            self._status_read = parent_sock.detach()
+            status_write = child_sock.detach()
+            try:
+                self._wake_read, self._wake_write = os.pipe()
+            except BaseException:
+                os.close(self._status_read)
+                os.close(status_write)
+                raise
             script = _status_script(_with_prefix(command))
-            # The status pipe rides in as stdin (fd 0) and the script remaps it to
-            # _STATUS_FD before swapping in /dev/null: dash rejects multi-digit fds
-            # in redirections at parse time, so the script can never reference
-            # status_write directly once it lands >= 10.
             spawn_kwargs: dict[str, Any] = {"start_new_session": True, "stdin": status_write}
         else:
+            # Windows: no status/gate channel and no process groups; liveness and
+            # reaping go through wait()/taskkill instead.
             script = _with_prefix(command)
             spawn_kwargs = {"stdin": subprocess.DEVNULL}
         try:
@@ -142,6 +154,14 @@ class BashHandle:
         with _live_lock:
             _live_handles.add(self)
         _record_journal(self.pid, active=True)
+        if _IS_POSIX:
+            # Journal first, then open the gate: the child does not run the user
+            # command until this byte arrives. A failed write means the child
+            # already died; the status/EOF paths report that normally.
+            try:
+                os.write(self._status_read, b"\n")
+            except OSError:
+                pass
         threading.Thread(target=self._pump, daemon=True).start()
         threading.Thread(target=self._report, daemon=True).start()
         threading.Thread(target=self._watch, daemon=True).start()
@@ -195,7 +215,7 @@ class BashHandle:
         self._eof.set()
 
     def _report(self) -> None:
-        # Finalize at foreground completion (status pipe), not pipe EOF, so
+        # Finalize at foreground completion (status channel), not EOF, so
         # `cmd &` does not hang the await; the shell then `wait`s for its
         # background jobs, keeping the journaled group identity alive.
         status: int | None = None
@@ -214,12 +234,12 @@ class BashHandle:
             self._finalize(status)
 
     def _watch(self) -> None:
-        # Observe shell death independently of the status pipe: an early
+        # Observe shell death independently of the status socket: an early
         # `exit`/`exec`/`set -e`/fatal signal skips `printf`, and background
-        # children can hold the pipe open past the shell's lifetime.
+        # children can hold the socket open past the shell's lifetime.
         exit_code = self._proc.wait()
         if self._wake_write >= 0:
-            # Unblock _read_status: background children can hold the status pipe
+            # Unblock _read_status: background children can hold the status socket
             # open past the shell's lifetime via bash's saved-fd duplicate.
             try:
                 os.write(self._wake_write, b"x")
@@ -362,14 +382,17 @@ def _with_prefix(command: str) -> str:
 
 
 def _status_script(command: str) -> str:
-    # The status pipe arrives as stdin (fd 0); the prologue dups it to the
+    # The status socket arrives as stdin (fd 0); the prologue dups it to the
     # single-digit _STATUS_FD (dash rejects multi-digit fds in redirections at
     # parse time) and points stdin at /dev/null, so no other copy remains. The
-    # brace group runs the command with the status fd closed so `&` children
-    # do not inherit it; the trailing `wait` keeps the shell alive as group
-    # leader until its own jobs exit (double-forked daemons stay out of scope).
+    # gate read blocks until the parent has journaled the pid; EOF (parent died
+    # first) exits without running the command. The brace group runs the command
+    # with the status fd closed so `&` children do not inherit it; the trailing
+    # `wait` keeps the shell alive as group leader until its own jobs exit
+    # (double-forked daemons stay out of scope).
     return (
         f"exec {_STATUS_FD}>&0 0</dev/null\n"
+        f"read -r _prime_agent_gate <&{_STATUS_FD} || exit 127\n"
         "{\n"
         f"{command}\n"
         f"}} {_STATUS_FD}>&-\n"

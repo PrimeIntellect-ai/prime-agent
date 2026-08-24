@@ -2775,6 +2775,7 @@ describe("AgentSession rlm recursion", () => {
 			{
 				env: { ...process.env, PYTHONPATH: runtime, RLM_DEPTH: "1", RLM_MAX_DEPTH: "1" },
 				encoding: "utf8",
+				timeout: 15_000,
 			},
 		);
 
