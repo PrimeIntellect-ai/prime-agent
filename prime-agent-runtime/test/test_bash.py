@@ -392,8 +392,39 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
-            await _poll_group_dead(pids[0])
+            # The cancel path awaits confirmed group death before propagating.
+            if bash_module._IS_POSIX:
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(pids[0], 0)
             await asyncio.sleep(1.0)
+            self.assertFalse(os.path.exists(marker))
+
+    async def test_cancelled_direct_await_escalates_past_term_trap(self):
+        # A TERM-trapping command must be group-KILLed before the cancel
+        # resolves, so its later side effects never land.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker")
+            pids: list[int] = []
+            original_init = bash_module.BashHandle.__init__
+
+            def capturing_init(handle_self, command):
+                original_init(handle_self, command)
+                pids.append(handle_self._pid)
+
+            async def run_oneshot():
+                await bash(f"trap '' TERM; sleep 1.0; touch {marker}; sleep 30")
+
+            with mock.patch.object(bash_module, "_CANCEL_TERM_GRACE", 0.2):
+                with mock.patch.object(bash_module.BashHandle, "__init__", capturing_init):
+                    task = asyncio.ensure_future(run_oneshot())
+                    await asyncio.sleep(0.2)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+            if bash_module._IS_POSIX:
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(pids[0], 0)
+            await asyncio.sleep(1.2)
             self.assertFalse(os.path.exists(marker))
 
     async def test_background_handle_survives_cancel_of_creating_context(self):
@@ -517,6 +548,48 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 with mock.patch.object(bash_module, "_process_start_id", return_value=None):
                     with self.assertRaises(RuntimeError):
                         bash("sleep 30")
+
+    async def test_journal_short_write_rejects_when_configured(self):
+        # A partial os.write would leave a truncated JSON line the host
+        # discards; enrollment must treat it as failure.
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.jsonl")
+
+            def short_write(fd, data):
+                return 0  # no progress
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                },
+            ):
+                with mock.patch.object(bash_module.os, "write", short_write):
+                    self.assertFalse(bash_module._record_journal(os.getpid(), active=False))
+
+    async def test_journal_partial_writes_complete_the_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.jsonl")
+            real_write = os.write
+
+            def partial_write(fd, data):
+                # One byte at a time: the loop must still write the full record.
+                return real_write(fd, bytes(data)[:1])
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                },
+            ):
+                with mock.patch.object(bash_module.os, "write", partial_write):
+                    self.assertTrue(bash_module._record_journal(os.getpid(), active=False))
+            with open(journal) as f:
+                record = json.loads(f.read())
+            self.assertEqual(record["pid"], os.getpid())
+            self.assertFalse(record["active"])
 
     async def test_unconfigured_journal_stays_permissive(self):
         # Permissiveness is about configuration, not start-id availability.

@@ -205,19 +205,45 @@ class _Pump:
             _send({"event": self._stream, "id": None, "text": text})
 
 
+class _TaggedBuffer(io.RawIOBase):
+    """Binary proxy for _TaggedWriter.buffer: bytes go to the raw fd channel.
+
+    Byte ownership cannot be proven at this layer, so buffer writes ride the
+    captured pipe and surface as id:null stream events (drained before done
+    like any other raw fd write).
+    """
+
+    def __init__(self, fallback_fd: int) -> None:
+        self._fallback_fd = fallback_fd
+
+    def write(self, data: Any) -> int:
+        return os.write(self._fallback_fd, bytes(data))
+
+    def flush(self) -> None:
+        pass
+
+    def fileno(self) -> int:
+        return self._fallback_fd
+
+    def writable(self) -> bool:
+        return True
+
+
 class _TaggedWriter(io.TextIOBase):
     """sys.stdout/sys.stderr replacement tagging writes with the writer's cell id.
 
     Python-level writes carry write-time provenance from the _current_cell
     contextvar (asyncio tasks inherit the spawning cell's id; user threads see
     None) and ship straight to the protocol, bypassing the fd pipe. fileno()
-    exposes a dup of the captured pipe so subprocesses and C-level writers keep
-    working through the raw channel (null-attributed).
+    and .buffer expose the captured pipe so subprocesses, C-level writers, and
+    sys.stdout.buffer.write() keep working through the raw channel
+    (null-attributed).
     """
 
     def __init__(self, stream: str, fallback_fd: int) -> None:
         self._stream = stream
         self._fallback_fd = fallback_fd
+        self._buffer = _TaggedBuffer(fallback_fd)
 
     def write(self, text: str) -> int:
         if not isinstance(text, str):
@@ -234,6 +260,10 @@ class _TaggedWriter(io.TextIOBase):
 
     def writable(self) -> bool:
         return True
+
+    @property
+    def buffer(self) -> _TaggedBuffer:
+        return self._buffer
 
     @property
     def encoding(self) -> str:

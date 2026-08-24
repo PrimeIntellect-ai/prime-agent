@@ -16,7 +16,8 @@ event.
   to the protocol.
 - fds 1 and 2 are redirected into pipes at startup; pump threads read them and
   ship the bytes as `stdout`/`stderr` events with `id: null` — raw fd bytes
-  (`os.write`, C extensions, subprocesses) are never attributed to a cell.
+  (`os.write`, `sys.stdout.buffer.write`, C extensions, subprocesses) are never
+  attributed to a cell.
   Neither channel can corrupt protocol framing. Ordering is preserved within
   each channel, not across them.
 - fd 0 is rebound to `/dev/null` after the reader thread takes it, so user
