@@ -1163,6 +1163,7 @@ export class AgentSession {
 	private _rlmSessionDir?: string;
 	private _rlmParentNodeId?: string;
 	private _rlmParentAgent?: string;
+	private _rlmParentRun?: RlmChildRun;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
@@ -9954,7 +9955,9 @@ export class AgentSession {
 			void session.disposeAsync().catch(() => undefined);
 			return false;
 		}
-		this._rlmChildSessions.set(childId, { session, run: this._activeRlmChildRuns.get(childId) });
+		const run = this._activeRlmChildRuns.get(childId) ?? session._rlmParentRun;
+		if (run) session._rlmParentRun = run;
+		this._rlmChildSessions.set(childId, { session, run });
 		if (unsubscribe) {
 			this._rlmChildUnsubscribes.set(childId, unsubscribe);
 		}
@@ -10000,6 +10003,35 @@ export class AgentSession {
 		};
 	}
 
+	private _rlmChildSnapshotForSession(childId: string, child: AgentSession): RlmChildAgentSnapshot {
+		let answerPreview: string | undefined;
+		let toolUseCount = 0;
+		const messages =
+			child.state.streamingMessage?.role === "assistant"
+				? [...child.messages, child.state.streamingMessage]
+				: child.messages;
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			const text = compactRlmText(readAssistantText(message));
+			if (text) answerPreview = text;
+			toolUseCount += message.content.filter((block) => block.type === "toolCall").length;
+		}
+		return {
+			id: childId,
+			parentId: this._rlmParentNodeId,
+			sessionName: child.sessionName,
+			model: child.model ? `${child.model.provider}/${child.model.id}` : undefined,
+			label: child.sessionName ?? "child agent",
+			status: "done",
+			answerPreview,
+			toolUseCount: toolUseCount > 0 ? toolUseCount : undefined,
+			tokenCount: child._contextTokensForCurrentMessages(),
+			recap: child.getCurrentRecap(),
+			sessionDir: child._rlmSessionDir ?? child.sessionManager.getSessionDir(),
+			repliedSinceTask: child._repliedToParentSinceTask,
+		};
+	}
+
 	/** Live recursive child roster from lifecycle state, including nested work under retained parents. */
 	getRlmChildSnapshots(): RlmChildAgentSnapshot[] {
 		const snapshots: RlmChildAgentSnapshot[] = [];
@@ -10022,17 +10054,9 @@ export class AgentSession {
 			if (recorded.has(childId) || traversed.has(childId)) continue;
 			const hidden = this._deletingRlmChildren.has(childId) || this._deletedRlmChildIds.has(childId);
 			if (!hidden) {
-				const snapshot: RlmChildAgentSnapshot = run
+				const snapshot = run
 					? this._rlmChildSnapshotForRun(run, child)
-					: {
-							id: childId,
-							parentId: this._rlmParentNodeId,
-							sessionName: child.sessionName,
-							model: child.model ? `${child.model.provider}/${child.model.id}` : undefined,
-							label: child.sessionName ?? "child agent",
-							status: "done",
-							sessionDir: child._rlmSessionDir ?? child.sessionManager.getSessionDir(),
-						};
+					: this._rlmChildSnapshotForSession(childId, child);
 				snapshots.push({
 					...snapshot,
 					status: this._rlmChildCleanupFailures.has(childId) ? "cancelled" : snapshot.status,

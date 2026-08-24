@@ -616,6 +616,10 @@ describe("AgentSession rlm recursion", () => {
 		mkdirSync(childDir, { recursive: true });
 		const child = createSession({ rlmSessionDir: childDir });
 		child.setSessionName("restored-worker");
+		const restoredAnswer = assistantMessage("restored answer", usage(7, 3));
+		restoredAnswer.content.push({ type: "toolCall", id: "tool-1", name: "ipython", arguments: {} });
+		child.agent.state.messages.push(restoredAnswer);
+		child.setCurrentRecap("restored recap");
 		const disposeChild = vi.spyOn(child, "disposeAsync");
 		const root = createSession();
 		const childStatuses: string[] = [];
@@ -626,6 +630,15 @@ describe("AgentSession rlm recursion", () => {
 		});
 
 		expect(root.registerRlmChildSession(childId, child)).toBe(true);
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({
+				id: childId,
+				answerPreview: "restored answer",
+				toolUseCount: 1,
+				tokenCount: 10,
+				recap: "restored recap",
+			}),
+		]);
 		expect((await root.listRlmSubagents()).subagents).toEqual([
 			expect.objectContaining({
 				rlm_child_id: childId,
@@ -2302,6 +2315,9 @@ describe("AgentSession rlm recursion", () => {
 		}
 		const rootInternals = root as unknown as InspectableRlmSession;
 		await waitFor(() => !rootInternals._activeRlmChildRuns.has(childId));
+		const unsubscribe = root.releaseRlmChildSession(childId, child);
+		if (!unsubscribe) throw new Error("Failed to release retained child");
+		expect(root.registerRlmChildSession(childId, child, unsubscribe)).toBe(true);
 
 		child.setCurrentRecap("retained recap");
 		child.setSessionName("renamed-worker");
@@ -2312,10 +2328,19 @@ describe("AgentSession rlm recursion", () => {
 		);
 		expect(childUpdates.at(-1)?.child).toMatchObject({
 			sessionName: "renamed-worker",
+			durationMs: expect.any(Number),
 			tokenCount: 10,
 			recap: "retained recap",
 			repliedSinceTask: false,
 		});
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({
+				sessionName: "renamed-worker",
+				durationMs: expect.any(Number),
+				tokenCount: 10,
+				recap: "retained recap",
+			}),
+		]);
 	});
 
 	it("surfaces a child's recap on its snapshot once the summarizer sets it", async () => {
