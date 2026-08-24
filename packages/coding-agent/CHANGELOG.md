@@ -13,6 +13,7 @@
 - Fixed a snapshot request with identical `path` and `manifest_path` silently clobbering the just-written state payload; the runtime now rejects it as a failed request.
 - Fixed a snapshot request with a negative `max_bytes`/`max_variable_bytes` and `prune_oversized` writing an empty payload and then deleting every user variable; size caps must now be non-negative integers.
 - Fixed an interrupt landing mid-snapshot leaving prune deletions half-applied: once the snapshot manifest is committed, SIGINT is deferred until every oversized name is removed, so the namespace always matches the on-disk snapshot.
+- Hardened bash(): cancelling `await bash(cmd)` now kills the command's process group (background handles are unaffected), Windows helper binaries resolve via absolute System32 paths, kill() retries taskkill for already-reaped Windows trees, and orphan-journal enrollment fails closed when configured.
 
 ## [0.8.0] - 2026-08-21
 
