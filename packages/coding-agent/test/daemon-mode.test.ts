@@ -1493,24 +1493,29 @@ describe("daemon mode helpers", () => {
 		expect((await internals.createAgentMessageListResult(source)).agents).toContainEqual(
 			expect.objectContaining({ activeSessionId: remoteSelector }),
 		);
-		const handlers = createAgentMessageHostHandlers(internals.createAgentMessageController(() => source));
-		const roster = await handlers["agent_message.list_agents"]!({});
-		expect(roster.current).toMatchObject({ name: "Source", id: "session-source", depth: 0 });
-		expect(roster.entries).toContainEqual({
-			relationship: "sibling",
-			name: "Remote",
-			id: "session-remote",
-			depth: 0,
-			status: "idle",
-		});
-		await expect(
-			handlers["agent_message.send"]!({
-				message: "continue remotely",
-				receiver_role: "sibling",
-				receiver_name: "Remote",
-			}),
-		).resolves.toEqual(receipt);
-		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "session-remote", "continue remotely");
+		const listAll = vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
+		try {
+			const handlers = createAgentMessageHostHandlers(internals.createAgentMessageController(() => source));
+			const roster = await handlers["agent_message.list_agents"]!({});
+			expect(roster.current).toMatchObject({ name: "Source", id: "session-source", depth: 0 });
+			expect(roster.entries).toContainEqual({
+				relationship: "sibling",
+				name: "Remote",
+				id: "session-remote",
+				depth: 0,
+				status: "idle",
+			});
+			await expect(
+				handlers["agent_message.send"]!({
+					message: "continue remotely",
+					receiver_role: "sibling",
+					receiver_name: "Remote",
+				}),
+			).resolves.toEqual(receipt);
+			expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "session-remote", "continue remotely");
+		} finally {
+			listAll.mockRestore();
+		}
 	});
 
 	it("routes nonresident agent-message targets through the supervisor wake path", async () => {
