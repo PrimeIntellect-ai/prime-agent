@@ -120,6 +120,8 @@ export class ReplKernelManager {
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
 	private startGeneration = 0;
+	/** Generation whose graceful shutdown() owns the teardown, so the exit handler must not run it. */
+	private gracefulShutdownGeneration?: number;
 	/** Memoized so concurrent callers all await the same in-flight startup. */
 	private startPromise?: Promise<void>;
 	/** Pending debounced auto-snapshot, if one has been scheduled. */
@@ -275,6 +277,10 @@ export class ReplKernelManager {
 			}
 			this.state = "shutdown";
 			liveKernels.delete(this);
+			// This exit is part of an in-flight graceful shutdown(): that call owns the
+			// teardown and runs cleanupResources itself. Cleaning up here would bump the
+			// generation and misread the owning shutdown as superseded.
+			if (this.gracefulShutdownGeneration === this.startGeneration) return;
 			this.cleanupResources();
 		});
 	}
@@ -852,6 +858,10 @@ export class ReplKernelManager {
 		}
 		this.state = "shutdown";
 		liveKernels.delete(this);
+		// Claim the teardown: our own child's exit handler must not run cleanupResources
+		// (which bumps the generation and would misread this call as superseded). A
+		// concurrent kill()/dispose() still bumps the generation and supersedes us.
+		this.gracefulShutdownGeneration = generation;
 
 		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		let doneWaiterId: string | undefined;
@@ -887,6 +897,7 @@ export class ReplKernelManager {
 		} finally {
 			if (shutdownTimer) globalThis.clearTimeout(shutdownTimer);
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
+			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			// A superseded shutdown must not tear down the newer start's kernel. Ownership is decided
 			// here, before cleanupResources bumps the generation and would misread this call as superseded.
 			if (!this.startStale(generation)) {

@@ -25,15 +25,15 @@ describe("rewriteCellMagics", () => {
 		expect(rewritten.startsWith("\n\n_prime_agent_bash")).toBe(true);
 	});
 
-	it("rewrites %cd with a target directory and tracks the previous cwd", () => {
+	it("rewrites %cd with a target directory, tracks the previous cwd, and echoes the new cwd", () => {
 		expect(rewriteCellMagics("%cd /tmp/dir")).toBe(
-			'_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("/tmp/dir"))',
+			'_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("/tmp/dir")); print(__import__("os").getcwd())',
 		);
 	});
 
 	it("rewrites bare %cd to the home directory", () => {
 		expect(rewriteCellMagics("%cd")).toBe(
-			'_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("~"))',
+			'_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(__import__("os").path.expanduser("~")); print(__import__("os").getcwd())',
 		);
 	});
 
@@ -58,7 +58,7 @@ describe("rewriteCellMagics", () => {
 		const rewritten = rewriteCellMagics("%cd -");
 		expect(rewritten).toContain('globals().get("_prime_agent_prev_cd")');
 		expect(rewritten).toContain('raise RuntimeError("No previous directory to change to")');
-		expect(rewritten).toContain('__import__("os").chdir(_prime_agent_cd_target)');
+		expect(rewritten).toContain('__import__("os").chdir(_prime_agent_cd_target); print(__import__("os").getcwd())');
 	});
 
 	it("rewrites %cd with a tab separator and tolerates a trailing carriage return", () => {
@@ -68,7 +68,7 @@ describe("rewriteCellMagics", () => {
 
 	it("rewrites bare %cd and bare %env on CRLF lines", () => {
 		expect(rewriteCellMagics("%cd\r\n")).toContain('__import__("os").path.expanduser("~")');
-		expect(rewriteCellMagics("%env\r\n")).toContain('print(dict(__import__("os").environ))');
+		expect(rewriteCellMagics("%env\r\n")).toContain('"[REDACTED]"');
 	});
 
 	it("rewrites %env NAME=value to an environ assignment", () => {
@@ -77,6 +77,14 @@ describe("rewriteCellMagics", () => {
 
 	it("rewrites %env NAME value (space-separated) to an environ assignment", () => {
 		expect(rewriteCellMagics("%env FOO bar")).toBe('__import__("os").environ["FOO"] = "bar"');
+	});
+
+	it("splits %env at the first '=' even with surrounding spaces", () => {
+		expect(rewriteCellMagics("%env FOO = bar")).toBe('__import__("os").environ["FOO"] = "bar"');
+	});
+
+	it("keeps '=' in the value when the assignment is space-separated", () => {
+		expect(rewriteCellMagics("%env FOO bar=baz")).toBe('__import__("os").environ["FOO"] = "bar=baz"');
 	});
 
 	it("expands $var values in %env assignments from Python variables", () => {
@@ -121,8 +129,12 @@ describe("rewriteCellMagics", () => {
 		expect(rewriteCellMagics("%env FOO")).toBe('print(__import__("os").environ["FOO"])');
 	});
 
-	it("rewrites bare %env to an environ listing", () => {
-		expect(rewriteCellMagics("%env")).toBe('print(dict(__import__("os").environ))');
+	it("rewrites bare %env to a credential-redacting environ listing", () => {
+		const rewritten = rewriteCellMagics("%env");
+		expect(rewritten).toBe(
+			'print({k: ("[REDACTED]" if any(marker in k.lower() for marker in ("key", "token", "secret")) else v) for k, v in __import__("os").environ.items()})',
+		);
+		assertValidPython(rewritten);
 	});
 
 	it("rewrites magics only at column 0 and keeps other lines untouched", () => {

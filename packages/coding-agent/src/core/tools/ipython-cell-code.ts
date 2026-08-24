@@ -39,7 +39,8 @@ function rewriteBashCell(body: string): string {
 const CD_NO_PREVIOUS_ERROR = "No previous directory to change to";
 
 function rewriteChdir(targetExpression: string): string {
-	return `_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(${targetExpression})`;
+	// IPython's %cd echoes the new working directory after changing into it.
+	return `_prime_agent_prev_cd = __import__("os").getcwd(); __import__("os").chdir(${targetExpression}); print(__import__("os").getcwd())`;
 }
 
 function rewriteCdMagic(rawTarget: string): string {
@@ -112,12 +113,20 @@ function pythonFStringFromEnvValue(value: string): string {
 	return `f"${source}"`;
 }
 
+// Like IPython's bare %env, hide values whose variable name looks like a credential.
+const ENV_LISTING_CODE =
+	'print({k: ("[REDACTED]" if any(marker in k.lower() for marker in ("key", "token", "secret")) else v) for k, v in __import__("os").environ.items()})';
+
 function rewriteEnvMagic(argument: string): string {
 	if (!argument) {
-		return 'print(dict(__import__("os").environ))';
+		return ENV_LISTING_CODE;
 	}
-	// %env NAME=value and %env NAME value both assign; split on whichever separator comes first.
-	const separator = argument.search(/[= \t]/);
+	// %env NAME=value and %env NAME value both assign. Like IPython, prefer the first '='
+	// (so `%env FOO = bar` sets "bar"), but if that leaves whitespace inside the name
+	// (`%env FOO bar=baz`), split on whitespace instead and keep the '=' in the value.
+	let separator = argument.indexOf("=");
+	if (separator > 0 && /\s/.test(argument.slice(0, separator).trim())) separator = -1;
+	if (separator === -1) separator = argument.search(/[ \t]/);
 	if (separator <= 0) {
 		return `print(__import__("os").environ[${JSON.stringify(argument)}])`;
 	}
