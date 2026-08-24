@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
@@ -678,6 +679,15 @@ class ReplTest(unittest.TestCase):
             events = self.repl.execute("m3", "'big' in dir()")
             self.assertEqual(one(events, "result")["text"], "True")
 
+    def test_closed_stdio_cell_still_completes_and_serves_next(self):
+        # Closing sys.stdout/sys.stderr must not kill the serve loop: done still
+        # arrives and the runtime keeps serving cells.
+        events = self.repl.execute("close-io", "import sys\nsys.stdout.close()\nsys.stderr.close()")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        follow = self.repl.execute("after-close", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
     def test_restore_missing_snapshot_is_ok_with_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.repl.send({"type": "restore", "id": "r0", "path": os.path.join(tmp, "absent.dill")})
@@ -710,6 +720,19 @@ class FinishRequestTest(unittest.TestCase):
         self.assertTrue(repl._pending_interrupts["any"])
         repl._finish_request("b")
         self.assertFalse(repl._pending_interrupts["any"])
+
+    def test_compile_error_consumes_parked_untargeted_interrupt(self):
+        # An untargeted interrupt parked while a compile-broken request was
+        # inflight belongs to that request: its compile-error finish must
+        # consume it even while another request is still inflight, so the
+        # interrupt cannot leak onto the next cell.
+        repl = self.repl_module
+        repl._inflight.update({"bad", "other"})
+        repl._pending_interrupts["any"] = True
+        asyncio.run(repl._handle_execute({"id": "bad", "code": "def broken(:\n    pass"}, {}))
+        self.assertFalse(repl._pending_interrupts["any"])
+        self.assertNotIn("bad", repl._inflight)
+        self.assertIn("other", repl._inflight)
 
 
 if __name__ == "__main__":
