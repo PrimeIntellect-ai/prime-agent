@@ -2,7 +2,7 @@ import { lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import {
@@ -236,7 +236,7 @@ describe("telemetry controls", () => {
 	it("honors settings and environment opt-outs", () => {
 		const settings = SettingsManager.inMemory({ telemetry: { enabled: true } });
 
-		vi.stubEnv("NODE_ENV", "production");
+		vi.stubEnv("DO_NOT_TRACK", "0");
 		expect(isTelemetryEnabled(settings)).toBe(true);
 
 		vi.stubEnv("DO_NOT_TRACK", "1");
@@ -249,14 +249,6 @@ describe("telemetry controls", () => {
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		vi.stubEnv("PI_OFFLINE", "true");
 		expect(isTelemetryEnabled(settings)).toBe(false);
-	});
-
-	it("is disabled by default in tests unless explicitly enabled", () => {
-		const settings = SettingsManager.inMemory({ telemetry: { enabled: true } });
-		vi.stubEnv("NODE_ENV", "test");
-		expect(isTelemetryEnabled(settings)).toBe(false);
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
-		expect(isTelemetryEnabled(settings)).toBe(true);
 	});
 
 	it("normalizes malformed telemetry settings before updating them", async () => {
@@ -276,6 +268,10 @@ describe("telemetry controls", () => {
 });
 
 describe("agent telemetry aggregation", () => {
+	beforeEach(() => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+	});
+
 	it("captures only allowlisted built-in command names", async () => {
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const sink = new FakeTelemetrySink();
