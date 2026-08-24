@@ -543,6 +543,15 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(done["status"], "error")
             self.assertIn("max_variable_bytes must be an integer", done["reason"])
 
+    def test_snapshot_rejects_identical_path_and_manifest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            self.repl.send({"type": "snapshot", "id": "sp1", "path": path, "manifest_path": path})
+            done = one(self.repl.until_done("sp1"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertEqual(done["reason"], "path and manifest_path must differ")
+            self.assertFalse(os.path.exists(path))
+
     def test_exception_with_broken_str_reported_safely(self):
         code = "\n".join(
             [
