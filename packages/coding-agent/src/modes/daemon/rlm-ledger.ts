@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+	type BigIntStats,
 	closeSync,
 	existsSync,
 	fstatSync,
@@ -33,9 +34,10 @@ import { readFirstLineSync } from "../../utils/file-lines.js";
  * Multi-writer reality: the supervisor and each session worker hold their own
  * instance over the same file. Appends are single small O_APPEND writes (well
  * under PIPE_BUF-scale sizes), whose atomicity we rely on for interleaving;
- * reads re-read the whole file per operation, so cross-process staleness is
- * bounded to in-flight appends. In-process appends are serialized on an
- * internal queue.
+ * reads stat the file per operation and reuse an in-process replay only while
+ * its identity and metadata remain unchanged. Changed files are re-read in
+ * full, so cross-process staleness is bounded to in-flight appends. In-process
+ * appends are serialized on an internal queue and invalidate the cached replay.
  */
 
 export const RLM_LEDGER_DIR = "rlm-ledger";
@@ -295,6 +297,41 @@ function edgeKey(childId: string, child: string): string {
 	return `${childId}\u0000${canonicalSessionPath(child)}`;
 }
 
+interface RlmLedgerFileIdentity {
+	dev: bigint;
+	ino: bigint;
+	size: bigint;
+	mtimeNs: bigint;
+	ctimeNs: bigint;
+	birthtimeNs: bigint;
+}
+
+function ledgerFileIdentity(stats: BigIntStats): RlmLedgerFileIdentity {
+	return {
+		dev: stats.dev,
+		ino: stats.ino,
+		size: stats.size,
+		mtimeNs: stats.mtimeNs,
+		ctimeNs: stats.ctimeNs,
+		birthtimeNs: stats.birthtimeNs,
+	};
+}
+
+function sameLedgerFileIdentity(left: RlmLedgerFileIdentity, right: RlmLedgerFileIdentity): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs &&
+		left.birthtimeNs === right.birthtimeNs
+	);
+}
+
+function cloneLedgerEdges(edges: ReadonlyMap<string, RlmLedgerEdge>): Map<string, RlmLedgerEdge> {
+	return new Map([...edges].map(([key, edge]) => [key, { ...edge }]));
+}
+
 /**
  * Per-sessions-dir spawn ledger. All operations are serialized on an internal
  * queue; the first operation lazily seeds a missing ledger from the existing
@@ -306,6 +343,7 @@ export class RlmSpawnLedger {
 	private readonly canonicalSessionsDir: string;
 	private queue: Promise<unknown> = Promise.resolve();
 	private seedAttempted = false;
+	private replayCache?: { identity: RlmLedgerFileIdentity; edges: Map<string, RlmLedgerEdge> };
 
 	constructor(
 		agentDir: string,
@@ -687,6 +725,7 @@ export class RlmSpawnLedger {
 		// degradation mode) rather than a check-then-rename race.
 		try {
 			linkSync(tempPath, this.path);
+			this.invalidateReplayCache();
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
 			if (code === "EEXIST") {
@@ -697,6 +736,7 @@ export class RlmSpawnLedger {
 	}
 
 	private appendRecord(record: RlmLedgerRecord): void {
+		this.invalidateReplayCache();
 		const dir = dirname(this.path);
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const isNew = !existsSync(this.path);
@@ -755,6 +795,7 @@ export class RlmSpawnLedger {
 				if (second.length !== first.length || !second.equals(first)) return;
 				if (fstatSync(fd).size !== first.length) return;
 				ftruncateSync(fd, lastNewline + 1);
+				this.invalidateReplayCache();
 				this.log(`RLM ledger: truncated torn final line (${first.length - lastNewline - 1} bytes)`);
 			} finally {
 				closeSync(fd);
@@ -764,16 +805,30 @@ export class RlmSpawnLedger {
 		}
 	}
 
+	private invalidateReplayCache(): void {
+		this.replayCache = undefined;
+	}
+
+	private ledgerFileIdentitySync(): RlmLedgerFileIdentity | undefined {
+		if (!existsSync(this.path)) return undefined;
+		return ledgerFileIdentity(statSync(this.path, { bigint: true }));
+	}
+
 	private replaySync(): Map<string, RlmLedgerEdge> {
-		const edges = new Map<string, RlmLedgerEdge>();
-		if (!existsSync(this.path)) return edges;
-		const size = statSync(this.path).size;
-		if (size > RLM_LEDGER_MAX_BYTES) {
-			throw new Error(`RLM ledger ${this.path} exceeds ${RLM_LEDGER_MAX_BYTES} bytes (${size}); refusing to read`);
+		const identity = this.ledgerFileIdentitySync();
+		if (!identity) return new Map();
+		if (this.replayCache && sameLedgerFileIdentity(this.replayCache.identity, identity)) {
+			return cloneLedgerEdges(this.replayCache.edges);
+		}
+		if (identity.size > BigInt(RLM_LEDGER_MAX_BYTES)) {
+			throw new Error(
+				`RLM ledger ${this.path} exceeds ${RLM_LEDGER_MAX_BYTES} bytes (${identity.size}); refusing to read`,
+			);
 		}
 		const contents = readFileSync(this.path, "utf8");
 		const endsWithNewline = contents.endsWith("\n");
 		const rawLines = contents.split("\n");
+		const edges = new Map<string, RlmLedgerEdge>();
 		let recordCount = 0;
 		for (let index = 0; index < rawLines.length; index++) {
 			const line = rawLines[index].trim();
@@ -823,6 +878,11 @@ export class RlmSpawnLedger {
 					break;
 				}
 			}
+		}
+		const identityAfterRead = this.ledgerFileIdentitySync();
+		if (identityAfterRead && sameLedgerFileIdentity(identity, identityAfterRead)) {
+			this.replayCache = { identity: identityAfterRead, edges };
+			return cloneLedgerEdges(edges);
 		}
 		return edges;
 	}

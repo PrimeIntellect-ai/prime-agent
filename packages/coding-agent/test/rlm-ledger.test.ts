@@ -1,20 +1,39 @@
+import { spawnSync } from "node:child_process";
 import {
+	appendFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 
 const linkFailure = vi.hoisted(() => ({ code: undefined as string | undefined }));
+const ledgerReadTracking = vi.hoisted(() => ({
+	enabled: false,
+	count: 0,
+	afterRead: undefined as (() => void) | undefined,
+}));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
+		readFileSync: new Proxy(actual.readFileSync, {
+			apply(target, thisArg, argArray) {
+				const result = Reflect.apply(target, thisArg, argArray);
+				if (ledgerReadTracking.enabled) ledgerReadTracking.count++;
+				const afterRead = ledgerReadTracking.afterRead;
+				ledgerReadTracking.afterRead = undefined;
+				afterRead?.();
+				return result;
+			},
+		}),
 		linkSync: (
 			existingPath: Parameters<typeof actual.linkSync>[0],
 			newPath: Parameters<typeof actual.linkSync>[1],
@@ -104,6 +123,171 @@ describe("rlm spawn ledger", () => {
 		}
 	});
 
+	it("reuses an unchanged replay without exposing cached edge objects", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-cache-hit-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "original",
+			});
+
+			ledgerReadTracking.count = 0;
+			ledgerReadTracking.enabled = true;
+			try {
+				const first = await ledger.edges();
+				expect(ledgerReadTracking.count).toBe(1);
+				first[0]!.name = "caller mutation";
+
+				await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "original" })]);
+				expect(ledgerReadTracking.count).toBe(1);
+			} finally {
+				ledgerReadTracking.enabled = false;
+				ledgerReadTracking.count = 0;
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not cache a replay when the ledger changes between its read and identity check", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-cache-read-race-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "before-race",
+			});
+			const racedRecord = `${JSON.stringify({
+				v: 1,
+				op: "spawn",
+				at: "2026-01-01T00:00:00.000Z",
+				childId: "sub-22222222",
+				parent: canonicalSessionPath(parentFile),
+				child: canonicalSessionPath(join(root, "b.jsonl")),
+				depth: 1,
+				name: "during-race",
+			})}\n`;
+
+			ledgerReadTracking.count = 0;
+			ledgerReadTracking.enabled = true;
+			ledgerReadTracking.afterRead = () => appendFileSync(ledger.ledgerPath, racedRecord);
+			try {
+				await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ childId: "sub-11111111" })]);
+				expect(ledgerReadTracking.count).toBe(1);
+
+				await expect(ledger.edges()).resolves.toEqual([
+					expect.objectContaining({ childId: "sub-11111111" }),
+					expect.objectContaining({ childId: "sub-22222222" }),
+				]);
+				expect(ledgerReadTracking.count).toBe(2);
+			} finally {
+				ledgerReadTracking.enabled = false;
+				ledgerReadTracking.count = 0;
+				ledgerReadTracking.afterRead = undefined;
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("invalidates the replay cache after local and external-process appends", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-cache-append-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const firstChild = join(root, "a.jsonl");
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: firstChild,
+				depth: 1,
+				name: "first",
+			});
+			await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "first" })]);
+
+			await ledger.appendRename({ childId: "sub-11111111", child: firstChild, name: "locally-renamed" });
+			await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "locally-renamed" })]);
+
+			const externalRecord = `${JSON.stringify({
+				v: 1,
+				op: "spawn",
+				at: "2026-01-01T00:00:00.000Z",
+				childId: "sub-22222222",
+				parent: canonicalSessionPath(parentFile),
+				child: canonicalSessionPath(join(root, "b.jsonl")),
+				depth: 1,
+				name: "externally-appended",
+			})}\n`;
+			const externalAppend = spawnSync(
+				process.execPath,
+				[
+					"-e",
+					'require("node:fs").appendFileSync(process.argv[1], process.argv[2])',
+					ledger.ledgerPath,
+					externalRecord,
+				],
+				{ encoding: "utf8" },
+			);
+			expect(externalAppend.error).toBeUndefined();
+			expect(externalAppend.status, externalAppend.stderr).toBe(0);
+			await expect(ledger.edges()).resolves.toEqual([
+				expect.objectContaining({ childId: "sub-11111111", name: "locally-renamed" }),
+				expect.objectContaining({ childId: "sub-22222222", name: "externally-appended" }),
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("invalidates the replay cache after a same-size atomic replacement", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-cache-replace-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "alpha",
+			});
+			const fixedTimestamp = new Date("2020-01-01T00:00:00.000Z");
+			utimesSync(ledger.ledgerPath, fixedTimestamp, fixedTimestamp);
+			await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "alpha" })]);
+
+			const before = statSync(ledger.ledgerPath, { bigint: true });
+			const original = readFileSync(ledger.ledgerPath, "utf8");
+			const replacement = original.replace('"name":"alpha"', '"name":"bravo"');
+			expect(Buffer.byteLength(replacement)).toBe(Buffer.byteLength(original));
+			const replacementPath = `${ledger.ledgerPath}.replacement`;
+			writeFileSync(replacementPath, replacement);
+			utimesSync(replacementPath, fixedTimestamp, fixedTimestamp);
+			renameSync(replacementPath, ledger.ledgerPath);
+			const after = statSync(ledger.ledgerPath, { bigint: true });
+			expect(after.size).toBe(before.size);
+			expect(after.mtimeNs).toBe(before.mtimeNs);
+			expect(
+				after.dev !== before.dev ||
+					after.ino !== before.ino ||
+					after.ctimeNs !== before.ctimeNs ||
+					after.birthtimeNs !== before.birthtimeNs,
+			).toBe(true);
+
+			await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "bravo" })]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects a duplicate canonical child path at append", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-dup-"));
 		try {
@@ -137,6 +321,7 @@ describe("rlm spawn ledger", () => {
 				depth: 1,
 				name: "a",
 			});
+			await expect(ledger.edges()).resolves.toHaveLength(1);
 			writeFileSync(ledger.ledgerPath, `${readFileSync(ledger.ledgerPath, "utf8")}not json\n`);
 			await expect(ledger.edges()).rejects.toThrow("Malformed RLM ledger line");
 			const fresh = new RlmSpawnLedger(root, sessionsDir);
@@ -163,11 +348,13 @@ describe("rlm spawn ledger", () => {
 				name: "a",
 			});
 			const intact = readFileSync(ledger.ledgerPath, "utf8");
-			// A crashed writer's torn final append (no trailing newline) is
-			// in-progress data: ignored with a log, not fail-closed.
-			writeFileSync(ledger.ledgerPath, `${intact}{"v":1,"op":"spawn","at":"2026-`);
 			const logged: string[] = [];
 			const torn = new RlmSpawnLedger(root, sessionsDir, undefined, (message) => logged.push(message));
+			await expect(torn.edges()).resolves.toEqual([expect.objectContaining({ childId: "sub-11111111" })]);
+			// A crashed writer's torn final append (no trailing newline) is
+			// in-progress data: ignored with a log, not fail-closed, even after
+			// the intact ledger was cached.
+			writeFileSync(ledger.ledgerPath, `${intact}{"v":1,"op":"spawn","at":"2026-`);
 			await expect(torn.edges()).resolves.toEqual([expect.objectContaining({ childId: "sub-11111111" })]);
 			expect(logged.some((message) => message.includes("torn final line"))).toBe(true);
 			// The next append repairs the torn tail with a newline first.
