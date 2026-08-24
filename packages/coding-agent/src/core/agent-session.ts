@@ -7685,8 +7685,10 @@ export class AgentSession {
 			} catch (error) {
 				const code = error instanceof AgentContinueError ? error.code : undefined;
 				if (code === "busy") {
-					this._postCompactionContinuationScheduled = true;
-					this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
+					if (this._postCompactionContinuationSettlement === settlement) {
+						this._postCompactionContinuationScheduled = true;
+						this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
+					}
 					continue;
 				}
 				if (code !== "nothing-to-continue") {
