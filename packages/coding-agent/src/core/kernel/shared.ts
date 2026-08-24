@@ -221,6 +221,8 @@ export interface ExecuteResult {
 	attachments?: KernelAttachment[];
 	/** Agent messages sent from this cell, in order. */
 	sentAgentMessages?: KernelSentAgentMessage[];
+	/** Output that arrived without this cell's id (user threads, other cells' leftovers, raw fd writes). */
+	backgroundOutput?: string;
 	status: "ok" | "error" | "aborted";
 	error?: { ename: string; evalue: string; traceback: string[] };
 	durationMs: number;

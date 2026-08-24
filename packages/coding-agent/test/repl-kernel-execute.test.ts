@@ -151,4 +151,24 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		expect(read.status).toBe("ok");
 		expect(read.stdout.trim()).toBe("hello");
 	}, 30_000);
+
+	it("surfaces unattributed background output separately from cell stdout", async () => {
+		manager = new ReplKernelManager({ python: python as string, cwd: dir });
+		const first = await manager.execute(
+			[
+				"import threading, time",
+				"def late():",
+				"    time.sleep(0.5)",
+				"    print('SECRET-thread', flush=True)",
+				"threading.Thread(target=late, daemon=True).start()",
+			].join("\n"),
+		);
+		expect(first.status).toBe("ok");
+
+		const second = await manager.execute("import time\ntime.sleep(1.0)\nprint('own-output')");
+		expect(second.status).toBe("ok");
+		expect(second.stdout).toContain("own-output");
+		expect(second.stdout).not.toContain("SECRET-thread");
+		expect(second.backgroundOutput ?? "").toContain("SECRET-thread");
+	}, 30_000);
 });

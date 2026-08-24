@@ -268,4 +268,50 @@ describe("ReplKernelManager abort handling", () => {
 		expect(signal?.aborted).toBe(true);
 		await expect(snapshot).resolves.toBeNull();
 	});
+
+	it("routes null-id and stale-id stream events into backgroundOutput, not stdout", async () => {
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager, internals } = runningManagerWith(writeLine);
+
+		const executePromise = manager.execute("print('own')");
+		await waitForCalls(writeLine, 1);
+		const execution = internals.activeExecution;
+		expect(execution).toBeDefined();
+		if (!execution) {
+			throw new Error("Expected an active execution");
+		}
+
+		internals.handleEvent({ event: "stdout", id: execution.requestId, text: "own\n" });
+		internals.handleEvent({ event: "stdout", id: null, text: "SECRET-null\n" });
+		internals.handleEvent({ event: "stdout", id: "stale-cell", text: "SECRET-stale\n" });
+		internals.handleEvent({ event: "done", id: execution.requestId, status: "ok" });
+
+		const result = await executePromise;
+		expect(result.stdout).toBe("own\n");
+		expect(result.stdout).not.toContain("SECRET");
+		expect(result.backgroundOutput).toBe("SECRET-null\nSECRET-stale\n");
+		manager.disposeSync();
+	});
+
+	it("carries between-cell background output into the next execution's result", async () => {
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager, internals } = runningManagerWith(writeLine);
+
+		// No active execution: null-id output parks as pending background output.
+		internals.handleEvent({ event: "stdout", id: null, text: "between-cells\n" });
+
+		const executePromise = manager.execute("x = 1");
+		await waitForCalls(writeLine, 1);
+		const execution = internals.activeExecution;
+		expect(execution).toBeDefined();
+		if (!execution) {
+			throw new Error("Expected an active execution");
+		}
+		internals.handleEvent({ event: "done", id: execution.requestId, status: "ok" });
+
+		const result = await executePromise;
+		expect(result.stdout).toBe("");
+		expect(result.backgroundOutput).toBe("between-cells\n");
+		manager.disposeSync();
+	});
 });
