@@ -266,6 +266,37 @@ class ReplTest(unittest.TestCase):
         tagged = next(e for e in events if e.get("event") == "stdout" and "tagged" in e["text"])
         self.assertEqual(tagged["id"], "rawfd")
 
+    def test_hostile_deeply_nested_json_line_does_not_kill_reader(self):
+        # json.loads raises RecursionError on pathological nesting; the reader
+        # thread must survive and keep serving.
+        self.repl.send_raw("[" * 100_000)
+        error = self.repl.read_event()
+        self.assertEqual(error["event"], "error")
+        self.assertEqual(error["ename"], "ProtocolError")
+        follow = self.repl.execute("after-hostile", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
+    def test_interrupt_without_pthread_kill_cancels_awaited_cell(self):
+        # Windows fallback seam: with pthread_kill absent the reader cancels
+        # the active task on the loop; an await-suspended cell still interrupts.
+        code = "\n".join(
+            [
+                "import signal",
+                "if hasattr(signal, 'pthread_kill'):",
+                "    del signal.pthread_kill",
+                "import asyncio",
+                "await asyncio.sleep(30)",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "nokill", "code": code})
+        time.sleep(0.4)
+        self.repl.send({"type": "interrupt"})
+        events = self.repl.until_done("nokill")
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
+
     def test_stdout_buffer_write_works_and_surfaces_as_null(self):
         # Libraries write bytes via sys.stdout.buffer; the tagged writer must
         # expose a working buffer whose bytes surface (null-attributed) before done.
