@@ -8,6 +8,7 @@ import { expandTildePath } from "../config.js";
 import type { AgentSessionEvent } from "../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js";
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
+import { looksLikeSessionPath } from "../core/session-resolver.js";
 import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
@@ -619,10 +620,6 @@ function parseExtensionFlagOption(
 	const name = arg.slice(2);
 	config.extensionFlagValues[name] = true;
 	return { consumed: 0, daemonArg: arg };
-}
-
-function looksLikeSessionPath(value: string): boolean {
-	return value.includes("/") || value.includes("\\") || value.endsWith(".jsonl");
 }
 
 function requireOptionValue(args: string[], index: number, option: string): string {
