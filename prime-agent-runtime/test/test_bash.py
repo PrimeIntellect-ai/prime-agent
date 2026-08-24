@@ -5,6 +5,8 @@ import json
 import os
 import resource
 import signal
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -291,6 +293,54 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         finally:
             handle.kill(signal.SIGKILL)
             await asyncio.wait_for(handle, timeout=5)
+
+    def test_gate_eof_without_journal_prevents_command_execution(self):
+        # A kernel SIGKILL between Popen and journaling closes the parent socket;
+        # the child's gate read must then EOF and exit before running the command.
+        if not bash_module._IS_POSIX:
+            self.skipTest("POSIX-only gate")
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "ran")
+            script = bash_module._status_script(f"touch {marker}")
+            parent, child = socket.socketpair()
+            proc = subprocess.Popen(
+                [bash_module._shell(), "-c", script],
+                stdin=child.fileno(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            child.close()
+            parent.close()  # simulate parent death before the gate byte
+            proc.communicate(timeout=10)
+            self.assertEqual(proc.returncode, 127)
+            self.assertFalse(os.path.exists(marker))
+
+    def test_status_socket_closed_when_wake_pipe_fails(self):
+        if not bash_module._IS_POSIX:
+            self.skipTest("POSIX-only fds")
+        acquired: list[int] = []
+        closed: list[int] = []
+        real_socketpair = socket.socketpair
+        real_close = os.close
+
+        def capturing_socketpair(*args, **kwargs):
+            pair = real_socketpair(*args, **kwargs)
+            acquired.extend((pair[0].fileno(), pair[1].fileno()))
+            return pair
+
+        def recording_close(fd):
+            closed.append(fd)
+            real_close(fd)
+
+        with mock.patch.object(bash_module.socket, "socketpair", capturing_socketpair):
+            with mock.patch.object(bash_module.os, "close", recording_close):
+                with mock.patch.object(bash_module.os, "pipe", side_effect=OSError("boom")):
+                    with self.assertRaises(OSError):
+                        bash("echo never")
+        self.assertEqual(len(acquired), 2)
+        for fd in acquired:
+            self.assertIn(fd, closed)
 
     def test_windows_process_start_id(self):
         completed = mock.Mock(stdout="638000000000000000\n")
