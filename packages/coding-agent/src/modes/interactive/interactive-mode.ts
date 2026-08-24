@@ -982,7 +982,6 @@ export class InteractiveMode {
 
 	private skillCommands = new Map<string, string>();
 	private connectionCommands: AgentConnectionSlashCommand[] = [];
-	private connectionModels: AgentConnectionModel[] = [];
 	private connectionModelCatalog: AgentConnectionModel[] = [];
 	private connectionConfiguredProviders = new Set<string>();
 	private connectionModelsFetchedAt = 0;
@@ -7717,7 +7716,10 @@ export class InteractiveMode {
 	private applyConnectionModelCatalog(catalog: AgentConnectionModelCatalog): void {
 		this.connectionModelCatalog = [...catalog.models];
 		this.connectionConfiguredProviders = new Set(catalog.configuredProviders);
-		this.connectionModels = catalog.models.filter((model) => this.connectionConfiguredProviders.has(model.provider));
+	}
+
+	private getAvailableConnectionModels(): AgentConnectionModel[] {
+		return this.connectionModelCatalog.filter((model) => this.connectionConfiguredProviders.has(model.provider));
 	}
 
 	private async getConnectionAvailableModels(): Promise<AgentConnectionModel[]> {
@@ -7729,11 +7731,11 @@ export class InteractiveMode {
 		const version = this.connectionModelsRefreshVersion;
 		const promise = this.agentConnection.getModelCatalog().then((catalog) => {
 			if (version !== this.connectionModelsRefreshVersion) {
-				return [...this.connectionModels];
+				return this.getAvailableConnectionModels();
 			}
 			this.applyConnectionModelCatalog(catalog);
 			this.connectionModelsFetchedAt = Date.now();
-			return [...this.connectionModels];
+			return this.getAvailableConnectionModels();
 		});
 		this.connectionModelsRefreshInFlight = { version, promise };
 
@@ -7784,7 +7786,6 @@ export class InteractiveMode {
 	}
 
 	private invalidateConnectionModels(): void {
-		this.connectionModels = [];
 		this.connectionConfiguredProviders = new Set();
 		this.connectionModelsFetchedAt = 0;
 		this.invalidateConnectionModelRefresh();
