@@ -584,7 +584,6 @@ interface StateOptions {
 	messages?: AgentMessage[];
 	hasUserContent?: boolean;
 	summaryState?: ActiveSessionState["summaryState"];
-	childRunStatuses?: Record<string, "queued" | "running" | "done" | "error" | "cancelled">;
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
 	unfinishedActionCount?: number;
@@ -635,7 +634,6 @@ function makeState(options: StateOptions): ActiveSessionState {
 					hasUserContent: () => options.hasUserContent ?? false,
 				},
 				messages: options.messages ?? ([] as AgentMessage[]),
-				getRlmChildRunStatus: (childId: string) => options.childRunStatuses?.[childId],
 				getRlmChildSnapshots: () => options.childSnapshots ?? [],
 				hasRunningRlmChildren: () => options.hasRunningRlmChildren ?? false,
 				hasAcceptedPromptInFlight: options.hasAcceptedPromptInFlight ?? false,

@@ -9976,7 +9976,10 @@ export class AgentSession {
 		return unsubscribe;
 	}
 
-	private _rlmChildSnapshotForRun(run: RlmChildRun, child = run.session): RlmChildAgentSnapshot {
+	private _rlmChildSnapshotForRun(
+		run: RlmChildRun,
+		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
+	): RlmChildAgentSnapshot {
 		const model = child?.model ?? run.model;
 		return {
 			id: run.id,
