@@ -69,6 +69,41 @@ describe("daemon mode helpers", () => {
 		expect(client.id).toBe("public-client");
 	});
 
+	it("waits for bash_end when aborting Bash during close", async () => {
+		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active");
+		let listener: ((event: { type: string }) => void) | undefined;
+		const unsubscribe = vi.fn();
+		const subscribe = vi.fn((next: (event: { type: string }) => void) => {
+			listener = next;
+			return unsubscribe;
+		});
+		const abortBash = vi.fn();
+		state.runtime = {
+			...state.runtime,
+			session: { isBashRunning: true, subscribe, abortBash },
+		} as never;
+		const abortBashForClose = (
+			daemon as unknown as { abortBashForClose(state: ActiveSessionState): Promise<void> }
+		).abortBashForClose.bind(daemon);
+
+		let settled = false;
+		const closing = abortBashForClose(state).then(() => {
+			settled = true;
+		});
+		listener?.({ type: "bash_output" });
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		listener?.({ type: "bash_end" });
+		await closing;
+
+		expect(abortBash).toHaveBeenCalledOnce();
+		expect(unsubscribe).toHaveBeenCalledOnce();
+	});
+
 	it("normalizes daemon session names before validation and persistence", async () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },

@@ -6448,14 +6448,24 @@ export class AgentDaemon {
 	}
 
 	private async abortBashForClose(state: ActiveSessionState): Promise<void> {
-		if (!state.runtime.session.isBashRunning) {
+		const session = state.runtime.session;
+		if (!session.isBashRunning) {
 			return;
 		}
-		state.runtime.session.abortBash();
-		const deadline = Date.now() + UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS;
-		while (state.runtime.session.isBashRunning && Date.now() < deadline) {
-			await delay(50);
-		}
+		let resolveBashEnd!: () => void;
+		const bashEnd = new Promise<void>((resolve) => {
+			resolveBashEnd = resolve;
+		});
+		const unsubscribe = session.subscribe((event) => {
+			if (event.type === "bash_end") {
+				resolveBashEnd();
+			}
+		});
+		const timeout = setTimeout(resolveBashEnd, UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS);
+		session.abortBash();
+		await bashEnd;
+		clearTimeout(timeout);
+		unsubscribe();
 	}
 
 	private async closeSessionOnce(
