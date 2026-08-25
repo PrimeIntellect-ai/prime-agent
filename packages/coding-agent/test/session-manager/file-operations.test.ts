@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,8 @@ import {
 	findMostRecentSession,
 	loadEntriesFromFile,
 	loadEntriesFromFileAsync,
+	loadEntriesFromFileAsyncWithTail,
+	loadEntriesFromFileWithTail,
 	readSessionInfo,
 	resolveSessionRlmDepth,
 	SessionManager,
@@ -71,6 +73,95 @@ describe("loadEntriesFromFile", () => {
 		expect(entries).toHaveLength(2);
 	});
 
+	describe("incomplete trailing record (#928)", () => {
+		const header = '{"type":"session","id":"abc","version":3,"timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}';
+		const validMessage =
+			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z",' +
+			'"message":{"role":"user","content":"hi","timestamp":1}}';
+		const truncatedTail = '{"type":"message","id":"2","parentId":"1","timestamp":"2025-01-01T00:00:02Z","mess';
+
+		it("loadEntriesFromFileWithTail reports a truncated final record without dropping earlier ones", () => {
+			const file = join(tempDir, "truncated-tail.jsonl");
+			writeFileSync(file, [header, validMessage, truncatedTail].join("\n"));
+
+			const { entries, incompleteTail } = loadEntriesFromFileWithTail(file);
+
+			expect(entries).toHaveLength(2);
+			expect(incompleteTail?.toString("utf8")).toBe(truncatedTail);
+		});
+
+		it("loadEntriesFromFileAsyncWithTail reports the same truncated tail via the streaming path", async () => {
+			const file = join(tempDir, "truncated-tail-streamed.jsonl");
+			writeFileSync(file, [header, validMessage, truncatedTail].join("\n"));
+
+			const { entries, incompleteTail } = await loadEntriesFromFileAsyncWithTail(file, { streamThresholdBytes: 0 });
+
+			expect(entries).toHaveLength(2);
+			expect(incompleteTail?.toString("utf8")).toBe(truncatedTail);
+		});
+
+		it("does not report a tail when the file's last record is valid but unterminated", () => {
+			const file = join(tempDir, "unterminated-but-valid.jsonl");
+			writeFileSync(file, [header, validMessage].join("\n")); // no trailing newline
+
+			expect(loadEntriesFromFileWithTail(file).incompleteTail).toBeUndefined();
+		});
+
+		it("does not report a tail for a malformed line that isn't the last one", () => {
+			const file = join(tempDir, "malformed-middle.jsonl");
+			writeFileSync(file, [header, "not valid json", validMessage, ""].join("\n"));
+
+			expect(loadEntriesFromFileWithTail(file).incompleteTail).toBeUndefined();
+		});
+
+		it("SessionManager.open repairs a truncated tail: quarantines it, keeps earlier records, and round-trips a new append", () => {
+			const file = join(tempDir, "resume-truncated.jsonl");
+			writeFileSync(file, [header, validMessage, truncatedTail].join("\n"));
+
+			const manager = SessionManager.open(file, tempDir);
+
+			// Earlier valid records survive the repair.
+			expect(manager.getEntries()).toHaveLength(1);
+
+			// The corrupt fragment is preserved for forensic recovery, not silently dropped.
+			const quarantineFiles = readdirSync(tempDir).filter((name) => name.includes("incomplete-tail"));
+			expect(quarantineFiles).toHaveLength(1);
+			expect(readFileSync(join(tempDir, quarantineFiles[0]!), "utf8")).toBe(truncatedTail);
+
+			// The on-disk file itself was truncated back to just the valid records:
+			// a naive appendFileSync onto the pre-repair bytes would have produced one
+			// combined malformed line, losing whatever gets appended next too.
+			const onDiskLines = readFileSync(file, "utf8").trim().split("\n");
+			expect(onDiskLines).toHaveLength(2);
+			expect(() => JSON.parse(onDiskLines[1]!)).not.toThrow();
+
+			// A subsequent entry round-trips cleanly instead of concatenating onto the fragment.
+			// (flushNow forces durability the same way it does for any pre-assistant entry;
+			// see its doc comment -- unrelated to this fix.)
+			manager.appendMessage({ role: "user", content: "after repair", timestamp: 2 });
+			manager.flushNow();
+			const reloaded = loadEntriesFromFile(file);
+			expect(reloaded).toHaveLength(3); // header + surviving "hi" message + the new append
+			expect(reloaded[2]).toMatchObject({ message: { content: "after repair" } });
+		});
+
+		it("SessionManager.openAsync repairs a truncated tail the same way as the sync path", async () => {
+			const file = join(tempDir, "resume-truncated-async.jsonl");
+			writeFileSync(file, [header, validMessage, truncatedTail].join("\n"));
+
+			const manager = await SessionManager.openAsync(file, tempDir);
+
+			expect(manager.getEntries()).toHaveLength(1);
+			const onDiskLines = readFileSync(file, "utf8").trim().split("\n");
+			expect(onDiskLines).toHaveLength(2);
+
+			manager.appendMessage({ role: "user", content: "after async repair", timestamp: 2 });
+			manager.flushNow();
+			const reloaded = loadEntriesFromFile(file);
+			expect(reloaded).toHaveLength(3); // header + surviving "hi" message + the new append
+			expect(reloaded[2]).toMatchObject({ message: { content: "after async repair" } });
+		});
+	});
 	it("yields while parsing a multi-megabyte session below the streaming threshold", async () => {
 		const file = join(tempDir, "buffered.jsonl");
 		writeFileSync(

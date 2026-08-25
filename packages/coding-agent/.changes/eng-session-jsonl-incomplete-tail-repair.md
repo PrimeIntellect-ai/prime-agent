@@ -1,0 +1,1 @@
+- Fixed a crash-truncated session record silently swallowing the next message too by repairing an incomplete trailing JSONL record on resume instead of leaving it on disk for the next append to concatenate onto.

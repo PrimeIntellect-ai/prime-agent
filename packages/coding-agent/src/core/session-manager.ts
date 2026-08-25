@@ -1,5 +1,13 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	getLogger,
+	type ImageContent,
+	type Message,
+	type ServiceTier,
+	type TextContent,
+	type Usage,
+} from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -29,6 +37,8 @@ import {
 	createCustomMessage,
 } from "./messages.js";
 import { cloneUsage } from "./usage.js";
+
+const log = getLogger("coding-agent.session-manager");
 
 export const CURRENT_SESSION_VERSION = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
@@ -537,37 +547,69 @@ export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefault
 	return sessionDir;
 }
 
+export interface LoadedSessionEntries {
+	entries: FileEntry[];
+	/**
+	 * Raw bytes of the file's final non-blank line when it existed but failed to
+	 * parse -- e.g. a crash truncated the previous write mid-record. Only the
+	 * trailing line is ever reported: a malformed line elsewhere is followed by
+	 * content that already round-tripped, so it isn't attributable to an
+	 * in-flight write and is left silently skipped, same as before (see #928;
+	 * out of scope like the row-validation done for #709). Undefined when the
+	 * file's last non-blank line parsed cleanly (the common case).
+	 */
+	incompleteTail?: Buffer;
+}
+
 // Decode per line off a Buffer: toString("utf8") on a whole large file is far slower
 // (one giant UTF-16 string). Splitting on 0x0a is UTF-8-safe.
-function appendEntryFromBuffer(entries: FileEntry[], buffer: Buffer, start = 0, end = buffer.length): void {
-	if (end <= start) return;
+function tryParseLine(buffer: Buffer, start: number, end: number): FileEntry | undefined {
+	if (end <= start) return undefined;
 	try {
-		entries.push(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry);
+		return JSON.parse(buffer.toString("utf8", start, end)) as FileEntry;
 	} catch {
-		// Skip malformed or blank lines.
+		return undefined;
 	}
 }
 
-function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
+function parseEntriesFromBuffer(buffer: Buffer): LoadedSessionEntries {
 	const entries: FileEntry[] = [];
+	let incompleteTail: Buffer | undefined;
 	let start = 0;
 	while (start < buffer.length) {
 		let end = buffer.indexOf(0x0a, start);
 		if (end === -1) end = buffer.length;
-		appendEntryFromBuffer(entries, buffer, start, end);
+		if (end > start) {
+			const entry = tryParseLine(buffer, start, end);
+			if (entry !== undefined) {
+				entries.push(entry);
+				incompleteTail = undefined;
+			} else {
+				incompleteTail = Buffer.from(buffer.subarray(start, end));
+			}
+		}
 		start = end + 1;
 	}
-	return entries;
+	return { entries, incompleteTail };
 }
 
-async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]> {
+async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<LoadedSessionEntries> {
 	const entries: FileEntry[] = [];
+	let incompleteTail: Buffer | undefined;
 	let start = 0;
 	let bytesSinceYield = 0;
 	while (start < buffer.length) {
 		let end = buffer.indexOf(0x0a, start);
 		if (end === -1) end = buffer.length;
-		appendEntryFromBuffer(entries, buffer, start, end);
+		if (end > start) {
+			const entry = tryParseLine(buffer, start, end);
+			if (entry !== undefined) {
+				entries.push(entry);
+				incompleteTail = undefined;
+			} else {
+				incompleteTail = Buffer.from(buffer.subarray(start, end));
+			}
+		}
 		bytesSinceYield += end - start + 1;
 		start = end + 1;
 		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
@@ -575,7 +617,7 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	}
-	return entries;
+	return { entries, incompleteTail };
 }
 
 function finalizeLoadedEntries(entries: FileEntry[]): FileEntry[] {
@@ -589,8 +631,14 @@ function finalizeLoadedEntries(entries: FileEntry[]): FileEntry[] {
 }
 
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
-	if (!existsSync(filePath)) return [];
-	return finalizeLoadedEntries(parseEntriesFromBuffer(readFileSync(filePath)));
+	return loadEntriesFromFileWithTail(filePath).entries;
+}
+
+/** Like {@link loadEntriesFromFile}, but also reports an incomplete trailing record. */
+export function loadEntriesFromFileWithTail(filePath: string): LoadedSessionEntries {
+	if (!existsSync(filePath)) return { entries: [] };
+	const { entries, incompleteTail } = parseEntriesFromBuffer(readFileSync(filePath));
+	return { entries: finalizeLoadedEntries(entries), incompleteTail };
 }
 
 // Async loader for the daemon: reads off the event loop and yields while parsing so a
@@ -600,23 +648,39 @@ export async function loadEntriesFromFileAsync(
 	filePath: string,
 	options: { streamThresholdBytes?: number } = {},
 ): Promise<FileEntry[]> {
-	if (!existsSync(filePath)) return [];
+	return (await loadEntriesFromFileAsyncWithTail(filePath, options)).entries;
+}
+
+/** Like {@link loadEntriesFromFileAsync}, but also reports an incomplete trailing record. */
+export async function loadEntriesFromFileAsyncWithTail(
+	filePath: string,
+	options: { streamThresholdBytes?: number } = {},
+): Promise<LoadedSessionEntries> {
+	if (!existsSync(filePath)) return { entries: [] };
 	const streamThresholdBytes = options.streamThresholdBytes ?? SESSION_STREAMING_LOAD_THRESHOLD_BYTES;
 	if ((await stat(filePath)).size < streamThresholdBytes) {
-		return finalizeLoadedEntries(await parseEntriesFromBufferAsync(await readFile(filePath)));
+		const { entries, incompleteTail } = await parseEntriesFromBufferAsync(await readFile(filePath));
+		return { entries: finalizeLoadedEntries(entries), incompleteTail };
 	}
 
 	const entries: FileEntry[] = [];
+	let incompleteTail: Buffer | undefined;
 	let bytesSinceYield = 0;
 	for await (const line of readLinesAsBuffers(filePath)) {
-		appendEntryFromBuffer(entries, line);
+		const entry = tryParseLine(line, 0, line.length);
+		if (entry !== undefined) {
+			entries.push(entry);
+			incompleteTail = undefined;
+		} else if (line.length > 0) {
+			incompleteTail = Buffer.from(line);
+		}
 		bytesSinceYield += line.length + 1;
 		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
 			bytesSinceYield = 0;
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	}
-	return finalizeLoadedEntries(entries);
+	return { entries: finalizeLoadedEntries(entries), incompleteTail };
 }
 
 function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined {
@@ -1119,6 +1183,7 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		preloadedEntries?: FileEntry[],
+		preloadedIncompleteTail?: Buffer,
 	) {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
@@ -1128,7 +1193,7 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this.setSessionFile(sessionFile, preloadedEntries);
+			this.setSessionFile(sessionFile, preloadedEntries, preloadedIncompleteTail);
 		} else {
 			this.newSession();
 		}
@@ -1136,13 +1201,21 @@ export class SessionManager {
 
 	/**
 	 * Switch to a different session file (used for resume and branching).
-	 * preloadedEntries must be loadEntriesFromFile(sessionFile) for the same path; it
+	 * preloadedEntries must be loadEntriesFromFile(sessionFile) for the same path (and
+	 * preloadedIncompleteTail its loadEntriesFromFileWithTail/-Async counterpart); it
 	 * lets the async daemon path skip the synchronous re-read.
 	 */
-	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
+	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[], preloadedIncompleteTail?: Buffer): void {
 		this.sessionFile = resolve(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
+			let incompleteTail = preloadedIncompleteTail;
+			if (preloadedEntries) {
+				this.fileEntries = preloadedEntries;
+			} else {
+				const loaded = loadEntriesFromFileWithTail(this.sessionFile);
+				this.fileEntries = loaded.entries;
+				incompleteTail = loaded.incompleteTail;
+			}
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
 			// to avoid appending messages without a session header (which breaks the session)
@@ -1169,10 +1242,47 @@ export class SessionManager {
 
 			this._buildIndex();
 			this.flushed = true;
+			this._repairIncompleteTail(incompleteTail);
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --resume selector
+		}
+	}
+
+	/**
+	 * A crash mid-write can leave the file's final record truncated. Left alone, the
+	 * fragment's bytes stay on disk and the next appendFileSync (the hot path in
+	 * _persist) concatenates the new entry directly onto it -- producing one combined
+	 * malformed line that also fails to parse, so the new entry is lost too (#928).
+	 * Quarantine the fragment for forensic recovery and force the next persisted entry
+	 * through the atomic rewrite path (temp file + rename, see _rewriteFile) instead of
+	 * a raw append: that rewrite serializes only the entries this instance actually
+	 * loaded, which physically drops the stray trailing bytes before anything new lands.
+	 */
+	private _repairIncompleteTail(incompleteTail: Buffer | undefined): void {
+		if (!incompleteTail || incompleteTail.length === 0 || !this.sessionFile) return;
+		const quarantinePath = `${this.sessionFile}.incomplete-tail-${Date.now()}-${randomUUID().slice(0, 8)}.jsonl`;
+		try {
+			writeFileSync(quarantinePath, incompleteTail);
+			log.warn(
+				`session ${this.sessionFile}: repaired an incomplete trailing record (likely a crash mid-write); ` +
+					`quarantined ${incompleteTail.length} byte(s) to ${quarantinePath}`,
+			);
+		} catch (error) {
+			log.warn(
+				`session ${this.sessionFile}: repaired an incomplete trailing record (likely a crash mid-write), ` +
+					`but could not quarantine it: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		// Truncate the corrupt tail immediately rather than deferring to the next
+		// append: a session that is only ever read after this (e.g. a passive list/
+		// context-tree view) must not leave the fragment sitting on disk indefinitely.
+		if (this.persist) {
+			this._rewriteFile();
+			this.flushed = true;
+		} else {
+			this.flushed = false;
 		}
 	}
 
@@ -1985,13 +2095,13 @@ export class SessionManager {
 		if (!existsSync(path)) {
 			return SessionManager.open(path, sessionDir, cwdOverride);
 		}
-		const entries = await loadEntriesFromFileAsync(path);
+		const { entries, incompleteTail } = await loadEntriesFromFileAsyncWithTail(path);
 		if (entries.length === 0) {
 			return SessionManager.open(path, sessionDir, cwdOverride);
 		}
 		const cwd = cwdOverride ?? (entries[0] as SessionHeader).cwd;
 		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries);
+		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries, incompleteTail);
 	}
 
 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
