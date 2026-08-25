@@ -363,7 +363,7 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 			return fallback;
 		} catch (fallbackError) {
 			throw new Error(
-				`couldn't create kernel venv directory at ${primary} or ${fallback}; set PRIME_AGENT_KERNEL_PYTHON to a python with prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
+				`couldn't create kernel venv directory at ${primary} or ${fallback}; set PRIME_AGENT_KERNEL_PYTHON to a python with a current prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
 			);
 		}
 	}

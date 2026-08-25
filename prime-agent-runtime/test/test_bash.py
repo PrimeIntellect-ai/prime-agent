@@ -676,6 +676,60 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             handle.kill(signal.SIGKILL)
             await asyncio.wait_for(handle, timeout=5)
 
+    async def test_windows_failed_job_terminate_falls_back_to_taskkill(self):
+        handle = bash("sleep 30")
+        job = 888
+        handle._job = job
+        handle._had_job = True
+        try:
+            with mock.patch.object(bash_module, "_IS_POSIX", False):
+                with mock.patch.object(bash_module._winjob, "terminate", return_value=False):
+                    with mock.patch.object(bash_module._winjob, "close") as close:
+                        with mock.patch.object(
+                            bash_module, "_taskkill_tree", return_value=True
+                        ) as taskkill:
+                            handle.kill()  # failed terminate must not strand the tree
+                            taskkill.assert_called_once_with(handle._pid)
+                            taskkill.reset_mock()
+                            # Reap closes the handle anyway (a kill attempt) but
+                            # only journals inactive via the taskkill result.
+                            self.assertTrue(handle._reap_group())
+                            close.assert_called_once_with(job)
+                            taskkill.assert_called_once_with(handle._pid)
+                            self.assertIsNone(handle._job)
+        finally:
+            handle._reaped = False
+            handle._job = None
+            handle._had_job = False
+            handle.kill(signal.SIGKILL)
+            await asyncio.wait_for(handle, timeout=5)
+
+    async def test_windows_failed_terminate_and_taskkill_leaves_record_active(self):
+        # Failed terminate + failed taskkill on an exited leader: nothing
+        # proved the tree died, so _reap_group must NOT retire the record via
+        # the jobless leader-dead rule (that rule is for handles without jobs).
+        handle = bash("echo hi")
+        await asyncio.wait_for(handle, timeout=5)
+        for _ in range(100):
+            if handle._proc.poll() is not None:
+                break
+            await asyncio.sleep(0.05)
+        self.assertIsNotNone(handle._proc.poll())
+        handle._job = 999
+        handle._had_job = True
+        try:
+            with mock.patch.object(bash_module, "_IS_POSIX", False):
+                with mock.patch.object(bash_module._winjob, "terminate", return_value=False):
+                    with mock.patch.object(bash_module._winjob, "close"):
+                        with mock.patch.object(
+                            bash_module, "_taskkill_tree", return_value=False
+                        ):
+                            self.assertFalse(handle._reap_group())
+                            self.assertIsNone(handle._job)
+        finally:
+            handle._job = None
+            handle._had_job = False
+
     def test_darwin_start_id_uses_absolute_ps(self):
         completed = mock.Mock(stdout="Mon Jan  1 00:00:00 2026\n")
         with mock.patch.object(bash_module.sys, "platform", "darwin"):

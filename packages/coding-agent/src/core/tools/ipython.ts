@@ -515,7 +515,7 @@ export class IpythonKernelProvisioner {
 				});
 				if (bootstrap.status !== "ok") {
 					const details = [bootstrap.stderr, bootstrap.error?.traceback.join("\n")].filter(Boolean).join("\n");
-					throw new Error(`Failed to initialize rlm runtime in the kernel:\n${details}`);
+					throw new Error(`Failed to initialize rlm runtime in the Python kernel:\n${details}`);
 				}
 			} catch (error) {
 				// Never leak the kernel process if startup fails after spawn.
