@@ -84,8 +84,10 @@ an `id` the interrupt applies to the running request, or — when none is runnin
 yet — to the next queued one; with an `id` it applies to that request only.
 An interrupt that arrives before its request starts executing is parked and
 delivered the moment the request becomes active, so `execute` + `interrupt`
-written back-to-back still interrupts the cell. Interrupts for finished or
-unknown requests are dropped.
+written back-to-back still interrupts the cell. A request stays
+interrupt-targetable until its `done` event is emitted: this covers the
+post-run trailing-expression `repr` and output drain. Interrupts for finished
+or unknown requests are dropped.
 
 Delivery: the reader thread sends SIGINT to the main thread (also the loop
 thread); the handler asks asyncio which task's step the signal interrupted.
