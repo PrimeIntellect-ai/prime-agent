@@ -7,10 +7,10 @@ import type { AgentSession } from "../core/agent-session.js";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import {
 	clearOrphanProcessJournal,
-	isOrphanProcessIdentityCurrent,
 	killOrphanProcess,
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
+	shouldReapOrphanProcess,
 } from "../core/orphan-process-journal.js";
 import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../modes/rpc/jsonl.js";
@@ -298,9 +298,7 @@ export async function runOwnedSessionWorkerFrontend(
 			}
 		}
 		for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, workerPid)) {
-			// Pid-only records = kernel crashed before the start-id landed: best-effort
-			// kill; blast radius bounded by ownerPid scoping and the journal clear below.
-			if (orphan.processStartId !== undefined && !isOrphanProcessIdentityCurrent(orphan)) {
+			if (!shouldReapOrphanProcess(orphan)) {
 				continue;
 			}
 			killOrphanProcess(orphan.pid);

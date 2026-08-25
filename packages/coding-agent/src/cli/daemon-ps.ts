@@ -7,6 +7,7 @@ import {
 	isOrphanProcessIdentityCurrent,
 	killOrphanProcess,
 	readActiveOrphanProcesses,
+	shouldReapOrphanProcess,
 } from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
 import { DaemonClient } from "../modes/daemon/daemon-client.js";
@@ -942,9 +943,11 @@ async function forceStopTrackedWorkers(
 				failures.push(`could not read child process records for worker ${descriptor.workerId}: ${String(error)}`);
 			}
 			for (const orphan of orphans) {
-				// Pid-only = crashed before start-id landed; best-effort kill (stopTrackedProcess needs a startId).
+				// Pid-only records go through the platform predicate (stopTrackedProcess needs a startId).
 				if (orphan.processStartId === undefined) {
-					killOrphanProcess(orphan.pid);
+					if (shouldReapOrphanProcess(orphan)) {
+						killOrphanProcess(orphan.pid);
+					}
 					continue;
 				}
 				if (!isOrphanProcessIdentityCurrent(orphan)) {
