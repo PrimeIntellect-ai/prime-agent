@@ -364,6 +364,24 @@ export class IpythonKernelProvisioner {
 		return this.startedManager?.isRunning ?? false;
 	}
 
+	/**
+	 * Best-effort read of the kernel's current working directory, or undefined
+	 * when no kernel is running or the read fails. Never forces a kernel start;
+	 * callers use this to mirror a `cd`/`%cd` executed in the kernel.
+	 */
+	async getWorkingDirectory(signal?: AbortSignal): Promise<string | undefined> {
+		const m = this.startedManager;
+		if (!m) return undefined;
+		try {
+			const r = await m.execute("import os; print(os.getcwd())", { signal });
+			if (r.status !== "ok") return undefined;
+			const cwd = (r.stdout ?? "").trim();
+			return cwd || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/** Remove live variables above the snapshot's per-variable size limit. */
 	async pruneOversizedVariables(): Promise<string[] | null> {
 		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));

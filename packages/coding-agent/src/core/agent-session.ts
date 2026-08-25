@@ -3572,6 +3572,12 @@ export class AgentSession {
 			}
 		}
 
+		// Mirror a `%cd` in the IPython kernel onto the session cwd so the idle
+		// splash and footer show the directory the agent is actually operating in.
+		if (event.type === "agent_end") {
+			void this._reconcileWorkingDirectoryFromKernel();
+		}
+
 		if (event.type === "message_start" && startsAgentRun(event.message)) {
 			this._overflowRecovery = "idle";
 		}
@@ -8263,6 +8269,24 @@ export class AgentSession {
 				this._reconnectToAgent();
 			}
 		}
+	}
+
+	/**
+	 * Mirror a `cd`/`%cd` executed in the live IPython kernel onto the session's
+	 * working directory so snapshots, the header, and tool runtimes report the
+	 * effective directory instead of the launch one. Best-effort and never forces
+	 * a kernel start; returns true when the directory actually changed.
+	 */
+	private async _reconcileWorkingDirectoryFromKernel(): Promise<boolean> {
+		const provisioner = this._ipythonKernelProvisioner;
+		if (!provisioner) return false;
+		const liveCwd = await provisioner.getWorkingDirectory().catch(() => undefined);
+		if (!liveCwd) return false;
+		const normalized = resolve(liveCwd);
+		if (resolve(this.sessionManager.getCwd()) === normalized) return false;
+		this.sessionManager.setWorkingDirectory(normalized);
+		this._cwd = normalized;
+		return true;
 	}
 
 	abortBranchSummary(): void {

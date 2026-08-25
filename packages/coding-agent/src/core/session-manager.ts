@@ -1302,6 +1302,15 @@ export class SessionManager {
 		return this.cwd;
 	}
 
+	/**
+	 * Move the session's working directory, e.g. to mirror a `cd` executed inside
+	 * a long-lived tool runtime (IPython kernel or boxing shell). Later snapshots
+	 * and sidecars that read {@link getCwd} then report the live directory.
+	 */
+	setWorkingDirectory(cwd: string): void {
+		this.cwd = cwd;
+	}
+
 	getSessionDir(): string {
 		return this.sessionDir;
 	}
