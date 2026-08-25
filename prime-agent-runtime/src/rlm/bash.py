@@ -322,27 +322,27 @@ class BashHandle:
         if delivered is None and not self._done.is_set():
             self._drain_grace()
             self._finalize(exit_code)
-        self._reap_group()
+        delivered = self._reap_group()
         self._reaped = True
-        _record_journal(self._pid, active=False)
+        if delivered:
+            _record_journal(self._pid, active=False)
         with _live_lock:
             _live_handles.discard(self)
 
-    def _reap_group(self) -> None:
+    def _reap_group(self) -> bool:
         # Group liveness, not leader death, gates the inactive record: members
         # that outlive the leader would leak behind a stale journal anchor.
         if not _IS_POSIX:
             # No group anchor after the shell exits on Windows: best-effort
             # taskkill of the remembered tree before the handle is marked reaped.
-            _taskkill_tree(self._pid)
-            return
+            return _taskkill_tree(self._pid)
         try:
             os.killpg(self._pid, 0)
         except ProcessLookupError:
-            return
+            return True  # group already gone
         except PermissionError:
             pass
-        _signal_group(self._pid, signal.SIGKILL)
+        return _signal_group(self._pid, signal.SIGKILL)
 
     def _read_status(self) -> int | None:
         if self._status_read < 0:
@@ -505,12 +505,14 @@ class BashHandle:
                     except OSError:
                         pass
             self._status_read = self._wake_read = self._wake_write = -1
-            _signal_group(self._pid, signal.SIGKILL)
-        elif not _taskkill_tree(self._pid):
-            try:
-                self._proc.kill()
-            except OSError:
-                pass
+            delivered = _signal_group(self._pid, signal.SIGKILL)
+        else:
+            delivered = _taskkill_tree(self._pid)
+            if not delivered:
+                try:
+                    self._proc.kill()
+                except OSError:
+                    pass
         if self._proc.stdout is not None:
             self._proc.stdout.close()
         try:
@@ -520,7 +522,8 @@ class BashHandle:
         self._reaped = True
         with _live_lock:
             _live_handles.discard(self)
-        _record_journal(self._pid, active=False)
+        if delivered:
+            _record_journal(self._pid, active=False)
 
     def __await__(self) -> Generator[Any, None, BashResult]:
         # A handle awaited before any other API use is a one-shot command tied
@@ -602,11 +605,15 @@ def _child_env() -> dict[str, str]:
     return {**os.environ, "NO_COLOR": "1", "TERM": "dumb", "CLICOLOR": "0", "FORCE_COLOR": "0"}
 
 
-def _signal_group(pid: int, sig: int) -> None:
+def _signal_group(pid: int, sig: int) -> bool:
+    """True when the signal was delivered or the group is already gone."""
     try:
         os.killpg(pid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
+    except ProcessLookupError:
+        return True  # already dead: safe to mark the journal record inactive
+    except OSError:
+        return False  # not delivered: the record must stay active for the host reaper
+    return True
 
 
 def _system32(*parts: str) -> str:
@@ -725,13 +732,18 @@ def _kill_live_handles() -> None:
         handles = list(_live_handles)
     for handle in handles:
         if _IS_POSIX:
-            _signal_group(handle._pid, signal.SIGKILL)
-        elif not _taskkill_tree(handle._pid):
-            try:
-                handle._proc.kill()
-            except OSError:
-                pass
-        _record_journal(handle._pid, active=False)
+            delivered = _signal_group(handle._pid, signal.SIGKILL)
+        else:
+            delivered = _taskkill_tree(handle._pid)
+            if not delivered:
+                # Leader-only fallback cannot prove the tree died: never
+                # justifies an inactive record.
+                try:
+                    handle._proc.kill()
+                except OSError:
+                    pass
+        if delivered:
+            _record_journal(handle._pid, active=False)
 
 
 def _install_shutdown_hook() -> None:
