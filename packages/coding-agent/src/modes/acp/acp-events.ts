@@ -121,13 +121,7 @@ function ipythonRichOutput(result: unknown): PrimeAgentIpythonMeta | undefined {
 	return meta.attachments || meta.diffCount !== undefined ? meta : undefined;
 }
 
-/**
- * Correlates streaming bash output with its run.
- *
- * `bash_output` carries no `runId`, so the id of the most recent `bash_start` is
- * tracked here. Output would otherwise be attributed to a bare fallback id that
- * no `bash_start` ever used, leaving the chunks unattached to any tool call.
- */
+/** Correlates streamed bash output and assistant chunks with their owning run or message. */
 export interface AcpEventMappingState {
 	activeBashRunId?: string;
 	activeAssistantMessageId?: string;
