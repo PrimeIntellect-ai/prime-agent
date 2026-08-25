@@ -499,11 +499,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					runtimeKind: "subagent",
 				},
 			});
-			return session.acceptAgentMessagePrompt(message.content, {
-				customMessage: message,
-				queueIfBusy: true,
-				streamingBehavior: "steer",
-			});
+			return session.queueAgentMessagePrompt(message.content, "steer", message);
 		};
 
 		for (let index = 0; index < 20; index++) {
@@ -511,7 +507,12 @@ describe("AgentSession concurrent prompt guard", () => {
 		}
 		await expect(accept(20)).rejects.toThrow("Target session has too many pending messages");
 		expect(session.unfinishedActionCount).toBe(20);
-		await session.abort();
+		const snapshot = session.getSessionActionRecoverySnapshot();
+		session.dispose();
+
+		createSession();
+		await expect(session.restoreSessionActions(snapshot)).resolves.toBe(20);
+		expect(session.unfinishedActionCount).toBe(20);
 	});
 
 	it("retains an accepted agent message across direct compaction until resume", async () => {

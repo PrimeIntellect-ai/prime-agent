@@ -4580,6 +4580,7 @@ export class AgentSession {
 			options?.queueIfBusy === true &&
 			options.streamingBehavior
 		) {
+			options.admissionCommitted?.();
 			const queued = await this.queueAgentMessagePrompt(text, options.streamingBehavior, customMessage);
 			options.preflightResult?.(queued, queued);
 			return;
@@ -5564,7 +5565,11 @@ export class AgentSession {
 		if (this._sessionInputAdmissionPauses.size > 0) {
 			throw new Error("Cannot admit a session action while session input admission is paused.");
 		}
-		if (action.payload.kind === "turn" && isAgentSessionMessage(primaryDeliveryRecord(action).message)) {
+		if (
+			options.restore !== true &&
+			action.payload.kind === "turn" &&
+			isAgentSessionMessage(primaryDeliveryRecord(action).message)
+		) {
 			assertAgentMessageQueueCapacity(
 				this._actionStore.unfinishedActions().length,
 				DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,

@@ -1920,6 +1920,71 @@ describe("daemon mode helpers", () => {
 		expect(acceptAgentMessagePrompt.mock.calls[0]?.[1]).toMatchObject({ streamingBehavior: "steer" });
 	});
 
+	it("rejects an agent message when pause wins core admission", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const targetState = makeState("target");
+		let releaseAdmission: () => void = () => {};
+		const admissionGate = new Promise<void>((resolve) => {
+			releaseAdmission = resolve;
+		});
+		let markAdmissionStarted: () => void = () => {};
+		const admissionStarted = new Promise<void>((resolve) => {
+			markAdmissionStarted = resolve;
+		});
+		const acceptAgentMessagePrompt = vi.fn(
+			async (
+				_message: string,
+				options?: {
+					admissionCommitted?: () => void;
+					preflightResult?: (accepted: boolean) => void;
+				},
+			) => {
+				markAdmissionStarted();
+				await admissionGate;
+				options?.admissionCommitted?.();
+				options?.preflightResult?.(true);
+			},
+		);
+		targetState.runtime = {
+			...targetState.runtime,
+			cwd: "/tmp",
+			session: {
+				sessionId: "session-target",
+				sessionName: "Target",
+				acceptAgentMessagePrompt,
+				clearQueuedUserMessagesMatching: vi.fn(() => ({ steering: [], followUp: [] })),
+			},
+		} as never;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			sendAgentSessionMessage(options: {
+				targetSelector: string;
+				message: string;
+				origin: "agent" | "cli";
+			}): Promise<unknown>;
+		};
+		internals.sessions.set(targetState.activeSessionId, targetState);
+
+		const send = internals.sendAgentSessionMessage({
+			targetSelector: targetState.activeSessionId,
+			message: "pause race",
+			origin: "agent",
+		});
+		await admissionStarted;
+		await internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
+			type: "agent_messages_pause",
+		});
+		releaseAdmission();
+
+		await expect(send).rejects.toThrow("Agent messaging is paused");
+	});
+
 	it("ignores a legacy follow-up mode and always steers agent messages", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },

@@ -5651,15 +5651,6 @@ export class AgentDaemon {
 			target: this.createAgentSessionMessageEndpoint(targetState),
 		};
 		try {
-			if (this.agentMessagesPaused) {
-				throw new Error("Agent messaging is paused");
-			}
-			if (!this.sessions.has(targetState.activeSessionId) || this.closingSessions.has(targetState.activeSessionId)) {
-				throw new Error("Target session is closing before agent message delivery");
-			}
-			if (targetState.runtime.session.sessionId !== payload.target.sessionId) {
-				throw new Error("Target session changed before agent message delivery");
-			}
 			const { status } = await this.acceptAgentSessionMessage(targetState, payload);
 			return createAgentSessionMessageReceipt(payload, status);
 		} catch (error) {
@@ -5731,6 +5722,20 @@ export class AgentDaemon {
 			streamingBehavior: "steer",
 			queueIfBusy: true,
 			customMessage: message,
+			admissionCommitted: () => {
+				if (this.agentMessagesPaused) {
+					throw new Error("Agent messaging is paused");
+				}
+				if (
+					!this.sessions.has(targetState.activeSessionId) ||
+					this.closingSessions.has(targetState.activeSessionId)
+				) {
+					throw new Error("Target session is closing before agent message delivery");
+				}
+				if (targetState.runtime.session.sessionId !== payload.target.sessionId) {
+					throw new Error("Target session changed before agent message delivery");
+				}
+			},
 			preflightResult: (didSucceed, didQueue) => {
 				preflightFailed = !didSucceed;
 				preflightQueued = didSucceed && didQueue === true;
