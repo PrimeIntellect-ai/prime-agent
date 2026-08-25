@@ -1,0 +1,1 @@
+- Fixed the Amazon Bedrock provider failing with "Cannot find module" on first use because the release bundle never emitted its chunk.
