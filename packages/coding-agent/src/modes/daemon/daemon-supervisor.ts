@@ -274,7 +274,6 @@ interface ResidentWorker {
 	descriptorPath: string;
 	client?: DaemonWorkerClient;
 	heartbeatSnapshot?: AgentConnectionHeartbeat[];
-	heartbeatSnapshotStale?: boolean;
 	summaries: Map<string, SessionSummary>;
 	snapshotCache: Map<string, DaemonAttachResult>;
 	transcriptCaches: Map<string, SnapshotTranscriptCache>;
@@ -1870,15 +1869,14 @@ export class DaemonSupervisor {
 								if (response.success) {
 									const snapshot = heartbeatsFromResponse(response);
 									worker.heartbeatSnapshot = snapshot;
-									worker.heartbeatSnapshotStale = false;
 									return { heartbeats: snapshot };
 								}
 								this.log(`Could not list heartbeats from a worker: ${response.error}`);
-								if (worker.heartbeatSnapshot === undefined || worker.heartbeatSnapshotStale === true) {
+								if (worker.heartbeatSnapshot === undefined) {
 									return { response };
 								}
 							}
-							if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
+							if (worker.heartbeatSnapshot !== undefined) {
 								return { heartbeats: worker.heartbeatSnapshot };
 							}
 							const state =
@@ -4166,7 +4164,7 @@ export class DaemonSupervisor {
 			snapshotPurpose,
 		} = frame.header;
 		if (outboundType === "heartbeats_changed") {
-			worker.heartbeatSnapshotStale = true;
+			worker.heartbeatSnapshot = undefined;
 			this.broadcastHeartbeatsChanged();
 			return;
 		}

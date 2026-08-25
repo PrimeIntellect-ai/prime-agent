@@ -99,7 +99,6 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		const target = {
 			...worker("ready"),
 			heartbeatSnapshot: [{ job: { id: "heartbeat-1" } }],
-			heartbeatSnapshotStale: false,
 		};
 		supervisor.workers.set("target", target);
 		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
@@ -115,7 +114,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 			type: "heartbeats_list",
 		});
 
-		expect(target.heartbeatSnapshotStale).toBe(true);
+		expect(target.heartbeatSnapshot).toBeUndefined();
 		expect(response).toMatchObject({ success: false, error: "worker unavailable" });
 	});
 
