@@ -626,6 +626,18 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(display["data"]["text/plain"], "label")
             self.assertEqual(display["id"], f"emit{i}")
 
+    def test_emit_nan_payload_errors_in_cell_and_keeps_framing(self):
+        # NaN would serialize as non-JSON text and tear protocol framing;
+        # emit() must raise in the caller's cell instead.
+        code = "from rlm.repl import emit\nemit({'application/json': float('nan')})"
+        events = self.repl.execute("emit-nan", code)
+        self.assertEqual(one(events, "error")["ename"], "ValueError")
+        self.assertEqual(one(events, "done")["status"], "error")
+        self.assertIsNone(one(events, "display"))
+        follow = self.repl.execute("after-emit-nan", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+        self.assertEqual(one(follow, "done")["status"], "ok")
+
     def test_bash_integration(self):
         events = self.repl.execute(
             "sh1", "from rlm import bash\nresult = await bash('echo repl-bash')\nresult.output.strip()"
