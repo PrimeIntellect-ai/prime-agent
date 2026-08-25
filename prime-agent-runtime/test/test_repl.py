@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import tempfile
@@ -472,6 +473,20 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(events, "done")["status"], "error")
         follow = self.repl.execute("after-race", "5+5")
         self.assertEqual(one(follow, "result")["text"], "10")
+
+    def test_stale_target_from_finished_interrupt_ignores_later_sigint_on_reused_id(self):
+        # A targeted interrupt completes "reuse"; a later request reusing the id
+        # must not be cancelled by a delayed/external SIGINT that only matches
+        # the stale target of the finished request.
+        events = self._interrupt_after_running("reuse", "import time\nwhile True:\n    time.sleep(0.05)")
+        self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+        self.repl.send({"type": "execute", "id": "reuse", "code": "import time\ntime.sleep(1.5)\nprint('survived')"})
+        time.sleep(0.4)  # let the cell enter its sleep before the stray SIGINT
+        os.kill(self.repl.proc.pid, signal.SIGINT)
+        events = self.repl.until_done("reuse")
+        self.assertIsNone(one(events, "error"))
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertIn("survived", stream_text(events, "stdout"))
 
     def test_interrupt_during_slow_repr_cancels_finishing_request(self):
         # The cell body finishes instantly; the interrupt lands while the
