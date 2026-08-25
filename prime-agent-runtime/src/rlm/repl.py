@@ -346,12 +346,16 @@ def _consume_handoff_interrupt() -> bool:
 
 def _finish_locked(rid: str) -> None:
     """Drop a finished request; a parked untargeted interrupt survives while others are inflight."""
-    global _finishing_rid, _handoff_interrupted
+    global _finishing_rid, _handoff_interrupted, _sigint_target
     if _finishing_rid == rid:
         # An unconsumed handoff interrupt dies with its request (state requests
         # have no cancellable post-run work); it must never hit the next request.
         _finishing_rid = None
         _handoff_interrupted = False
+    if _sigint_target == rid:
+        # The target dies with its request: a later request reusing this id must
+        # not match a stale target when a delayed/external SIGINT arrives.
+        _sigint_target = None
     _inflight.discard(rid)
     _pending_interrupts["ids"].discard(rid)
     if not _inflight:
