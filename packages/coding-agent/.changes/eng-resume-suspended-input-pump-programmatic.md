@@ -1,0 +1,1 @@
+- Fixed queued agent messages and scheduled follow-ups starving for hours at an idle session after an abort suspended the input pump; only a typed prompt used to resume delivery.

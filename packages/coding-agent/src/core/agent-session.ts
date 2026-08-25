@@ -5541,6 +5541,22 @@ export class AgentSession {
 		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
+			// A coalesced re-fire (the normal shape for a re-firing scheduler, or a
+			// repeated agent message) is still evidence a producer wants delivery.
+			// Resume a pump suspended by an abort so the owning queued action can
+			// drain at idle; otherwise this early return swallows the re-fire and
+			// nothing ever restarts the pump (see #1000). A restart-hold suspension
+			// is left alone: queued inputs must survive into the restart manifest.
+			if (
+				!options.restore &&
+				options.wake !== false &&
+				!this.isStreaming &&
+				this._sessionInputPumpSuspended &&
+				!this._sessionInputSuspendedForUpdateRestart
+			) {
+				this._resumeSessionInputAdmission();
+				this._scheduleSessionInputPump();
+			}
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
 				this._rejectAgentMessage(
 					action.agentMessageId,
@@ -5575,6 +5591,23 @@ export class AgentSession {
 			if (action.payload.kind === "turn" && action.wake === "immediate") {
 				this._resumeSessionInputAdmission();
 			}
+			this._scheduleSessionInputPump();
+		}
+		if (
+			!options.restore &&
+			options.wake !== false &&
+			action.payload.kind === "turn" &&
+			!this.isStreaming &&
+			this._sessionInputPumpSuspended &&
+			!this._sessionInputSuspendedForUpdateRestart
+		) {
+			// Programmatic admissions (agent messages, scheduled follow-ups) must resume
+			// a pump suspended by an abort, matching what a typed prompt already does via
+			// _resumeSessionInputAdmission(); otherwise queued work starves at idle until
+			// a human types (see #1000). A restart-hold suspension is left alone: queued
+			// inputs must survive into the restart manifest instead of starting a turn
+			// during teardown.
+			this._resumeSessionInputAdmission();
 			this._scheduleSessionInputPump();
 		}
 		return { accepted: true, disposition, ticket: controller.ticket };
