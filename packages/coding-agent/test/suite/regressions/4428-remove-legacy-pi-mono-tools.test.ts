@@ -138,7 +138,7 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 			const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
 			expect(ipythonTool).toBeTruthy();
 
-			// Legacy %%bash cells fail as plain Python syntax errors instead of running.
+			// %%bash cells fail as plain Python syntax errors instead of running.
 			const rejected = await ipythonTool!.execute("tool-0", { code: "%%bash\necho body" });
 			expect(rejected.details).toMatchObject({ status: "error" });
 			const rejectedText = rejected.content
