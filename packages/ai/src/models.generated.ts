@@ -16215,7 +16215,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 204800,
-			maxTokens: 8192,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"minimax/minimax-m3": {
 			id: "minimax/minimax-m3",
