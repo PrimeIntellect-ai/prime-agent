@@ -366,7 +366,7 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 			return fallback;
 		} catch (fallbackError) {
 			throw new Error(
-				`couldn't create kernel venv directory at ${primary} or ${fallback}; set PRIME_AGENT_KERNEL_PYTHON to a python with ipykernel installed. ${errorMessage(fallbackError)}`,
+				`couldn't create kernel venv directory at ${primary} or ${fallback}; set PRIME_AGENT_KERNEL_PYTHON to a python with a current prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
 			);
 		}
 	}
@@ -848,8 +848,8 @@ async function kernelReady(
 function formatBootstrapFailure(error: unknown): Error {
 	return new Error(
 		`Failed to set up the Python kernel runtime. ${errorMessage(error)}\n` +
-			"First-time setup needs internet to install uv, Python, ipykernel, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. " +
-			"Set PRIME_AGENT_KERNEL_PYTHON to a Python with ipykernel, a current prime-agent-runtime, and default Python packages installed to skip auto-bootstrap.",
+			"First-time setup needs internet to install uv, Python, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. " +
+			"Set PRIME_AGENT_KERNEL_PYTHON to a Python with a current prime-agent-runtime and default Python packages installed (plus ipykernel when PRIME_AGENT_KERNEL=ipython) to skip auto-bootstrap.",
 	);
 }
 

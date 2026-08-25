@@ -181,7 +181,7 @@ const KERNEL_RESTART_NOTICE = [
 ].join("\n");
 
 function createAbortError(): Error {
-	return new Error("IPython execution aborted");
+	return new Error("Python execution aborted");
 }
 
 function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, onAbort?: () => void): Promise<T> {
@@ -559,7 +559,7 @@ export class IpythonKernelProvisioner {
 				});
 				if (bootstrap.status !== "ok") {
 					const details = [bootstrap.stderr, bootstrap.error?.traceback.join("\n")].filter(Boolean).join("\n");
-					throw new Error(`Failed to initialize rlm runtime in the IPython kernel:\n${details}`);
+					throw new Error(`Failed to initialize rlm runtime in the Python kernel:\n${details}`);
 				}
 			} catch (error) {
 				// Never leak the kernel's ZMQ sockets / temp dir if startup fails after spawn.

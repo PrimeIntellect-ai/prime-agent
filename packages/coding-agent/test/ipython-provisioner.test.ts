@@ -167,7 +167,7 @@ describe("IpythonKernelProvisioner", () => {
 
 		const started = provisioner.ensure(undefined, controller.signal);
 		controller.abort();
-		await expect(started).rejects.toThrow("IPython execution aborted");
+		await expect(started).rejects.toThrow("Python execution aborted");
 		release();
 		await new Promise((r) => setTimeout(r, 50));
 
@@ -215,7 +215,7 @@ describe("IpythonKernelProvisioner", () => {
 		const controller = new AbortController();
 		controller.abort();
 
-		await expect(provisioner.ensure(undefined, controller.signal)).rejects.toThrow("IPython execution aborted");
+		await expect(provisioner.ensure(undefined, controller.signal)).rejects.toThrow("Python execution aborted");
 		expect(dispose).not.toHaveBeenCalled();
 		expect(provisioner.manager).toBe(manager);
 	});
