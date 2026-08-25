@@ -51,8 +51,6 @@ vi.mock("openai", () => {
 	return { default: FakeOpenAI };
 });
 
-// The generated catalog no longer mirrors Workers AI models under
-// cloudflare-ai-gateway; build the /compat-route model from the Workers AI entry.
 const cloudflareGatewayCompatModel: Model<"openai-completions"> = {
 	...getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6"),
 	provider: "cloudflare-ai-gateway",

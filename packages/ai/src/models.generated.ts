@@ -11159,9 +11159,9 @@ export const MODELS = {
 			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text", "image"],
 			cost: {
-				input: 0.44,
-				output: 1.32,
-				cacheRead: 0.014,
+				input: 0.22,
+				output: 0.66,
+				cacheRead: 0.007,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
@@ -16364,7 +16364,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 8192,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"moonshotai/kimi-k2.7-code": {
 			id: "moonshotai/kimi-k2.7-code",
