@@ -3,7 +3,11 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, unlinkSync } 
 import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
-import { isOrphanProcessIdentityCurrent, readActiveOrphanProcesses } from "../core/orphan-process-journal.js";
+import {
+	isOrphanProcessIdentityCurrent,
+	killOrphanProcess,
+	readActiveOrphanProcesses,
+} from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
 import { DaemonClient } from "../modes/daemon/daemon-client.js";
 import {
@@ -938,6 +942,11 @@ async function forceStopTrackedWorkers(
 				failures.push(`could not read child process records for worker ${descriptor.workerId}: ${String(error)}`);
 			}
 			for (const orphan of orphans) {
+				// Pid-only = crashed before start-id landed; best-effort kill (stopTrackedProcess needs a startId).
+				if (orphan.processStartId === undefined) {
+					killOrphanProcess(orphan.pid);
+					continue;
+				}
 				if (!isOrphanProcessIdentityCurrent(orphan)) {
 					continue;
 				}
