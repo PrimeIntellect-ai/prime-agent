@@ -54,6 +54,7 @@ describe("ACP session event mapping", () => {
 			messageId: "prime-agent-assistant-1",
 		});
 		expect(acpUpdatesForSessionEvent(end, state)).toEqual([]);
+		expect(state.activeAssistantMessageId).toBeUndefined();
 
 		expect(acpUpdatesForSessionEvent(start, state)).toEqual([]);
 		expect(acpUpdatesForSessionEvent(assistantDelta("text_delta", "next"), state)[0]).toMatchObject({
