@@ -629,8 +629,10 @@ def _snapshot_state(
             ns.pop(name, None)
     finally:
         signal.signal(signal.SIGINT, previous)
-        if parked:
-            signal.raise_signal(signal.SIGINT)
+        # The parked SIGINT is consumed, not re-raised: with the manifest committed and
+        # the namespace pruned, the destructive snapshot has succeeded, and re-raising
+        # would misreport it as failed and risk the host discarding the only copy of
+        # the pruned variables. The interrupt targeted this now-complete request.
     return {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
 
 
