@@ -10762,7 +10762,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"arcee-ai/virtuoso-large": {
 			id: "arcee-ai/virtuoso-large",
@@ -10853,7 +10853,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"bytedance-seed/seed-2.0-code": {
 			id: "bytedance-seed/seed-2.0-code",
@@ -10994,7 +10994,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 163840,
-			maxTokens: 147456,
+			maxTokens: 163840,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-chat-v3.1": {
 			id: "deepseek/deepseek-chat-v3.1",
@@ -11013,7 +11013,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 163840,
-			maxTokens: 144900,
+			maxTokens: 161000,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-r1": {
 			id: "deepseek/deepseek-r1",
@@ -11089,7 +11089,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 163840,
-			maxTokens: 147456,
+			maxTokens: 163840,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-v3.2-exp": {
 			id: "deepseek/deepseek-v3.2-exp",
@@ -11121,9 +11121,9 @@ export const MODELS = {
 			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
-				input: 0.08259999999999999,
-				output: 0.16519999999999999,
-				cacheRead: 0.01652,
+				input: 0.0854,
+				output: 0.1708,
+				cacheRead: 0.01708,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
@@ -11140,9 +11140,9 @@ export const MODELS = {
 			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
-				input: 0.061599999999999995,
-				output: 0.12319999999999999,
-				cacheRead: 0.012320000000000001,
+				input: 0.14,
+				output: 0.28,
+				cacheRead: 0.028,
 				cacheWrite: 0,
 			},
 			contextWindow: 1310720,
@@ -11178,9 +11178,9 @@ export const MODELS = {
 			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
-				input: 0.572808,
-				output: 1.145616,
-				cacheRead: 0.047734000000000006,
+				input: 0.5790719999999999,
+				output: 1.1581439999999998,
+				cacheRead: 0.048256,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
@@ -11203,7 +11203,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 943717,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"dots-studio/dots-3-note-preview:free": {
 			id: "dots-studio/dots-3-note-preview:free",
@@ -11222,7 +11222,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 512000,
-			maxTokens: 460800,
+			maxTokens: 512000,
 		} satisfies Model<"openai-completions">,
 		"google/gemini-2.5-flash": {
 			id: "google/gemini-2.5-flash",
@@ -11532,7 +11532,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"google/gemma-4-26b-a4b-it": {
 			id: "google/gemma-4-26b-a4b-it",
@@ -11589,7 +11589,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"google/gemma-4-31b-it:free": {
 			id: "google/gemma-4-31b-it:free",
@@ -11625,7 +11625,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"inception/mercury-2": {
 			id: "inception/mercury-2",
@@ -11785,7 +11785,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"meta-llama/llama-3.3-70b-instruct": {
 			id: "meta-llama/llama-3.3-70b-instruct",
@@ -11854,7 +11854,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"meta/muse-spark-1.1": {
 			id: "meta/muse-spark-1.1",
@@ -11872,7 +11872,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 943718,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"meta/muse-spark-1.2": {
 			id: "meta/muse-spark-1.2",
@@ -11890,7 +11890,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 943718,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"meta/muse-spark-1.2-contributor": {
 			id: "meta/muse-spark-1.2-contributor",
@@ -11908,7 +11908,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 943718,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"minimax/minimax-m1": {
 			id: "minimax/minimax-m1",
@@ -12003,7 +12003,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 204800,
-			maxTokens: 176947,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"minimax/minimax-m2.7:free": {
 			id: "minimax/minimax-m2.7:free",
@@ -12022,7 +12022,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 196608,
-			maxTokens: 176947,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"minimax/minimax-m3": {
 			id: "minimax/minimax-m3",
@@ -12060,7 +12060,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 943718,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/codestral-2508": {
 			id: "mistralai/codestral-2508",
@@ -12077,7 +12077,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 256000,
-			maxTokens: 204800,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/devstral-2512": {
 			id: "mistralai/devstral-2512",
@@ -12094,7 +12094,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/ministral-14b-2512": {
 			id: "mistralai/ministral-14b-2512",
@@ -12111,7 +12111,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/ministral-3b-2512": {
 			id: "mistralai/ministral-3b-2512",
@@ -12128,7 +12128,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 104857,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/ministral-8b-2512": {
 			id: "mistralai/ministral-8b-2512",
@@ -12145,7 +12145,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-large": {
 			id: "mistralai/mistral-large",
@@ -12162,7 +12162,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 128000,
-			maxTokens: 102400,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-large-2407": {
 			id: "mistralai/mistral-large-2407",
@@ -12179,7 +12179,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 104857,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-large-2512": {
 			id: "mistralai/mistral-large-2512",
@@ -12196,7 +12196,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-medium-3": {
 			id: "mistralai/mistral-medium-3",
@@ -12213,7 +12213,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 104857,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-medium-3-5": {
 			id: "mistralai/mistral-medium-3-5",
@@ -12231,7 +12231,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-medium-3.1": {
 			id: "mistralai/mistral-medium-3.1",
@@ -12248,7 +12248,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 104857,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-nemo": {
 			id: "mistralai/mistral-nemo",
@@ -12282,7 +12282,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 32768,
-			maxTokens: 26214,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-small-2603": {
 			id: "mistralai/mistral-small-2603",
@@ -12300,7 +12300,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-small-3.2-24b-instruct": {
 			id: "mistralai/mistral-small-3.2-24b-instruct",
@@ -12334,7 +12334,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 65536,
-			maxTokens: 52428,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"mistralai/voxtral-small-24b-2507": {
 			id: "mistralai/voxtral-small-24b-2507",
@@ -12351,7 +12351,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 32000,
-			maxTokens: 25600,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"moonshotai/kimi-k2": {
 			id: "moonshotai/kimi-k2",
@@ -12442,7 +12442,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"moonshotai/kimi-k2.7-code": {
 			id: "moonshotai/kimi-k2.7-code",
@@ -12461,7 +12461,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"moonshotai/kimi-k3": {
 			id: "moonshotai/kimi-k3",
@@ -12498,7 +12498,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"nex-agi/nex-n2-pro": {
 			id: "nex-agi/nex-n2-pro",
@@ -12517,7 +12517,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-nano-30b-a3b": {
 			id: "nvidia/nemotron-3-nano-30b-a3b",
@@ -12536,7 +12536,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
 			id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -12591,7 +12591,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-ultra-550b-a55b": {
 			id: "nvidia/nemotron-3-ultra-550b-a55b",
@@ -12609,7 +12609,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 512288,
-			maxTokens: 461059,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-ultra-550b-a55b:free": {
 			id: "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -12699,7 +12699,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 4095,
-			maxTokens: 3685,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"openai/gpt-3.5-turbo-16k": {
 			id: "openai/gpt-3.5-turbo-16k",
@@ -13439,7 +13439,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"openai/gpt-oss-20b": {
 			id: "openai/gpt-oss-20b",
@@ -13457,7 +13457,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"openai/gpt-oss-safeguard-20b": {
 			id: "openai/gpt-oss-safeguard-20b",
@@ -13768,7 +13768,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 32768,
-			maxTokens: 29491,
+			maxTokens: 32768,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen-plus": {
 			id: "qwen/qwen-plus",
@@ -13794,6 +13794,25 @@ export const MODELS = {
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: false,
+			input: ["text"],
+			cost: {
+				input: 0.26,
+				output: 0.78,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 32768,
+		} satisfies Model<"openai-completions">,
+		"qwen/qwen-plus-2025-07-28:thinking": {
+			id: "qwen/qwen-plus-2025-07-28:thinking",
+			name: "Qwen: Qwen Plus 0728 (thinking)",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: {"supportsReasoningEffort":false},
+			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":null,"max":null},
 			input: ["text"],
 			cost: {
 				input: 0.26,
@@ -13876,7 +13895,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3-30b-a3b": {
 			id: "qwen/qwen3-30b-a3b",
@@ -14003,7 +14022,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3-coder-flash": {
 			id: "qwen/qwen3-coder-flash",
@@ -14037,7 +14056,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3-coder-plus": {
 			id: "qwen/qwen3-coder-plus",
@@ -14107,7 +14126,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3-next-80b-a3b-thinking": {
 			id: "qwen/qwen3-next-80b-a3b-thinking",
@@ -14270,7 +14289,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.5-27b": {
 			id: "qwen/qwen3.5-27b",
@@ -14308,7 +14327,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.5-397b-a17b": {
 			id: "qwen/qwen3.5-397b-a17b",
@@ -14327,7 +14346,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.5-9b": {
 			id: "qwen/qwen3.5-9b",
@@ -14346,7 +14365,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.5-flash-02-23": {
 			id: "qwen/qwen3.5-flash-02-23",
@@ -14441,7 +14460,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.6-flash": {
 			id: "qwen/qwen3.6-flash",
@@ -14626,7 +14645,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 16384,
-			maxTokens: 14745,
+			maxTokens: 16384,
 		} satisfies Model<"openai-completions">,
 		"relace/relace-search": {
 			id: "relace/relace-search",
@@ -14751,7 +14770,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 230400,
+			maxTokens: 256000,
 		} satisfies Model<"openai-completions">,
 		"tencent/hy3": {
 			id: "tencent/hy3",
@@ -14787,7 +14806,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"thedrummer/unslopnemo-12b": {
 			id: "thedrummer/unslopnemo-12b",
@@ -14804,7 +14823,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1024000,
-			maxTokens: 26214,
+			maxTokens: 32768,
 		} satisfies Model<"openai-completions">,
 		"thinkingmachines/inkling": {
 			id: "thinkingmachines/inkling",
@@ -14895,7 +14914,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"upstage/solar-pro4": {
 			id: "upstage/solar-pro4",
@@ -14933,7 +14952,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 2000000,
-			maxTokens: 1800000,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"x-ai/grok-4.3": {
 			id: "x-ai/grok-4.3",
@@ -14951,7 +14970,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 900000,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"x-ai/grok-4.5": {
 			id: "x-ai/grok-4.5",
@@ -14969,7 +14988,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 500000,
-			maxTokens: 450000,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"x-ai/grok-4.6": {
 			id: "x-ai/grok-4.6",
@@ -14987,7 +15006,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 500000,
-			maxTokens: 450000,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"x-ai/grok-build-0.1": {
 			id: "x-ai/grok-build-0.1",
@@ -15006,7 +15025,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 256000,
-			maxTokens: 230400,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"xiaomi/mimo-v2.5": {
 			id: "xiaomi/mimo-v2.5",
@@ -15234,7 +15253,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 204800,
-			maxTokens: 182476,
+			maxTokens: 202752,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5.2": {
 			id: "z-ai/glm-5.2",
@@ -15270,7 +15289,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 256000,
-			maxTokens: 230400,
+			maxTokens: 256000,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5.3": {
 			id: "z-ai/glm-5.3",
@@ -15399,7 +15418,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1310720,
-			maxTokens: 943718,
+			maxTokens: 1048576,
 		} satisfies Model<"openai-completions">,
 		"~google/gemini-flash-latest": {
 			id: "~google/gemini-flash-latest",
@@ -15453,7 +15472,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 943718,
+			maxTokens: 1048576,
 		} satisfies Model<"openai-completions">,
 		"~openai/gpt-latest": {
 			id: "~openai/gpt-latest",
@@ -15507,7 +15526,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 500000,
-			maxTokens: 450000,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"~z-ai/glm-latest": {
 			id: "~z-ai/glm-latest",
@@ -15799,7 +15818,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 163840,
-			maxTokens: 147456,
+			maxTokens: 163840,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-chat-v3.1": {
 			id: "deepseek/deepseek-chat-v3.1",
@@ -15818,7 +15837,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 163840,
-			maxTokens: 144900,
+			maxTokens: 161000,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-v3.1-terminus": {
 			id: "deepseek/deepseek-v3.1-terminus",
@@ -15856,7 +15875,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 163840,
-			maxTokens: 147456,
+			maxTokens: 163840,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-v3.2-exp": {
@@ -16086,7 +16105,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"meta-llama/Llama-3.2-1B-Instruct": {
 			id: "meta-llama/Llama-3.2-1B-Instruct",
@@ -16104,7 +16123,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 60000,
-			maxTokens: 54000,
+			maxTokens: 60000,
 		} satisfies Model<"openai-completions">,
 		"meta-llama/Llama-3.2-3B-Instruct": {
 			id: "meta-llama/Llama-3.2-3B-Instruct",
@@ -16234,7 +16253,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 8192,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mistral-nemo": {
 			id: "mistralai/mistral-nemo",
@@ -16271,7 +16290,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 209715,
+			maxTokens: 8192,
 		} satisfies Model<"openai-completions">,
 		"mistralai/mixtral-8x22b-instruct": {
 			id: "mistralai/mixtral-8x22b-instruct",
@@ -16289,7 +16308,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 65536,
-			maxTokens: 52428,
+			maxTokens: 8192,
 		} satisfies Model<"openai-completions">,
 		"moonshotai/kimi-k2-0905": {
 			id: "moonshotai/kimi-k2-0905",
@@ -16364,7 +16383,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"moonshotai/kimi-k3": {
@@ -16404,7 +16423,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"nvidia/nemotron-3-super-120b-a12b": {
@@ -16919,7 +16938,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
-			maxTokens: 117964,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"openai/gpt-oss-20b": {
 			id: "openai/gpt-oss-20b",
@@ -17068,7 +17087,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3-max": {
@@ -17181,7 +17200,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.5-397b-a17b": {
 			id: "qwen/qwen3.5-397b-a17b",
@@ -17238,7 +17257,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 262144,
-			maxTokens: 235929,
+			maxTokens: 262144,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.7-flash": {
 			id: "qwen/qwen3.7-flash",
@@ -17489,7 +17508,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 204800,
-			maxTokens: 182476,
+			maxTokens: 202752,
 			featured: true,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5.2": {
