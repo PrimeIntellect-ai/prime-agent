@@ -8,6 +8,7 @@ import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import {
 	clearOrphanProcessJournal,
 	isOrphanProcessIdentityCurrent,
+	killOrphanProcess,
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
 } from "../core/orphan-process-journal.js";
@@ -297,19 +298,12 @@ export async function runOwnedSessionWorkerFrontend(
 			}
 		}
 		for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, workerPid)) {
-			if (!isOrphanProcessIdentityCurrent(orphan)) {
+			// Pid-only records = kernel crashed before the start-id landed: best-effort
+			// kill; blast radius bounded by ownerPid scoping and the journal clear below.
+			if (orphan.processStartId !== undefined && !isOrphanProcessIdentityCurrent(orphan)) {
 				continue;
 			}
-			const { pid } = orphan;
-			try {
-				process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
-			} catch {
-				try {
-					process.kill(pid, "SIGKILL");
-				} catch {
-					// The detached resource may already have exited.
-				}
-			}
+			killOrphanProcess(orphan.pid);
 		}
 		clearOrphanProcessJournal(orphanProcessJournalPath);
 	};
