@@ -562,10 +562,15 @@ def _snapshot_state(
     skipped: list[dict[str, str]] = []
     oversized: list[str] = []
     total = 0
+    missing = object()
     for name in list(ns.keys()):
         if name.startswith("_") or name in _ALWAYS_SKIP:
             continue
-        value = ns[name]
+        value = ns.get(name, missing)
+        if value is missing:
+            # A background thread deleted the name after the key listing.
+            skipped.append({"name": name, "reason": "deleted during snapshot"})
+            continue
         remaining = max_bytes - total
         limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)
         buffer = _SnapshotBuffer(limit)

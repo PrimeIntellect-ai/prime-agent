@@ -1128,6 +1128,31 @@ class SnapshotTempCleanupTest(unittest.TestCase):
             self.assertFalse(os.path.exists(path + ".tmp"))
             self.assertFalse(os.path.exists(path))
 
+    def test_name_deleted_by_background_thread_mid_snapshot_is_skipped(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm.repl import _snapshot_state
+
+        class RacyNs(dict):
+            # Simulates a background thread deleting "gone" between the key
+            # listing and the per-name lookup.
+            def keys(self):
+                yield from ("gone", "kept")
+
+        ns = RacyNs(kept=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _snapshot_state(
+                ns,
+                os.path.join(tmp, "kernel-state.dill"),
+                os.path.join(tmp, "manifest.json"),
+                max_bytes=1 << 20,
+                max_variable_bytes=1 << 20,
+                prune_oversized=False,
+            )
+        self.assertNotIn("error", result)
+        self.assertEqual(result["saved"], ["kept"])
+        self.assertEqual(result["skipped"], [{"name": "gone", "reason": "deleted during snapshot"}])
+
 
 class OwnerWatchdogTest(unittest.TestCase):
     def test_owner_watchdog_exits_busy_runtime(self):
