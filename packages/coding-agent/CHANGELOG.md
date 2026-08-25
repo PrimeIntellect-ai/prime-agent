@@ -16,6 +16,7 @@
 - Fixed an interrupt landing mid-snapshot leaving prune deletions half-applied: once the snapshot manifest is committed, SIGINT is deferred until every oversized name is removed, so the namespace always matches the on-disk snapshot.
 - Hardened bash(): cancelling `await bash(cmd)` now kills the command's process group (background handles are unaffected), Windows helper binaries resolve via absolute System32 paths, kill() retries taskkill for already-reaped Windows trees, and orphan-journal enrollment fails closed when configured.
 - Fixed cross-cell output misattribution in the REPL runtime: stream events are attributed at write time via context, and raw fd or user-thread output is emitted with a null id instead of being credited to whichever cell is running.
+- Hardened bash() further: the host now injects an absolute default shell into the kernel (no PATH lookup; /bin/bash else /bin/sh on POSIX), macOS start-id lookup uses /bin/ps, Windows journal records are written pid-first so a kernel crash during the start-id query cannot leak the child (crash reapers best-effort-kill such records), and Windows worker-teardown orphan kills go through hardened taskkill /T.
 
 ## [0.8.0] - 2026-08-21
 

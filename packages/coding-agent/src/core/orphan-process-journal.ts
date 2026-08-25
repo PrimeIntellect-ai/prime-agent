@@ -19,7 +19,8 @@ interface OrphanProcessRecord {
 export interface ActiveOrphanProcess {
 	pid: number;
 	kernelPid?: number;
-	processStartId: string;
+	/** Missing on pid-only records written before the start-id query completed (Windows pre-enrollment). */
+	processStartId?: string;
 }
 
 export function recordOrphanProcessState(pid: number, active: boolean): void {
@@ -80,20 +81,23 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 			// A crash can truncate only the final append.
 		}
 	}
+	// Pid-only actives (no processStartId) come from the Windows pre-enrollment
+	// window; the enriched record normally supersedes them within seconds.
 	return [...latest.values()]
 		.filter(
-			(record): record is OrphanProcessRecord & { processStartId: string } =>
-				record.active && typeof record.processStartId === "string",
+			(record) =>
+				record.active && (record.processStartId === undefined || typeof record.processStartId === "string"),
 		)
 		.map((record) => ({
 			pid: record.pid,
 			...(Number.isInteger(record.kernelPid) ? { kernelPid: record.kernelPid } : {}),
-			processStartId: record.processStartId,
+			...(typeof record.processStartId === "string" ? { processStartId: record.processStartId } : {}),
 		}));
 }
 
 export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boolean {
-	return getProcessStartId(orphan.pid) === orphan.processStartId;
+	// Pid-only records can never claim identity (undefined === undefined must not match).
+	return orphan.processStartId !== undefined && getProcessStartId(orphan.pid) === orphan.processStartId;
 }
 
 export function clearOrphanProcessJournal(path: string): void {
@@ -116,39 +120,45 @@ export function reapKernelOrphanProcesses(kernelPid: number): void {
 		if (orphan.kernelPid !== kernelPid || orphan.pid === kernelPid) {
 			continue;
 		}
-		if (!isOrphanProcessIdentityCurrent(orphan)) {
+		// Pid-only records = kernel crashed before the start-id landed: best-effort
+		// kill; blast radius bounded by ownerPid + kernelPid scoping.
+		if (orphan.processStartId !== undefined && !isOrphanProcessIdentityCurrent(orphan)) {
 			continue;
 		}
-		let signaled = false;
-		if (process.platform === "win32") {
-			// In-kernel bash() kill paths use taskkill /T; the reaper must kill the same tree, not just the shell pid.
-			// Absolute System32 path + NoDefaultCurrentDirectoryInExePath: a bare name could resolve a planted CWD taskkill.exe.
-			const result = spawnSync(
-				win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
-				["/F", "/T", "/PID", String(orphan.pid)],
-				{
-					stdio: "ignore",
-					timeout: 10_000,
-					env: { ...process.env, NoDefaultCurrentDirectoryInExePath: "1" },
-				},
-			);
-			signaled = result.status === 0;
-		} else {
-			try {
-				process.kill(-orphan.pid, "SIGKILL");
-				signaled = true;
-			} catch {
-				try {
-					process.kill(orphan.pid, "SIGKILL");
-					signaled = true;
-				} catch {
-					// The bash child may already have exited.
-				}
-			}
-		}
 		// Inactive only after a delivered signal; a stale record is neutralized by the startId check.
-		if (signaled) {
+		if (killOrphanProcess(orphan.pid)) {
 			recordOrphanProcessState(orphan.pid, false);
 		}
 	}
+}
+
+// Hardened cross-platform tree kill for journaled orphans: absolute System32
+// taskkill /T on win32 (a bare name could resolve a planted CWD taskkill.exe),
+// process-group then pid SIGKILL elsewhere.
+export function killOrphanProcess(pid: number): boolean {
+	if (process.platform === "win32") {
+		// In-kernel bash() kill paths use taskkill /T; the reaper must kill the same tree, not just the shell pid.
+		const result = spawnSync(
+			win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
+			["/F", "/T", "/PID", String(pid)],
+			{
+				stdio: "ignore",
+				timeout: 10_000,
+				env: { ...process.env, NoDefaultCurrentDirectoryInExePath: "1" },
+			},
+		);
+		return result.status === 0;
+	}
+	try {
+		process.kill(-pid, "SIGKILL");
+		return true;
+	} catch {
+		try {
+			process.kill(pid, "SIGKILL");
+			return true;
+		} catch {
+			// The orphan may already have exited.
+		}
+	}
+	return false;
 }
