@@ -505,10 +505,15 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             os.killpg(pids[0], 0)
 
     async def test_windows_without_bash_raises_teaching_error(self):
+        # Windows must raise without consulting PATH: a which() hit would be
+        # the same repo-controlled-PATH hole the host-side resolution closed.
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.shutil, "which", return_value=None):
+            with mock.patch.object(
+                bash_module.shutil, "which", return_value=r"C:\evil\bash.exe"
+            ) as which:
                 with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
                     bash_module._shell()
+                which.assert_not_called()
 
     async def test_pump_paused_between_read_and_commit_does_not_lose_output(self):
         # Reviewer repro: the chunk is out of the pipe (FIONREAD 0) but not yet

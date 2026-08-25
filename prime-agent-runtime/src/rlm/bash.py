@@ -598,16 +598,17 @@ def _shell() -> str:
         if not os.path.isabs(override):
             raise ValueError("PRIME_AGENT_BASH_SHELL must be an absolute path")
         return override
-    # PATH fallback only serves bare/standalone runtime use: the host always
-    # injects PRIME_AGENT_BASH_SHELL (an absolute path) when a shell exists.
-    shell = shutil.which("bash")
-    if shell is None and not _IS_POSIX:
-        # cmd.exe cannot run the `-c <script>` invocation, so fail with a
-        # teaching error instead of a confusing Popen failure on /bin/sh.
+    if not _IS_POSIX:
+        # Never consult PATH on Windows: a repo-controlled PATH could supply
+        # the shell. The host injects PRIME_AGENT_BASH_SHELL when one exists.
         raise RuntimeError(
-            "bash() needs a bash executable on PATH on Windows (e.g. Git Bash); "
-            "or set PRIME_AGENT_BASH_SHELL to the absolute path of a POSIX shell"
+            "bash() needs PRIME_AGENT_BASH_SHELL set to the absolute path of a "
+            "POSIX shell on Windows (e.g. install Git Bash in its default "
+            "location so the host injects it)"
         )
+    # PATH fallback only serves bare/standalone POSIX runtime use: the host
+    # always injects PRIME_AGENT_BASH_SHELL (an absolute path) when a shell exists.
+    shell = shutil.which("bash")
     return shell or "/bin/sh"
 
 
