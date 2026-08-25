@@ -1075,7 +1075,7 @@ class FinishRequestTest(unittest.TestCase):
 class SnapshotPruneShieldTest(unittest.TestCase):
     """The prune-deletion window must not be split by a SIGINT-raised KeyboardInterrupt."""
 
-    def test_sigint_mid_prune_defers_until_all_deletions_ran(self):
+    def test_sigint_mid_prune_is_consumed_after_all_deletions_ran(self):
         import signal
 
         sys.path.insert(0, SRC)
@@ -1094,19 +1094,21 @@ class SnapshotPruneShieldTest(unittest.TestCase):
 
         ns = SigintOnFirstPop(big1=b"x" * 100_000, big2=b"y" * 100_000)
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(KeyboardInterrupt):
-                _snapshot_state(
-                    ns,
-                    os.path.join(tmp, "kernel-state.dill"),
-                    os.path.join(tmp, "kernel-state.json"),
-                    max_bytes=1 << 20,
-                    max_variable_bytes=1024,
-                    prune_oversized=True,
-                )
-        # Both deletions ran before the interrupt was re-delivered: ns matches the manifest.
+            result = _snapshot_state(
+                ns,
+                os.path.join(tmp, "kernel-state.dill"),
+                os.path.join(tmp, "kernel-state.json"),
+                max_bytes=1 << 20,
+                max_variable_bytes=1024,
+                prune_oversized=True,
+            )
+        # The parked SIGINT is consumed: the committed snapshot reports success.
+        self.assertEqual(result["pruned"], ["big1", "big2"])
+        self.assertNotIn("error", result)
+        # Both deletions ran: ns matches the manifest.
         self.assertEqual(dict(ns), {})
 
-    def test_sigint_after_manifest_commit_before_deletions_defers(self):
+    def test_sigint_after_manifest_commit_before_deletions_is_consumed(self):
         import signal
         from unittest import mock
 
@@ -1125,15 +1127,18 @@ class SnapshotPruneShieldTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = os.path.join(tmp, "kernel-state.json")
             with mock.patch("json.dump", dump_then_sigint):
-                with self.assertRaises(KeyboardInterrupt):
-                    _snapshot_state(
-                        ns,
-                        os.path.join(tmp, "kernel-state.dill"),
-                        manifest_path,
-                        max_bytes=1 << 20,
-                        max_variable_bytes=1024,
-                        prune_oversized=True,
-                    )
+                result = _snapshot_state(
+                    ns,
+                    os.path.join(tmp, "kernel-state.dill"),
+                    manifest_path,
+                    max_bytes=1 << 20,
+                    max_variable_bytes=1024,
+                    prune_oversized=True,
+                )
+            # The parked SIGINT is consumed: the committed destructive snapshot
+            # reports success instead of surfacing KeyboardInterrupt.
+            self.assertEqual(result["pruned"], ["big1", "big2"])
+            self.assertNotIn("error", result)
             # The deletions still ran: ns is consistent with the committed manifest.
             self.assertEqual(ns, {})
             with open(manifest_path) as fh:
