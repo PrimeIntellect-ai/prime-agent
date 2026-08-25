@@ -69,39 +69,51 @@ describe("daemon mode helpers", () => {
 		expect(client.id).toBe("public-client");
 	});
 
-	it("waits for bash_end when aborting Bash during close", async () => {
-		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
-			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
-			createRuntime: vi.fn(),
-		});
-		const state = makeState("active");
-		let listener: ((event: { type: string }) => void) | undefined;
-		const unsubscribe = vi.fn();
-		const subscribe = vi.fn((next: (event: { type: string }) => void) => {
-			listener = next;
-			return unsubscribe;
-		});
-		const abortBash = vi.fn();
-		state.runtime = {
-			...state.runtime,
-			session: { isBashRunning: true, subscribe, abortBash },
-		} as never;
-		const abortBashForClose = (
-			daemon as unknown as { abortBashForClose(state: ActiveSessionState): Promise<void> }
-		).abortBashForClose.bind(daemon);
+	it("waits for tracked Bash completion with a bounded close deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				createRuntime: vi.fn(),
+			});
+			const abortBashForClose = (
+				daemon as unknown as { abortBashForClose(state: ActiveSessionState): Promise<void> }
+			).abortBashForClose.bind(daemon);
 
-		let settled = false;
-		const closing = abortBashForClose(state).then(() => {
-			settled = true;
-		});
-		listener?.({ type: "bash_output" });
-		await Promise.resolve();
-		expect(settled).toBe(false);
-		listener?.({ type: "bash_end" });
-		await closing;
+			let resolveBash!: () => void;
+			const state = makeState("active");
+			const abortBash = vi.fn();
+			state.runtime = {
+				...state.runtime,
+				session: { isBashRunning: true, abortBash },
+			} as never;
+			state.inFlightBash = new Promise<void>((resolve) => {
+				resolveBash = resolve;
+			});
 
-		expect(abortBash).toHaveBeenCalledOnce();
-		expect(unsubscribe).toHaveBeenCalledOnce();
+			const closing = abortBashForClose(state);
+			expect(await Promise.race([closing.then(() => "done"), Promise.resolve("pending")])).toBe("pending");
+			resolveBash();
+			await expect(closing).resolves.toBeUndefined();
+			expect(abortBash).toHaveBeenCalledOnce();
+
+			const stalledState = makeState("stalled");
+			const abortStalledBash = vi.fn();
+			stalledState.runtime = {
+				...stalledState.runtime,
+				session: { isBashRunning: true, abortBash: abortStalledBash },
+			} as never;
+			stalledState.inFlightBash = new Promise<void>(() => {});
+
+			const stalledClose = abortBashForClose(stalledState);
+			await vi.advanceTimersByTimeAsync(4999);
+			expect(await Promise.race([stalledClose.then(() => "done"), Promise.resolve("pending")])).toBe("pending");
+			await vi.advanceTimersByTimeAsync(1);
+			await expect(stalledClose).resolves.toBeUndefined();
+			expect(abortStalledBash).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("normalizes daemon session names before validation and persistence", async () => {
