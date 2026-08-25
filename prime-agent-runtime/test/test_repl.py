@@ -1046,6 +1046,58 @@ class FinishRequestTest(unittest.TestCase):
         self.assertTrue(repl._pending_interrupts["any"])
         self.assertIn("other", repl._inflight)
 
+    def test_sigint_in_post_run_guarded_window_reports_snapshot_ok(self):
+        # A finishing-targeted SIGINT between _run_guarded's return and
+        # _finish_request raises KeyboardInterrupt into _handle_state; the
+        # completed destructive snapshot must still report done status ok.
+        import signal
+        from unittest import mock
+
+        repl = self.repl_module
+        real_run_guarded = repl._run_guarded
+
+        async def run_guarded_then_sigint(task, rid):
+            outcome = await real_run_guarded(task, rid)
+            with repl._interrupt_lock:
+                repl._sigint_target = rid
+            # Synchronous SIGINT in the post-run window: the handler sees
+            # _sigint_target == _finishing_rid and raises right here.
+            signal.raise_signal(signal.SIGINT)
+            return outcome
+
+        previous = signal.signal(signal.SIGINT, repl._sigint_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+        sent = []
+        ns = {"big": b"x" * 100_000}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            req = {
+                "type": "snapshot",
+                "id": "snap",
+                "path": os.path.join(tmp, "kernel-state.dill"),
+                "manifest_path": os.path.join(tmp, "kernel-state.json"),
+                "max_variable_bytes": 1024,
+                "prune_oversized": True,
+            }
+
+            async def main():
+                repl._loop = asyncio.get_running_loop()
+                repl._inflight.add("snap")
+                await repl._handle_request(repl._handle_state, req, ns)
+
+            with mock.patch.object(repl, "_run_guarded", run_guarded_then_sigint):
+                with mock.patch.object(repl, "_send", sent.append):
+                    asyncio.run(main())
+
+        done = next(e for e in sent if e.get("event") == "done")
+        self.assertEqual(done["status"], "ok")
+        self.assertEqual(done["pruned"], ["big"])
+        # The prune ran (destructive success) and the request is fully finished.
+        self.assertEqual(ns, {})
+        self.assertNotIn("snap", repl._inflight)
+
     def test_untargeted_interrupt_in_done_task_handoff_is_not_parked(self):
         # The cell task is done but _run_guarded's finally has not run yet
         # (_active still names the rid, _finishing_rid is unset). An untargeted

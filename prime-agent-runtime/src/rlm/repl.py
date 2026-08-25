@@ -665,7 +665,7 @@ def _snapshot_state(
     }
     # A SIGINT-raised KeyboardInterrupt anywhere between the committed manifest and the
     # last prune deletion would desync the namespace from the manifest: park SIGINT for
-    # the whole interval (manifest commit through deletions), then re-deliver.
+    # the whole interval (manifest commit through deletions); it is consumed, see below.
     parked: list[int] = []
     previous = signal.signal(signal.SIGINT, lambda signum, frame: parked.append(signum))
     try:
@@ -745,8 +745,29 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
 
     assert _loop is not None
     task = _loop.create_task(run())
-    status, result, error = await _run_guarded(task, rid)
-    _finish_request(rid)  # no post-run repr/drain: close the interrupt window now
+    outcome: tuple[str, Any, dict[str, Any] | None] | None = None
+    try:
+        outcome = await _run_guarded(task, rid)
+        _finish_request(rid)  # no post-run repr/drain: close the interrupt window now
+    except KeyboardInterrupt:
+        # A finishing-targeted SIGINT can raise anywhere between _run_guarded's
+        # finally publishing _finishing_rid and _finish_request clearing it; the
+        # handler only raises once _finishing_rid is set, so the task is already
+        # complete (destructively so for a pruning snapshot). Consume the
+        # interrupt and report the task's real outcome; escaping to the backstop
+        # would misreport a committed snapshot as failed.
+        _finish_request(rid)
+        if outcome is None:
+            # The KeyboardInterrupt pre-empted _run_guarded's return: recover
+            # the completed task's outcome with _run_guarded's failure mapping.
+            try:
+                outcome = ("ok", task.result(), None)
+            except asyncio.CancelledError as exc:
+                event = _interrupt_event(rid, exc) if _active["interrupted"] else _error_event(rid, exc)
+                outcome = ("error", None, event)
+            except BaseException as exc:  # noqa: BLE001 - every request failure becomes an error event
+                outcome = ("error", None, _error_event(rid, exc))
+    status, result, error = outcome
     if status != "ok":
         reason = "interrupted" if error and error.get("ename") == "KeyboardInterrupt" else (
             f"{error.get('ename')}: {error.get('evalue')}" if error else "failed"
