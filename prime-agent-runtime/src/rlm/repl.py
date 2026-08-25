@@ -11,6 +11,7 @@ import ast
 import asyncio
 import codecs
 import contextvars
+import ctypes
 import inspect
 import io
 import json
@@ -20,6 +21,7 @@ import platform
 import signal
 import sys
 import threading
+import time
 import traceback
 import types
 import uuid
@@ -828,6 +830,65 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
     _loop.call_soon_threadsafe(queue.put_nowait, {"type": "shutdown"})
 
 
+def _resolve_owner_pid() -> int:
+    raw = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID", "")
+    try:
+        owner = int(raw)
+    except ValueError:
+        owner = 0
+    return owner if owner > 0 else os.getppid()
+
+
+def _owner_alive_posix(owner: int, initial_ppid: int) -> bool:
+    # Reparenting is the race-free parent-death signal when the owner is the
+    # parent; the kill-0 probe covers an env-designated non-parent owner.
+    if initial_ppid == owner and os.getppid() != initial_ppid:
+        return False
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass  # EPERM etc.: alive but unprobeable
+    return True
+
+
+def _wait_owner_windows(owner: int) -> None:
+    # Blocks until the owner exits. os.kill(pid, 0) on Windows TERMINATES the
+    # target, so a SYNCHRONIZE handle wait is the only sound probe.
+    SYNCHRONIZE = 0x00100000
+    INFINITE = 0xFFFFFFFF
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = k32.OpenProcess(SYNCHRONIZE, False, owner)
+    if not handle:
+        return  # already gone (or unprobeable): exit rather than run ownerless
+    try:
+        k32.WaitForSingleObject(handle, INFINITE)
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _owner_watchdog(owner: int, initial_ppid: int) -> None:
+    if os.name == "nt":
+        _wait_owner_windows(owner)
+    else:
+        while _owner_alive_posix(owner, initial_ppid):
+            time.sleep(1.0)
+    # Event-loop-independent by design: a synchronous cell monopolizes the
+    # loop, so the queued EOF shutdown can never run; hard-exit from here.
+    try:
+        _kill_live_handles()
+    except BaseException:  # noqa: BLE001
+        pass
+    os._exit(1)
+
+
+def _start_owner_watchdog() -> None:
+    threading.Thread(
+        target=_owner_watchdog, args=(_resolve_owner_pid(), os.getppid()), daemon=True
+    ).start()
+
+
 _pump_out: _Pump
 _pump_err: _Pump
 
@@ -858,6 +919,7 @@ def _setup_fds() -> int:
 def main() -> None:
     global _loop, _serve_task
     stdin_fd = _setup_fds()
+    _start_owner_watchdog()
 
     # Alias the executing module so an in-cell `from rlm.repl import emit`
     # binds the live module, not a second copy.

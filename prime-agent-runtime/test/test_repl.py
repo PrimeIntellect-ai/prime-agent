@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 
@@ -19,8 +20,12 @@ _EOF = object()
 class ReplProcess:
     """Drives one `python -m rlm.repl` subprocess over the JSON-lines protocol."""
 
-    def __init__(self) -> None:
-        env = {**os.environ, "PYTHONPATH": SRC + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    def __init__(self, env: dict[str, str] | None = None) -> None:
+        env = {
+            **os.environ,
+            "PYTHONPATH": SRC + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            **(env or {}),
+        }
         self.spawned_at = time.monotonic()
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "rlm.repl"],
@@ -1122,6 +1127,83 @@ class SnapshotTempCleanupTest(unittest.TestCase):
                     )
             self.assertFalse(os.path.exists(path + ".tmp"))
             self.assertFalse(os.path.exists(path))
+
+
+class OwnerWatchdogTest(unittest.TestCase):
+    def test_owner_watchdog_exits_busy_runtime(self):
+        # The reproduced F4 scenario: stdin stays open (no EOF shutdown), a
+        # synchronous cell monopolizes the loop, and only the watchdog thread
+        # can notice the owner's death and exit the runtime.
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        try:
+            repl = ReplProcess(env={"PRIME_AGENT_KERNEL_OWNER_PID": str(owner.pid)})
+            self.addCleanup(repl.close)
+            repl.ready()
+            repl.send({"type": "execute", "id": "busy", "code": "while True: pass"})
+            time.sleep(1.0)  # let the busy cell start monopolizing the loop
+            self.assertIsNone(repl.proc.poll())
+            owner.kill()
+            owner.wait(timeout=10)
+            self.assertEqual(repl.proc.wait(timeout=15), 1)
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+                owner.wait(timeout=10)
+
+    def test_resolve_owner_pid_falls_back_to_ppid(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        import rlm.repl as repl_module
+
+        with mock.patch.dict(os.environ, {"PRIME_AGENT_KERNEL_OWNER_PID": "4242"}):
+            self.assertEqual(repl_module._resolve_owner_pid(), 4242)
+        for raw in (None, "", "garbage", "0", "-7"):
+            env = {} if raw is None else {"PRIME_AGENT_KERNEL_OWNER_PID": raw}
+            with mock.patch.dict(os.environ, env, clear=False):
+                if raw is None:
+                    os.environ.pop("PRIME_AGENT_KERNEL_OWNER_PID", None)
+                self.assertEqual(repl_module._resolve_owner_pid(), os.getppid())
+
+    def test_owner_watchdog_windows_waits_on_process_handle(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        import rlm.repl as repl_module
+
+        calls: list[tuple] = []
+
+        class FakeKernel32:
+            def OpenProcess(self, access, inherit, pid):
+                calls.append(("OpenProcess", access, inherit, pid))
+                return 1234
+
+            def WaitForSingleObject(self, handle, timeout):
+                calls.append(("WaitForSingleObject", handle, timeout))
+                return 0
+
+            def CloseHandle(self, handle):
+                calls.append(("CloseHandle", handle))
+                return 1
+
+        with mock.patch.object(repl_module.ctypes, "WinDLL", create=True, return_value=FakeKernel32()):
+            repl_module._wait_owner_windows(777)
+        self.assertEqual(
+            calls,
+            [
+                ("OpenProcess", 0x00100000, False, 777),
+                ("WaitForSingleObject", 1234, 0xFFFFFFFF),
+                ("CloseHandle", 1234),
+            ],
+        )
+
+        class GoneKernel32(FakeKernel32):
+            def OpenProcess(self, access, inherit, pid):
+                calls.append(("OpenProcess", access, inherit, pid))
+                return 0
+
+        calls.clear()
+        with mock.patch.object(repl_module.ctypes, "WinDLL", create=True, return_value=GoneKernel32()):
+            repl_module._wait_owner_windows(778)
+        self.assertEqual(calls, [("OpenProcess", 0x00100000, False, 778)])
 
 
 if __name__ == "__main__":
