@@ -287,7 +287,7 @@ export interface IpythonToolDetails {
 }
 
 export interface IpythonToolOptions {
-	/** Python override. Must have `ipykernel` installed. */
+	/** Python override. Needs `ipykernel` installed only when `PRIME_AGENT_KERNEL=ipython` selects the legacy Jupyter kernel. */
 	python?: string;
 	env?: Record<string, string>;
 	/** Command prefix prepended to every %%bash cell. */
