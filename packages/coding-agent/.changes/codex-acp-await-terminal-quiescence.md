@@ -1,1 +1,2 @@
 - Changed ACP prompt requests to resolve only after all causally admitted subagent and parent work has settled.
+- Fixed ACP assistant chunks to identify message boundaries across autonomous turns.

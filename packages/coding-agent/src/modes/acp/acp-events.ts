@@ -54,12 +54,12 @@ function textContent(text: string): { type: "text"; text: string } {
  * `thinking_delta`) and carries a plain string, so reasoning and visible answer
  * text are distinct ACP update kinds a client can render or hide separately.
  */
-function assistantDeltaUpdates(event: AssistantMessageEvent): AcpSessionUpdate[] {
+function assistantDeltaUpdates(event: AssistantMessageEvent, messageId: string): AcpSessionUpdate[] {
 	if (event.type === "thinking_delta" && event.delta.length > 0) {
-		return [{ sessionUpdate: "agent_thought_chunk", content: textContent(event.delta) }];
+		return [{ sessionUpdate: "agent_thought_chunk", messageId, content: textContent(event.delta) }];
 	}
 	if (event.type === "text_delta" && event.delta.length > 0) {
-		return [{ sessionUpdate: "agent_message_chunk", content: textContent(event.delta) }];
+		return [{ sessionUpdate: "agent_message_chunk", messageId, content: textContent(event.delta) }];
 	}
 	return [];
 }
@@ -130,6 +130,15 @@ function ipythonRichOutput(result: unknown): PrimeAgentIpythonMeta | undefined {
  */
 export interface AcpEventMappingState {
 	activeBashRunId?: string;
+	activeAssistantMessageId?: string;
+	nextAssistantMessageSequence?: number;
+}
+
+function startAssistantMessage(state: AcpEventMappingState): string {
+	const sequence = (state.nextAssistantMessageSequence ?? 0) + 1;
+	state.nextAssistantMessageSequence = sequence;
+	state.activeAssistantMessageId = `prime-agent-assistant-${sequence}`;
+	return state.activeAssistantMessageId;
 }
 
 export function acpUpdatesForSessionEvent(
@@ -137,9 +146,20 @@ export function acpUpdatesForSessionEvent(
 	state: AcpEventMappingState = {},
 ): AcpSessionUpdate[] {
 	switch (event.type) {
+		case "message_start":
+			if (event.message.role === "assistant") startAssistantMessage(state);
+			return [];
+
 		case "message_update":
 			if (event.message.role !== "assistant") return [];
-			return assistantDeltaUpdates(event.assistantMessageEvent);
+			return assistantDeltaUpdates(
+				event.assistantMessageEvent,
+				state.activeAssistantMessageId ?? startAssistantMessage(state),
+			);
+
+		case "message_end":
+			if (event.message.role === "assistant") state.activeAssistantMessageId = undefined;
+			return [];
 
 		case "tool_execution_start": {
 			const cell = event.toolName === IPYTHON_TOOL_NAME ? ipythonCellSource(event.args) : undefined;
