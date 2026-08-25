@@ -13,10 +13,11 @@ the durable state and stagnation calculation; the Python API is a typed bridge.
 
 1. Call `await autoresearch.initialize(objective, topic=...)` once. This creates
    or recovers one retained supervisor child.
-2. Begin with publications. Use `discover_literature`, Crossref, Semantic
-   Scholar graph expansion, arXiv, and Unpaywall as appropriate. Read legal full
-   text where possible and verify publication identity/status separately. Add
-   each important work with `add_publication`.
+2. Begin with publications. Use Prime's native search/web tools for broad
+   discovery, synonym expansion, references, citations, related work, and
+   recent papers. Use Crossref, arXiv, and Unpaywall as verification/full-text
+   helpers. Read legal full text where possible and add each important work
+   with `add_publication`.
 3. Add claims with exact evidence bindings. Promote only claims whose wording
    is supported. Keep contradictions and unresolved objections visible.
 4. Build a candidate, then call `await autoresearch.review_candidate(candidate)`.
@@ -38,14 +39,14 @@ the durable state and stagnation calculation; the Python API is a typed bridge.
 
 Never skip the supervisor checkpoint because a candidate failed.
 
-## Scholarly discovery API
+## Search, verification, and full text
+
+Search with the agent's normal tools first. Do not depend on a separate
+scholarly graph API or declare novelty from one query. Once a paper matters to
+the argument, verify and inspect it:
 
 ```python
-found = await autoresearch.discover_literature("agent memory evidence authority")
 verified = await autoresearch.crossref_verify("10.1234/example")
-references = await autoresearch.semantic_scholar_expand(
-    "DOI:10.1234/example", relation="references"
-)
 recent = await autoresearch.arxiv_search(
     'all:"agent memory" AND submittedDate:[202501010000 TO 202612312359]'
 )
@@ -57,11 +58,9 @@ artifact = await autoresearch.download_open_full_text(
 
 Crossref records deliberately use `published_status_unclear`; Crossref deposit
 metadata alone is not universal proof of peer review. Confirm venue/publisher
-status separately before changing that field. Semantic Scholar is a discovery
-graph, not the authoritative publication-status record. arXiv records remain
-`preprint` even when they include a DOI. API keys and contact emails are read
-from `SEMANTIC_SCHOLAR_API_KEY`, `CROSSREF_MAILTO`, and `UNPAYWALL_EMAIL` and are
-never persisted in research state.
+status separately before changing that field. arXiv records remain `preprint`
+even when they include a DOI. Contact emails are read from `CROSSREF_MAILTO`
+and `UNPAYWALL_EMAIL` and are never persisted in research state.
 
 `download_open_full_text` accepts only credential-free public HTTPS targets,
 revalidates redirects, enforces a byte limit, and stores a SHA-256-addressed

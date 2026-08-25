@@ -151,44 +151,6 @@ def _crossref_publication(item: dict[str, Any]) -> dict[str, Any]:
     return publication
 
 
-def _semantic_publication(item: dict[str, Any]) -> dict[str, Any]:
-    external = item.get("externalIds") if isinstance(item.get("externalIds"), dict) else {}
-    doi = str(external.get("DOI", "")).strip()
-    arxiv_id = str(external.get("ArXiv", "")).strip()
-    paper_id = str(item.get("paperId", "")).strip()
-    oa_pdf = item.get("openAccessPdf") if isinstance(item.get("openAccessPdf"), dict) else {}
-    publication: dict[str, Any] = {
-        "paper_id": f"doi:{doi.lower()}" if doi else f"s2:{paper_id}",
-        "title": str(item.get("title", "Untitled scholarly record")),
-        "authors": [
-            str(author.get("name"))
-            for author in item.get("authors", [])
-            if isinstance(author, dict) and author.get("name")
-        ]
-        or ["Unknown author"],
-        "publication_status": "preprint" if arxiv_id and not item.get("venue") else "published_status_unclear",
-        "metadata_verified_by": ["semantic_scholar"],
-        "semantic_scholar_id": paper_id,
-        "abstract": item.get("abstract"),
-        "citation_count": item.get("citationCount"),
-    }
-    if doi:
-        publication["doi"] = doi
-    if arxiv_id:
-        publication["preprint_id"] = arxiv_id
-    if isinstance(item.get("year"), int):
-        publication["year"] = item["year"]
-    if item.get("venue"):
-        publication["venue"] = str(item["venue"])
-    if oa_pdf.get("url"):
-        publication["full_text_url"] = str(oa_pdf["url"])
-    elif arxiv_id:
-        publication["full_text_url"] = f"https://arxiv.org/pdf/{arxiv_id}"
-    elif not doi:
-        publication["full_text_url"] = f"https://www.semanticscholar.org/paper/{paper_id}"
-    return publication
-
-
 async def initialize(objective: str, topic: str | None = None) -> dict[str, Any]:
     """Initialize one session-local research run and retain its supervisor child."""
     if not isinstance(objective, str):
@@ -249,70 +211,6 @@ async def crossref_verify(doi: str, *, mailto: str | None = None) -> dict[str, A
     if not isinstance(message, dict):
         raise RuntimeError("Crossref DOI response omitted message metadata")
     return _crossref_publication(message)
-
-
-async def semantic_scholar_search(
-    query: str,
-    *,
-    limit: int = 10,
-    year: str | None = None,
-) -> list[dict[str, Any]]:
-    """Search the Semantic Scholar graph for discovery and OA locations."""
-    if not isinstance(query, str):
-        raise TypeError(f"query must be str, got {type(query).__name__}")
-    if not isinstance(limit, int) or not 1 <= limit <= 100:
-        raise ValueError("limit must be an integer from 1 to 100")
-    fields = "paperId,title,authors,year,venue,externalIds,openAccessPdf,abstract,citationCount"
-    params: dict[str, str | int] = {"query": query, "limit": limit, "fields": fields}
-    if year:
-        params["year"] = year
-    headers = {}
-    api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
-    if api_key:
-        headers["x-api-key"] = api_key
-    payload = await asyncio.to_thread(
-        _request_json,
-        f"https://api.semanticscholar.org/graph/v1/paper/search?{urlencode(params)}",
-        headers,
-    )
-    return [_semantic_publication(item) for item in payload.get("data", []) if isinstance(item, dict)]
-
-
-async def semantic_scholar_expand(
-    paper_id: str,
-    *,
-    relation: str = "references",
-    limit: int = 20,
-) -> list[dict[str, Any]]:
-    """Expand a seed through references, citations, or related-paper recommendations."""
-    if relation not in {"references", "citations", "recommendations"}:
-        raise ValueError('relation must be "references", "citations", or "recommendations"')
-    if not isinstance(limit, int) or not 1 <= limit <= 100:
-        raise ValueError("limit must be an integer from 1 to 100")
-    fields = "paperId,title,authors,year,venue,externalIds,openAccessPdf,abstract,citationCount"
-    encoded = quote(paper_id, safe="")
-    if relation == "recommendations":
-        url = (
-            f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{encoded}"
-            f"?{urlencode({'limit': limit, 'fields': fields})}"
-        )
-    else:
-        url = (
-            f"https://api.semanticscholar.org/graph/v1/paper/{encoded}/{relation}"
-            f"?{urlencode({'limit': limit, 'fields': fields})}"
-        )
-    headers = {}
-    api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
-    if api_key:
-        headers["x-api-key"] = api_key
-    payload = await asyncio.to_thread(_request_json, url, headers)
-    publications: list[dict[str, Any]] = []
-    for item in payload.get("recommendedPapers", payload.get("data", [])):
-        if not isinstance(item, dict):
-            continue
-        nested = item.get("citedPaper") if relation == "references" else item.get("citingPaper")
-        publications.append(_semantic_publication(nested if isinstance(nested, dict) else item))
-    return publications
 
 
 async def arxiv_search(query: str, *, max_results: int = 10, start: int = 0) -> list[dict[str, Any]]:
@@ -459,42 +357,6 @@ async def download_open_full_text(
     if not isinstance(max_bytes, int) or not 1 <= max_bytes <= 250 * 1024 * 1024:
         raise ValueError("max_bytes must be an integer from 1 to 262144000")
     return await asyncio.to_thread(_download_open_full_text, url, filename, max_bytes)
-
-
-async def discover_literature(query: str, *, limit_per_source: int = 10) -> dict[str, Any]:
-    """Run Crossref, Semantic Scholar, and arXiv discovery and deduplicate identities."""
-    results = await asyncio.gather(
-        crossref_search(query, rows=limit_per_source),
-        semantic_scholar_search(query, limit=limit_per_source),
-        arxiv_search(query, max_results=limit_per_source),
-        return_exceptions=True,
-    )
-    publications: list[dict[str, Any]] = []
-    errors: dict[str, str] = {}
-    for source, result in zip(("crossref", "semantic_scholar", "arxiv"), results, strict=True):
-        if isinstance(result, BaseException):
-            errors[source] = str(result)
-        else:
-            publications.extend(result)
-    deduplicated: dict[str, dict[str, Any]] = {}
-    for publication in publications:
-        key = str(
-            publication.get("doi")
-            or publication.get("preprint_id")
-            or publication.get("paper_id")
-            or publication.get("title")
-        ).lower()
-        existing = deduplicated.get(key)
-        if existing:
-            existing["metadata_verified_by"] = sorted(
-                set(existing.get("metadata_verified_by", []))
-                | set(publication.get("metadata_verified_by", []))
-            )
-            if not existing.get("full_text_url") and publication.get("full_text_url"):
-                existing["full_text_url"] = publication["full_text_url"]
-        else:
-            deduplicated[key] = publication
-    return {"publications": list(deduplicated.values()), "errors": errors}
 
 
 async def add_publication(publication: dict[str, Any]) -> dict[str, Any]:
@@ -833,7 +695,6 @@ __all__ = [
     "crossref_search",
     "crossref_verify",
     "disable_heartbeat",
-    "discover_literature",
     "download_open_full_text",
     "enable_heartbeat",
     "export_deliverable",
@@ -849,8 +710,6 @@ __all__ = [
     "remember",
     "review_candidate",
     "reviewer_prompts",
-    "semantic_scholar_expand",
-    "semantic_scholar_search",
     "spawn_reviewers",
     "stop_gate",
     "sync_nooa_memory",

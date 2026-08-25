@@ -69,19 +69,20 @@ canonical claim that gains contradictory evidence is downgraded to `contested`
 and receives a new lineage entry. Fully unsupported claims can be invalidated
 without deleting their earlier evidence history.
 
-Use Crossref or publisher metadata to verify bibliographic identity/status, and
-use legal OA or arXiv/publisher full text to inspect the paper itself. Semantic
-Scholar citation/reference and recommendation graphs are useful discovery
-expansions, but discovered records do not become evidence until inspected.
+Use Prime's native search/web tools to discover papers, follow references and
+citations, search adjacent terminology, and inspect publisher/repository pages.
+Discovered records do not become evidence until inspected. Use Crossref or
+publisher metadata to verify bibliographic identity/status, and use legal OA or
+arXiv/publisher full text to inspect the paper itself.
 
-The skill exposes `discover_literature`, `crossref_search`, `crossref_verify`,
-`semantic_scholar_search`, `semantic_scholar_expand`, `arxiv_search`, and
-`unpaywall_lookup`. `download_open_full_text` saves a declared legal OA/arXiv
+The skill exposes `crossref_search`, `crossref_verify`, `arxiv_search`, and
+`unpaywall_lookup` as verification/full-text helpers, not as a replacement for
+agent-driven search. `download_open_full_text` saves a declared legal OA/arXiv
 copy as a bounded, hashed session artifact after public-HTTPS and redirect
 validation. Crossref results remain `published_status_unclear` until a
 venue/publisher check establishes the status; an arXiv page never silently
-becomes evidence of peer review. Semantic Scholar API keys and contact emails
-come from environment variables and are not written into canonical state.
+becomes evidence of peer review. Contact emails come from environment variables
+and are not written into canonical state.
 
 Every serious candidate records whether its search covered mechanism queries,
 adjacent terminology, backward/forward citations, recommendations, recent
@@ -209,7 +210,6 @@ References:
 - [NVIDIA AVO long-horizon architecture article](https://developer.nvidia.com/blog/nvidia-avo-reaches-100-on-arc-agi-3-demonstrating-a-frontier-level-general-purpose-architecture-for-long-horizon-autonomous-agents/)
 - [Prime Agent RLM programming model](rlm.md)
 - [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/)
-- [Semantic Scholar API](https://www.semanticscholar.org/product/api)
 - [arXiv API manual](https://info.arxiv.org/help/api/user-manual.html)
 - [Unpaywall API](https://unpaywall.org/api)
 - [NVIDIA NOOA memory](https://github.com/NVIDIA-NeMo/labs-OO-Agents/tree/main/packages/nooa-memory)
