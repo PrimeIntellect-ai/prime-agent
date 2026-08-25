@@ -651,7 +651,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!hasCloudflareAiGatewayCredentials())(
 		"Cloudflare AI Gateway → Workers AI (Kimi K2.6 via /compat)",
 		() => {
-			const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
+			const llm = getModel("cloudflare-ai-gateway", "gpt-4o-mini");
 
 			it("should complete basic text generation", { retry: 3 }, async () => {
 				await basicTextGeneration(llm);

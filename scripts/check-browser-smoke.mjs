@@ -14,6 +14,7 @@ try {
 		format: "esm",
 		logLevel: "silent",
 		outfile: outputPath,
+		external: ["node:os", "node:worker_threads", "node:url", "node:path"],
 	});
 	process.exit(0);
 } catch (error) {

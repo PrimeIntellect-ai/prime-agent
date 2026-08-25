@@ -32,12 +32,16 @@ try {
 rmSync(outdir, { recursive: true, force: true });
 
 await build({
-	entryPoints: [join(packageDir, "dist", "cli.js")],
+	entryPoints: [
+		join(packageDir, "dist", "cli.js"),
+		join(packageDir, "..", "ai", "dist", "utils", "stream-worker.js"),
+	],
 	outdir,
 	bundle: true,
 	splitting: true,
 	format: "esm",
 	platform: "node",
+	entryNames: '[name]',
 	// Native or interop-sensitive packages stay external; they resolve from
 	// node_modules at runtime (and are loaded via createRequire/lazily anyway).
 	external: ["zeromq", "koffi", "undici", "@silvia-odwyer/photon-node", "@mariozechner/clipboard"],

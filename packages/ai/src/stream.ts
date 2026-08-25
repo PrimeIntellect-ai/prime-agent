@@ -11,8 +11,10 @@ import type {
 	SimpleStreamOptions,
 	StreamOptions,
 } from "./types.js";
+import { workerStream, workerStreamSimple } from "./utils/stream-worker-pool.js";
 
 export { getEnvApiKey } from "./env-api-keys.js";
+export { isWorkerStreamEnabled } from "./utils/stream-worker-pool.js";
 
 function resolveApiProvider(api: Api) {
 	const provider = getApiProvider(api);
@@ -27,8 +29,12 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: ProviderStreamOptions,
 ): AssistantMessageEventStream {
+	const opts = (options ?? {}) as StreamOptions & Record<string, unknown>;
+	const workerResult = workerStream(model, context, opts);
+	if (workerResult) return workerResult;
+
 	const provider = resolveApiProvider(model.api);
-	return provider.stream(model, context, options as StreamOptions);
+	return provider.stream(model, context, opts as StreamOptions);
 }
 
 export async function complete<TApi extends Api>(
@@ -45,8 +51,12 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	const opts = (options ?? {}) as StreamOptions & Record<string, unknown>;
+	const workerResult = workerStreamSimple(model, context, opts);
+	if (workerResult) return workerResult;
+
 	const provider = resolveApiProvider(model.api);
-	return provider.streamSimple(model, context, options);
+	return provider.streamSimple(model, context, opts);
 }
 
 export async function completeSimple<TApi extends Api>(
