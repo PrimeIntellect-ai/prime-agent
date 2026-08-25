@@ -335,7 +335,10 @@ class BashHandle:
         if not _IS_POSIX:
             # No group anchor after the shell exits on Windows: best-effort
             # taskkill of the remembered tree before the handle is marked reaped.
-            return _taskkill_tree(self._pid)
+            # A dead leader counts as delivered: _watch fires on leader exit,
+            # where taskkill typically fails with "process not found"; keeping
+            # every clean exit active would leave stale journal records.
+            return _taskkill_tree(self._pid) or self._proc.poll() is not None
         try:
             os.killpg(self._pid, 0)
         except ProcessLookupError:
