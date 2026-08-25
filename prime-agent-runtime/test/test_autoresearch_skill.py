@@ -6,9 +6,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from rlm import RLMSpawnHandle
-
-
 SKILL = Path(__file__).parents[2] / "packages/coding-agent/skills/autoresearch/src/autoresearch/__init__.py"
 
 
@@ -42,34 +39,26 @@ class AutoresearchSkillTest(unittest.TestCase):
         )
         host = AsyncMock(
             return_value={
-                "candidate": {"candidateId": "candidate-authority"},
-                "prompts": {role: f"Review as {role}" for role in roles},
+                "assignments": [
+                    {
+                        "childId": f"sub-autoresearch-{role}",
+                        "name": f"autoresearch-{role}",
+                        "role": role,
+                        "candidateDigest": "sha256:candidate",
+                    }
+                    for role in roles
+                ],
             }
         )
-        spawn = AsyncMock(
-            side_effect=lambda prompt, **kwargs: RLMSpawnHandle(
-                rlm_child_id=f"sub-{kwargs['name']}",
-                name=kwargs["name"],
-                session_dir=Path("/tmp") / kwargs["name"],
-                model="provider/model",
-            )
-        )
-        with patch.object(module, "host_request", host), patch.object(module, "spawn_rlm", spawn):
-            handles = asyncio.run(
-                module.spawn_reviewers(
-                    {"candidate_id": "candidate-authority"},
-                    model="provider/model",
-                    thinking="high",
-                )
-            )
-        self.assertEqual(len(handles), 4)
-        self.assertEqual(spawn.await_count, 4)
-        self.assertTrue(all(call.kwargs["model"] == "provider/model" for call in spawn.await_args_list))
-        self.assertTrue(all(call.kwargs["thinking"] == "high" for call in spawn.await_args_list))
+        candidate = {"candidate_id": "candidate-authority"}
+        with patch.object(module, "host_request", host):
+            assignments = asyncio.run(module.spawn_reviewers(candidate))
+        self.assertEqual(len(assignments), 4)
         self.assertEqual(
-            [call.args[0] for call in spawn.await_args_list],
-            [f"Review as {role}" for role in roles],
+            [assignment["role"] for assignment in assignments],
+            list(roles),
         )
+        host.assert_awaited_once_with("autoresearch.reviewers.spawn", {"candidate": candidate})
 
     def test_rejects_non_dict_claim_before_contacting_host(self) -> None:
         module = load_skill("autoresearch_validation_test")
@@ -110,10 +99,11 @@ class AutoresearchSkillTest(unittest.TestCase):
         with patch.object(module, "_cached_bytes", return_value=arxiv_xml):
             arxiv = asyncio.run(module.arxiv_search("agent memory", max_results=1))
         self.assertEqual(crossref[0]["paper_id"], "doi:10.1000/example")
-        self.assertEqual(crossref[0]["publication_status"], "published_status_unclear")
-        self.assertEqual(crossref[0]["metadata_verified_by"], ["crossref"])
+        self.assertNotIn("publication_status", crossref[0])
+        self.assertNotIn("metadata_verified_by", crossref[0])
         self.assertEqual(arxiv[0]["paper_id"], "arxiv:2608.12345")
-        self.assertEqual(arxiv[0]["publication_status"], "preprint")
+        self.assertNotIn("publication_status", arxiv[0])
+        self.assertNotIn("metadata_verified_by", arxiv[0])
         self.assertEqual(arxiv[0]["full_text_url"], "https://arxiv.org/pdf/2608.12345v2")
 
     def test_memory_reuse_and_final_export_use_host_gates(self) -> None:
