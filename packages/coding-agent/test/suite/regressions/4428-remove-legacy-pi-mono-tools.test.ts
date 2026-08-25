@@ -138,14 +138,14 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 			const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
 			expect(ipythonTool).toBeTruthy();
 
-			// Legacy %%bash cells are rejected with the bash() teaching message instead of running.
+			// Legacy %%bash cells fail as plain Python syntax errors instead of running.
 			const rejected = await ipythonTool!.execute("tool-0", { code: "%%bash\necho body" });
 			expect(rejected.details).toMatchObject({ status: "error" });
 			const rejectedText = rejected.content
 				.filter((item): item is { type: "text"; text: string } => item.type === "text")
 				.map((item) => item.text)
 				.join("");
-			expect(rejectedText).toContain("%%bash cells are not supported");
+			expect(rejectedText).toContain("SyntaxError");
 
 			// bash() picks up the configured shell and command prefix from the tool environment.
 			const result = await ipythonTool!.execute("tool-1", {
