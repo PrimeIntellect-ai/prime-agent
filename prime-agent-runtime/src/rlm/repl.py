@@ -74,6 +74,12 @@ def emit(data: dict[str, Any]) -> None:
     """
     if not isinstance(data, dict) or not data or not all(isinstance(k, str) for k in data):
         raise TypeError("emit() requires a non-empty dict keyed by MIME type strings")
+    # Strict-dumps validation: default allow_nan=True would let NaN/Infinity
+    # serialize as non-JSON text and tear the host's protocol framing (a
+    # non-serializable value already raises in _send before any bytes are
+    # written, so NaN is the only corruption vector). Payloads are small, so
+    # the throwaway serialization here is cheap; _send re-serializes.
+    json.dumps(data, allow_nan=False)
     _send({"event": "display", "id": _current_cell.get(), "data": data})
 
 
