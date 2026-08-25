@@ -253,9 +253,9 @@ class BashHandle:
                 self._taskkill()
             return
         if not _IS_POSIX:
-            if self._job is not None:
-                _winjob.terminate(self._job)
+            if self._job is not None and _winjob.terminate(self._job):
                 return
+            # No job or TerminateJobObject failed: hardened taskkill fallback.
             if not self._taskkill():
                 try:
                     self._proc.kill()
@@ -372,15 +372,25 @@ class BashHandle:
             if self._job is not None:
                 # Terminate then close the last handle: kill-on-close reaps any
                 # straggler, so the tree is provably dead and the journal
-                # record may go inactive.
-                _winjob.terminate(self._job)
+                # record may go inactive. Close even after a failed terminate
+                # (closing the last kill-on-close handle is itself a kill
+                # attempt), but an unproven kill falls through to taskkill.
+                delivered = _winjob.terminate(self._job)
                 job, self._job = self._job, None
                 _winjob.close(job)
-                return True
-            # Job creation failed (old Windows editions): best-effort taskkill
-            # of the remembered tree before the handle is marked reaped.
+                if delivered:
+                    return True
+            # Job creation failed (old Windows editions) or TerminateJobObject
+            # failed: best-effort taskkill of the remembered tree before the
+            # handle is marked reaped.
             if self._taskkill():
                 return True
+            if self._had_job:
+                # Failed terminate + failed taskkill: nothing proved the tree
+                # died (close() suppresses errors), so the leader-dead
+                # retirement below must not apply -- the record stays active
+                # for the host reaper unless a taskkill was proven earlier.
+                return self._tree_kill_delivered
             if self._proc.poll() is not None:
                 # Leader already dead: taskkill usually fails with "not found"
                 # on a clean exit, and keeping every clean exit journal-active
@@ -526,9 +536,7 @@ class BashHandle:
         if not await self._await_group_death(_CANCEL_TERM_GRACE):
             if _IS_POSIX:
                 _signal_group(self._pid, signal.SIGKILL)
-            elif self._job is not None:
-                _winjob.terminate(self._job)
-            else:
+            elif self._job is None or not _winjob.terminate(self._job):
                 self._taskkill()
             await self._await_group_death(_CANCEL_KILL_WAIT)
 
@@ -568,13 +576,14 @@ class BashHandle:
                         pass
             self._status_read = self._wake_read = self._wake_write = -1
             delivered = _signal_group(self._pid, signal.SIGKILL)
-        elif self._job is not None:
-            _winjob.terminate(self._job)
-            job, self._job = self._job, None
-            _winjob.close(job)
-            delivered = True
         else:
-            delivered = _taskkill_tree(self._pid)
+            delivered = False
+            if self._job is not None:
+                delivered = _winjob.terminate(self._job)
+                job, self._job = self._job, None
+                _winjob.close(job)
+            if not delivered:
+                delivered = _taskkill_tree(self._pid)
             if not delivered:
                 try:
                     self._proc.kill()
@@ -808,10 +817,10 @@ def _kill_live_handles() -> None:
     for handle in handles:
         if _IS_POSIX:
             delivered = _signal_group(handle._pid, signal.SIGKILL)
-        elif handle._job is not None:
-            delivered = _winjob.terminate(handle._job)
         else:
-            delivered = _taskkill_tree(handle._pid)
+            delivered = handle._job is not None and _winjob.terminate(handle._job)
+            if not delivered:
+                delivered = _taskkill_tree(handle._pid)
             if not delivered:
                 # Leader-only fallback cannot prove the tree died: never
                 # justifies an inactive record.
