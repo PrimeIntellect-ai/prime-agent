@@ -1721,6 +1721,37 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(recoverWorker).toHaveBeenCalledOnce();
 	});
 
+	it("starts recovery for a disconnected worker still marked ready", async () => {
+		const root = { id: "active-root", activeSessionId: "active-root", sessionId: "session-root", cwd: "/tmp" };
+		const worker = {
+			descriptor: {
+				workerId: "disconnected-ready-worker",
+				rootActiveSessionId: root.activeSessionId,
+				lifecycle: "ready",
+			},
+			client: undefined as object | undefined,
+			summaries: new Map([[root.activeSessionId, root as SessionSummary]]),
+			intentionalStop: false,
+		};
+		const recoverWorker = vi.fn(async () => {
+			worker.client = {};
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			recoverWorker,
+		}) as {
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
+		};
+
+		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/session.jsonl")).resolves.toBe(worker);
+		expect(recoverWorker).toHaveBeenCalledOnce();
+	});
+
 	it("rejects recovered workers whose assigned root is still missing", async () => {
 		const worker = {
 			descriptor: {

@@ -35,13 +35,13 @@ interface SupervisorInternals {
 interface WorkerFixture {
 	descriptor: {
 		workerId: string;
-		lifecycle: "ready";
+		lifecycle: "ready" | "starting";
 		rootActiveSessionId: string;
 		rootSessionId: string;
 		pid: number;
 		authenticationToken: string;
 		ownerClientId?: string;
-		createCommand: { config: { cwd: string } };
+		createCommand: { config: { cwd: string }; sessionPath?: string };
 	};
 	client: {
 		request: ReturnType<typeof vi.fn>;
@@ -340,6 +340,10 @@ describe("daemon supervisor passive subagent topology", () => {
 		});
 
 		const first = supervisor.createOrReuseWorker("client", { type: "create", name: "named", sessionPath });
+		const starting = worker("starting");
+		starting.descriptor.lifecycle = "starting";
+		starting.descriptor.createCommand = { config: { cwd: "/tmp/project" }, sessionPath };
+		supervisor.workers.set(starting.descriptor.workerId, starting);
 		const second = supervisor.createOrReuseWorker("client", { type: "create", sessionPath });
 		releaseSiblings();
 		expect(await Promise.all([first, second])).toEqual([resident, resident]);

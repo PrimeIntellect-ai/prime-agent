@@ -2258,10 +2258,6 @@ export class DaemonSupervisor {
 				? resolve(command.sessionPath)
 				: await this.catalog.resolve(command.sessionPath, config.cwd ?? process.cwd(), config.sessionDir);
 			createCommand = { ...createCommand, sessionPath };
-			const existing = this.findWorkerBySessionFile(sessionPath);
-			if (existing && !(await this.reclaimStaleWorkerRegistration(existing, command.launchEnv !== undefined))) {
-				return this.reuseWorkerForCreate(existing, ownerClientId, sessionPath);
-			}
 		}
 		const key = createCommand.sessionPath
 			? canonicalSessionPath(createCommand.sessionPath)
@@ -2269,6 +2265,12 @@ export class DaemonSupervisor {
 		const pending = this.openingWorkers.get(key);
 		if (pending) {
 			return pending;
+		}
+		if (createCommand.sessionPath) {
+			const existing = this.findWorkerBySessionFile(createCommand.sessionPath);
+			if (existing && !(await this.reclaimStaleWorkerRegistration(existing, command.launchEnv !== undefined))) {
+				return this.reuseWorkerForCreate(existing, ownerClientId, createCommand.sessionPath);
+			}
 		}
 		const opening = (async () => {
 			if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);
@@ -2313,7 +2315,7 @@ export class DaemonSupervisor {
 		if (!this.isWorkerReadyForCreate(worker)) {
 			if (worker.recovery) {
 				await worker.recovery;
-			} else if (worker.descriptor.lifecycle === "recovering" && this.isWorkerRecoveryEligible(worker)) {
+			} else if (this.isWorkerRecoveryEligible(worker)) {
 				await this.recoverWorker(worker);
 			}
 		}
