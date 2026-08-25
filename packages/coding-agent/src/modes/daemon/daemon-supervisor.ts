@@ -36,10 +36,10 @@ import {
 } from "../../core/cron-jobs.js";
 import {
 	clearOrphanProcessJournal,
-	isOrphanProcessIdentityCurrent,
 	killOrphanProcess,
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
+	shouldReapOrphanProcess,
 } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import {
@@ -3177,8 +3177,7 @@ export class DaemonSupervisor {
 		if (orphanProcessJournalPath) {
 			try {
 				for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, worker.descriptor.pid)) {
-					// Pid-only = crashed before start-id landed; best-effort kill, scoped by ownerPid.
-					if (orphan.processStartId !== undefined && !isOrphanProcessIdentityCurrent(orphan)) {
+					if (!shouldReapOrphanProcess(orphan)) {
 						continue;
 					}
 					killOrphanProcess(orphan.pid);

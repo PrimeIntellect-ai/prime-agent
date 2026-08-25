@@ -342,4 +342,67 @@ describeIf("repl runtime outlives-owner watchdog (real runtime)", { tags: ["kern
 			rmSync(dir, { recursive: true, force: true });
 		}
 	}, 30_000);
+
+	it("runtime exits after owner death even while a non-yielding cell holds the loop", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "prime-agent-repl-watchdog-busy-"));
+		const pidFile = join(dir, "runtime.pid");
+		const busyFile = join(dir, "busy.marker");
+		// The cell marks the file, then spins synchronously: the asyncio loop is
+		// monopolized, so the stdin-EOF shutdown can never run — only the
+		// watchdog thread can take the runtime down.
+		const busyRequest = JSON.stringify({
+			type: "execute",
+			id: "busy-cell",
+			code: `open(${JSON.stringify(busyFile)}, "w").write("busy")\nwhile True: pass`,
+		});
+		const ownerScript = [
+			`const { spawn } = require("node:child_process");`,
+			`const { writeFileSync } = require("node:fs");`,
+			`const k = spawn(${JSON.stringify(replPython)}, ["-m", "rlm.repl"], {`,
+			`  env: { ...process.env, PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid) },`,
+			`  stdio: ["pipe", "ignore", "ignore"],`,
+			`});`,
+			`writeFileSync(${JSON.stringify(pidFile)}, String(k.pid));`,
+			`k.stdin.write(${JSON.stringify(`${busyRequest}\n`)});`,
+			`setInterval(() => {}, 1000);`,
+		].join("\n");
+		const owner = spawn(process.execPath, ["-e", ownerScript], { stdio: ["ignore", "ignore", "inherit"] });
+		let runtimePid = 0;
+
+		try {
+			await vi.waitFor(
+				() => {
+					runtimePid = Number(readFileSync(pidFile, "utf8"));
+					expect(runtimePid).toBeGreaterThan(0);
+					expect(() => process.kill(runtimePid, 0)).not.toThrow();
+					// The marker proves the busy cell has entered its spin.
+					expect(existsSync(busyFile)).toBe(true);
+				},
+				{ timeout: 20_000, interval: 500 },
+			);
+
+			owner.kill("SIGKILL");
+
+			await vi.waitFor(
+				() => {
+					expect(() => process.kill(runtimePid, 0)).toThrow();
+				},
+				{ timeout: 20_000, interval: 500 },
+			);
+		} finally {
+			if (runtimePid > 0) {
+				try {
+					process.kill(runtimePid, "SIGKILL");
+				} catch {
+					// Already exited (the expected outcome).
+				}
+			}
+			try {
+				owner.kill("SIGKILL");
+			} catch {
+				// Already exited.
+			}
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
 });
