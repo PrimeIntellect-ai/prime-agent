@@ -16,7 +16,6 @@ import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
 	refreshWorkerSummaries(worker: WorkerFixture): Promise<void>;
-	syncAgentPeers(): Promise<void>;
 	findSummaryInWorker(worker: WorkerFixture, selector: string): SessionSummary | undefined;
 	createOrReuseWorker(
 		clientId: string,
@@ -84,7 +83,7 @@ function worker(workerId: string, summaries: SessionSummary[] = []): WorkerFixtu
 		},
 		client: {
 			request: vi.fn(),
-			requestWorker: vi.fn(async () => ({ type: "response", command: "worker_sync_agent_peers", success: true })),
+			requestWorker: vi.fn(),
 		},
 		summaries: new Map(summaries.map((entry) => [entry.activeSessionId ?? entry.id, entry])),
 	};
@@ -645,7 +644,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		await expect(first).resolves.toBe(launched);
 	});
 
-	it("retains passive worker summaries but syncs only roots to cross-worker peer maps", async () => {
+	it("returns only other worker roots for an authenticated peer query", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-passive-peers-"));
 		tempDirs.push(directory);
 		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
@@ -687,11 +686,17 @@ describe("daemon supervisor passive subagent topology", () => {
 		});
 		first.summaries.set(first.descriptor.rootActiveSessionId, firstRoot);
 
-		await supervisor.syncAgentPeers();
-		const secondPeerCommand = second.client.requestWorker.mock.calls[0]?.[0] as
-			| { peers: AgentSessionMessageAgentSummary[] }
-			| undefined;
-		expect(secondPeerCommand?.peers).toEqual([
+		await expect(
+			supervisor.handleCommand({}, { type: "list_agent_peers", workerToken: "invalid-token" }),
+		).rejects.toThrow("Worker authentication failed");
+		const response = (await supervisor.handleCommand(
+			{},
+			{
+				type: "list_agent_peers",
+				workerToken: second.descriptor.authenticationToken,
+			},
+		)) as { data: { peers: AgentSessionMessageAgentSummary[] } };
+		expect(response.data.peers).toEqual([
 			expect.objectContaining({
 				activeSessionId: "first-root-active",
 				sessionId: "first-root-session",

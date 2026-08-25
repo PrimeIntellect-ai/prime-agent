@@ -582,120 +582,26 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("keeps fresh local rows over stale synced peers in the family catalog", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-local-precedence.sock", {
-			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
-			createRuntime: vi.fn(),
-		});
-		const state = makeState("local-active");
-		state.runtime = {
-			...state.runtime,
-			cwd: "/tmp",
-			metadata: { kind: "top-level", createdAt: 1 },
-			session: {
-				sessionId: "shared-session",
-				sessionName: "fresh-local",
-				isSessionActive: false,
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				hasRunningRlmChildren: () => false,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			remoteAgentPeers: Map<string, Record<string, unknown>>;
-			createAgentFamilyCatalog(): Promise<Array<{ id: string; name?: string }>>;
-		};
-		internals.sessions.set(state.activeSessionId, state);
-		internals.remoteAgentPeers.set("stale-active", {
-			activeSessionId: "stale-active",
-			sessionId: "shared-session",
-			sessionName: "stale-peer",
-			runtimeKind: "top-level",
-			cwd: "/tmp",
-			isStreaming: false,
-			unfinishedActionCount: 0,
-		});
-		const listAll = vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
-		try {
-			expect(await internals.createAgentFamilyCatalog()).toContainEqual(
-				expect.objectContaining({ id: "shared-session", name: "fresh-local" }),
-			);
-		} finally {
-			listAll.mockRestore();
-		}
-	});
-
-	it("canonicalizes symlinked paths in the family catalog and name reservations", async () => {
+	it("canonicalizes symlinked parent paths in name reservations", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-family-catalog-paths-"));
 		try {
 			const realDir = join(tempDir, "real");
 			const aliasDir = join(tempDir, "alias");
 			mkdirSync(realDir);
 			symlinkSync(realDir, aliasDir, "dir");
-			const parentPath = join(realDir, "parent.jsonl");
-			writeFileSync(parentPath, "");
-			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
-				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: tempDir },
-				createRuntime: vi.fn(),
-			});
-			const parent = makeState("parent");
-			parent.runtime = {
-				...parent.runtime,
-				cwd: tempDir,
-				metadata: { kind: "top-level", createdAt: 1 },
-				session: {
-					sessionId: "session-parent",
-					sessionName: "parent",
-					sessionFile: parentPath,
-					sessionManager: { getSessionArtifactDir: () => undefined },
-					rlmDepth: 0,
-					isStreaming: false,
-					isSessionActive: false,
-					unfinishedActionCount: 0,
-					hasRunningRlmChildren: () => false,
-				},
-			} as never;
-			const child = {
-				activeSessionId: "child-active",
-				sessionId: "session-child",
-				sessionName: "child",
-				runtimeKind: "subagent",
-				cwd: tempDir,
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				parentSessionPath: join(aliasDir, "parent.jsonl"),
-				rlmDepth: 1,
-				status: "idle",
-			};
-			const internals = daemon as unknown as {
-				sessions: Map<string, ActiveSessionState>;
-				remoteAgentPeers: Map<string, typeof child>;
-				createAgentFamilyRoster(state: ActiveSessionState): Promise<{ entries: Array<{ id: string }> }>;
-			};
-			internals.sessions.set(parent.activeSessionId, parent);
-			internals.remoteAgentPeers.set(child.activeSessionId, child);
-			const listAll = vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
-			try {
-				expect(await internals.createAgentFamilyRoster(parent)).toMatchObject({
-					entries: [expect.objectContaining({ id: "session-child" })],
-				});
-				expect(
-					sessionNameReservationKey({
-						name: "worker",
-						depth: 1,
-						parentSessionPath: parentPath,
-					}),
-				).toBe(
-					sessionNameReservationKey({
-						name: "worker",
-						depth: 1,
-						parentSessionPath: join(aliasDir, "parent.jsonl"),
-					}),
-				);
-			} finally {
-				listAll.mockRestore();
-			}
+			expect(
+				sessionNameReservationKey({
+					name: "worker",
+					depth: 1,
+					parentSessionPath: join(realDir, "parent.jsonl"),
+				}),
+			).toBe(
+				sessionNameReservationKey({
+					name: "worker",
+					depth: 1,
+					parentSessionPath: join(aliasDir, "parent.jsonl"),
+				}),
+			);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -1505,7 +1411,7 @@ describe("daemon mode helpers", () => {
 		const sendRemoteAgentSessionMessage = vi.fn().mockResolvedValue(receipt);
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
-			remoteAgentPeers: Map<string, Record<string, unknown>>;
+			listSupervisorAgentPeers: ReturnType<typeof vi.fn>;
 			createAgentMessageListResult(
 				current: ActiveSessionState,
 			): Promise<{ agents: Array<{ activeSessionId: string }> }>;
@@ -1518,15 +1424,17 @@ describe("daemon mode helpers", () => {
 			}): Promise<unknown>;
 		};
 		internals.sessions.set(source.activeSessionId, source);
-		internals.remoteAgentPeers.set(remoteSelector, {
-			activeSessionId: remoteSelector,
-			sessionId: "session-remote",
-			sessionName: "Remote",
-			runtimeKind: "top-level",
-			cwd: "/tmp/remote",
-			isStreaming: false,
-			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
-		});
+		internals.listSupervisorAgentPeers = vi.fn(async () => [
+			{
+				activeSessionId: remoteSelector,
+				sessionId: "session-remote",
+				sessionName: "Remote",
+				runtimeKind: "top-level",
+				cwd: "/tmp/remote",
+				isStreaming: false,
+				unfinishedActionCount: 0,
+			},
+		]);
 		internals.sendRemoteAgentSessionMessage = sendRemoteAgentSessionMessage;
 
 		expect((await internals.createAgentMessageListResult(source)).agents).toContainEqual(

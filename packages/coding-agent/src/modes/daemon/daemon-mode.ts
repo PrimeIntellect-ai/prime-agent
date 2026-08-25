@@ -517,7 +517,6 @@ export class AgentDaemon {
 	private readonly agentDir: string;
 	private readonly cronScheduler: AgentCronScheduler;
 	private readonly agentMessageRateLimiter = new AgentSessionMessageRateLimiter();
-	private readonly remoteAgentPeers = new Map<string, AgentSessionMessageAgentSummary>();
 	private readonly agentMessagePendingReservations = new Map<string, number>();
 	private readonly agentMessageTargetLocks = new Map<string, Promise<void>>();
 	private readonly agentMessageAcceptingTargets = new Set<string>();
@@ -3613,13 +3612,6 @@ export class AgentDaemon {
 					this.write(client, success(command.id, "detach"));
 					return;
 				}
-				case "worker_sync_agent_peers":
-					this.remoteAgentPeers.clear();
-					for (const peer of command.peers) {
-						this.remoteAgentPeers.set(peer.activeSessionId, peer);
-					}
-					this.writeWorkerSuccess(client, command);
-					return;
 				case "worker_archive_and_shutdown": {
 					for (const state of [...this.sessions.values()]) {
 						await this.closeSession(state, "killed");
@@ -5322,7 +5314,30 @@ export class AgentDaemon {
 		};
 	}
 
-	private async createAgentMessageListResult(current: ActiveSessionState): Promise<AgentSessionMessageListResult> {
+	private async listSupervisorAgentPeers(): Promise<AgentSessionMessageAgentSummary[]> {
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
+		if (!this.options.worker || !supervisorSocketPath) return [];
+		const client = new DaemonClient(supervisorSocketPath);
+		try {
+			await client.connect(1000);
+			await client.waitForHello(1000);
+			const response = await client.request(
+				{ type: "list_agent_peers", workerToken: this.options.worker.authenticationToken },
+				5000,
+			);
+			if (!response.success) throw deserializeDaemonError(response);
+			// SAFETY: The authenticated supervisor constructs the peer response.
+			return (response.data as { peers: AgentSessionMessageAgentSummary[] }).peers;
+		} finally {
+			client.close();
+		}
+	}
+
+	private async createAgentMessageListResult(
+		current: ActiveSessionState,
+		peers?: AgentSessionMessageAgentSummary[],
+	): Promise<AgentSessionMessageListResult> {
+		peers ??= await this.listSupervisorAgentPeers();
 		const localAgents = this.listTargetableSessionStates(current).map((state) =>
 			this.createAgentMessageAgentSummary(state),
 		);
@@ -5355,28 +5370,24 @@ export class AgentDaemon {
 			});
 		}
 		const localIds = new Set(localAgents.map((agent) => agent.activeSessionId));
+		const remoteAgents = peers.filter(
+			(peer) => !localIds.has(peer.activeSessionId) && !this.closingSessions.has(peer.activeSessionId),
+		);
 		return {
 			current: this.createAgentSessionMessageEndpoint(current),
-			agents: [
-				...localAgents,
-				...[...this.remoteAgentPeers.values()].filter(
-					(peer) =>
-						peer.status !== "inactive" &&
-						!localIds.has(peer.activeSessionId) &&
-						!this.closingSessions.has(peer.activeSessionId),
-				),
-			],
+			agents: [...localAgents, ...remoteAgents],
 		};
 	}
 
 	private async createAgentFamilyCatalog(currentState?: ActiveSessionState): Promise<AgentFamilyCatalogEntry[]> {
 		const current =
 			currentState ?? [...this.sessions.values()].find((state) => !this.bindingSessions.has(state.activeSessionId));
-		const listed = current ? await this.createAgentMessageListResult(current) : { agents: [] };
-		const remotePeers = new Set(this.remoteAgentPeers.values());
+		const remotePeers = current ? await this.listSupervisorAgentPeers() : [];
+		const listed = current ? await this.createAgentMessageListResult(current, remotePeers) : { agents: [] };
+		const remotePeerSet = new Set(remotePeers);
 		const localAgents = current
-			? [this.createAgentMessageAgentSummary(current), ...listed.agents.filter((agent) => !remotePeers.has(agent))]
-			: listed.agents.filter((agent) => !remotePeers.has(agent));
+			? [this.createAgentMessageAgentSummary(current), ...listed.agents.filter((agent) => !remotePeerSet.has(agent))]
+			: listed.agents;
 		const activePaths = new Set(
 			localAgents.flatMap((agent) => (agent.sessionPath ? [canonicalSessionPath(agent.sessionPath)] : [])),
 		);
@@ -5417,7 +5428,7 @@ export class AgentDaemon {
 				...(agent.sessionPath ? { sessionPath: canonicalSessionPath(agent.sessionPath) } : {}),
 			});
 		};
-		for (const peer of this.remoteAgentPeers.values()) addAgent(peer);
+		for (const peer of remotePeers) addAgent(peer);
 		for (const agent of localAgents) addAgent(agent);
 		for (const state of this.sessions.values()) {
 			const entry = byId.get(state.runtime.session.sessionId);
