@@ -33,6 +33,25 @@ __all__ = ["McpIntegration", "McpToolError", "NotEnabled"]
 _EXPIRY_SKEW_SECONDS = 30
 
 
+def _tool_input_schema(t: Any) -> dict[str, Any]:
+    """Read a tool's JSON Schema, honoring the SDK's ``inputSchema`` alias.
+
+    ``mcp.types.Tool`` is a pydantic model whose field is the snake_case
+    ``input_schema`` with a camelCase alias ``inputSchema``. Aliases are only
+    honored on validation and ``model_dump(by_alias=True)``, never as a plain
+    attribute, so a bare ``getattr(t, "inputSchema", None)`` always misses and
+    silently returns an empty schema. Dump by alias first; fall back to
+    ``getattr`` for duck-typed stubs (e.g. in tests) that set the attribute
+    directly rather than being a real pydantic model.
+    """
+    if hasattr(t, "model_dump"):
+        dumped = t.model_dump(by_alias=True, exclude_none=True)
+        schema = dumped.get("inputSchema")
+        if schema:
+            return schema
+    return getattr(t, "inputSchema", None) or {}
+
+
 class NotEnabled(RuntimeError):
     """Raised when an integration has no usable credentials.
 
@@ -264,7 +283,7 @@ class McpIntegration:
                     t.name: {
                         "name": t.name,
                         "description": getattr(t, "description", "") or "",
-                        "inputSchema": getattr(t, "inputSchema", None) or {},
+                        "inputSchema": _tool_input_schema(t),
                     }
                     for t in resp.tools
                 }

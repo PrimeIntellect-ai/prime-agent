@@ -26,14 +26,13 @@ class _FakeSession:
         self.calls = []
 
     async def list_tools(self):
-        Tool = type("Tool", (), {})
+        from mcp.types import Tool
 
         def make(name, desc, schema):
-            t = Tool()
-            t.name = name
-            t.description = desc
-            t.inputSchema = schema
-            return t
+            # Real SDK model: input_schema is snake_case with a camelCase
+            # ``inputSchema`` alias, never a plain ``inputSchema`` attribute.
+            # A duck-typed stub here would hide the alias bug (see #1073).
+            return Tool(name=name, description=desc, input_schema=schema)
 
         resp = type("Resp", (), {})()
         resp.tools = [make(*t) for t in self._tools]
@@ -168,6 +167,36 @@ class McpIntegrationTest(unittest.TestCase):
             out = _run(integration.list_issues(team="Eng"))
         self.assertEqual(out, {"issues": [1, 2]})
         self.assertEqual(session.calls, [("list_issues", {"team": "Eng"})])
+
+    def test_list_tools_preserves_input_schema(self):
+        # Regression test for #1073: mcp.types.Tool exposes its schema as the
+        # snake_case field `input_schema` with a camelCase alias `inputSchema`;
+        # the alias is only honored on validation/model_dump(by_alias=True),
+        # never as a plain attribute. A naive `getattr(t, "inputSchema", None)`
+        # always misses and silently returns {}.
+        schema = {
+            "type": "object",
+            "properties": {"libraryName": {"type": "string"}, "query": {"type": "string"}},
+            "required": ["libraryName", "query"],
+        }
+        session = _FakeSession(
+            tools=[("resolve-library-id", "Resolve a library id", schema)],
+            result=None,
+        )
+        self._write_auth(
+            {"type": "oauth", "access": "t", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        with self._patch_session(session):
+            integration = _Integration()
+            tools = _run(integration.list_tools())
+        self.assertEqual(
+            tools,
+            [{"name": "resolve-library-id", "description": "Resolve a library id", "inputSchema": schema}],
+        )
+        # __getattr__'s bound-tool docstring reads the same dict; it must also
+        # advertise the real schema instead of falling back to "{}".
+        doc = integration.__getattr__("resolve-library-id").__doc__
+        self.assertIn("libraryName", doc)
 
     def test_unknown_tool_raises_with_available_list(self):
         session = _FakeSession(tools=[("list_issues", "", {})], result=None)
