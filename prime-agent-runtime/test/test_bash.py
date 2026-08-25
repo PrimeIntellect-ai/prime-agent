@@ -560,6 +560,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 taskkill.reset_mock()
                 handle._reap_group()  # watcher path: taskkill before marking reaped
                 taskkill.assert_called_once_with(handle._pid)
+            with mock.patch.object(bash_module, "_taskkill_tree", return_value=False):
+                # Leader already exited: "tree gone" counts as delivered, so
+                # the journal record is retired on clean Windows exits.
+                self.assertTrue(handle._reap_group())
 
     async def test_undelivered_kill_leaves_journal_record_active(self):
         if not bash_module._IS_POSIX:
