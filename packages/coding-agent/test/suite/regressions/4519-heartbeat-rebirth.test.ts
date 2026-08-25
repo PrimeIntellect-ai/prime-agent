@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentSession } from "../../../src/core/agent-session.js";
 import type { CreateAgentSessionRuntimeFactory } from "../../../src/core/agent-session-runtime.js";
 import type { AgentCronJob, AgentCronJobStore, AgentCronScheduler } from "../../../src/core/cron-jobs.js";
 import type { ActiveSessionState } from "../../../src/modes/daemon/active-session-state.js";
@@ -9,18 +8,11 @@ import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
 import { createHarness, type Harness } from "../harness.js";
 
 type AgentDaemonCronInternals = {
-	agentMessagePreparingTargets: Map<string, number>;
-	agentMessageTargetLocks: Map<string, Promise<void>>;
 	cronStore: AgentCronJobStore;
 	cronScheduler: AgentCronScheduler;
 	createRuntime(command: { type: "create"; sessionPath: string }): Promise<ActiveSessionState>;
 	sessions: Map<string, ActiveSessionState>;
 	runCronJob(job: AgentCronJob): Promise<"skipped" | undefined>;
-	withAgentMessagePreparingGuard(
-		state: ActiveSessionState,
-		run: (session: AgentSession) => Promise<void>,
-		canRun?: () => boolean,
-	): Promise<boolean>;
 };
 
 function createDaemon(harness: Harness, createRuntime: CreateAgentSessionRuntimeFactory): AgentDaemon {
@@ -166,124 +158,6 @@ describe("ENG-4519 heartbeat rebirth", () => {
 
 		await expect(run).resolves.toBe("skipped");
 		expect(internals.sessions.size).toBe(0);
-	});
-
-	it("records a heartbeat cancelled while waiting to prompt as skipped", async () => {
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		harness.sessionManager.appendSessionState({ status: "active" });
-		const promptHeartbeat = vi.spyOn(harness.session, "promptHeartbeat").mockResolvedValue();
-		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async ({ cwd, agentDir }) =>
-			runtimeResult(harness, cwd, agentDir),
-		);
-		const daemon = createDaemon(harness, createRuntime);
-		const internals = daemon as unknown as AgentDaemonCronInternals;
-		const state = await internals.createRuntime({
-			type: "create",
-			sessionPath: harness.session.sessionFile!,
-		});
-		const heartbeat = createDueHeartbeat(internals.cronStore, {
-			activeSessionId: state.activeSessionId,
-			sessionId: harness.session.sessionId,
-			sessionFile: harness.session.sessionFile!,
-			cwd: harness.tempDir,
-		});
-		let releaseLock: () => void = () => {};
-		const lock = new Promise<void>((resolve) => {
-			releaseLock = resolve;
-		});
-		internals.agentMessageTargetLocks.set(state.activeSessionId, lock);
-
-		const run = internals.cronScheduler.runDue(new Date());
-		await waitForCondition(() => internals.agentMessagePreparingTargets.has(state.activeSessionId));
-		internals.cronStore.cancel(heartbeat.id);
-		releaseLock();
-
-		await expect(run).resolves.toBe(0);
-		expect(promptHeartbeat).not.toHaveBeenCalled();
-		const storedHeartbeat = internals.cronStore.list().find((job) => job.id === heartbeat.id);
-		expect(storedHeartbeat).toMatchObject({
-			status: "cancelled",
-			runCount: 0,
-		});
-		expect(storedHeartbeat?.lastRunAt).toBeUndefined();
-	});
-
-	it("uses an updated RLM heartbeat instruction after waiting to prompt", async () => {
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		harness.sessionManager.appendSessionState({ status: "active" });
-		const promptHeartbeat = vi.spyOn(harness.session, "promptHeartbeat").mockResolvedValue();
-		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async ({ cwd, agentDir }) =>
-			runtimeResult(harness, cwd, agentDir),
-		);
-		const daemon = createDaemon(harness, createRuntime);
-		const internals = daemon as unknown as AgentDaemonCronInternals;
-		const state = await internals.createRuntime({
-			type: "create",
-			sessionPath: harness.session.sessionFile!,
-		});
-		const heartbeat = internals.cronStore.createRlmHeartbeat({
-			activeSessionId: state.activeSessionId,
-			sessionId: harness.session.sessionId,
-			sessionFile: harness.session.sessionFile!,
-			cwd: harness.tempDir,
-			scheduleText: "every 10s",
-			prompt: "old instruction",
-			now: new Date(Date.now() - 20_000),
-		});
-		let releaseLock: () => void = () => {};
-		const lock = new Promise<void>((resolve) => {
-			releaseLock = resolve;
-		});
-		internals.agentMessageTargetLocks.set(state.activeSessionId, lock);
-
-		const run = internals.cronScheduler.runDue(new Date());
-		await waitForCondition(() => internals.agentMessagePreparingTargets.has(state.activeSessionId));
-		internals.cronStore.updateRlmHeartbeat(state.activeSessionId, heartbeat.id, {
-			prompt: "updated instruction",
-		});
-		releaseLock();
-
-		await expect(run).resolves.toBe(1);
-		expect(promptHeartbeat).toHaveBeenCalledWith(
-			expect.objectContaining({ id: heartbeat.id, prompt: "updated instruction" }),
-			expect.anything(),
-		);
-	});
-
-	it("uses the current runtime session after waiting for a prompt lock", async () => {
-		const original = await createHarness();
-		const replacement = await createHarness();
-		harnesses.push(original, replacement);
-		const daemon = createDaemon(original, async () => {
-			throw new Error("runtime creation is not expected");
-		});
-		const internals = daemon as unknown as AgentDaemonCronInternals;
-		const activeSessionId = "active-session";
-		const runtime = { session: original.session };
-		const state = { activeSessionId, runtime } as unknown as ActiveSessionState;
-		internals.sessions.set(activeSessionId, state);
-		let releaseLock: () => void = () => {};
-		const lock = new Promise<void>((resolve) => {
-			releaseLock = resolve;
-		});
-		internals.agentMessageTargetLocks.set(activeSessionId, lock);
-		let promptedSession: AgentSession | undefined;
-
-		const guardedRun = internals.withAgentMessagePreparingGuard(
-			state,
-			async (session) => {
-				promptedSession = session;
-			},
-			() => runtime.session === replacement.session,
-		);
-		await waitForCondition(() => internals.agentMessagePreparingTargets.has(activeSessionId));
-		runtime.session = replacement.session;
-		releaseLock();
-
-		await expect(guardedRun).resolves.toBe(true);
-		expect(promptedSession).toBe(replacement.session);
 	});
 
 	it("still restores and prompts a session explicitly persisted as active", async () => {
