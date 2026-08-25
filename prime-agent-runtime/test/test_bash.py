@@ -560,10 +560,48 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 taskkill.reset_mock()
                 handle._reap_group()  # watcher path: taskkill before marking reaped
                 taskkill.assert_called_once_with(handle._pid)
-            with mock.patch.object(bash_module, "_taskkill_tree", return_value=False):
-                # Leader already exited: "tree gone" counts as delivered, so
-                # the journal record is retired on clean Windows exits.
+            with mock.patch.object(bash_module, "_taskkill_tree", return_value=False) as taskkill:
+                # Leader already exited: one best-effort retry sweeps racing
+                # descendants, then "tree gone" counts as delivered so the
+                # journal record is retired on clean Windows exits.
                 self.assertTrue(handle._reap_group())
+                self.assertEqual(taskkill.call_count, 2)
+
+    async def test_windows_prerecord_journals_pid_before_start_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.jsonl")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                },
+            ):
+                with mock.patch.object(bash_module, "_IS_POSIX", False):
+                    handle = bash("echo hi")
+                    await asyncio.wait_for(handle, timeout=5)
+                    for _ in range(100):
+                        if handle._reaped:
+                            break
+                        await asyncio.sleep(0.05)
+            records = await _poll_journal(journal, count=2)
+            # Pid-only pre-record lands before the start-id query; the enriched
+            # record supersedes it (the host keeps the last record per pid).
+            self.assertTrue(records[0]["active"])
+            self.assertNotIn("processStartId", records[0])
+            self.assertTrue(records[1]["active"])
+            self.assertIn("processStartId", records[1])
+            self.assertEqual(records[0]["pid"], records[1]["pid"])
+
+    def test_darwin_start_id_uses_absolute_ps(self):
+        completed = mock.Mock(stdout="Mon Jan  1 00:00:00 2026\n")
+        with mock.patch.object(bash_module.sys, "platform", "darwin"):
+            with mock.patch("builtins.open", side_effect=OSError):
+                with mock.patch.object(bash_module.subprocess, "run", return_value=completed) as run:
+                    self.assertEqual(
+                        bash_module._process_start_id(1234), "ps:Mon Jan  1 00:00:00 2026"
+                    )
+        self.assertEqual(run.call_args.args[0][0], "/bin/ps")
 
     async def test_undelivered_kill_leaves_journal_record_active(self):
         if not bash_module._IS_POSIX:
