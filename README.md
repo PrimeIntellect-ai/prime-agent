@@ -9,7 +9,7 @@
 </p>
 
 <h3 align="center">
-Prime Agent: A Self-Improving RLM Agent
+Prime Agent: A Self-Improving RLM Harness
 </h3>
 
 <p align="center">
