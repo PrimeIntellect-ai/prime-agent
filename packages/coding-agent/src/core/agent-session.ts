@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -91,6 +91,9 @@ import {
 } from "./autonomous.js";
 import {
 	AUTORESEARCH_SKILL_NAME,
+	type AutoresearchPublication,
+	type AutoresearchPublicationVerification,
+	type AutoresearchReviewerRole,
 	AutoresearchStore,
 	buildAutoresearchReviewerPrompts,
 	buildAutoresearchSupervisorPrompt,
@@ -1271,7 +1274,9 @@ export class AgentSession {
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
 		this._autoresearchStore =
-			this._rlmDepth === 0 ? new AutoresearchStore(this.sessionManager.getSessionArtifactDir()) : undefined;
+			this._rlmDepth === 0
+				? new AutoresearchStore(this.sessionManager.getSessionArtifactDir(), undefined, this._cwd)
+				: undefined;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
@@ -3239,6 +3244,136 @@ export class AgentSession {
 		}
 	}
 
+	private async _verifyAutoresearchPublication(
+		publication: AutoresearchPublication,
+	): Promise<AutoresearchPublicationVerification> {
+		const verifiedAt = new Date().toISOString();
+		if (publication.doi) {
+			const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(publication.doi)}`, {
+				headers: { Accept: "application/json", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+				signal: AbortSignal.timeout(30_000),
+			});
+			if (!response.ok) throw new Error(`Crossref verification failed with HTTP ${response.status}`);
+			const body = await response.text();
+			const payload = JSON.parse(body) as unknown;
+			if (!isObjectRecord(payload) || !isObjectRecord(payload.message)) {
+				throw new Error("Crossref verification response omitted message metadata");
+			}
+			const message = payload.message;
+			const doi = typeof message.DOI === "string" ? message.DOI : publication.doi;
+			if (doi.toLowerCase() !== publication.doi.toLowerCase()) {
+				throw new Error("Crossref verification returned a different DOI");
+			}
+			const rawTitles = message.title;
+			const title = Array.isArray(rawTitles) && typeof rawTitles[0] === "string" ? rawTitles[0] : publication.title;
+			const authors = Array.isArray(message.author)
+				? message.author
+						.filter(isObjectRecord)
+						.map((author) =>
+							[author.given, author.family]
+								.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+								.join(" "),
+						)
+						.filter((author) => author.length > 0)
+				: [];
+			const containers = message["container-title"];
+			const venue =
+				Array.isArray(containers) && typeof containers[0] === "string" ? containers[0] : publication.venue;
+			let year = publication.year;
+			for (const key of ["published-print", "published-online", "published", "issued"] as const) {
+				const date = message[key];
+				if (!isObjectRecord(date) || !Array.isArray(date["date-parts"])) continue;
+				const parts = date["date-parts"][0];
+				if (Array.isArray(parts) && typeof parts[0] === "number") {
+					year = parts[0];
+					break;
+				}
+			}
+			const registeredType = typeof message.type === "string" ? message.type : "";
+			const peerReviewedTypes = new Set(["journal-article", "proceedings-article"]);
+			const publicationStatus =
+				peerReviewedTypes.has(registeredType) && venue ? "peer_reviewed" : "published_status_unclear";
+			const resolvedMetadata: AutoresearchPublicationVerification["resolvedMetadata"] = {
+				title,
+				authors: authors.length > 0 ? authors : publication.authors,
+				doi,
+				fullTextUrl: publication.fullTextUrl ?? `https://doi.org/${encodeURIComponent(doi)}`,
+			};
+			if (year !== undefined) resolvedMetadata.year = year;
+			if (venue) resolvedMetadata.venue = venue;
+			return {
+				verificationId: `publication-verification-${randomUUID()}`,
+				paperId: publication.paperId,
+				source: "crossref",
+				publicationStatus,
+				verifiedAt,
+				metadataDigest: createHash("sha256").update(body).digest("hex"),
+				resolvedMetadata,
+			};
+		}
+		if (publication.preprintId) {
+			const response = await fetch(
+				`https://export.arxiv.org/api/query?id_list=${encodeURIComponent(publication.preprintId)}`,
+				{
+					headers: { Accept: "application/atom+xml", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+					signal: AbortSignal.timeout(30_000),
+				},
+			);
+			if (!response.ok) throw new Error(`arXiv verification failed with HTTP ${response.status}`);
+			const body = await response.text();
+			if (!/<entry[>\s]/i.test(body)) throw new Error("arXiv verification returned no matching entry");
+			const title = body
+				.match(/<title>([\s\S]*?)<\/title>/gi)
+				?.at(-1)
+				?.replace(/<\/?title>/gi, "")
+				.trim();
+			const authors = [...body.matchAll(/<author>[\s\S]*?<name>([\s\S]*?)<\/name>[\s\S]*?<\/author>/gi)]
+				.map((match) => match[1]?.replace(/\s+/g, " ").trim())
+				.filter((author): author is string => !!author);
+			const published = body.match(/<published>(\d{4})-/i)?.[1];
+			const resolvedMetadata: AutoresearchPublicationVerification["resolvedMetadata"] = {
+				title: title?.replace(/\s+/g, " ") || publication.title,
+				authors: authors.length > 0 ? authors : publication.authors,
+				preprintId: publication.preprintId,
+				fullTextUrl: publication.fullTextUrl ?? `https://arxiv.org/pdf/${publication.preprintId}`,
+			};
+			if (published) resolvedMetadata.year = Number.parseInt(published, 10);
+			return {
+				verificationId: `publication-verification-${randomUUID()}`,
+				paperId: publication.paperId,
+				source: "arxiv",
+				publicationStatus: "preprint",
+				verifiedAt,
+				metadataDigest: createHash("sha256").update(body).digest("hex"),
+				resolvedMetadata,
+			};
+		}
+		throw new Error("host publication verification requires a DOI or arXiv preprint_id");
+	}
+
+	private async _spawnAutoresearchReviewers(
+		candidate: ReturnType<typeof parseAutoresearchCandidateInput>,
+	): Promise<ReturnType<AutoresearchStore["getReviewerAssignments"]>> {
+		const store = this._requireAutoresearchStore();
+		const existing = new Map(store.getReviewerAssignments(candidate.candidateId).map((item) => [item.role, item]));
+		const prompts = buildAutoresearchReviewerPrompts(candidate, store.getState());
+		const roles = Object.keys(prompts) as AutoresearchReviewerRole[];
+		const slug = candidate.candidateId.replace(/[^A-Za-z0-9]+/g, "-").slice(0, 20) || "candidate";
+		for (const role of roles) {
+			if (existing.has(role)) continue;
+			const kwargs: Record<string, unknown> = {
+				name: `research-${role.replaceAll("_", "-")}-${slug}-${randomUUID().slice(0, 8)}`,
+			};
+			const handle = await this.runRlmChild(prompts[role], kwargs);
+			const assignment = store.registerReviewerAssignment(candidate, role, {
+				rlmChildId: handle.rlm_child_id,
+				name: handle.name,
+			});
+			existing.set(role, assignment);
+		}
+		return store.getReviewerAssignments(candidate.candidateId);
+	}
+
 	private _collectAutoresearchAgentResults(): {
 		ingested: number;
 		reviews: ReturnType<AutoresearchStore["getState"]>["collectedReviews"];
@@ -3257,7 +3392,7 @@ export class AgentSession {
 		for (const message of messages) {
 			if (!isAgentSessionMessage(message) || !message.details.message.includes("AUTORESEARCH_")) continue;
 			try {
-				if (store.ingestAgentMessage(message.details.id, message.details.message)) ingested++;
+				if (store.ingestAgentMessage(message.details.id, message.details.message, message.details.from)) ingested++;
 			} catch (error) {
 				errors.push({
 					messageId: message.details.id,
@@ -3296,6 +3431,20 @@ export class AgentSession {
 			case "autoresearch.publication.add": {
 				const publication = store.addPublication(parseAutoresearchPublicationInput(payload.publication));
 				return { publication };
+			}
+			case "autoresearch.publication.verify": {
+				if (typeof payload.paper_id !== "string") {
+					throw new Error("autoresearch.publication.verify paper_id must be a string");
+				}
+				const publication = store.getState().publications.find((item) => item.paperId === payload.paper_id);
+				if (!publication) throw new Error(`publication ${payload.paper_id} was not found`);
+				const verification = store.recordPublicationVerification(
+					await this._verifyAutoresearchPublication(publication),
+				);
+				return {
+					publication: store.getState().publications.find((item) => item.paperId === publication.paperId),
+					verification,
+				};
 			}
 			case "autoresearch.experiment.record": {
 				const experiment = store.recordExperiment(parseAutoresearchExperimentInput(payload.experiment));
@@ -3363,27 +3512,19 @@ export class AgentSession {
 				const candidate = parseAutoresearchCandidateInput(payload.candidate);
 				return { candidate, prompts: buildAutoresearchReviewerPrompts(candidate, store.getState()) };
 			}
+			case "autoresearch.reviewers.spawn": {
+				if (payload.model !== undefined || payload.thinking !== undefined) {
+					throw new Error("autoresearch reviewers inherit the current Prime model/provider configuration");
+				}
+				const candidate = parseAutoresearchCandidateInput(payload.candidate);
+				const assignments = await this._spawnAutoresearchReviewers(candidate);
+				return { candidate, assignments };
+			}
 			case "autoresearch.results.collect":
 				return this._collectAutoresearchAgentResults();
 			case "autoresearch.cycle.complete": {
 				const collection = this._collectAutoresearchAgentResults();
-				let cycleInput = payload.cycle;
-				if (isObjectRecord(cycleInput) && isObjectRecord(cycleInput.candidate)) {
-					const candidateId = cycleInput.candidate.candidate_id ?? cycleInput.candidate.candidateId;
-					if (typeof candidateId === "string") {
-						const byRole = new Map<string, unknown>();
-						for (const reviewer of store.getCollectedReviews(candidateId)) byRole.set(reviewer.role, reviewer);
-						if (Array.isArray(cycleInput.reviewers)) {
-							for (const reviewer of cycleInput.reviewers) {
-								if (isObjectRecord(reviewer) && typeof reviewer.role === "string") {
-									byRole.set(reviewer.role, reviewer);
-								}
-							}
-						}
-						cycleInput = { ...cycleInput, reviewers: [...byRole.values()] };
-					}
-				}
-				const result = store.recordCycle(parseAutoresearchCycleInput(cycleInput));
+				const result = store.recordCycle(parseAutoresearchCycleInput(payload.cycle));
 				let supervisor: { rlmChildId: string; name: string };
 				try {
 					supervisor = await this._ensureAutoresearchSupervisor();
@@ -9422,6 +9563,7 @@ export class AgentSession {
 				"autoresearch.initialize",
 				"autoresearch.get",
 				"autoresearch.publication.add",
+				"autoresearch.publication.verify",
 				"autoresearch.experiment.record",
 				"autoresearch.memory.remember",
 				"autoresearch.memory.recall",
@@ -9432,6 +9574,7 @@ export class AgentSession {
 				"autoresearch.claim.promote",
 				"autoresearch.claim.invalidate",
 				"autoresearch.reviewer_prompts",
+				"autoresearch.reviewers.spawn",
 				"autoresearch.results.collect",
 				"autoresearch.cycle.complete",
 				"autoresearch.supervision.record",

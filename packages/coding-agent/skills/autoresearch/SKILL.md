@@ -21,8 +21,9 @@ the durable state and stagnation calculation; the Python API is a typed bridge.
 3. Add claims with exact evidence bindings. Promote only claims whose wording
    is supported. Keep contradictions and unresolved objections visible.
 4. Build a candidate, then call `await autoresearch.review_candidate(candidate)`.
-   The four children are a literature auditor, prior-art killer, experimental
-   critic, and top-tier editor. Marked JSON replies are ingested automatically.
+   The host—not the root model—spawns and binds the literature auditor,
+   prior-art killer, experimental critic, and top-tier editor. A marked JSON
+   verdict is accepted only from the child assigned to that candidate and role.
 5. Call `complete_cycle` after **every** major cycle, including rejection,
    revision, prior-art collision, or experimental failure. The host compares
    the complete field map, counts genuinely new publication identities,
@@ -30,9 +31,12 @@ the durable state and stagnation calculation; the Python API is a typed bridge.
 6. `complete_cycle` waits for and ingests the retained supervisor's marked JSON
    response by default. The supervisor may redirect search but may not promote
    claims or declare novelty. `record_supervision` remains available for manual
-   recovery of an unmarked response.
+   recovery of an unmarked response, but manual recovery can never clear the
+   final stop gate.
 7. Record preliminary work with `record_experiment`; completed results require
-   artifact paths, metrics, results, interpretation, and confounds.
+   artifact paths, metrics, results, interpretation, and confounds. The host
+   resolves and SHA-256-hashes every artifact, then rechecks those receipts
+   before experimental evidence can support promotion or the final gate.
 8. End problem discovery only after `stop_gate()` passes. Final
    `export_deliverable()` is blocked until then and returns all 18 roadmap
    sections.
@@ -56,11 +60,15 @@ artifact = await autoresearch.download_open_full_text(
 )
 ```
 
-Crossref records deliberately use `published_status_unclear`; Crossref deposit
-metadata alone is not universal proof of peer review. Confirm venue/publisher
-status separately before changing that field. arXiv records remain `preprint`
-even when they include a DOI. Contact emails are read from `CROSSREF_MAILTO`
-and `UNPAYWALL_EMAIL` and are never persisted in research state.
+Search helpers return candidate identities, never authoritative status fields.
+`add_publication` immediately asks a fixed-domain host verifier to resolve the
+DOI through Crossref or the preprint ID through arXiv. The host records a
+metadata digest and receipt; callers cannot submit `publication_status` or
+`metadata_verified_by`. Crossref journal/proceedings registrations with a
+container are conservatively classified as `peer_reviewed`; all other Crossref
+types stay `published_status_unclear`, and arXiv-only records stay `preprint`.
+Contact emails are read from `CROSSREF_MAILTO` and `UNPAYWALL_EMAIL` and are
+never persisted in research state.
 
 `download_open_full_text` accepts only credential-free public HTTPS targets,
 revalidates redirects, enforces a byte limit, and stores a SHA-256-addressed
@@ -85,10 +93,13 @@ conditions, a reusable procedure, and verification requirements. Call
 `verify_memory_reuse` only after checking those requirements. A plan is not
 usable while its status is `proposed` or `rejected`.
 
-`remember` mirrors records into NVIDIA NOOA when `nooa-memory` is installed on a
-supported Python 3.12–3.13 runtime. Prime's current Python 3.14 runtime uses the
-same host-owned typed records and reuse gates as a lossless fallback; inspect
-`nooa_backend_status()` rather than assuming the optional mirror is active.
+`remember`, `sync_nooa_memory`, and `recall` use NVIDIA NOOA 0.0.8 through a
+pinned Python 3.13 `uv` sidecar. Prime's model, provider, and main Python runtime
+are unchanged. Canonical records remain host-owned; NOOA supplies its real
+hashing embeddings, dense+sparse candidate retrieval, ACT-R scoring, and graph
+spread. If the sidecar is unavailable, recall reports the reason and uses the
+host lexical index as a lossless fallback. Inspect `nooa_backend_status()` and
+the returned `nooa` receipt rather than assuming it ran.
 
 ## Publication and claim API
 
@@ -100,9 +111,7 @@ await autoresearch.add_publication({
     "year": 2026,
     "venue": "Example Conference",
     "doi": "10.1234/example",
-    "publication_status": "peer_reviewed",  # peer_reviewed | preprint | published_status_unclear
     "full_text_url": "https://example.org/paper.pdf",
-    "metadata_verified_by": ["crossref", "publisher"],
 })
 
 claim = await autoresearch.add_claim({
@@ -113,6 +122,8 @@ claim = await autoresearch.add_claim({
         "source_type": "publication",
         "source_id": "doi:10.1234/example",
         "exact_pointer": "Section 3, p. 5",
+        "evidence_kind": "text",
+        "exact_quote": "The method requires A during every training update.",
         "demonstrates": "The method requires A during training.",
         "interpretation": "This is one instance of assumption A, not proof of field-wide consensus.",
     }],
@@ -132,7 +143,9 @@ Claim types are `FIELD_PRACTICE`, `SHARED_ASSUMPTION`, `KNOWN_LIMITATION`,
 `CONTRADICTION`, `PRIOR_ART`, `EMPIRICAL_OBSERVATION`,
 `MECHANISTIC_HYPOTHESIS`, and `FEASIBILITY_CONSTRAINT`. Evidence source types
 are `publication`, `experiment`, `dataset`, `code`, and `web`. Literature claim
-types require publication evidence before promotion.
+types require publication evidence before promotion. Textual publication
+evidence requires `exact_quote`; use `evidence_kind` of `figure`, `table`, or
+`result` for genuinely non-textual evidence instead of inventing a quote.
 
 ## Candidate and cycle API
 
@@ -152,12 +165,12 @@ candidate = {
     "broader_relevance": "...",
     "requirements": ["dataset X", "API Y", "2x GPU"],
 }
-reviewers = await autoresearch.review_candidate(candidate)
+await autoresearch.review_candidate(candidate)
 ```
 
 Complete the cycle with the candidate, the publications first encountered in
-that cycle, the **entire current** field map, reviewer JSON results, and all
-problem gates:
+that cycle, the **entire current** field map, and all problem gates. Do not pass
+reviewer verdicts; the host joins the assigned children’s collected results:
 
 ```python
 checkpoint = await autoresearch.complete_cycle({
@@ -175,12 +188,6 @@ checkpoint = await autoresearch.complete_cycle({
         "methods_and_evaluations": ["..."],
         "closest_prior_work": ["..."],
     },
-    "reviewers": [{
-        "role": "prior_art_killer",
-        "verdict": "reject",
-        "summary": "...",
-        "objections": ["..."],
-    }],
     "gates": {
         "important": True,
         "unresolved": False,

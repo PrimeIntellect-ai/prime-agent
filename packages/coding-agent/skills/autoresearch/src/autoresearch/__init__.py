@@ -8,8 +8,9 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
-import sys
+import subprocess
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -19,7 +20,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from rlm import RLMSpawnHandle, host_request, run as spawn_rlm
+from rlm import host_request
 
 
 _USER_AGENT = "Prime-Agent-Autoresearch/0.1 (scholarly metadata client)"
@@ -134,8 +135,6 @@ def _crossref_publication(item: dict[str, Any]) -> dict[str, Any]:
         "paper_id": f"doi:{doi.lower()}" if doi else f"crossref:{hashlib.sha256(title.encode()).hexdigest()[:20]}",
         "title": title,
         "authors": authors or ["Unknown author"],
-        "publication_status": "published_status_unclear",
-        "metadata_verified_by": ["crossref"],
     }
     if doi:
         publication["doi"] = doi
@@ -261,10 +260,8 @@ async def arxiv_search(query: str, *, max_results: int = 10, start: int = 0) -> 
             "paper_id": f"arxiv:{base_id.lower()}",
             "title": title,
             "authors": authors or ["Unknown author"],
-            "publication_status": "preprint",
             "preprint_id": base_id,
             "full_text_url": pdf_url,
-            "metadata_verified_by": ["arxiv"],
             "abstract": " ".join((entry.findtext(f"{atom}summary") or "").split()),
         }
         if published[:4].isdigit():
@@ -360,8 +357,23 @@ async def download_open_full_text(
 
 
 async def add_publication(publication: dict[str, Any]) -> dict[str, Any]:
-    """Add or refresh a publication identity before binding claims to it."""
-    return await host_request("autoresearch.publication.add", {"publication": _object(publication, "publication")})
+    """Add an identity, then ask the host to verify its metadata and status."""
+    candidate = dict(_object(publication, "publication"))
+    for key in ("publication_status", "publicationStatus", "metadata_verified_by", "metadataVerifiedBy"):
+        candidate.pop(key, None)
+    added = await host_request("autoresearch.publication.add", {"publication": candidate})
+    recorded = added.get("publication")
+    paper_id = recorded.get("paperId") if isinstance(recorded, dict) else None
+    if not isinstance(paper_id, str):
+        raise RuntimeError("autoresearch.publication.add returned no paperId")
+    return await verify_publication(paper_id)
+
+
+async def verify_publication(paper_id: str) -> dict[str, Any]:
+    """Run fixed-domain host verification for a recorded DOI or arXiv identity."""
+    if not isinstance(paper_id, str):
+        raise TypeError(f"paper_id must be str, got {type(paper_id).__name__}")
+    return await host_request("autoresearch.publication.verify", {"paper_id": paper_id})
 
 
 async def record_experiment(experiment: dict[str, Any]) -> dict[str, Any]:
@@ -373,57 +385,68 @@ async def record_experiment(experiment: dict[str, Any]) -> dict[str, Any]:
 
 
 def nooa_backend_status() -> dict[str, Any]:
-    """Describe whether the optional NVIDIA NOOA memory mirror can run here."""
-    if sys.version_info >= (3, 14):
+    """Describe the pinned Python 3.13 NOOA sidecar without changing Prime's provider."""
+    uv = shutil.which("uv")
+    session_dir = os.environ.get("RLM_SESSION_DIR")
+    if not uv:
+        return {"available": False, "backend": "host_owned_fallback", "reason": "uv is unavailable"}
+    if not session_dir:
         return {
             "available": False,
             "backend": "host_owned_fallback",
-            "reason": "NOOA currently declares Python <3.14; Prime's bundled runtime is newer.",
+            "reason": "RLM_SESSION_DIR is unset",
         }
-    try:
-        import nooa_memory  # noqa: F401
-    except ImportError as error:
-        return {"available": False, "backend": "host_owned_fallback", "reason": str(error)}
-    return {"available": True, "backend": "nooa_memory"}
+    return {
+        "available": True,
+        "backend": "nooa_memory_sidecar",
+        "package": "nooa-memory==0.0.8",
+        "runtime": "python3.13",
+        "provider_unchanged": True,
+    }
 
 
-def _mirror_memory_to_nooa(memory: dict[str, Any]) -> dict[str, Any]:
+def _run_nooa_sidecar(command: str, payload: dict[str, Any]) -> dict[str, Any]:
     status = nooa_backend_status()
     if not status["available"]:
         return status
+    session_dir = os.environ["RLM_SESSION_DIR"]
+    path = Path(session_dir) / "autoresearch" / "nooa-memory.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar = Path(__file__).with_name("nooa_sidecar.py")
+    process = subprocess.run(
+        [
+            shutil.which("uv") or "uv",
+            "run",
+            "--no-project",
+            "--python",
+            "3.13",
+            "--with",
+            "nooa-memory==0.0.8",
+            "python",
+            str(sidecar),
+            command,
+            str(path),
+        ],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if process.returncode != 0:
+        reason = process.stderr.strip() or process.stdout.strip() or f"sidecar exited {process.returncode}"
+        return {**status, "ok": False, "reason": reason[-2000:]}
     try:
-        from nooa_memory.schema import Memory, MemoryType
-        from nooa_memory.store import MemoryStore
+        result = json.loads(process.stdout)
+    except json.JSONDecodeError as error:
+        return {**status, "ok": False, "reason": f"invalid sidecar JSON: {error}"}
+    if not isinstance(result, dict):
+        return {**status, "ok": False, "reason": "sidecar returned a non-object result"}
+    return {**status, **result, "path": str(path)}
 
-        session_dir = os.environ.get("RLM_SESSION_DIR")
-        if not session_dir:
-            return {"available": True, "backend": "nooa_memory", "mirrored": False, "reason": "RLM_SESSION_DIR is unset"}
-        path = Path(session_dir) / "autoresearch" / "nooa-memory.sqlite"
-        store = MemoryStore(path)
-        type_map = {
-            "USEFUL_SEARCH_QUERY": MemoryType.SKILL,
-            "FAILED_DIRECTION": MemoryType.EPISODE,
-            "EXPERIMENT_RESULT": MemoryType.EPISODE,
-            "REVIEWER_OBJECTION": MemoryType.REFLECTION,
-            "SUPERVISOR_INTERVENTION": MemoryType.REFLECTION,
-        }
-        record = Memory(
-            id=str(memory["memoryId"]),
-            type=type_map.get(str(memory["type"]), MemoryType.INFO),
-            title=str(memory["title"]),
-            content=str(memory["content"]),
-            importance=float(memory["importance"]),
-            tags=[str(tag) for tag in memory.get("tags", [])],
-            owner="prime-autoresearch",
-        )
-        if store.get(record.id):
-            store.save(record)
-        else:
-            store.add(record)
-        store.close()
-        return {"available": True, "backend": "nooa_memory", "mirrored": True, "path": str(path)}
-    except Exception as error:  # NOOA is an optional compatibility bridge
-        return {"available": True, "backend": "nooa_memory", "mirrored": False, "reason": str(error)}
+
+def _mirror_memory_to_nooa(memory: dict[str, Any]) -> dict[str, Any]:
+    return _run_nooa_sidecar("upsert", {"memory": memory})
 
 
 async def remember(memory: dict[str, Any], *, mirror_nooa: bool = True) -> dict[str, Any]:
@@ -442,30 +465,47 @@ async def remember(memory: dict[str, Any], *, mirror_nooa: bool = True) -> dict[
 
 
 async def recall(query: str, *, limit: int = 8) -> dict[str, Any]:
-    """Retrieve relevant memories as hints; retrieval alone never authorizes reuse."""
+    """Retrieve through NOOA hybrid/ACT-R recall, with the host index as fallback."""
     if not isinstance(query, str):
         raise TypeError(f"query must be str, got {type(query).__name__}")
-    return await host_request("autoresearch.memory.recall", {"query": query, "limit": limit})
+    fallback = await host_request("autoresearch.memory.recall", {"query": query, "limit": limit})
+    state_response = await get_state()
+    state = state_response.get("state")
+    memories = state.get("memories", []) if isinstance(state, dict) else []
+    sync = await asyncio.to_thread(
+        _run_nooa_sidecar,
+        "sync",
+        {"memories": [memory for memory in memories if isinstance(memory, dict)]},
+    )
+    if not sync.get("ok"):
+        fallback["nooa"] = sync
+        return fallback
+    nooa = await asyncio.to_thread(_run_nooa_sidecar, "recall", {"query": query, "limit": limit})
+    recalled_ids = nooa.get("memory_ids")
+    if isinstance(recalled_ids, list):
+        by_id = {
+            str(memory.get("memoryId")): memory
+            for memory in memories
+            if isinstance(memory, dict) and memory.get("memoryId")
+        }
+        fallback["memories"] = [by_id[memory_id] for memory_id in recalled_ids if memory_id in by_id]
+    fallback["nooa"] = nooa
+    return fallback
 
 
 async def sync_nooa_memory() -> dict[str, Any]:
-    """Mirror all host-owned research memories into NOOA when it is compatible."""
+    """Synchronize the canonical host ledger into the real NOOA vector store."""
     status = nooa_backend_status()
     if not status["available"]:
         return {**status, "mirrored": 0}
     response = await get_state()
     state = response.get("state")
     memories = state.get("memories", []) if isinstance(state, dict) else []
-    results = [
-        await asyncio.to_thread(_mirror_memory_to_nooa, memory)
-        for memory in memories
-        if isinstance(memory, dict)
-    ]
-    return {
-        **status,
-        "mirrored": sum(1 for result in results if result.get("mirrored")),
-        "failed": [result for result in results if not result.get("mirrored")],
-    }
+    return await asyncio.to_thread(
+        _run_nooa_sidecar,
+        "sync",
+        {"memories": [memory for memory in memories if isinstance(memory, dict)]},
+    )
 
 
 async def prepare_memory_reuse(reuse: dict[str, Any]) -> dict[str, Any]:
@@ -528,35 +568,14 @@ async def reviewer_prompts(candidate: dict[str, Any]) -> dict[str, Any]:
 
 async def spawn_reviewers(
     candidate: dict[str, Any],
-    *,
-    model: str | None = None,
-    thinking: str | None = None,
-) -> list[RLMSpawnHandle]:
-    """Spawn the four specialist reviewers and return their admission handles."""
-    response = await reviewer_prompts(candidate)
-    prompts = response.get("prompts")
-    if not isinstance(prompts, dict):
-        raise RuntimeError("autoresearch.reviewer_prompts returned an invalid prompts object")
-    response_candidate = response.get("candidate")
-    candidate_id = (
-        str(response_candidate.get("candidateId", "candidate"))
-        if isinstance(response_candidate, dict)
-        else "candidate"
-    )
-    slug = re.sub(r"[^a-z0-9]+", "-", candidate_id.lower()).strip("-")[:20] or "candidate"
-    suffix = uuid.uuid4().hex[:8]
-    handles: list[RLMSpawnHandle] = []
-    for role in ("literature_auditor", "prior_art_killer", "experimental_critic", "top_tier_editor"):
-        prompt = prompts.get(role)
-        if not isinstance(prompt, str) or not prompt:
-            raise RuntimeError(f"autoresearch.reviewer_prompts omitted {role}")
-        kwargs: dict[str, Any] = {"name": f"research-{role.replace('_', '-')}-{slug}-{suffix}"}
-        if model is not None:
-            kwargs["model"] = model
-        if thinking is not None:
-            kwargs["thinking"] = thinking
-        handles.append(await spawn_rlm(prompt, **kwargs))
-    return handles
+) -> list[dict[str, Any]]:
+    """Ask the host to spawn and bind all four reviewer children."""
+    payload: dict[str, Any] = {"candidate": _object(candidate, "candidate")}
+    response = await host_request("autoresearch.reviewers.spawn", payload)
+    assignments = response.get("assignments")
+    if not isinstance(assignments, list):
+        raise RuntimeError("autoresearch.reviewers.spawn returned no assignments")
+    return [assignment for assignment in assignments if isinstance(assignment, dict)]
 
 
 async def collect_results() -> dict[str, Any]:
@@ -596,11 +615,9 @@ async def review_candidate(
     *,
     timeout: float = 300,
     poll_interval: float = 2,
-    model: str | None = None,
-    thinking: str | None = None,
 ) -> list[dict[str, Any]]:
     """Spawn all specialist reviewers and return their automatically ingested results."""
-    await spawn_reviewers(candidate, model=model, thinking=thinking)
+    await spawn_reviewers(candidate)
     candidate_id = candidate.get("candidate_id") or candidate.get("candidateId")
     if not isinstance(candidate_id, str):
         raise ValueError("candidate requires candidate_id to await its reviews")
@@ -615,7 +632,9 @@ async def complete_cycle(
     poll_interval: float = 2,
 ) -> dict[str, Any]:
     """Commit a cycle, message the retained supervisor, and ingest its response."""
-    response = await host_request("autoresearch.cycle.complete", {"cycle": _object(cycle, "cycle")})
+    canonical_cycle = dict(_object(cycle, "cycle"))
+    canonical_cycle.pop("reviewers", None)
+    response = await host_request("autoresearch.cycle.complete", {"cycle": canonical_cycle})
     cycle_result = response.get("cycle")
     cycle_id = cycle_result.get("cycleId") if isinstance(cycle_result, dict) else None
     if not await_supervisor or not isinstance(cycle_id, str) or response.get("delivery", {}).get("error"):

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	AutoresearchStore,
 	parseAutoresearchAgentPayload,
+	parseAutoresearchCandidateInput,
 	parseAutoresearchClaimInput,
 	parseAutoresearchClaimUpdateInput,
 	parseAutoresearchCycleInput,
@@ -25,9 +26,26 @@ function publication(index = 1) {
 		year: 2026,
 		venue: "Research Conference",
 		doi: `10.1000/example-${index}`,
-		publication_status: "peer_reviewed",
 		full_text_url: `https://example.test/paper-${index}.pdf`,
-		metadata_verified_by: ["crossref", "publisher"],
+	};
+}
+
+function verification(index = 1, publicationStatus: "peer_reviewed" | "preprint" = "peer_reviewed") {
+	return {
+		verificationId: `verification-${index}`,
+		paperId: `doi:10.1000/example-${index}`,
+		source: publicationStatus === "preprint" ? ("arxiv" as const) : ("crossref" as const),
+		publicationStatus,
+		verifiedAt: NOW,
+		metadataDigest: `${index}`.repeat(64),
+		resolvedMetadata: {
+			title: `Example paper ${index}`,
+			authors: ["A. Researcher"],
+			year: 2026,
+			venue: publicationStatus === "peer_reviewed" ? "Research Conference" : "arXiv",
+			doi: `10.1000/example-${index}`,
+			fullTextUrl: `https://example.test/paper-${index}.pdf`,
+		},
 	};
 }
 
@@ -102,14 +120,6 @@ function rejectedCycle(index: number) {
 		trajectory_fingerprint: `trajectory ${index}`,
 		publications: [],
 		field_maps: fieldMaps(),
-		reviewers: [
-			{
-				role: "prior_art_killer",
-				verdict: "reject",
-				summary: "The candidate does not survive the prior-art search.",
-				objections: [`objection ${index}`],
-			},
-		],
 		gates: gates({ unresolved: false }),
 		canonical_promotion_ids: [],
 	};
@@ -126,13 +136,35 @@ describe("autoresearch control plane", () => {
 	function store(): { root: string; value: AutoresearchStore } {
 		const root = mkdtempSync(join(tmpdir(), "prime-autoresearch-"));
 		tempDirs.push(root);
-		return { root, value: new AutoresearchStore(root, () => NOW) };
+		return { root, value: new AutoresearchStore(root, () => NOW, root) };
+	}
+
+	function addVerifiedPublication(value: AutoresearchStore, index = 1): void {
+		value.addPublication(parseAutoresearchPublicationInput(publication(index), NOW));
+		value.recordPublicationVerification(verification(index));
+	}
+
+	function ingestPassingReviews(
+		value: AutoresearchStore,
+		candidateValue: ReturnType<typeof parseAutoresearchCandidateInput>,
+	): void {
+		const candidateId = candidateValue.candidateId;
+		for (const reviewer of passingReviewers()) {
+			const role = reviewer.role as Parameters<AutoresearchStore["registerReviewerAssignment"]>[1];
+			const child = { rlmChildId: `child-${role}`, name: `reviewer-${role}` };
+			value.registerReviewerAssignment(candidateValue, role, child);
+			const message = `AUTORESEARCH_REVIEW_JSON:${candidateId}\n${JSON.stringify({
+				candidate_id: candidateId,
+				...reviewer,
+			})}`;
+			value.ingestAgentMessage(`message-${candidateId}-${role}`, message, { sessionName: child.name });
+		}
 	}
 
 	it("keeps publication identity separate from exact claim evidence and persists canonical lineage", () => {
 		const { root, value } = store();
 		value.initialize("Find a publication-grade agent-memory problem", "long-horizon agent memory");
-		value.addPublication(parseAutoresearchPublicationInput(publication(), NOW));
+		addVerifiedPublication(value);
 		const claim = value.addClaim(
 			parseAutoresearchClaimInput(
 				{
@@ -145,6 +177,7 @@ describe("autoresearch control plane", () => {
 							source_type: "publication",
 							source_id: "doi:10.1000/example-1",
 							exact_pointer: "Section 3, p. 5",
+							exact_quote: "Retrieved memory is inserted directly into the generation context.",
 							demonstrates: "Retrieved memory is injected without an authority check.",
 							interpretation: "This supports the assumption for this method family only.",
 						},
@@ -166,6 +199,7 @@ describe("autoresearch control plane", () => {
 							source_type: "publication",
 							source_id: "doi:10.1000/example-1",
 							exact_pointer: "Appendix B, p. 14",
+							exact_quote: "The authority ablation reduces the measured effect.",
 							demonstrates: "One ablation reduces the apparent authority effect.",
 							interpretation: "The canonical interpretation is now contested, not disproved.",
 						},
@@ -193,6 +227,7 @@ describe("autoresearch control plane", () => {
 						source_type: "publication",
 						source_id: "missing-paper",
 						exact_pointer: "Figure 2",
+						evidence_kind: "figure",
 						demonstrates: "The same intervention is evaluated.",
 						interpretation: "This is a direct novelty collision.",
 					},
@@ -203,22 +238,51 @@ describe("autoresearch control plane", () => {
 		expect(() => value.addClaim(claim)).toThrow("not in the publication ledger");
 	});
 
+	it("rejects caller-authored publication authority and quote-free textual evidence", () => {
+		expect(() =>
+			parseAutoresearchPublicationInput({ ...publication(), publication_status: "peer_reviewed" }, NOW),
+		).toThrow("publication status is host-verified");
+		expect(() =>
+			parseAutoresearchPublicationInput({ ...publication(), metadata_verified_by: ["crossref"] }, NOW),
+		).toThrow("metadata verification is host-owned");
+		expect(() =>
+			parseAutoresearchClaimInput(
+				{
+					claim_text: "A textual claim without a quote.",
+					claim_type: "PRIOR_ART",
+					supporting_evidence: [
+						{
+							source_type: "publication",
+							source_id: "doi:10.1000/example-1",
+							exact_pointer: "Section 2",
+							demonstrates: "A claimed result.",
+							interpretation: "An interpretation.",
+						},
+					],
+				},
+				NOW,
+			),
+		).toThrow("exact_quote is required");
+	});
+
 	it("enforces the four-review and strong-problem gates for surviving candidates", () => {
+		const { value } = store();
+		value.initialize("Test host-owned reviewer gates");
+		addVerifiedPublication(value);
+		addVerifiedPublication(value, 2);
 		const raw = {
 			...rejectedCycle(1),
 			outcome: "survived",
 			rejection_reason: undefined,
-			reviewers: [
-				{
-					role: "literature_auditor",
-					verdict: "pass",
-					summary: "Supported",
-					objections: [],
-				},
-			],
 			gates: gates(),
+			search_coverage: searchCoverage(),
+			motivation_paper_ids: ["doi:10.1000/example-1", "doi:10.1000/example-2"],
+			closest_prior_work_paper_ids: ["doi:10.1000/example-1"],
 		};
-		expect(() => parseAutoresearchCycleInput(raw, NOW)).toThrow("require all four reviewer roles");
+		expect(() => value.recordCycle(parseAutoresearchCycleInput(raw, NOW))).toThrow("require all four reviewer roles");
+		expect(() => parseAutoresearchCycleInput({ ...raw, reviewers: passingReviewers() }, NOW)).toThrow(
+			"cycle.reviewers is host-owned",
+		);
 	});
 
 	it("checks the supervisor after failed cycles and intervenes after five cycles without canonical progress", () => {
@@ -261,6 +325,8 @@ describe("autoresearch control plane", () => {
 			"experiments",
 			"memories",
 			"memoryReusePlans",
+			"publicationVerifications",
+			"reviewerAssignments",
 			"collectedReviews",
 			"ingestedAgentMessageIds",
 		]) {
@@ -270,7 +336,7 @@ describe("autoresearch control plane", () => {
 
 		const restored = new AutoresearchStore(root, () => NOW).getState();
 		expect(restored).toMatchObject({
-			schemaVersion: 2,
+			schemaVersion: 3,
 			objective: "Preserve a version-one research run",
 			publications: [{ paperId: "doi:10.1000/example-1" }],
 			experiments: [],
@@ -324,8 +390,10 @@ describe("autoresearch control plane", () => {
 	});
 
 	it("tracks experiments and requires verified current-state-conditioned memory reuse", () => {
-		const { value } = store();
+		const { root, value } = store();
 		value.initialize("Test experiment evidence and safe memory reuse");
+		mkdirSync(join(root, "artifacts"), { recursive: true });
+		writeFileSync(join(root, "artifacts", "authority-results.json"), '{"accuracy_delta":0.12}\n', "utf8");
 		const experiment = value.recordExperiment(
 			parseAutoresearchExperimentInput(
 				{
@@ -344,7 +412,7 @@ describe("autoresearch control plane", () => {
 				NOW,
 			),
 		);
-		expect(experiment.status).toBe("completed");
+		expect(experiment).toMatchObject({ status: "completed", artifactReceipts: [{ sha256: expect.any(String) }] });
 		const claim = value.addClaim(
 			parseAutoresearchClaimInput(
 				{
@@ -364,6 +432,23 @@ describe("autoresearch control plane", () => {
 			),
 		);
 		expect(value.promoteClaim(claim.claimId).status).toBe("canonical");
+		writeFileSync(join(root, "artifacts", "authority-results.json"), '{"accuracy_delta":0.99}\n', "utf8");
+		expect(() =>
+			value.updateClaim(
+				claim.claimId,
+				parseAutoresearchClaimUpdateInput({
+					supporting_evidence: [
+						{
+							source_type: "experiment",
+							source_id: experiment.experimentId,
+							exact_pointer: "artifacts/authority-results.json:accuracy_delta",
+							demonstrates: "The changed artifact should not be trusted.",
+							interpretation: "Receipt mismatch must block this update.",
+						},
+					],
+				}),
+			),
+		).toThrow("missing or modified artifact receipts");
 
 		const memory = value.remember(
 			parseAutoresearchMemoryInput(
@@ -402,6 +487,16 @@ describe("autoresearch control plane", () => {
 	it("ingests marked specialist results exactly once", () => {
 		const { value } = store();
 		value.initialize("Collect hostile reviews");
+		const reviewedCandidate = parseAutoresearchCandidateInput(candidate(1));
+		const child = { rlmChildId: "child-prior-art", name: "assigned-prior-art-reviewer" };
+		value.registerReviewerAssignment(reviewedCandidate, "prior_art_killer", child);
+		expect(() =>
+			value.registerReviewerAssignment(
+				{ ...reviewedCandidate, statement: "A different candidate smuggled under the same ID." },
+				"prior_art_killer",
+				child,
+			),
+		).toThrow("changed after reviewer assignment");
 		const message = `AUTORESEARCH_REVIEW_JSON:candidate-1\n${JSON.stringify({
 			candidate_id: "candidate-1",
 			role: "prior_art_killer",
@@ -413,16 +508,21 @@ describe("autoresearch control plane", () => {
 			kind: "review",
 			candidateId: "candidate-1",
 		});
-		expect(value.ingestAgentMessage("message-1", message)).toMatchObject({ kind: "review" });
-		expect(value.ingestAgentMessage("message-1", message)).toBeUndefined();
+		expect(() => value.ingestAgentMessage("forged-message", message, { sessionName: "root" })).toThrow(
+			"assigned reviewer child",
+		);
+		expect(value.ingestAgentMessage("message-1", message, { sessionName: child.name })).toMatchObject({
+			kind: "review",
+		});
+		expect(value.ingestAgentMessage("message-1", message, { sessionName: child.name })).toBeUndefined();
 		expect(value.getCollectedReviews("candidate-1")).toMatchObject([{ role: "prior_art_killer" }]);
 	});
 
 	it("blocks final export until the complete roadmap stop gate passes", () => {
-		const { value } = store();
+		const { root, value } = store();
 		value.initialize("Find a final publication-grade problem");
-		value.addPublication(parseAutoresearchPublicationInput(publication(1), NOW));
-		value.addPublication(parseAutoresearchPublicationInput(publication(2), NOW));
+		addVerifiedPublication(value, 1);
+		addVerifiedPublication(value, 2);
 		const claim = value.addClaim(
 			parseAutoresearchClaimInput(
 				{
@@ -434,6 +534,7 @@ describe("autoresearch control plane", () => {
 							source_type: "publication",
 							source_id: "doi:10.1000/example-1",
 							exact_pointer: "Section 4",
+							exact_quote: "The evaluation does not control source authority.",
 							demonstrates: "Authority is not controlled in the evaluation.",
 							interpretation: "This leaves a mechanism-level question open.",
 						},
@@ -441,6 +542,7 @@ describe("autoresearch control plane", () => {
 							source_type: "publication",
 							source_id: "doi:10.1000/example-2",
 							exact_pointer: "Section 5",
+							exact_quote: "Authority calibration is outside the scope of this evaluation.",
 							demonstrates: "A second method family also omits an authority control.",
 							interpretation: "The motivation spans more than one publication.",
 						},
@@ -450,6 +552,8 @@ describe("autoresearch control plane", () => {
 			),
 		);
 		value.promoteClaim(claim.claimId);
+		mkdirSync(join(root, "artifacts"), { recursive: true });
+		writeFileSync(join(root, "artifacts", "final.json"), '{"delta":0.1}\n', "utf8");
 		value.recordExperiment(
 			parseAutoresearchExperimentInput(
 				{
@@ -468,6 +572,7 @@ describe("autoresearch control plane", () => {
 				NOW,
 			),
 		);
+		ingestPassingReviews(value, parseAutoresearchCandidateInput(candidate(1)));
 		const cycle = value.recordCycle(
 			parseAutoresearchCycleInput(
 				{
@@ -477,7 +582,6 @@ describe("autoresearch control plane", () => {
 					trajectory_fingerprint: "authority mechanism",
 					publications: [],
 					field_maps: fieldMaps("final"),
-					reviewers: passingReviewers(),
 					gates: gates(),
 					search_coverage: searchCoverage(),
 					motivation_paper_ids: ["doi:10.1000/example-1", "doi:10.1000/example-2"],
@@ -489,19 +593,33 @@ describe("autoresearch control plane", () => {
 			),
 		).cycle;
 		expect(() => value.exportDeliverable(true)).toThrow("retained supervisor has not cleared");
-		value.recordSupervision(
-			parseAutoresearchSupervisionInput(
-				{
-					cycle_id: cycle.cycleId,
-					status: "progressing",
-					reason: "The verified trajectory is advancing.",
-					detected_pattern: "none",
-					intervention_needed: false,
-					alternative_directions: [],
-				},
-				NOW,
-			),
+		const manual = parseAutoresearchSupervisionInput(
+			{
+				cycle_id: cycle.cycleId,
+				status: "progressing",
+				reason: "Manual recovery believes the trajectory is advancing.",
+				detected_pattern: "none",
+				intervention_needed: false,
+				alternative_directions: [],
+			},
+			NOW,
 		);
+		value.recordSupervision(manual);
+		expect(value.evaluateStopGate().checks.supervisorProgressing).toBe(false);
+		const supervisor = { rlmChildId: "supervisor-child", name: "retained-supervisor" };
+		value.setSupervisor(supervisor);
+		const message = `AUTORESEARCH_SUPERVISION_JSON:${cycle.cycleId}\n${JSON.stringify({
+			cycle_id: cycle.cycleId,
+			status: "progressing",
+			reason: "The verified trajectory is advancing.",
+			detected_pattern: "none",
+			intervention_needed: false,
+			alternative_directions: [],
+		})}`;
+		expect(() => value.ingestAgentMessage("forged-supervision", message, { sessionName: "root" })).toThrow(
+			"retained supervisor child",
+		);
+		value.ingestAgentMessage("supervision-message", message, { sessionName: supervisor.name });
 		expect(value.evaluateStopGate().passed).toBe(true);
 		expect(value.exportDeliverable(true)).toMatchObject({
 			final_problem_statement: { candidateId: "candidate-1" },

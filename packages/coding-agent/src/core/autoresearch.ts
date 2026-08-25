@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const AUTORESEARCH_SKILL_NAME = "autoresearch";
-export const AUTORESEARCH_STATE_VERSION = 2;
+export const AUTORESEARCH_STATE_VERSION = 3;
 
 const FIELD_MAP_KINDS = [
 	"assumptions",
@@ -23,11 +23,14 @@ const CLAIM_TYPES = [
 	"FEASIBILITY_CONSTRAINT",
 ] as const;
 const SOURCE_TYPES = ["publication", "experiment", "dataset", "code", "web"] as const;
+const EVIDENCE_KINDS = ["text", "figure", "table", "result", "code", "dataset"] as const;
 const PUBLICATION_STATUSES = ["peer_reviewed", "preprint", "published_status_unclear"] as const;
+const PUBLICATION_VERIFICATION_SOURCES = ["crossref", "arxiv"] as const;
 const CYCLE_OUTCOMES = ["rejected", "revised", "survived", "experiment_failed", "promoted"] as const;
 const REVIEWER_ROLES = ["literature_auditor", "prior_art_killer", "experimental_critic", "top_tier_editor"] as const;
 const REVIEWER_VERDICTS = ["pass", "revise", "reject"] as const;
 const SUPERVISOR_STATUSES = ["progressing", "watch", "intervene"] as const;
+const SUPERVISION_SOURCES = ["retained_supervisor_message", "manual_recovery"] as const;
 const MEMORY_TYPES = [
 	"PAPER_FINDING",
 	"ASSUMPTION",
@@ -46,11 +49,14 @@ const REUSE_STATUSES = ["proposed", "verified", "rejected"] as const;
 export type AutoresearchFieldMapKind = (typeof FIELD_MAP_KINDS)[number];
 export type AutoresearchClaimType = (typeof CLAIM_TYPES)[number];
 export type AutoresearchSourceType = (typeof SOURCE_TYPES)[number];
+export type AutoresearchEvidenceKind = (typeof EVIDENCE_KINDS)[number];
 export type AutoresearchPublicationStatus = (typeof PUBLICATION_STATUSES)[number];
+export type AutoresearchPublicationVerificationSource = (typeof PUBLICATION_VERIFICATION_SOURCES)[number];
 export type AutoresearchCycleOutcome = (typeof CYCLE_OUTCOMES)[number];
 export type AutoresearchReviewerRole = (typeof REVIEWER_ROLES)[number];
 export type AutoresearchReviewerVerdict = (typeof REVIEWER_VERDICTS)[number];
 export type AutoresearchSupervisorStatus = (typeof SUPERVISOR_STATUSES)[number];
+export type AutoresearchSupervisionSource = (typeof SUPERVISION_SOURCES)[number];
 export type AutoresearchMemoryType = (typeof MEMORY_TYPES)[number];
 export type AutoresearchExperimentStatus = (typeof EXPERIMENT_STATUSES)[number];
 export type AutoresearchReuseStatus = (typeof REUSE_STATUSES)[number];
@@ -69,10 +75,30 @@ export interface AutoresearchPublication {
 	lastVerifiedAt: string;
 }
 
+export interface AutoresearchPublicationVerification {
+	verificationId: string;
+	paperId: string;
+	source: AutoresearchPublicationVerificationSource;
+	publicationStatus: AutoresearchPublicationStatus;
+	verifiedAt: string;
+	metadataDigest: string;
+	resolvedMetadata: {
+		title: string;
+		authors: string[];
+		year?: number;
+		venue?: string;
+		doi?: string;
+		preprintId?: string;
+		fullTextUrl?: string;
+	};
+}
+
 export interface AutoresearchEvidenceBinding {
 	sourceType: AutoresearchSourceType;
 	sourceId: string;
 	exactPointer: string;
+	evidenceKind: AutoresearchEvidenceKind;
+	exactQuote?: string;
 	demonstrates: string;
 	interpretation: string;
 }
@@ -150,6 +176,7 @@ export interface AutoresearchExperiment {
 	codeRequirements: string[];
 	computeRequirements: string[];
 	artifactPaths: string[];
+	artifactReceipts: AutoresearchArtifactReceipt[];
 	metrics: Record<string, number | string | boolean>;
 	results?: string;
 	interpretation?: string;
@@ -157,6 +184,13 @@ export interface AutoresearchExperiment {
 	status: AutoresearchExperimentStatus;
 	createdAt: string;
 	updatedAt: string;
+}
+
+export interface AutoresearchArtifactReceipt {
+	path: string;
+	sha256: string;
+	size: number;
+	verifiedAt: string;
 }
 
 export interface AutoresearchMemory {
@@ -190,8 +224,28 @@ export interface AutoresearchMemoryReusePlan {
 export interface AutoresearchCollectedReview {
 	messageId: string;
 	candidateId: string;
+	assignmentId: string;
+	reviewerChildId: string;
+	reviewerName: string;
 	recordedAt: string;
 	reviewer: AutoresearchReviewerResult;
+}
+
+export interface AutoresearchReviewerAssignment {
+	assignmentId: string;
+	candidateId: string;
+	candidateDigest: string;
+	role: AutoresearchReviewerRole;
+	rlmChildId: string;
+	name: string;
+	assignedAt: string;
+}
+
+export interface AutoresearchAgentSender {
+	activeSessionId?: string;
+	sessionId?: string;
+	sessionName?: string;
+	clientId?: string;
 }
 
 export interface AutoresearchStopGate {
@@ -256,6 +310,7 @@ export interface AutoresearchSupervision {
 	cycleId: string;
 	recordedAt: string;
 	status: AutoresearchSupervisorStatus;
+	source: AutoresearchSupervisionSource;
 	reason: string;
 	detectedPattern: string;
 	interventionNeeded: boolean;
@@ -299,11 +354,13 @@ export interface AutoresearchState {
 	updatedAt: string;
 	supervisor?: AutoresearchSupervisorRef;
 	publications: AutoresearchPublication[];
+	publicationVerifications: AutoresearchPublicationVerification[];
 	checkpointedPublicationKeys: string[];
 	claims: AutoresearchClaim[];
 	experiments: AutoresearchExperiment[];
 	memories: AutoresearchMemory[];
 	memoryReusePlans: AutoresearchMemoryReusePlan[];
+	reviewerAssignments: AutoresearchReviewerAssignment[];
 	collectedReviews: AutoresearchCollectedReview[];
 	ingestedAgentMessageIds: string[];
 	fieldMaps: Record<AutoresearchFieldMapKind, string[]>;
@@ -321,7 +378,6 @@ export interface AutoresearchCycleInput {
 	trajectoryFingerprint?: string;
 	publications: AutoresearchPublication[];
 	fieldMaps: Record<AutoresearchFieldMapKind, string[]>;
-	reviewers: AutoresearchReviewerResult[];
 	gates: AutoresearchProblemGates;
 	searchCoverage: AutoresearchSearchCoverage;
 	motivationPaperIds: string[];
@@ -353,11 +409,13 @@ function emptyState(now: string): AutoresearchState {
 		schemaVersion: AUTORESEARCH_STATE_VERSION,
 		updatedAt: now,
 		publications: [],
+		publicationVerifications: [],
 		checkpointedPublicationKeys: [],
 		claims: [],
 		experiments: [],
 		memories: [],
 		memoryReusePlans: [],
+		reviewerAssignments: [],
 		collectedReviews: [],
 		ingestedAgentMessageIds: [],
 		fieldMaps: emptyFieldMaps(),
@@ -474,6 +532,17 @@ export function parseAutoresearchPublicationInput(
 	now = new Date().toISOString(),
 ): AutoresearchPublication {
 	const source = requireRecord(value, "publication");
+	const suppliedStatus = source.publication_status ?? source.publicationStatus;
+	if (suppliedStatus !== undefined && suppliedStatus !== "published_status_unclear") {
+		throw new Error("publication status is host-verified; callers may only submit published_status_unclear");
+	}
+	const suppliedVerifiers = optionalStringArray(
+		source.metadata_verified_by ?? source.metadataVerifiedBy,
+		"publication.metadata_verified_by",
+	);
+	if (suppliedVerifiers.length > 0) {
+		throw new Error("publication metadata verification is host-owned; callers cannot submit metadata_verified_by");
+	}
 	const year = source.year;
 	if (year !== undefined && (!Number.isInteger(year) || (year as number) < 1000 || (year as number) > 9999)) {
 		throw new Error("publication.year must be a four-digit integer when provided");
@@ -482,13 +551,8 @@ export function parseAutoresearchPublicationInput(
 		paperId: requireString(source.paper_id ?? source.paperId, "publication.paper_id"),
 		title: requireString(source.title, "publication.title"),
 		authors: stringArray(source.authors, "publication.authors"),
-		publicationStatus: enumValue(
-			source.publication_status ?? source.publicationStatus,
-			PUBLICATION_STATUSES,
-			"publication.publication_status",
-		),
-		lastVerifiedAt:
-			optionalString(source.last_verified_at ?? source.lastVerifiedAt, "publication.last_verified_at") ?? now,
+		publicationStatus: "published_status_unclear",
+		lastVerifiedAt: now,
 	};
 	if (publication.authors.length === 0) throw new Error("publication.authors must contain at least one author");
 	if (year !== undefined) publication.year = year as number;
@@ -496,15 +560,10 @@ export function parseAutoresearchPublicationInput(
 	const doi = optionalString(source.doi, "publication.doi");
 	const preprintId = optionalString(source.preprint_id ?? source.preprintId, "publication.preprint_id");
 	const fullTextUrl = optionalString(source.full_text_url ?? source.fullTextUrl, "publication.full_text_url");
-	const metadataVerifiedBy = optionalStringArray(
-		source.metadata_verified_by ?? source.metadataVerifiedBy,
-		"publication.metadata_verified_by",
-	);
 	if (venue) publication.venue = venue;
 	if (doi) publication.doi = doi;
 	if (preprintId) publication.preprintId = preprintId;
 	if (fullTextUrl) publication.fullTextUrl = fullTextUrl;
-	if (metadataVerifiedBy.length > 0) publication.metadataVerifiedBy = normalizeList(metadataVerifiedBy);
 	if (!publication.doi && !publication.preprintId && !publication.fullTextUrl) {
 		throw new Error("publication must include a DOI, preprint ID, or full-text URL");
 	}
@@ -513,13 +572,26 @@ export function parseAutoresearchPublicationInput(
 
 function parseEvidenceBinding(value: unknown, label: string): AutoresearchEvidenceBinding {
 	const source = requireRecord(value, label);
-	return {
-		sourceType: enumValue(source.source_type ?? source.sourceType, SOURCE_TYPES, `${label}.source_type`),
+	const sourceType = enumValue(source.source_type ?? source.sourceType, SOURCE_TYPES, `${label}.source_type`);
+	const evidenceKind = enumValue(
+		source.evidence_kind ?? source.evidenceKind ?? "text",
+		EVIDENCE_KINDS,
+		`${label}.evidence_kind`,
+	);
+	const exactQuote = optionalString(source.exact_quote ?? source.exactQuote, `${label}.exact_quote`);
+	if (sourceType === "publication" && evidenceKind === "text" && !exactQuote) {
+		throw new Error(`${label}.exact_quote is required for textual publication evidence`);
+	}
+	const binding: AutoresearchEvidenceBinding = {
+		sourceType,
 		sourceId: requireString(source.source_id ?? source.sourceId, `${label}.source_id`),
 		exactPointer: requireString(source.exact_pointer ?? source.exactPointer, `${label}.exact_pointer`),
+		evidenceKind,
 		demonstrates: requireString(source.demonstrates, `${label}.demonstrates`),
 		interpretation: requireString(source.interpretation, `${label}.interpretation`),
 	};
+	if (exactQuote) binding.exactQuote = exactQuote;
+	return binding;
 }
 
 function evidenceArray(value: unknown, label: string): AutoresearchEvidenceBinding[] {
@@ -732,6 +804,7 @@ export function parseAutoresearchExperimentInput(
 			"experiment.compute_requirements",
 		),
 		artifactPaths: optionalStringArray(source.artifact_paths ?? source.artifactPaths, "experiment.artifact_paths"),
+		artifactReceipts: [],
 		metrics: scalarRecord(source.metrics, "experiment.metrics"),
 		confounds: optionalStringArray(source.confounds, "experiment.confounds"),
 		status,
@@ -829,8 +902,9 @@ export function parseAutoresearchCycleInput(value: unknown, now = new Date().toI
 	const source = requireRecord(value, "cycle");
 	const rawPublications = source.publications ?? [];
 	if (!Array.isArray(rawPublications)) throw new Error("cycle.publications must be an array");
-	const rawReviewers = source.reviewers ?? [];
-	if (!Array.isArray(rawReviewers)) throw new Error("cycle.reviewers must be an array");
+	if (source.reviewers !== undefined) {
+		throw new Error("cycle.reviewers is host-owned; use autoresearch.review_candidate before completing the cycle");
+	}
 	const input: AutoresearchCycleInput = {
 		candidate: parseAutoresearchCandidateInput(source.candidate),
 		outcome: enumValue(source.outcome, CYCLE_OUTCOMES, "cycle.outcome"),
@@ -846,7 +920,6 @@ export function parseAutoresearchCycleInput(value: unknown, now = new Date().toI
 		),
 		publications: rawPublications.map((item) => parseAutoresearchPublicationInput(item, now)),
 		fieldMaps: parseFieldMaps(source.field_maps ?? source.fieldMaps),
-		reviewers: rawReviewers.map((item, index) => parseReviewer(item, index)),
 		gates: parseGates(source.gates),
 		searchCoverage: parseSearchCoverage(source.search_coverage ?? source.searchCoverage),
 		motivationPaperIds: normalizeList(
@@ -873,9 +946,11 @@ export function parseAutoresearchCycleInput(value: unknown, now = new Date().toI
 	return input;
 }
 
-function validateCycleGate(input: AutoresearchCycleInput): void {
-	const roles = new Set(input.reviewers.map((reviewer) => reviewer.role));
-	if (roles.size !== input.reviewers.length) throw new Error("cycle.reviewers must not repeat a reviewer role");
+function validateCycleGate(input: AutoresearchCycleInput, reviewers?: AutoresearchReviewerResult[]): void {
+	const roles = new Set((reviewers ?? []).map((reviewer) => reviewer.role));
+	if (reviewers && roles.size !== reviewers.length) {
+		throw new Error("host-collected reviews must not repeat a reviewer role");
+	}
 	if (input.outcome === "rejected" && !input.rejectionReason) {
 		throw new Error("a rejected cycle requires rejection_reason");
 	}
@@ -883,12 +958,15 @@ function validateCycleGate(input: AutoresearchCycleInput): void {
 		throw new Error("a promoted cycle requires canonical_promotion_ids");
 	}
 	if (input.outcome !== "survived" && input.outcome !== "promoted") return;
-	const missingRoles = REVIEWER_ROLES.filter((role) => !roles.has(role));
-	if (missingRoles.length > 0) {
-		throw new Error(`surviving candidates require all four reviewer roles; missing: ${missingRoles.join(", ")}`);
+	if (reviewers) {
+		const missingRoles = REVIEWER_ROLES.filter((role) => !roles.has(role));
+		if (missingRoles.length > 0) {
+			throw new Error(`surviving candidates require all four reviewer roles; missing: ${missingRoles.join(", ")}`);
+		}
+		const failedReview = reviewers.find((reviewer) => reviewer.verdict !== "pass");
+		if (failedReview)
+			throw new Error(`surviving candidates require passing reviews; ${failedReview.role} did not pass`);
 	}
-	const failedReview = input.reviewers.find((reviewer) => reviewer.verdict !== "pass");
-	if (failedReview) throw new Error(`surviving candidates require passing reviews; ${failedReview.role} did not pass`);
 	const failedGate = Object.entries(input.gates).find(([, passed]) => !passed);
 	if (failedGate) throw new Error(`surviving candidates require every problem gate; ${failedGate[0]} did not pass`);
 	const missingCoverage = Object.entries(input.searchCoverage).find(([, covered]) => !covered);
@@ -911,6 +989,7 @@ function validateCycleGate(input: AutoresearchCycleInput): void {
 export function parseAutoresearchSupervisionInput(
 	value: unknown,
 	now = new Date().toISOString(),
+	provenance: AutoresearchSupervisionSource = "manual_recovery",
 ): AutoresearchSupervision {
 	const source = requireRecord(value, "supervision");
 	const status = enumValue(source.status, SUPERVISOR_STATUSES, "supervision.status");
@@ -963,6 +1042,7 @@ export function parseAutoresearchSupervisionInput(
 		cycleId: requireString(source.cycle_id ?? source.cycleId, "supervision.cycle_id"),
 		recordedAt: now,
 		status,
+		source: provenance,
 		reason: requireString(source.reason, "supervision.reason"),
 		detectedPattern: requireString(source.detected_pattern ?? source.detectedPattern, "supervision.detected_pattern"),
 		interventionNeeded,
@@ -1018,7 +1098,7 @@ export function parseAutoresearchAgentPayload(
 		if (candidateId !== markerId) throw new Error("autoresearch review marker and candidate_id do not agree");
 		return { kind: "review", candidateId, reviewer: parseReviewer(source, 0) };
 	}
-	const supervision = parseAutoresearchSupervisionInput(source, now);
+	const supervision = parseAutoresearchSupervisionInput(source, now, "retained_supervisor_message");
 	if (supervision.cycleId !== markerId) {
 		throw new Error("autoresearch supervision marker and cycle_id do not agree");
 	}
@@ -1137,11 +1217,13 @@ function isAutoresearchState(value: unknown): value is AutoresearchState {
 		value.schemaVersion === AUTORESEARCH_STATE_VERSION &&
 		typeof value.updatedAt === "string" &&
 		Array.isArray(value.publications) &&
+		Array.isArray(value.publicationVerifications) &&
 		Array.isArray(value.checkpointedPublicationKeys) &&
 		Array.isArray(value.claims) &&
 		Array.isArray(value.experiments) &&
 		Array.isArray(value.memories) &&
 		Array.isArray(value.memoryReusePlans) &&
+		Array.isArray(value.reviewerAssignments) &&
 		Array.isArray(value.collectedReviews) &&
 		Array.isArray(value.ingestedAgentMessageIds) &&
 		FIELD_MAP_KINDS.every((kind) => Array.isArray(fieldMaps[kind])) &&
@@ -1152,7 +1234,7 @@ function isAutoresearchState(value: unknown): value is AutoresearchState {
 }
 
 function migrateAutoresearchState(value: unknown): unknown {
-	if (!isRecord(value) || value.schemaVersion !== 1) return value;
+	if (!isRecord(value) || (value.schemaVersion !== 1 && value.schemaVersion !== 2)) return value;
 	const cycles = Array.isArray(value.cycles)
 		? value.cycles.map((item) => {
 				if (!isRecord(item)) return item;
@@ -1165,15 +1247,51 @@ function migrateAutoresearchState(value: unknown): unknown {
 				};
 			})
 		: value.cycles;
+	const publications = Array.isArray(value.publications)
+		? value.publications.map((item) =>
+				isRecord(item)
+					? {
+							...item,
+							publicationStatus: "published_status_unclear",
+							metadataVerifiedBy: undefined,
+						}
+					: item,
+			)
+		: [];
+	const experiments = Array.isArray(value.experiments)
+		? value.experiments.map((item) => (isRecord(item) ? { ...item, artifactReceipts: [] } : item))
+		: [];
+	const claims = Array.isArray(value.claims)
+		? value.claims.map((item) => {
+				if (!isRecord(item)) return item;
+				const migrateBindings = (bindings: unknown): unknown =>
+					Array.isArray(bindings)
+						? bindings.map((binding) => (isRecord(binding) ? { evidenceKind: "text", ...binding } : binding))
+						: bindings;
+				return {
+					...item,
+					supportingEvidence: migrateBindings(item.supportingEvidence),
+					contradictingEvidence: migrateBindings(item.contradictingEvidence),
+				};
+			})
+		: [];
+	const supervision = Array.isArray(value.supervision)
+		? value.supervision.map((item) => (isRecord(item) ? { ...item, source: item.source ?? "manual_recovery" } : item))
+		: [];
 	return {
 		...value,
 		schemaVersion: AUTORESEARCH_STATE_VERSION,
-		experiments: [],
-		memories: [],
-		memoryReusePlans: [],
+		publications,
+		publicationVerifications: [],
+		claims,
+		experiments,
+		memories: Array.isArray(value.memories) ? value.memories : [],
+		memoryReusePlans: Array.isArray(value.memoryReusePlans) ? value.memoryReusePlans : [],
+		reviewerAssignments: [],
 		collectedReviews: [],
-		ingestedAgentMessageIds: [],
+		ingestedAgentMessageIds: Array.isArray(value.ingestedAgentMessageIds) ? value.ingestedAgentMessageIds : [],
 		cycles,
+		supervision,
 	};
 }
 
@@ -1219,6 +1337,10 @@ function memoryTerms(value: string): Set<string> {
 	);
 }
 
+function candidateDigest(candidate: AutoresearchCandidate): string {
+	return createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
+}
+
 function memoryRelevance(memory: AutoresearchMemory, query: string): number {
 	const queryTerms = memoryTerms(query);
 	if (queryTerms.size === 0) return 0;
@@ -1236,6 +1358,7 @@ export class AutoresearchStore {
 	constructor(
 		artifactDir?: string,
 		private readonly now: () => string = () => new Date().toISOString(),
+		private readonly workspaceDir: string = process.cwd(),
 	) {
 		this.statePath = artifactDir ? join(artifactDir, "autoresearch", "state.json") : undefined;
 		this.state = this.load();
@@ -1310,13 +1433,71 @@ export class AutoresearchStore {
 
 	addPublication(publication: AutoresearchPublication): AutoresearchPublication {
 		const existing = this.state.publications.findIndex((candidate) => samePublication(candidate, publication));
-		if (existing >= 0) this.state.publications[existing] = publication;
-		else this.state.publications.push(publication);
+		if (existing >= 0) {
+			const current = this.state.publications[existing]!;
+			const isVerified = this.state.publicationVerifications.some((item) => item.paperId === current.paperId);
+			this.state.publications[existing] = isVerified
+				? {
+						...current,
+						doi: current.doi ?? publication.doi,
+						preprintId: current.preprintId ?? publication.preprintId,
+						fullTextUrl: current.fullTextUrl ?? publication.fullTextUrl,
+					}
+				: publication;
+		} else this.state.publications.push(publication);
 		this.save();
-		return structuredClone(publication);
+		return structuredClone(this.state.publications[existing >= 0 ? existing : this.state.publications.length - 1]!);
+	}
+
+	recordPublicationVerification(
+		verification: AutoresearchPublicationVerification,
+	): AutoresearchPublicationVerification {
+		const publication = this.state.publications.find((item) => item.paperId === verification.paperId);
+		if (!publication) throw new Error(`publication verification references unknown paper ${verification.paperId}`);
+		if (!/^[a-f0-9]{64}$/i.test(verification.metadataDigest)) {
+			throw new Error("publication verification metadata digest must be SHA-256");
+		}
+		if (verification.publicationStatus === "peer_reviewed" && verification.source !== "crossref") {
+			throw new Error("only the host Crossref verifier may classify a publication as peer_reviewed");
+		}
+		if (
+			verification.source === "crossref" &&
+			(!verification.resolvedMetadata.doi ||
+				(!!publication.doi && verification.resolvedMetadata.doi.toLowerCase() !== publication.doi.toLowerCase()))
+		) {
+			throw new Error("Crossref verification must resolve the publication DOI");
+		}
+		if (
+			verification.source === "arxiv" &&
+			(!verification.resolvedMetadata.preprintId ||
+				(!!publication.preprintId &&
+					verification.resolvedMetadata.preprintId.toLowerCase() !== publication.preprintId.toLowerCase()))
+		) {
+			throw new Error("arXiv verification must resolve the publication preprint ID");
+		}
+		if (this.state.publicationVerifications.some((item) => item.verificationId === verification.verificationId)) {
+			throw new Error(`publication verification ${verification.verificationId} already exists`);
+		}
+		const metadata = verification.resolvedMetadata;
+		publication.title = requireString(metadata.title, "publication verification title");
+		publication.authors = normalizeList(metadata.authors);
+		if (publication.authors.length === 0) throw new Error("publication verification requires at least one author");
+		publication.publicationStatus = verification.publicationStatus;
+		publication.lastVerifiedAt = verification.verifiedAt;
+		publication.metadataVerifiedBy = normalizeList([...(publication.metadataVerifiedBy ?? []), verification.source]);
+		if (metadata.year !== undefined) publication.year = metadata.year;
+		if (metadata.venue) publication.venue = metadata.venue;
+		if (metadata.doi) publication.doi = metadata.doi;
+		if (metadata.preprintId) publication.preprintId = metadata.preprintId;
+		if (metadata.fullTextUrl) publication.fullTextUrl = metadata.fullTextUrl;
+		this.state.publicationVerifications.push(structuredClone(verification));
+		this.save();
+		return structuredClone(verification);
 	}
 
 	recordExperiment(experiment: AutoresearchExperiment): AutoresearchExperiment {
+		experiment.artifactReceipts =
+			experiment.status === "completed" ? this.createArtifactReceipts(experiment.artifactPaths) : [];
 		const existing = this.state.experiments.findIndex((item) => item.experimentId === experiment.experimentId);
 		if (existing >= 0) {
 			const previous = this.state.experiments[existing]!;
@@ -1347,6 +1528,37 @@ export class AutoresearchStore {
 		}
 		this.save();
 		return structuredClone(experiment);
+	}
+
+	private createArtifactReceipts(paths: string[]): AutoresearchArtifactReceipt[] {
+		return paths.map((path) => {
+			const base = this.workspaceDir;
+			const resolvedPath = realpathSync(isAbsolute(path) ? path : resolve(base, path));
+			const stats = statSync(resolvedPath);
+			if (!stats.isFile()) throw new Error(`experiment artifact is not a file: ${path}`);
+			return {
+				path: resolvedPath,
+				sha256: createHash("sha256").update(readFileSync(resolvedPath)).digest("hex"),
+				size: stats.size,
+				verifiedAt: this.now(),
+			};
+		});
+	}
+
+	private experimentArtifactsAreCurrent(experiment: AutoresearchExperiment): boolean {
+		if (experiment.status !== "completed" || experiment.artifactReceipts.length === 0) return false;
+		try {
+			return experiment.artifactReceipts.every((receipt) => {
+				const stats = statSync(receipt.path);
+				return (
+					stats.isFile() &&
+					stats.size === receipt.size &&
+					createHash("sha256").update(readFileSync(receipt.path)).digest("hex") === receipt.sha256
+				);
+			});
+		} catch {
+			return false;
+		}
 	}
 
 	remember(memory: AutoresearchMemory): AutoresearchMemory {
@@ -1411,12 +1623,73 @@ export class AutoresearchStore {
 		return [...byRole.values()].map((reviewer) => structuredClone(reviewer));
 	}
 
-	ingestAgentMessage(messageId: string, text: string): AutoresearchAgentPayload | undefined {
+	registerReviewerAssignment(
+		candidate: AutoresearchCandidate,
+		role: AutoresearchReviewerRole,
+		child: { rlmChildId: string; name: string },
+	): AutoresearchReviewerAssignment {
+		const normalizedCandidateId = requireIdentifier(candidate.candidateId, "candidate_id");
+		const digest = candidateDigest(candidate);
+		const existing = this.state.reviewerAssignments.find(
+			(item) => item.candidateId === normalizedCandidateId && item.role === role,
+		);
+		if (existing) {
+			if (existing.candidateDigest !== digest) {
+				throw new Error(`candidate ${normalizedCandidateId} changed after reviewer assignment`);
+			}
+			return structuredClone(existing);
+		}
+		const assignment: AutoresearchReviewerAssignment = {
+			assignmentId: `review-assignment-${randomUUID()}`,
+			candidateId: normalizedCandidateId,
+			candidateDigest: digest,
+			role,
+			rlmChildId: requireString(child.rlmChildId, "reviewer rlm_child_id"),
+			name: requireString(child.name, "reviewer name"),
+			assignedAt: this.now(),
+		};
+		this.state.reviewerAssignments.push(assignment);
+		this.save();
+		return structuredClone(assignment);
+	}
+
+	getReviewerAssignments(candidateId: string): AutoresearchReviewerAssignment[] {
+		const normalizedCandidateId = requireIdentifier(candidateId, "candidate_id");
+		return this.state.reviewerAssignments
+			.filter((item) => item.candidateId === normalizedCandidateId)
+			.map((item) => structuredClone(item));
+	}
+
+	private senderMatchesChild(
+		sender: AutoresearchAgentSender | undefined,
+		child: { rlmChildId: string; name: string },
+	): boolean {
+		if (!sender) return false;
+		return (
+			sender.sessionName === child.name ||
+			[sender.activeSessionId, sender.sessionId, sender.clientId].some((value) => value === child.rlmChildId)
+		);
+	}
+
+	ingestAgentMessage(
+		messageId: string,
+		text: string,
+		sender?: AutoresearchAgentSender,
+	): AutoresearchAgentPayload | undefined {
 		const normalizedMessageId = requireString(messageId, "message_id");
 		if (this.state.ingestedAgentMessageIds.includes(normalizedMessageId)) return undefined;
 		const payload = parseAutoresearchAgentPayload(text, this.now());
 		if (!payload) return undefined;
 		if (payload.kind === "review") {
+			const assignment = this.state.reviewerAssignments.find(
+				(item) => item.candidateId === payload.candidateId && item.role === payload.reviewer.role,
+			);
+			if (!assignment) {
+				throw new Error(`no host-owned ${payload.reviewer.role} assignment exists for ${payload.candidateId}`);
+			}
+			if (!this.senderMatchesChild(sender, assignment)) {
+				throw new Error(`review for ${payload.candidateId} did not come from its assigned reviewer child`);
+			}
 			const duplicate = this.state.collectedReviews.some(
 				(item) => item.candidateId === payload.candidateId && item.reviewer.role === payload.reviewer.role,
 			);
@@ -1425,10 +1698,16 @@ export class AutoresearchStore {
 			this.state.collectedReviews.push({
 				messageId: normalizedMessageId,
 				candidateId: payload.candidateId,
+				assignmentId: assignment.assignmentId,
+				reviewerChildId: assignment.rlmChildId,
+				reviewerName: assignment.name,
 				recordedAt: this.now(),
 				reviewer: payload.reviewer,
 			});
 		} else {
+			if (!this.state.supervisor || !this.senderMatchesChild(sender, this.state.supervisor)) {
+				throw new Error("supervision did not come from the retained supervisor child");
+			}
 			this.recordSupervision(payload.supervision, false);
 		}
 		this.state.ingestedAgentMessageIds.push(normalizedMessageId);
@@ -1484,6 +1763,9 @@ export class AutoresearchStore {
 				if (!publication.metadataVerifiedBy?.length) {
 					throw new Error(`publication evidence ${binding.sourceId} requires metadata_verified_by`);
 				}
+				if (!this.state.publicationVerifications.some((receipt) => receipt.paperId === publication.paperId)) {
+					throw new Error(`publication evidence ${binding.sourceId} requires a host verification receipt`);
+				}
 			}
 			if (binding.sourceType === "experiment") {
 				const experiment = this.state.experiments.find((item) => item.experimentId === binding.sourceId);
@@ -1491,6 +1773,9 @@ export class AutoresearchStore {
 					throw new Error(
 						`experiment evidence ${binding.sourceId} must reference a completed or failed experiment`,
 					);
+				}
+				if (experiment.status === "completed" && !this.experimentArtifactsAreCurrent(experiment)) {
+					throw new Error(`experiment evidence ${binding.sourceId} has missing or modified artifact receipts`);
 				}
 			}
 		}
@@ -1547,10 +1832,19 @@ export class AutoresearchStore {
 
 	recordCycle(input: AutoresearchCycleInput): AutoresearchCycleResult {
 		if (!this.state.objective) throw new Error("initialize autoresearch before completing a cycle");
+		const reviewers = this.getCollectedReviews(input.candidate.candidateId);
+		validateCycleGate(input, reviewers);
+		const digest = candidateDigest(input.candidate);
+		for (const reviewer of reviewers) {
+			const assignment = this.state.reviewerAssignments.find(
+				(item) => item.candidateId === input.candidate.candidateId && item.role === reviewer.role,
+			);
+			if (!assignment || assignment.candidateDigest !== digest) {
+				throw new Error(`host-collected ${reviewer.role} review does not match the completed candidate`);
+			}
+		}
 		for (const publication of input.publications) {
-			const index = this.state.publications.findIndex((paper) => samePublication(paper, publication));
-			if (index >= 0) this.state.publications[index] = publication;
-			else this.state.publications.push(publication);
+			this.addPublication(publication);
 		}
 		const checkpointedPublicationKeys = new Set(this.state.checkpointedPublicationKeys);
 		const newPublications = this.state.publications.filter(
@@ -1570,7 +1864,8 @@ export class AutoresearchStore {
 		}
 		for (const paperId of [...input.motivationPaperIds, ...input.closestPriorWorkPaperIds]) {
 			const publication = this.state.publications.find((paper) => paper.paperId === paperId);
-			if (!publication?.metadataVerifiedBy?.length) {
+			const verification = this.state.publicationVerifications.find((receipt) => receipt.paperId === paperId);
+			if (!publication?.metadataVerifiedBy?.length || !verification) {
 				throw new Error(`cycle paper reference ${paperId} is missing from the verified publication ledger`);
 			}
 		}
@@ -1581,6 +1876,9 @@ export class AutoresearchStore {
 			}
 			if (input.outcome === "promoted" && experiment.status !== "completed") {
 				throw new Error(`promoted candidate evidence ${experimentId} must be a completed experiment`);
+			}
+			if (input.outcome === "promoted" && !this.experimentArtifactsAreCurrent(experiment)) {
+				throw new Error(`promoted candidate evidence ${experimentId} has missing or modified artifacts`);
 			}
 		}
 		const cycle: AutoresearchCycle = {
@@ -1598,7 +1896,7 @@ export class AutoresearchStore {
 				...input.publications.map((publication) => publication.paperId),
 			]),
 			fieldMapChanged,
-			reviewers: input.reviewers,
+			reviewers,
 			gates: input.gates,
 			searchCoverage: input.searchCoverage,
 			motivationPaperIds: input.motivationPaperIds,
@@ -1651,8 +1949,12 @@ export class AutoresearchStore {
 		if (!this.state.cycles.some((cycle) => cycle.cycleId === supervision.cycleId)) {
 			throw new Error(`supervision references unknown cycle ${supervision.cycleId}`);
 		}
-		if (this.state.supervision.some((item) => item.cycleId === supervision.cycleId)) {
-			throw new Error(`cycle ${supervision.cycleId} already has recorded supervision`);
+		if (
+			this.state.supervision.some(
+				(item) => item.cycleId === supervision.cycleId && item.source === supervision.source,
+			)
+		) {
+			throw new Error(`cycle ${supervision.cycleId} already has ${supervision.source} supervision`);
 		}
 		this.state.supervision.push(supervision);
 		if (supervision.interventionNeeded) {
@@ -1762,7 +2064,9 @@ export class AutoresearchStore {
 					.filter((experiment): experiment is AutoresearchExperiment => experiment !== undefined)
 			: [];
 		const supervision = promoted
-			? [...this.state.supervision].reverse().find((item) => item.cycleId === promoted.cycleId)
+			? [...this.state.supervision]
+					.reverse()
+					.find((item) => item.cycleId === promoted.cycleId && item.source === "retained_supervisor_message")
 			: undefined;
 		const hostCheckpoint = evaluateAutoresearchCheckpoint(this.state.cycles);
 		const checks: AutoresearchStopGate["checks"] = {
@@ -1774,7 +2078,21 @@ export class AutoresearchStore {
 					(publication) =>
 						!!publication.metadataVerifiedBy?.length &&
 						publication.publicationStatus !== "published_status_unclear" &&
-						promotedClaimPublicationIds.has(publication.paperId),
+						this.state.publicationVerifications.some(
+							(receipt) =>
+								receipt.paperId === publication.paperId &&
+								receipt.publicationStatus === publication.publicationStatus,
+						) &&
+						promotedClaimPublicationIds.has(publication.paperId) &&
+						(promoted?.canonicalPromotionIds ?? []).some((claimId) => {
+							const claim = this.state.claims.find((item) => item.claimId === claimId);
+							return claim?.supportingEvidence.some(
+								(binding) =>
+									binding.sourceType === "publication" &&
+									binding.sourceId === publication.paperId &&
+									(binding.evidenceKind !== "text" || !!binding.exactQuote?.trim()),
+							);
+						}),
 				) &&
 				motivationPublications.some((publication) => publication.publicationStatus === "peer_reviewed"),
 			latestPreprintCheck: promoted?.searchCoverage.recentPreprints === true,
@@ -1785,7 +2103,9 @@ export class AutoresearchStore {
 			feasibleExperiment: promoted?.gates.feasible === true && !!promoted.candidate.experimentDesign.trim(),
 			preliminaryEvidence:
 				preliminaryExperiments.length > 0 &&
-				preliminaryExperiments.every((experiment) => experiment.status === "completed"),
+				preliminaryExperiments.every(
+					(experiment) => experiment.status === "completed" && this.experimentArtifactsAreCurrent(experiment),
+				),
 			strongBaselinePlan: !!promoted?.candidate.baselinePlan.trim(),
 			broaderRelevance: promoted?.gates.broaderRelevance === true && !!promoted.candidate.broaderRelevance.trim(),
 			fourReviewSurvival:
