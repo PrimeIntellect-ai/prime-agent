@@ -10,6 +10,7 @@ import {
 	readActiveOrphanProcesses,
 	reapKernelOrphanProcesses,
 	recordOrphanProcessState,
+	shouldReapOrphanProcess,
 } from "../src/core/orphan-process-journal.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
 
@@ -119,6 +120,7 @@ describe("orphan process journal", () => {
 		expect(readActiveOrphanProcesses(path, process.pid)).toEqual([]);
 	});
 
+	// POSIX behavior: CI runs Ubuntu, so this exercises the real kill path.
 	it("best-effort kills pid-only records in the kernel crash-reap path", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
 		tempDirs.push(directory);
@@ -148,5 +150,46 @@ describe("orphan process journal", () => {
 		const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
 		await exited;
 		expect(child.signalCode).toBe("SIGKILL");
+	});
+
+	it("win32 reapers ignore identity-free records", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
+		tempDirs.push(directory);
+		const path = join(directory, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
+
+		const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+		child.unref();
+		const childPid = child.pid;
+		expect(childPid).toBeTypeOf("number");
+		const kernelPid = 999_999;
+		appendFileSync(
+			path,
+			`${JSON.stringify({
+				version: 1,
+				pid: childPid,
+				ownerPid: process.pid,
+				kernelPid,
+				active: true,
+				recordedAt: new Date().toISOString(),
+			})}\n`,
+		);
+
+		const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32" });
+			expect(shouldReapOrphanProcess({ pid: childPid!, kernelPid })).toBe(false);
+			// The kernel's kill-on-close job already reaped the tree; a bare-pid
+			// taskkill could only hit a reused pid, so the reaper must skip it.
+			reapKernelOrphanProcesses(kernelPid);
+		} finally {
+			if (originalPlatform) {
+				Object.defineProperty(process, "platform", originalPlatform);
+			}
+		}
+
+		expect(child.exitCode).toBeNull();
+		expect(child.signalCode).toBeNull();
+		process.kill(childPid!, "SIGKILL");
 	});
 });

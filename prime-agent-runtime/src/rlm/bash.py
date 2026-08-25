@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from . import _winjob
+
 _IS_POSIX = os.name == "posix"
 
 if _IS_POSIX:
@@ -117,15 +119,16 @@ class BashHandle:
         self._status: int | None = None
         self._status_known = threading.Event()
         self._reaped = False
-        # Windows: remembers whether any taskkill /T for this handle succeeded,
-        # so _reap_group can retire the journal record with more confidence.
+        # Windows job-less fallback only: remembers whether any taskkill /T for
+        # this handle succeeded, so _reap_group can retire the journal record
+        # with more confidence when no job object exists.
         self._tree_kill_delivered = False
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._callback_lock = threading.Lock()
         self._started = time.monotonic()
         # POSIX: own process group so kill() signals the whole pipeline; Windows
-        # has no group signalling, so kill() tree-kills via taskkill instead.
+        # contains the tree in a kill-on-close job object (taskkill fallback).
         self._status_read = -1
         self._wake_read = -1
         self._wake_write = -1
@@ -151,8 +154,8 @@ class BashHandle:
             script = _status_script(_with_prefix(command))
             spawn_kwargs: dict[str, Any] = {"start_new_session": True, "stdin": status_write}
         else:
-            # Windows: no status/gate channel and no process groups; liveness and
-            # reaping go through wait()/taskkill instead.
+            # Windows: no status/gate channel and no process groups; liveness
+            # and reaping go through the job object (wait()/taskkill fallback).
             script = _with_prefix(command)
             spawn_kwargs = {"stdin": subprocess.DEVNULL}
         try:
@@ -173,22 +176,27 @@ class BashHandle:
             if status_write >= 0:
                 os.close(status_write)
         self._pid: int = self._proc.pid
+        self._job: int | None = None
+        if not _IS_POSIX:
+            # Kill-on-close job right after Popen: a kernel death closes the
+            # last job handle and the OS reaps the whole tree, so no pid-only
+            # pre-record is needed (a bare-pid taskkill could only ever hit a
+            # reused pid). Children the shell spawns before assign() escape the
+            # job; the window is sub-ms and accepted. None = job creation
+            # failed (old Windows editions): legacy taskkill bookkeeping below.
+            self._job = _winjob.create_job()
+            proc_handle = getattr(self._proc, "_handle", None)
+            if self._job is not None and (
+                proc_handle is None or not _winjob.assign(self._job, int(proc_handle))
+            ):
+                _winjob.close(self._job)
+                self._job = None
+        # A job-reaped tree is provably dead: kill() after reap stays a no-op.
+        self._had_job = self._job is not None
         self._released = False
         with _live_lock:
             _live_handles.add(self)
-        enrolled = True
-        if not _IS_POSIX:
-            # Durable pid-only record BEFORE the up-to-5s start-id query: a
-            # kernel crash in that window must still leave a reapable anchor
-            # (POSIX needs no pre-record: the gate keeps the command from
-            # running until journaled). The enriched record below supersedes it
-            # (the host keeps the last record per pid). Residual window: Popen
-            # return -> this append is sub-ms and accepted; pid reuse on a
-            # pid-only kill is bounded by ownerPid/kernelPid scoping and
-            # per-teardown journal clearing.
-            enrolled = _record_journal(self._pid, active=True, with_start_id=False)
-        if enrolled:
-            enrolled = _record_journal(self._pid, active=True)
+        enrolled = _record_journal(self._pid, active=True)
         if not enrolled:
             # Fail closed: a configured journal that cannot enroll the pid must
             # not let the command run (the host reaper would never see it).
@@ -238,12 +246,16 @@ class BashHandle:
         # background group after the foreground result was already delivered.
         self._released = True
         if self._reaped:
-            if not _IS_POSIX:
-                # Best-effort second chance: `&`-descendants can outlive the
-                # shell on Windows, where _reap_group has no group anchor.
+            if not _IS_POSIX and not self._had_job:
+                # Job-less fallback second chance: `&`-descendants can outlive
+                # the shell on Windows without a job anchor. With a job,
+                # _reap_group already terminated and closed it (tree dead).
                 self._taskkill()
             return
         if not _IS_POSIX:
+            if self._job is not None:
+                _winjob.terminate(self._job)
+                return
             if not self._taskkill():
                 try:
                     self._proc.kill()
@@ -357,8 +369,16 @@ class BashHandle:
         # Group liveness, not leader death, gates the inactive record: members
         # that outlive the leader would leak behind a stale journal anchor.
         if not _IS_POSIX:
-            # No group anchor after the shell exits on Windows: best-effort
-            # taskkill of the remembered tree before the handle is marked reaped.
+            if self._job is not None:
+                # Terminate then close the last handle: kill-on-close reaps any
+                # straggler, so the tree is provably dead and the journal
+                # record may go inactive.
+                _winjob.terminate(self._job)
+                job, self._job = self._job, None
+                _winjob.close(job)
+                return True
+            # Job creation failed (old Windows editions): best-effort taskkill
+            # of the remembered tree before the handle is marked reaped.
             if self._taskkill():
                 return True
             if self._proc.poll() is not None:
@@ -367,7 +387,7 @@ class BashHandle:
                 # would pin stale records. One retry sweeps descendants that
                 # raced the first attempt; then the record goes inactive
                 # regardless -- detached/reparented descendants may survive
-                # (no job objects; accepted best-effort).
+                # (no job anchor; accepted best-effort).
                 self._taskkill()
                 return True
             return self._tree_kill_delivered
@@ -506,12 +526,19 @@ class BashHandle:
         if not await self._await_group_death(_CANCEL_TERM_GRACE):
             if _IS_POSIX:
                 _signal_group(self._pid, signal.SIGKILL)
+            elif self._job is not None:
+                _winjob.terminate(self._job)
             else:
                 self._taskkill()
             await self._await_group_death(_CANCEL_KILL_WAIT)
 
     def _group_alive(self) -> bool:
         if not _IS_POSIX:
+            if self._job is not None:
+                # Job accounting sees detached descendants a dead leader hides.
+                empty = _winjob.is_empty(self._job)
+                if empty is not None:
+                    return not empty
             return self._proc.poll() is None
         try:
             os.killpg(self._pid, 0)
@@ -541,6 +568,11 @@ class BashHandle:
                         pass
             self._status_read = self._wake_read = self._wake_write = -1
             delivered = _signal_group(self._pid, signal.SIGKILL)
+        elif self._job is not None:
+            _winjob.terminate(self._job)
+            job, self._job = self._job, None
+            _winjob.close(job)
+            delivered = True
         else:
             delivered = _taskkill_tree(self._pid)
             if not delivered:
@@ -580,10 +612,11 @@ def bash(command: str) -> BashHandle:
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
     kills the command's process group. `h = bash(cmd)` used as a background
     handle (any .pid/.running/.output()/.tail()/.poll()/.kill() access before
-    the first await) survives cancellation; awaiting it only waits. Windows:
-    kill() uses taskkill /T, but daemonized or reparented descendants that
-    detach from the tree can still outlive it (no job objects); the journal
-    record is retired best-effort on leader exit.
+    the first await) survives cancellation; awaiting it only waits. Leak
+    containment is per-platform: process groups plus the orphan journal on
+    POSIX; a kill-on-close job object on Windows, so even a crashed kernel
+    reaps the tree (taskkill /T remains only as the fallback when job creation
+    failed on old Windows editions).
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
@@ -598,16 +631,17 @@ def _shell() -> str:
         if not os.path.isabs(override):
             raise ValueError("PRIME_AGENT_BASH_SHELL must be an absolute path")
         return override
-    # PATH fallback only serves bare/standalone runtime use: the host always
-    # injects PRIME_AGENT_BASH_SHELL (an absolute path) when a shell exists.
-    shell = shutil.which("bash")
-    if shell is None and not _IS_POSIX:
-        # cmd.exe cannot run the `-c <script>` invocation, so fail with a
-        # teaching error instead of a confusing Popen failure on /bin/sh.
+    if not _IS_POSIX:
+        # Never consult PATH on Windows: a repo-controlled PATH could supply
+        # the shell. The host injects PRIME_AGENT_BASH_SHELL when one exists.
         raise RuntimeError(
-            "bash() needs a bash executable on PATH on Windows (e.g. Git Bash); "
-            "or set PRIME_AGENT_BASH_SHELL to the absolute path of a POSIX shell"
+            "bash() needs PRIME_AGENT_BASH_SHELL set to the absolute path of a "
+            "POSIX shell on Windows (e.g. install Git Bash in its default "
+            "location so the host injects it)"
         )
+    # PATH fallback only serves bare/standalone POSIX runtime use: the host
+    # always injects PRIME_AGENT_BASH_SHELL (an absolute path) when a shell exists.
+    shell = shutil.which("bash")
     return shell or "/bin/sh"
 
 
@@ -723,13 +757,10 @@ def _process_start_id(pid: int) -> str | None:
         return None
 
 
-def _record_journal(pid: int, active: bool, with_start_id: bool = True) -> bool:
+def _record_journal(pid: int, active: bool) -> bool:
     # Returns False only when the journal is configured but enrollment failed;
-    # active-record callers must then fail closed. Records without a
-    # processStartId (with_start_id=False) skip the start-id query entirely:
-    # the host best-effort-kills such pid-only actives in its crash-reap paths,
-    # but identity-verified reaping still requires the enriched record, so
-    # enriched enrollment keeps failing closed.
+    # active-record callers must then fail closed. Active records always carry
+    # a processStartId so host reaping stays identity-verified.
     path = os.environ.get("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL")
     owner = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID")
     if not path or not owner:
@@ -738,8 +769,8 @@ def _record_journal(pid: int, active: bool, with_start_id: bool = True) -> bool:
         owner_pid = int(owner)
     except ValueError:
         return False
-    start_id = _process_start_id(pid) if active and with_start_id else None
-    if active and with_start_id and start_id is None:
+    start_id = _process_start_id(pid) if active else None
+    if active and start_id is None:
         return False
     record: dict[str, Any] = {
         "version": 1,
@@ -777,6 +808,8 @@ def _kill_live_handles() -> None:
     for handle in handles:
         if _IS_POSIX:
             delivered = _signal_group(handle._pid, signal.SIGKILL)
+        elif handle._job is not None:
+            delivered = _winjob.terminate(handle._job)
         else:
             delivered = _taskkill_tree(handle._pid)
             if not delivered:

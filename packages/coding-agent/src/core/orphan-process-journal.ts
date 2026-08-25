@@ -19,7 +19,7 @@ interface OrphanProcessRecord {
 export interface ActiveOrphanProcess {
 	pid: number;
 	kernelPid?: number;
-	/** Missing on pid-only records written before the start-id query completed (Windows pre-enrollment). */
+	/** Missing on identity-free records: old journals or host writes whose start-id query failed (kernels no longer write pid-only records). */
 	processStartId?: string;
 }
 
@@ -81,8 +81,8 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 			// A crash can truncate only the final append.
 		}
 	}
-	// Pid-only actives (no processStartId) come from the Windows pre-enrollment
-	// window; the enriched record normally supersedes them within seconds.
+	// Pid-only actives (no processStartId) still surface from old journals or
+	// host writes whose start-id query failed; reapers decide per-platform.
 	return [...latest.values()]
 		.filter(
 			(record) =>
@@ -98,6 +98,20 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boolean {
 	// Pid-only records can never claim identity (undefined === undefined must not match).
 	return orphan.processStartId !== undefined && getProcessStartId(orphan.pid) === orphan.processStartId;
+}
+
+/**
+ * Identity-free records cannot prove the pid still names the journaled process.
+ * On win32 the kernel's kill-on-close job already reaped its tree when it died,
+ * so a bare-pid taskkill only risks killing a reused pid. POSIX keeps the
+ * best-effort kill (group-scoped, and the spawn gate makes pid-only actives
+ * host-written rarities there).
+ */
+export function shouldReapOrphanProcess(orphan: ActiveOrphanProcess): boolean {
+	if (orphan.processStartId === undefined) {
+		return process.platform !== "win32";
+	}
+	return isOrphanProcessIdentityCurrent(orphan);
 }
 
 export function clearOrphanProcessJournal(path: string): void {
@@ -120,9 +134,7 @@ export function reapKernelOrphanProcesses(kernelPid: number): void {
 		if (orphan.kernelPid !== kernelPid || orphan.pid === kernelPid) {
 			continue;
 		}
-		// Pid-only records = kernel crashed before the start-id landed: best-effort
-		// kill; blast radius bounded by ownerPid + kernelPid scoping.
-		if (orphan.processStartId !== undefined && !isOrphanProcessIdentityCurrent(orphan)) {
+		if (!shouldReapOrphanProcess(orphan)) {
 			continue;
 		}
 		// Inactive only after a delivered signal; a stale record is neutralized by the startId check.
