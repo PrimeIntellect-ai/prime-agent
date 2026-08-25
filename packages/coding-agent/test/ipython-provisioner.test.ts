@@ -232,28 +232,6 @@ describe("IpythonKernelProvisioner", () => {
 		expect(internals.startupListeners.has(onProgress)).toBe(false);
 	});
 
-	it("rejects a %%bash cell with the teaching error without booting a kernel", async () => {
-		const ensure = vi.fn(async () => {
-			throw new Error("ensure must not be called for a rejected cell");
-		});
-		const provisioner = { ensure } as unknown as IpythonKernelProvisioner;
-		const tool = createIpythonToolDefinition(tempDir, { provisioner });
-
-		const result = await tool.execute(
-			"tool-call",
-			{ code: "%%bash\necho body" },
-			undefined,
-			undefined,
-			{} as ExtensionContext,
-		);
-
-		expect(result.details.status).toBe("error");
-		expect(result.details.durationMs).toBe(0);
-		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-		expect(text).toBe("%%bash cells are not supported; use bash('cmd') / await bash('cmd')");
-		expect(ensure).not.toHaveBeenCalled();
-	});
-
 	it("lets the user wait when an interrupted kernel is still busy", async () => {
 		const execute = vi
 			.fn<KernelClient["execute"]>()

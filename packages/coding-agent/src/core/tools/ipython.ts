@@ -19,7 +19,6 @@ import {
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
-import { magicRejection } from "./ipython-cell-code.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const RLM_BOOTSTRAP_HEADER_CODE = `
@@ -641,14 +640,6 @@ export function createIpythonToolDefinition(
 			};
 
 			try {
-				const rejection = magicRejection(params.code);
-				if (rejection) {
-					return {
-						content: [{ type: "text", text: rejection }],
-						details: { status: "error", durationMs: 0 },
-						isError: true,
-					};
-				}
 				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
 					provisioner,
 					reportStartupProgress,
