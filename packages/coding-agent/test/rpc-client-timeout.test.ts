@@ -85,6 +85,14 @@ describe("RpcClient operation completion", () => {
 		await expect(state).resolves.toEqual({});
 	});
 
+	it("starts from the child spawn signal without waiting for a timer", async () => {
+		vi.useFakeTimers();
+		const client = new RpcClient({ cliPath: fixturePath });
+		clients.add(client);
+
+		await expect(client.start()).resolves.toBeUndefined();
+	});
+
 	it("rejects start when the child cannot spawn", async () => {
 		const client = new RpcClient({ cliPath: fixturePath, env: { PATH: "" } });
 

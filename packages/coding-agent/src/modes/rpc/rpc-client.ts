@@ -5,6 +5,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { once } from "node:events";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
@@ -135,12 +136,10 @@ export class RpcClient {
 			this.handleLine(line);
 		});
 
-		// Wait a moment for process to initialize
-		await new Promise((resolve) => setTimeout(resolve, 100));
-
-		if (this.transportError) throw this.transportError;
-		if (child.exitCode !== null) {
-			throw new Error(`Agent process exited immediately with code ${child.exitCode}. Stderr: ${this.stderr}`);
+		try {
+			await once(child, "spawn");
+		} catch (error) {
+			throw this.transportError ?? error;
 		}
 	}
 
