@@ -29,7 +29,7 @@ export class KernelBusyAfterInterruptError extends Error {
  * The returned record is sent back verbatim as the reply payload.
  *
  * The unary form is the dispatcher and registration contract; context-aware
- * handlers are staged separately below.
+ * handlers are declared separately below.
  */
 export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
