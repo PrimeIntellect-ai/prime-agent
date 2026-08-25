@@ -561,6 +561,42 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 handle._reap_group()  # watcher path: taskkill before marking reaped
                 taskkill.assert_called_once_with(handle._pid)
 
+    async def test_undelivered_kill_leaves_journal_record_active(self):
+        if not bash_module._IS_POSIX:
+            self.skipTest("POSIX signal-delivery semantics")
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.jsonl")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                },
+            ):
+                handle = bash("sleep 30")
+                try:
+                    records = await _poll_journal(journal, count=1)
+                    self.assertTrue(records[-1]["active"])
+                    with mock.patch.object(bash_module, "_signal_group", return_value=False):
+                        bash_module._kill_live_handles()
+                    await asyncio.sleep(0.2)  # give any (wrong) inactive write time to land
+                    records = await _poll_journal(journal, count=1)
+                    self.assertEqual(len(records), 1)
+                    self.assertTrue(records[-1]["active"])
+                finally:
+                    handle.kill(signal.SIGKILL)
+                    await asyncio.wait_for(handle, timeout=5)
+
+    async def test_signal_group_reports_delivery(self):
+        if not bash_module._IS_POSIX:
+            self.skipTest("POSIX signal-delivery semantics")
+        with mock.patch.object(bash_module.os, "killpg", side_effect=ProcessLookupError):
+            self.assertTrue(bash_module._signal_group(1234567, signal.SIGKILL))
+        with mock.patch.object(bash_module.os, "killpg", side_effect=PermissionError):
+            self.assertFalse(bash_module._signal_group(1234567, signal.SIGKILL))
+        with mock.patch.object(bash_module.os, "killpg", side_effect=OSError):
+            self.assertFalse(bash_module._signal_group(1234567, signal.SIGKILL))
+
     async def test_journal_configured_but_unwritable_kills_child_and_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             marker = os.path.join(tmp, "marker")

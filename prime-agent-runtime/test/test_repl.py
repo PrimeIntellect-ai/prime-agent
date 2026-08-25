@@ -468,6 +468,26 @@ class ReplTest(unittest.TestCase):
         follow = self.repl.execute("after-race", "5+5")
         self.assertEqual(one(follow, "result")["text"], "10")
 
+    def test_interrupt_during_slow_repr_cancels_finishing_request(self):
+        # The cell body finishes instantly; the interrupt lands while the
+        # trailing-expression repr is sleeping (post-run finishing window).
+        code = "\n".join(
+            [
+                "import time",
+                "class SlowRepr:",
+                "    def __repr__(self):",
+                "        time.sleep(600)",
+                "        return 'late'",
+                "SlowRepr()",
+            ]
+        )
+        events = self._interrupt_after_running("slowrepr", code)
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
+        follow = self.repl.execute("after-slowrepr", "1+1")
+        self.assertEqual(one(follow, "result")["text"], "2")
+
     def test_traceback_clean_with_source_line(self):
         code = "def boom():\n    raise ValueError('nope')\nboom()"
         events = self.repl.execute("tb", code)
@@ -966,6 +986,10 @@ class FinishRequestTest(unittest.TestCase):
         self.repl_module._inflight.clear()
         self.repl_module._pending_interrupts["ids"].clear()
         self.repl_module._pending_interrupts["any"] = False
+        self.repl_module._finishing_rid = None
+        self.repl_module._handoff_interrupted = False
+        self.repl_module._sigint_target = None
+        self.repl_module._active.update({"task": None, "rid": None, "interrupted": False})
 
     def test_parked_any_survives_while_another_request_is_inflight(self):
         repl = self.repl_module
@@ -1003,6 +1027,36 @@ class FinishRequestTest(unittest.TestCase):
         repl._inflight.update({"done", "other"})
         asyncio.run(repl._handle_request(finished_then_broken, {"id": "done"}, {}))
         self.assertTrue(repl._pending_interrupts["any"])
+        self.assertIn("other", repl._inflight)
+
+    def test_untargeted_interrupt_in_done_task_handoff_is_not_parked(self):
+        # The cell task is done but _run_guarded's finally has not run yet
+        # (_active still names the rid, _finishing_rid is unset). An untargeted
+        # interrupt in that handoff belongs to THIS request: it must be recorded
+        # for its finishing phase, never parked where the next request eats it.
+        import signal
+
+        repl = self.repl_module
+
+        class DoneTask:
+            def done(self):
+                return True
+
+            def cancel(self):
+                raise AssertionError("a done task must not be cancelled")
+
+        repl._inflight.update({"handoff", "other"})
+        repl._active.update({"task": DoneTask(), "rid": "handoff", "interrupted": False})
+        previous = signal.signal(signal.SIGINT, repl._sigint_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        repl._request_interrupt(None)
+        deadline = time.monotonic() + 5
+        while not repl._handoff_interrupted and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(repl._sigint_target, "handoff")
+        self.assertFalse(repl._pending_interrupts["any"])
+        self.assertTrue(repl._consume_handoff_interrupt())
+        self.assertFalse(repl._handoff_interrupted)
         self.assertIn("other", repl._inflight)
 
 

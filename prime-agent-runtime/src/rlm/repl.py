@@ -58,6 +58,8 @@ _interrupt_lock = threading.Lock()
 _inflight: set[str] = set()
 _pending_interrupts: dict[str, Any] = {"ids": set(), "any": False}
 _sigint_target: str | None = None
+_finishing_rid: str | None = None
+_handoff_interrupted = False
 
 
 def _send(event: dict[str, Any]) -> None:
@@ -286,10 +288,21 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
 
 
 def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
+    global _handoff_interrupted
     task = _active["task"]
     # No lock (the main thread may hold it): the rid equality revalidates the
     # target so a SIGINT delayed past its request's finish cannot hit a later cell.
     if task is None or task.done() or _active["rid"] != _sigint_target:
+        if _sigint_target is not None and _sigint_target == _active["rid"]:
+            # Handoff: the task is done but _run_guarded's finally has not run
+            # yet, so the main thread may be inside loop internals where raising
+            # would kill the serve loop. Record it; the finishing phase consumes it.
+            _handoff_interrupted = True
+            return
+        # Post-run repr/drain is synchronous main-thread work: raise into it.
+        # The equality revalidation drops a SIGINT delayed past the done send.
+        if _sigint_target is not None and _sigint_target == _finishing_rid:
+            raise KeyboardInterrupt
         return
     _active["interrupted"] = True
     # Handler runs in the main (loop) thread: current_task is whose step the signal interrupted.
@@ -311,15 +324,21 @@ def _request_interrupt(target: str | None) -> None:
 
     Runs on the reader thread. Without a target id the interrupt applies to
     the running request, else to the next queued one; with a target id it
-    applies to that request only. Interrupts for finished or unknown requests
-    are dropped.
+    applies to that request only. A request finishing its post-run repr/drain
+    is still interrupted (never parked: parking would hit the NEXT request).
+    Interrupts for finished or unknown requests are dropped.
     """
     global _sigint_target
     with _interrupt_lock:
         task = _active["task"]
-        active = task is not None and not task.done()
-        if active and (target is None or target == _active["rid"]):
-            _sigint_target = _active["rid"]
+        rid = _active["rid"]
+        if rid is not None and (target is None or target == rid):
+            # Active, or in the done-task handoff before _run_guarded's finally:
+            # either way the rid still owns the interrupt (parking here would
+            # leak it onto the next request); the handler decides delivery.
+            _sigint_target = rid
+        elif _finishing_rid is not None and (target is None or target == _finishing_rid):
+            _sigint_target = _finishing_rid
         elif target is not None:
             if target in _inflight:
                 _pending_interrupts["ids"].add(target)
@@ -331,7 +350,8 @@ def _request_interrupt(target: str | None) -> None:
             return
     # SIGINT must land on the main thread, where cells execute. Windows has no
     # signal.pthread_kill: fall back to cancelling the active task on the loop
-    # (sync-blocked cells cannot be broken there; best-effort parity).
+    # (sync-blocked cells and the finishing repr/drain cannot be broken there;
+    # best-effort parity).
     if hasattr(signal, "pthread_kill"):
         signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
         if _loop is not None:
@@ -357,8 +377,23 @@ def _consume_pending_interrupt(rid: str) -> bool:
     return pending
 
 
+def _consume_handoff_interrupt() -> bool:
+    """Check-and-clear an interrupt that landed in the done-task handoff."""
+    global _handoff_interrupted
+    with _interrupt_lock:
+        pending = _handoff_interrupted
+        _handoff_interrupted = False
+        return pending
+
+
 def _finish_locked(rid: str) -> None:
     """Drop a finished request; a parked untargeted interrupt survives while others are inflight."""
+    global _finishing_rid, _handoff_interrupted
+    if _finishing_rid == rid:
+        # An unconsumed handoff interrupt dies with its request (state requests
+        # have no cancellable post-run work); it must never hit the next request.
+        _finishing_rid = None
+        _handoff_interrupted = False
     _inflight.discard(rid)
     _pending_interrupts["ids"].discard(rid)
     if not _inflight:
@@ -466,9 +501,14 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
         return "error", None, _error_event(rid, exc)
     finally:
         with _interrupt_lock:
+            global _finishing_rid
+            # The rid stays inflight and interrupt-targetable through the
+            # post-run repr/drain; the handler closes the window via _finish_request.
+            # Set before clearing _active: the lock-free handler must always see
+            # the rid in one of the two slots, never a torn in-between state.
+            _finishing_rid = rid
             _active["task"] = None
             _active["rid"] = None
-            _finish_locked(rid)
 
 
 async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
@@ -485,13 +525,22 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         task = _loop.create_task(_run_codes(codes, ns))
         status, value, error = await _run_guarded(task, cell_id)
         result_text: str | None = None
-        if status == "ok" and has_trailing and value is not None:
-            try:
-                ns["_"] = value
-                result_text = repr(value)
-            except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
-                status, error = "error", _error_event(cell_id, exc)
-        _drain_output()
+        try:
+            if _consume_handoff_interrupt() and status == "ok":
+                # SIGINT landed between the task's completion and the finishing
+                # phase: it targeted this request, so cancel its remaining work.
+                status, error = "error", _error_event(cell_id, KeyboardInterrupt())
+            if status == "ok" and has_trailing and value is not None:
+                try:
+                    ns["_"] = value
+                    result_text = repr(value)
+                except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
+                    status, error = "error", _error_event(cell_id, exc)
+            _drain_output()
+        finally:
+            # Close the interrupt window before the protocol sends so a
+            # handler-raised KeyboardInterrupt can never tear a frame mid-_send.
+            _finish_request(cell_id)
         if result_text is not None:
             _send({"event": "result", "id": cell_id, "text": result_text})
         if error is not None:
@@ -689,6 +738,7 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     assert _loop is not None
     task = _loop.create_task(run())
     status, result, error = await _run_guarded(task, rid)
+    _finish_request(rid)  # no post-run repr/drain: close the interrupt window now
     if status != "ok":
         reason = "interrupted" if error and error.get("ename") == "KeyboardInterrupt" else (
             f"{error.get('ename')}: {error.get('evalue')}" if error else "failed"
