@@ -89,6 +89,21 @@ import {
 	refreshAutonomousQualityGates,
 	setAutonomousEnabled,
 } from "./autonomous.js";
+import {
+	AUTORESEARCH_SKILL_NAME,
+	AutoresearchStore,
+	buildAutoresearchReviewerPrompts,
+	buildAutoresearchSupervisorPrompt,
+	parseAutoresearchCandidateInput,
+	parseAutoresearchClaimInput,
+	parseAutoresearchClaimUpdateInput,
+	parseAutoresearchCycleInput,
+	parseAutoresearchExperimentInput,
+	parseAutoresearchMemoryInput,
+	parseAutoresearchMemoryReuseInput,
+	parseAutoresearchPublicationInput,
+	parseAutoresearchSupervisionInput,
+} from "./autoresearch.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
 	COMPACT_SKILL_NAME,
@@ -1125,6 +1140,7 @@ export class AgentSession {
 	private _rlmHeartbeatController?: AgentRlmHeartbeatController;
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
+	private _autoresearchStore?: AutoresearchStore;
 	private _mcpManager?: McpManager;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
@@ -1254,6 +1270,8 @@ export class AgentSession {
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
+		this._autoresearchStore =
+			this._rlmDepth === 0 ? new AutoresearchStore(this.sessionManager.getSessionArtifactDir()) : undefined;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
@@ -3161,6 +3179,243 @@ export class AgentSession {
 			}
 			default:
 				throw new Error(`unknown RLM heartbeat request type "${type}"`);
+		}
+	}
+
+	private _requireAutoresearchStore(): AutoresearchStore {
+		if (!this._autoresearchStore || this._rlmDepth !== 0) {
+			throw new Error("autoresearch is only available in a root agent session");
+		}
+		if (!this._agentMessageController) {
+			throw new Error("autoresearch requires retained-child messaging");
+		}
+		return this._autoresearchStore;
+	}
+
+	private async _ensureAutoresearchSupervisor(): Promise<{ rlmChildId: string; name: string }> {
+		const store = this._requireAutoresearchStore();
+		const state = store.getState();
+		if (!state.objective) throw new Error("initialize autoresearch before starting its supervisor");
+		const children = (await this.listRlmSubagents()).subagents;
+		const configured = state.supervisor;
+		if (configured) {
+			const retained = children.find(
+				(child) => child.rlm_child_id === configured.rlmChildId || child.session_name === configured.name,
+			);
+			if (retained && retained.status !== "error") {
+				if (retained.rlm_child_id !== configured.rlmChildId || retained.session_name !== configured.name) {
+					store.setSupervisor({ rlmChildId: retained.rlm_child_id, name: retained.session_name });
+				}
+				return { rlmChildId: retained.rlm_child_id, name: retained.session_name };
+			}
+		}
+
+		const stableSuffix = this.sessionId.replace(/[^A-Za-z0-9]/g, "").slice(-8) || randomUUID().slice(0, 8);
+		const preferredName = `autoresearch-supervisor-${stableSuffix}`;
+		const name = children.some((child) => child.session_name === preferredName)
+			? `${preferredName}-${randomUUID().slice(0, 8)}`
+			: preferredName;
+		const handle = await this.runRlmChild(buildAutoresearchSupervisorPrompt(state.objective, state.topic), { name });
+		store.setSupervisor({ rlmChildId: handle.rlm_child_id, name: handle.name });
+		return { rlmChildId: handle.rlm_child_id, name: handle.name };
+	}
+
+	private async _dispatchAutoresearchCheckpoint(
+		supervisor: { rlmChildId: string; name: string },
+		cycleId: string,
+		packet: Record<string, unknown>,
+	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
+		try {
+			await this._awaitPendingRlmChildPublication(supervisor.name);
+			const receipt = await this._agentMessageController!.sendAgentMessage({
+				target: assertDirectAgentMessageTarget(supervisor.name),
+				message: normalizeAgentSessionMessage(
+					`[autoresearch checkpoint ${cycleId}]\n\n${JSON.stringify(packet, null, 2)}`,
+				),
+			});
+			return { receipt };
+		} catch (error) {
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private _collectAutoresearchAgentResults(): {
+		ingested: number;
+		reviews: ReturnType<AutoresearchStore["getState"]>["collectedReviews"];
+		supervision: ReturnType<AutoresearchStore["getState"]>["supervision"];
+		errors: Array<{ messageId: string; error: string }>;
+	} {
+		const store = this._requireAutoresearchStore();
+		let ingested = 0;
+		const errors: Array<{ messageId: string; error: string }> = [];
+		const messages = [...this.messages];
+		for (const action of this._actionStore.unfinishedActions()) {
+			if (action.payload.kind === "turn" && action.payload.customMessage) {
+				messages.push(action.payload.customMessage);
+			}
+		}
+		for (const message of messages) {
+			if (!isAgentSessionMessage(message) || !message.details.message.includes("AUTORESEARCH_")) continue;
+			try {
+				if (store.ingestAgentMessage(message.details.id, message.details.message)) ingested++;
+			} catch (error) {
+				errors.push({
+					messageId: message.details.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const state = store.getState();
+		return {
+			ingested,
+			reviews: state.collectedReviews,
+			supervision: state.supervision,
+			errors,
+		};
+	}
+
+	async handleAutoresearchHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
+		const store = this._requireAutoresearchStore();
+		switch (type) {
+			case "autoresearch.initialize": {
+				if (typeof payload.objective !== "string") {
+					throw new Error("autoresearch.initialize objective must be a string");
+				}
+				if (payload.topic !== undefined && typeof payload.topic !== "string") {
+					throw new Error("autoresearch.initialize topic must be a string when provided");
+				}
+				store.initialize(payload.objective, payload.topic);
+				const supervisor = await this._ensureAutoresearchSupervisor();
+				return { state: store.getState(), supervisor };
+			}
+			case "autoresearch.get":
+				return { state: store.getState() };
+			case "autoresearch.publication.add": {
+				const publication = store.addPublication(parseAutoresearchPublicationInput(payload.publication));
+				return { publication };
+			}
+			case "autoresearch.experiment.record": {
+				const experiment = store.recordExperiment(parseAutoresearchExperimentInput(payload.experiment));
+				return { experiment };
+			}
+			case "autoresearch.memory.remember": {
+				const memory = store.remember(parseAutoresearchMemoryInput(payload.memory));
+				return { memory };
+			}
+			case "autoresearch.memory.recall": {
+				if (typeof payload.query !== "string") {
+					throw new Error("autoresearch.memory.recall query must be a string");
+				}
+				if (payload.limit !== undefined && typeof payload.limit !== "number") {
+					throw new Error("autoresearch.memory.recall limit must be a number when provided");
+				}
+				return { memories: store.recallMemories(payload.query, payload.limit ?? 8) };
+			}
+			case "autoresearch.memory.reuse.prepare": {
+				const reuse = store.createMemoryReusePlan(parseAutoresearchMemoryReuseInput(payload.reuse));
+				return { reuse };
+			}
+			case "autoresearch.memory.reuse.verify": {
+				if (typeof payload.reuse_id !== "string") {
+					throw new Error("autoresearch.memory.reuse.verify reuse_id must be a string");
+				}
+				if (typeof payload.accepted !== "boolean") {
+					throw new Error("autoresearch.memory.reuse.verify accepted must be a boolean");
+				}
+				if (!Array.isArray(payload.evidence) || !payload.evidence.every((item) => typeof item === "string")) {
+					throw new Error("autoresearch.memory.reuse.verify evidence must be an array of strings");
+				}
+				return {
+					reuse: store.verifyMemoryReuse(payload.reuse_id, payload.accepted, payload.evidence),
+				};
+			}
+			case "autoresearch.claim.add": {
+				const claim = store.addClaim(parseAutoresearchClaimInput(payload.claim));
+				return { claim };
+			}
+			case "autoresearch.claim.update": {
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("autoresearch.claim.update claim_id must be a string");
+				}
+				return {
+					claim: store.updateClaim(payload.claim_id, parseAutoresearchClaimUpdateInput(payload.update)),
+				};
+			}
+			case "autoresearch.claim.promote": {
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("autoresearch.claim.promote claim_id must be a string");
+				}
+				return { claim: store.promoteClaim(payload.claim_id) };
+			}
+			case "autoresearch.claim.invalidate": {
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("autoresearch.claim.invalidate claim_id must be a string");
+				}
+				if (typeof payload.reason !== "string") {
+					throw new Error("autoresearch.claim.invalidate reason must be a string");
+				}
+				return { claim: store.invalidateClaim(payload.claim_id, payload.reason) };
+			}
+			case "autoresearch.reviewer_prompts": {
+				const candidate = parseAutoresearchCandidateInput(payload.candidate);
+				return { candidate, prompts: buildAutoresearchReviewerPrompts(candidate, store.getState()) };
+			}
+			case "autoresearch.results.collect":
+				return this._collectAutoresearchAgentResults();
+			case "autoresearch.cycle.complete": {
+				const collection = this._collectAutoresearchAgentResults();
+				let cycleInput = payload.cycle;
+				if (isObjectRecord(cycleInput) && isObjectRecord(cycleInput.candidate)) {
+					const candidateId = cycleInput.candidate.candidate_id ?? cycleInput.candidate.candidateId;
+					if (typeof candidateId === "string") {
+						const byRole = new Map<string, unknown>();
+						for (const reviewer of store.getCollectedReviews(candidateId)) byRole.set(reviewer.role, reviewer);
+						if (Array.isArray(cycleInput.reviewers)) {
+							for (const reviewer of cycleInput.reviewers) {
+								if (isObjectRecord(reviewer) && typeof reviewer.role === "string") {
+									byRole.set(reviewer.role, reviewer);
+								}
+							}
+						}
+						cycleInput = { ...cycleInput, reviewers: [...byRole.values()] };
+					}
+				}
+				const result = store.recordCycle(parseAutoresearchCycleInput(cycleInput));
+				let supervisor: { rlmChildId: string; name: string };
+				try {
+					supervisor = await this._ensureAutoresearchSupervisor();
+				} catch (error) {
+					return {
+						...result,
+						supervisor: null,
+						delivery: { error: error instanceof Error ? error.message : String(error) },
+					};
+				}
+				const delivery = await this._dispatchAutoresearchCheckpoint(
+					supervisor,
+					result.cycle.cycleId,
+					result.packet,
+				);
+				return { ...result, supervisor, delivery, collection };
+			}
+			case "autoresearch.supervision.record": {
+				return { supervision: store.recordSupervision(parseAutoresearchSupervisionInput(payload.supervision)) };
+			}
+			case "autoresearch.stop_gate":
+				this._collectAutoresearchAgentResults();
+				return { stop_gate: store.evaluateStopGate() };
+			case "autoresearch.export": {
+				if (payload.final !== undefined && typeof payload.final !== "boolean") {
+					throw new Error("autoresearch.export final must be a boolean when provided");
+				}
+				this._collectAutoresearchAgentResults();
+				return { deliverable: store.exportDeliverable(payload.final === true) };
+			}
+			default:
+				throw new Error(`unknown autoresearch request type "${type}"`);
 		}
 	}
 
@@ -9053,6 +9308,14 @@ export class AgentSession {
 		if (!this._agentObserveController || !this._rlmHeartbeatController) {
 			skills = skills.filter((skill) => skill.name !== ORCHESTRATION_HEARTBEAT_SKILL_NAME);
 		}
+		const canRunAutoresearch =
+			this._rlmDepth === 0 &&
+			this._rlmDepth < this._rlmMaxDepth &&
+			this._agentMessageController !== undefined &&
+			skills.some((skill) => skill.name === AGENT_MESSAGE_SKILL_NAME && !skill.disableModelInvocation);
+		if (!canRunAutoresearch) {
+			skills = skills.filter((skill) => skill.name !== AUTORESEARCH_SKILL_NAME);
+		}
 		return skills;
 	}
 
@@ -9153,6 +9416,30 @@ export class AgentSession {
 						}) as AgentObserveRecentMessagesResult,
 				}),
 			);
+		}
+		if (visibleKernelSkillNames.has(AUTORESEARCH_SKILL_NAME)) {
+			for (const type of [
+				"autoresearch.initialize",
+				"autoresearch.get",
+				"autoresearch.publication.add",
+				"autoresearch.experiment.record",
+				"autoresearch.memory.remember",
+				"autoresearch.memory.recall",
+				"autoresearch.memory.reuse.prepare",
+				"autoresearch.memory.reuse.verify",
+				"autoresearch.claim.add",
+				"autoresearch.claim.update",
+				"autoresearch.claim.promote",
+				"autoresearch.claim.invalidate",
+				"autoresearch.reviewer_prompts",
+				"autoresearch.results.collect",
+				"autoresearch.cycle.complete",
+				"autoresearch.supervision.record",
+				"autoresearch.stop_gate",
+				"autoresearch.export",
+			]) {
+				handlers[type] = async (payload) => this.handleAutoresearchHostRequest(type, payload);
+			}
 		}
 		if (this._mcpManager) {
 			Object.assign(handlers, this._mcpManager.hostHandlers());

@@ -1,0 +1,1 @@
+- Added a supervisor-first autoresearch control plane with Crossref, Semantic Scholar, arXiv, and Unpaywall discovery; publication/claim/experiment provenance; NOOA-compatible safe research memory; automatic hostile-review and supervisor-result ingestion; cycle-level stagnation checks; autonomous heartbeats; and a strict final stop gate.
