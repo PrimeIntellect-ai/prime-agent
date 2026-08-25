@@ -95,6 +95,12 @@ describe("resolveModelScopeFromModels", () => {
 
 		expect(result).toEqual([{ model: mockOpenRouterModels[0], thinkingLevel: "high" }]);
 	});
+
+	test("keeps the model and drops an invalid thinking suffix", () => {
+		const result = resolveModelScopeFromModels(["sonnet:random"], allModels);
+
+		expect(result).toEqual([{ model: mockModels[0], thinkingLevel: undefined }]);
+	});
 });
 
 describe("resolveCliModel", () => {
