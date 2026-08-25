@@ -21,6 +21,7 @@
 - Hardened bash(): cancelling `await bash(cmd)` now kills the command's process group (background handles are unaffected), Windows helper binaries resolve via absolute System32 paths, kill() retries taskkill for already-reaped Windows trees, and orphan-journal enrollment fails closed when configured.
 - Fixed cross-cell output misattribution in the REPL runtime: stream events are attributed at write time via context, and raw fd or user-thread output is emitted with a null id instead of being credited to whichever cell is running.
 - REPL kernel: output from user threads, other cells' leftovers, and raw fd writes is no longer merged into the running cell's stdout; it is surfaced separately as unattributed background output.
+- Hardened bash() further: the host now injects an absolute default shell into the kernel (no PATH lookup; /bin/bash else /bin/sh on POSIX), macOS start-id lookup uses /bin/ps, Windows journal records are written pid-first so a kernel crash during the start-id query cannot leak the child (crash reapers best-effort-kill such records), and Windows worker-teardown orphan kills go through hardened taskkill /T.
 
 ## [0.8.0] - 2026-08-21
 

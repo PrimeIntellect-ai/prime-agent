@@ -90,4 +90,63 @@ describe("orphan process journal", () => {
 		expect(remaining).not.toContain(childPid);
 		expect(remaining).toContain(process.pid);
 	});
+
+	it("accepts pid-only active records and lets enriched records supersede them", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
+		tempDirs.push(directory);
+		const path = join(directory, "orphans.jsonl");
+		const appendRecord = (record: Record<string, unknown>) => {
+			appendFileSync(path, `${JSON.stringify(record)}\n`);
+		};
+		const base = { version: 1, pid: process.pid, ownerPid: process.pid, recordedAt: new Date().toISOString() };
+
+		// Pid-only pre-record (Windows pre-enrollment window): returned, never identity-current.
+		appendRecord({ ...base, active: true });
+		let active = readActiveOrphanProcesses(path, process.pid);
+		expect(active).toHaveLength(1);
+		expect(active[0]?.processStartId).toBeUndefined();
+		expect(active[0] && isOrphanProcessIdentityCurrent(active[0])).toBe(false);
+
+		// The enriched record supersedes the pid-only one (last record per pid wins).
+		appendRecord({ ...base, active: true, processStartId: getProcessStartId(process.pid) });
+		active = readActiveOrphanProcesses(path, process.pid);
+		expect(active).toHaveLength(1);
+		expect(active[0]?.processStartId).toBeTypeOf("string");
+		expect(active[0] && isOrphanProcessIdentityCurrent(active[0])).toBe(true);
+
+		// An inactive record supersedes both.
+		appendRecord({ ...base, active: false });
+		expect(readActiveOrphanProcesses(path, process.pid)).toEqual([]);
+	});
+
+	it("best-effort kills pid-only records in the kernel crash-reap path", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
+		tempDirs.push(directory);
+		const path = join(directory, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
+
+		const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+		child.unref();
+		const childPid = child.pid;
+		expect(childPid).toBeTypeOf("number");
+		const kernelPid = 999_999;
+		// Pid-only record: the kernel crashed before the start-id query landed.
+		appendFileSync(
+			path,
+			`${JSON.stringify({
+				version: 1,
+				pid: childPid,
+				ownerPid: process.pid,
+				kernelPid,
+				active: true,
+				recordedAt: new Date().toISOString(),
+			})}\n`,
+		);
+
+		reapKernelOrphanProcesses(kernelPid);
+
+		const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+		await exited;
+		expect(child.signalCode).toBe("SIGKILL");
+	});
 });
