@@ -1543,7 +1543,7 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
-	it("strong quiescence yields to a real gated child bash while interactive idle remains resolved", async () => {
+	it("strong quiescence waits for a gated child bash activity change", async () => {
 		const child = createSession({ rlmSessionDir: join(tempDir, "bash-active-child") });
 		const bashStarted = deferred<void>();
 		const bashCompletion = deferred<void>();
@@ -1563,7 +1563,7 @@ describe("AgentSession rlm recursion", () => {
 		const originalHeadlessIdle = child.waitForHeadlessIdle.bind(child);
 		let headlessIdleCalls = 0;
 		vi.spyOn(child, "waitForHeadlessIdle").mockImplementation(async () => {
-			if (++headlessIdleCalls > 100) throw new Error("RLM quiescence spun without yielding a macrotask");
+			headlessIdleCalls++;
 			await originalHeadlessIdle();
 		});
 
@@ -1576,11 +1576,12 @@ describe("AgentSession rlm recursion", () => {
 			sleep(20).then(() => "timer" as const),
 		]);
 		expect(firstBoundary).toBe("timer");
+		expect(headlessIdleCalls).toBe(1);
 
 		bashCompletion.resolve();
 		await bash;
 		await expect(quiescence).resolves.toBeUndefined();
-		expect(headlessIdleCalls).toBeLessThan(100);
+		expect(headlessIdleCalls).toBe(2);
 	});
 
 	it("rechecks parent self-activity after a child quiescence boundary", async () => {
