@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -638,7 +638,7 @@ function makeConnection(): { info: ConnectionInfo; path: string; tempDir: string
 		key: randomBytes(16).toString("hex"),
 		kernel_name: "python3",
 	};
-	const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-"));
+	const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "prime-agent-kernel-")));
 	const path = join(tempDir, "connection.json");
 	writeFileSync(path, JSON.stringify(info, null, 2), { mode: 0o600 });
 	return { info, path, tempDir };

@@ -1,6 +1,7 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KernelManager } from "../src/core/kernel/index.js";
 
@@ -41,6 +42,31 @@ describe("KernelManager startup", () => {
 			);
 		} finally {
 			errorSpy.mockRestore();
+			await manager.dispose();
+		}
+	});
+
+	it("launches and cleans up with one canonical connection path", async () => {
+		let connectionPath: string | undefined;
+		let canonicalPathAtLaunch: string | undefined;
+		const manager = new KernelManager({
+			python: "unused-by-test-launcher",
+			cwd: tempDir,
+			processLauncher: ({ args }) => {
+				const fileFlag = args.indexOf("-f");
+				if (fileFlag < 0 || !args[fileFlag + 1]) throw new Error("missing kernel connection path");
+				connectionPath = args[fileFlag + 1];
+				canonicalPathAtLaunch = realpathSync(connectionPath);
+				return spawn(process.execPath, ["-e", "process.exit(42)"], { stdio: ["ignore", "pipe", "pipe"] });
+			},
+		});
+
+		try {
+			await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before resolving ports/);
+			if (!connectionPath) throw new Error("test launcher was not invoked");
+			expect(connectionPath).toBe(canonicalPathAtLaunch);
+			expect(existsSync(dirname(connectionPath))).toBe(false);
+		} finally {
 			await manager.dispose();
 		}
 	});
