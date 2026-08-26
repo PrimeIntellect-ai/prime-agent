@@ -1,0 +1,1 @@
+- Fixed `install.ps1` to detect and add Git for Windows bash to User PATH, so the `prime` command works on Windows systems where bash is not already on PATH.
