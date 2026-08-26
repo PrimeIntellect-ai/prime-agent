@@ -105,6 +105,8 @@ interface AcpPendingTerminal {
 	boundary: TurnBoundary;
 	outcome: "result" | "error";
 	abort: AbortController;
+	status?: AgentAutonomousStatus;
+	turnFailure?: string;
 	failure?: string;
 	task?: Promise<void>;
 }
@@ -641,6 +643,8 @@ export async function runAcpModeWithConnection(
 				if (pending.abort.signal.aborted || session !== entry || entry.pendingTerminal !== pending) return;
 				const terminalQuiescence = quiescenceMeta(status, liveChildren);
 				if (terminalQuiescence.outstandingSubagents !== 0) continue;
+				pending.status = status;
+				pending.turnFailure = finalFailure;
 
 				entry.producer.sealTerminal(pending.promptTurnId);
 				const autonomous = autonomousMeta(status);
@@ -653,11 +657,9 @@ export async function runAcpModeWithConnection(
 					"terminalQuiescence",
 					finalFailure ? "error" : pending.outcome,
 				);
-				// publish() admits the terminal update synchronously before its first await.
-				// Release the next prompt only after that ordering cut, not after the client
-				// has already observed the notification.
-				if (entry.pendingTerminal === pending) entry.pendingTerminal = undefined;
-				if (entry.abort === pending.abort) entry.abort = undefined;
+				// Keep terminal ownership until this settlement task has fully drained.
+				// A follow-up prompt awaits that task; clearing ownership at publication
+				// admission would let it overlap the first prompt handler.
 				if (!(await publication)) return;
 				await entry.producer.drain();
 				return;
@@ -669,7 +671,6 @@ export async function runAcpModeWithConnection(
 			})
 			.finally(() => {
 				entry.producer.finishTerminalLifecycle(pending.promptTurnId);
-				if (!pending.abort.signal.aborted) return;
 				if (entry.pendingTerminal === pending) entry.pendingTerminal = undefined;
 				if (entry.abort === pending.abort) entry.abort = undefined;
 			});
@@ -869,6 +870,7 @@ export async function runAcpModeWithConnection(
 			// delivered. This prevents late producer events becoming the next turn.
 			const promptTurnId = entry.producer.beginPrompt();
 			let responseBoundaryEmitted = false;
+			let terminalSettlementCancelled = false;
 			try {
 				const { text, images } = promptContent(params.prompt);
 				const priorMessages = turnBoundary(await connection.getMessages());
@@ -907,6 +909,7 @@ export async function runAcpModeWithConnection(
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
 				const outcome = failure ? "error" : "result";
+				let terminalStatus = status;
 				const observedQuiescence = quiescenceMeta(status, liveChildren);
 				// The roster is telemetry at the response cut, not proof of terminality:
 				// a child can publish a terminal status before its result reaches the parent.
@@ -937,12 +940,21 @@ export async function runAcpModeWithConnection(
 					const pending: AcpPendingTerminal = { promptTurnId, boundary: priorMessages, outcome, abort };
 					entry.pendingTerminal = pending;
 					finalizePendingTerminal(entry, pending);
+					await pending.task;
+					terminalSettlementCancelled = abort.signal.aborted;
+					if (pending.failure) {
+						throw new Error(`ACP lifecycle reconciliation failed: ${pending.failure}`);
+					}
+					if (pending.turnFailure) {
+						throw new Error(`prime-agent turn failed: ${pending.turnFailure}`);
+					}
+					terminalStatus = pending.status ?? status;
 				}
 				if (failure) throw new Error(`prime-agent turn failed: ${failure}`);
 				return {
 					stopReason: acpStopReason({
-						cancelled: abort.signal.aborted && !entry.producer.isResponseCommitted(promptTurnId),
-						autonomous: status,
+						cancelled: terminalSettlementCancelled,
+						autonomous: terminalStatus,
 					}),
 				};
 			} catch (error) {
