@@ -106,6 +106,11 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runNestedAgentCommand("schedule", "cron", args.slice(1));
 		case "status":
 			return runStatus(args.slice(1));
+		case "autoresearch": {
+			const { runAutoresearchDashboardCommand } = await import("./autoresearch-dashboard.js");
+			await runAutoresearchDashboardCommand(args.slice(1));
+			return HANDLED;
+		}
 		case "doctor":
 			return runDoctor(args.slice(1));
 		case "shutdown":
