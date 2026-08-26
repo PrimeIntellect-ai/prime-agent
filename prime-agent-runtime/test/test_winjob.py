@@ -253,10 +253,15 @@ class WinJobTest(unittest.TestCase):
         self.k32.WaitForSingleObject.return_value = 0  # WAIT_OBJECT_0
         self.assertEqual(proc.poll(), 7)
         self.assertEqual(proc.poll(), 7)  # second poll after signal: cached
-        # Caching happens exactly once; each handle is closed exactly once.
+        # Caching happens exactly once; the process handle stays open for close().
         self.assertEqual(self.k32.GetExitCodeProcess.call_count, 1)
         closed = sorted(c.args[0] for c in self.k32.CloseHandle.call_args_list)
+        self.assertEqual(closed, [202])
+        proc.close()
+        closed = sorted(c.args[0] for c in self.k32.CloseHandle.call_args_list)
         self.assertEqual(closed, [201, 202])
+        proc.close()  # idempotent: no second CloseHandle
+        self.assertEqual(len(self.k32.CloseHandle.call_args_list), 2)
         self.k32.reset_mock(side_effect=False)
         self.assertEqual(proc.poll(), 7)  # cached: no further kernel32 calls
         self.assertEqual(proc.wait(), 7)
@@ -339,6 +344,7 @@ class WinJobTest(unittest.TestCase):
         try:
             self.assertTrue(entered.wait(timeout=5))
             self.assertEqual(proc.poll(), 7)  # caches while the wait is blocked
+            proc.close()  # close request while a waiter is blocked: must defer
             closed = [c.args[0] for c in self.k32.CloseHandle.call_args_list]
             self.assertNotIn(201, closed)  # deferred: the waiter still uses it
             self.assertIn(202, closed)  # the thread handle may close at once
@@ -349,6 +355,41 @@ class WinJobTest(unittest.TestCase):
         self.assertEqual(results, [7])
         closed = [c.args[0] for c in self.k32.CloseHandle.call_args_list]
         self.assertEqual(closed.count(201), 1)  # the last waiter closed it
+
+    def test_job_process_close_during_wait_caches_exit_before_deferred_close(self):
+        # Reviewer schedule: close() during a blocked wait() must not release the
+        # handle before the signaled wait caches the exit code.
+        proc = _winjob.JobProcess(201, 202, 4242, mock.Mock())
+        entered, release = threading.Event(), threading.Event()
+        seen_handles: list[object] = []
+
+        def wfso(handle, millis):
+            entered.set()
+            assert release.wait(timeout=5)
+            return 0  # WAIT_OBJECT_0
+
+        def write_exit(handle, code_ptr):
+            seen_handles.append(handle)
+            ctypes.cast(code_ptr, ctypes.POINTER(wintypes.DWORD)).contents.value = 7
+            return 1
+
+        self.k32.WaitForSingleObject.side_effect = wfso
+        self.k32.GetExitCodeProcess.side_effect = write_exit
+        results: list[int] = []
+        waiter = threading.Thread(target=lambda: results.append(proc.wait()), daemon=True)
+        waiter.start()
+        try:
+            self.assertTrue(entered.wait(timeout=5))
+            proc.close()
+            self.k32.CloseHandle.assert_not_called()  # deferred: waiter in flight
+        finally:
+            release.set()
+            waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(results, [7])
+        self.assertEqual(seen_handles, [201])  # never GetExitCodeProcess(None)
+        closed = [c.args[0] for c in self.k32.CloseHandle.call_args_list]
+        self.assertEqual(closed, [202, 201])  # hThread at cache, then the deferred close
 
     def test_job_process_wait_invalid_timeout_does_not_leak_waiter(self):
         # int(nan/inf) raising after waiter registration would leak _waiters and the handle.
@@ -365,9 +406,38 @@ class WinJobTest(unittest.TestCase):
 
         self.k32.WaitForSingleObject.return_value = 0  # WAIT_OBJECT_0
         self.k32.GetExitCodeProcess.side_effect = write_exit
-        self.assertEqual(proc.poll(), 3)  # closes normally afterwards
+        self.assertEqual(proc.poll(), 3)  # caches normally afterwards
+        proc.close()
         closed = sorted(c.args[0] for c in self.k32.CloseHandle.call_args_list)
         self.assertEqual(closed, [201, 202])
+
+    def test_job_process_wait_retains_handle_until_close(self):
+        # PID-reuse guard: exit observation must not release the process handle.
+        def write_exit(handle, code_ptr):
+            ctypes.cast(code_ptr, ctypes.POINTER(wintypes.DWORD)).contents.value = 7
+            return 1
+
+        proc = _winjob.JobProcess(201, 202, 4242, mock.Mock())
+        self.k32.WaitForSingleObject.return_value = 0  # WAIT_OBJECT_0
+        self.k32.GetExitCodeProcess.side_effect = write_exit
+        self.assertEqual(proc.wait(), 7)
+        closed = sorted(c.args[0] for c in self.k32.CloseHandle.call_args_list)
+        self.assertEqual(closed, [202])  # 201 stays open until close()
+        proc.close()
+        closed = sorted(c.args[0] for c in self.k32.CloseHandle.call_args_list)
+        self.assertEqual(closed, [201, 202])
+        self.assertEqual(len(self.k32.CloseHandle.call_args_list), 2)
+
+    def test_job_process_close_before_exit_cached_is_safe(self):
+        proc = _winjob.JobProcess(201, 202, 4242, mock.Mock())
+        proc.close()
+        self.k32.CloseHandle.assert_called_once_with(201)
+        proc.close()  # idempotent
+        self.k32.CloseHandle.assert_called_once_with(201)
+        proc.kill()  # closed without exit: killing is a no-op
+        self.k32.TerminateProcess.assert_not_called()
+        with self.assertRaises(OSError):
+            proc.poll()
 
     def test_is_empty_maps_active_processes(self):
         def query(job, info_class, buffer, size, returned):

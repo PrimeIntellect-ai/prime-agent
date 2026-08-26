@@ -122,6 +122,8 @@ class BashHandle:
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._callback_lock = threading.Lock()
+        # Serializes kill/reap so a pid fallback can never outlive the process handle.
+        self._kill_lock = threading.Lock()
         self._started = time.monotonic()
         # POSIX: own process group so kill() signals the whole pipeline; Windows
         # contains the tree in a kill-on-close job object.
@@ -246,14 +248,17 @@ class BashHandle:
         if self._reaped:
             return
         if not _IS_POSIX:
-            if self._job is not None and _winjob.terminate(self._job):
-                return
-            # TerminateJobObject failed or reap raced: taskkill fallback.
-            if not _taskkill_tree(self._pid):
-                try:
-                    self._proc.kill()
-                except OSError:
-                    pass
+            with self._kill_lock:
+                if self._reaped:  # re-check: _watch may have reaped while we waited
+                    return
+                if self._job is not None and _winjob.terminate(self._job):
+                    return
+                # TerminateJobObject failed or reap raced: taskkill fallback.
+                if not _taskkill_tree(self._pid):
+                    try:
+                        self._proc.kill()
+                    except OSError:
+                        pass
             return
         _signal_group(self._pid, sig)
         if sig == signal.SIGTERM:
@@ -344,8 +349,12 @@ class BashHandle:
         if delivered is None and not self._done.is_set():
             self._drain_grace()
             self._finalize(exit_code)
-        delivered = self._reap_group()
-        self._reaped = True
+        with self._kill_lock:
+            delivered = self._reap_group()
+            self._reaped = True
+            if not _IS_POSIX:
+                # Reaped: pid fallbacks are gone, so the handle may finally close.
+                cast("_winjob.JobProcess", self._proc).close()
         if delivered:
             _record_journal(self._pid, active=False)
         with _live_lock:
@@ -499,15 +508,17 @@ class BashHandle:
         if not await self._await_group_death(_CANCEL_TERM_GRACE):
             if _IS_POSIX:
                 _signal_group(self._pid, signal.SIGKILL)
-            elif self._job is None or not _winjob.terminate(self._job):
-                _taskkill_tree(self._pid)
+            else:
+                # kill() holds the escalation lock; to_thread keeps the loop free.
+                await asyncio.to_thread(self.kill)
             await self._await_group_death(_CANCEL_KILL_WAIT)
 
     def _group_alive(self) -> bool:
         if not _IS_POSIX:
-            if self._job is not None:
+            job = self._job  # snapshot: _watch may clear it concurrently
+            if job is not None:
                 # Job accounting sees detached descendants a dead leader hides.
-                empty = _winjob.is_empty(self._job)
+                empty = _winjob.is_empty(job)
                 if empty is not None:
                     return not empty
             return self._proc.poll() is None
@@ -561,6 +572,8 @@ class BashHandle:
         except (OSError, subprocess.SubprocessError):
             pass
         self._reaped = True
+        if not _IS_POSIX:
+            cast("_winjob.JobProcess", self._proc).close()
         with _live_lock:
             _live_handles.discard(self)
         if delivered:
@@ -783,16 +796,19 @@ def _kill_live_handles() -> None:
         if _IS_POSIX:
             delivered = _signal_group(handle._pid, signal.SIGKILL)
         else:
-            delivered = handle._job is not None and _winjob.terminate(handle._job)
-            if not delivered:
-                delivered = _taskkill_tree(handle._pid)
-            if not delivered:
-                # Leader-only fallback cannot prove the tree died: never
-                # justifies an inactive record.
-                try:
-                    handle._proc.kill()
-                except OSError:
-                    pass
+            with handle._kill_lock:
+                if handle._reaped:
+                    continue
+                delivered = handle._job is not None and _winjob.terminate(handle._job)
+                if not delivered:
+                    delivered = _taskkill_tree(handle._pid)
+                if not delivered:
+                    # Leader-only fallback cannot prove the tree died: never
+                    # justifies an inactive record.
+                    try:
+                        handle._proc.kill()
+                    except OSError:
+                        pass
         if delivered:
             _record_journal(handle._pid, active=False)
 
