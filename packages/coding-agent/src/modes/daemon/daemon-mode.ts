@@ -5328,6 +5328,8 @@ export class AgentDaemon {
 			if (!response.success) throw deserializeDaemonError(response);
 			// SAFETY: The authenticated supervisor constructs the peer response.
 			return (response.data as { peers: AgentSessionMessageAgentSummary[] }).peers;
+		} catch {
+			return [];
 		} finally {
 			client.close();
 		}
