@@ -117,7 +117,7 @@ class ReplTest(unittest.TestCase):
 
     def test_ready_handshake_and_startup_time(self):
         self.assertEqual(self.ready_event["event"], "ready")
-        self.assertEqual(self.ready_event["protocol"], 1)
+        self.assertEqual(self.ready_event["protocol"], 2)
         major, minor = sys.version_info[:2]
         self.assertTrue(self.ready_event["python"].startswith(f"{major}.{minor}."))
         # Loose bound for loaded CI machines; still catches an order-of-magnitude regression.
@@ -735,8 +735,121 @@ class ReplTest(unittest.TestCase):
         events = self.repl.execute("ok", "'alive'")
         self.assertEqual(one(events, "result")["text"], "'alive'")
 
+    def test_list_names(self):
+        self.repl.execute("ln1", "alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()")
+        self.repl.send({"type": "list_names", "id": "ln2"})
+        done = one(self.repl.until_done("ln2"), "done")
+        self.assertEqual(done["status"], "ok")
+        self.assertIn("alpha", done["names"])
+        self.assertIn("helper", done["names"])
+        self.assertNotIn("_hidden", done["names"])
+        self.assertNotIn("rlm", done["names"])
+        self.assertEqual(done["names"], sorted(done["names"]))
+
+    def test_list_names_skips_non_string_keys(self):
+        self.repl.execute("lnk1", "globals()[1] = 1\nbeta = 2")
+        self.repl.send({"type": "list_names", "id": "lnk2"})
+        done = one(self.repl.until_done("lnk2"), "done")
+        self.assertEqual(done["status"], "ok")
+        self.assertIn("beta", done["names"])
+        self.assertNotIn(1, done["names"])
+        events = self.repl.execute("lnk3", "'alive'")
+        self.assertEqual(one(events, "result")["text"], "'alive'")
+
+    def test_host_request_round_trip(self):
+        code = "\n".join(
+            [
+                "from rlm.repl import host_request",
+                "reply = await host_request({'type': 'demo', 'value': 7})",
+                "reply",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "hr", "code": code})
+        request = self.repl.read_event()
+        while request.get("event") != "host_request":
+            request = self.repl.read_event()
+        self.assertEqual(request["data"], {"type": "demo", "value": 7})
+        self.repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "answer": 42}})
+        events = self.repl.until_done("hr")
+        self.assertEqual(one(events, "result")["text"], "{'status': 'ok', 'answer': 42}")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_host_reply_for_unknown_id_dropped(self):
+        self.repl.send({"type": "host_reply", "id": "no-such-request", "data": {"status": "ok"}})
+        events = self.repl.execute("ok", "'alive'")
+        self.assertEqual(one(events, "result")["text"], "'alive'")
+
+    def test_host_request_cancelled_cell_drops_pending_future(self):
+        code = "\n".join(
+            [
+                "from rlm.repl import host_request",
+                "await host_request({'type': 'never-answered'})",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "hr-cancel", "code": code})
+        request = self.repl.read_event()
+        while request.get("event") != "host_request":
+            request = self.repl.read_event()
+        self.repl.send({"type": "interrupt"})
+        events = self.repl.until_done("hr-cancel")
+        self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+        # A reply arriving after the cancel must be dropped, not crash the runtime.
+        self.repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok"}})
+        follow = self.repl.execute("after-cancel", "8+8")
+        self.assertEqual(one(follow, "result")["text"], "16")
+
+    def test_display_from_detached_task_keeps_cell_id(self):
+        code = "\n".join(
+            [
+                "import asyncio",
+                "from rlm.repl import emit",
+                "async def later():",
+                "    await asyncio.sleep(0.2)",
+                "    emit({'text/plain': 'late'})",
+                "detached = asyncio.create_task(later())",
+            ]
+        )
+        self.assertEqual(one(self.repl.execute("det", code), "done")["status"], "ok")
+        self.assertEqual(one(self.repl.execute("idle", "1"), "done")["status"], "ok")
+        display = self.repl.read_event()
+        while display.get("event") != "display":
+            display = self.repl.read_event()
+        self.assertEqual(display["id"], "det")
+        self.assertEqual(display["data"], {"text/plain": "late"})
+
     def test_shutdown_clean_exit(self):
         self.assertEqual(self.repl.shutdown(), 0)
+
+    def test_shutdown_after_mcp_import_exits_cleanly(self):
+        events = self.repl.execute("mcp-import", "import rlm.mcp")
+        self.assertEqual(one(events, "done")["status"], "ok")
+        self.assertEqual(self.repl.shutdown(), 0)
+
+    def _start_pending_host_request(self) -> None:
+        code = "\n".join(
+            [
+                "from rlm.repl import host_request",
+                "await host_request({'type': 'never-answered'})",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "hr-pending", "code": code})
+        request = self.repl.read_event()
+        while request.get("event") != "host_request":
+            request = self.repl.read_event()
+
+    def test_stdin_eof_with_pending_host_request_exits(self):
+        self._start_pending_host_request()
+        assert self.repl.proc.stdin is not None
+        self.repl.proc.stdin.close()
+        self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
+    def test_shutdown_with_pending_host_request_exits(self):
+        self._start_pending_host_request()
+        self.repl.send({"type": "shutdown", "id": "__shutdown__"})
+        events = self.repl.until_done("hr-pending")
+        self.assertEqual(one(events, "error")["ename"], "RuntimeError")
+        self.repl.until_done("__shutdown__")
+        self.assertEqual(self.repl.proc.wait(timeout=10), 0)
 
 
     def test_interrupt_with_non_string_id_is_protocol_error(self):

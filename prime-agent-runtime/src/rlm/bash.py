@@ -617,7 +617,7 @@ def bash(command: str) -> BashHandle:
 
 
 def _shell() -> str:
-    # Read per call: the forkserver applies session env after the fork.
+    # Read per call so env changes made in the REPL apply to later commands.
     override = os.environ.get("PRIME_AGENT_BASH_SHELL")
     if override:
         if not os.path.isabs(override):
@@ -825,20 +825,3 @@ def _install_shutdown_hook() -> None:
             return
         _hook_installed = True
     atexit.register(_kill_live_handles)
-    try:
-        kernel = get_ipython().kernel  # type: ignore[name-defined]
-    except (AttributeError, NameError):
-        return
-    if getattr(kernel, "_prime_agent_bash_shutdown", False):
-        return
-    original = kernel.do_shutdown
-
-    async def do_shutdown(restart: bool):
-        _kill_live_handles()
-        result = original(restart)
-        if hasattr(result, "__await__"):
-            return await result
-        return result
-
-    kernel.do_shutdown = do_shutdown
-    kernel._prime_agent_bash_shutdown = True

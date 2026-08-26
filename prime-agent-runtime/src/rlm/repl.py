@@ -31,7 +31,7 @@ from typing import Any
 
 from .bash import _kill_live_handles
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
@@ -45,9 +45,16 @@ _protocol_fd: int = -1
 _write_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _serve_task: asyncio.Task[Any] | None = None
+# Attribution rides task context: asyncio tasks copy it at creation, so a
+# detached task spawned by a cell keeps writing under that cell's id after
+# the cell finishes. Threads start with a fresh context and emit id null.
 _current_cell: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_cell", default=None)
 _active: dict[str, Any] = {"task": None, "rid": None, "interrupted": False}
 _cell_counter = 0
+_pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
+# Set on the loop thread once stdin hits EOF or a shutdown request arrives; no
+# host reply can arrive after that, so waiting (and future) host_request calls fail.
+_host_closed = False
 
 # Interrupt bookkeeping shared between the reader thread and the loop thread.
 _interrupt_lock = threading.Lock()
@@ -84,6 +91,49 @@ def emit(data: dict[str, Any]) -> None:
     # the throwaway serialization here is cheap; _send re-serializes.
     json.dumps(data, allow_nan=False)
     _send({"event": "display", "id": _current_cell.get(), "data": data})
+
+
+def is_active() -> bool:
+    """True when this process serves the repl protocol (not merely imported)."""
+    return _protocol_fd >= 0
+
+
+async def host_request(data: dict[str, Any]) -> dict[str, Any]:
+    """Send one typed request to the host and await its raw reply dict."""
+    if _loop is None:
+        raise RuntimeError("repl runtime is not serving")
+    if _host_closed:
+        raise RuntimeError("host connection closed; host_request cannot be answered")
+    rid = uuid.uuid4().hex
+    future: asyncio.Future[dict[str, Any]] = _loop.create_future()
+    _pending_host[rid] = future
+    try:
+        _send({"event": "host_request", "id": rid, "data": data})
+        return await future
+    finally:
+        _pending_host.pop(rid, None)
+
+
+def _fail_pending_host_requests() -> None:
+    """Loop-thread half of teardown: no host reply can arrive anymore, so every
+    awaiting cell must unblock or the queued shutdown would never be served."""
+    global _host_closed
+    _host_closed = True
+    for future in _pending_host.values():
+        if not future.done():
+            future.set_exception(RuntimeError("host connection closed; host_request cannot be answered"))
+
+
+def _resolve_host_reply(rid: str, data: dict[str, Any]) -> None:
+    """Reader-thread half of the host bridge; late/unknown replies are dropped."""
+    assert _loop is not None
+
+    def deliver() -> None:
+        future = _pending_host.get(rid)
+        if future is not None and not future.done():
+            future.set_result(data)
+
+    _loop.call_soon_threadsafe(deliver)
 
 
 class _Pump:
@@ -808,6 +858,18 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     _send({"event": "done", "id": rid, "status": "ok", **result})
 
 
+def _list_names(ns: dict[str, Any]) -> list[str]:
+    """User-defined top-level names, filtered like the snapshot."""
+    # Non-string keys (globals()[1] = 1) are not user-listable names.
+    return sorted(
+        name for name in ns if isinstance(name, str) and not name.startswith("_") and name not in _ALWAYS_SKIP
+    )
+
+
+async def _handle_list_names(req: dict[str, Any], ns: dict[str, Any]) -> None:
+    _send({"event": "done", "id": req["id"], "status": "ok", "names": _list_names(ns)})
+
+
 async def _handle_request(
     handler: Callable[[dict[str, Any], dict[str, Any]], Awaitable[None]],
     req: dict[str, Any],
@@ -839,6 +901,13 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
         rtype = req.get("type")
         if rtype == "shutdown":
             rid = req.get("id")
+            # MCP children must close before the loop dies; close() is internally bounded under the host's 5s deadline.
+            mcp_mod = sys.modules.get("rlm.mcp")
+            if mcp_mod is not None:
+                try:
+                    await mcp_mod.close()
+                except BaseException as exc:
+                    print(f"MCP shutdown failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             # Kill live bash children now; atexit would wait on parked executor threads.
             _kill_live_handles()
             if isinstance(rid, str):
@@ -848,12 +917,15 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             await _handle_request(_handle_execute, req, ns)
         elif rtype in ("snapshot", "restore"):
             await _handle_request(_handle_state, req, ns)
+        elif rtype == "list_names":
+            await _handle_request(_handle_list_names, req, ns)
 
 
 _REQUIRED_FIELDS = {
     "execute": ("id", "code"),
     "snapshot": ("id", "path", "manifest_path"),
     "restore": ("id", "path"),
+    "list_names": ("id",),
     "shutdown": (),
 }
 
@@ -874,6 +946,16 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
             return
         _request_interrupt(req.get("id"))
         return
+    if rtype == "host_reply":
+        # Bypass the FIFO queue: the awaiting cell IS the in-flight
+        # execute, so a queued reply would deadlock behind it.
+        rid = req.get("id")
+        data = req.get("data")
+        if isinstance(rid, str) and isinstance(data, dict):
+            _resolve_host_reply(rid, data)
+        else:
+            _protocol_error("host_reply request needs string id and dict data")
+        return
     if not isinstance(rtype, str) or rtype not in _REQUIRED_FIELDS:
         _protocol_error(f"unknown request type: {rtype!r}")
         return
@@ -891,6 +973,10 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
         if duplicate:
             _protocol_error(f"duplicate in-flight request id: {req['id']!r}")
             return
+    if rtype == "shutdown":
+        # No host reply follows a shutdown; a cell awaiting host_request
+        # must fail now or it would block _serve from ever consuming this.
+        _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, req)
 
 
@@ -909,6 +995,7 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
             except BaseException as err:  # noqa: BLE001
                 _protocol_error(f"{type(err).__name__}: {_safe_str(err)}")
     # Host closed stdin: shut the runtime down.
+    _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, {"type": "shutdown"})
 
 

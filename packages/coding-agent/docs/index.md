@@ -1,6 +1,6 @@
 # Prime Agent Documentation
 
-Prime Agent is an RLM-native coding and research harness built around a persistent IPython kernel, recursive subagents, durable sessions, and a multi-process local runtime. It began as a hard fork of pi-mono, but Prime Agent is now the product, CLI, install source, and development repository.
+Prime Agent is an RLM-native coding and research harness built around a persistent Python REPL kernel, recursive subagents, durable sessions, and a multi-process local runtime. It began as a hard fork of pi-mono, but Prime Agent is now the product, CLI, install source, and development repository.
 
 ## Quick Start
 
@@ -72,4 +72,4 @@ Public releases are currently installed from versioned release artifacts. The in
 - [Architecture overview](architecture.md) - system topology and end-to-end prompt flow.
 - [Daemon Architecture](daemon.md) - supervisor, catalog, worker, lifecycle, and recovery details.
 - [Agent Connection Architecture](agent-connection.md) - client/runtime connection boundary.
-- [RLM Runtime Architecture](rlm-runtime.md) - ZeroMQ kernel transport and recursive subagent execution.
+- [RLM Runtime Architecture](rlm-runtime.md) - stdio kernel transport and recursive subagent execution.
