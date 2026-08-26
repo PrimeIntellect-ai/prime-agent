@@ -7079,27 +7079,30 @@ export class InteractiveMode {
 		return this.enqueueQueueMutation(async () => {
 			if (discardStaleSelection()) return true;
 			const selected = this.queueSelection.selected;
-			if (!selected) return true;
 			let status: AgentConnectionQueuedMessageMutationStatus;
-			try {
-				status = await this.agentConnection.mutateQueuedMessage(
-					selected.lane,
-					selected.index,
-					selected.text,
-					mutation,
-				);
-			} catch (error) {
-				if (discardStaleSelection()) return true;
-				// The editor was already cleared by Enter; restore the edit before surfacing the error.
-				const editorUntouched =
-					submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
-				if (editorUntouched) {
-					this.setEditorTextFromQueueSelection(text);
+			if (selected) {
+				try {
+					status = await this.agentConnection.mutateQueuedMessage(
+						selected.lane,
+						selected.index,
+						selected.text,
+						mutation,
+					);
+				} catch (error) {
+					if (discardStaleSelection()) return true;
+					// The editor was already cleared by Enter; restore the edit before surfacing the error.
+					const editorUntouched =
+						submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
+					if (editorUntouched) {
+						this.setEditorTextFromQueueSelection(text);
+					}
+					if (!this.queueSelection.isBrowsing) {
+						this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
+					}
+					throw error;
 				}
-				if (!this.queueSelection.isBrowsing) {
-					this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
-				}
-				throw error;
+			} else {
+				status = "rejected";
 			}
 			if (discardStaleSelection()) return true;
 			const editorUntouched =
