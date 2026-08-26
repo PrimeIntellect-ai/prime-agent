@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1] - 2026-08-26
+
+- Fixed syntax highlighting in the expanded python tool-call view: triple-quoted strings spanning multiple lines now keep their string color instead of only the first line.
+- Changed the default RLM maximum recursion depth for new sessions from 1 to 2.
+- Changed ACP prompt requests to resolve only after all causally admitted subagent and parent work has settled.
+- Changed the Cloudflare AI Gateway default model to claude-sonnet-4.5 after the catalog dropped the gateway's workers-ai mirror ids.
+- Fixed ACP assistant chunks to identify message boundaries across autonomous turns.
+
 ## [0.8.0] - 2026-08-21
 
 - Fixed an OAuth login that finishes after its server was retargeted arming the old-endpoint token against the new URL: credentials are endpoint-bound at issuance, and the host and kernel only use a token bound to the configured endpoint. **Breaking**: generic MCP OAuth credentials stored before this release lack the binding and require one `/mcp login <server>`.
