@@ -2427,7 +2427,12 @@ describe("AgentSession rlm recursion", () => {
 		expect(attribution.aggregateUsage.cost.total).toBe(10);
 	});
 
-	it("attributes every tool-loop turn in the admitted task to spawn usage", async () => {
+	it("coalesces every tool-loop turn in the admitted task into one spawn usage attribution", async () => {
+		// Regression guard for #1054: a chatty child (or, here, a multi-turn tool
+		// loop) must not persist one child_usage_attributed JSONL entry per
+		// assistant message -- they are coalesced into at most one entry per
+		// RLM_CHILD_USAGE_ATTRIBUTION_COALESCE_MS window, with a forced final
+		// flush once the child settles so no usage from either turn is lost.
 		const tool = {
 			name: "echo",
 			description: "Echo a value",
@@ -2472,8 +2477,77 @@ describe("AgentSession rlm recursion", () => {
 			const attributions = root.sessionManager
 				.getEntries()
 				.filter((entry) => entry.type === "child_usage_attributed");
-			expect(attributions).toHaveLength(2);
-			expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
+			expect(attributions).toHaveLength(1);
+			expect(attributions[0]).toMatchObject({
+				origin: "spawn_task",
+				childUsage: { input: 3, output: 3 },
+				aggregateUsage: { input: 3, output: 3 },
+			});
+		});
+	});
+
+	it("persists far fewer entries than turns for a chatty child, with the correct combined total (#1054)", async () => {
+		const TURN_COUNT = 20;
+		const tool = {
+			name: "echo",
+			description: "Echo a value",
+			label: "echo",
+			parameters: Type.Object({ value: Type.String() }),
+			execute: async (_toolCallId: string, params: { value: string }) => ({
+				content: [{ type: "text" as const, text: params.value }],
+				details: {},
+			}),
+		};
+		const root = createSession({
+			customTools: [tool],
+			streamFn: (_model, context) => {
+				const toolResultCount = context.messages.filter((message) => message.role === "toolResult").length;
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message =
+						toolResultCount < TURN_COUNT
+							? {
+									...assistantMessage("", usage(1, 1)),
+									content: [
+										{
+											type: "toolCall" as const,
+											id: `echo-${toolResultCount}`,
+											name: "echo",
+											arguments: { value: "ok" },
+										},
+									],
+									stopReason: "toolUse" as const,
+								}
+							: assistantMessage("done", usage(0, 0));
+					stream.push({
+						type: "done",
+						reason: toolResultCount < TURN_COUNT ? "toolUse" : "stop",
+						message,
+					});
+				});
+				return stream;
+			},
+		});
+		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+		root.agent.state.messages.push(parentAssistant);
+		root.sessionManager.appendMessage(parentAssistant);
+
+		await root.runRlmChild("use a tool repeatedly");
+		await vi.waitFor(() => {
+			const attributions = root.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "child_usage_attributed");
+			// A per-message write policy would persist one entry per turn (20 here,
+			// matching the reported #1054 shape of ~550 entries for ~550 messages).
+			// Coalescing must cut this down to a small, bounded number of writes
+			// regardless of how many turns land inside the debounce window.
+			expect(attributions.length).toBeLessThan(TURN_COUNT / 2);
+			expect(attributions.length).toBeGreaterThan(0);
+			const totalInput = attributions.reduce((sum, entry) => sum + entry.childUsage.input, 0);
+			const totalOutput = attributions.reduce((sum, entry) => sum + entry.childUsage.output, 0);
+			expect(totalInput).toBe(TURN_COUNT);
+			expect(totalOutput).toBe(TURN_COUNT);
+			expect(attributions.at(-1)?.aggregateUsage).toMatchObject({ input: TURN_COUNT, output: TURN_COUNT });
 		});
 	});
 

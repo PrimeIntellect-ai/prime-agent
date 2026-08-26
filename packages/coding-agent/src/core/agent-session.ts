@@ -247,7 +247,13 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
-import type { BranchSummaryEntry, CompactionEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
+import type {
+	BranchSummaryEntry,
+	ChildUsageAttributionEntry,
+	CompactionEntry,
+	SessionContext,
+	SessionMessageEntry,
+} from "./session-manager.js";
 import {
 	CURRENT_SESSION_VERSION,
 	getLatestCompactionEntry,
@@ -917,6 +923,10 @@ interface RlmSubagentModelSelection {
 
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
+// A chatty child can emit tens of assistant messages per minute; persisting a full
+// child_usage_attributed JSONL entry per message saturates the worker (#1054).
+// Coalesce rapid-fire attributions to the same parent entry into one flush per window.
+const RLM_CHILD_USAGE_ATTRIBUTION_COALESCE_MS = 1000;
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -10246,6 +10256,39 @@ export class AgentSession {
 		const label = rlmChildLabel(prompt);
 		let answerPreview: string | undefined;
 		let durationMs: number | undefined;
+		// Coalesce this child's rapid-fire usage attributions into at most one
+		// persisted child_usage_attributed entry per RLM_CHILD_USAGE_ATTRIBUTION_COALESCE_MS
+		// window instead of one JSONL append per assistant message (#1054).
+		let pendingChildUsageDelta: Usage | undefined;
+		let pendingChildUsageOrigin: ChildUsageAttributionEntry["origin"] | undefined;
+		let childUsageAttributionFlushTimer: ReturnType<typeof setTimeout> | undefined;
+		const flushChildUsageAttribution = () => {
+			if (childUsageAttributionFlushTimer) {
+				clearTimeout(childUsageAttributionFlushTimer);
+				childUsageAttributionFlushTimer = undefined;
+			}
+			const delta = pendingChildUsageDelta;
+			const origin = pendingChildUsageOrigin;
+			pendingChildUsageDelta = undefined;
+			pendingChildUsageOrigin = undefined;
+			if (!delta || !parentAssistantForUsage) return;
+			const parentEntry = this._findAssistantEntryForMessage(parentAssistantForUsage);
+			if (!parentEntry) return;
+			attributeChildUsage(parentAssistantForUsage.usage, delta);
+			this.sessionManager.appendChildUsageAttribution(parentEntry.id, delta, parentAssistantForUsage.usage, origin);
+		};
+		const scheduleChildUsageAttribution = (usage: Usage, origin: ChildUsageAttributionEntry["origin"]) => {
+			if (!pendingChildUsageDelta) pendingChildUsageDelta = emptyUsage();
+			addAssistantUsage(pendingChildUsageDelta, usage);
+			pendingChildUsageOrigin = origin;
+			if (!childUsageAttributionFlushTimer) {
+				childUsageAttributionFlushTimer = setTimeout(
+					flushChildUsageAttribution,
+					RLM_CHILD_USAGE_ATTRIBUTION_COALESCE_MS,
+				);
+				childUsageAttributionFlushTimer.unref?.();
+			}
+		};
 		let toolUseCount = 0;
 		let runningToolCount = 0;
 		let activity: RlmChildAgentActivity | undefined;
@@ -10380,30 +10423,19 @@ export class AgentSession {
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
-							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
-							if (parentAssistantForUsage) {
-								const parentEntry = this._findAssistantEntryForMessage(parentAssistantForUsage);
-								if (parentEntry) {
-									const messages = child.messages;
-									const assistantIndex = messages.lastIndexOf(assistant);
-									const precedingPrompt = messages
-										.slice(0, assistantIndex)
-										.reverse()
-										.find((message) => message.role === "user" || message.role === "custom");
-									const origin =
-										precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
-											? precedingPrompt.details.id.startsWith("spawn:")
-												? "spawn_task"
-												: "agent_message"
-											: "direct_user";
-									this.sessionManager.appendChildUsageAttribution(
-										parentEntry.id,
-										assistant.usage,
-										parentAssistantForUsage.usage,
-										origin,
-									);
-								}
-							}
+							const messages = child.messages;
+							const assistantIndex = messages.lastIndexOf(assistant);
+							const precedingPrompt = messages
+								.slice(0, assistantIndex)
+								.reverse()
+								.find((message) => message.role === "user" || message.role === "custom");
+							const origin =
+								precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
+									? precedingPrompt.details.id.startsWith("spawn:")
+										? "spawn_task"
+										: "agent_message"
+									: "direct_user";
+							scheduleChildUsageAttribution(assistant.usage, origin);
 						}
 						const text = compactRlmText(readAssistantText(assistant));
 						if (text) answerPreview = text;
@@ -10545,6 +10577,10 @@ export class AgentSession {
 					}
 				}
 			} finally {
+				// Force the final coalesced usage attribution through now: without this, a
+				// child that settles inside the coalescing window would silently drop its
+				// last batch of usage instead of ever persisting it.
+				flushChildUsageAttribution();
 				if (run.detachedDeletion) {
 					run.deletionRunFinished = true;
 					if (!run.settled) {

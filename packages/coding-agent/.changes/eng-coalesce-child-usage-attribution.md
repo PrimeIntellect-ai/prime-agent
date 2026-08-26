@@ -1,0 +1,1 @@
+- Fixed chatty RLM subagents saturating the worker (high CPU, stuck attach/heartbeats) by coalescing rapid-fire child usage attribution writes into a bounded number of persisted entries instead of one per child message.
