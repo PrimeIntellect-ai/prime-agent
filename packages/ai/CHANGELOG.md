@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.8.1] - 2026-08-26
+
+- Refreshed the generated model catalog from live provider catalogs: added GLM 5.3 (OpenRouter, Prime Inference), DeepSeek V4 Flash Vision Exp, and Inkling free routes; followed the Vercel AI Gateway `xai/` to `spacexai/` grok rename; picked up repricing for gpt-5.6-sol, Gemini 3.6 Flash, and others.
+- Fixed OpenAI-compatible Chat Completions replay dropping opaque `reasoning_details` between turns.
+- Refreshed the generated model catalog from live provider catalogs: models.dev rescoped `cloudflare-ai-gateway` to proxied third-party models (the `workers-ai/@cf/...` mirrors and legacy OpenAI ids are gone; Cloudflare-hosted models remain under `cloudflare-workers-ai`); added devstral-2512 and MiniMax M2.7/M3 free routes; picked up repricing for gpt-5.6/gpt-5.6-sol (5/30 -> 4/20), kimi-k2.6, glm-5.1/5.2, and deepseek-v4-pro.
+
 ## [0.8.0] - 2026-08-21
 
 - Added endpoint binding to MCP OAuth credentials: tokens record the URL they were issued for, and refreshes carry the original binding forward without ever inferring one for unbound legacy credentials.
