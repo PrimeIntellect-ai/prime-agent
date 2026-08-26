@@ -87,6 +87,14 @@ export {
 } from "./kernel/index.js";
 export type { RefinementResult } from "./refinement/index.js";
 export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
+export {
+	AGENT_RUN_MODEL_SCOPE_VERSION,
+	type AgentRunModelScope,
+	type AgentRunRequestAuth,
+	type AgentRunRequestAuthContext,
+	type AgentRunRequestAuthResolver,
+	createAgentRunModelScope,
+} from "./run-model-scope.js";
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";
 export type { SessionStats } from "./session-stats.js";
 export { createSyntheticSourceInfo } from "./source-info.js";

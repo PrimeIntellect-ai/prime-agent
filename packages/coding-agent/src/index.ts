@@ -167,6 +167,14 @@ export type {
 } from "./core/refinement/index.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
+export {
+	AGENT_RUN_MODEL_SCOPE_VERSION,
+	type AgentRunModelScope,
+	type AgentRunRequestAuth,
+	type AgentRunRequestAuthContext,
+	type AgentRunRequestAuthResolver,
+	createAgentRunModelScope,
+} from "./core/run-model-scope.js";
 // SDK for programmatic usage
 export {
 	type AgentSessionCreationOptions,

@@ -3,6 +3,7 @@ import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestContext, HostRequestHandler, RegisteredHostRequestHandlers } from "./kernel/index.js";
+import type { AgentRunModelScope } from "./run-model-scope.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 
 /** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
@@ -132,10 +133,15 @@ function normalizeModelSearchText(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-export function findRlmModelMatches(query: string, models: Model<Api>[], limit: number): RlmModelMatch[] {
+export function findRlmModelMatches(
+	query: string,
+	models: Model<Api>[],
+	limit: number,
+	preserveInputOrder = false,
+): RlmModelMatch[] {
 	const normalizedQuery = normalizeModelSearchText(query.trim());
 	return models
-		.map((model) => {
+		.map((model, index) => {
 			const selector = `${model.provider}/${model.id}`;
 			const fields = [selector, model.id, model.name || model.id];
 			const normalizedFields = fields.map(normalizeModelSearchText);
@@ -148,10 +154,12 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 				else if (prefixIndex >= 0) score = 3 + prefixIndex;
 				else if (partialIndex >= 0) score = 6 + partialIndex;
 			}
-			return { model, selector, score };
+			return { model, selector, score, index };
 		})
 		.filter((candidate) => Number.isFinite(candidate.score))
-		.sort((a, b) => a.score - b.score || a.selector.localeCompare(b.selector))
+		.sort(
+			(a, b) => a.score - b.score || (preserveInputOrder ? a.index - b.index : a.selector.localeCompare(b.selector)),
+		)
 		.slice(0, limit)
 		.map(({ model, selector }) => ({
 			provider: model.provider,
@@ -239,6 +247,8 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmParentNodeId: string;
 	/** Host-only context inherited from the spawning execution. */
 	runContext?: unknown;
+	/** Host-only model authority inherited from the spawning execution. */
+	modelScope?: AgentRunModelScope;
 	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */

@@ -15,6 +15,7 @@ import { ModelRegistry } from "./model-registry.js";
 import { findInitialModel } from "./model-resolver.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
+import { hasAgentRunModelAuth } from "./run-model-scope.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { time } from "./timings.js";
@@ -98,6 +99,14 @@ export type {
 } from "./extensions/index.js";
 export type { PromptTemplate } from "./prompt-templates.js";
 export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
+export {
+	AGENT_RUN_MODEL_SCOPE_VERSION,
+	type AgentRunModelScope,
+	type AgentRunRequestAuth,
+	type AgentRunRequestAuthContext,
+	type AgentRunRequestAuthResolver,
+	createAgentRunModelScope,
+} from "./run-model-scope.js";
 export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 
@@ -284,10 +293,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				throw new Error(auth.error);
-			}
+			const runScopedAuth = hasAgentRunModelAuth(options);
+			const auth = runScopedAuth
+				? { ok: true as const, apiKey: options?.apiKey, headers: options?.headers }
+				: await modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok) throw new Error(auth.error);
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			return streamSimple(model, context, {
 				...options,

@@ -162,6 +162,32 @@ Handler definitions are copied when `AgentSession` is constructed and remain sta
 
 Run contexts are memory-only. They are removed and their handler signals are aborted when a run completes, fails, or is cancelled. They are not written to transcripts, queued-action recovery state, session files, or IPython namespace snapshots. Because arbitrary objects are intentionally not serialized, the remote daemon/RPC prompt protocol does not accept `runContext`; use the in-process `AgentSession` API at the host boundary.
 
+### Run-scoped model authority (v1)
+
+An in-process host can admit an exact root model, an ordered model roster for recursive agents, and request credentials for one prompt without changing the durable session model:
+
+```typescript
+import {
+  AGENT_RUN_MODEL_SCOPE_VERSION,
+  createAgentRunModelScope,
+} from "@earendil-works/pi-coding-agent";
+
+const modelScope = createAgentRunModelScope({
+  version: AGENT_RUN_MODEL_SCOPE_VERSION,
+  root: admittedModels[0],
+  models: admittedModels,
+  resolveRequestAuth(model, { executionId, signal }) {
+    return accessBroker.resolve({ model, executionId, signal });
+  },
+});
+
+await session.promptAndWait("Run the admitted task", { modelScope });
+```
+
+The root turn uses `root` exactly. Recursive children can select only entries in `models`, in the supplied order, and resolve credentials just before each provider request. Ambient registry models cannot expand this roster. The scope and resolver are memory-only, are inherited only by children of that execution, and are revoked when the root prompt succeeds, fails, or is cancelled. A scope is single-use; create a new scope for every prompt. The session's durable model and model-change history are not modified, so a later prompt may admit a different root on the same session.
+
+`AgentRunModelScope` is intentionally available only through the in-process API. Do not persist it or its resolver, put credentials in model objects, or pass it through the daemon/RPC protocol.
+
 ### createAgentSessionRuntime() and AgentSessionRuntime
 
 Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.
@@ -237,6 +263,8 @@ interface PromptOptions {
   streamingBehavior?: "steer" | "followUp";
   source?: InputSource;
   preflightResult?: (success: boolean) => void;
+  runContext?: unknown;
+  modelScope?: AgentRunModelScope;
 }
 ```
 

@@ -21,6 +21,7 @@ import type {
 	ImageContent,
 	Model,
 	ServiceTier,
+	SimpleStreamOptions,
 	TextContent,
 	Usage,
 	UserMessage,
@@ -235,6 +236,14 @@ import {
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
+import {
+	type AgentRunModelScope,
+	assertAgentRunModelScope,
+	findAgentRunScopedModel,
+	markAgentRunModelAuth,
+	resolveAgentRunRequestAuth,
+	revokeAgentRunModelScope,
+} from "./run-model-scope.js";
 import {
 	ActionStore,
 	type ActionTicket,
@@ -523,12 +532,16 @@ export interface PromptOptions {
 	customMessage?: CustomMessage;
 	/** Host-only value available to kernel host handlers for this admitted execution. */
 	runContext?: unknown;
+	/** Single-run model roster and request-auth capability. */
+	modelScope?: AgentRunModelScope;
 }
 
 interface InternalPromptOptions extends PromptOptions {
 	skipPrePromptWork?: boolean;
 	returnAfterAccepted?: boolean;
 	agentMessageId?: string;
+	modelScopeOwner?: boolean;
+	selectedModel?: Model<Api>;
 }
 
 type SubmissionExtensionCommandPolicy = "execute" | "reject" | "ignore";
@@ -925,7 +938,14 @@ interface AgentRunScope {
 	readonly executionId: string;
 	readonly runContext: unknown;
 	readonly controller: AbortController;
+	readonly modelScope?: AgentRunModelScope;
+	readonly modelScopeOwner: boolean;
+	readonly selectedModel?: Model<Api>;
 }
+
+type RunScopedStreamOptions = SimpleStreamOptions & {
+	readonly executionId?: string;
+};
 
 interface RlmSubagentModelSelection {
 	model: Model<Api>;
@@ -1281,6 +1301,7 @@ export class AgentSession {
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
+		this._installAgentRunModelStreamOverlay();
 		// A resumed child may have replied before this process started; false would
 		// claim knowledge that is not present in the session transcript.
 		this._repliedToParentSinceTask =
@@ -1405,6 +1426,33 @@ export class AgentSession {
 
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
+	}
+
+	private _installAgentRunModelStreamOverlay(): void {
+		const baseStream = this.agent.streamFn;
+		this.agent.streamFn = async (model, context, options) => {
+			const scopedOptions = options as RunScopedStreamOptions | undefined;
+			const executionId = scopedOptions?.executionId;
+			const runScope = executionId ? this._executionRunScopes.get(executionId) : undefined;
+			if (!runScope?.modelScope) return baseStream(model, context, options);
+			const selected = runScope.selectedModel;
+			if (!selected || selected.provider !== model.provider || selected.id !== model.id) {
+				throw new Error(`Model ${model.provider}/${model.id} is outside the admitted run scope`);
+			}
+			const auth = await resolveAgentRunRequestAuth(runScope.modelScope, model, {
+				executionId: runScope.executionId,
+				signal: options?.signal ?? runScope.controller.signal,
+			});
+			return baseStream(
+				model,
+				context,
+				markAgentRunModelAuth({
+					...options,
+					apiKey: auth.apiKey,
+					headers: auth.headers === undefined ? undefined : { ...auth.headers },
+				} as RunScopedStreamOptions),
+			);
+		};
 	}
 
 	setSubagentRuntimeHost(host?: SubagentRuntimeHost): void {
@@ -2036,7 +2084,14 @@ export class AgentSession {
 		}
 	}
 
-	private async _validateCanStartAgentRun(): Promise<void> {
+	private async _validateCanStartAgentRun(runScope?: AgentRunScope): Promise<void> {
+		if (runScope?.modelScope !== undefined && runScope.selectedModel !== undefined) {
+			await resolveAgentRunRequestAuth(runScope.modelScope, runScope.selectedModel, {
+				executionId: runScope.executionId,
+				signal: runScope.controller.signal,
+			});
+			return;
+		}
 		if (!this.model) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -4456,14 +4511,15 @@ export class AgentSession {
 		return this._finishSubmissionNormalization(text, images, policy);
 	}
 
-	private async _runPreTurnCompaction(): Promise<void> {
+	private async _runPreTurnCompaction(runScope?: AgentRunScope): Promise<void> {
 		const lastAssistant = this._findLastAssistantMessage();
-		if (lastAssistant) await this._checkCompaction(lastAssistant, false, false);
+		if (lastAssistant) await this._checkCompaction(lastAssistant, false, false, runScope);
 	}
 
 	private async _prepareForCommit<TPrepared, TCommitted>(
 		policy: CommitPreparationPolicy,
 		steps: CommitPreparationSteps<TPrepared, TCommitted>,
+		runScope?: AgentRunScope,
 	): Promise<TCommitted | undefined> {
 		if (
 			policy.initialRefineBarrier === "always" ||
@@ -4472,16 +4528,16 @@ export class AgentSession {
 			await this._waitForRefineIdle();
 		}
 		if (policy.flushPendingBashBeforeValidation) this._flushPendingBashMessages();
-		if (policy.validateModelAndAuth) await this._validateCanStartAgentRun();
+		if (policy.validateModelAndAuth) await this._validateCanStartAgentRun(runScope);
 		steps.afterValidation?.();
 		if (!policy.flushPendingBashBeforeValidation) this._flushPendingBashMessages();
 
-		if (policy.preTurnCompaction === "beforeModelSelection") await this._runPreTurnCompaction();
+		if (policy.preTurnCompaction === "beforeModelSelection") await this._runPreTurnCompaction(runScope);
 		if (policy.awaitPendingModelSelection) {
 			const pendingModelSelectEmit = this._pendingModelSelectEmit();
 			if (pendingModelSelectEmit) await pendingModelSelectEmit;
 		}
-		if (policy.preTurnCompaction === "afterModelSelection") await this._runPreTurnCompaction();
+		if (policy.preTurnCompaction === "afterModelSelection") await this._runPreTurnCompaction(runScope);
 
 		const prepared = await steps.prepare();
 		if (steps.shouldCommit && !steps.shouldCommit(prepared)) return undefined;
@@ -4542,6 +4598,10 @@ export class AgentSession {
 	}
 
 	async promptAndWait(text: string, options?: PromptOptions): Promise<void> {
+		return this._promptAndWait(text, options);
+	}
+
+	private async _promptAndWait(text: string, options?: InternalPromptOptions): Promise<void> {
 		const agentMessageId = options?.agentMessageId ?? `prompt-wait:${randomUUID()}`;
 		if (this._agentMessageOutcomes.get(agentMessageId)?.completion) {
 			throw new Error(`Prompt completion id is already in use: ${agentMessageId}`);
@@ -4799,6 +4859,9 @@ export class AgentSession {
 					(visibleQueued ? this._turnExecutionPolicy("queued") : this._turnExecutionPolicy("injected")),
 				queueVisible: visibleQueued,
 				runContext: options?.runContext,
+				modelScope: options?.modelScope,
+				modelScopeOwner: options?.modelScopeOwner,
+				selectedModel: options?.selectedModel,
 			});
 			const result = this._admitSessionInput(action, {
 				immediatelyEligible: !visibleQueued,
@@ -4958,6 +5021,9 @@ export class AgentSession {
 					acceptedAgentMessage,
 					acceptedBeforeCompletion: options?.returnAfterAccepted === true,
 					runContext: options?.runContext,
+					modelScope: options?.modelScope,
+					modelScopeOwner: options?.modelScopeOwner,
+					selectedModel: options?.selectedModel,
 				});
 				if (action.suppressAutonomousContinuation) {
 					this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
@@ -5452,8 +5518,18 @@ export class AgentSession {
 			acceptedAgentMessage?: boolean;
 			acceptedBeforeCompletion?: boolean;
 			runContext?: unknown;
+			modelScope?: AgentRunModelScope;
+			modelScopeOwner?: boolean;
+			selectedModel?: Model<Api>;
 		},
 	): QueuedSessionAction {
+		if (options.modelScope !== undefined) {
+			assertAgentRunModelScope(options.modelScope);
+			const selected = options.selectedModel ?? options.modelScope.root;
+			if (!findAgentRunScopedModel(options.modelScope, selected.provider, selected.id)) {
+				throw new Error(`Model ${selected.provider}/${selected.id} is outside the admitted run scope`);
+			}
+		}
 		const id = randomUUID();
 		const content = options.content ?? this._buildPromptContent(text, images);
 		const message =
@@ -5501,6 +5577,9 @@ export class AgentSession {
 			executionId: id,
 			runContext: options.runContext,
 			controller: new AbortController(),
+			modelScope: options.modelScope,
+			modelScopeOwner: options.modelScopeOwner ?? options.modelScope !== undefined,
+			selectedModel: options.selectedModel ?? options.modelScope?.root,
 		});
 		return action;
 	}
@@ -5511,6 +5590,7 @@ export class AgentSession {
 		this._actionRunScopes.delete(action);
 		this._executionRunScopes.delete(scope.executionId);
 		scope.controller.abort(reason);
+		if (scope.modelScope !== undefined && scope.modelScopeOwner) revokeAgentRunModelScope(scope.modelScope);
 	}
 
 	private _hostRequestContextForExecution(executionId?: string): HostRequestExecutionContext | undefined {
@@ -5524,6 +5604,11 @@ export class AgentSession {
 			if (scope) return scope.executionId;
 		}
 		return undefined;
+	}
+
+	private _activeAgentRunScope(): AgentRunScope | undefined {
+		const executionId = this._activeRunExecutionId();
+		return executionId ? this._executionRunScopes.get(executionId) : undefined;
 	}
 
 	private _createSessionCommandAction(
@@ -5649,6 +5734,9 @@ export class AgentSession {
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
 			runContext?: unknown;
+			modelScope?: AgentRunModelScope;
+			modelScopeOwner?: boolean;
+			selectedModel?: Model<Api>;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
@@ -5976,55 +6064,61 @@ export class AgentSession {
 			);
 		const firstTurn = activeTurns()[0];
 		if (!firstTurn) return;
+		const firstRunScope = this._actionRunScopes.get(firstTurn);
+		if (!firstRunScope) throw new Error("Prepared turn is missing its execution scope");
 		const executionPolicy = firstTurn.payload.executionPolicy;
 		const restoreNextTurnContext = () => {
 			this._pendingNextTurnMessages.unshift(...nextTurnMessages);
 			nextTurnMessages = [];
 		};
 		try {
-			const preparedTurn = await this._prepareForCommit(executionPolicy.preparation, {
-				afterValidation: () => {
-					if (this._isSessionInputHandoffDeferred(epoch)) {
-						throw new DeferredSessionInputError("Session input paused before preflight");
-					}
-				},
-				prepare: async () => {
-					if (executionPolicy.nextTurnContextTiming === "preparation") {
-						nextTurnMessages = this._takePendingNextTurnMessages();
-					}
-					if (!executionPolicy.runBeforeAgentStart) return undefined;
-					while (activeTurns().some((action) => action.payload.prepared === undefined)) {
+			const preparedTurn = await this._prepareForCommit(
+				executionPolicy.preparation,
+				{
+					afterValidation: () => {
 						if (this._isSessionInputHandoffDeferred(epoch)) {
-							throw new DeferredSessionInputError("Session input paused before preparation");
+							throw new DeferredSessionInputError("Session input paused before preflight");
 						}
-						const preparationAction = activeTurns().at(-1);
-						if (!preparationAction) return undefined;
-						const basePromptSnapshot = this._baseSystemPrompt;
-						const result = await this._extensionRunner.emitBeforeAgentStart(
-							preparationAction.payload.text,
-							preparationAction.payload.images,
-							basePromptSnapshot,
-							this._baseSystemPromptOptions,
-						);
-						if (activeTurns().at(-1) !== preparationAction) continue;
-						const prepared = { result, basePromptSnapshot };
-						for (const action of activeTurns()) action.payload.prepared = prepared;
-					}
-					if (this._isSessionInputHandoffDeferred(epoch)) {
-						throw new DeferredSessionInputError("Session input paused before handoff");
-					}
-					return activeTurns()[0]?.payload.prepared;
+					},
+					prepare: async () => {
+						if (executionPolicy.nextTurnContextTiming === "preparation") {
+							nextTurnMessages = this._takePendingNextTurnMessages();
+						}
+						if (!executionPolicy.runBeforeAgentStart) return undefined;
+						while (activeTurns().some((action) => action.payload.prepared === undefined)) {
+							if (this._isSessionInputHandoffDeferred(epoch)) {
+								throw new DeferredSessionInputError("Session input paused before preparation");
+							}
+							const preparationAction = activeTurns().at(-1);
+							if (!preparationAction) return undefined;
+							const basePromptSnapshot = this._baseSystemPrompt;
+							const result = await this._extensionRunner.emitBeforeAgentStart(
+								preparationAction.payload.text,
+								preparationAction.payload.images,
+								basePromptSnapshot,
+								this._baseSystemPromptOptions,
+							);
+							if (activeTurns().at(-1) !== preparationAction) continue;
+							const prepared = { result, basePromptSnapshot };
+							for (const action of activeTurns()) action.payload.prepared = prepared;
+						}
+						if (this._isSessionInputHandoffDeferred(epoch)) {
+							throw new DeferredSessionInputError("Session input paused before handoff");
+						}
+						return activeTurns()[0]?.payload.prepared;
+					},
+					shouldCommit: () => activeTurns().length > 0,
+					commit: (prepared) => {
+						if (this._isSessionInputHandoffDeferred(epoch)) {
+							throw new DeferredSessionInputError("Session input paused before handoff");
+						}
+						const turns = activeTurns();
+						if (turns.length === 0) return undefined;
+						return { prepared, turns };
+					},
 				},
-				shouldCommit: () => activeTurns().length > 0,
-				commit: (prepared) => {
-					if (this._isSessionInputHandoffDeferred(epoch)) {
-						throw new DeferredSessionInputError("Session input paused before handoff");
-					}
-					const turns = activeTurns();
-					if (turns.length === 0) return undefined;
-					return { prepared, turns };
-				},
-			});
+				firstRunScope,
+			);
 			if (!preparedTurn) {
 				restoreNextTurnContext();
 				return;
@@ -6066,16 +6160,16 @@ export class AgentSession {
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
-					const prompt = (executionId: string) =>
+					const prompt = (executionId: string, selectedModel?: Model<Api>) =>
 						turns.some((action) => action.suppressAutonomousContinuation)
 							? this._runWithAutonomousContinuationSuppressed(() =>
-									this.agent.prompt(preparedMessages, { executionId }),
+									this.agent.prompt(preparedMessages, { executionId, model: selectedModel }),
 								)
-							: this.agent.prompt(preparedMessages, { executionId });
+							: this.agent.prompt(preparedMessages, { executionId, model: selectedModel });
 					const runScope = this._actionRunScopes.get(turns[0]);
 					if (!runScope) throw new Error("Prepared turn is missing its execution scope");
 					this._executionRunScopes.set(runScope.executionId, runScope);
-					return prompt(runScope.executionId);
+					return prompt(runScope.executionId, runScope.selectedModel);
 				});
 			} finally {
 				commitFence.release();
@@ -8372,6 +8466,7 @@ export class AgentSession {
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
 		queueAutonomousContinuation = true,
+		runScope?: AgentRunScope,
 	): Promise<boolean> {
 		// An abort drops any compaction the model requested this turn, even on the
 		// pre-prompt path (skipAbortedCheck=false) which continues to threshold checks.
@@ -8397,14 +8492,17 @@ export class AgentSession {
 		}
 
 		const settings = this.settingsManager.getCompactionSettings();
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const selectedModel = runScope?.selectedModel ?? this.model;
+		const contextWindow = selectedModel?.contextWindow ?? 0;
 
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
 		// shouldn't trigger compaction for the new model.
 		const sameModel =
-			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
+			selectedModel &&
+			assistantMessage.provider === selectedModel.provider &&
+			assistantMessage.model === selectedModel.id;
 
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
@@ -8441,11 +8539,11 @@ export class AgentSession {
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 				this.agent.state.messages = messages.slice(0, -1);
 			}
-			return await this._runAutoCompaction("overflow", true);
+			return await this._runAutoCompaction("overflow", true, runScope);
 		}
 
 		if (this._pendingRequestedCompaction !== undefined) {
-			return await this._runAutoCompaction("requested", false);
+			return await this._runAutoCompaction("requested", false, runScope);
 		}
 
 		if (!settings.enabled || assistantIsFromBeforeCompaction) return false;
@@ -8464,7 +8562,7 @@ export class AgentSession {
 			) {
 				this._continueAfterThresholdCompaction = true;
 			}
-			return await this._runAutoCompaction("threshold", false);
+			return await this._runAutoCompaction("threshold", false, runScope);
 		}
 		return false;
 	}
@@ -8530,6 +8628,7 @@ export class AgentSession {
 	private async _runAutoCompaction(
 		reason: "overflow" | "threshold" | "requested",
 		willRetry: boolean,
+		runScope?: AgentRunScope,
 	): Promise<boolean> {
 		// Any compaction consumes a pending model request and honors its instructions
 		// (overflow recovery can fire first and take the request with it).
@@ -8561,10 +8660,23 @@ export class AgentSession {
 		this._autoCompactionAbortController = new AbortController();
 
 		try {
-			const authResult = this.model ? await this._modelRegistry.getApiKeyAndHeaders(this.model) : undefined;
-			if (!this.model || !authResult || !authResult.ok || !authResult.apiKey) {
+			const selectedModel = runScope?.selectedModel ?? this.model;
+			const scopedAuth =
+				runScope?.modelScope !== undefined && selectedModel !== undefined
+					? await resolveAgentRunRequestAuth(runScope.modelScope, selectedModel, {
+							executionId: runScope.executionId,
+							signal: runScope.controller.signal,
+						})
+					: undefined;
+			const authResult =
+				scopedAuth !== undefined
+					? { ok: true as const, ...scopedAuth }
+					: selectedModel
+						? await this._modelRegistry.getApiKeyAndHeaders(selectedModel)
+						: undefined;
+			if (!selectedModel || !authResult || !authResult.ok || !authResult.apiKey) {
 				const detail =
-					!this.model || !authResult
+					!selectedModel || !authResult
 						? "no model is selected"
 						: authResult.ok
 							? "no API key is available"
@@ -8579,7 +8691,7 @@ export class AgentSession {
 			}
 
 			const result = await this._performCompaction({
-				model: this.model,
+				model: selectedModel,
 				apiKey: authResult.apiKey,
 				headers: authResult.headers,
 				customInstructions,
@@ -9131,11 +9243,14 @@ export class AgentSession {
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
-			"model.info": async () => ({
-				id: this.model?.id ?? null,
-				provider: this.model?.provider ?? null,
-				input: this.model?.input ?? [],
-			}),
+			"model.info": async () => {
+				const model = this._activeAgentRunScope()?.selectedModel ?? this.model;
+				return {
+					id: model?.id ?? null,
+					provider: model?.provider ?? null,
+					input: model?.input ?? [],
+				};
+			},
 		};
 		if (this._includeGoals) {
 			for (const type of ["goal.get", "goal.create", "goal.complete"]) {
@@ -10229,6 +10344,11 @@ export class AgentSession {
 	}
 
 	private async _authenticatedRlmModels(): Promise<Model<Api>[]> {
+		const runScope = this._activeAgentRunScope();
+		if (runScope?.modelScope) {
+			assertAgentRunModelScope(runScope.modelScope);
+			return [...runScope.modelScope.models];
+		}
 		return (await this._modelRegistry.getExecutableModels()).filter((model) => {
 			const status = this._modelRegistry.getProviderAuthStatus(model.provider);
 			return status.source !== "stale" && status.label !== "expired";
@@ -10236,13 +10356,20 @@ export class AgentSession {
 	}
 
 	async findRlmModels(query: string, limit: number): Promise<RlmFindModelsResult> {
+		const runScope = this._activeAgentRunScope();
 		return {
-			models: findRlmModelMatches(query, await this._authenticatedRlmModels(), limit),
+			models: findRlmModelMatches(
+				query,
+				await this._authenticatedRlmModels(),
+				limit,
+				runScope?.modelScope !== undefined,
+			),
 		};
 	}
 
 	private async _resolveRlmSubagentModel(reference: string | undefined): Promise<RlmSubagentModelSelection> {
-		const parentModel = this.model;
+		const runScope = this._activeAgentRunScope();
+		const parentModel = runScope?.selectedModel ?? this.model;
 		if (!parentModel) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -10261,9 +10388,14 @@ export class AgentSession {
 			throw new Error(`Requested subagent model "${reference}" is unavailable, unauthenticated, or expired`);
 		}
 
-		const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) {
-			throw new Error(`Requested subagent model "${reference}" failed authentication preflight`);
+		if (runScope?.modelScope) {
+			await resolveAgentRunRequestAuth(runScope.modelScope, model, {
+				executionId: runScope.executionId,
+				signal: runScope.controller.signal,
+			});
+		} else {
+			const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok) throw new Error(`Requested subagent model "${reference}" failed authentication preflight`);
 		}
 		return { model };
 	}
@@ -10310,6 +10442,7 @@ export class AgentSession {
 			}
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
+		const parentRunScope = this._activeAgentRunScope();
 
 		const childSessionDir = this._createChildRlmSessionDir();
 		const childNodeId = basename(childSessionDir);
@@ -10389,6 +10522,7 @@ export class AgentSession {
 				thinkingLevel: requestedThinkingLevel,
 			}),
 			runContext,
+			modelScope: parentRunScope?.modelScope,
 			onSessionPublished: publishChildSession,
 		};
 
@@ -10525,11 +10659,14 @@ export class AgentSession {
 				};
 				throwIfCancelled();
 				const parentReplyCountBeforeRun = child._parentReplyCount;
-				await child.promptAndWait(content, {
+				await child._promptAndWait(content, {
 					expandPromptTemplates: false,
 					source: "extension",
 					customMessage: spawnMessage,
 					runContext: subagentOptions.runContext,
+					modelScope: subagentOptions.modelScope,
+					modelScopeOwner: false,
+					selectedModel: modelSelection.model,
 				});
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);

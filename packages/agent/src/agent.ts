@@ -1,4 +1,5 @@
 import {
+	type Api,
 	createAssistantMessageDiagnostic,
 	type ImageContent,
 	type Message,
@@ -60,6 +61,8 @@ type QueueMode = "all" | "one-at-a-time";
 export interface AgentRunOptions {
 	/** Opaque host-owned identifier propagated to tool invocations for this run. */
 	executionId?: string;
+	/** Host-selected model for this run without mutating durable agent state. */
+	model?: Model<Api>;
 }
 
 type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "pendingToolCalls" | "errorMessage"> & {
@@ -475,7 +478,7 @@ export class Agent {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			executionId: options.executionId,
-			model: this._state.model,
+			model: options.model ?? this._state.model,
 			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,
 			sessionId: this.sessionId,
