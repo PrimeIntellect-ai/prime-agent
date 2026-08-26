@@ -16,7 +16,7 @@ function bundledRlmHeartbeatSkill(): PythonSkillRuntimeInfo {
 	};
 }
 
-describe("RLM heartbeat skill over the kernel host bridge", () => {
+describe("RLM heartbeat skill over the kernel host bridge", { tags: ["kernel-heavy"] }, () => {
 	let tempDir: string;
 	let provisioner: IpythonKernelProvisioner | undefined;
 

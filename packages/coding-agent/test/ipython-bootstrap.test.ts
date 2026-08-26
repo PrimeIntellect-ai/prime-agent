@@ -57,7 +57,7 @@ function resolveKernelPython(): string | null {
 const python = resolveKernelPython();
 const describeIfKernel = python ? describe : describe.skip;
 
-describeIfKernel("IPython RLM bootstrap (real kernel)", () => {
+describeIfKernel("IPython RLM bootstrap (real kernel)", { tags: ["kernel-heavy"] }, () => {
 	const dir = mkdtempSync(join(tmpdir(), "prime-agent-bootstrap-"));
 
 	afterAll(() => {
