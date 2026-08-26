@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	DEFAULT_RLM_EXTRA_IMPORT_NAMES,
@@ -187,6 +187,8 @@ describe("kernel bootstrap", () => {
 		expect(log).toContain("pip install --python");
 		expect(log).toContain("ipykernel");
 		expect(log).toContain("prime-agent-runtime");
+		expect(log).toContain(resolve(process.cwd(), "../../prime-agent-runtime"));
+		expect(log).not.toContain(resolve(process.cwd(), "dist/prime-agent-runtime"));
 		expect(log).toContain("dill");
 		for (const uvArg of DEFAULT_RLM_EXTRA_UV_ARGS) {
 			expect(log).toContain(uvArg);

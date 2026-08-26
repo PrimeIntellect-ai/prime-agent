@@ -658,16 +658,21 @@ async function writeBootstrapVersion(
 
 function runtimeCandidateDirs(): string[] {
 	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-	// dist/prime-agent-runtime is listed first deliberately: it is the only path stable
-	// across every shipped layout (dist/, dist/bundle/, bun), where import.meta.url-relative
-	// resolution breaks. `npm run build` rebuilds it from live source (copy-assets does
-	// rm -rf + cp), so the staleness hash still refreshes on every build. The relative
-	// paths below cover running from source (tsx) where dist/ hasn't been built.
-	return [
-		path.join(getPackageDir(), "dist", "prime-agent-runtime"),
-		path.resolve(moduleDir, "..", "..", "prime-agent-runtime"),
-		path.resolve(moduleDir, "..", "..", "..", "..", "..", "prime-agent-runtime"),
-	];
+	const packageDir = getPackageDir();
+	const sourceRelativeModuleDir = path.relative(path.join(packageDir, "src"), moduleDir);
+	const runningFromSource =
+		sourceRelativeModuleDir !== ".." &&
+		!sourceRelativeModuleDir.startsWith(`..${path.sep}`) &&
+		!path.isAbsolute(sourceRelativeModuleDir);
+	const repositoryRuntimeDir = path.resolve(moduleDir, "..", "..", "..", "..", "..", "prime-agent-runtime");
+	const bundledRuntimeDir = path.join(packageDir, "dist", "prime-agent-runtime");
+	const relativeRuntimeDir = path.resolve(moduleDir, "..", "..", "prime-agent-runtime");
+	// Prefer the repository runtime while executing from source so a stale dist artifact
+	// cannot shadow current Python code. The dist path remains the stable shipped fallback
+	// across dist/, dist/bundle/, and bun layouts.
+	return runningFromSource
+		? [repositoryRuntimeDir, bundledRuntimeDir, relativeRuntimeDir]
+		: [bundledRuntimeDir, relativeRuntimeDir, repositoryRuntimeDir];
 }
 
 async function resolveRuntimeSourceDir(): Promise<string | null> {
