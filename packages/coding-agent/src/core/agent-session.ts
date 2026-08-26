@@ -4074,8 +4074,11 @@ export class AgentSession {
 			return this._disposeAsyncPromise;
 		}
 		if (this._disposed) {
-			await this._drainRunScopeCleanupOperations();
-			return this._disposeCallbacksPromise;
+			this._disposeAsyncPromise = (async () => {
+				await this._drainRunScopeCleanupOperations();
+				await this._disposeCallbacksPromise;
+			})();
+			return this._disposeAsyncPromise;
 		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
 		// the kernel snapshot flush finishes.
