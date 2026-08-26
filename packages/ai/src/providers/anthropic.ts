@@ -51,11 +51,11 @@ import { transformMessages } from "./transform-messages.js";
  * Resolve cache retention preference.
  * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
  */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
+function resolveCacheRetention(cacheRetention?: CacheRetention, disableEnvConfig = false): CacheRetention {
 	if (cacheRetention) {
 		return cacheRetention;
 	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
+	if (!disableEnvConfig && typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
 		return "long";
 	}
 	return "short";
@@ -64,8 +64,9 @@ function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention 
 function getCacheControl(
 	model: Model<"anthropic-messages">,
 	cacheRetention?: CacheRetention,
+	disableEnvConfig = false,
 ): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
-	const retention = resolveCacheRetention(cacheRetention);
+	const retention = resolveCacheRetention(cacheRetention, disableEnvConfig);
 	if (retention === "none") {
 		return { retention };
 	}
@@ -508,7 +509,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+			const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.disableEnvApiKey);
 			const usesAnthropicCachePricing = hasStandardAnthropicCachePricing(model);
 			let cacheWriteCost =
 				cacheControl && usesAnthropicCachePricing

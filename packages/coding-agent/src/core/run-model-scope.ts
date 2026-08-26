@@ -81,6 +81,15 @@ function normalizeRequestAccess(model: Model<Api>, access: AgentRunRequestAccess
 	if (!supportsExplicitRequestAccess(model.api)) {
 		throw new Error(`Agent run api ${model.api} does not support secret@1 access`);
 	}
+	let endpoint: URL;
+	try {
+		endpoint = new URL(model.baseUrl);
+	} catch {
+		throw new Error(`Agent run model ${model.provider}/${model.id} requires an explicit HTTP endpoint`);
+	}
+	if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username !== "" || endpoint.password !== "") {
+		throw new Error(`Agent run model ${model.provider}/${model.id} requires an explicit HTTP endpoint`);
+	}
 	if (typeof access.apiKey !== "string" || access.apiKey.trim() === "") {
 		throw new Error(`Agent run model ${model.provider}/${model.id} requires an explicit api key`);
 	}

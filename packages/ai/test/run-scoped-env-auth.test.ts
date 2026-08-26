@@ -24,13 +24,20 @@ describe("run-scoped provider authentication", () => {
 		vi.stubEnv("OPENAI_API_KEY", "ambient-openai-key");
 		vi.stubEnv("ANTHROPIC_API_KEY", "ambient-anthropic-key");
 		vi.stubEnv("AZURE_OPENAI_API_KEY", "ambient-azure-key");
+		vi.stubEnv("AZURE_OPENAI_BASE_URL", "https://hostile-azure.invalid");
+		vi.stubEnv("AZURE_OPENAI_API_VERSION", "hostile-version");
+		vi.stubEnv("AZURE_OPENAI_RESOURCE_NAME", "hostile-resource");
+		vi.stubEnv("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", '{"test-model":"hostile-deployment"}');
 		vi.stubEnv("GEMINI_API_KEY", "ambient-google-key");
+		vi.stubEnv("GOOGLE_CLOUD_API_KEY", "ambient-vertex-key");
+		vi.stubEnv("GOOGLE_CLOUD_PROJECT", "hostile-project");
+		vi.stubEnv("GOOGLE_CLOUD_LOCATION", "hostile-location");
 		vi.stubEnv("MISTRAL_API_KEY", "ambient-mistral-key");
+		vi.stubEnv("PI_CACHE_RETENTION", "long");
+		vi.stubEnv("PRIME_TEAM_ID", "hostile-team");
 		const routes: Array<readonly [Api, string]> = [
 			["anthropic-messages", "anthropic"],
-			["azure-openai-responses", "azure-openai-responses"],
 			["google-generative-ai", "google"],
-			["google-vertex", "google-vertex"],
 			["mistral-conversations", "mistral"],
 			["openai-codex-responses", "openai-codex"],
 			["openai-completions", "openai"],
@@ -45,6 +52,11 @@ describe("run-scoped provider authentication", () => {
 	});
 
 	it("rejects unsupported run-scoped APIs before provider dispatch", () => {
+		for (const api of ["azure-openai-responses", "google-vertex"] as const) {
+			expect(() =>
+				streamSimple(model(api, api), { messages: [] }, { disableEnvApiKey: true, apiKey: "explicit-key" }),
+			).toThrow(`Run-scoped requests do not support api: ${api}`);
+		}
 		expect(() =>
 			streamSimple(
 				model("bedrock-converse-stream", "amazon-bedrock"),
@@ -65,5 +77,17 @@ describe("run-scoped provider authentication", () => {
 				},
 			),
 		).toThrow("Run-scoped requests do not support api: future-provider-api");
+	});
+
+	it("requires an explicit safe endpoint before provider dispatch", () => {
+		for (const baseUrl of ["", "not-a-url", "file:///tmp/socket", "https://user:secret@example.invalid/v1"]) {
+			expect(() =>
+				streamSimple(
+					{ ...model("openai-responses", "openai"), baseUrl },
+					{ messages: [] },
+					{ disableEnvApiKey: true, apiKey: "explicit-key" },
+				),
+			).toThrow("Run-scoped request requires an explicit HTTP endpoint for provider: openai");
+		}
 	});
 });

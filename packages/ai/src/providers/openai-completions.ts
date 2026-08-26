@@ -126,11 +126,11 @@ type ChatCompletionToolWithCacheControl = OpenAI.Chat.Completions.ChatCompletion
 	cache_control?: OpenAICompatCacheControl;
 };
 
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
+function resolveCacheRetention(cacheRetention?: CacheRetention, disableEnvConfig = false): CacheRetention {
 	if (cacheRetention) {
 		return cacheRetention;
 	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
+	if (!disableEnvConfig && typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
 		return "long";
 	}
 	return "short";
@@ -165,14 +165,22 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 		try {
 			const apiKey = options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider)) ?? "";
 			const compat = getCompat(model);
-			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
+			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.disableEnvApiKey);
 			const cacheControl = getCompatCacheControl(compat, cacheRetention);
 			const cacheWriteCost =
 				cacheControl && hasStandardAnthropicCachePricing(model)
 					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
 					: undefined;
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
+			const client = createClient(
+				model,
+				context,
+				apiKey,
+				options?.headers,
+				cacheSessionId,
+				compat,
+				options?.disableEnvApiKey,
+			);
 			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -516,6 +524,7 @@ function createClient(
 	optionsHeaders?: Record<string, string>,
 	sessionId?: string,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
+	disableEnvConfig = false,
 ) {
 	if (!apiKey) {
 		if (!process.env.OPENAI_API_KEY) {
@@ -537,7 +546,7 @@ function createClient(
 	}
 
 	if (model.provider === "prime-inference") {
-		const teamId = getPrimeTeamId();
+		const teamId = disableEnvConfig ? undefined : getPrimeTeamId();
 		if (teamId) headers["X-Prime-Team-ID"] = teamId;
 	}
 
@@ -573,7 +582,7 @@ function buildParams(
 	context: Context,
 	options?: OpenAICompletionsOptions,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
-	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention),
+	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention, options?.disableEnvApiKey),
 	cacheControl: OpenAICompatCacheControl | undefined = getCompatCacheControl(compat, cacheRetention),
 ) {
 	const messages = convertMessages(model, context, compat);

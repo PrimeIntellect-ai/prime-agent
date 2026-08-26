@@ -217,6 +217,10 @@ describe("issue 171 run-scoped model overlay", () => {
 	});
 
 	it("requires a complete versioned access bundle before the run starts", () => {
+		vi.stubEnv("AZURE_OPENAI_BASE_URL", "https://hostile-azure.invalid");
+		vi.stubEnv("AZURE_OPENAI_API_VERSION", "hostile-version");
+		vi.stubEnv("GOOGLE_CLOUD_PROJECT", "hostile-project");
+		vi.stubEnv("GOOGLE_CLOUD_LOCATION", "hostile-location");
 		const model: Model<string> = {
 			id: "root",
 			name: "Root",
@@ -275,6 +279,36 @@ describe("issue 171 run-scoped model overlay", () => {
 				],
 			}),
 		).toThrow("does not support secret@1");
+		for (const api of ["azure-openai-responses", "google-vertex"] as const) {
+			const ambientConfigModel = { ...model, api };
+			expect(() =>
+				createAgentRunModelScope({
+					version: AGENT_RUN_MODEL_SCOPE_VERSION,
+					root: ambientConfigModel,
+					models: [ambientConfigModel],
+					requestAccess: [
+						{
+							model: ambientConfigModel,
+							access: { kind: "secret", contract: "secret@1", apiKey: "explicit-key" },
+						},
+					],
+				}),
+			).toThrow(`Agent run api ${api} does not support secret@1 access`);
+		}
+		expect(() => {
+			const missingEndpoint = { ...model, baseUrl: "" };
+			return createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: missingEndpoint,
+				models: [missingEndpoint],
+				requestAccess: [
+					{
+						model: missingEndpoint,
+						access: { kind: "secret", contract: "secret@1", apiKey: "explicit-key" },
+					},
+				],
+			});
+		}).toThrow("requires an explicit HTTP endpoint");
 		expect(() =>
 			createAgentRunModelScope({
 				version: AGENT_RUN_MODEL_SCOPE_VERSION,

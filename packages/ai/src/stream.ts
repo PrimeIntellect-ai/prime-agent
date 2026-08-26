@@ -16,9 +16,7 @@ export { getEnvApiKey } from "./env-api-keys.js";
 
 const EXPLICIT_REQUEST_ACCESS_APIS = new Set<Api>([
 	"anthropic-messages",
-	"azure-openai-responses",
 	"google-generative-ai",
-	"google-vertex",
 	"mistral-conversations",
 	"openai-codex-responses",
 	"openai-completions",
@@ -33,6 +31,15 @@ function assertExplicitRequestAccess(model: Model<Api>, options: StreamOptions |
 	if (options?.disableEnvApiKey !== true) return;
 	if (!supportsExplicitRequestAccess(model.api)) {
 		throw new Error(`Run-scoped requests do not support api: ${model.api}`);
+	}
+	let endpoint: URL;
+	try {
+		endpoint = new URL(model.baseUrl);
+	} catch {
+		throw new Error(`Run-scoped request requires an explicit HTTP endpoint for provider: ${model.provider}`);
+	}
+	if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username !== "" || endpoint.password !== "") {
+		throw new Error(`Run-scoped request requires an explicit HTTP endpoint for provider: ${model.provider}`);
 	}
 	if (typeof options.apiKey !== "string" || options.apiKey.trim() === "") {
 		throw new Error(`Run-scoped request requires explicit access for provider: ${model.provider}`);

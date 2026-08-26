@@ -32,11 +32,11 @@ const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"
  * Resolve cache retention preference.
  * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
  */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
+function resolveCacheRetention(cacheRetention?: CacheRetention, disableEnvConfig = false): CacheRetention {
 	if (cacheRetention) {
 		return cacheRetention;
 	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
+	if (!disableEnvConfig && typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
 		return "long";
 	}
 	return "short";
@@ -90,7 +90,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 
 		try {
 			const apiKey = options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider)) ?? "";
-			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
+			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.disableEnvApiKey);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
 			let params = buildParams(model, context, options);
@@ -218,7 +218,7 @@ function createClient(
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
 
-	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
+	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.disableEnvApiKey);
 	const compat = getCompat(model);
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
