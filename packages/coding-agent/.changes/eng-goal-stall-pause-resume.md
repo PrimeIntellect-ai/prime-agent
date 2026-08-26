@@ -1,0 +1,1 @@
+- Fixed Goal Mode injecting identical continuations forever when the model was blocked on user input; a stalled goal now pauses as waiting for user input and resumes on the next user prompt ([#986](https://github.com/PrimeIntellect-ai/prime-agent/issues/986), design and tests originally by [@romankhadka](https://github.com/romankhadka) in #1113).

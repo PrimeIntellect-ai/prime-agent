@@ -196,6 +196,8 @@ await goal.complete()
 
 Goal state records token usage, elapsed time, continuation count, and an optional explicit token budget. The harness keeps prompting an active goal after ordinary assistant turns; only `goal.complete()` marks successful completion. Creating a persistent goal is an explicit user or host action, not something the agent should infer from every task.
 
+Continuations stop when they can no longer make progress. When consecutive goal continuations end without a tool call or a new user message, the goal pauses as waiting for user input instead of re-presenting the same context. A goal paused this way resumes automatically on the next user prompt; an explicit `/goal pause` stays paused until `/goal resume`.
+
 ## Autonomous Mode
 
 Autonomous mode is a bounded host policy for runs where no human input is expected. Prime Agent adds follow-up continuations until configured quality gates pass or a continuation, turn, token, or wall-clock limit is reached.

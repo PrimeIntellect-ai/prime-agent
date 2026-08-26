@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { CustomMessage } from "./messages.js";
 
@@ -7,8 +8,28 @@ export const GOAL_CONTEXT_PREVIEW_LABEL = "Goal context";
 export const GOAL_SKILL_NAME = "goal";
 export const MAX_THREAD_GOAL_OBJECTIVE_CHARS = 4000;
 
+/**
+ * Number of consecutive goal continuations that may end without a tool call or
+ * new user message before the goal pauses as waiting for user input. Below
+ * this a continuation is a legitimate nudge; at this count the model has
+ * repeatedly declined to act (e.g. it is waiting on approval, a credential, or
+ * an unanswered question) and re-injecting the same context cannot make
+ * progress -- the goal-mode analogue of `DEFAULT_AUTONOMOUS_LIMITS.maxContinuations`.
+ *
+ * Design credit: this stall-detection approach (count consecutive
+ * no-progress continuation windows, pause as "waiting for user input", resume
+ * on the next genuine user message) is @romankhadka's from #1113 (closed,
+ * unmerged, for #986). Ported here against current main with the same
+ * algorithm and design rationale.
+ */
+export const MAX_STALLED_GOAL_CONTINUATIONS = 3;
+
 export type GoalStatus = "idle" | "active" | "paused" | "budget_limited" | "complete" | "error";
 export type GoalContextKind = "continuation" | "budget_limit" | "objective_updated";
+/** Why a paused goal is paused: "host" is the stall detector (resumed automatically
+ * by the next genuine user message); "user" is an explicit `/goal pause` (only
+ * `/goal resume` reactivates it). */
+export type GoalPausedBy = "user" | "host";
 
 export interface GoalState {
 	active: boolean;
@@ -23,6 +44,7 @@ export interface GoalState {
 	updatedAt?: number;
 	lastReason?: string;
 	lastError?: string;
+	pausedBy?: GoalPausedBy;
 }
 
 /** Goal payload returned to the kernel-side goal skill. Keys are Python-conventional snake_case. */
@@ -69,6 +91,7 @@ export function normalizeGoalState(goal: GoalState): GoalState {
 		tokensUsed: Math.max(0, Math.trunc(goal.tokensUsed)),
 		timeUsedSeconds: Math.max(0, Math.trunc(goal.timeUsedSeconds)),
 		continuationsUsed: Math.max(0, Math.trunc(goal.continuationsUsed)),
+		pausedBy: goal.status === "paused" ? goal.pausedBy : undefined,
 	};
 }
 
@@ -179,6 +202,38 @@ export function createGoalContextMessage(
 	};
 }
 
+/**
+ * Whether injecting another goal continuation into this run would only repeat
+ * the previous one. True when the run's trailing `MAX_STALLED_GOAL_CONTINUATIONS`
+ * goal-context windows all ended without progress: the model saw the same
+ * context that many times and chose no observable action, so the goal should
+ * pause and wait for user input instead of looping. A tool call is observable
+ * work and a user message is new information that can unblock the goal, so
+ * either one ends the stall; host-injected custom messages (heartbeats, agent
+ * messages) are neither.
+ */
+export function goalContinuationIsStalled(runMessages: AgentMessage[]): boolean {
+	let stalledWindows = 0;
+	// Walk backward; each goal context closes the window of messages after it.
+	for (let index = runMessages.length - 1; index >= 0; index--) {
+		const message = runMessages[index];
+		if (message.role === "custom" && message.customType === GOAL_CONTEXT_CUSTOM_TYPE) {
+			stalledWindows++;
+			if (stalledWindows >= MAX_STALLED_GOAL_CONTINUATIONS) {
+				return true;
+			}
+			continue;
+		}
+		if (message.role === "user") {
+			return false;
+		}
+		if (message.role === "assistant" && message.content.some((block) => block.type === "toolCall")) {
+			return false;
+		}
+	}
+	return false;
+}
+
 export function formatGoalUsage(goal: GoalState): string | undefined {
 	if (goal.tokenBudget !== undefined) {
 		return `${goal.tokensUsed} / ${goal.tokenBudget} tokens`;
@@ -226,7 +281,9 @@ The goal persists across turns. Ending one turn does not reduce or redefine the 
 
 Before marking the goal complete, audit the current state against every requirement in the objective. Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. If the objective is achieved, run \`await goal.complete()\` in ipython so usage accounting is preserved.
 
-Do not call \`goal.complete()\` unless the goal is complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.`;
+Do not call \`goal.complete()\` unless the goal is complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.
+
+If you cannot make progress without new user input (a required approval, credential, or answer), state what you are waiting for and end the turn without tool calls. After repeated turns with no tool calls the goal pauses automatically and resumes with the next user message.`;
 }
 
 function budgetLimitPrompt(goal: GoalState): string {
