@@ -48,6 +48,8 @@ flowchart LR
 
 Workers and kernels are separate processes for lifecycle and failure containment, not security sandboxes. They normally run with the same operating-system permissions as the client.
 
+SDK hosts can instead attach a versioned `kernelBoundaryScope` to one prompt. The host must prepare an OS-level workspace-write confinement before provider inference and supply the process launcher for the real IPython kernel. Prime bypasses the shared forkserver and persistent namespace snapshots for that run, routes the root and recursive-child kernels through execution-ephemeral launch leases, and awaits lease teardown at terminal success, failure, or cancellation. Network access remains enabled in the version 1 policy and is reported explicitly to lifecycle observers. Omitting the scope preserves the unrestricted persistent-kernel behavior.
+
 ## Prompt Execution Flow
 
 ```mermaid

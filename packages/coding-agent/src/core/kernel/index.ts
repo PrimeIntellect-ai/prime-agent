@@ -210,7 +210,19 @@ export interface KernelManagerOptions {
 	snapshot?: KernelSnapshotConfig;
 	/** Default: "prime-agent". */
 	username?: string;
+	/** Trusted host launch boundary. Supplying one disables the shared forkserver. */
+	processLauncher?: KernelProcessLauncher;
 }
+
+export interface KernelProcessLaunchRequest {
+	readonly command: string;
+	readonly args: readonly string[];
+	readonly cwd: string | undefined;
+	readonly env: Readonly<Record<string, string | undefined>>;
+}
+
+/** Launches the real kernel process at a trusted host-owned confinement boundary. */
+export type KernelProcessLauncher = (request: KernelProcessLaunchRequest) => ChildProcess;
 
 export interface KernelStartOptions {
 	onBootstrapProgress?: KernelBootstrapProgressHandler;
@@ -627,7 +639,15 @@ function installSignalHandlersOnce(): void {
 export class KernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "recursionDepth" | "hostHandlers" | "pythonSkills" | "snapshot"
+		| "python"
+		| "cwd"
+		| "env"
+		| "sessionId"
+		| "recursionDepth"
+		| "hostHandlers"
+		| "pythonSkills"
+		| "snapshot"
+		| "processLauncher"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
@@ -681,6 +701,7 @@ export class KernelManager {
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
 			username: options.username ?? "prime-agent",
+			processLauncher: options.processLauncher,
 		};
 	}
 
@@ -744,7 +765,7 @@ export class KernelManager {
 		// (disabled, unavailable, fork error) degrades to the direct-spawn path so
 		// correctness never depends on fork.
 		let forked = false;
-		if (isForkServerEnabled()) {
+		if (!this.options.processLauncher && isForkServerEnabled()) {
 			try {
 				const handle = await forkKernel(python, {
 					connectionPath: connection.path,
@@ -782,12 +803,11 @@ export class KernelManager {
 		}
 
 		if (!forked) {
-			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
-				cwd: this.options.cwd,
-				// ipykernel's parent poller exits the kernel if this pid dies (covers SIGKILL of the owner).
-				env: { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) },
-				stdio: ["ignore", "pipe", "pipe"],
-			});
+			const args = ["-m", "ipykernel_launcher", "-f", connection.path];
+			const env = { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) };
+			const kernel = this.options.processLauncher
+				? this.options.processLauncher({ command: python, args, cwd: this.options.cwd, env })
+				: spawn(python, args, { cwd: this.options.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
 			this.kernel = kernel;
 			if (kernel.pid !== undefined) recordOrphanProcessState(kernel.pid, true);
 
@@ -796,7 +816,7 @@ export class KernelManager {
 				this.kernelStderr += s;
 			});
 
-			kernel.on("error", (err) => {
+			kernel.on("error", (err: Error) => {
 				if (this.kernel !== kernel) return;
 				this.appendKernelDiagnostic(`spawn error: ${err.message}`);
 				this.state = "shutdown";
@@ -804,7 +824,7 @@ export class KernelManager {
 				this.cleanupResources();
 			});
 
-			kernel.on("exit", (code, signal) => {
+			kernel.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
 				if (this.kernel !== kernel) return;
 				if (this.state !== "shutdown") {
 					this.appendKernelDiagnostic(`unexpected exit code=${code} signal=${signal}`);

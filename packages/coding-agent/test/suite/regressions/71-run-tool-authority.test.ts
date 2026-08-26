@@ -66,6 +66,7 @@ describe("issue 71 run-scoped tool authority", () => {
 		expect(executions).toEqual([]);
 		expect(requests).toHaveLength(1);
 		expect(requests[0]).toMatchObject({
+			toolCallId: expect.any(String),
 			toolName: "counting_tool",
 			args: { value: 7 },
 			context: { runContext, recursionDepth: 0 },

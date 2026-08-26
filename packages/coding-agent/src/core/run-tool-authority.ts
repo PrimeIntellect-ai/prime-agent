@@ -8,6 +8,7 @@ export interface AgentRunToolAuthorizationContext {
 }
 
 export interface AgentRunToolAuthorizationRequest {
+	readonly toolCallId: string;
 	readonly toolName: string;
 	readonly args: unknown;
 	readonly context: AgentRunToolAuthorizationContext;
@@ -99,6 +100,7 @@ export async function authorizeAgentRunToolCall(
 	request.context.signal.throwIfAborted();
 	const decision = await (scope as AgentRunToolAuthorityScopeCapability).authorize(
 		Object.freeze({
+			toolCallId: request.toolCallId,
 			toolName: request.toolName,
 			args: immutableArgs(request.args),
 			context: Object.freeze({ ...request.context }),

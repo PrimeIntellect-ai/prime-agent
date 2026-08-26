@@ -14,6 +14,7 @@ import {
 	KernelBusyAfterInterruptError,
 	type KernelDiffDisplay,
 	KernelManager,
+	type KernelProcessLauncher,
 	type KernelSentAgentMessage,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
@@ -297,6 +298,10 @@ export interface IpythonToolOptions {
 	 */
 	onRestore?: (result: RestoreResult) => void;
 	onLateSentAgentMessage?: (toolCallId: string, message: KernelSentAgentMessage) => void;
+	/** Trusted process boundary used to launch the real kernel process. */
+	processLauncher?: KernelProcessLauncher;
+	/** Resolve an execution-ephemeral provisioner instead of the session provisioner. */
+	getRunProvisioner?: (executionId?: string) => IpythonKernelProvisioner | undefined;
 	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
 	provisioner?: IpythonKernelProvisioner;
 }
@@ -495,6 +500,7 @@ export class IpythonKernelProvisioner {
 				recursionDepth: this.options?.recursionDepth,
 				hostHandlers: this.options?.hostHandlers,
 				pythonSkills: this.options?.pythonSkills,
+				processLauncher: this.options?.processLauncher,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
 				snapshot: snapshotDir
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
@@ -662,8 +668,9 @@ export function createIpythonToolDefinition(
 
 			try {
 				const code = applyShellSettingsToBashMagicCell(params.code, options);
+				const selectedProvisioner = options?.getRunProvisioner?.(executionContext?.executionId) ?? provisioner;
 				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
-					provisioner,
+					selectedProvisioner,
 					reportStartupProgress,
 					toolCallId,
 					code,

@@ -1,0 +1,1 @@
+- Added a run-scoped host boundary for workspace-confined root and recursive IPython kernels.

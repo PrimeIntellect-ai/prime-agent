@@ -145,6 +145,8 @@ export {
 	type HostRequestContext,
 	type HostRequestInvocationMetadata,
 	type HostRequestPayload,
+	type KernelProcessLauncher,
+	type KernelProcessLaunchRequest,
 	type RegisteredHostRequestHandler,
 	type RegisteredHostRequestHandlers,
 } from "./core/kernel/index.js";
@@ -167,6 +169,17 @@ export type {
 } from "./core/refinement/index.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
+export {
+	AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+	type AgentRunKernelBoundaryContext,
+	type AgentRunKernelBoundaryLease,
+	type AgentRunKernelBoundaryLifecycleEvent,
+	type AgentRunKernelBoundaryObserver,
+	type AgentRunKernelBoundaryPolicy,
+	type AgentRunKernelBoundaryPreparer,
+	type AgentRunKernelBoundaryScope,
+	createAgentRunKernelBoundaryScope,
+} from "./core/run-kernel-boundary.js";
 export {
 	AGENT_RUN_MODEL_SCOPE_VERSION,
 	type AgentRunModelScope,

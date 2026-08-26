@@ -3,6 +3,7 @@ import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestContext, HostRequestHandler, RegisteredHostRequestHandlers } from "./kernel/index.js";
+import type { AgentRunKernelBoundaryScope } from "./run-kernel-boundary.js";
 import type { AgentRunModelScope } from "./run-model-scope.js";
 import type { AgentRunToolAuthorityScope } from "./run-tool-authority.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
@@ -252,6 +253,8 @@ export interface CreateRlmSubagentRuntimeOptions {
 	modelScope?: AgentRunModelScope;
 	/** Host-only tool authority inherited from the spawning execution. */
 	toolAuthorityScope?: AgentRunToolAuthorityScope;
+	/** Host-owned workspace confinement inherited from the spawning execution. */
+	kernelBoundaryScope?: AgentRunKernelBoundaryScope;
 	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */

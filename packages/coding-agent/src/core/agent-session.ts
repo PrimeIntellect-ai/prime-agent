@@ -237,6 +237,13 @@ import {
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import {
+	type AgentRunKernelBoundaryScope,
+	assertAgentRunKernelBoundaryScope,
+	prepareAgentRunKernelBoundary,
+	releaseAgentRunKernelBoundary,
+	revokeAgentRunKernelBoundaryScope,
+} from "./run-kernel-boundary.js";
+import {
 	type AgentRunModelScope,
 	assertAgentRunModelScope,
 	findAgentRunScopedModel,
@@ -542,6 +549,8 @@ export interface PromptOptions {
 	modelScope?: AgentRunModelScope;
 	/** Single-run host authority for root and recursive-child tool calls. */
 	toolAuthorityScope?: AgentRunToolAuthorityScope;
+	/** Single-run workspace confinement for IPython and every descendant process. */
+	kernelBoundaryScope?: AgentRunKernelBoundaryScope;
 }
 
 interface InternalPromptOptions extends PromptOptions {
@@ -550,6 +559,7 @@ interface InternalPromptOptions extends PromptOptions {
 	agentMessageId?: string;
 	modelScopeOwner?: boolean;
 	toolAuthorityScopeOwner?: boolean;
+	kernelBoundaryScopeOwner?: boolean;
 	selectedModel?: Model<Api>;
 }
 
@@ -947,10 +957,14 @@ interface AgentRunScope {
 	readonly executionId: string;
 	readonly runContext: unknown;
 	readonly controller: AbortController;
+	cancelled: boolean;
 	readonly modelScope?: AgentRunModelScope;
 	readonly modelScopeOwner: boolean;
 	readonly toolAuthorityScope?: AgentRunToolAuthorityScope;
 	readonly toolAuthorityScopeOwner: boolean;
+	readonly kernelBoundaryScope?: AgentRunKernelBoundaryScope;
+	readonly kernelBoundaryScopeOwner: boolean;
+	boundedKernelProvisioner?: IpythonKernelProvisioner;
 	readonly selectedModel?: Model<Api>;
 }
 
@@ -1191,6 +1205,7 @@ export class AgentSession {
 	private _disposing = false;
 	private _disposeAsyncPromise?: Promise<void>;
 	private _ipythonKernelProvisioner?: IpythonKernelProvisioner;
+	private readonly _boundedKernelProvisioners = new Map<string, IpythonKernelProvisioner>();
 	/** Artifact dir backing the current provisioner's kernel snapshot, if any. */
 	private _ipythonKernelSnapshotDir?: string;
 	/** True once the runtime has been built once; later builds are in-process rebuilds (/reload). */
@@ -1505,6 +1520,7 @@ export class AgentSession {
 			const runScope = this._activeAgentRunScope();
 			if (runScope?.toolAuthorityScope) {
 				const decision = await authorizeAgentRunToolCall(runScope.toolAuthorityScope, {
+					toolCallId: toolCall.id,
 					toolName: toolCall.name,
 					args,
 					context: {
@@ -1819,7 +1835,8 @@ export class AgentSession {
 			}
 		}
 		for (const action of actions) {
-			this._releaseRunScope(action, error.message);
+			const hasKernelBoundary = this._actionRunScopes.get(action)?.kernelBoundaryScope !== undefined;
+			const release = this._releaseRunScope(action, error.message, "cancelled");
 			const ticket = this._actionStore.ticketFor(action);
 			if (
 				action.payload.kind === "turn" &&
@@ -1831,7 +1848,15 @@ export class AgentSession {
 			} else {
 				ticket.settleDelivered({ status: "not_applicable" });
 			}
-			ticket.settleCompleted(error);
+			if (hasKernelBoundary) {
+				void release.then(
+					() => ticket.settleCompleted(error),
+					(cleanupError: unknown) => ticket.settleCompleted(this._asError(cleanupError)),
+				);
+			} else {
+				void release.catch(() => undefined);
+				ticket.settleCompleted(error);
+			}
 			const dispatched = previousStates.get(action.id) === "committing" && action.payload.kind === "turn";
 			if (action.payload.kind === "turn") {
 				const payload = action.payload;
@@ -4893,6 +4918,8 @@ export class AgentSession {
 				modelScopeOwner: options?.modelScopeOwner,
 				toolAuthorityScope: options?.toolAuthorityScope,
 				toolAuthorityScopeOwner: options?.toolAuthorityScopeOwner,
+				kernelBoundaryScope: options?.kernelBoundaryScope,
+				kernelBoundaryScopeOwner: options?.kernelBoundaryScopeOwner,
 				selectedModel: options?.selectedModel,
 			});
 			const result = this._admitSessionInput(action, {
@@ -5057,6 +5084,8 @@ export class AgentSession {
 					modelScopeOwner: options?.modelScopeOwner,
 					toolAuthorityScope: options?.toolAuthorityScope,
 					toolAuthorityScopeOwner: options?.toolAuthorityScopeOwner,
+					kernelBoundaryScope: options?.kernelBoundaryScope,
+					kernelBoundaryScopeOwner: options?.kernelBoundaryScopeOwner,
 					selectedModel: options?.selectedModel,
 				});
 				if (action.suppressAutonomousContinuation) {
@@ -5556,6 +5585,8 @@ export class AgentSession {
 			modelScopeOwner?: boolean;
 			toolAuthorityScope?: AgentRunToolAuthorityScope;
 			toolAuthorityScopeOwner?: boolean;
+			kernelBoundaryScope?: AgentRunKernelBoundaryScope;
+			kernelBoundaryScopeOwner?: boolean;
 			selectedModel?: Model<Api>;
 		},
 	): QueuedSessionAction {
@@ -5568,6 +5599,9 @@ export class AgentSession {
 		}
 		if (options.toolAuthorityScope !== undefined) {
 			assertAgentRunToolAuthorityScope(options.toolAuthorityScope);
+		}
+		if (options.kernelBoundaryScope !== undefined) {
+			assertAgentRunKernelBoundaryScope(options.kernelBoundaryScope);
 		}
 		const id = randomUUID();
 		const content = options.content ?? this._buildPromptContent(text, images);
@@ -5616,16 +5650,45 @@ export class AgentSession {
 			executionId: id,
 			runContext: options.runContext,
 			controller: new AbortController(),
+			cancelled: false,
 			modelScope: options.modelScope,
 			modelScopeOwner: options.modelScopeOwner ?? options.modelScope !== undefined,
 			toolAuthorityScope: options.toolAuthorityScope,
 			toolAuthorityScopeOwner: options.toolAuthorityScopeOwner ?? options.toolAuthorityScope !== undefined,
+			kernelBoundaryScope: options.kernelBoundaryScope,
+			kernelBoundaryScopeOwner: options.kernelBoundaryScopeOwner ?? options.kernelBoundaryScope !== undefined,
 			selectedModel: options.selectedModel ?? options.modelScope?.root,
 		});
 		return action;
 	}
 
-	private _releaseRunScope(action: QueuedSessionAction, reason: string): void {
+	private async _prepareRunKernelBoundary(scope: AgentRunScope): Promise<void> {
+		if (!scope.kernelBoundaryScope || scope.boundedKernelProvisioner) return;
+		const lease = await prepareAgentRunKernelBoundary(scope.kernelBoundaryScope, {
+			executionId: scope.executionId,
+			sessionId: this.sessionId,
+			recursionDepth: this._rlmDepth,
+			cwd: this._cwd,
+			signal: scope.controller.signal,
+		});
+		const provisioner = new IpythonKernelProvisioner(this._cwd, {
+			env: this._rlmKernelEnv(),
+			sessionId: this.sessionId,
+			recursionDepth: this._rlmDepth,
+			hostHandlers: this._createKernelHostHandlers(),
+			getHostRequestContext: (executionId) => this._hostRequestContextForExecution(executionId),
+			pythonSkills: getPythonSkillRuntimeInfo(this._modelVisibleSkills()),
+			processLauncher: lease.launch,
+		});
+		scope.boundedKernelProvisioner = provisioner;
+		this._boundedKernelProvisioners.set(scope.executionId, provisioner);
+	}
+
+	private async _releaseRunScope(
+		action: QueuedSessionAction,
+		reason: string,
+		outcome: "completed" | "failed" | "cancelled" = "cancelled",
+	): Promise<void> {
 		const scope = this._actionRunScopes.get(action);
 		if (!scope) return;
 		this._actionRunScopes.delete(action);
@@ -5634,6 +5697,16 @@ export class AgentSession {
 		if (scope.modelScope !== undefined && scope.modelScopeOwner) revokeAgentRunModelScope(scope.modelScope);
 		if (scope.toolAuthorityScope !== undefined && scope.toolAuthorityScopeOwner) {
 			revokeAgentRunToolAuthorityScope(scope.toolAuthorityScope);
+		}
+		if (scope.boundedKernelProvisioner) {
+			this._boundedKernelProvisioners.delete(scope.executionId);
+			await scope.boundedKernelProvisioner.kill();
+		}
+		if (scope.kernelBoundaryScope !== undefined) {
+			await releaseAgentRunKernelBoundary(scope.kernelBoundaryScope, scope.executionId, outcome, reason);
+			if (scope.kernelBoundaryScopeOwner) {
+				await revokeAgentRunKernelBoundaryScope(scope.kernelBoundaryScope, reason);
+			}
 		}
 	}
 
@@ -5715,7 +5788,7 @@ export class AgentSession {
 		ticket?: ActionTicket;
 	} {
 		if (this._disposed || this._disposing) {
-			this._releaseRunScope(action, "run rejected before admission");
+			void this._releaseRunScope(action, "run rejected before admission");
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
 		if (this._sessionInputAdmissionPauses.size > 0) {
@@ -5723,7 +5796,7 @@ export class AgentSession {
 		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
-			this._releaseRunScope(action, "run coalesced before admission");
+			void this._releaseRunScope(action, "run coalesced before admission");
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
 				this._rejectAgentMessage(
 					action.agentMessageId,
@@ -5782,6 +5855,8 @@ export class AgentSession {
 			modelScopeOwner?: boolean;
 			toolAuthorityScope?: AgentRunToolAuthorityScope;
 			toolAuthorityScopeOwner?: boolean;
+			kernelBoundaryScope?: AgentRunKernelBoundaryScope;
+			kernelBoundaryScopeOwner?: boolean;
 			selectedModel?: Model<Api>;
 		} = {},
 	): Promise<boolean> {
@@ -5919,6 +5994,14 @@ export class AgentSession {
 							}
 						}
 						if (action.lifecycle.state === "running") {
+							const lastMessage = this.agent.state.messages.at(-1);
+							const runScope = this._actionRunScopes.get(action);
+							const boundaryOutcome =
+								runScope?.cancelled ||
+								(lastMessage?.role === "assistant" && lastMessage.stopReason === "aborted")
+									? "cancelled"
+									: "completed";
+							await this._releaseRunScope(action, `run ${boundaryOutcome}`, boundaryOutcome);
 							transitionSessionAction(action, { state: "completed" });
 							this._actionStore.ticketFor(action).settleCompleted();
 							this._settleAgentMessage(action.agentMessageId, "completion");
@@ -5963,6 +6046,7 @@ export class AgentSession {
 								error: terminalError,
 							});
 						}
+						await this._releaseRunScope(action, terminalError.message, "failed");
 						const ticket = this._actionStore.ticketFor(action);
 						if (undelivered.includes(action)) {
 							ticket.rejectDelivered(terminalError);
@@ -5987,7 +6071,13 @@ export class AgentSession {
 								action.lifecycle.state === "cancelled")
 						) {
 							this._durableRlmTerminalNoticeActionIds.delete(action.id);
-							this._releaseRunScope(action, "run completed");
+							const outcome =
+								action.lifecycle.state === "completed"
+									? "completed"
+									: action.lifecycle.state === "failed"
+										? "failed"
+										: "cancelled";
+							await this._releaseRunScope(action, `run ${outcome}`, outcome);
 							this._actionStore.releaseTerminal(action);
 						}
 					}
@@ -6169,6 +6259,7 @@ export class AgentSession {
 				restoreNextTurnContext();
 				return;
 			}
+			await this._prepareRunKernelBoundary(firstRunScope);
 			const { prepared, turns } = preparedTurn;
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let promptPromise: Promise<void>;
@@ -7080,6 +7171,12 @@ export class AgentSession {
 	}
 
 	requestAbort(): void {
+		for (const action of this._actionStore.activeActions()) {
+			const scope = this._actionRunScopes.get(action);
+			if (!scope) continue;
+			scope.cancelled = true;
+			scope.controller.abort("run cancelled");
+		}
 		for (const run of [...this._unsettledRlmChildRuns]) {
 			if (run.status === "cancelled") this._abandonRlmRunForQuiescence(run);
 		}
@@ -9190,6 +9287,8 @@ export class AgentSession {
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
 					provisioner: this._ipythonKernelProvisioner,
+					getRunProvisioner: (executionId) =>
+						executionId ? this._boundedKernelProvisioners.get(executionId) : undefined,
 					getHostRequestContext: (executionId) => this._hostRequestContextForExecution(executionId),
 					commandPrefix: this.settingsManager.getShellCommandPrefix(),
 					shellPath: this.settingsManager.getShellPath(),
@@ -10570,6 +10669,7 @@ export class AgentSession {
 			runContext,
 			modelScope: parentRunScope?.modelScope,
 			toolAuthorityScope: parentRunScope?.toolAuthorityScope,
+			kernelBoundaryScope: parentRunScope?.kernelBoundaryScope,
 			onSessionPublished: publishChildSession,
 		};
 
@@ -10715,6 +10815,8 @@ export class AgentSession {
 					modelScopeOwner: false,
 					toolAuthorityScope: subagentOptions.toolAuthorityScope,
 					toolAuthorityScopeOwner: false,
+					kernelBoundaryScope: subagentOptions.kernelBoundaryScope,
+					kernelBoundaryScopeOwner: false,
 					selectedModel: modelSelection.model,
 				});
 				await child.waitForRlmQuiescence();
