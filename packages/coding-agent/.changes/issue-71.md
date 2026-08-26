@@ -1,0 +1,1 @@
+- Added versioned in-memory model, tool, host, and kernel authority for root and recursive runs, including exact upfront request access, workspace-confined kernels, authority lineage cleanup, current source-runtime precedence, and fail-closed scoped compaction without changing durable session state ([#71](https://github.com/PrimeIntellect-ai/prime-agent/issues/71)).

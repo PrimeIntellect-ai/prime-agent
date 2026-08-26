@@ -515,6 +515,7 @@ export async function generateSummary(
 	customInstructions?: string,
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
+	disableEnvApiKey = false,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
@@ -538,8 +539,8 @@ export async function generateSummary(
 
 	const completionOptions =
 		model.reasoning && thinkingLevel && thinkingLevel !== "off"
-			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-			: { maxTokens, signal, apiKey, headers };
+			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel, disableEnvApiKey }
+			: { maxTokens, signal, apiKey, headers, disableEnvApiKey };
 
 	const response = await completeSimple(
 		model,
@@ -678,6 +679,7 @@ export async function compact(
 	customInstructions?: string,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	disableEnvApiKey = false,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -704,6 +706,7 @@ export async function compact(
 						customInstructions,
 						previousSummary,
 						thinkingLevel,
+						disableEnvApiKey,
 					)
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(
@@ -714,6 +717,7 @@ export async function compact(
 				headers,
 				signal,
 				thinkingLevel,
+				disableEnvApiKey,
 			),
 		]);
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
@@ -728,6 +732,7 @@ export async function compact(
 			customInstructions,
 			previousSummary,
 			thinkingLevel,
+			disableEnvApiKey,
 		);
 	}
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
@@ -756,6 +761,7 @@ async function generateTurnPrefixSummary(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	disableEnvApiKey = false,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
@@ -773,8 +779,8 @@ async function generateTurnPrefixSummary(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		model.reasoning && thinkingLevel && thinkingLevel !== "off"
-			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-			: { maxTokens, signal, apiKey, headers },
+			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel, disableEnvApiKey }
+			: { maxTokens, signal, apiKey, headers, disableEnvApiKey },
 	);
 
 	if (response.stopReason === "error") {

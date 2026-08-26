@@ -415,6 +415,65 @@ describe("issue 171 run-scoped model overlay", () => {
 		expect(persistedAfterCancellation).not.toContain("secret-header-cancelled-run");
 	});
 
+	it("keeps hostile environment configuration disabled during scoped automatic compaction", async () => {
+		vi.stubEnv("PI_CACHE_RETENTION", "long");
+		vi.stubEnv("PRIME_TEAM_ID", "hostile-team");
+		vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "hostile-account");
+		vi.stubEnv("CLOUDFLARE_GATEWAY_ID", "hostile-gateway");
+		const provider = registerFauxProvider({
+			api: "faux-run-compaction",
+			provider: "native-compaction",
+			models: [{ id: "compaction", name: "Compaction" }],
+		});
+		providers.push(provider);
+		const harness = await createHarness({ settings: { compaction: { keepRecentTokens: 1 } } });
+		harnesses.push(harness);
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: `old turn ${"x".repeat(10_000)}` }],
+			timestamp: Date.now() - 3,
+		});
+		harness.sessionManager.appendMessage(fauxAssistantMessage("old answer", { timestamp: Date.now() - 2 }));
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "recent turn" }],
+			timestamp: Date.now() - 1,
+		});
+		harness.sessionManager.appendMessage(fauxAssistantMessage("recent answer"));
+		const model = { ...provider.getModel("compaction")!, provider: "native-compaction" };
+		const scope = createAgentRunModelScope({
+			version: AGENT_RUN_MODEL_SCOPE_VERSION,
+			root: model,
+			models: [model],
+			requestAccess: [
+				{
+					model,
+					access: { kind: "secret", contract: "secret@1", apiKey: "scoped-compaction-key" },
+				},
+			],
+		});
+		let observedOptions: SimpleStreamOptions | undefined;
+		provider.setResponses([
+			(_context, options) => {
+				observedOptions = options;
+				return fauxAssistantMessage("scoped summary");
+			},
+		]);
+		const internals = harness.session as unknown as {
+			_runAutoCompaction: (reason: "threshold", willRetry: boolean, runScope: unknown) => Promise<boolean>;
+		};
+		const compacted = await internals._runAutoCompaction("threshold", false, {
+			modelScope: scope,
+			selectedModel: model,
+		});
+		expect(observedOptions).toMatchObject({
+			apiKey: "scoped-compaction-key",
+			disableEnvApiKey: true,
+		});
+		expect(compacted).toBe(false);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({ aborted: false });
+	});
+
 	it("does not accept a lookalike stream option as run-scoped auth authority", async () => {
 		const provider = registerFauxProvider({
 			api: "faux-run-forgery",

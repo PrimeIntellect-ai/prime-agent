@@ -662,7 +662,7 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false, undefined);
 	});
 
 	it("triggers threshold compaction when trailing context exceeds the model window", async () => {
@@ -693,7 +693,7 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(successfulAssistant, false);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false, undefined);
 	});
 
 	it("stops a tool loop for threshold compaction before the next model call", async () => {
@@ -1078,7 +1078,7 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(successfulAssistant, false);
 
-		expect(runCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runCompactionSpy).toHaveBeenCalledWith("threshold", false, undefined);
 		expect(followUpSpy).not.toHaveBeenCalled();
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 		const queuedText = harness.session.getFollowUpMessages()[0] ?? "";
@@ -1124,7 +1124,7 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(successfulAssistant, false, false);
 
-		expect(runCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runCompactionSpy).toHaveBeenCalledWith("threshold", false, undefined);
 		expect(followUpSpy).not.toHaveBeenCalled();
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(0);
 	});

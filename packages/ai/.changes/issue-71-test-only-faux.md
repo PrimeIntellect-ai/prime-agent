@@ -1,1 +1,0 @@
-- Changed faux provider helpers to use the explicit test-only `@earendil-works/pi-ai/faux` entrypoint ([#71](https://github.com/PrimeIntellect-ai/prime-agent/issues/71)).

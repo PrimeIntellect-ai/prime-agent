@@ -32,6 +32,9 @@ function assertExplicitRequestAccess(model: Model<Api>, options: StreamOptions |
 	if (!supportsExplicitRequestAccess(model.api)) {
 		throw new Error(`Run-scoped requests do not support api: ${model.api}`);
 	}
+	if (/\{CLOUDFLARE_[A-Z0-9_]+\}/.test(model.baseUrl)) {
+		throw new Error(`Run-scoped request requires a resolved Cloudflare endpoint for provider: ${model.provider}`);
+	}
 	let endpoint: URL;
 	try {
 		endpoint = new URL(model.baseUrl);

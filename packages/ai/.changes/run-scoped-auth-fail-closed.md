@@ -1,1 +1,0 @@
-- Prevented run-scoped provider requests from falling back to ambient credentials or transport configuration, required explicit HTTP endpoints, and rejected APIs such as Azure and Vertex whose full request configuration is not yet explicit.

@@ -7826,10 +7826,11 @@ export class AgentSession {
 		model: Model<any>;
 		apiKey: string;
 		headers?: Record<string, string>;
+		disableEnvApiKey?: boolean;
 		customInstructions?: string;
 		signal: AbortSignal;
 	}): Promise<CompactionResult> {
-		const { model, apiKey, headers, customInstructions, signal } = options;
+		const { model, apiKey, headers, disableEnvApiKey, customInstructions, signal } = options;
 		const pathEntries = this.sessionManager.getBranch();
 		const settings = this.settingsManager.getCompactionSettings();
 
@@ -7866,7 +7867,16 @@ export class AgentSession {
 
 		const { summary, firstKeptEntryId, tokensBefore, details } =
 			extensionCompaction ??
-			(await compact(preparation, model, apiKey, headers, customInstructions, signal, this.thinkingLevel));
+			(await compact(
+				preparation,
+				model,
+				apiKey,
+				headers,
+				customInstructions,
+				signal,
+				this.thinkingLevel,
+				disableEnvApiKey,
+			));
 
 		if (signal.aborted) {
 			throw new Error("Compaction cancelled");
@@ -8960,6 +8970,7 @@ export class AgentSession {
 				model: selectedModel,
 				apiKey: authResult.apiKey,
 				headers: authResult.headers,
+				disableEnvApiKey: scopedAuth !== undefined,
 				customInstructions,
 				signal: this._autoCompactionAbortController.signal,
 			});

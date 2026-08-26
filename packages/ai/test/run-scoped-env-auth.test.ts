@@ -90,4 +90,19 @@ describe("run-scoped provider authentication", () => {
 			).toThrow("Run-scoped request requires an explicit HTTP endpoint for provider: openai");
 		}
 	});
+
+	it("rejects unresolved Cloudflare endpoints without consulting hostile environment configuration", () => {
+		vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "hostile-account");
+		vi.stubEnv("CLOUDFLARE_GATEWAY_ID", "hostile-gateway");
+		expect(() =>
+			streamSimple(
+				{
+					...model("openai-responses", "cloudflare-ai-gateway"),
+					baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/openai",
+				},
+				{ messages: [] },
+				{ disableEnvApiKey: true, apiKey: "explicit-key" },
+			),
+		).toThrow("Run-scoped request requires a resolved Cloudflare endpoint for provider: cloudflare-ai-gateway");
+	});
 });

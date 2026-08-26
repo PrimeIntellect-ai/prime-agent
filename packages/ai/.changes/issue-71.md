@@ -1,0 +1,1 @@
+- Changed faux provider helpers to use the explicit test-only `@earendil-works/pi-ai/faux` entrypoint, and made run-scoped requests require explicit credentials and resolved endpoints while rejecting incomplete provider mappings and ambient transport configuration ([#71](https://github.com/PrimeIntellect-ai/prime-agent/issues/71)).
