@@ -22,6 +22,7 @@
 - Hardened bash() further: the host now injects an absolute default shell into the kernel (no PATH lookup; /bin/bash else /bin/sh on POSIX), macOS start-id lookup uses /bin/ps, and Windows worker-teardown orphan kills go through hardened taskkill /T.
 - Hardened Windows bash execution: the kernel shell is resolved only from trusted absolute paths (never PATH), and bash children are contained by kill-on-close job objects so a crashed kernel cannot leak process trees (taskkill remains only as a fallback when job creation fails).
 - Hardened Windows bash() containment: children are now created directly inside the kill-on-close job (PROC_THREAD_ATTRIBUTE_JOB_LIST at CreateProcessW time), so no window exists in which a kernel kill can leak a suspended, never-run process; handle inheritance is restricted to exactly the child's stdio handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so concurrent spawns cannot leak each other's handles; the journal start-id query still runs only while the job-contained child is suspended, and bash() still raises instead of falling back to jobless taskkill when containment fails.
+- Fixed a Windows bash() PID-reuse hazard: the child process handle is now retained through job cleanup and every taskkill-by-pid fallback (watch reap, kill(), cancel escalation, shutdown cleanup) and closed exactly once only after the handle is marked reaped, so a recycled pid can never be killed by the fallback.
 
 ## [0.8.1] - 2026-08-26
 
