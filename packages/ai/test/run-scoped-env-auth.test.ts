@@ -1,13 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { streamSimpleAnthropic } from "../src/providers/anthropic.js";
-import { streamSimpleOpenAICompletions } from "../src/providers/openai-completions.js";
-import { streamSimpleOpenAIResponses } from "../src/providers/openai-responses.js";
-import type { Model } from "../src/types.js";
+import { streamSimple } from "../src/stream.js";
+import type { Api, Model } from "../src/types.js";
 
-function model<TApi extends "anthropic-messages" | "openai-completions" | "openai-responses">(
-	api: TApi,
-	provider: string,
-): Model<TApi> {
+function model(api: Api, provider: string): Model<Api> {
 	return {
 		id: "test-model",
 		name: "Test model",
@@ -25,19 +20,50 @@ function model<TApi extends "anthropic-messages" | "openai-completions" | "opena
 describe("run-scoped provider authentication", () => {
 	afterEach(() => vi.unstubAllEnvs());
 
-	it("fails before transport instead of using OpenAI or Anthropic environment keys", () => {
+	it("rejects ambient credentials centrally for every explicit-access provider api", () => {
 		vi.stubEnv("OPENAI_API_KEY", "ambient-openai-key");
 		vi.stubEnv("ANTHROPIC_API_KEY", "ambient-anthropic-key");
-		const options = { disableEnvApiKey: true } as const;
+		vi.stubEnv("AZURE_OPENAI_API_KEY", "ambient-azure-key");
+		vi.stubEnv("GEMINI_API_KEY", "ambient-google-key");
+		vi.stubEnv("MISTRAL_API_KEY", "ambient-mistral-key");
+		const routes: Array<readonly [Api, string]> = [
+			["anthropic-messages", "anthropic"],
+			["azure-openai-responses", "azure-openai-responses"],
+			["google-generative-ai", "google"],
+			["google-vertex", "google-vertex"],
+			["mistral-conversations", "mistral"],
+			["openai-codex-responses", "openai-codex"],
+			["openai-completions", "openai"],
+			["openai-responses", "openai"],
+		];
 
-		expect(() => streamSimpleOpenAIResponses(model("openai-responses", "openai"), { messages: [] }, options)).toThrow(
-			"No API key for provider: openai",
-		);
+		for (const [api, provider] of routes) {
+			expect(() => streamSimple(model(api, provider), { messages: [] }, { disableEnvApiKey: true })).toThrow(
+				`Run-scoped request requires explicit access for provider: ${provider}`,
+			);
+		}
+	});
+
+	it("rejects unsupported run-scoped APIs before provider dispatch", () => {
 		expect(() =>
-			streamSimpleOpenAICompletions(model("openai-completions", "openai"), { messages: [] }, options),
-		).toThrow("No API key for provider: openai");
-		expect(() => streamSimpleAnthropic(model("anthropic-messages", "anthropic"), { messages: [] }, options)).toThrow(
-			"No API key for provider: anthropic",
-		);
+			streamSimple(
+				model("bedrock-converse-stream", "amazon-bedrock"),
+				{ messages: [] },
+				{
+					disableEnvApiKey: true,
+					apiKey: "explicit-but-unsupported",
+				},
+			),
+		).toThrow("Run-scoped requests do not support api: bedrock-converse-stream");
+		expect(() =>
+			streamSimple(
+				model("future-provider-api", "future-provider"),
+				{ messages: [] },
+				{
+					disableEnvApiKey: true,
+					apiKey: "explicit-but-unsupported",
+				},
+			),
+		).toThrow("Run-scoped requests do not support api: future-provider-api");
 	});
 });

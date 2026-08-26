@@ -14,6 +14,31 @@ import type {
 
 export { getEnvApiKey } from "./env-api-keys.js";
 
+const EXPLICIT_REQUEST_ACCESS_APIS = new Set<Api>([
+	"anthropic-messages",
+	"azure-openai-responses",
+	"google-generative-ai",
+	"google-vertex",
+	"mistral-conversations",
+	"openai-codex-responses",
+	"openai-completions",
+	"openai-responses",
+]);
+
+export function supportsExplicitRequestAccess(api: Api): boolean {
+	return EXPLICIT_REQUEST_ACCESS_APIS.has(api) || api === "faux" || api.startsWith("faux-");
+}
+
+function assertExplicitRequestAccess(model: Model<Api>, options: StreamOptions | undefined): void {
+	if (options?.disableEnvApiKey !== true) return;
+	if (!supportsExplicitRequestAccess(model.api)) {
+		throw new Error(`Run-scoped requests do not support api: ${model.api}`);
+	}
+	if (typeof options.apiKey !== "string" || options.apiKey.trim() === "") {
+		throw new Error(`Run-scoped request requires explicit access for provider: ${model.provider}`);
+	}
+}
+
 function resolveApiProvider(api: Api) {
 	const provider = getApiProvider(api);
 	if (!provider) {
@@ -27,6 +52,7 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: ProviderStreamOptions,
 ): AssistantMessageEventStream {
+	assertExplicitRequestAccess(model, options);
 	const provider = resolveApiProvider(model.api);
 	return provider.stream(model, context, options as StreamOptions);
 }
@@ -45,6 +71,7 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	assertExplicitRequestAccess(model, options);
 	const provider = resolveApiProvider(model.api);
 	return provider.streamSimple(model, context, options);
 }

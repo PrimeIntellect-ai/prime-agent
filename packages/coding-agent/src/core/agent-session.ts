@@ -247,8 +247,8 @@ import {
 	type AgentRunModelScope,
 	assertAgentRunModelScope,
 	findAgentRunScopedModel,
+	getAgentRunRequestAccess,
 	markAgentRunModelAuth,
-	resolveAgentRunRequestAuth,
 	revokeAgentRunModelScope,
 } from "./run-model-scope.js";
 import {
@@ -1479,10 +1479,7 @@ export class AgentSession {
 			if (!selected || selected.provider !== model.provider || selected.id !== model.id) {
 				throw new Error(`Model ${model.provider}/${model.id} is outside the admitted run scope`);
 			}
-			const auth = await resolveAgentRunRequestAuth(runScope.modelScope, model, {
-				executionId: runScope.executionId,
-				signal: options?.signal ?? runScope.controller.signal,
-			});
+			const auth = getAgentRunRequestAccess(runScope.modelScope, model);
 			return baseStream(
 				model,
 				context,
@@ -2155,10 +2152,7 @@ export class AgentSession {
 
 	private async _validateCanStartAgentRun(runScope?: AgentRunScope): Promise<void> {
 		if (runScope?.modelScope !== undefined && runScope.selectedModel !== undefined) {
-			await resolveAgentRunRequestAuth(runScope.modelScope, runScope.selectedModel, {
-				executionId: runScope.executionId,
-				signal: runScope.controller.signal,
-			});
+			getAgentRunRequestAccess(runScope.modelScope, runScope.selectedModel);
 			return;
 		}
 		if (!this.model) {
@@ -8938,10 +8932,7 @@ export class AgentSession {
 			const selectedModel = runScope?.selectedModel ?? this.model;
 			const scopedAuth =
 				runScope?.modelScope !== undefined && selectedModel !== undefined
-					? await resolveAgentRunRequestAuth(runScope.modelScope, selectedModel, {
-							executionId: runScope.executionId,
-							signal: runScope.controller.signal,
-						})
+					? getAgentRunRequestAccess(runScope.modelScope, selectedModel)
 					: undefined;
 			const authResult =
 				scopedAuth !== undefined
@@ -10667,10 +10658,7 @@ export class AgentSession {
 		}
 
 		if (runScope?.modelScope) {
-			await resolveAgentRunRequestAuth(runScope.modelScope, model, {
-				executionId: runScope.executionId,
-				signal: runScope.controller.signal,
-			});
+			getAgentRunRequestAccess(runScope.modelScope, model);
 		} else {
 			const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) throw new Error(`Requested subagent model "${reference}" failed authentication preflight`);

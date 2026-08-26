@@ -1,1 +1,1 @@
-- Prevented run-scoped provider requests from falling back to ambient environment credentials.
+- Prevented run-scoped provider requests from falling back to ambient environment credentials and rejected unsupported APIs before provider dispatch.

@@ -3,7 +3,11 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earen
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { ModelRegistry } from "../../../src/core/model-registry.js";
-import { AGENT_RUN_MODEL_SCOPE_VERSION, createAgentRunModelScope } from "../../../src/core/run-model-scope.js";
+import {
+	AGENT_RUN_MODEL_SCOPE_VERSION,
+	createAgentRunModelScope,
+	getAgentRunRequestAccess,
+} from "../../../src/core/run-model-scope.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import { SettingsManager } from "../../../src/core/settings-manager.js";
@@ -103,7 +107,6 @@ describe("issue 171 run-scoped model overlay", () => {
 			return fauxAssistantMessage("root done");
 		};
 		sharedAdapter.setResponses([respond, respond, respond, respond, respond, respond]);
-		const authCalls: string[] = [];
 		const secrets = [
 			"secret-key-native-provider-one",
 			"secret-key-native-provider-two",
@@ -114,13 +117,15 @@ describe("issue 171 run-scoped model overlay", () => {
 			version: AGENT_RUN_MODEL_SCOPE_VERSION,
 			root: rootModel,
 			models: [rootModel, workerBModel, workerAModel],
-			resolveRequestAuth(model) {
-				authCalls.push(`${model.provider}/${model.id}`);
-				return {
+			requestAccess: [rootModel, workerBModel, workerAModel].map((model) => ({
+				model,
+				access: {
+					kind: "secret" as const,
+					contract: "secret@1" as const,
 					apiKey: `secret-key-${model.provider}`,
 					headers: { "x-run-secret": `secret-header-${model.provider}` },
-				};
-			},
+				},
+			})),
 		});
 
 		const runOne = harness.session.promptAndWait("run one", { modelScope: scope });
@@ -147,9 +152,6 @@ describe("issue 171 run-scoped model overlay", () => {
 		await vi.waitFor(() => expect(sharedAdapter.state.callCount).toBe(6));
 		await harness.session.waitForSessionInputIdle();
 		expect(outsiderProvider.state.callCount).toBe(0);
-		expect(authCalls).toContain("native-provider-one/root-a");
-		expect(authCalls).toContain("native-provider-two/worker-b");
-		expect(authCalls).toContain("native-provider-one/worker-a");
 		expect(requestAuth.get("native-provider-one/root-a")).toEqual([
 			{
 				apiKey: "secret-key-native-provider-one",
@@ -196,7 +198,12 @@ describe("issue 171 run-scoped model overlay", () => {
 			version: AGENT_RUN_MODEL_SCOPE_VERSION,
 			root: workerBModel,
 			models: [workerBModel],
-			resolveRequestAuth: () => ({ apiKey: "second-run-key" }),
+			requestAccess: [
+				{
+					model: workerBModel,
+					access: { kind: "secret", contract: "secret@1", apiKey: "second-run-key" },
+				},
+			],
 		});
 		await harness.session.promptAndWait("run two", { modelScope: secondScope });
 		expect(sharedAdapter.state.callCount).toBe(7);
@@ -207,6 +214,97 @@ describe("issue 171 run-scoped model overlay", () => {
 		expect(
 			JSON.stringify({ entries: harness.sessionManager.getEntries(), state: harness.session.agent.state }),
 		).not.toContain("second-run-key");
+	});
+
+	it("requires a complete versioned access bundle before the run starts", () => {
+		const model: Model<string> = {
+			id: "root",
+			name: "Root",
+			api: "openai-responses",
+			provider: "provider-one",
+			baseUrl: "https://example.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		};
+		const outsider = { ...model, provider: "provider-two" };
+
+		expect(() =>
+			createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: model,
+				models: [model],
+				requestAccess: [],
+			}),
+		).toThrow("exactly cover");
+		expect(() =>
+			createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: model,
+				models: [model],
+				requestAccess: [
+					{ model: outsider, access: { kind: "secret", contract: "secret@1", apiKey: "outsider-key" } },
+				],
+			}),
+		).toThrow("outside the ordered roster");
+		expect(() =>
+			createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: model,
+				models: [model],
+				requestAccess: [
+					{
+						model,
+						access: { kind: "managed-runtime", contract: "managed-runtime@1", environment: {} },
+					},
+				],
+			}),
+		).toThrow("does not support managed-runtime@1");
+		expect(() =>
+			createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: { ...model, api: "future-api" },
+				models: [{ ...model, api: "future-api" }],
+				requestAccess: [
+					{
+						model: { ...model, api: "future-api" },
+						access: { kind: "secret", contract: "secret@1", apiKey: "future-key" },
+					},
+				],
+			}),
+		).toThrow("does not support secret@1");
+		expect(() =>
+			createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: model,
+				models: [model],
+				requestAccess: [
+					{
+						model,
+						access: { kind: "secret", contract: "secret@2", apiKey: "wrong-version" } as never,
+					},
+				],
+			}),
+		).toThrow("Unsupported agent run request access contract");
+
+		const supplied = { kind: "secret" as const, contract: "secret@1" as const, apiKey: "original-key" };
+		const scope = createAgentRunModelScope({
+			version: AGENT_RUN_MODEL_SCOPE_VERSION,
+			root: model,
+			models: [model],
+			requestAccess: [{ model, access: supplied }],
+		});
+		supplied.apiKey = "mutated-key";
+		const first = getAgentRunRequestAccess(scope, model);
+		const second = getAgentRunRequestAccess(scope, model);
+		expect(first).toBe(second);
+		expect(first.apiKey).toBe("original-key");
+		expect(Object.isFrozen(first)).toBe(true);
+		expect(() => getAgentRunRequestAccess(scope, { ...model, baseUrl: "https://other.invalid/v1" })).toThrow(
+			"does not match its admitted api and endpoint",
+		);
 	});
 
 	it("revokes request auth after failure and cancellation", async () => {
@@ -227,14 +325,10 @@ describe("issue 171 run-scoped model overlay", () => {
 			version: AGENT_RUN_MODEL_SCOPE_VERSION,
 			root: model,
 			models: [model],
-			resolveRequestAuth: () => {
-				void failedAuth;
-				throw new Error("run auth unavailable");
-			},
+			requestAccess: [{ model, access: { kind: "secret", contract: "secret@1", ...failedAuth } }],
 		});
-		await expect(harness.session.promptAndWait("fail", { modelScope: failed })).rejects.toThrow(
-			"run auth unavailable",
-		);
+		provider.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider failed" })]);
+		await harness.session.promptAndWait("fail", { modelScope: failed });
 		await expect(harness.session.promptAndWait("reuse failed", { modelScope: failed })).rejects.toThrow("revoked");
 		const persistedAfterFailure = JSON.stringify({
 			entries: harness.sessionManager.getEntries(),
@@ -260,10 +354,17 @@ describe("issue 171 run-scoped model overlay", () => {
 			version: AGENT_RUN_MODEL_SCOPE_VERSION,
 			root: model,
 			models: [model],
-			resolveRequestAuth: () => ({
-				apiKey: "secret-key-cancelled-run",
-				headers: { "x-run-secret": "secret-header-cancelled-run" },
-			}),
+			requestAccess: [
+				{
+					model,
+					access: {
+						kind: "secret",
+						contract: "secret@1",
+						apiKey: "secret-key-cancelled-run",
+						headers: { "x-run-secret": "secret-header-cancelled-run" },
+					},
+				},
+			],
 		});
 		const run = harness.session.prompt("cancel", { modelScope: cancelled });
 		await started;

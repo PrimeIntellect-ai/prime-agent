@@ -101,10 +101,11 @@ export type { PromptTemplate } from "./prompt-templates.js";
 export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
 export {
 	AGENT_RUN_MODEL_SCOPE_VERSION,
+	type AgentRunManagedRuntimeRequestAccess,
+	type AgentRunModelRequestAccess,
 	type AgentRunModelScope,
-	type AgentRunRequestAuth,
-	type AgentRunRequestAuthContext,
-	type AgentRunRequestAuthResolver,
+	type AgentRunRequestAccess,
+	type AgentRunSecretRequestAccess,
 	createAgentRunModelScope,
 } from "./run-model-scope.js";
 export {

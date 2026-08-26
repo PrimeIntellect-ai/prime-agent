@@ -80,7 +80,7 @@ export interface StreamOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
 	apiKey?: string;
-	/** Do not consult provider environment variables when `apiKey` is absent. */
+	/** Require explicit request access and reject unsupported APIs before provider dispatch. */
 	disableEnvApiKey?: boolean;
 	/**
 	 * Preferred transport for providers that support multiple transports.

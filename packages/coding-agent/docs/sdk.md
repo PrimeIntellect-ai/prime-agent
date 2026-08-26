@@ -176,17 +176,23 @@ const modelScope = createAgentRunModelScope({
   version: AGENT_RUN_MODEL_SCOPE_VERSION,
   root: admittedModels[0],
   models: admittedModels,
-  resolveRequestAuth(model, { executionId, signal }) {
-    return accessBroker.resolve({ model, executionId, signal });
-  },
+  requestAccess: admittedModels.map((model) => ({
+    model,
+    access: {
+      kind: "secret",
+      contract: "secret@1",
+      apiKey: accessByModel.get(model)!.apiKey,
+      headers: accessByModel.get(model)!.headers,
+    },
+  })),
 });
 
 await session.promptAndWait("Run the admitted task", { modelScope });
 ```
 
-The root turn uses `root` exactly. Recursive children can select only entries in `models`, in the supplied order, and resolve credentials just before each provider request. Ambient registry models cannot expand this roster. The scope and resolver are memory-only, are inherited only by children of that execution, and are revoked when the root prompt succeeds, fails, or is cancelled. A scope is single-use; create a new scope for every prompt. The session's durable model and model-change history are not modified, so a later prompt may admit a different root on the same session.
+The root turn uses `root` exactly. `requestAccess` must cover every roster entry exactly before the prompt starts. Each entry uses the tagged `secret@1` or `managed-runtime@1` contract; Prime validates the contract against the model API and rejects unsupported native mappings before inference. Recursive children can select only entries in `models`, in the supplied order, and every root or child request reads the same immutable upfront access without reacquiring it. Ambient registry models cannot expand this roster, and ambient provider credentials are prohibited for every run-scoped request. The scope and access bundle are memory-only, are inherited only by children of that execution, and are revoked when the root prompt succeeds, fails, or is cancelled. A scope is single-use; create a new scope for every prompt. The session's durable model and model-change history are not modified, so a later prompt may admit a different root on the same session.
 
-`AgentRunModelScope` is intentionally available only through the in-process API. Do not persist it or its resolver, put credentials in model objects, or pass it through the daemon/RPC protocol.
+`AgentRunModelScope` is intentionally available only through the in-process API. Do not persist it or its access bundle, put credentials in model objects, or pass it through the daemon/RPC protocol. Version 1 supports explicit `secret@1` access for the built-in Anthropic, Azure OpenAI, Google, Google Vertex API-key, Mistral, OpenAI Codex, OpenAI Completions, and OpenAI Responses transports. `managed-runtime@1`, Bedrock, and unknown APIs fail closed until a Prime-native request mapping is implemented.
 
 ### Run-scoped tool authority (v1)
 

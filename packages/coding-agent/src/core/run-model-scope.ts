@@ -1,26 +1,32 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { type Api, type Model, supportsExplicitRequestAccess } from "@earendil-works/pi-ai";
 
 export const AGENT_RUN_MODEL_SCOPE_VERSION = 1 as const;
 
-export interface AgentRunRequestAuth {
-	readonly apiKey?: string;
+export interface AgentRunSecretRequestAccess {
+	readonly kind: "secret";
+	readonly contract: "secret@1";
+	readonly apiKey: string;
 	readonly headers?: Readonly<Record<string, string>>;
 }
 
-export interface AgentRunRequestAuthContext {
-	readonly executionId: string;
-	readonly signal: AbortSignal;
+export interface AgentRunManagedRuntimeRequestAccess {
+	readonly kind: "managed-runtime";
+	readonly contract: "managed-runtime@1";
+	readonly executable?: string;
+	readonly environment: Readonly<Record<string, string>>;
 }
 
-export type AgentRunRequestAuthResolver = (
-	model: Model<Api>,
-	context: AgentRunRequestAuthContext,
-) => AgentRunRequestAuth | Promise<AgentRunRequestAuth>;
+export type AgentRunRequestAccess = AgentRunSecretRequestAccess | AgentRunManagedRuntimeRequestAccess;
+
+export interface AgentRunModelRequestAccess {
+	readonly model: Model<Api>;
+	readonly access: AgentRunRequestAccess;
+}
 
 const agentRunModelScopeBrand = Symbol("AgentRunModelScope");
 const agentRunModelAuthBrand = Symbol("AgentRunModelAuth");
 
-/** A factory-minted, single-run model and request-auth capability. */
+/** A factory-minted, single-run model and upfront request-access capability. */
 export interface AgentRunModelScope {
 	readonly version: typeof AGENT_RUN_MODEL_SCOPE_VERSION;
 	readonly root: Model<Api>;
@@ -46,18 +52,64 @@ function immutableModel(model: Model<Api>): Model<Api> {
 	return deepFreeze(structuredClone(model));
 }
 
+function immutableStringRecord(
+	value: Readonly<Record<string, string>>,
+	label: string,
+): Readonly<Record<string, string>> {
+	const copy: Record<string, string> = {};
+	for (const [key, entry] of Object.entries(value)) {
+		if (key.trim() === "" || typeof entry !== "string") throw new Error(`${label} must contain only string entries`);
+		copy[key] = entry;
+	}
+	return Object.freeze(copy);
+}
+
+function normalizeRequestAccess(model: Model<Api>, access: AgentRunRequestAccess): AgentRunSecretRequestAccess {
+	if (access.kind === "managed-runtime") {
+		if (access.contract !== "managed-runtime@1") {
+			throw new Error("Unsupported agent run managed-runtime access contract");
+		}
+		immutableStringRecord(access.environment, "Agent run managed-runtime environment");
+		if (access.executable !== undefined && access.executable.trim() === "") {
+			throw new Error("Agent run managed-runtime executable must be non-empty");
+		}
+		throw new Error(`Agent run api ${model.api} does not support managed-runtime@1 access`);
+	}
+	if (access.kind !== "secret" || access.contract !== "secret@1") {
+		throw new Error("Unsupported agent run request access contract");
+	}
+	if (!supportsExplicitRequestAccess(model.api)) {
+		throw new Error(`Agent run api ${model.api} does not support secret@1 access`);
+	}
+	if (typeof access.apiKey !== "string" || access.apiKey.trim() === "") {
+		throw new Error(`Agent run model ${model.provider}/${model.id} requires an explicit api key`);
+	}
+	return Object.freeze({
+		kind: "secret",
+		contract: "secret@1",
+		apiKey: access.apiKey,
+		...(access.headers === undefined
+			? {}
+			: { headers: immutableStringRecord(access.headers, "Agent run secret headers") }),
+	});
+}
+
 class AgentRunModelScopeCapability implements AgentRunModelScope {
 	readonly version = AGENT_RUN_MODEL_SCOPE_VERSION;
 	readonly root: Model<Api>;
 	readonly models: readonly Model<Api>[];
 	readonly [agentRunModelScopeBrand] = true;
 	#active = true;
-	readonly #resolveRequestAuth: AgentRunRequestAuthResolver;
+	readonly #requestAccessByModel: ReadonlyMap<string, AgentRunSecretRequestAccess>;
 
-	constructor(root: Model<Api>, models: readonly Model<Api>[], resolver: AgentRunRequestAuthResolver) {
+	constructor(
+		root: Model<Api>,
+		models: readonly Model<Api>[],
+		requestAccessByModel: ReadonlyMap<string, AgentRunSecretRequestAccess>,
+	) {
 		this.root = root;
 		this.models = models;
-		this.#resolveRequestAuth = resolver;
+		this.#requestAccessByModel = requestAccessByModel;
 		Object.freeze(this);
 	}
 
@@ -65,12 +117,11 @@ class AgentRunModelScopeCapability implements AgentRunModelScope {
 		if (!this.#active) throw new Error("Agent run model scope is revoked");
 	}
 
-	resolveRequestAuth(
-		model: Model<Api>,
-		context: AgentRunRequestAuthContext,
-	): AgentRunRequestAuth | Promise<AgentRunRequestAuth> {
+	requestAccess(model: Model<Api>): AgentRunSecretRequestAccess {
 		this.assertActive();
-		return this.#resolveRequestAuth(model, context);
+		const access = this.#requestAccessByModel.get(exactModelIdentity(model));
+		if (access === undefined) throw new Error(`Agent run model ${model.provider}/${model.id} has no upfront access`);
+		return access;
 	}
 
 	revoke(): void {
@@ -82,22 +133,43 @@ export function createAgentRunModelScope(input: {
 	readonly version: typeof AGENT_RUN_MODEL_SCOPE_VERSION;
 	readonly root: Model<Api>;
 	readonly models: readonly Model<Api>[];
-	readonly resolveRequestAuth: AgentRunRequestAuthResolver;
+	readonly requestAccess: readonly AgentRunModelRequestAccess[];
 }): AgentRunModelScope {
 	if (input.version !== AGENT_RUN_MODEL_SCOPE_VERSION) throw new Error("Unsupported agent run model scope version");
 	if (input.models.length < 1) throw new Error("Agent run model scope requires at least one model");
-	if (typeof input.resolveRequestAuth !== "function") throw new Error("Agent run model scope requires request auth");
+	if (!Array.isArray(input.requestAccess)) throw new Error("Agent run model scope requires upfront request access");
 	const models = input.models.map(immutableModel);
 	const identities = new Set<string>();
+	const exactIdentities = new Map<string, Model<Api>>();
 	for (const model of models) {
 		const identity = modelIdentity(model);
 		if (identities.has(identity))
 			throw new Error(`Agent run model scope contains duplicate model ${model.provider}/${model.id}`);
 		identities.add(identity);
+		exactIdentities.set(exactModelIdentity(model), model);
 	}
-	const root = models.find((model) => exactModelIdentity(model) === exactModelIdentity(input.root));
+	const root = exactIdentities.get(exactModelIdentity(input.root));
 	if (!root) throw new Error("Agent run model scope root must belong to its ordered model roster");
-	return new AgentRunModelScopeCapability(root, Object.freeze(models), input.resolveRequestAuth);
+	if (input.requestAccess.length !== models.length) {
+		throw new Error("Agent run request access must exactly cover the ordered model roster");
+	}
+	const requestAccessByModel = new Map<string, AgentRunSecretRequestAccess>();
+	for (const entry of input.requestAccess) {
+		const identity = exactModelIdentity(entry.model);
+		const selected = exactIdentities.get(identity);
+		if (selected === undefined)
+			throw new Error("Agent run request access contains a model outside the ordered roster");
+		if (requestAccessByModel.has(identity)) {
+			throw new Error(`Agent run request access contains duplicate model ${selected.provider}/${selected.id}`);
+		}
+		requestAccessByModel.set(identity, normalizeRequestAccess(selected, entry.access));
+	}
+	for (const model of models) {
+		if (!requestAccessByModel.has(exactModelIdentity(model))) {
+			throw new Error(`Agent run model ${model.provider}/${model.id} has no upfront access`);
+		}
+	}
+	return new AgentRunModelScopeCapability(root, Object.freeze(models), requestAccessByModel);
 }
 
 export function assertAgentRunModelScope(value: unknown): asserts value is AgentRunModelScope {
@@ -116,22 +188,14 @@ export function findAgentRunScopedModel(
 	return scope.models.find((model) => model.provider === provider && model.id === modelId);
 }
 
-export async function resolveAgentRunRequestAuth(
-	scope: AgentRunModelScope,
-	model: Model<Api>,
-	context: AgentRunRequestAuthContext,
-): Promise<AgentRunRequestAuth> {
+export function getAgentRunRequestAccess(scope: AgentRunModelScope, model: Model<Api>): AgentRunSecretRequestAccess {
 	assertAgentRunModelScope(scope);
 	const selected = findAgentRunScopedModel(scope, model.provider, model.id);
 	if (!selected) throw new Error(`Model ${model.provider}/${model.id} is outside the admitted run scope`);
-	context.signal.throwIfAborted();
-	const auth = await (scope as AgentRunModelScopeCapability).resolveRequestAuth(selected, context);
-	assertAgentRunModelScope(scope);
-	context.signal.throwIfAborted();
-	return Object.freeze({
-		...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
-		...(auth.headers === undefined ? {} : { headers: Object.freeze({ ...auth.headers }) }),
-	});
+	if (exactModelIdentity(selected) !== exactModelIdentity(model)) {
+		throw new Error(`Model ${model.provider}/${model.id} does not match its admitted api and endpoint`);
+	}
+	return (scope as AgentRunModelScopeCapability).requestAccess(selected);
 }
 
 export function revokeAgentRunModelScope(scope: AgentRunModelScope): void {
