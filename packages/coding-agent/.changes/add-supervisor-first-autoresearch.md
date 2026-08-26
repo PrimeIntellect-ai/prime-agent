@@ -9,3 +9,4 @@
 - Prevented fast models from burning research turns on skill/source introspection before creating durable state.
 - Rebound failed reviewers and stale supervisors after provider or root-session failures, including secure terminal-result recovery and idempotent retry of the latest durable supervisor checkpoint.
 - Made weak-model supervision restart-safe by bounding bootstrap behavior and checkpoint deadlines, preserving active daemon follow-up status, accepting only durable parent-send receipts, and recovering bound child receipts from validated artifact descriptors after daemon restarts.
+- Restored failed passive-child status reporting, made unavailable kernel host calls fail before opening a Comm, and promoted the pinned NOOA behavioral evaluator into required CI.

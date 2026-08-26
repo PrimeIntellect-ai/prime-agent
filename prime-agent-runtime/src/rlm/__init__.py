@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 import types
 from dataclasses import dataclass
@@ -22,6 +24,20 @@ except Exception:  # pragma: no cover - only available in kernels
     get_ipython = None  # type: ignore[assignment]
 
 HOST_COMM_TARGET = "host.request"
+HOST_REQUEST_TYPES_ENV = "PRIME_AGENT_HOST_REQUEST_TYPES"
+
+
+def _advertised_host_request_types() -> set[str] | None:
+    raw = os.environ.get(HOST_REQUEST_TYPES_ENV)
+    if raw is None:
+        return None
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        return None
+    return set(values)
 
 
 @dataclass(frozen=True)
@@ -93,6 +109,11 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
         raise TypeError("request_type must be a non-empty str")
     if payload is not None and not isinstance(payload, dict):
         raise TypeError(f"payload must be a dict or None, got {type(payload).__name__}")
+    advertised_types = _advertised_host_request_types()
+    if advertised_types is not None and request_type not in advertised_types:
+        raise RuntimeError(
+            f'host request type "{request_type}" is not available in this session'
+        )
     if Comm is None:
         raise RuntimeError("Jupyter comm support is unavailable in this kernel")
     _install_control_comm_handlers()

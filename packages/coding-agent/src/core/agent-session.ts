@@ -10369,15 +10369,15 @@ export class AgentSession {
 	private _buildRlmSubagentList(listedAgents?: AgentSessionMessageListResult): RlmListSubagentsResult {
 		const daemonChildren = new Map<string, AgentSessionMessageAgentSummary>();
 		const daemonStatus = (child: AgentSessionMessageAgentSummary): RlmSubagentRegistryEntry["status"] => {
-			if (
-				child.isStreaming ||
-				child.unfinishedActionCount > 0 ||
-				child.rlmChildRegistryStatus === "running" ||
-				child.status === "running"
-			) {
+			if (child.isStreaming || child.unfinishedActionCount > 0 || child.status === "running") {
 				return "running";
 			}
-			return child.rlmChildRegistryStatus === "deleted" ? "error" : "completed";
+			// A nonresident daemon ledger entry left in `running` did not reach its
+			// durable completion boundary. Only live daemon activity above can turn
+			// that stale registry state back into a running child.
+			return child.rlmChildRegistryStatus === "running" || child.rlmChildRegistryStatus === "deleted"
+				? "error"
+				: "completed";
 		};
 		const parentActiveSessionId = listedAgents?.current?.activeSessionId;
 		if (parentActiveSessionId) {

@@ -9,9 +9,13 @@ PYTHONPATH=packages/coding-agent/skills/autoresearch/src/autoresearch \
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+SKILL_SOURCE = Path(__file__).resolve().parents[1] / "src" / "autoresearch"
+sys.path.insert(0, str(SKILL_SOURCE))
 
 from nooa_sidecar import OWNER, run
 from nooa_memory.store import MemoryStore
