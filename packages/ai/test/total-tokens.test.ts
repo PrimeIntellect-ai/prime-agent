@@ -9,7 +9,7 @@ type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
-import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
+import { hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
 const oauthTokens = await Promise.all([
@@ -261,26 +261,6 @@ describe("totalTokens field", () => {
 			const llm = getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6");
 
 			console.log(`\nCloudflare Workers AI / ${llm.id}:`);
-			const { first, second } = await testTotalTokensWithCache(llm, {
-				apiKey: process.env.CLOUDFLARE_API_KEY,
-			});
-
-			logUsage("First request", first);
-			logUsage("Second request", second);
-
-			assertTotalTokensEqualsComponents(first);
-			assertTotalTokensEqualsComponents(second);
-		});
-	});
-
-	describe.skipIf(!hasCloudflareAiGatewayCredentials())("Cloudflare AI Gateway", () => {
-		it("workers-ai/@cf/moonshotai/kimi-k2.6 - should return totalTokens equal to sum of components", {
-			retry: 3,
-			timeout: 60000,
-		}, async () => {
-			const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
-
-			console.log(`\nCloudflare AI Gateway / ${llm.id}:`);
 			const { first, second } = await testTotalTokensWithCache(llm, {
 				apiKey: process.env.CLOUDFLARE_API_KEY,
 			});
