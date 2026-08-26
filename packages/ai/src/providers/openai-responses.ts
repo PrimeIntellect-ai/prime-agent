@@ -89,7 +89,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 		};
 
 		try {
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+			const apiKey = options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider)) ?? "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
@@ -145,7 +145,7 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider));
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}

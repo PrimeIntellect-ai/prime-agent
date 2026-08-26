@@ -6,6 +6,9 @@ import {
 	AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
 	type AgentRunKernelBoundaryLifecycleEvent,
 	createAgentRunKernelBoundaryScope,
+	prepareAgentRunKernelBoundary,
+	releaseAgentRunKernelBoundary,
+	revokeAgentRunKernelBoundaryScope,
 } from "../../../src/core/run-kernel-boundary.js";
 import { createHarness } from "../harness.js";
 
@@ -42,6 +45,69 @@ describe("issue 71 bounded kernel", () => {
 		);
 		expect(providerRequests).toBe(0);
 		harness.cleanup();
+	});
+
+	it("retains failed cleanup debt, retries it on revoke, and reports persistent failure", async () => {
+		let disposeAttempts = 0;
+		const events: AgentRunKernelBoundaryLifecycleEvent[] = [];
+		const scope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: process.cwd(),
+				workspaceScopeDigest: "sha256:cleanup-debt",
+				network: "enabled",
+				reviewerMode: "automatic",
+			},
+			prepare: () => ({
+				launch: () => {
+					throw new Error("not launched");
+				},
+				dispose: () => {
+					disposeAttempts += 1;
+					if (disposeAttempts === 1) throw new Error("transient cleanup failure");
+				},
+			}),
+			observe: (event) => {
+				events.push(event);
+			},
+		});
+		const context = {
+			executionId: "cleanup-debt",
+			sessionId: "session",
+			recursionDepth: 0,
+			cwd: process.cwd(),
+			signal: new AbortController().signal,
+		};
+		await prepareAgentRunKernelBoundary(scope, context);
+
+		await expect(releaseAgentRunKernelBoundary(scope, context.executionId, "failed", "first")).rejects.toThrow(
+			"Kernel boundary cleanup failed",
+		);
+		await expect(revokeAgentRunKernelBoundaryScope(scope, "retry")).resolves.toBeUndefined();
+
+		expect(disposeAttempts).toBe(2);
+		expect(events.filter((event) => event.phase === "terminal")).toMatchObject([
+			{ cleanup: "failed" },
+			{ cleanup: "completed" },
+		]);
+
+		const persistent = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: scope.policy,
+			prepare: () => ({
+				launch: () => {
+					throw new Error("not launched");
+				},
+				dispose: () => {
+					throw new Error("persistent cleanup failure");
+				},
+			}),
+		});
+		await prepareAgentRunKernelBoundary(persistent, { ...context, executionId: "persistent-debt" });
+		await expect(revokeAgentRunKernelBoundaryScope(persistent, "persistent")).rejects.toThrow(
+			"Kernel boundary revocation failed",
+		);
 	});
 
 	it("uses the trusted launch boundary and awaits terminal confinement cleanup", async () => {

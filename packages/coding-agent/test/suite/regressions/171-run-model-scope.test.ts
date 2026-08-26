@@ -23,6 +23,8 @@ describe("issue 171 run-scoped model overlay", () => {
 	afterEach(() => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 		while (providers.length > 0) providers.pop()?.unregister();
+		vi.unstubAllEnvs();
+		vi.unstubAllGlobals();
 	});
 
 	it("uses an exact three-model roster across isolated providers without persisting the run root", async () => {
@@ -106,7 +108,7 @@ describe("issue 171 run-scoped model overlay", () => {
 			await Promise.all(childCalls);
 			return fauxAssistantMessage("root done");
 		};
-		sharedAdapter.setResponses([respond, respond, respond, respond]);
+		sharedAdapter.setResponses([respond, respond, respond, respond, respond, respond]);
 		const authCalls: string[] = [];
 		const secrets = [
 			"secret-key-native-provider-one",
@@ -148,13 +150,21 @@ describe("issue 171 run-scoped model overlay", () => {
 		});
 		releaseRootRequest();
 		await runOne;
-		await vi.waitFor(() => expect(sharedAdapter.state.callCount).toBe(4));
+		await vi.waitFor(() => expect(sharedAdapter.state.callCount).toBe(6));
 		await harness.session.waitForSessionInputIdle();
 		expect(outsiderProvider.state.callCount).toBe(0);
 		expect(authCalls).toContain("native-provider-one/root-a");
 		expect(authCalls).toContain("native-provider-two/worker-b");
 		expect(authCalls).toContain("native-provider-one/worker-a");
 		expect(requestAuth.get("native-provider-one/root-a")).toEqual([
+			{
+				apiKey: "secret-key-native-provider-one",
+				headers: { "x-run-secret": "secret-header-native-provider-one" },
+			},
+			{
+				apiKey: "secret-key-native-provider-one",
+				headers: { "x-run-secret": "secret-header-native-provider-one" },
+			},
 			{
 				apiKey: "secret-key-native-provider-one",
 				headers: { "x-run-secret": "secret-header-native-provider-one" },
@@ -195,7 +205,7 @@ describe("issue 171 run-scoped model overlay", () => {
 			resolveRequestAuth: () => ({ apiKey: "second-run-key" }),
 		});
 		await harness.session.promptAndWait("run two", { modelScope: secondScope });
-		expect(sharedAdapter.state.callCount).toBe(5);
+		expect(sharedAdapter.state.callCount).toBe(7);
 		expect(harness.session.model).toEqual(durableModel);
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "model_change")).toHaveLength(
 			modelChangesBefore,

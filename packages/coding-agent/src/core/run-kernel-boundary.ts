@@ -141,13 +141,13 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 	async release(executionId: string, outcome: "completed" | "failed" | "cancelled", reason: string): Promise<void> {
 		const admitted = this.#leases.get(executionId);
 		if (!admitted) return;
-		this.#leases.delete(executionId);
 		let cleanup: "completed" | "failed" = "completed";
 		try {
 			await admitted.lease.dispose(reason);
 		} catch {
 			cleanup = "failed";
 		}
+		if (cleanup === "completed") this.#leases.delete(executionId);
 		await this.#observe?.({
 			phase: "terminal",
 			context: publicContext(admitted.context),
@@ -160,9 +160,13 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 
 	async revoke(reason: string): Promise<void> {
 		this.#active = false;
-		await Promise.allSettled(
+		const results = await Promise.allSettled(
 			[...this.#leases.keys()].map((executionId) => this.release(executionId, "cancelled", reason)),
 		);
+		const failures = results
+			.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+			.map((result) => result.reason);
+		if (failures.length > 0) throw new AggregateError(failures, "Kernel boundary revocation failed");
 	}
 }
 

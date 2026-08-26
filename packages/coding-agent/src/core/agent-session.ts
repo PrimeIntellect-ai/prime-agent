@@ -561,6 +561,7 @@ interface InternalPromptOptions extends PromptOptions {
 	toolAuthorityScopeOwner?: boolean;
 	kernelBoundaryScopeOwner?: boolean;
 	selectedModel?: Model<Api>;
+	authorityLineage?: AgentRunAuthorityLineage;
 }
 
 type SubmissionExtensionCommandPolicy = "execute" | "reject" | "ignore";
@@ -949,6 +950,7 @@ interface RlmChildRun {
 	deletionNeedsCompletionNotice?: boolean;
 	completeDeletion?: () => Promise<void>;
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
+	authorityLineage?: AgentRunAuthorityLineage;
 	emitUpdate?: () => void;
 	unsubscribe?: () => void;
 }
@@ -965,6 +967,17 @@ interface AgentRunScope {
 	readonly kernelBoundaryScope?: AgentRunKernelBoundaryScope;
 	readonly kernelBoundaryScopeOwner: boolean;
 	boundedKernelProvisioner?: IpythonKernelProvisioner;
+	readonly selectedModel?: Model<Api>;
+	readonly authorityLineage?: AgentRunAuthorityLineage;
+}
+
+interface AgentRunAuthorityLineage {
+	references: number;
+	revoked: boolean;
+	readonly runContext: unknown;
+	readonly modelScope?: AgentRunModelScope;
+	readonly toolAuthorityScope?: AgentRunToolAuthorityScope;
+	readonly kernelBoundaryScope?: AgentRunKernelBoundaryScope;
 	readonly selectedModel?: Model<Api>;
 }
 
@@ -1121,6 +1134,7 @@ export class AgentSession {
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private readonly _sessionInputAdmissionPauses = new Set<symbol>();
 	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
+	private readonly _rlmTerminalNoticeLineages = new WeakMap<CustomMessage, AgentRunAuthorityLineage>();
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
 	private _sessionActionCommitOwner: symbol | undefined;
 	private _pendingSessionActionFenceWaiters = 0;
@@ -4240,6 +4254,12 @@ export class AgentSession {
 			this._rlmChildSessions.clear();
 			this._rlmChildCleanupFailures.clear();
 			this._deletedRlmChildIds.clear();
+			for (const message of this._pendingNextTurnMessages) {
+				const lineage = this._rlmTerminalNoticeLineages.get(message);
+				if (lineage) {
+					void this._releaseRunAuthorityLineage(lineage, "session disposed").catch(() => undefined);
+				}
+			}
 			this._pendingNextTurnMessages = [];
 			const deliveryError = new Error("Session disposed before prompt delivery.");
 			const completionError = new Error("Session disposed before prompt completion.");
@@ -4696,6 +4716,7 @@ export class AgentSession {
 	async acceptAgentMessagePrompt(text: string, options?: PromptOptions): Promise<void> {
 		const customMessage =
 			options?.customMessage && isAgentSessionMessage(options.customMessage) ? options.customMessage : undefined;
+		const authorityLineage = customMessage ? this._authorityLineageForAgentMessage(customMessage) : undefined;
 		await this._prompt(text, {
 			...options,
 			resumeIfIdle: false,
@@ -4705,6 +4726,7 @@ export class AgentSession {
 			returnAfterAccepted: true,
 			agentMessageId: options?.agentMessageId ?? customMessage?.details.id ?? parseAgentSessionMessagePromptId(text),
 			customMessage,
+			authorityLineage,
 		});
 		if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 	}
@@ -4715,10 +4737,12 @@ export class AgentSession {
 		customMessage?: AgentSessionMessage,
 	): Promise<boolean> {
 		const agentMessageId = customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
+		const authorityLineage = customMessage ? this._authorityLineageForAgentMessage(customMessage) : undefined;
 		if (streamingBehavior === "steer") {
 			await this._queuePreparedPrompt("steer", text, undefined, {
 				agentMessageId,
 				message: customMessage,
+				authorityLineage,
 			});
 			if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 			return true;
@@ -4726,9 +4750,19 @@ export class AgentSession {
 		const queued = await this._queuePreparedPrompt("followUp", text, undefined, {
 			agentMessageId,
 			message: customMessage,
+			authorityLineage,
 		});
 		if (queued && customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 		return queued;
+	}
+
+	private _authorityLineageForAgentMessage(message: AgentSessionMessage): AgentRunAuthorityLineage | undefined {
+		const sourceSessionId = message.details.from?.sessionId;
+		if (!sourceSessionId) return undefined;
+		for (const run of this._activeRlmChildRuns.values()) {
+			if (run.session?.sessionId === sourceSessionId) return run.authorityLineage;
+		}
+		return undefined;
 	}
 
 	async promptHeartbeat(job: AgentCronJob, options?: PromptOptions): Promise<void> {
@@ -4763,7 +4797,7 @@ export class AgentSession {
 		return this._pendingNextTurnMessages.some((message) => this._isRlmTerminalNotice(message));
 	}
 
-	private _enqueueRlmTerminalNoticeAction(message: CustomMessage): void {
+	private _enqueueRlmTerminalNoticeAction(message: CustomMessage, authorityLineage?: AgentRunAuthorityLineage): void {
 		this._assertRlmTerminalNotice(message);
 		const action = this._createPreparedTurnAction("followUp", message.content as string, undefined, {
 			message,
@@ -4772,6 +4806,7 @@ export class AgentSession {
 			source: "internal",
 			executionPolicy: this._turnExecutionPolicy("injected"),
 			queueVisible: false,
+			authorityLineage,
 		});
 		this._durableRlmTerminalNoticeActionIds.add(action.id);
 		try {
@@ -4797,12 +4832,14 @@ export class AgentSession {
 			const index = this._pendingNextTurnMessages.findIndex((message) => this._isRlmTerminalNotice(message));
 			if (index < 0) break;
 			const message = this._pendingNextTurnMessages[index];
+			const lineage = this._rlmTerminalNoticeLineages.get(message);
 			try {
-				this._enqueueRlmTerminalNoticeAction(message);
+				this._enqueueRlmTerminalNoticeAction(message, lineage);
 			} catch {
 				return;
 			}
 			this._pendingNextTurnMessages.splice(index, 1);
+			void this._releaseRunAuthorityLineage(lineage, "recursive terminal notice admitted").catch(() => undefined);
 		}
 		this._scheduleSessionInputPump();
 	}
@@ -4837,13 +4874,21 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private async _deferRlmTerminalNotice(message: CustomMessage): Promise<void> {
+	private async _deferRlmTerminalNotice(
+		message: CustomMessage,
+		authorityLineage?: AgentRunAuthorityLineage,
+	): Promise<void> {
 		this._assertRlmTerminalNotice(message);
 		const fence = await this._acquireRlmTerminalNoticeRetentionFence();
 		if (!fence) return;
 		try {
 			if (this._disposed || this._disposing) return;
-			this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+			const retainedMessage = cloneCustomMessage(message);
+			if (authorityLineage) {
+				this._retainRunAuthorityLineage(authorityLineage);
+				this._rlmTerminalNoticeLineages.set(retainedMessage, authorityLineage);
+			}
+			this._pendingNextTurnMessages.push(retainedMessage);
 			this._flushDeferredRlmTerminalNotices();
 		} finally {
 			fence.release();
@@ -4858,7 +4903,15 @@ export class AgentSession {
 		for (const action of actions) {
 			if (!this._isRlmTerminalNoticeAction(action)) continue;
 			const message = primaryDeliveryRecord(action).message;
-			if (message.role === "custom") this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+			if (message.role === "custom") {
+				const retainedMessage = cloneCustomMessage(message);
+				const lineage = this._actionRunScopes.get(action)?.authorityLineage;
+				if (lineage) {
+					this._retainRunAuthorityLineage(lineage);
+					this._rlmTerminalNoticeLineages.set(retainedMessage, lineage);
+				}
+				this._pendingNextTurnMessages.push(retainedMessage);
+			}
 		}
 		const ids = new Set(actions.map((action) => action.id));
 		this._cancelSessionActions(
@@ -4921,6 +4974,7 @@ export class AgentSession {
 				kernelBoundaryScope: options?.kernelBoundaryScope,
 				kernelBoundaryScopeOwner: options?.kernelBoundaryScopeOwner,
 				selectedModel: options?.selectedModel,
+				authorityLineage: options?.authorityLineage,
 			});
 			const result = this._admitSessionInput(action, {
 				immediatelyEligible: !visibleQueued,
@@ -5087,6 +5141,7 @@ export class AgentSession {
 					kernelBoundaryScope: options?.kernelBoundaryScope,
 					kernelBoundaryScopeOwner: options?.kernelBoundaryScopeOwner,
 					selectedModel: options?.selectedModel,
+					authorityLineage: options?.authorityLineage,
 				});
 				if (action.suppressAutonomousContinuation) {
 					this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
@@ -5588,21 +5643,44 @@ export class AgentSession {
 			kernelBoundaryScope?: AgentRunKernelBoundaryScope;
 			kernelBoundaryScopeOwner?: boolean;
 			selectedModel?: Model<Api>;
+			authorityLineage?: AgentRunAuthorityLineage;
 		},
 	): QueuedSessionAction {
-		if (options.modelScope !== undefined) {
-			assertAgentRunModelScope(options.modelScope);
-			const selected = options.selectedModel ?? options.modelScope.root;
-			if (!findAgentRunScopedModel(options.modelScope, selected.provider, selected.id)) {
+		const modelScope = options.authorityLineage?.modelScope ?? options.modelScope;
+		const toolAuthorityScope = options.authorityLineage?.toolAuthorityScope ?? options.toolAuthorityScope;
+		const kernelBoundaryScope = options.authorityLineage?.kernelBoundaryScope ?? options.kernelBoundaryScope;
+		const selectedModel = options.selectedModel ?? options.authorityLineage?.selectedModel ?? modelScope?.root;
+		if (modelScope !== undefined) {
+			assertAgentRunModelScope(modelScope);
+			const selected = selectedModel ?? modelScope.root;
+			if (!findAgentRunScopedModel(modelScope, selected.provider, selected.id)) {
 				throw new Error(`Model ${selected.provider}/${selected.id} is outside the admitted run scope`);
 			}
 		}
-		if (options.toolAuthorityScope !== undefined) {
-			assertAgentRunToolAuthorityScope(options.toolAuthorityScope);
+		if (toolAuthorityScope !== undefined) {
+			assertAgentRunToolAuthorityScope(toolAuthorityScope);
 		}
-		if (options.kernelBoundaryScope !== undefined) {
-			assertAgentRunKernelBoundaryScope(options.kernelBoundaryScope);
+		if (kernelBoundaryScope !== undefined) {
+			assertAgentRunKernelBoundaryScope(kernelBoundaryScope);
 		}
+		const ownsAuthority =
+			(options.modelScopeOwner ?? options.modelScope !== undefined) ||
+			(options.toolAuthorityScopeOwner ?? options.toolAuthorityScope !== undefined) ||
+			(options.kernelBoundaryScopeOwner ?? options.kernelBoundaryScope !== undefined);
+		const authorityLineage =
+			options.authorityLineage ??
+			(ownsAuthority
+				? {
+						references: 0,
+						revoked: false,
+						runContext: options.runContext,
+						modelScope,
+						toolAuthorityScope,
+						kernelBoundaryScope,
+						selectedModel,
+					}
+				: undefined);
+		if (authorityLineage) authorityLineage.references += 1;
 		const id = randomUUID();
 		const content = options.content ?? this._buildPromptContent(text, images);
 		const message =
@@ -5648,16 +5726,21 @@ export class AgentSession {
 		};
 		this._actionRunScopes.set(action, {
 			executionId: id,
-			runContext: options.runContext,
+			runContext: authorityLineage?.runContext ?? options.runContext,
 			controller: new AbortController(),
 			cancelled: false,
-			modelScope: options.modelScope,
-			modelScopeOwner: options.modelScopeOwner ?? options.modelScope !== undefined,
-			toolAuthorityScope: options.toolAuthorityScope,
-			toolAuthorityScopeOwner: options.toolAuthorityScopeOwner ?? options.toolAuthorityScope !== undefined,
-			kernelBoundaryScope: options.kernelBoundaryScope,
-			kernelBoundaryScopeOwner: options.kernelBoundaryScopeOwner ?? options.kernelBoundaryScope !== undefined,
-			selectedModel: options.selectedModel ?? options.modelScope?.root,
+			modelScope,
+			modelScopeOwner: authorityLineage ? false : (options.modelScopeOwner ?? options.modelScope !== undefined),
+			toolAuthorityScope,
+			toolAuthorityScopeOwner: authorityLineage
+				? false
+				: (options.toolAuthorityScopeOwner ?? options.toolAuthorityScope !== undefined),
+			kernelBoundaryScope,
+			kernelBoundaryScopeOwner: authorityLineage
+				? false
+				: (options.kernelBoundaryScopeOwner ?? options.kernelBoundaryScope !== undefined),
+			selectedModel,
+			authorityLineage,
 		});
 		return action;
 	}
@@ -5683,6 +5766,37 @@ export class AgentSession {
 		});
 		scope.boundedKernelProvisioner = provisioner;
 		this._boundedKernelProvisioners.set(scope.executionId, provisioner);
+	}
+
+	private _retainRunAuthorityLineage(lineage: AgentRunAuthorityLineage | undefined): void {
+		if (!lineage) return;
+		if (lineage.revoked) throw new Error("Agent run authority lineage is revoked");
+		lineage.references += 1;
+	}
+
+	private async _releaseRunAuthorityLineage(
+		lineage: AgentRunAuthorityLineage | undefined,
+		reason: string,
+	): Promise<void> {
+		if (!lineage) return;
+		lineage.references -= 1;
+		if (lineage.references < 0) throw new Error("Agent run authority lineage reference count underflow");
+		if (lineage.references > 0 || lineage.revoked) return;
+		const errors: unknown[] = [];
+		const revoke = async (operation: () => void | Promise<void>): Promise<void> => {
+			try {
+				await operation();
+			} catch (error) {
+				errors.push(error);
+			}
+		};
+		if (lineage.modelScope) await revoke(() => revokeAgentRunModelScope(lineage.modelScope!));
+		if (lineage.toolAuthorityScope) await revoke(() => revokeAgentRunToolAuthorityScope(lineage.toolAuthorityScope!));
+		if (lineage.kernelBoundaryScope) {
+			await revoke(() => revokeAgentRunKernelBoundaryScope(lineage.kernelBoundaryScope!, reason));
+		}
+		if (errors.length > 0) throw new AggregateError(errors, "Agent run authority revocation failed");
+		lineage.revoked = true;
 	}
 
 	private async _releaseRunScope(
@@ -5721,6 +5835,7 @@ export class AgentSession {
 				await attemptCleanup(() => revokeAgentRunKernelBoundaryScope(scope.kernelBoundaryScope!, reason));
 			}
 		}
+		await attemptCleanup(() => this._releaseRunAuthorityLineage(scope.authorityLineage, reason));
 		if (cleanupErrors.length > 0) {
 			throw new AggregateError(cleanupErrors, "Agent run scope cleanup failed");
 		}
@@ -5874,6 +5989,7 @@ export class AgentSession {
 			kernelBoundaryScope?: AgentRunKernelBoundaryScope;
 			kernelBoundaryScopeOwner?: boolean;
 			selectedModel?: Model<Api>;
+			authorityLineage?: AgentRunAuthorityLineage;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
@@ -10604,12 +10720,12 @@ export class AgentSession {
 			}
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
-		const parentRunScope = this._activeAgentRunScope();
-
 		const childSessionDir = this._createChildRlmSessionDir();
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+		const parentRunScope = this._activeAgentRunScope();
+		this._retainRunAuthorityLineage(parentRunScope?.authorityLineage);
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		const label = rlmChildLabel(prompt);
@@ -10631,6 +10747,7 @@ export class AgentSession {
 			publication: createAgentMessageDeferred(),
 			settlement: createAgentMessageDeferred(),
 			deletionReservation: createAgentMessageDeferred(),
+			authorityLineage: parentRunScope?.authorityLineage,
 		};
 		const throwIfCancelled = () => {
 			if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
@@ -10693,7 +10810,7 @@ export class AgentSession {
 		const deliverTerminalMessageToParent = async (message: CustomMessage): Promise<void> => {
 			// Synthesized lifecycle notices always use the parent's private durable
 			// path. Explicit child replies continue through agent_message separately.
-			await this._deferRlmTerminalNotice(message);
+			await this._deferRlmTerminalNotice(message, run.authorityLineage);
 		};
 
 		run.completeDeletion = () => {
@@ -10835,6 +10952,7 @@ export class AgentSession {
 					kernelBoundaryScope: subagentOptions.kernelBoundaryScope,
 					kernelBoundaryScopeOwner: false,
 					selectedModel: modelSelection.model,
+					authorityLineage: run.authorityLineage,
 				});
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
@@ -10963,6 +11081,7 @@ export class AgentSession {
 					this._unsettledRlmChildRuns.delete(run);
 					this._maybeResumeGoalContinuationAfterRlmWork();
 				}
+				await this._releaseRunAuthorityLineage(run.authorityLineage, "recursive child settled");
 			}
 		})().catch(() => undefined);
 

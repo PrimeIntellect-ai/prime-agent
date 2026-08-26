@@ -163,7 +163,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 		};
 
 		try {
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+			const apiKey = options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider)) ?? "";
 			const compat = getCompat(model);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheControl = getCompatCacheControl(compat, cacheRetention);
@@ -489,7 +489,7 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider));
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}

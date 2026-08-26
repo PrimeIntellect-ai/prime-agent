@@ -50,6 +50,8 @@ Workers and kernels are separate processes for lifecycle and failure containment
 
 SDK hosts can instead attach a versioned `kernelBoundaryScope` to one prompt. The host must prepare an OS-level workspace-write confinement before provider inference and supply the process launcher for the real IPython kernel. Prime bypasses the shared forkserver and persistent namespace snapshots for that run, routes the root and recursive-child kernels through execution-ephemeral launch leases, and awaits lease teardown at terminal success, failure, or cancellation. The launch request contains only a small allowlist of system runtime variables and non-secret RLM path/depth metadata; the ambient process environment and provider credentials are excluded. Network access remains enabled in the version 1 policy and is reported explicitly to lifecycle observers. Omitting the scope preserves the unrestricted persistent-kernel behavior.
 
+If a boundary disposer fails, its lease remains cleanup debt. Scope revocation retries every retained lease and propagates an aggregate failure if confinement teardown still cannot complete.
+
 ## Prompt Execution Flow
 
 ```mermaid

@@ -485,7 +485,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = options.client;
 				isOAuth = false;
 			} else {
-				const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
+				const apiKey =
+					options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider)) ?? "";
 
 				let copilotDynamicHeaders: Record<string, string> | undefined;
 				if (model.provider === "github-copilot") {
@@ -800,7 +801,7 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = options?.apiKey ?? (options?.disableEnvApiKey ? undefined : getEnvApiKey(model.provider));
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}

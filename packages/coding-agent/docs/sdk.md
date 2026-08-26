@@ -222,6 +222,8 @@ The authorizer receives the exact tool name, an immutable copy of schema-validat
 
 The capability is memory-only, inherited only by recursive children of the admitted execution, and revoked when the root prompt succeeds, fails, or is cancelled. It is single-use and is not persisted in session state. Omitting `toolAuthorityScope` preserves unrestricted tool behavior, so a host may use this seam for selected modes without changing Prime Agent's generic defaults. This API supplies the enforcement boundary only; the host remains responsible for defining approval policy and user interaction.
 
+Recursive child replies and synthesized child-terminal notices retain the originating interaction's model, tool, and kernel authority until their follow-up turns settle. A later user interaction does not inherit that lineage. Run-scoped provider requests also disable provider environment-key fallback; missing admitted authentication fails closed instead of consulting ambient process credentials.
+
 ### createAgentSessionRuntime() and AgentSessionRuntime
 
 Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.
