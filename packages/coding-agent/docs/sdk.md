@@ -299,6 +299,8 @@ interface PromptOptions {
   preflightResult?: (success: boolean) => void;
   runContext?: unknown;
   modelScope?: AgentRunModelScope;
+  toolAuthorityScope?: AgentRunToolAuthorityScope;
+  kernelBoundaryScope?: AgentRunKernelBoundaryScope;
 }
 ```
 

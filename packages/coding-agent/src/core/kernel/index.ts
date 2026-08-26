@@ -212,6 +212,8 @@ export interface KernelManagerOptions {
 	username?: string;
 	/** Trusted host launch boundary. Supplying one disables the shared forkserver. */
 	processLauncher?: KernelProcessLauncher;
+	/** Reject kernel host requests that are not correlated with a current admitted execution. */
+	requireHostRequestContext?: boolean;
 }
 
 export interface KernelProcessLaunchRequest {
@@ -223,6 +225,45 @@ export interface KernelProcessLaunchRequest {
 
 /** Launches the real kernel process at a trusted host-owned confinement boundary. */
 export type KernelProcessLauncher = (request: KernelProcessLaunchRequest) => ChildProcess;
+
+const BOUNDED_KERNEL_AMBIENT_ENV = [
+	"PATH",
+	"HOME",
+	"TMPDIR",
+	"TMP",
+	"TEMP",
+	"LANG",
+	"LC_ALL",
+	"LC_CTYPE",
+	"SHELL",
+	"SYSTEMROOT",
+	"WINDIR",
+	"COMSPEC",
+	"PATHEXT",
+] as const;
+
+const BOUNDED_KERNEL_RUNTIME_ENV = [
+	"RLM_DEPTH",
+	"RLM_MAX_DEPTH",
+	"RLM_GLOBAL_HARNESS_STATE_DIR",
+	"RLM_SESSION_DIR",
+	"RLM_HARNESS_STATE_DIR",
+	"PRIME_AGENT_CODING_AGENT_DIR",
+] as const;
+
+function boundedKernelEnvironment(
+	runtimeEnv: Readonly<Record<string, string>> | undefined,
+): Record<string, string | undefined> {
+	const env: Record<string, string | undefined> = {};
+	for (const name of BOUNDED_KERNEL_AMBIENT_ENV) {
+		if (process.env[name] !== undefined) env[name] = process.env[name];
+	}
+	for (const name of BOUNDED_KERNEL_RUNTIME_ENV) {
+		if (runtimeEnv?.[name] !== undefined) env[name] = runtimeEnv[name];
+	}
+	env.JPY_PARENT_PID = String(process.pid);
+	return env;
+}
 
 export interface KernelStartOptions {
 	onBootstrapProgress?: KernelBootstrapProgressHandler;
@@ -648,6 +689,7 @@ export class KernelManager {
 		| "pythonSkills"
 		| "snapshot"
 		| "processLauncher"
+		| "requireHostRequestContext"
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
@@ -702,6 +744,7 @@ export class KernelManager {
 			snapshot: options.snapshot,
 			username: options.username ?? "prime-agent",
 			processLauncher: options.processLauncher,
+			requireHostRequestContext: options.requireHostRequestContext,
 		};
 	}
 
@@ -804,7 +847,9 @@ export class KernelManager {
 
 		if (!forked) {
 			const args = ["-m", "ipykernel_launcher", "-f", connection.path];
-			const env = { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) };
+			const env = this.options.processLauncher
+				? boundedKernelEnvironment(this.options.env)
+				: { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) };
 			const kernel = this.options.processLauncher
 				? this.options.processLauncher({ command: python, args, cwd: this.options.cwd, env })
 				: spawn(python, args, { cwd: this.options.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -1538,6 +1583,12 @@ export class KernelManager {
 
 		const task = (async () => {
 			try {
+				if (this.options.requireHostRequestContext && !executionContext) {
+					throw new Error("host request is outside a current admitted execution");
+				}
+				if (executionContext?.signal.aborted) {
+					throw new Error("host request execution is no longer current");
+				}
 				const result = await this.handleHostRequest(data, context);
 				try {
 					await this.sendCommMessage(commId, { ...result, status: "ok" });

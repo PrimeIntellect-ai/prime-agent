@@ -1,0 +1,1 @@
+- Added per-run model selection and opaque execution context propagation to provider requests and tool calls.

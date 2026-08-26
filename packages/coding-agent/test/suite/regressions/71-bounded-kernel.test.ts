@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
 	type AgentRunKernelBoundaryLifecycleEvent,
@@ -10,6 +10,10 @@ import {
 import { createHarness } from "../harness.js";
 
 describe("issue 71 bounded kernel", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
 	it("fails boundary initialization before the first provider request", async () => {
 		let providerRequests = 0;
 		const harness = await createHarness();
@@ -42,8 +46,14 @@ describe("issue 71 bounded kernel", () => {
 
 	it("uses the trusted launch boundary and awaits terminal confinement cleanup", async () => {
 		const events: AgentRunKernelBoundaryLifecycleEvent[] = [];
-		const launches: Array<{ command: string; args: readonly string[]; cwd: string | undefined }> = [];
+		const launches: Array<{
+			command: string;
+			args: readonly string[];
+			cwd: string | undefined;
+			env: Readonly<Record<string, string | undefined>>;
+		}> = [];
 		let cleanupFinished = false;
+		vi.stubEnv("PRIME_BOUNDARY_SENTINEL_SECRET", "must-not-reach-kernel");
 		const harness = await createHarness();
 		const scope = createAgentRunKernelBoundaryScope({
 			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
@@ -56,7 +66,7 @@ describe("issue 71 bounded kernel", () => {
 			},
 			prepare: () => ({
 				launch(request) {
-					launches.push({ command: request.command, args: request.args, cwd: request.cwd });
+					launches.push({ command: request.command, args: request.args, cwd: request.cwd, env: request.env });
 					return spawn(request.command, [...request.args], {
 						cwd: request.cwd,
 						env: { ...request.env },
@@ -115,6 +125,7 @@ describe("issue 71 bounded kernel", () => {
 		expect(launches).toHaveLength(1);
 		expect(launches[0]).toMatchObject({ cwd: harness.tempDir });
 		expect(launches[0]?.args.slice(0, 2)).toEqual(["-m", "ipykernel_launcher"]);
+		expect(launches[0]?.env.PRIME_BOUNDARY_SENTINEL_SECRET).toBeUndefined();
 		expect(cleanupFinished).toBe(true);
 		expect(events.map((event) => event.phase)).toEqual(["initialized", "terminal"]);
 		expect(events[0]).toMatchObject({
@@ -237,6 +248,64 @@ describe("issue 71 bounded kernel", () => {
 			initializedDepths: [0, 1],
 			terminalDepths: [1, 0],
 		});
+		harness.cleanup();
+	});
+
+	it("still releases the host boundary and revokes the scope when kernel kill fails", async () => {
+		let kernel: ReturnType<typeof spawn> | undefined;
+		let disposed = false;
+		const harness = await createHarness();
+		const scope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: harness.tempDir,
+				workspaceScopeDigest: "sha256:cleanup-failure",
+				network: "enabled",
+				reviewerMode: "automatic",
+			},
+			prepare: () => ({
+				launch(request) {
+					kernel = spawn(request.command, [...request.args], {
+						cwd: request.cwd,
+						env: { ...request.env },
+						stdio: ["ignore", "pipe", "pipe"],
+					});
+					return kernel;
+				},
+				dispose() {
+					disposed = true;
+					kernel?.kill("SIGKILL");
+				},
+			}),
+		});
+		const response = (context: Context) => {
+			const hasToolResult = context.messages.some((message) => message.role === "toolResult");
+			if (!hasToolResult) {
+				return fauxAssistantMessage(fauxToolCall("ipython", { code: "40 + 2" }), { stopReason: "toolUse" });
+			}
+			const provisioners = (
+				harness.session as unknown as {
+					_boundedKernelProvisioners: Map<string, { kill(): Promise<void> }>;
+				}
+			)._boundedKernelProvisioners;
+			expect(provisioners.size).toBe(1);
+			for (const provisioner of provisioners.values()) {
+				provisioner.kill = async () => {
+					throw new Error("injected kernel kill failure");
+				};
+			}
+			return fauxAssistantMessage("done");
+		};
+		harness.setResponses([response, response]);
+
+		await expect(harness.session.promptAndWait("cleanup failure", { kernelBoundaryScope: scope })).rejects.toThrow(
+			"Agent run scope cleanup failed",
+		);
+		expect(disposed).toBe(true);
+		await expect(harness.session.promptAndWait("cannot reuse", { kernelBoundaryScope: scope })).rejects.toThrow(
+			"revoked",
+		);
 		harness.cleanup();
 	});
 

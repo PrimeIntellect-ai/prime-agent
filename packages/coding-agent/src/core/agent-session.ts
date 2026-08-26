@@ -5676,6 +5676,7 @@ export class AgentSession {
 			sessionId: this.sessionId,
 			recursionDepth: this._rlmDepth,
 			hostHandlers: this._createKernelHostHandlers(),
+			requireHostRequestContext: true,
 			getHostRequestContext: (executionId) => this._hostRequestContextForExecution(executionId),
 			pythonSkills: getPythonSkillRuntimeInfo(this._modelVisibleSkills()),
 			processLauncher: lease.launch,
@@ -5694,19 +5695,34 @@ export class AgentSession {
 		this._actionRunScopes.delete(action);
 		this._executionRunScopes.delete(scope.executionId);
 		scope.controller.abort(reason);
-		if (scope.modelScope !== undefined && scope.modelScopeOwner) revokeAgentRunModelScope(scope.modelScope);
+		const cleanupErrors: unknown[] = [];
+		const attemptCleanup = async (cleanup: () => void | Promise<void>): Promise<void> => {
+			try {
+				await cleanup();
+			} catch (error) {
+				cleanupErrors.push(error);
+			}
+		};
+		if (scope.modelScope !== undefined && scope.modelScopeOwner) {
+			await attemptCleanup(() => revokeAgentRunModelScope(scope.modelScope!));
+		}
 		if (scope.toolAuthorityScope !== undefined && scope.toolAuthorityScopeOwner) {
-			revokeAgentRunToolAuthorityScope(scope.toolAuthorityScope);
+			await attemptCleanup(() => revokeAgentRunToolAuthorityScope(scope.toolAuthorityScope!));
 		}
 		if (scope.boundedKernelProvisioner) {
 			this._boundedKernelProvisioners.delete(scope.executionId);
-			await scope.boundedKernelProvisioner.kill();
+			await attemptCleanup(() => scope.boundedKernelProvisioner!.kill());
 		}
 		if (scope.kernelBoundaryScope !== undefined) {
-			await releaseAgentRunKernelBoundary(scope.kernelBoundaryScope, scope.executionId, outcome, reason);
+			await attemptCleanup(() =>
+				releaseAgentRunKernelBoundary(scope.kernelBoundaryScope!, scope.executionId, outcome, reason),
+			);
 			if (scope.kernelBoundaryScopeOwner) {
-				await revokeAgentRunKernelBoundaryScope(scope.kernelBoundaryScope, reason);
+				await attemptCleanup(() => revokeAgentRunKernelBoundaryScope(scope.kernelBoundaryScope!, reason));
 			}
+		}
+		if (cleanupErrors.length > 0) {
+			throw new AggregateError(cleanupErrors, "Agent run scope cleanup failed");
 		}
 	}
 
@@ -9278,6 +9294,7 @@ export class AgentSession {
 				sessionId: this.sessionId,
 				recursionDepth: this._rlmDepth,
 				hostHandlers: this._createKernelHostHandlers(),
+				requireHostRequestContext: true,
 				getHostRequestContext: (executionId) => this._hostRequestContextForExecution(executionId),
 				pythonSkills,
 				snapshotDir: this._ipythonKernelSnapshotDir,

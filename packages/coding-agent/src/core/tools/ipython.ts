@@ -282,6 +282,8 @@ export interface IpythonToolOptions {
 	recursionDepth?: number;
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
+	/** Fail closed when a host request is not correlated with a current admitted execution. */
+	requireHostRequestContext?: boolean;
 	/** Resolves the current admitted run without exposing it to the Python payload. */
 	getHostRequestContext?: (executionId?: string) => HostRequestExecutionContext | undefined;
 	pythonSkills?: readonly PythonSkillRuntimeInfo[];
@@ -499,6 +501,7 @@ export class IpythonKernelProvisioner {
 				sessionId: this.options?.sessionId,
 				recursionDepth: this.options?.recursionDepth,
 				hostHandlers: this.options?.hostHandlers,
+				requireHostRequestContext: this.options?.requireHostRequestContext,
 				pythonSkills: this.options?.pythonSkills,
 				processLauncher: this.options?.processLauncher,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.

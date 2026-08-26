@@ -1,1 +1,1 @@
-- Added a versioned, in-memory run model scope for exact root selection, recursive model-roster enforcement, and request-time credentials without changing durable session model state ([#171](https://github.com/PrimeIntellect-ai/prime-agent/issues/171)).
+- Added a versioned, in-memory run model scope for exact root selection, recursive model-roster enforcement, and request-time credentials without changing durable session model state ([Relayer #171](https://github.com/vishaltandale00/relayer-graphcomplete/issues/171)).

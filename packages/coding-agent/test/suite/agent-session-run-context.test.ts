@@ -151,6 +151,40 @@ describe("AgentSession run-scoped kernel context", () => {
 		expect(captured[1]?.runContext).toBe(cancellationContext);
 	});
 
+	it("rejects a detached host request that opens after its admitted run is terminal", async () => {
+		const captured: HostRequestContext[] = [];
+		const harness = await createHarness({ hostRequestHandlers: contextHandler(captured) });
+		harnesses.push(harness);
+		const attemptedMarker = `${harness.tempDir}/detached-host-request-attempted`;
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("ipython", {
+					code: [
+						"import asyncio",
+						"from pathlib import Path",
+						"from rlm import host_request",
+						"async def detached_request():",
+						"    await asyncio.sleep(0.2)",
+						`    Path(${JSON.stringify(attemptedMarker)}).touch()`,
+						"    try:",
+						'        await host_request("test.context", {"mode": "capture"})',
+						"    except Exception:",
+						"        pass",
+						"asyncio.create_task(detached_request())",
+					].join("\n"),
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.promptAndWait("schedule detached request", {
+			runContext: { marker: "terminal-context" },
+		});
+		await vi.waitFor(() => expect(existsSync(attemptedMarker)).toBe(true), { timeout: 10_000 });
+		expect(captured).toEqual([]);
+	});
+
 	it("propagates one root context to sibling and nested child executions", async () => {
 		const captured: HostRequestContext[] = [];
 		const harness = await createHarness({
