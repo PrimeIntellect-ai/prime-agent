@@ -193,6 +193,7 @@ class _Pump:
             if i == -1:
                 break
             self._emit(data[:i])
+            self._finish_decode()
             seen.set()
             data = data[i + len(token) :]
         # Hold back a tail that could be the start of a token split across reads.
@@ -213,6 +214,12 @@ class _Pump:
         if text:
             # Raw fd bytes have no provable owner (os.write, C extensions,
             # subprocesses, threads from earlier cells): never credit a cell.
+            _send({"event": self._stream, "id": None, "text": text})
+
+    def _finish_decode(self) -> None:
+        text = self._decoder.decode(b"", final=True)
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        if text:
             _send({"event": self._stream, "id": None, "text": text})
 
 
@@ -681,10 +688,16 @@ def _snapshot_state(
     previous = None
     try:
         try:
+            serialized = _SnapshotBuffer(max_bytes)
+            try:
+                dill.dump(payload, serialized)
+            except _SnapshotSizeLimitExceeded:
+                return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
+            serialized_payload = serialized.getvalue()
             fh, tmp = stage_temp(path, "wb")
             with fh:
-                dill.dump(payload, fh)
-            bytes_written = os.path.getsize(tmp)
+                fh.write(serialized_payload)
+            bytes_written = len(serialized_payload)
             saved = sorted(payload.keys())
             pruned = sorted(name for name in oversized if name in ns) if prune_oversized else []
             manifest = {
@@ -1025,9 +1038,17 @@ def _owner_alive_posix(owner: int, initial_ppid: int) -> bool:
 def _wait_owner_windows(owner: int) -> None:
     # Blocks until the owner exits. os.kill(pid, 0) on Windows TERMINATES the
     # target, so a SYNCHRONIZE handle wait is the only sound probe.
+    from ctypes import wintypes
+
     SYNCHRONIZE = 0x00100000
     INFINITE = 0xFFFFFFFF
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
     handle = k32.OpenProcess(SYNCHRONIZE, False, owner)
     if not handle:
         return  # already gone (or unprobeable): exit rather than run ownerless

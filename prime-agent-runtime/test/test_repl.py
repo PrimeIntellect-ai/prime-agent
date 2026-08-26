@@ -272,6 +272,16 @@ class ReplTest(unittest.TestCase):
         tagged = next(e for e in events if e.get("event") == "stdout" and "tagged" in e["text"])
         self.assertEqual(tagged["id"], "rawfd")
 
+    def test_drain_finalizes_incomplete_raw_utf8_before_done(self):
+        first = self.repl.execute("partial-utf8", "import os\nos.write(1, b'\\xe2\\x82')")
+        replacement = next(e for e in first if e.get("event") == "stdout")
+        self.assertEqual(replacement["text"], "\ufffd")
+        self.assertLess(first.index(replacement), first.index(one(first, "done")))
+
+        second = self.repl.execute("continuation-utf8", "os.write(1, b'\\xac')")
+        self.assertEqual(stream_text(second, "stdout"), "\ufffd")
+        self.assertNotIn("€", stream_text(second, "stdout"))
+
     def test_hostile_deeply_nested_json_line_does_not_kill_reader(self):
         # json.loads raises RecursionError on pathological nesting; the reader
         # thread must survive and keep serving.
@@ -1612,7 +1622,7 @@ class SnapshotTempCleanupTest(unittest.TestCase):
             real_dump = dill.dump
 
             def interrupted_dump(payload, fh):
-                if hasattr(fh, "name"):  # the temp-file dump, not per-variable buffers
+                if isinstance(payload, dict):  # the complete payload, not a per-variable value
                     fh.write(b"partial")
                     raise KeyboardInterrupt
                 return real_dump(payload, fh)
@@ -1696,6 +1706,16 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
             ["kernel-state.dill", "kernel-state.json"],
         )
 
+    def test_complete_payload_respects_aggregate_size_cap(self):
+        result = self._snap({"x" * 10_000: 1}, max_bytes=128, max_variable_bytes=128)
+        self.assertEqual(result, {"error": "write failed: snapshot exceeds aggregate snapshot size cap"})
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def test_zero_size_cap_writes_no_empty_payload_overhead(self):
+        result = self._snap({}, max_bytes=0, max_variable_bytes=0)
+        self.assertEqual(result, {"error": "write failed: snapshot exceeds aggregate snapshot size cap"})
+        self.assertEqual(os.listdir(self.dir), [])
+
     def test_manifest_write_failure_preserves_prior_pair(self):
         old_payload, old_manifest = self._old_pair()
         ns = {"keep": 1, "big": b"x" * 100_000}
@@ -1721,9 +1741,28 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
         self._assert_pair(old_payload, old_manifest)
         self._assert_only_pair_files()
 
-    def test_getsize_failure_returns_error_dict_and_cleans_temp(self):
+    def test_payload_write_failure_returns_error_dict_and_cleans_temp(self):
         old_payload, old_manifest = self._old_pair()
-        with mock.patch("os.path.getsize", side_effect=OSError("stat failed")):
+        real_fdopen = os.fdopen
+
+        class FailingWrite:
+            def __init__(self, fh):
+                self.fh = fh
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.fh.close()
+
+            def write(self, data):
+                raise OSError("disk full")
+
+        def fdopen(fd, mode):
+            fh = real_fdopen(fd, mode)
+            return FailingWrite(fh) if mode == "wb" else fh
+
+        with mock.patch("os.fdopen", side_effect=fdopen):
             result = self._snap({"keep": 2})
         self.assertTrue(result["error"].startswith("write failed"))
         self._assert_pair(old_payload, old_manifest)
@@ -1901,22 +1940,29 @@ class OwnerWatchdogTest(unittest.TestCase):
         self.addCleanup(sys.path.remove, SRC)
         import rlm.repl as repl_module
 
+        from ctypes import wintypes
+
         calls: list[tuple] = []
 
+        class FakeFunction:
+            def __init__(self, name, result):
+                self.name = name
+                self.result = result
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                calls.append((self.name, *args))
+                return self.result
+
         class FakeKernel32:
-            def OpenProcess(self, access, inherit, pid):
-                calls.append(("OpenProcess", access, inherit, pid))
-                return 1234
+            def __init__(self, open_result=1234):
+                self.OpenProcess = FakeFunction("OpenProcess", open_result)
+                self.WaitForSingleObject = FakeFunction("WaitForSingleObject", 0)
+                self.CloseHandle = FakeFunction("CloseHandle", 1)
 
-            def WaitForSingleObject(self, handle, timeout):
-                calls.append(("WaitForSingleObject", handle, timeout))
-                return 0
-
-            def CloseHandle(self, handle):
-                calls.append(("CloseHandle", handle))
-                return 1
-
-        with mock.patch.object(repl_module.ctypes, "WinDLL", create=True, return_value=FakeKernel32()):
+        k32 = FakeKernel32()
+        with mock.patch.object(repl_module.ctypes, "WinDLL", create=True, return_value=k32):
             repl_module._wait_owner_windows(777)
         self.assertEqual(
             calls,
@@ -1926,14 +1972,17 @@ class OwnerWatchdogTest(unittest.TestCase):
                 ("CloseHandle", 1234),
             ],
         )
-
-        class GoneKernel32(FakeKernel32):
-            def OpenProcess(self, access, inherit, pid):
-                calls.append(("OpenProcess", access, inherit, pid))
-                return 0
+        self.assertEqual(k32.OpenProcess.argtypes, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD])
+        self.assertIs(k32.OpenProcess.restype, wintypes.HANDLE)
+        self.assertEqual(k32.WaitForSingleObject.argtypes, [wintypes.HANDLE, wintypes.DWORD])
+        self.assertIs(k32.WaitForSingleObject.restype, wintypes.DWORD)
+        self.assertEqual(k32.CloseHandle.argtypes, [wintypes.HANDLE])
+        self.assertIs(k32.CloseHandle.restype, wintypes.BOOL)
 
         calls.clear()
-        with mock.patch.object(repl_module.ctypes, "WinDLL", create=True, return_value=GoneKernel32()):
+        with mock.patch.object(
+            repl_module.ctypes, "WinDLL", create=True, return_value=FakeKernel32(open_result=0)
+        ):
             repl_module._wait_owner_windows(778)
         self.assertEqual(calls, [("OpenProcess", 0x00100000, False, 778)])
 
