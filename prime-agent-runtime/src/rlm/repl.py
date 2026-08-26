@@ -827,6 +827,10 @@ async def _handle_request(
 async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> None:
     while True:
         req = await queue.get()
+        # A cell (or a snapshot-restored prior handler) may have rebound SIGINT; the
+        # protocol handler must own it before each request. Mid-cell rebinds remain
+        # that cell's own problem for that cell only.
+        signal.signal(signal.SIGINT, _sigint_handler)
         rtype = req.get("type")
         if rtype == "shutdown":
             rid = req.get("id")
