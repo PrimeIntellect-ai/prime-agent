@@ -6080,7 +6080,7 @@ export class AgentSession {
 				}
 				const schedule = options?.streamingBehavior ?? "followUp";
 				const prefixMessages = visibleQueued ? this._takePendingNextTurnMessages() : undefined;
-				if (!isInternalPrompt && this._avoRuntime) {
+				if (!isInternalPrompt && options?.skipPrePromptWork !== true && this._avoRuntime) {
 					this._avoRuntime.observeRootPrompt(normalized.text);
 					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 					this.agent.state.systemPrompt = this._baseSystemPrompt;
