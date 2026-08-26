@@ -269,6 +269,22 @@ describe("IpythonKernelProvisioner", () => {
 		);
 	});
 
+	it("surfaces backgroundOutput in details without changing model content", async () => {
+		const execute = vi
+			.fn<KernelManager["execute"]>()
+			.mockResolvedValueOnce({ ...okExecuteResult(), backgroundOutput: "bg-line" });
+		const manager = { execute } as unknown as KernelManager;
+		const ensure = vi.fn(async () => manager);
+		const kill = vi.fn(async () => {});
+		const provisioner = { ensure, kill } as unknown as IpythonKernelProvisioner;
+		const tool = createIpythonToolDefinition(tempDir, { provisioner });
+
+		const result = await tool.execute("tool-call", { code: "x = 1" }, undefined, undefined, {} as ExtensionContext);
+
+		expect(result.details.backgroundOutput).toBe("bg-line");
+		expect(result.content).toEqual([{ type: "text", text: "ok\n[background output (unattributed)]\nbg-line" }]);
+	});
+
 	it("lets the user wait when an interrupted kernel is still busy", async () => {
 		const execute = vi
 			.fn<KernelManager["execute"]>()
