@@ -197,6 +197,51 @@ describe("issue 71 bounded kernel", () => {
 		]);
 	});
 
+	it("retries terminal observer debt without disposing a completed lease twice", async () => {
+		let disposeAttempts = 0;
+		let terminalObserverAttempts = 0;
+		const scope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: process.cwd(),
+				workspaceScopeDigest: "sha256:terminal-observer-debt",
+				network: "enabled",
+				reviewerMode: "automatic",
+			},
+			prepare: () => ({
+				launch: () => {
+					throw new Error("not launched");
+				},
+				dispose: () => {
+					disposeAttempts += 1;
+				},
+			}),
+			observe: (event) => {
+				if (event.phase !== "terminal") return;
+				terminalObserverAttempts += 1;
+				if (terminalObserverAttempts === 1) throw new Error("terminal publication failed");
+			},
+		});
+		const context = {
+			executionId: "terminal-observer-debt",
+			sessionId: "session",
+			recursionDepth: 0,
+			cwd: process.cwd(),
+			signal: new AbortController().signal,
+		};
+		await prepareAgentRunKernelBoundary(scope, context);
+
+		await expect(releaseAgentRunKernelBoundary(scope, context.executionId, "completed", "done")).rejects.toThrow(
+			"terminal publication failed",
+		);
+		expect(disposeAttempts).toBe(1);
+		await expect(revokeAgentRunKernelBoundaryScope(scope, "retry observer publication")).resolves.toBeUndefined();
+
+		expect(disposeAttempts).toBe(1);
+		expect(terminalObserverAttempts).toBe(2);
+	});
+
 	it("uses the trusted launch boundary and awaits terminal confinement cleanup", async () => {
 		const events: AgentRunKernelBoundaryLifecycleEvent[] = [];
 		const launches: Array<{
@@ -395,7 +440,6 @@ describe("issue 71 bounded kernel", () => {
 		harness.setResponses([response, response, response, response]);
 
 		await harness.session.promptAndWait("spawn bounded child", { kernelBoundaryScope: scope });
-
 		expect({ launches, initializedDepths, terminalDepths }).toEqual({
 			launches: 2,
 			initializedDepths: [0, 1],

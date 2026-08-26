@@ -989,6 +989,11 @@ interface ModelRequestAdmission {
 	release(): void;
 }
 
+interface PromptAuthorityOwnership {
+	transfer(): void;
+	release(reason: string): Promise<void>;
+}
+
 interface AgentRunAuthorityLineage {
 	references: number;
 	revoked: boolean;
@@ -1001,6 +1006,12 @@ interface AgentRunAuthorityLineage {
 
 type RunScopedStreamOptions = SimpleStreamOptions & {
 	readonly executionId?: string;
+};
+
+const admittedRunExecutionBrand = Symbol("admittedRunExecution");
+
+type AdmittedRunStreamOptions = RunScopedStreamOptions & {
+	readonly [admittedRunExecutionBrand]?: true;
 };
 
 interface RlmSubagentModelSelection {
@@ -1159,6 +1170,7 @@ export class AgentSession {
 	private readonly _sessionActionCommitContext = new AsyncLocalStorage<symbol>();
 	private readonly _actionRunScopes = new WeakMap<QueuedSessionAction, AgentRunScope>();
 	private readonly _executionRunScopes = new Map<string, AgentRunScope>();
+	private readonly _runScopeCleanupOperations = new Set<Promise<void>>();
 	private readonly _scopedModelRequestAdmissions = new Set<symbol>();
 	private readonly _auxiliaryModelRequestAdmissions = new Set<symbol>();
 	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
@@ -1192,6 +1204,7 @@ export class AgentSession {
 	private _retryPromise: Promise<void> | undefined = undefined;
 	private _retryResolve: (() => void) | undefined = undefined;
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
+	private _retryContinuationTimer: ReturnType<typeof setTimeout> | undefined;
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
@@ -1491,10 +1504,21 @@ export class AgentSession {
 	private _installAgentRunModelStreamOverlay(): void {
 		const baseStream = this.agent.streamFn;
 		this.agent.streamFn = async (model, context, options) => {
-			const scopedOptions = options as RunScopedStreamOptions | undefined;
+			const scopedOptions = options as AdmittedRunStreamOptions | undefined;
 			const executionId = scopedOptions?.executionId;
 			const runScope = executionId ? this._executionRunScopes.get(executionId) : undefined;
-			if (!runScope?.modelScope) return baseStream(model, context, options);
+			if (executionId && !runScope) {
+				if (scopedOptions?.[admittedRunExecutionBrand]) return baseStream(model, context, options);
+				throw new Error(`Agent run execution ${executionId} is no longer admitted`);
+			}
+			if (runScope?.controller.signal.aborted) {
+				throw new Error(`Agent run execution ${executionId} is cancelled`);
+			}
+			const admittedOptions = Object.defineProperty({ ...options }, admittedRunExecutionBrand, {
+				value: true,
+				enumerable: true,
+			});
+			if (!runScope?.modelScope) return baseStream(model, context, admittedOptions);
 			const selected = runScope.selectedModel;
 			if (!selected || selected.provider !== model.provider || selected.id !== model.id) {
 				throw new Error(`Model ${model.provider}/${model.id} is outside the admitted run scope`);
@@ -1504,7 +1528,7 @@ export class AgentSession {
 				model,
 				context,
 				markAgentRunModelAuth({
-					...options,
+					...admittedOptions,
 					apiKey: auth.apiKey,
 					headers: auth.headers === undefined ? undefined : { ...auth.headers },
 				} as RunScopedStreamOptions),
@@ -4043,6 +4067,7 @@ export class AgentSession {
 	 */
 	async disposeAsync(): Promise<void> {
 		if (this._disposed) {
+			await this._drainRunScopeCleanupOperations();
 			return this._disposeCallbacksPromise;
 		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
@@ -4233,6 +4258,7 @@ export class AgentSession {
 			// a failed kernel startup already cleaned up after itself
 		}
 		this.dispose();
+		await this._drainRunScopeCleanupOperations();
 		await this._disposeCallbacksPromise;
 	}
 
@@ -4265,6 +4291,7 @@ export class AgentSession {
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
 		try {
+			this.abortRetry();
 			// Invalidate scheduled timers and abort any in-flight review so a late
 			// resolution cannot write harness state or re-subscribe handlers.
 			this._autoRefineReviewAbort?.abort();
@@ -4292,7 +4319,8 @@ export class AgentSession {
 			for (const message of this._pendingNextTurnMessages) {
 				const lineage = this._rlmTerminalNoticeLineages.get(message);
 				if (lineage) {
-					void this._releaseRunAuthorityLineage(lineage, "session disposed").catch(() => undefined);
+					const cleanup = this._releaseRunAuthorityLineage(lineage, "session disposed");
+					void this._trackRunScopeCleanupOperation(cleanup).catch(() => undefined);
 				}
 			}
 			this._pendingNextTurnMessages = [];
@@ -4962,12 +4990,23 @@ export class AgentSession {
 		message: CustomMessage,
 		options?: InternalPromptOptions & { executionPolicy?: TurnExecutionPolicy },
 	): Promise<void> {
+		const authorityOwnership = await this._takePromptAuthorityOwnership(options);
 		if (!this.isStreaming && options?.resumeIfIdle) this._resumeSessionInputAdmission();
 		const admissionEpoch = this._sessionInputPumpEpoch;
-		const admissionFence = await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
-			throwIfPromptAdmissionCancelled(options?.signal);
+		let admissionFence: { owner: symbol; release(): void };
+		try {
+			admissionFence = await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
+				throwIfPromptAdmissionCancelled(options?.signal);
+				throw error;
+			});
+		} catch (error) {
+			try {
+				await authorityOwnership.release("injected prompt rejected before action construction");
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Injected prompt rejection cleanup failed");
+			}
 			throw error;
-		});
+		}
 		const reportPreflight = oncePreflight(options?.preflightResult);
 		try {
 			throwIfPromptAdmissionCancelled(options?.signal);
@@ -5011,6 +5050,7 @@ export class AgentSession {
 				selectedModel: options?.selectedModel,
 				authorityLineage: options?.authorityLineage,
 			});
+			authorityOwnership.transfer();
 			const result = await this._admitPreparedSessionInput(action, {
 				immediatelyEligible: !visibleQueued,
 			});
@@ -5039,11 +5079,13 @@ export class AgentSession {
 			throw error;
 		} finally {
 			admissionFence.release();
+			await authorityOwnership.release("injected prompt ended before action ownership transfer");
 		}
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
 		const reportPreflight = oncePreflight(options?.preflightResult);
+		const authorityOwnership = await this._takePromptAuthorityOwnership(options);
 		const modelScope = options?.authorityLineage?.modelScope ?? options?.modelScope;
 		let modelRequestAdmission: ModelRequestAdmission | undefined;
 		let modelRequestAdmissionTransferred = false;
@@ -5058,6 +5100,11 @@ export class AgentSession {
 		} catch (error) {
 			modelRequestAdmission?.release();
 			reportPreflight(false);
+			try {
+				await authorityOwnership.release("prompt rejected before model admission");
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Prompt rejection cleanup failed");
+			}
 			throw error;
 		}
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
@@ -5078,6 +5125,11 @@ export class AgentSession {
 		} catch (error) {
 			modelRequestAdmission?.release();
 			reportPreflight(false);
+			try {
+				await authorityOwnership.release("prompt rejected before action construction");
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Prompt rejection cleanup failed");
+			}
 			throw error;
 		}
 		const run = async () => {
@@ -5204,6 +5256,7 @@ export class AgentSession {
 					selectedModel: options?.selectedModel,
 					authorityLineage: options?.authorityLineage,
 				});
+				authorityOwnership.transfer();
 				if (action.suppressAutonomousContinuation) {
 					this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 				}
@@ -5272,6 +5325,7 @@ export class AgentSession {
 			} finally {
 				commitFence?.release();
 				if (!modelRequestAdmissionTransferred) modelRequestAdmission?.release();
+				await authorityOwnership.release("prompt ended before action ownership transfer");
 			}
 		};
 		return commitFence ? this._sessionActionCommitContext.run(commitFence.owner, run) : run();
@@ -5683,6 +5737,68 @@ export class AgentSession {
 		};
 	}
 
+	private async _takePromptAuthorityOwnership(options?: InternalPromptOptions): Promise<PromptAuthorityOwnership> {
+		const ownsModel =
+			options?.authorityLineage === undefined && (options?.modelScopeOwner ?? options?.modelScope !== undefined);
+		const ownsTools =
+			options?.authorityLineage === undefined &&
+			(options?.toolAuthorityScopeOwner ?? options?.toolAuthorityScope !== undefined);
+		const ownsKernel =
+			options?.authorityLineage === undefined &&
+			(options?.kernelBoundaryScopeOwner ?? options?.kernelBoundaryScope !== undefined);
+		let transferred = false;
+		let released = false;
+		try {
+			if (options?.modelScope) assertAgentRunModelScope(options.modelScope);
+			if (options?.toolAuthorityScope) assertAgentRunToolAuthorityScope(options.toolAuthorityScope);
+			if (options?.kernelBoundaryScope) assertAgentRunKernelBoundaryScope(options.kernelBoundaryScope);
+		} catch (error) {
+			const cleanupErrors: unknown[] = [];
+			if (ownsModel && options?.modelScope) revokeAgentRunModelScope(options.modelScope);
+			if (ownsTools && options?.toolAuthorityScope) revokeAgentRunToolAuthorityScope(options.toolAuthorityScope);
+			if (ownsKernel && options?.kernelBoundaryScope) {
+				try {
+					await revokeAgentRunKernelBoundaryScope(
+						options.kernelBoundaryScope,
+						"prompt authority validation failed",
+					);
+				} catch (cleanupError) {
+					cleanupErrors.push(cleanupError);
+				}
+			}
+			if (cleanupErrors.length > 0) {
+				throw new AggregateError([error, ...cleanupErrors], "Prompt authority validation cleanup failed");
+			}
+			throw error;
+		}
+		return {
+			transfer: () => {
+				if (released) throw new Error("Prompt authority was released before transfer");
+				transferred = true;
+			},
+			release: async (reason: string) => {
+				if (transferred || released) return;
+				released = true;
+				const errors: unknown[] = [];
+				const revoke = async (operation: () => void | Promise<void>) => {
+					try {
+						await operation();
+					} catch (error) {
+						errors.push(error);
+					}
+				};
+				if (ownsModel && options?.modelScope) await revoke(() => revokeAgentRunModelScope(options.modelScope!));
+				if (ownsTools && options?.toolAuthorityScope) {
+					await revoke(() => revokeAgentRunToolAuthorityScope(options.toolAuthorityScope!));
+				}
+				if (ownsKernel && options?.kernelBoundaryScope) {
+					await revoke(() => revokeAgentRunKernelBoundaryScope(options.kernelBoundaryScope!, reason));
+				}
+				if (errors.length > 0) throw new AggregateError(errors, "Prompt authority cleanup failed");
+			},
+		};
+	}
+
 	private _createPreparedTurnAction(
 		schedule: SessionInputSchedule,
 		text: string,
@@ -5865,45 +5981,60 @@ export class AgentSession {
 		lineage.revoked = true;
 	}
 
-	private async _releaseRunScope(
+	private _releaseRunScope(
 		action: QueuedSessionAction,
 		reason: string,
 		outcome: "completed" | "failed" | "cancelled" = "cancelled",
 	): Promise<void> {
 		const scope = this._actionRunScopes.get(action);
-		if (!scope) return;
+		if (!scope) return Promise.resolve();
 		this._actionRunScopes.delete(action);
 		this._executionRunScopes.delete(scope.executionId);
 		scope.controller.abort(reason);
-		const cleanupErrors: unknown[] = [];
-		const attemptCleanup = async (cleanup: () => void | Promise<void>): Promise<void> => {
-			try {
-				await cleanup();
-			} catch (error) {
-				cleanupErrors.push(error);
+		const cleanupOperation = (async () => {
+			const cleanupErrors: unknown[] = [];
+			const attemptCleanup = async (cleanup: () => void | Promise<void>): Promise<void> => {
+				try {
+					await cleanup();
+				} catch (error) {
+					cleanupErrors.push(error);
+				}
+			};
+			if (scope.modelScope !== undefined && scope.modelScopeOwner) {
+				await attemptCleanup(() => revokeAgentRunModelScope(scope.modelScope!));
 			}
-		};
-		if (scope.modelScope !== undefined && scope.modelScopeOwner) {
-			await attemptCleanup(() => revokeAgentRunModelScope(scope.modelScope!));
-		}
-		if (scope.toolAuthorityScope !== undefined && scope.toolAuthorityScopeOwner) {
-			await attemptCleanup(() => revokeAgentRunToolAuthorityScope(scope.toolAuthorityScope!));
-		}
-		if (scope.boundedKernelProvisioner) {
-			this._boundedKernelProvisioners.delete(scope.executionId);
-			await attemptCleanup(() => scope.boundedKernelProvisioner!.kill());
-		}
-		if (scope.kernelBoundaryScope !== undefined) {
-			await attemptCleanup(() =>
-				releaseAgentRunKernelBoundary(scope.kernelBoundaryScope!, scope.executionId, outcome, reason),
-			);
-			if (scope.kernelBoundaryScopeOwner) {
-				await attemptCleanup(() => revokeAgentRunKernelBoundaryScope(scope.kernelBoundaryScope!, reason));
+			if (scope.toolAuthorityScope !== undefined && scope.toolAuthorityScopeOwner) {
+				await attemptCleanup(() => revokeAgentRunToolAuthorityScope(scope.toolAuthorityScope!));
 			}
-		}
-		await attemptCleanup(() => this._releaseRunAuthorityLineage(scope.authorityLineage, reason));
-		if (cleanupErrors.length > 0) {
-			throw new AggregateError(cleanupErrors, "Agent run scope cleanup failed");
+			if (scope.boundedKernelProvisioner) {
+				this._boundedKernelProvisioners.delete(scope.executionId);
+				await attemptCleanup(() => scope.boundedKernelProvisioner!.kill());
+			}
+			if (scope.kernelBoundaryScope !== undefined) {
+				await attemptCleanup(() =>
+					releaseAgentRunKernelBoundary(scope.kernelBoundaryScope!, scope.executionId, outcome, reason),
+				);
+				if (scope.kernelBoundaryScopeOwner) {
+					await attemptCleanup(() => revokeAgentRunKernelBoundaryScope(scope.kernelBoundaryScope!, reason));
+				}
+			}
+			await attemptCleanup(() => this._releaseRunAuthorityLineage(scope.authorityLineage, reason));
+			if (cleanupErrors.length > 0) {
+				throw new AggregateError(cleanupErrors, "Agent run scope cleanup failed");
+			}
+		})();
+		return this._trackRunScopeCleanupOperation(cleanupOperation);
+	}
+
+	private _trackRunScopeCleanupOperation(operation: Promise<void>): Promise<void> {
+		this._runScopeCleanupOperations.add(operation);
+		void operation.finally(() => this._runScopeCleanupOperations.delete(operation)).catch(() => undefined);
+		return operation;
+	}
+
+	private async _drainRunScopeCleanupOperations(): Promise<void> {
+		while (this._runScopeCleanupOperations.size > 0) {
+			await Promise.allSettled([...this._runScopeCleanupOperations]);
 		}
 	}
 
@@ -11565,9 +11696,21 @@ export class AgentSession {
 		}
 		this._retryAbortController = undefined;
 
-		// Retry via continue() - use setTimeout to break out of event handler chain
+		// Retry via continue() - use setTimeout to break out of event handler chain.
+		// The continuation remains fenced to the exact admitted execution captured
+		// here; an aborted scope can never degrade into an ambient continuation.
 		const executionId = this._activeRunExecutionId();
-		setTimeout(() => {
+		if (!executionId) {
+			this._resolveRetry();
+			return false;
+		}
+		this._retryContinuationTimer = setTimeout(() => {
+			this._retryContinuationTimer = undefined;
+			const runScope = this._executionRunScopes.get(executionId);
+			if (!runScope || runScope.controller.signal.aborted) {
+				this._resolveRetry();
+				return;
+			}
 			this.agent.continue({ executionId }).catch(() => {
 				// Retry failed - will be caught by next agent_end
 			});
@@ -11577,6 +11720,10 @@ export class AgentSession {
 	}
 
 	abortRetry(): void {
+		if (this._retryContinuationTimer) {
+			clearTimeout(this._retryContinuationTimer);
+			this._retryContinuationTimer = undefined;
+		}
 		if (this._retryAbortController) {
 			this._retryAbortController.abort();
 			return;

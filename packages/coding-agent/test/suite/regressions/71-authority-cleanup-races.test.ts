@@ -213,4 +213,139 @@ describe("issue 71 authority cleanup races", () => {
 		await root;
 		await harness.session.waitForIdle();
 	});
+
+	it("revokes every supplied capability when a slash command fails before action construction", async () => {
+		const harness = await createHarness({ api: "openai-completions", provider: "slash-authority" });
+		harnesses.push(harness);
+		const model = harness.getModel();
+		const modelScope = createAgentRunModelScope({
+			version: AGENT_RUN_MODEL_SCOPE_VERSION,
+			root: model,
+			models: [model],
+			requestAccess: [{ model, access: { kind: "secret", contract: "secret@1", apiKey: "slash-key" } }],
+		});
+		const toolScope = createAgentRunToolAuthorityScope({
+			version: AGENT_RUN_TOOL_AUTHORITY_SCOPE_VERSION,
+			authorize: () => ({ decision: "allow" }),
+		});
+		const kernelScope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: harness.tempDir,
+				workspaceScopeDigest: "sha256:slash-command",
+				network: "enabled",
+				reviewerMode: "ask",
+			},
+			prepare: () => {
+				throw new Error("slash command must not initialize a boundary");
+			},
+		});
+
+		await expect(
+			harness.session.prompt("/compact", {
+				modelScope,
+				toolAuthorityScope: toolScope,
+				kernelBoundaryScope: kernelScope,
+			}),
+		).rejects.toThrow("Scoped model runs accept prompts only");
+
+		expect(() => assertAgentRunModelScope(modelScope)).toThrow("revoked");
+		expect(() => assertAgentRunToolAuthorityScope(toolScope)).toThrow("revoked");
+		expect(() => assertAgentRunKernelBoundaryScope(kernelScope)).toThrow("revoked");
+		expect(harness.faux.state.callCount).toBe(0);
+	});
+
+	it("does not let a deferred retry call the provider after its exact run is aborted", async () => {
+		const retryContinuationStarted = deferred();
+		const releaseRetryContinuation = deferred();
+		const harness = await createHarness({
+			api: "openai-completions",
+			provider: "retry-authority",
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		const originalContinue = harness.session.agent.continue.bind(harness.session.agent);
+		vi.spyOn(harness.session.agent, "continue").mockImplementation(async (options) => {
+			retryContinuationStarted.resolve();
+			await releaseRetryContinuation.promise;
+			return originalContinue(options);
+		});
+		const model = harness.getModel();
+		const modelScope = createAgentRunModelScope({
+			version: AGENT_RUN_MODEL_SCOPE_VERSION,
+			root: model,
+			models: [model],
+			requestAccess: [{ model, access: { kind: "secret", contract: "secret@1", apiKey: "retry-key" } }],
+		});
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "temporary provider failure" }),
+			fauxAssistantMessage("stale retry must not be sent"),
+		]);
+
+		const run = harness.session.prompt("retry then abort", { modelScope });
+		await retryContinuationStarted.promise;
+		const abort = harness.session.abort();
+		releaseRetryContinuation.resolve();
+		await abort;
+		await Promise.allSettled([run]);
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(() => assertAgentRunModelScope(modelScope)).toThrow("revoked");
+	});
+
+	it("does not resolve disposeAsync until cancelled run-scope cleanup finishes", async () => {
+		const requestStarted = deferred();
+		const cleanupStarted = deferred();
+		const releaseCleanup = deferred();
+		const harness = await createHarness({ settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		const kernelScope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: harness.tempDir,
+				workspaceScopeDigest: "sha256:dispose-cleanup-gate",
+				network: "enabled",
+				reviewerMode: "automatic",
+			},
+			prepare: () => ({
+				launch: (request) =>
+					spawn(request.command, [...request.args], {
+						cwd: request.cwd,
+						env: { ...request.env },
+						stdio: ["ignore", "pipe", "pipe"],
+					}),
+				dispose: async () => {
+					cleanupStarted.resolve();
+					await releaseCleanup.promise;
+				},
+			}),
+		});
+		harness.setResponses([
+			(_context, options) =>
+				new Promise((_resolve, reject) => {
+					requestStarted.resolve();
+					const abort = () => reject(options?.signal?.reason ?? new Error("cancelled"));
+					options?.signal?.addEventListener("abort", abort, { once: true });
+					if (options?.signal?.aborted) abort();
+				}),
+		]);
+
+		const run = harness.session.prompt("bounded run", { kernelBoundaryScope: kernelScope });
+		await requestStarted.promise;
+		harness.session.requestAbort();
+		await cleanupStarted.promise;
+		let disposalSettled = false;
+		const disposal = harness.session.disposeAsync().then(() => {
+			disposalSettled = true;
+		});
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		expect(disposalSettled).toBe(false);
+
+		releaseCleanup.resolve();
+		await Promise.all([run.catch(() => undefined), disposal]);
+		expect(disposalSettled).toBe(true);
+	});
 });
