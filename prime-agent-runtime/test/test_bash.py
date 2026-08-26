@@ -638,11 +638,11 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                                 handle = bash("sleep 30")
                 try:
                     # CREATE_SUSPENDED closes the pre-assignment escape window;
-                    # resume happens only after job assignment and journaling.
+                    # resume happens only after journaling and job assignment.
                     self.assertEqual(spawned[-1].spawn_kwargs["creationflags"] & 0x4, 0x4)
                     assign.assert_called_once_with(sentinel, 555)
                     resume.assert_called_once_with(handle._pid)
-                    self.assertEqual(order, ["create_job", "assign", "journal", "resume"])
+                    self.assertEqual(order, ["journal", "create_job", "assign", "resume"])
                     self.assertEqual(handle._job, sentinel)
                 finally:
                     handle._job = None
@@ -652,35 +652,58 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
     async def test_windows_assign_failure_fails_closed(self):
         sentinel = 4242
         spawned = []
+        journal_calls = []
+
+        def journal(pid, active):
+            journal_calls.append((pid, active))
+            return True
+
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
-                with mock.patch.object(bash_module._winjob, "create_job", return_value=sentinel):
-                    with mock.patch.object(bash_module._winjob, "assign", return_value=False):
-                        with mock.patch.object(bash_module._winjob, "close") as close:
-                            with mock.patch.object(bash_module._winjob, "resume_process") as resume:
-                                with self.assertRaisesRegex(RuntimeError, "job containment"):
-                                    bash("sleep 30")
+                with mock.patch.object(bash_module, "_record_journal", journal):
+                    with mock.patch.object(bash_module._winjob, "create_job", return_value=sentinel):
+                        with mock.patch.object(bash_module._winjob, "assign", return_value=False):
+                            with mock.patch.object(bash_module._winjob, "close") as close:
+                                with mock.patch.object(
+                                    bash_module._winjob, "resume_process"
+                                ) as resume:
+                                    with self.assertRaisesRegex(RuntimeError, "job containment"):
+                                        bash("sleep 30")
         # The child is not in the job: close it and kill the never-run leader.
         close.assert_called_once_with(sentinel)
         resume.assert_not_called()
         self.assertIsNotNone(spawned[0].poll())
+        self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
     async def test_windows_create_job_failure_fails_closed(self):
         spawned = []
+        journal_calls = []
+
+        def journal(pid, active):
+            journal_calls.append((pid, active))
+            return True
+
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
-                with mock.patch.object(bash_module._winjob, "create_job", return_value=None):
-                    with mock.patch.object(bash_module._winjob, "resume_process") as resume:
-                        with self.assertRaisesRegex(RuntimeError, "job containment"):
-                            bash("sleep 30")
+                with mock.patch.object(bash_module, "_record_journal", journal):
+                    with mock.patch.object(bash_module._winjob, "create_job", return_value=None):
+                        with mock.patch.object(bash_module._winjob, "resume_process") as resume:
+                            with self.assertRaisesRegex(RuntimeError, "job containment"):
+                                bash("sleep 30")
         resume.assert_not_called()
         self.assertIsNotNone(spawned[0].poll())
+        self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
     async def test_windows_resume_failure_fails_closed(self):
         sentinel = 4343
         spawned = []
+        journal_calls = []
+
+        def journal(pid, active):
+            journal_calls.append((pid, active))
+            return True
 
         def terminate(job):
             # The abort kills the suspended, job-contained child via the job.
@@ -690,19 +713,41 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
-                with mock.patch.object(bash_module._winjob, "create_job", return_value=sentinel):
-                    with mock.patch.object(bash_module._winjob, "assign", return_value=True):
-                        with mock.patch.object(
-                            bash_module._winjob, "resume_process", return_value=False
-                        ):
+                with mock.patch.object(bash_module, "_record_journal", journal):
+                    with mock.patch.object(
+                        bash_module._winjob, "create_job", return_value=sentinel
+                    ):
+                        with mock.patch.object(bash_module._winjob, "assign", return_value=True):
                             with mock.patch.object(
-                                bash_module._winjob, "terminate", side_effect=terminate
-                            ) as term:
-                                with mock.patch.object(bash_module._winjob, "close") as close:
-                                    with self.assertRaisesRegex(RuntimeError, "job containment"):
-                                        bash("sleep 30")
+                                bash_module._winjob, "resume_process", return_value=False
+                            ):
+                                with mock.patch.object(
+                                    bash_module._winjob, "terminate", side_effect=terminate
+                                ) as term:
+                                    with mock.patch.object(bash_module._winjob, "close") as close:
+                                        with self.assertRaisesRegex(
+                                            RuntimeError, "job containment"
+                                        ):
+                                            bash("sleep 30")
         term.assert_called_once_with(sentinel)
         close.assert_called_once_with(sentinel)
+        self.assertIsNotNone(spawned[0].poll())
+        self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
+
+    async def test_windows_journal_enrollment_failure_kills_suspended_leader(self):
+        # Enrollment now happens before any job exists: a journal failure must
+        # kill the suspended leader without touching job or resume machinery.
+        spawned = []
+        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        with mock.patch.object(bash_module, "_IS_POSIX", False):
+            with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
+                with mock.patch.object(bash_module, "_record_journal", return_value=False):
+                    with mock.patch.object(bash_module._winjob, "create_job") as create_job:
+                        with mock.patch.object(bash_module._winjob, "resume_process") as resume:
+                            with self.assertRaisesRegex(RuntimeError, "journal enrollment"):
+                                bash("sleep 30")
+        create_job.assert_not_called()
+        resume.assert_not_called()
         self.assertIsNotNone(spawned[0].poll())
 
     async def test_windows_job_reap_and_kill(self):
