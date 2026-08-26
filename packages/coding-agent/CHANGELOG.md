@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 - Fixed the REPL runtime `list_names` request crashing the serve loop when the namespace held a non-string key; non-string keys are now skipped and every runtime request fails individually through the shared backstop instead of killing the loop.
-- Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel, made `%cd`/`%env` rewrites match IPython semantics (`~` expansion, quoted `%cd` targets, `%cd -` and new-cwd echo, `=`-preferred and space-separated assignments, `$var`/`${var}` value expansion, bare `%env` listing with `key`/`token`/`secret` values redacted) with linear-time magic patterns, kept `%cd -` previous-directory tracking intact when a `%cd` target does not exist, and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
+- Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
 - Fixed graceful REPL kernel `shutdown()` losing teardown ownership to its own child's exit handler, which made `restart()` misread the shutdown as superseded and never start the kernel again.
 - Fixed REPL kernel `start()` waiting out the full 30s ready timeout when the kernel process fails to spawn; the spawn error now rejects startup immediately.
 - Fixed a cell that rebound or ignored SIGINT (or a restored prior handler) permanently breaking protocol interrupts: the REPL runtime now re-asserts its SIGINT handler between cells.
@@ -13,7 +13,6 @@
 - Fixed two REPL runtime request-lifecycle bugs: a cell closing sys.stdout/sys.stderr no longer kills the serve loop (done still arrives and later cells run), and an untargeted interrupt parked for a request that fails to compile is consumed with that request instead of spuriously cancelling the next cell.
 - Fixed the REPL runtime leaking a finished cell's id onto late background-thread output: the current cell is now cleared right after the post-cell drain, so `done` stays the last event with that id and between-cell output carries a null id.
 - Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
-- Fixed IPython magic rejection missing column-0 `%`/`!` lines after the first line, so stale multi-line magic cells get the one-line migration guidance instead of a raw SyntaxError.
 - Fixed rlm.run outside a live kernel hanging forever instead of failing fast, which stalled CI shard 3 until timeout.
 - Fixed two bash() spawn races: status-channel fds no longer leak when pipe creation fails mid-setup, and a status-socket gate keeps the command from starting until its pid is journaled (a kernel kill in that window now stops the child instead of orphaning it past the reaper).
 - Fixed a compile-phase crash (e.g. RecursionError from a pathologically deep attribute chain) killing the REPL runtime instead of failing the one cell: any per-request failure now becomes error+done and the serve loop keeps running; rebinding sys.stdout/sys.stderr to flush-less objects no longer kills it either.
