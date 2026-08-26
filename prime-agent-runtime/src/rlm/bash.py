@@ -19,7 +19,7 @@ from collections import deque
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from . import _winjob
 
@@ -39,8 +39,6 @@ _STATUS_FD = 9
 # wait for a confirmed group exit before CancelledError propagates.
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
-# subprocess does not export CREATE_SUSPENDED.
-_CREATE_SUSPENDED = 0x00000004
 
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
@@ -151,28 +149,33 @@ class BashHandle:
                 os.close(status_write)
                 raise
             script = _status_script(_with_prefix(command))
-            spawn_kwargs: dict[str, Any] = {"start_new_session": True, "stdin": status_write}
         else:
-            # Windows: no status/gate channel; the child starts CREATE_SUSPENDED
-            # with the kill-on-close job pre-created, so job assignment is the
-            # next containment step after Popen. A kernel kill after process
-            # creation but before job assignment leaks at most one suspended,
-            # never-run leader.
+            # Windows: no status/gate channel; the child is created suspended and
+            # directly inside the kill-on-close job (PROC_THREAD_ATTRIBUTE_JOB_LIST
+            # at CreateProcessW time), so no window exists between creation and
+            # containment. Order: spawn-in-job (suspended) -> journal (may run a
+            # PowerShell start-id query) -> resume.
             script = _with_prefix(command)
-            spawn_kwargs = {"stdin": subprocess.DEVNULL, "creationflags": _CREATE_SUSPENDED}
             self._job = _winjob.create_job()
             if self._job is None:
                 # Nothing spawned yet, so nothing can leak: refuse to start.
                 raise RuntimeError("bash(): Windows job containment could not be established")
         try:
-            self._proc = subprocess.Popen(
-                [_shell(), "-c", script],
-                cwd=os.getcwd(),
-                env=_child_env(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                **spawn_kwargs,
-            )
+            self._proc: subprocess.Popen[bytes] | _winjob.JobProcess
+            if _IS_POSIX:
+                self._proc = subprocess.Popen(
+                    [_shell(), "-c", script],
+                    cwd=os.getcwd(),
+                    env=_child_env(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    stdin=status_write,
+                )
+            else:
+                self._proc = _winjob.spawn_in_job(
+                    self._job, [_shell(), "-c", script], cwd=os.getcwd(), env=_child_env()
+                )
         except BaseException:
             for fd in (self._status_read, self._wake_read, self._wake_write):
                 if fd >= 0:
@@ -186,21 +189,6 @@ class BashHandle:
                 os.close(status_write)
         self._pid: int = self._proc.pid
         self._released = False
-        if not _IS_POSIX:
-            # Join the pre-created job as the next step after Popen: once the
-            # still-suspended leader is assigned, closing the job handle
-            # (including OS handle cleanup on kernel death) kills it, and the
-            # journal write (which may run a PowerShell start-id query) happens
-            # only after the child is job-contained.
-            proc_handle = getattr(self._proc, "_handle", None)
-            if proc_handle is None or not _winjob.assign(self._job, int(proc_handle)):
-                # Not in the job: close it so _abort_spawn falls through to
-                # proc.kill() on the uncontained, never-run leader.
-                job, self._job = self._job, None
-                if job is not None:
-                    _winjob.close(job)
-                self._abort_spawn()
-                raise RuntimeError("bash(): Windows job containment could not be established")
         with _live_lock:
             _live_handles.add(self)
         enrolled = _record_journal(self._pid, active=True)
@@ -224,7 +212,7 @@ class BashHandle:
             # The child is already job-contained and journaled; resume is the
             # last step. A failed resume would strand a permanently suspended
             # child: fail closed via the assigned job.
-            if not _winjob.resume_process(self._pid):
+            if not cast("_winjob.JobProcess", self._proc).resume():
                 self._abort_spawn()
                 raise RuntimeError("bash(): Windows job containment could not be established")
         threading.Thread(target=self._pump, daemon=True).start()

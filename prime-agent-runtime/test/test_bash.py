@@ -22,22 +22,27 @@ from rlm import bash
 bash_module = sys.modules["rlm.bash"]
 
 
-def _win_popen(procs=None, handle=555):
-    # POSIX Popen has no _handle and rejects creationflags; inject/strip both
-    # so the mocked-Windows spawn path is testable on the Ubuntu CI.
-    real_popen = subprocess.Popen
-
-    def popen(*args, **kwargs):
-        recorded = dict(kwargs)
-        kwargs.pop("creationflags", None)
-        proc = real_popen(*args, **kwargs)
-        proc._handle = handle
-        proc.spawn_kwargs = recorded
+def _win_spawn(procs=None, resume=True):
+    # POSIX stand-in for _winjob.spawn_in_job: a real Popen with the same
+    # stream wiring plus a resume() mock, so the mocked-Windows spawn path is
+    # testable on the Ubuntu CI.
+    def spawn_in_job(job, argv, cwd, env):
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+        proc.resume = mock.Mock(return_value=resume)
+        proc.spawn_job = job
+        proc.spawn_argv = argv
         if procs is not None:
             procs.append(proc)
         return proc
 
-    return popen
+    return spawn_in_job
 
 
 class BashTest(unittest.IsolatedAsyncioTestCase):
@@ -586,113 +591,67 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 },
             ):
                 with mock.patch.object(bash_module, "_IS_POSIX", False):
-                    with mock.patch.object(bash_module.subprocess, "Popen", _win_popen()):
+                    with mock.patch.object(bash_module._winjob, "spawn_in_job", _win_spawn()):
                         with mock.patch.object(bash_module._winjob, "create_job", return_value=7):
-                            with mock.patch.object(bash_module._winjob, "assign", return_value=True):
-                                with mock.patch.object(
-                                    bash_module._winjob, "resume_process", return_value=True
-                                ):
-                                    with mock.patch.object(
-                                        bash_module._winjob, "terminate", return_value=True
-                                    ):
-                                        with mock.patch.object(bash_module._winjob, "close"):
-                                            handle = bash("echo hi")
-                                            await asyncio.wait_for(handle, timeout=5)
-                                            for _ in range(100):
-                                                if handle._reaped:
-                                                    break
-                                                await asyncio.sleep(0.05)
+                            with mock.patch.object(
+                                bash_module._winjob, "terminate", return_value=True
+                            ):
+                                with mock.patch.object(bash_module._winjob, "close"):
+                                    handle = bash("echo hi")
+                                    await asyncio.wait_for(handle, timeout=5)
+                                    for _ in range(100):
+                                        if handle._reaped:
+                                            break
+                                        await asyncio.sleep(0.05)
             active = [r for r in await _poll_journal(journal, count=1) if r["active"]]
             self.assertEqual(len(active), 1)
             self.assertIn("processStartId", active[0])
 
-    async def test_windows_spawn_assigns_job(self):
+    async def test_windows_spawn_creates_child_inside_job(self):
         sentinel = 4242
         spawned = []
         order = []
         real_journal = bash_module._record_journal
-        base_popen = _win_popen(spawned)
+        base_spawn = _win_spawn(spawned)
 
         def journal(pid, active):
             order.append("journal")
             return real_journal(pid, active)
 
-        def popen(*args, **kwargs):
-            order.append("popen")
-            return base_popen(*args, **kwargs)
+        def spawn(job, argv, cwd, env):
+            order.append("spawn")
+            proc = base_spawn(job, argv, cwd, env)
+            proc.resume = mock.Mock(side_effect=lambda: order.append("resume") or True)
+            return proc
 
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.subprocess, "Popen", popen):
+            with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
                 with mock.patch.object(bash_module, "_record_journal", journal):
                     with mock.patch.object(
                         bash_module._winjob,
                         "create_job",
                         side_effect=lambda: order.append("create_job") or sentinel,
                     ):
-                        with mock.patch.object(
-                            bash_module._winjob,
-                            "assign",
-                            side_effect=lambda job, h: order.append("assign") or True,
-                        ) as assign:
-                            with mock.patch.object(
-                                bash_module._winjob,
-                                "resume_process",
-                                side_effect=lambda pid: order.append("resume") or True,
-                            ) as resume:
-                                handle = bash("sleep 30")
+                        handle = bash("sleep 30")
                 try:
-                    # The job is pre-created before spawn and joined right after
-                    # Popen; the journal write (which may query a start id) runs
-                    # only once the suspended child is job-contained, then resume.
-                    self.assertEqual(spawned[-1].spawn_kwargs["creationflags"] & 0x4, 0x4)
-                    assign.assert_called_once_with(sentinel, 555)
-                    resume.assert_called_once_with(handle._pid)
-                    self.assertEqual(order, ["create_job", "popen", "assign", "journal", "resume"])
+                    # The job is pre-created and the child spawned directly inside
+                    # it; the journal write (which may query a start id) runs while
+                    # the job-contained child is still suspended, then resume.
+                    self.assertEqual(spawned[-1].spawn_job, sentinel)
+                    self.assertEqual(
+                        spawned[-1].spawn_argv,
+                        ["/bin/sh", "-c", bash_module._with_prefix("sleep 30")],
+                    )
+                    spawned[-1].resume.assert_called_once_with()
+                    self.assertEqual(order, ["create_job", "spawn", "journal", "resume"])
                     self.assertEqual(handle._job, sentinel)
                 finally:
                     handle._job = None
                     handle.kill(signal.SIGKILL)
                     await asyncio.wait_for(handle, timeout=5)
 
-    async def test_windows_assign_failure_fails_closed(self):
-        sentinel = 4242
-        spawned = []
-        journal_calls = []
-
-        def journal(pid, active):
-            journal_calls.append((pid, active))
-            return True
-
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
-        with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
-                with mock.patch.object(bash_module, "_record_journal", journal):
-                    with mock.patch.object(bash_module._winjob, "create_job", return_value=sentinel):
-                        with mock.patch.object(bash_module._winjob, "assign", return_value=False):
-                            with mock.patch.object(bash_module._winjob, "close") as close:
-                                with mock.patch.object(
-                                    bash_module._winjob, "terminate"
-                                ) as terminate:
-                                    with mock.patch.object(
-                                        bash_module._winjob, "resume_process"
-                                    ) as resume:
-                                        with self.assertRaisesRegex(
-                                            RuntimeError, "job containment"
-                                        ):
-                                            bash("sleep 30")
-        # The child is not in the job: close it and kill the never-run leader
-        # directly, never by terminating the empty job. Enrollment never ran
-        # (assignment precedes the journal write), so the only record is the
-        # harmless inactive one from the delivered kill.
-        close.assert_called_once_with(sentinel)
-        terminate.assert_not_called()
-        resume.assert_not_called()
-        self.assertIsNotNone(spawned[0].poll())
-        self.assertEqual(journal_calls, [(spawned[0].pid, False)])
-
     async def test_windows_create_job_failure_fails_closed(self):
-        spawned = []
         journal_calls = []
 
         def journal(pid, active):
@@ -701,16 +660,14 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
+            with mock.patch.object(bash_module._winjob, "spawn_in_job") as spawn:
                 with mock.patch.object(bash_module, "_record_journal", journal):
                     with mock.patch.object(bash_module._winjob, "create_job", return_value=None):
-                        with mock.patch.object(bash_module._winjob, "resume_process") as resume:
-                            with self.assertRaisesRegex(RuntimeError, "job containment"):
-                                bash("sleep 30")
+                        with self.assertRaisesRegex(RuntimeError, "job containment"):
+                            bash("sleep 30")
         # The job is pre-created before spawn: a create failure aborts before
-        # Popen, so nothing is spawned and nothing touches the journal.
-        resume.assert_not_called()
-        self.assertEqual(spawned, [])
+        # spawn_in_job, so nothing is spawned and nothing touches the journal.
+        spawn.assert_not_called()
         self.assertEqual(journal_calls, [])
 
     async def test_windows_resume_failure_fails_closed(self):
@@ -729,32 +686,28 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
+            with mock.patch.object(
+                bash_module._winjob, "spawn_in_job", _win_spawn(spawned, resume=False)
+            ):
                 with mock.patch.object(bash_module, "_record_journal", journal):
                     with mock.patch.object(
                         bash_module._winjob, "create_job", return_value=sentinel
                     ):
-                        with mock.patch.object(bash_module._winjob, "assign", return_value=True):
-                            with mock.patch.object(
-                                bash_module._winjob, "resume_process", return_value=False
-                            ):
-                                with mock.patch.object(
-                                    bash_module._winjob, "terminate", side_effect=terminate
-                                ) as term:
-                                    with mock.patch.object(bash_module._winjob, "close") as close:
-                                        with self.assertRaisesRegex(
-                                            RuntimeError, "job containment"
-                                        ):
-                                            bash("sleep 30")
+                        with mock.patch.object(
+                            bash_module._winjob, "terminate", side_effect=terminate
+                        ) as term:
+                            with mock.patch.object(bash_module._winjob, "close") as close:
+                                with self.assertRaisesRegex(RuntimeError, "job containment"):
+                                    bash("sleep 30")
         term.assert_called_once_with(sentinel)
         close.assert_called_once_with(sentinel)
         self.assertIsNotNone(spawned[0].poll())
         self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
     async def test_windows_journal_enrollment_failure_kills_suspended_leader(self):
-        # Enrollment runs only after job assignment: a journal failure must
-        # terminate the suspended leader via the assigned job and retire the
-        # record (the failed active attempt, then the retirement write).
+        # Enrollment runs only after the child is spawned inside the job: a
+        # journal failure must terminate the suspended leader via the job and
+        # retire the record (the failed active attempt, then the retirement write).
         sentinel = 4545
         spawned = []
         journal_calls = []
@@ -769,32 +722,26 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.subprocess, "Popen", _win_popen(spawned)):
+            with mock.patch.object(bash_module._winjob, "spawn_in_job", _win_spawn(spawned)):
                 with mock.patch.object(bash_module, "_record_journal", journal):
                     with mock.patch.object(
                         bash_module._winjob, "create_job", return_value=sentinel
                     ):
-                        with mock.patch.object(bash_module._winjob, "assign", return_value=True):
-                            with mock.patch.object(
-                                bash_module._winjob, "terminate", side_effect=terminate
-                            ) as term:
-                                with mock.patch.object(bash_module._winjob, "close") as close:
-                                    with mock.patch.object(
-                                        bash_module._winjob, "resume_process"
-                                    ) as resume:
-                                        with self.assertRaisesRegex(
-                                            RuntimeError, "journal enrollment"
-                                        ):
-                                            bash("sleep 30")
+                        with mock.patch.object(
+                            bash_module._winjob, "terminate", side_effect=terminate
+                        ) as term:
+                            with mock.patch.object(bash_module._winjob, "close") as close:
+                                with self.assertRaisesRegex(RuntimeError, "journal enrollment"):
+                                    bash("sleep 30")
         term.assert_called_once_with(sentinel)
         close.assert_called_once_with(sentinel)
-        resume.assert_not_called()
+        spawned[0].resume.assert_not_called()
         self.assertIsNotNone(spawned[0].poll())
         self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
-    async def test_windows_popen_failure_closes_precreated_job(self):
-        # The job is pre-created before spawn: a Popen failure must close it
-        # so the kill-on-close handle does not leak, and never touch the journal.
+    async def test_windows_spawn_failure_closes_precreated_job(self):
+        # The job is pre-created before spawn: a spawn_in_job failure must close
+        # it so the kill-on-close handle does not leak, and never touch the journal.
         sentinel = 4646
         journal_calls = []
 
@@ -802,12 +749,12 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             journal_calls.append((pid, active))
             return True
 
-        def popen(*args, **kwargs):
+        def spawn(job, argv, cwd, env):
             raise OSError("spawn failed")
 
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.subprocess, "Popen", popen):
+            with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
                 with mock.patch.object(bash_module, "_record_journal", journal):
                     with mock.patch.object(
                         bash_module._winjob, "create_job", return_value=sentinel
