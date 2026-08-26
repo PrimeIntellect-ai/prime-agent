@@ -175,6 +175,15 @@ export {
 	type AgentRunRequestAuthResolver,
 	createAgentRunModelScope,
 } from "./core/run-model-scope.js";
+export {
+	AGENT_RUN_TOOL_AUTHORITY_SCOPE_VERSION,
+	type AgentRunToolAuthorityScope,
+	type AgentRunToolAuthorizationContext,
+	type AgentRunToolAuthorizationDecision,
+	type AgentRunToolAuthorizationRequest,
+	type AgentRunToolAuthorizer,
+	createAgentRunToolAuthorityScope,
+} from "./core/run-tool-authority.js";
 // SDK for programmatic usage
 export {
 	type AgentSessionCreationOptions,

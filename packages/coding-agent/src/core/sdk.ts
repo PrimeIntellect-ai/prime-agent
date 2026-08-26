@@ -107,6 +107,15 @@ export {
 	type AgentRunRequestAuthResolver,
 	createAgentRunModelScope,
 } from "./run-model-scope.js";
+export {
+	AGENT_RUN_TOOL_AUTHORITY_SCOPE_VERSION,
+	type AgentRunToolAuthorityScope,
+	type AgentRunToolAuthorizationContext,
+	type AgentRunToolAuthorizationDecision,
+	type AgentRunToolAuthorizationRequest,
+	type AgentRunToolAuthorizer,
+	createAgentRunToolAuthorityScope,
+} from "./run-tool-authority.js";
 export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 

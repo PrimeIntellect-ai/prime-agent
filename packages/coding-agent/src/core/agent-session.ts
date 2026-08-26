@@ -245,6 +245,12 @@ import {
 	revokeAgentRunModelScope,
 } from "./run-model-scope.js";
 import {
+	type AgentRunToolAuthorityScope,
+	assertAgentRunToolAuthorityScope,
+	authorizeAgentRunToolCall,
+	revokeAgentRunToolAuthorityScope,
+} from "./run-tool-authority.js";
+import {
 	ActionStore,
 	type ActionTicket,
 	canSelectSessionAction,
@@ -534,6 +540,8 @@ export interface PromptOptions {
 	runContext?: unknown;
 	/** Single-run model roster and request-auth capability. */
 	modelScope?: AgentRunModelScope;
+	/** Single-run host authority for root and recursive-child tool calls. */
+	toolAuthorityScope?: AgentRunToolAuthorityScope;
 }
 
 interface InternalPromptOptions extends PromptOptions {
@@ -541,6 +549,7 @@ interface InternalPromptOptions extends PromptOptions {
 	returnAfterAccepted?: boolean;
 	agentMessageId?: string;
 	modelScopeOwner?: boolean;
+	toolAuthorityScopeOwner?: boolean;
 	selectedModel?: Model<Api>;
 }
 
@@ -940,6 +949,8 @@ interface AgentRunScope {
 	readonly controller: AbortController;
 	readonly modelScope?: AgentRunModelScope;
 	readonly modelScopeOwner: boolean;
+	readonly toolAuthorityScope?: AgentRunToolAuthorityScope;
+	readonly toolAuthorityScopeOwner: boolean;
 	readonly selectedModel?: Model<Api>;
 }
 
@@ -1490,7 +1501,26 @@ export class AgentSession {
 	 * happens here instead of in wrappers.
 	 */
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+		this.agent.beforeToolCall = async ({ toolCall, args }, signal) => {
+			const runScope = this._activeAgentRunScope();
+			if (runScope?.toolAuthorityScope) {
+				const decision = await authorizeAgentRunToolCall(runScope.toolAuthorityScope, {
+					toolName: toolCall.name,
+					args,
+					context: {
+						executionId: runScope.executionId,
+						runContext: runScope.runContext,
+						recursionDepth: this._rlmDepth,
+						signal: signal ?? runScope.controller.signal,
+					},
+				});
+				if (decision.decision === "deny") {
+					return {
+						block: true,
+						reason: decision.reason ?? `Tool ${toolCall.name} was denied by the run authority`,
+					};
+				}
+			}
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -4861,6 +4891,8 @@ export class AgentSession {
 				runContext: options?.runContext,
 				modelScope: options?.modelScope,
 				modelScopeOwner: options?.modelScopeOwner,
+				toolAuthorityScope: options?.toolAuthorityScope,
+				toolAuthorityScopeOwner: options?.toolAuthorityScopeOwner,
 				selectedModel: options?.selectedModel,
 			});
 			const result = this._admitSessionInput(action, {
@@ -5023,6 +5055,8 @@ export class AgentSession {
 					runContext: options?.runContext,
 					modelScope: options?.modelScope,
 					modelScopeOwner: options?.modelScopeOwner,
+					toolAuthorityScope: options?.toolAuthorityScope,
+					toolAuthorityScopeOwner: options?.toolAuthorityScopeOwner,
 					selectedModel: options?.selectedModel,
 				});
 				if (action.suppressAutonomousContinuation) {
@@ -5520,6 +5554,8 @@ export class AgentSession {
 			runContext?: unknown;
 			modelScope?: AgentRunModelScope;
 			modelScopeOwner?: boolean;
+			toolAuthorityScope?: AgentRunToolAuthorityScope;
+			toolAuthorityScopeOwner?: boolean;
 			selectedModel?: Model<Api>;
 		},
 	): QueuedSessionAction {
@@ -5529,6 +5565,9 @@ export class AgentSession {
 			if (!findAgentRunScopedModel(options.modelScope, selected.provider, selected.id)) {
 				throw new Error(`Model ${selected.provider}/${selected.id} is outside the admitted run scope`);
 			}
+		}
+		if (options.toolAuthorityScope !== undefined) {
+			assertAgentRunToolAuthorityScope(options.toolAuthorityScope);
 		}
 		const id = randomUUID();
 		const content = options.content ?? this._buildPromptContent(text, images);
@@ -5579,6 +5618,8 @@ export class AgentSession {
 			controller: new AbortController(),
 			modelScope: options.modelScope,
 			modelScopeOwner: options.modelScopeOwner ?? options.modelScope !== undefined,
+			toolAuthorityScope: options.toolAuthorityScope,
+			toolAuthorityScopeOwner: options.toolAuthorityScopeOwner ?? options.toolAuthorityScope !== undefined,
 			selectedModel: options.selectedModel ?? options.modelScope?.root,
 		});
 		return action;
@@ -5591,6 +5632,9 @@ export class AgentSession {
 		this._executionRunScopes.delete(scope.executionId);
 		scope.controller.abort(reason);
 		if (scope.modelScope !== undefined && scope.modelScopeOwner) revokeAgentRunModelScope(scope.modelScope);
+		if (scope.toolAuthorityScope !== undefined && scope.toolAuthorityScopeOwner) {
+			revokeAgentRunToolAuthorityScope(scope.toolAuthorityScope);
+		}
 	}
 
 	private _hostRequestContextForExecution(executionId?: string): HostRequestExecutionContext | undefined {
@@ -5736,6 +5780,8 @@ export class AgentSession {
 			runContext?: unknown;
 			modelScope?: AgentRunModelScope;
 			modelScopeOwner?: boolean;
+			toolAuthorityScope?: AgentRunToolAuthorityScope;
+			toolAuthorityScopeOwner?: boolean;
 			selectedModel?: Model<Api>;
 		} = {},
 	): Promise<boolean> {
@@ -10523,6 +10569,7 @@ export class AgentSession {
 			}),
 			runContext,
 			modelScope: parentRunScope?.modelScope,
+			toolAuthorityScope: parentRunScope?.toolAuthorityScope,
 			onSessionPublished: publishChildSession,
 		};
 
@@ -10666,6 +10713,8 @@ export class AgentSession {
 					runContext: subagentOptions.runContext,
 					modelScope: subagentOptions.modelScope,
 					modelScopeOwner: false,
+					toolAuthorityScope: subagentOptions.toolAuthorityScope,
+					toolAuthorityScopeOwner: false,
 					selectedModel: modelSelection.model,
 				});
 				await child.waitForRlmQuiescence();

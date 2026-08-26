@@ -188,6 +188,40 @@ The root turn uses `root` exactly. Recursive children can select only entries in
 
 `AgentRunModelScope` is intentionally available only through the in-process API. Do not persist it or its resolver, put credentials in model objects, or pass it through the daemon/RPC protocol.
 
+### Run-scoped tool authority (v1)
+
+An in-process host can require authorization immediately before every validated tool call in a root run and its recursive children:
+
+```typescript
+import {
+  AGENT_RUN_TOOL_AUTHORITY_SCOPE_VERSION,
+  createAgentRunToolAuthorityScope,
+} from "@earendil-works/pi-coding-agent";
+
+const toolAuthorityScope = createAgentRunToolAuthorityScope({
+  version: AGENT_RUN_TOOL_AUTHORITY_SCOPE_VERSION,
+  async authorize({ toolName, args, context }) {
+    return approvalBroker.authorize({
+      toolName,
+      args,
+      executionId: context.executionId,
+      runContext: context.runContext,
+      recursionDepth: context.recursionDepth,
+      signal: context.signal,
+    });
+  },
+});
+
+await session.promptAndWait("Run with host tool authority", {
+  runContext: { interactionId: "interaction-42" },
+  toolAuthorityScope,
+});
+```
+
+The authorizer receives the exact tool name, an immutable copy of schema-validated arguments, and execution context. It must resolve to `{ decision: "allow" }` or `{ decision: "deny", reason? }`; denied calls do not execute. Authorization is awaited, and cancellation aborts the supplied signal while the call is pending.
+
+The capability is memory-only, inherited only by recursive children of the admitted execution, and revoked when the root prompt succeeds, fails, or is cancelled. It is single-use and is not persisted in session state. Omitting `toolAuthorityScope` preserves unrestricted tool behavior, so a host may use this seam for selected modes without changing Prime Agent's generic defaults. This API supplies the enforcement boundary only; the host remains responsible for defining approval policy and user interaction.
+
 ### createAgentSessionRuntime() and AgentSessionRuntime
 
 Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.

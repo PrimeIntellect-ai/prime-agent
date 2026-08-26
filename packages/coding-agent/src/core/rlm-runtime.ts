@@ -4,6 +4,7 @@ import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestContext, HostRequestHandler, RegisteredHostRequestHandlers } from "./kernel/index.js";
 import type { AgentRunModelScope } from "./run-model-scope.js";
+import type { AgentRunToolAuthorityScope } from "./run-tool-authority.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 
 /** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
@@ -249,6 +250,8 @@ export interface CreateRlmSubagentRuntimeOptions {
 	runContext?: unknown;
 	/** Host-only model authority inherited from the spawning execution. */
 	modelScope?: AgentRunModelScope;
+	/** Host-only tool authority inherited from the spawning execution. */
+	toolAuthorityScope?: AgentRunToolAuthorityScope;
 	/** Source of the IPython cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */

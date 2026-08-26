@@ -1,0 +1,1 @@
+- Added a versioned, in-memory run tool-authority scope for host authorization of validated root and recursive-child tool calls without changing durable session state.

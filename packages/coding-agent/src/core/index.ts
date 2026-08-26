@@ -95,6 +95,15 @@ export {
 	type AgentRunRequestAuthResolver,
 	createAgentRunModelScope,
 } from "./run-model-scope.js";
+export {
+	AGENT_RUN_TOOL_AUTHORITY_SCOPE_VERSION,
+	type AgentRunToolAuthorityScope,
+	type AgentRunToolAuthorizationContext,
+	type AgentRunToolAuthorizationDecision,
+	type AgentRunToolAuthorizationRequest,
+	type AgentRunToolAuthorizer,
+	createAgentRunToolAuthorityScope,
+} from "./run-tool-authority.js";
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";
 export type { SessionStats } from "./session-stats.js";
 export { createSyntheticSourceInfo } from "./source-info.js";
