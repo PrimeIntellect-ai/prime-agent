@@ -579,7 +579,11 @@ function decode(frames: Buffer[]): JupyterMessage | null {
 const CONNECTION_PORT_KEYS = ["shell_port", "iopub_port", "stdin_port", "control_port", "hb_port"] as const;
 
 function hasResolvedPorts(info: ConnectionInfo): boolean {
-	return CONNECTION_PORT_KEYS.every((key) => Number.isInteger(info[key]) && info[key] > 0);
+	const ports = CONNECTION_PORT_KEYS.map((key) => info[key]);
+	return (
+		ports.every((port) => Number.isInteger(port) && port >= 1 && port <= 65_535) &&
+		new Set(ports).size === ports.length
+	);
 }
 
 function parseConnectionInfo(value: unknown): ConnectionInfo | null {
