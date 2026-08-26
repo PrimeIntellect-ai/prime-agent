@@ -67,6 +67,7 @@ interface IpythonDetails {
 	stdout?: string;
 	stderr?: string;
 	result?: string;
+	backgroundOutput?: string;
 	diffs?: DiffDisplay[];
 	sentAgentMessages?: SentAgentMessageDisplay[];
 	error?: IpythonErrorDetails;
@@ -147,6 +148,7 @@ function readDetails(details: unknown): IpythonDetails {
 		stdout: typeof record.stdout === "string" ? record.stdout : undefined,
 		stderr: typeof record.stderr === "string" ? record.stderr : undefined,
 		result: typeof record.result === "string" ? record.result : undefined,
+		backgroundOutput: typeof record.backgroundOutput === "string" ? record.backgroundOutput : undefined,
 		diffs: readDiffDisplays(record.diffs),
 		sentAgentMessages: readSentAgentMessages(record.sentAgentMessages),
 		error,
@@ -446,7 +448,7 @@ export class IPythonCellComponent implements Component {
 		const hasDiffs = (details.diffs?.length ?? 0) > 0;
 		const sentMessages = details.sentAgentMessages ?? [];
 		const result = isAgentMessageReceipt(details.result, sentMessages) ? undefined : details.result;
-		const structured = [details.stdout, details.stderr, result]
+		const structured = [details.stdout, details.stderr, result, details.backgroundOutput]
 			.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
 			.join("\n");
 		const blocksText = textFromBlocks(this.state.content);
@@ -591,6 +593,14 @@ export class IPythonCellComponent implements Component {
 			this.renderOutputText(lines, width, normalizeErrorDetails(text), this.state.isError ? "err" : "out");
 		}
 
+		// Without structured fields the fallback content text above already contains the appended background block.
+		const backgroundOutput =
+			hasStructuredOutput && details.backgroundOutput?.trim() ? details.backgroundOutput : undefined;
+		if (backgroundOutput) {
+			// Suppresses the placeholders below when background output is the cell's only output; rendered after the traceback to match the model-facing order.
+			renderedTextOutput = true;
+		}
+
 		if (!renderedTextOutput && this.state.isPartial) {
 			startOutput();
 			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for output..."), width);
@@ -620,6 +630,12 @@ export class IPythonCellComponent implements Component {
 		} else if (traceback) {
 			startOutput();
 			this.renderTraceback(lines, width, traceback.traceback);
+		}
+
+		if (backgroundOutput) {
+			startOutput();
+			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "background output (unattributed)"), width);
+			this.renderOutputText(lines, width, normalizeErrorDetails(backgroundOutput), "err");
 		}
 
 		if (imageCount > 0) {

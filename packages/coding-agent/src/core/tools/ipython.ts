@@ -253,6 +253,8 @@ export interface IpythonToolDetails {
 	stdout?: string;
 	stderr?: string;
 	result?: string;
+	/** Output that arrived without this cell's id (threads, other cells' leftovers), shown separately from stdout. */
+	backgroundOutput?: string;
 	/** Diffs streamed from file edits, rendered by the cell view. */
 	diffs?: KernelDiffDisplay[];
 	/** Media attachments loaded into context (e.g. by the attach-image skill). */
@@ -682,6 +684,7 @@ export function createIpythonToolDefinition(
 						stdout: r.stdout,
 						stderr: r.stderr,
 						result: r.result,
+						backgroundOutput: r.backgroundOutput,
 						diffs: r.diffs,
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,

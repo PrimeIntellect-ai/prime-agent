@@ -605,6 +605,7 @@ def _snapshot_state(
     max_bytes: int,
     max_variable_bytes: int,
     prune_oversized: bool,
+    committed: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     import datetime
 
@@ -720,6 +721,10 @@ def _snapshot_state(
             return {"error": f"manifest write failed: {err}"}
         for name in pruned:
             ns.pop(name, None)
+        result = {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
+        # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
+        if committed is not None:
+            committed.append(result)
     finally:
         # The one guaranteed cleanup point (unique owned names: after a successful
         # commit the renamed temps no longer exist, so this is a no-op). It runs with
@@ -734,10 +739,12 @@ def _snapshot_state(
                 # the namespace pruned, the destructive snapshot has succeeded, and re-raising
                 # would misreport it as failed and risk the host discarding the only copy of
                 # the pruned variables. The interrupt targeted this now-complete request.
-    return {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
+    return result
 
 
-def _restore_state(ns: dict[str, Any], path: str) -> dict[str, Any]:
+def _restore_state(
+    ns: dict[str, Any], path: str, committed: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     if not os.path.exists(path):
         return {"restored": [], "failed": [], "reason": "snapshot not found"}
     try:
@@ -752,22 +759,33 @@ def _restore_state(ns: dict[str, Any], path: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"error": "corrupt snapshot: not a dict"}
 
-    restored: list[str] = []
+    staged: dict[str, Any] = {}
     failed: list[dict[str, str]] = []
     for name, blob in payload.items():
         if name in _RESTORE_SKIP:
             continue
         try:
-            ns[name] = dill.loads(blob)
-            restored.append(name)
+            staged[name] = dill.loads(blob)
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
             failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
-    return {"restored": sorted(restored), "failed": failed}
+    result = {"restored": sorted(staged), "failed": failed}
+    # Park SIGINT across the whole apply so it is all-or-nothing; the parked interrupt is consumed by the commit (as in snapshot).
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
+    try:
+        for name, value in staged.items():
+            ns[name] = value
+        # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
+        if committed is not None:
+            committed.append(result)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    return result
 
 
 async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     """Run snapshot/restore as an interruptible task and reply in the done event."""
     rid = req["id"]
+    committed: list[dict[str, Any]] = []
 
     async def run() -> dict[str, Any]:
         if req["type"] == "snapshot":
@@ -791,8 +809,9 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
                 req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES),
                 req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
                 prune,
+                committed,
             )
-        return _restore_state(ns, req["path"])
+        return _restore_state(ns, req["path"], committed)
 
     assert _loop is not None
     task = _loop.create_task(run())
@@ -819,6 +838,14 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
             except BaseException as exc:  # noqa: BLE001 - every request failure becomes an error event
                 outcome = ("error", None, _error_event(rid, exc))
     status, result, error = outcome
+    if (
+        committed
+        and _active["interrupted"]
+        and error is not None
+        and error.get("ename") == "KeyboardInterrupt"
+    ):
+        # Recover only a protocol interrupt that landed after the commit; a user KeyboardInterrupt keeps interrupted reporting.
+        status, result, error = "ok", committed[0], None
     if status != "ok":
         reason = "interrupted" if error and error.get("ename") == "KeyboardInterrupt" else (
             f"{error.get('ename')}: {error.get('evalue')}" if error else "failed"
