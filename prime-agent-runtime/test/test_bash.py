@@ -23,9 +23,7 @@ bash_module = sys.modules["rlm.bash"]
 
 
 def _win_spawn(procs=None, resume=True):
-    # POSIX stand-in for _winjob.spawn_in_job: a real Popen with the same
-    # stream wiring plus a resume() mock, so the mocked-Windows spawn path is
-    # testable on the Ubuntu CI.
+    # POSIX stand-in for _winjob.spawn_in_job: a real Popen plus a resume() mock (Ubuntu CI).
     def spawn_in_job(job, argv, cwd, env):
         proc = subprocess.Popen(
             argv,
@@ -635,9 +633,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     ):
                         handle = bash("sleep 30")
                 try:
-                    # The job is pre-created and the child spawned directly inside
-                    # it; the journal write (which may query a start id) runs while
-                    # the job-contained child is still suspended, then resume.
+                    # The journal write runs while the job-contained child is still suspended.
                     self.assertEqual(spawned[-1].spawn_job, sentinel)
                     self.assertEqual(
                         spawned[-1].spawn_argv,
@@ -665,8 +661,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     with mock.patch.object(bash_module._winjob, "create_job", return_value=None):
                         with self.assertRaisesRegex(RuntimeError, "job containment"):
                             bash("sleep 30")
-        # The job is pre-created before spawn: a create failure aborts before
-        # spawn_in_job, so nothing is spawned and nothing touches the journal.
+        # A create_job failure aborts before spawn_in_job: nothing spawned, nothing journaled.
         spawn.assert_not_called()
         self.assertEqual(journal_calls, [])
 
@@ -705,9 +700,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
     async def test_windows_journal_enrollment_failure_kills_suspended_leader(self):
-        # Enrollment runs only after the child is spawned inside the job: a
-        # journal failure must terminate the suspended leader via the job and
-        # retire the record (the failed active attempt, then the retirement write).
+        # A journal failure must kill the suspended, job-contained leader and retire the record.
         sentinel = 4545
         spawned = []
         journal_calls = []
@@ -740,8 +733,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
     async def test_windows_spawn_failure_closes_precreated_job(self):
-        # The job is pre-created before spawn: a spawn_in_job failure must close
-        # it so the kill-on-close handle does not leak, and never touch the journal.
+        # A spawn_in_job failure must close the pre-created job and never touch the journal.
         sentinel = 4646
         journal_calls = []
 

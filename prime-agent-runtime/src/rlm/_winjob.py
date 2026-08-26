@@ -66,8 +66,7 @@ class _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
         ("ActiveProcesses", _DWORD), ("TotalTerminatedProcesses", _DWORD)]
 
 
-# Fixed-width ABI types (not wintypes) so these structs match the Win64 layout
-# on every host: wintypes.DWORD is c_ulong, which is 8 bytes on LP64 POSIX.
+# Fixed-width Win64 ABI types on every host: wintypes.DWORD is 8-byte c_ulong on LP64 POSIX.
 _DWORD32, _WORD16, _PTR, _WSTR = ctypes.c_uint32, ctypes.c_uint16, ctypes.c_void_p, ctypes.c_wchar_p
 
 
@@ -131,8 +130,7 @@ def _last_error() -> int:
 
 
 def _open_reader(handle: int) -> BinaryIO:
-    """Wrap the pipe HANDLE in a binary reader, consuming the HANDLE on every
-    path: on any failure it is closed here, never by the caller."""
+    """Wrap the pipe HANDLE in a binary reader, consuming the HANDLE on every path."""
     # Windows-only module, so the import cannot live at the top on POSIX.
     import msvcrt
 
@@ -171,9 +169,7 @@ class JobProcess:
     def __init__(self, hprocess: int, hthread: int, pid: int, stdout: BinaryIO) -> None:
         self.pid = pid
         self.stdout: BinaryIO | None = stdout
-        # Every (_exit_code, _hprocess, _hthread, _waiters) transition happens
-        # under the lock, so the handles are closed exactly once; blocking
-        # waits never hold it (read handle -> wait outside -> re-acquire).
+        # Guards every (_exit_code, _hprocess, _hthread, _waiters) transition; never held blocking.
         self._lock = threading.Lock()
         self._hprocess: int | None = hprocess
         self._hthread: int | None = hthread
@@ -190,12 +186,11 @@ class JobProcess:
             return True
 
     def _cache_exit_code_locked(self) -> int:
-        # Only called under the lock, after WaitForSingleObject signaled, so
-        # the code can never be the STILL_ACTIVE(259) sentinel.
+        # Runs under the lock after a signaled wait, so never the STILL_ACTIVE(259) sentinel.
         k32 = _kernel32()
         code = _DWORD()
         if not k32.GetExitCodeProcess(self._hprocess, ctypes.byref(code)):
-            # Leave the handles open (nothing cached) so a retry is possible.
+            # Handles stay open (nothing cached) so a retry is possible.
             raise OSError(f"GetExitCodeProcess failed: {_last_error()}")
         self._exit_code = int(code.value)
         if self._hthread is not None:
@@ -205,8 +200,7 @@ class JobProcess:
         return self._exit_code
 
     def _close_hprocess_locked(self) -> None:
-        # Closing a handle with a blocking WaitForSingleObject in flight is
-        # undefined behavior: only the last returning waiter may close it.
+        # Closing a handle mid-WaitForSingleObject is UB: the last returning waiter closes it.
         if self._exit_code is not None and self._waiters == 0 and self._hprocess is not None:
             _kernel32().CloseHandle(self._hprocess)
             self._hprocess = None
@@ -224,8 +218,7 @@ class JobProcess:
             return self._cache_exit_code_locked()
 
     def wait(self, timeout: float | None = None) -> int:
-        # Convert before registering as a waiter: int(nan/inf) raises, and a
-        # raise after the increment would leak _waiters (handle never closed).
+        # Convert before registering: int(nan/inf) raises and would leak _waiters forever.
         millis = _INFINITE if timeout is None else max(0, int(timeout * 1000))
         with self._lock:
             if self._exit_code is not None:
@@ -239,8 +232,7 @@ class JobProcess:
                 self._waiters -= 1
                 self._close_hprocess_locked()  # last waiter after a cache closes
         with self._lock:
-            # Another thread may have cached while the wait was in flight; the
-            # cached code wins, even over WAIT_FAILED.
+            # A code cached concurrently during the wait wins, even over WAIT_FAILED.
             if self._exit_code is not None:
                 return self._exit_code
             if result == _WAIT_TIMEOUT:
@@ -259,10 +251,8 @@ class JobProcess:
 
 
 def spawn_in_job(job: int, argv: list[str], cwd: str, env: dict[str, str]) -> JobProcess:
-    """Create argv suspended and atomically inside the (caller-owned) job via
-    PROC_THREAD_ATTRIBUTE_JOB_LIST: the child is a job member from the instant
-    CreateProcessW returns, so a kernel kill can never catch it outside the job.
-    Raises OSError on any failure; nothing is spawned then."""
+    """Create argv suspended and atomically inside the caller-owned job (JOB_LIST
+    attribute, no assignment window); raises OSError on any failure (nothing spawned)."""
     try:
         k32 = _kernel32()
     except (OSError, AttributeError) as exc:
@@ -298,9 +288,7 @@ def spawn_in_job(job: int, argv: list[str], cwd: str, env: dict[str, str]) -> Jo
             attr_list, 0, _PROC_THREAD_ATTRIBUTE_JOB_LIST, ctypes.byref(jobs),
             ctypes.sizeof(jobs), None, None):
             raise OSError(f"UpdateProcThreadAttribute failed: {_last_error()}")
-        # HANDLE_LIST caps inheritance to exactly these two handles: with only
-        # bInheritHandles=True, a concurrent spawn's inheritable handles would
-        # leak into this child. Both arrays must outlive CreateProcessW.
+        # HANDLE_LIST blocks concurrent spawns' handle leaks; both arrays outlive CreateProcessW.
         inheritable = (wintypes.HANDLE * 2)(write_handle, nul_handle)
         if not k32.UpdateProcThreadAttribute(
             attr_list, 0, _PROC_THREAD_ATTRIBUTE_HANDLE_LIST, ctypes.byref(inheritable),
@@ -312,11 +300,9 @@ def spawn_in_job(job: int, argv: list[str], cwd: str, env: dict[str, str]) -> Jo
         startup.StartupInfo.hStdInput = nul_handle
         startup.StartupInfo.hStdOutput = startup.StartupInfo.hStdError = write_handle
         startup.lpAttributeList = ctypes.cast(attr_list, wintypes.LPVOID)
-        # CreateProcessW may rewrite lpCommandLine in place: a writable buffer
-        # is mandatory, never a Python str.
+        # CreateProcessW may rewrite lpCommandLine in place: a writable buffer is mandatory.
         cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
-        # The buffer's implicit terminator supplies the block's second NUL.
-        # CreateProcessW requires the block sorted case-insensitively by name.
+        # Sorted case-insensitively per CreateProcessW; the implicit terminator is the second NUL.
         env_block = ctypes.create_unicode_buffer(
             "\0".join(
                 f"{key}={value}" for key, value in sorted(env.items(), key=lambda kv: kv[0].upper())
@@ -328,15 +314,13 @@ def spawn_in_job(job: int, argv: list[str], cwd: str, env: dict[str, str]) -> Jo
             ctypes.byref(startup), ctypes.byref(info)):
             raise OSError(f"CreateProcessW failed: {_last_error()}")
         try:
-            # Ownership of the read handle transfers to _open_reader at the
-            # call: it consumes the handle on every path, so drop it here.
+            # _open_reader consumes the read handle on every path: drop it at the call.
             reader_handle, read_handle = read_handle, None
             proc = JobProcess(
                 int(info.hProcess or 0), int(info.hThread or 0), int(info.dwProcessId),
                 _open_reader(reader_handle))
         except BaseException:
-            # No JobProcess exists to own these: close them here; the caller's
-            # job close (kill-on-close) then reaps the suspended child.
+            # No JobProcess owns these yet; the caller's kill-on-close job reaps the child.
             for handle in (info.hProcess, info.hThread):
                 if handle:
                     k32.CloseHandle(handle)

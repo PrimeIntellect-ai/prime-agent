@@ -106,15 +106,11 @@ class WinJobTest(unittest.TestCase):
         captured = self._wire_spawn_mocks()
         argv = ["C:/shell.exe", "-c", "echo hi"]
         env = {"A": "1", "B": "two"}
-        # _open_reader is exercised separately with an injected fake msvcrt
-        # (ownership tests below); here it stays a mocked seam.
+        # _open_reader stays a mocked seam here; the fake-msvcrt tests exercise it directly.
         with mock.patch.object(_winjob, "_open_reader") as open_reader:
             proc = _winjob.spawn_in_job(314, argv, "C:/work", env)
 
-        # The job rides into CreateProcessW through the attribute list: attribute
-        # PROC_THREAD_ATTRIBUTE_JOB_LIST, one HANDLE-sized slot holding the job;
-        # PROC_THREAD_ATTRIBUTE_HANDLE_LIST caps inheritance to exactly the
-        # write and NUL handles.
+        # JOB_LIST carries the job; HANDLE_LIST caps inheritance to the write and NUL handles.
         self.assertEqual(captured["updates"], [
             (0x2000D, (314,), ctypes.sizeof(wintypes.HANDLE)),
             (0x20002, (102, 103), 2 * ctypes.sizeof(wintypes.HANDLE)),
@@ -188,10 +184,7 @@ class WinJobTest(unittest.TestCase):
         with mock.patch.object(_winjob, "_open_reader", side_effect=OSError("bad handle")):
             with self.assertRaises(OSError):
                 _winjob.spawn_in_job(314, ["sh"], "C:/work", {})
-        # hProcess/hThread would otherwise leak: no JobProcess exists to own
-        # them. 101 is absent: ownership moved to _open_reader at the call (the
-        # mock does not consume it; the fake-msvcrt tests below prove the real
-        # one does).
+        # 101 is absent: ownership moved to the mocked _open_reader, which does not consume it.
         closed = sorted(c.args[0] for c in self.k32.CloseHandle.call_args_list)
         self.assertEqual(closed, [102, 103, 201, 202])
 
@@ -216,16 +209,14 @@ class WinJobTest(unittest.TestCase):
                 with self.assertRaises(OSError):
                     _winjob.spawn_in_job(314, ["sh"], "C:/work", {})
         fake.open_osfhandle.assert_called_once_with(101, os.O_RDONLY)
-        # The CRT fd owns the handle after open_osfhandle: the fd must be
-        # closed (EBADF below) and CloseHandle(101) must never run.
+        # The CRT fd owns the handle after open_osfhandle: fd closed (EBADF), never CloseHandle.
         with self.assertRaises(OSError):
             os.fstat(fd)
         closed = sorted(c.args[0] for c in self.k32.CloseHandle.call_args_list)
         self.assertEqual(closed, [102, 103, 201, 202])
 
     def test_win64_abi_struct_layout(self):
-        # Fixed-width fields pin the Win64 layout on every host; with wintypes
-        # the LP64 DWORD (8 bytes) would make this assertion vacuous.
+        # Fixed-width fields pin the Win64 layout on every host (LP64 DWORD would be vacuous).
         self.assertEqual(ctypes.sizeof(_winjob._STARTUPINFOEXW), 112)
         self.assertEqual(ctypes.sizeof(_winjob._PROCESS_INFORMATION), 24)
         self.assertEqual(_winjob._STARTUPINFOEXW.lpAttributeList.offset, 104)
@@ -315,8 +306,7 @@ class WinJobTest(unittest.TestCase):
         proc = _winjob.JobProcess(201, 202, 4242, mock.Mock())
 
         def cache_then_fail(handle, millis):
-            # Simulate another thread caching and closing while this
-            # WaitForSingleObject was in flight (handle now invalid).
+            # Simulates another thread caching and closing during the in-flight wait.
             with proc._lock:
                 proc._exit_code, proc._hprocess, proc._hthread = 9, None, None
             return 0xFFFFFFFF  # WAIT_FAILED
@@ -326,9 +316,7 @@ class WinJobTest(unittest.TestCase):
         self.k32.GetExitCodeProcess.assert_not_called()
 
     def test_job_process_close_deferred_while_wait_in_flight(self):
-        # Closing hProcess while a blocking WaitForSingleObject uses it is UB:
-        # a poll() that caches during an in-flight wait() must defer the close
-        # to the last returning waiter.
+        # UB guard: a poll() cache during an in-flight wait() defers the close to the waiter.
         proc = _winjob.JobProcess(201, 202, 4242, mock.Mock())
         entered, release = threading.Event(), threading.Event()
 
@@ -363,8 +351,7 @@ class WinJobTest(unittest.TestCase):
         self.assertEqual(closed.count(201), 1)  # the last waiter closed it
 
     def test_job_process_wait_invalid_timeout_does_not_leak_waiter(self):
-        # int(nan/inf) raises; a raise after waiter registration would leave
-        # _waiters stuck > 0 and the process handle permanently unclosable.
+        # int(nan/inf) raising after waiter registration would leak _waiters and the handle.
         proc = _winjob.JobProcess(201, 202, 4242, mock.Mock())
         for bad in (float("nan"), float("inf")):
             with self.assertRaises((ValueError, OverflowError)):
