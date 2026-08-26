@@ -515,8 +515,18 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 	const fromPath = await findExecutable("uv");
 	if (fromPath) return fromPath;
 
-	const localUv = path.join(os.homedir(), ".local", "bin", process.platform === "win32" ? "uv.exe" : "uv");
-	if (await isExecutable(localUv)) return localUv;
+	const uvExeName = process.platform === "win32" ? "uv.exe" : "uv";
+	const localUvCandidates = [
+		path.join(os.homedir(), ".local", "bin", uvExeName),
+		path.join(os.homedir(), ".cargo", "bin", uvExeName),
+	];
+	if (process.env.CARGO_HOME) {
+		localUvCandidates.push(path.join(process.env.CARGO_HOME, "bin", uvExeName));
+	}
+
+	for (const candidate of localUvCandidates) {
+		if (await isExecutable(candidate)) return candidate;
+	}
 
 	const shouldInstallUv =
 		process.env.PRIME_AGENT_INSTALL_UV === "1" || (!options.onProgress && (await confirmUvInstall()));
@@ -536,10 +546,13 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 		);
 	}
 
-	if (await isExecutable(localUv)) return localUv;
+	for (const candidate of localUvCandidates) {
+		if (await isExecutable(candidate)) return candidate;
+	}
+
 	const installedFromPath = await findExecutable("uv");
 	if (installedFromPath) return installedFromPath;
-	throw new Error("uv install completed but binary not found at ~/.local/bin/uv");
+	throw new Error("uv install completed but binary not found at ~/.local/bin/uv or ~/.cargo/bin/uv");
 }
 
 async function confirmUvInstall(): Promise<boolean> {
