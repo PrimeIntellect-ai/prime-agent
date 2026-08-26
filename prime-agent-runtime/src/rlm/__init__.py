@@ -21,6 +21,14 @@ try:
 except Exception:  # pragma: no cover - only available in kernels
     get_ipython = None  # type: ignore[assignment]
 
+from . import _script_process_group as _script_process_group
+
+# Give every %%bash/%%script cell's subprocess tree its own OS process group
+# and an escalating SIGINT/SIGTERM/SIGKILL interrupt path, without ever
+# touching the kernel process itself. Installed unconditionally so it is live
+# before any user cell (including the very first one) can run. See #849.
+_script_process_group.install()
+
 HOST_COMM_TARGET = "host.request"
 
 
