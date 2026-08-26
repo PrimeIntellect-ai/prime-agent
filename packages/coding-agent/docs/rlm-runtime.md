@@ -244,13 +244,13 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 | Failure | Behavior |
 |---|---|
 | Managed runtime is missing | Kernel bootstrap rebuilds it; a custom Python without `rlm` fails clearly when recursion is called. |
-| Depth limit reached | Python raises before opening a comm; the host checks again. |
+| Depth limit reached | The host rejects the `rlm.run` request; the error reply raises in Python. |
 | Unsupported options | Host rejects the request. |
 | Requested model unavailable | Spawn fails instead of substituting another model. |
-| Shell-channel comm reply | Deadlock risk; current replies use control. |
+| Host connection closed | Pending `host_request` calls fail with `RuntimeError` so awaiting cells unblock. |
 | Child cancellation | Host aborts the child and removes failed/cancelled registry entries. |
 | Parent teardown | Active descendants are cancelled and their runtimes are closed. |
 
 ## Focused Validation
 
-From the repository root, the implementation is covered by focused kernel, recursion, context-tree, daemon RLM, and runtime tests. When changing child creation or accounting, include `agent-session-recursion.test.ts`; when changing comm transport, include the kernel comm tests; when changing daemon retention, include the daemon RLM lifecycle tests.
+From the repository root, the implementation is covered by focused kernel, recursion, context-tree, daemon RLM, and runtime tests. When changing child creation or accounting, include `agent-session-recursion.test.ts`; when changing the stdio runtime protocol, include the `repl-kernel-*.test.ts` suites; when changing daemon retention, include the daemon RLM lifecycle tests.
