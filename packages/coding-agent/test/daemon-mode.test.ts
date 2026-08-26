@@ -1957,7 +1957,7 @@ describe("daemon mode helpers", () => {
 				sessionId: "session-target",
 				sessionName: "Target",
 				acceptAgentMessagePrompt,
-				clearQueuedUserMessagesMatching: vi.fn(() => ({ steering: [], followUp: [] })),
+				clearQueuedAgentMessages: vi.fn(() => ({ steering: [], followUp: [] })),
 			},
 		} as never;
 		const internals = daemon as unknown as {
@@ -2067,7 +2067,7 @@ describe("daemon mode helpers", () => {
 					),
 					followUp: vi.fn(async () => true),
 					clearQueue: vi.fn(() => ({ cleared: 0 })),
-					clearQueuedUserMessagesMatching: vi.fn(() => ({ steering: [], followUp: [] })),
+					clearQueuedAgentMessages: vi.fn(() => ({ steering: [], followUp: [] })),
 				},
 			} as never;
 		}
@@ -2134,12 +2134,7 @@ describe("daemon mode helpers", () => {
 			},
 		});
 		const targetState = makeState("target");
-		const agentMessageText =
-			"Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: agentmsg_test\n\nhello";
-		const clearQueuedUserMessagesMatching = vi.fn((predicate: (text: string) => boolean) => ({
-			steering: [agentMessageText].filter(predicate),
-			followUp: [],
-		}));
+		const clearQueuedAgentMessages = vi.fn(() => ({ steering: ["agent message"], followUp: [] }));
 		const clearQueue = vi.fn(() => ({ steering: ["user prompt"], followUp: ["heartbeat"] }));
 		targetState.runtime = {
 			...targetState.runtime,
@@ -2149,7 +2144,7 @@ describe("daemon mode helpers", () => {
 				sessionName: "Target",
 				isStreaming: false,
 				unfinishedActionCount: 2,
-				clearQueuedUserMessagesMatching,
+				clearQueuedAgentMessages,
 				clearQueue,
 			},
 		} as never;
@@ -2165,10 +2160,7 @@ describe("daemon mode helpers", () => {
 			activeSessionId: targetState.activeSessionId,
 		});
 
-		expect(clearQueuedUserMessagesMatching).toHaveBeenCalledOnce();
-		const predicate = clearQueuedUserMessagesMatching.mock.calls[0]?.[0];
-		expect(predicate?.(agentMessageText)).toBe(true);
-		expect(predicate?.("ordinary queued follow-up")).toBe(false);
+		expect(clearQueuedAgentMessages).toHaveBeenCalledOnce();
 		expect(clearQueue).not.toHaveBeenCalled();
 	});
 
@@ -2183,7 +2175,7 @@ describe("daemon mode helpers", () => {
 		const secondState = makeState("target-2");
 		const firstClear = vi.fn(() => ({ steering: [], followUp: ["agent message"] }));
 		const secondClear = vi.fn(() => ({ steering: ["agent message"], followUp: [] }));
-		for (const [state, clearQueuedUserMessagesMatching] of [
+		for (const [state, clearQueuedAgentMessages] of [
 			[firstState, firstClear],
 			[secondState, secondClear],
 		] as const) {
@@ -2195,7 +2187,7 @@ describe("daemon mode helpers", () => {
 					sessionName: state.activeSessionId,
 					isStreaming: false,
 					unfinishedActionCount: 1,
-					clearQueuedUserMessagesMatching,
+					clearQueuedAgentMessages,
 				},
 			} as never;
 		}
@@ -2235,7 +2227,7 @@ describe("daemon mode helpers", () => {
 				}),
 		);
 		const readyClear = vi.fn(() => ({ steering: [], followUp: ["agent message"] }));
-		for (const [state, clearQueuedUserMessagesMatching] of [
+		for (const [state, clearQueuedAgentMessages] of [
 			[blockedState, blockedClear],
 			[readyState, readyClear],
 		] as const) {
@@ -2247,7 +2239,7 @@ describe("daemon mode helpers", () => {
 					sessionName: state.activeSessionId,
 					isStreaming: false,
 					unfinishedActionCount: 1,
-					clearQueuedUserMessagesMatching,
+					clearQueuedAgentMessages,
 				},
 			} as never;
 		}

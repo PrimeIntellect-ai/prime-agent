@@ -515,6 +515,37 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(session.unfinishedActionCount).toBe(20);
 	});
 
+	it("rejects an agent message when clear wins core admission", async () => {
+		createSession();
+		const internals = session as unknown as {
+			_acquireSessionActionCommitFence(): Promise<{ release(): void }>;
+		};
+		const fence = await internals._acquireSessionActionCommitFence();
+		const message = createAgentSessionMessage({
+			id: "agentmsg-clear-race",
+			source: "agent_message",
+			message: "clear race",
+			from: { clientId: "test" },
+			target: {
+				activeSessionId: "target",
+				sessionId: session.sessionId,
+				runtimeKind: "subagent",
+			},
+		});
+		const accepted = session.acceptAgentMessagePrompt(message.content, {
+			customMessage: message,
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+		});
+		await Promise.resolve();
+
+		session.clearQueuedAgentMessages();
+		fence.release();
+
+		await expect(accepted).rejects.toThrow("Agent message was cleared before admission");
+		expect(session.unfinishedActionCount).toBe(0);
+	});
+
 	it("retains an accepted agent message across direct compaction until resume", async () => {
 		createSession();
 		let releaseCompaction: (result: CompactionResult) => void = () => {};

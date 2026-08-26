@@ -50,7 +50,6 @@ import {
 	DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY,
 	DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
 	formatAgentSessionNameUnavailable,
-	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
 	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
@@ -4094,7 +4093,7 @@ export class AgentDaemon {
 			case "agent_messages_clear": {
 				const state = this.getSessionState(command.activeSessionId);
 				this.agentMessageRateLimiter.clearMatching((key) => key.endsWith(`->${state.activeSessionId}`));
-				const cleared = state.runtime.session.clearQueuedUserMessagesMatching(isAgentSessionMessagePrompt);
+				const cleared = state.runtime.session.clearQueuedAgentMessages();
 				return success(command.id, "agent_messages_clear", cleared);
 			}
 
@@ -5452,7 +5451,7 @@ export class AgentDaemon {
 	}
 
 	private async clearQueuedAgentSessionMessagesForState(state: ActiveSessionState) {
-		return state.runtime.session.clearQueuedUserMessagesMatching(isAgentSessionMessagePrompt);
+		return state.runtime.session.clearQueuedAgentMessages();
 	}
 
 	private async clearQueuedAgentSessionMessagesForAllStates(): Promise<void> {
