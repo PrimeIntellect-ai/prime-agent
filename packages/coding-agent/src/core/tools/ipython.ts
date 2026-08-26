@@ -340,7 +340,8 @@ function applyShellSettingsToBashMagicCell(
 }
 
 /**
- * Owns the lazy create+start+runtime-bootstrap of one session's IPython kernel.
+ * Owns the lazy create+start+runtime-bootstrap of one session's kernel (REPL or
+ * IPython, chosen by usesIpythonKernel()).
  *
  * Concurrent ensure() calls await the same in-flight startup, a failed startup
  * clears the memo so the next call retries fresh, and progress listeners can
