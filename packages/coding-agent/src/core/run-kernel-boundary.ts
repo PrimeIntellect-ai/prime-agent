@@ -115,15 +115,22 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 			if (!lease || typeof lease.launch !== "function" || typeof lease.dispose !== "function") {
 				throw new Error("Kernel boundary preparer returned an invalid launch lease");
 			}
+			// Once prepare returns a disposable lease, retain it before any further
+			// validation or observation. Failed rollback remains cleanup debt that
+			// revoke() can retry instead of losing the only handle to the boundary.
+			this.#leases.set(context.executionId, { context, lease });
 			this.assertActive();
 			context.signal.throwIfAborted();
 		} catch (error) {
-			if (lease && typeof lease.dispose === "function") {
-				await lease.dispose("boundary initialization was revoked");
+			if (this.#leases.has(context.executionId)) {
+				try {
+					await this.release(context.executionId, "cancelled", "boundary initialization was revoked");
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "Kernel boundary initialization rollback failed");
+				}
 			}
 			throw error;
 		}
-		this.#leases.set(context.executionId, { context, lease });
 		try {
 			await this.#observe?.({
 				phase: "initialized",
@@ -131,8 +138,11 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 				policy: this.policy,
 			});
 		} catch (error) {
-			this.#leases.delete(context.executionId);
-			await lease.dispose("boundary initialization observation failed");
+			try {
+				await this.release(context.executionId, "failed", "boundary initialization observation failed");
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Kernel boundary initialization rollback failed");
+			}
 			throw error;
 		}
 		return lease;

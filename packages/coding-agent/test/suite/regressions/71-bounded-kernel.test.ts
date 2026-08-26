@@ -111,6 +111,92 @@ describe("issue 71 bounded kernel", () => {
 		);
 	});
 
+	it("retains rollback debt when the run aborts after prepare returns", async () => {
+		const controller = new AbortController();
+		let disposeAttempts = 0;
+		const scope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: process.cwd(),
+				workspaceScopeDigest: "sha256:abort-after-prepare",
+				network: "enabled",
+				reviewerMode: "automatic",
+			},
+			prepare: () => {
+				controller.abort("parent run ended");
+				return {
+					launch: () => {
+						throw new Error("not launched");
+					},
+					dispose: () => {
+						disposeAttempts += 1;
+						if (disposeAttempts === 1) throw new Error("transient rollback failure");
+					},
+				};
+			},
+		});
+
+		await expect(
+			prepareAgentRunKernelBoundary(scope, {
+				executionId: "abort-after-prepare",
+				sessionId: "session",
+				recursionDepth: 0,
+				cwd: process.cwd(),
+				signal: controller.signal,
+			}),
+		).rejects.toThrow("Kernel boundary initialization rollback failed");
+		expect(disposeAttempts).toBe(1);
+		await expect(revokeAgentRunKernelBoundaryScope(scope, "retry rollback debt")).resolves.toBeUndefined();
+		expect(disposeAttempts).toBe(2);
+	});
+
+	it("retains observer rollback debt until revoke successfully disposes it", async () => {
+		let disposeAttempts = 0;
+		const events: AgentRunKernelBoundaryLifecycleEvent[] = [];
+		const scope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: process.cwd(),
+				workspaceScopeDigest: "sha256:observer-rollback",
+				network: "enabled",
+				reviewerMode: "ask",
+			},
+			prepare: () => ({
+				launch: () => {
+					throw new Error("not launched");
+				},
+				dispose: () => {
+					disposeAttempts += 1;
+					if (disposeAttempts === 1) throw new Error("transient observer rollback failure");
+				},
+			}),
+			observe: (event) => {
+				events.push(event);
+				if (event.phase === "initialized") throw new Error("observer rejected initialization");
+			},
+		});
+
+		await expect(
+			prepareAgentRunKernelBoundary(scope, {
+				executionId: "observer-rollback",
+				sessionId: "session",
+				recursionDepth: 0,
+				cwd: process.cwd(),
+				signal: new AbortController().signal,
+			}),
+		).rejects.toThrow("Kernel boundary initialization rollback failed");
+		expect(disposeAttempts).toBe(1);
+		await expect(revokeAgentRunKernelBoundaryScope(scope, "retry observer rollback debt")).resolves.toBeUndefined();
+		expect(disposeAttempts).toBe(2);
+		expect(events).toMatchObject([
+			{ phase: "initialized" },
+			{ phase: "terminal", cleanup: "failed" },
+			{ phase: "terminal", cleanup: "completed" },
+		]);
+	});
+
 	it("uses the trusted launch boundary and awaits terminal confinement cleanup", async () => {
 		const events: AgentRunKernelBoundaryLifecycleEvent[] = [];
 		const launches: Array<{

@@ -69,6 +69,7 @@ export interface HostRequestInvocationMetadata<RunContext = unknown> {
 	readonly sessionId?: string;
 	readonly recursionDepth: number;
 	readonly runContext: RunContext | undefined;
+	readonly executionId?: string;
 }
 
 /**
@@ -128,6 +129,7 @@ function mintHostRequestContext(
 		sessionId: metadata.sessionId,
 		recursionDepth: metadata.recursionDepth,
 		runContext: metadata.runContext,
+		executionId: metadata.executionId,
 		isCurrent: () => current && !controller.signal.aborted,
 	});
 	dispatcherCreatedHostRequestContexts.add(context);
@@ -179,6 +181,7 @@ export type HostRequestHandlers = Record<string, HostRequestHandler>;
 
 /** In-memory execution scope used to correlate kernel comms with one admitted run. */
 export interface HostRequestExecutionContext<RunContext = unknown> {
+	readonly executionId: string;
 	readonly runContext: RunContext | undefined;
 	readonly signal: AbortSignal;
 }
@@ -1583,6 +1586,7 @@ export class KernelManager {
 			sessionId: this.options.sessionId,
 			recursionDepth: this.options.recursionDepth ?? 0,
 			runContext: executionContext?.runContext,
+			executionId: executionContext?.executionId,
 		});
 
 		const task = (async () => {

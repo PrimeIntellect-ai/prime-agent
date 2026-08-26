@@ -161,6 +161,7 @@ import {
 } from "./goals.js";
 import {
 	assertHostRequestHandler,
+	type HostRequestContext,
 	type HostRequestExecutionContext,
 	type HostRequestHandlers,
 	type KernelSentAgentMessage,
@@ -5010,7 +5011,7 @@ export class AgentSession {
 				selectedModel: options?.selectedModel,
 				authorityLineage: options?.authorityLineage,
 			});
-			const result = this._admitSessionInput(action, {
+			const result = await this._admitPreparedSessionInput(action, {
 				immediatelyEligible: !visibleQueued,
 			});
 			admissionFence.release();
@@ -5206,7 +5207,7 @@ export class AgentSession {
 				if (action.suppressAutonomousContinuation) {
 					this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 				}
-				const result = this._admitSessionInput(action, {
+				const result = await this._admitPreparedSessionInput(action, {
 					immediatelyEligible: !visibleQueued && this._canStartSessionActionImmediately(),
 				});
 				commitFence?.release();
@@ -5908,7 +5909,9 @@ export class AgentSession {
 
 	private _hostRequestContextForExecution(executionId?: string): HostRequestExecutionContext | undefined {
 		const scope = executionId ? this._executionRunScopes.get(executionId) : undefined;
-		return scope ? { runContext: scope.runContext, signal: scope.controller.signal } : undefined;
+		return scope
+			? { executionId: scope.executionId, runContext: scope.runContext, signal: scope.controller.signal }
+			: undefined;
 	}
 
 	private _activeRunExecutionId(): string | undefined {
@@ -6061,6 +6064,7 @@ export class AgentSession {
 			front?: boolean;
 			wake?: boolean;
 			immediatelyEligible?: boolean;
+			awaitRejectionCleanup?: boolean;
 		} = {},
 	): {
 		accepted: boolean;
@@ -6068,7 +6072,7 @@ export class AgentSession {
 		ticket?: ActionTicket;
 	} {
 		if (this._disposed || this._disposing) {
-			void this._releaseRunScope(action, "run rejected before admission");
+			if (!options.awaitRejectionCleanup) void this._releaseRunScope(action, "run rejected before admission");
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
 		if (this._sessionInputAdmissionPauses.size > 0) {
@@ -6076,7 +6080,7 @@ export class AgentSession {
 		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
-			void this._releaseRunScope(action, "run coalesced before admission");
+			if (!options.awaitRejectionCleanup) void this._releaseRunScope(action, "run coalesced before admission");
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
 				this._rejectAgentMessage(
 					action.agentMessageId,
@@ -6116,6 +6120,34 @@ export class AgentSession {
 		return { accepted: true, disposition, ticket: controller.ticket };
 	}
 
+	/**
+	 * A prepared turn owns any run capabilities until admission transfers that
+	 * ownership to the action store. Pre-admission rejection therefore revokes
+	 * and awaits those capabilities before it is observable by the caller.
+	 */
+	private async _admitPreparedSessionInput(
+		action: QueuedSessionAction,
+		options: {
+			restore?: boolean;
+			front?: boolean;
+			wake?: boolean;
+			immediatelyEligible?: boolean;
+		} = {},
+	): Promise<{ accepted: boolean; disposition: "starts_when_admitted" | "queued"; ticket?: ActionTicket }> {
+		try {
+			const result = this._admitSessionInput(action, { ...options, awaitRejectionCleanup: true });
+			if (!result.accepted) await this._releaseRunScope(action, "run rejected before admission");
+			return result;
+		} catch (error) {
+			try {
+				await this._releaseRunScope(action, "run rejected before admission");
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Session action rejection cleanup failed");
+			}
+			throw error;
+		}
+	}
+
 	private async _queuePreparedPrompt(
 		schedule: SessionInputSchedule,
 		text: string,
@@ -6145,7 +6177,7 @@ export class AgentSession {
 		if (action.suppressAutonomousContinuation) {
 			this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 		}
-		return this._admitSessionInput(action).accepted;
+		return (await this._admitPreparedSessionInput(action)).accepted;
 	}
 
 	private _runtimeActivity(): RuntimeActivity {
@@ -9676,7 +9708,7 @@ export class AgentSession {
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }, context) => ({
-				...(await this._startRlmChildRun(prompt, kwargs, cellSourceCode, context?.runContext)),
+				...(await this._startRlmChildRun(prompt, kwargs, cellSourceCode, context)),
 			})),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
@@ -10781,13 +10813,17 @@ export class AgentSession {
 		assertAgentSessionNameAvailable(catalog, input);
 	}
 
-	private async _authenticatedRlmModels(): Promise<Model<Api>[]> {
-		const runScope = this._activeAgentRunScope();
+	private async _authenticatedRlmModels(
+		runScope = this._activeAgentRunScope(),
+		assertCurrent?: () => void,
+	): Promise<Model<Api>[]> {
 		if (runScope?.modelScope) {
 			assertAgentRunModelScope(runScope.modelScope);
 			return [...runScope.modelScope.models];
 		}
-		return (await this._modelRegistry.getExecutableModels()).filter((model) => {
+		const executableModels = await this._modelRegistry.getExecutableModels();
+		assertCurrent?.();
+		return executableModels.filter((model) => {
 			const status = this._modelRegistry.getProviderAuthStatus(model.provider);
 			return status.source !== "stale" && status.label !== "expired";
 		});
@@ -10805,8 +10841,11 @@ export class AgentSession {
 		};
 	}
 
-	private async _resolveRlmSubagentModel(reference: string | undefined): Promise<RlmSubagentModelSelection> {
-		const runScope = this._activeAgentRunScope();
+	private async _resolveRlmSubagentModel(
+		reference: string | undefined,
+		runScope = this._activeAgentRunScope(),
+		assertCurrent?: () => void,
+	): Promise<RlmSubagentModelSelection> {
 		const parentModel = runScope?.selectedModel ?? this.model;
 		if (!parentModel) {
 			throw new Error(formatNoModelSelectedMessage());
@@ -10819,7 +10858,7 @@ export class AgentSession {
 		if (`${parentModel.provider}/${parentModel.id}`.toLowerCase() === normalizedReference) {
 			return { model: parentModel };
 		}
-		const model = (await this._authenticatedRlmModels()).find(
+		const model = (await this._authenticatedRlmModels(runScope, assertCurrent)).find(
 			(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === normalizedReference,
 		);
 		if (!model) {
@@ -10830,6 +10869,7 @@ export class AgentSession {
 			getAgentRunRequestAccess(runScope.modelScope, model);
 		} else {
 			const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
+			assertCurrent?.();
 			if (!auth.ok) throw new Error(`Requested subagent model "${reference}" failed authentication preflight`);
 		}
 		return { model };
@@ -10839,8 +10879,28 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
-		runContext?: unknown,
+		hostContext?: HostRequestContext,
 	): Promise<RlmSpawnHandle> {
+		// The host dispatcher mints this context for one exact execution. Capture
+		// that execution before any asynchronous model/name resolution so another
+		// active turn cannot donate authority to a stale rlm.run request.
+		const parentRunScope = hostContext?.executionId
+			? this._executionRunScopes.get(hostContext.executionId)
+			: this._activeAgentRunScope();
+		const assertSpawnCurrent = () => {
+			if (!hostContext) return;
+			hostContext.signal.throwIfAborted();
+			if (!hostContext.isCurrent()) throw new Error("rlm.run host request is no longer current");
+			if (
+				!hostContext.executionId ||
+				!parentRunScope ||
+				this._executionRunScopes.get(hostContext.executionId) !== parentRunScope ||
+				parentRunScope.controller.signal.aborted
+			) {
+				throw new Error("rlm.run parent execution is no longer current");
+			}
+		};
+		assertSpawnCurrent();
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -10863,8 +10923,12 @@ export class AgentSession {
 		}
 		let modelSelection: RlmSubagentModelSelection;
 		try {
-			if (requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(requestedSessionName, true);
-			modelSelection = await this._resolveRlmSubagentModel(requestedModel);
+			if (requestedSessionName) {
+				await this._assertRlmSubagentSessionNameAvailable(requestedSessionName, true);
+				assertSpawnCurrent();
+			}
+			modelSelection = await this._resolveRlmSubagentModel(requestedModel, parentRunScope, assertSpawnCurrent);
+			assertSpawnCurrent();
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
@@ -10880,8 +10944,11 @@ export class AgentSession {
 		const childSessionDir = this._createChildRlmSessionDir();
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
-		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
-		const parentRunScope = this._activeAgentRunScope();
+		if (!requestedSessionName) {
+			await this._assertRlmSubagentSessionNameAvailable(sessionName);
+			assertSpawnCurrent();
+		}
+		assertSpawnCurrent();
 		this._retainRunAuthorityLineage(parentRunScope?.authorityLineage);
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
@@ -10957,7 +11024,7 @@ export class AgentSession {
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
 			}),
-			runContext,
+			runContext: hostContext?.runContext ?? parentRunScope?.runContext,
 			modelScope: parentRunScope?.modelScope,
 			toolAuthorityScope: parentRunScope?.toolAuthorityScope,
 			kernelBoundaryScope: parentRunScope?.kernelBoundaryScope,
@@ -11005,6 +11072,7 @@ export class AgentSession {
 		void (async () => {
 			let childRuntime: RlmSubagentRuntime | undefined;
 			try {
+				assertSpawnCurrent();
 				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
