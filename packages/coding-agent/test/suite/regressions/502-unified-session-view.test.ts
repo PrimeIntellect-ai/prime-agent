@@ -38,6 +38,14 @@ function savedSession(id: string) {
 	return { path: `/tmp/${id}.jsonl`, id };
 }
 
+function savedSessionListItem(id: string) {
+	return {
+		type: "session_list_item" as const,
+		command: "list_saved_sessions" as const,
+		session: rawSavedSession(id),
+	};
+}
+
 function refreshHarness() {
 	const applySessionList = vi.fn();
 	const reconcileCatalogs = vi.fn();
@@ -124,7 +132,7 @@ describe("#502 unified session view regressions", () => {
 						_timeout: unknown,
 						options: { onProgress: (update: { type: string; session: unknown }) => void },
 					) => {
-						options.onProgress({ type: "session_list_session", session: rawSavedSession("streamed") });
+						options.onProgress(savedSessionListItem("streamed"));
 						throw new Error("scan failed");
 					},
 				),
@@ -147,6 +155,208 @@ describe("#502 unified session view regressions", () => {
 
 		expect([harness.savedSessions, harness.persistentState.savedSessions]).toEqual([previous, previous]);
 		expect(harness.savedCatalogRefreshPending).toBe(false);
+	});
+
+	test("batches streamed saved sessions and immediately applies the authoritative final catalog", async () => {
+		vi.useFakeTimers();
+		try {
+			const response = deferred<{ success: true; data: { sessions: ReturnType<typeof rawSavedSession>[] } }>();
+			let onProgress: ((update: ReturnType<typeof savedSessionListItem>) => void) | undefined;
+			const client = {
+				request: vi.fn(
+					(
+						_command: unknown,
+						_timeout: unknown,
+						options: { onProgress: (update: ReturnType<typeof savedSessionListItem>) => void },
+					) => {
+						onProgress = options.onProgress;
+						return response.promise;
+					},
+				),
+			};
+			const previous = [savedSession("previous")];
+			const harness = {
+				...refreshHarness(),
+				savedSessions: previous,
+				lastSuccessfulSavedSessions: previous,
+				requireClient: () => client,
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+			};
+			const refresh = privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions");
+
+			const pending = refresh.call(harness);
+			expect(onProgress).toBeDefined();
+			onProgress?.(savedSessionListItem("streamed-a"));
+			onProgress?.(savedSessionListItem("streamed-b"));
+			expect(harness.reconcileCatalogs).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(99);
+			expect(harness.reconcileCatalogs).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+			expect(harness.savedSessions.map((session) => session.path)).toEqual([
+				"/tmp/previous.jsonl",
+				"/tmp/streamed-a.jsonl",
+				"/tmp/streamed-b.jsonl",
+			]);
+
+			onProgress?.(savedSessionListItem("streamed-c"));
+			response.resolve({
+				success: true,
+				data: { sessions: [rawSavedSession("final-b"), rawSavedSession("final-a")] },
+			});
+			expect(await pending).toBe(true);
+			expect(harness.savedSessions.map((session) => session.path)).toEqual([
+				"/tmp/final-b.jsonl",
+				"/tmp/final-a.jsonl",
+			]);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
+
+			await vi.advanceTimersByTimeAsync(100);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("cancels a delayed saved-session update before rolling back on error", async () => {
+		vi.useFakeTimers();
+		try {
+			const response = deferred<{ success: true; data: { sessions: ReturnType<typeof rawSavedSession>[] } }>();
+			let onProgress: ((update: ReturnType<typeof savedSessionListItem>) => void) | undefined;
+			const client = {
+				request: (
+					_command: unknown,
+					_timeout: unknown,
+					options: { onProgress: (update: ReturnType<typeof savedSessionListItem>) => void },
+				) => {
+					onProgress = options.onProgress;
+					return response.promise;
+				},
+			};
+			const previous = [savedSession("previous")];
+			const harness = {
+				...refreshHarness(),
+				savedSessions: previous,
+				lastSuccessfulSavedSessions: previous,
+				requireClient: () => client,
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+			};
+			const pending =
+				privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions").call(harness);
+
+			onProgress?.(savedSessionListItem("partial"));
+			response.reject(new Error("scan failed"));
+			expect(await pending).toBe(false);
+			expect(harness.savedSessions).toEqual(previous);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+
+			await vi.advanceTimersByTimeAsync(100);
+			expect(harness.savedSessions).toEqual(previous);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("an older saved refresh cannot clear or apply a newer progress timer", async () => {
+		vi.useFakeTimers();
+		try {
+			const older = deferred<{ success: true; data: { sessions: ReturnType<typeof rawSavedSession>[] } }>();
+			const newer = deferred<{ success: true; data: { sessions: ReturnType<typeof rawSavedSession>[] } }>();
+			const progress: Array<(update: ReturnType<typeof savedSessionListItem>) => void> = [];
+			const client = {
+				request: vi
+					.fn()
+					.mockImplementationOnce(
+						(
+							_command: unknown,
+							_timeout: unknown,
+							options: { onProgress: (update: ReturnType<typeof savedSessionListItem>) => void },
+						) => {
+							progress.push(options.onProgress);
+							return older.promise;
+						},
+					)
+					.mockImplementationOnce(
+						(
+							_command: unknown,
+							_timeout: unknown,
+							options: { onProgress: (update: ReturnType<typeof savedSessionListItem>) => void },
+						) => {
+							progress.push(options.onProgress);
+							return newer.promise;
+						},
+					),
+			};
+			const previous = [savedSession("previous")];
+			const harness = {
+				...refreshHarness(),
+				savedSessions: previous,
+				lastSuccessfulSavedSessions: previous,
+				requireClient: () => client,
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+			};
+			const refresh = privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions");
+
+			const oldRefresh = refresh.call(harness);
+			progress[0]?.(savedSessionListItem("old-progress"));
+			const newRefresh = refresh.call(harness);
+			progress[1]?.(savedSessionListItem("new-progress"));
+			older.resolve({ success: true, data: { sessions: [rawSavedSession("old-final")] } });
+			expect(await oldRefresh).toBe(false);
+
+			await vi.advanceTimersByTimeAsync(100);
+			expect(harness.savedSessions.map((session) => session.path)).toEqual([
+				"/tmp/previous.jsonl",
+				"/tmp/new-progress.jsonl",
+			]);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+
+			newer.resolve({ success: true, data: { sessions: [rawSavedSession("new-final")] } });
+			expect(await newRefresh).toBe(true);
+			expect(harness.savedSessions.map((session) => session.path)).toEqual(["/tmp/new-final.jsonl"]);
+			expect(harness.reconcileCatalogs).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("finish cancels a pending saved-session progress timer before closing the client", async () => {
+		vi.useFakeTimers();
+		try {
+			const delayedUpdate = vi.fn();
+			const timeout = setTimeout(delayedUpdate, 100);
+			const client = { close: vi.fn() };
+			const harness = {
+				stopped: false,
+				savedCatalogProgressTimer: { generation: 1, timeout },
+				savedCatalogGeneration: 1,
+				liveCatalogGeneration: 1,
+				heartbeatCatalogGeneration: 1,
+				pollTimer: undefined,
+				heartbeatPollTimer: undefined,
+				animationTimer: undefined,
+				clearCtrlCExitHint: vi.fn(),
+				clearDeleteConfirmation: vi.fn(),
+				setStatusMessage: vi.fn(),
+				ui: { stop: vi.fn() },
+				unsubscribeClientClose: undefined,
+				unsubscribeClientMessage: undefined,
+				client,
+				resolveRun: vi.fn(),
+			};
+
+			privateMethod<(this: typeof harness, result: { type: "exit" }) => void>("finish").call(harness, {
+				type: "exit",
+			});
+			expect(harness.savedCatalogProgressTimer).toBeUndefined();
+			expect(client.close).toHaveBeenCalledOnce();
+			await vi.advanceTimersByTimeAsync(100);
+			expect(delayedUpdate).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("reconnect retries the saved catalog and fences a stale startup scan", async () => {
@@ -196,7 +406,7 @@ describe("#502 unified session view regressions", () => {
 				_timeout: unknown,
 				options: { onProgress: (update: { type: string; session: unknown }) => void },
 			) => {
-				options.onProgress({ type: "session_list_session", session: rawSavedSession("partial") });
+				options.onProgress(savedSessionListItem("partial"));
 				throw new Error("retry failed");
 			},
 		};
