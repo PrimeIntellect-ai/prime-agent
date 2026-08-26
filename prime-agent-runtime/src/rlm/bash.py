@@ -39,6 +39,8 @@ _STATUS_FD = 9
 # wait for a confirmed group exit before CancelledError propagates.
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
+# subprocess does not export CREATE_SUSPENDED.
+_CREATE_SUSPENDED = 0x00000004
 
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
@@ -119,16 +121,12 @@ class BashHandle:
         self._status: int | None = None
         self._status_known = threading.Event()
         self._reaped = False
-        # Windows job-less fallback only: remembers whether any taskkill /T for
-        # this handle succeeded, so _reap_group can retire the journal record
-        # with more confidence when no job object exists.
-        self._tree_kill_delivered = False
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._callback_lock = threading.Lock()
         self._started = time.monotonic()
         # POSIX: own process group so kill() signals the whole pipeline; Windows
-        # contains the tree in a kill-on-close job object (taskkill fallback).
+        # contains the tree in a kill-on-close job object.
         self._status_read = -1
         self._wake_read = -1
         self._wake_write = -1
@@ -154,10 +152,11 @@ class BashHandle:
             script = _status_script(_with_prefix(command))
             spawn_kwargs: dict[str, Any] = {"start_new_session": True, "stdin": status_write}
         else:
-            # Windows: no status/gate channel and no process groups; liveness
-            # and reaping go through the job object (wait()/taskkill fallback).
+            # Windows: no status/gate channel; the child starts CREATE_SUSPENDED
+            # and is resumed only after job assignment and journal enrollment
+            # (no escape window).
             script = _with_prefix(command)
-            spawn_kwargs = {"stdin": subprocess.DEVNULL}
+            spawn_kwargs = {"stdin": subprocess.DEVNULL, "creationflags": _CREATE_SUSPENDED}
         try:
             self._proc = subprocess.Popen(
                 [_shell(), "-c", script],
@@ -178,21 +177,21 @@ class BashHandle:
         self._pid: int = self._proc.pid
         self._job: int | None = None
         if not _IS_POSIX:
-            # Kill-on-close job right after Popen: a kernel death closes the
-            # last job handle and the OS reaps the whole tree, so no pid-only
-            # pre-record is needed (a bare-pid taskkill could only ever hit a
-            # reused pid). Children the shell spawns before assign() escape the
-            # job; the window is sub-ms and accepted. None = job creation
-            # failed (old Windows editions): legacy taskkill bookkeeping below.
+            # Suspended start: the main thread has not run, so no child can
+            # spawn before the job assignment. Containment is mandatory;
+            # failure aborts the never-run leader.
             self._job = _winjob.create_job()
             proc_handle = getattr(self._proc, "_handle", None)
-            if self._job is not None and (
-                proc_handle is None or not _winjob.assign(self._job, int(proc_handle))
+            if self._job is None or proc_handle is None or not _winjob.assign(
+                self._job, int(proc_handle)
             ):
-                _winjob.close(self._job)
-                self._job = None
-        # A job-reaped tree is provably dead: kill() after reap stays a no-op.
-        self._had_job = self._job is not None
+                if self._job is not None:
+                    # Not in the job when assign failed: close it so
+                    # _abort_spawn falls through to proc.kill() on the leader.
+                    _winjob.close(self._job)
+                    self._job = None
+                self._abort_spawn()
+                raise RuntimeError("bash(): Windows job containment could not be established")
         self._released = False
         with _live_lock:
             _live_handles.add(self)
@@ -213,6 +212,13 @@ class BashHandle:
                 os.write(self._status_read, b"\n")
             except OSError:
                 pass
+        else:
+            # Journal first, then resume: like the POSIX gate above, the child
+            # never runs before its pid is journaled. A failed resume would
+            # strand a permanently suspended child, so it fails closed too.
+            if not _winjob.resume_process(self._pid):
+                self._abort_spawn()
+                raise RuntimeError("bash(): Windows job containment could not be established")
         threading.Thread(target=self._pump, daemon=True).start()
         threading.Thread(target=self._report, daemon=True).start()
         threading.Thread(target=self._watch, daemon=True).start()
@@ -246,17 +252,12 @@ class BashHandle:
         # background group after the foreground result was already delivered.
         self._released = True
         if self._reaped:
-            if not _IS_POSIX and not self._had_job:
-                # Job-less fallback second chance: `&`-descendants can outlive
-                # the shell on Windows without a job anchor. With a job,
-                # _reap_group already terminated and closed it (tree dead).
-                self._taskkill()
             return
         if not _IS_POSIX:
             if self._job is not None and _winjob.terminate(self._job):
                 return
-            # No job or TerminateJobObject failed: hardened taskkill fallback.
-            if not self._taskkill():
+            # TerminateJobObject failed or reap raced: taskkill fallback.
+            if not _taskkill_tree(self._pid):
                 try:
                     self._proc.kill()
                 except OSError:
@@ -358,49 +359,19 @@ class BashHandle:
         with _live_lock:
             _live_handles.discard(self)
 
-    def _taskkill(self) -> bool:
-        # Windows tree kill with per-handle success memory for _reap_group.
-        if _taskkill_tree(self._pid):
-            self._tree_kill_delivered = True
-            return True
-        return False
-
     def _reap_group(self) -> bool:
         # Group liveness, not leader death, gates the inactive record: members
         # that outlive the leader would leak behind a stale journal anchor.
         if not _IS_POSIX:
+            # Terminate then close the last handle: kill-on-close reaps
+            # stragglers. An unproven terminate falls back to taskkill; if
+            # that also fails the record stays active for the host reaper.
+            delivered = False
             if self._job is not None:
-                # Terminate then close the last handle: kill-on-close reaps any
-                # straggler, so the tree is provably dead and the journal
-                # record may go inactive. Close even after a failed terminate
-                # (closing the last kill-on-close handle is itself a kill
-                # attempt), but an unproven kill falls through to taskkill.
                 delivered = _winjob.terminate(self._job)
                 job, self._job = self._job, None
                 _winjob.close(job)
-                if delivered:
-                    return True
-            # Job creation failed (old Windows editions) or TerminateJobObject
-            # failed: best-effort taskkill of the remembered tree before the
-            # handle is marked reaped.
-            if self._taskkill():
-                return True
-            if self._had_job:
-                # Failed terminate + failed taskkill: nothing proved the tree
-                # died (close() suppresses errors), so the leader-dead
-                # retirement below must not apply -- the record stays active
-                # for the host reaper unless a taskkill was proven earlier.
-                return self._tree_kill_delivered
-            if self._proc.poll() is not None:
-                # Leader already dead: taskkill usually fails with "not found"
-                # on a clean exit, and keeping every clean exit journal-active
-                # would pin stale records. One retry sweeps descendants that
-                # raced the first attempt; then the record goes inactive
-                # regardless -- detached/reparented descendants may survive
-                # (no job anchor; accepted best-effort).
-                self._taskkill()
-                return True
-            return self._tree_kill_delivered
+            return delivered or _taskkill_tree(self._pid)
         try:
             os.killpg(self._pid, 0)
         except ProcessLookupError:
@@ -537,7 +508,7 @@ class BashHandle:
             if _IS_POSIX:
                 _signal_group(self._pid, signal.SIGKILL)
             elif self._job is None or not _winjob.terminate(self._job):
-                self._taskkill()
+                _taskkill_tree(self._pid)
             await self._await_group_death(_CANCEL_KILL_WAIT)
 
     def _group_alive(self) -> bool:
@@ -565,8 +536,9 @@ class BashHandle:
         return True
 
     def _abort_spawn(self) -> None:
-        # Enrollment failed before the gate opened (POSIX) or right after spawn
-        # (Windows): kill the child and unwind the handle before threads start.
+        # Enrollment or containment failed before the gate opened (POSIX) or
+        # while the child is still suspended, before resume (Windows): kill
+        # the child and unwind the handle before threads start.
         if _IS_POSIX:
             for fd in (self._status_read, self._wake_read, self._wake_write):
                 if fd >= 0:
@@ -583,8 +555,7 @@ class BashHandle:
                 job, self._job = self._job, None
                 _winjob.close(job)
             if not delivered:
-                delivered = _taskkill_tree(self._pid)
-            if not delivered:
+                # Pre-resume abort: the never-run leader has no descendants.
                 try:
                     self._proc.kill()
                 except OSError:
@@ -623,9 +594,9 @@ def bash(command: str) -> BashHandle:
     handle (any .pid/.running/.output()/.tail()/.poll()/.kill() access before
     the first await) survives cancellation; awaiting it only waits. Leak
     containment is per-platform: process groups plus the orphan journal on
-    POSIX; a kill-on-close job object on Windows, so even a crashed kernel
-    reaps the tree (taskkill /T remains only as the fallback when job creation
-    failed on old Windows editions).
+    POSIX; a kill-on-close job object on Windows entered while the child is
+    still suspended, so no descendant can escape it and kill()/crash cleanup
+    are unconditional -- bash() raises if containment cannot be established.
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
