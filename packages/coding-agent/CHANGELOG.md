@@ -8,6 +8,7 @@
 - Hardened bash(): cancelling `await bash(cmd)` now kills the command's process group (background handles are unaffected), Windows helper binaries resolve via absolute System32 paths, kill() retries taskkill for already-reaped Windows trees, and orphan-journal enrollment fails closed when configured.
 - Hardened bash() further: the host now injects an absolute default shell into the kernel (no PATH lookup; /bin/bash else /bin/sh on POSIX), macOS start-id lookup uses /bin/ps, and Windows worker-teardown orphan kills go through hardened taskkill /T.
 - Hardened Windows bash execution: the kernel shell is resolved only from trusted absolute paths (never PATH), and bash children are contained by kill-on-close job objects so a crashed kernel cannot leak process trees (taskkill remains only as a fallback when job creation fails).
+- Hardened Windows bash() containment: children start suspended and enter their kill-on-close job before running (no escape window); bash() now raises instead of falling back to jobless taskkill when containment fails.
 
 ## [0.8.0] - 2026-08-21
 
